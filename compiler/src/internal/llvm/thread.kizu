@@ -1,0 +1,91 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::mem;
+
+// Mechanical port of internal/llvm/thread.go: the one pool-round call and the
+// thunk it calls every worker through.
+
+/// Reports whether any function starts a pool round, the Go
+/// `usesThreadPoolEach`.
+fn (self: &Emitter) uses_thread_pool_each(module: &ir::Module) -> bool {
+    var function_index = 0;
+    while module.functions.get(function_index) |function| {
+        function_index = function_index + 1;
+        let function_node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while function_node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let node = module.instrs.at(instr.node);
+                if node.op == ir::Op::Call and
+                    module.names.is(node.operand, "std::internal::builtin::thread_pool_each") {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/// Emits the typed side of the pool's callback ABI, the Go
+/// `writeThreadEachInvokeThunk`. A worker takes its view as the {ptr, len}
+/// value; the runtime hands the chunk behind a pointer and this thunk makes
+/// the one call with Kizu's own ABI. Every view is the same pair whatever T
+/// is, so one thunk serves every element type.
+fn (self: &var Emitter) write_thread_each_invoke_thunk(module: &ir::Module) -> !void {
+    if !self.uses_thread_pool_each(module) {
+        return;
+    }
+    try self.line(
+        "define internal void @kizu.thread.each.invoke(ptr %kizu.worker, ptr %kizu.part, i64 %kizu.index) #0 {"
+    );
+    try self.line("entry:");
+    try self.line("  %kizu.part.value = load %kizu.slice.u8, ptr %kizu.part");
+    try self.line("  call void %kizu.worker(%kizu.slice.u8 %kizu.part.value, i64 %kizu.index)");
+    try self.line("  ret void");
+    try self.line("}");
+    return self.line("");
+}
+
+/// Lowers one pool round, the Go `writeThreadPoolEach`. The runtime does not
+/// know T, so the call carries the slice behind a pointer, what T measures,
+/// and the thunk that calls the worker.
+fn (self: &var Emitter) write_thread_pool_each(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 4 {
+        return try self.fail0("llvm error: thread_pool_each expects pool, data, chunk and worker");
+    }
+    let data = node.args.get_or_panic(1);
+    let data_text = ir::name_text(&module.names, data.type_name);
+    let data_bytes = data_text.as_bytes();
+    if mem::len(data_bytes) < 2 or data_bytes[0] != cast<u8>(91) or data_bytes[1] != cast<u8>(93) {
+        return try self.fail_name1(
+            module, "llvm error: thread_pool_each data is %s, not a view", data.type_name);
+    }
+    let elem_size = try self.element_size_operand_bytes(
+        module, data_bytes[2..mem::len(data_bytes)]);
+    let slot = try self.text1("%%kizu.thread.each.%d.data", Arg::Int(self.next_thread_each));
+    self.next_thread_each = self.next_thread_each + 1;
+    try self.line1("  %s = alloca %%kizu.slice.u8", Arg::Str(slot));
+    let data_value = try self.operand(module, data);
+    try self.line2("  store %%kizu.slice.u8 %s, ptr %s", Arg::Str(data_value.operand), Arg::Str(slot));
+    let pool = try self.operand(module, node.args.get_or_panic(0));
+    let chunk = try self.operand(module, node.args.get_or_panic(2));
+    let worker = try self.operand(module, node.args.get_or_panic(3));
+    let symbol = try self.callee_symbol(module, node.operand);
+    try self.line6(
+        "  call void @%s(i64 %s, ptr %s, i64 %s, i64 %s, ptr %s, ptr @kizu.thread.each.invoke)",
+        Arg::Str(symbol),
+        Arg::Str(pool.operand),
+        Arg::Str(slot),
+        Arg::Str(elem_size),
+        Arg::Str(chunk.operand),
+        Arg::Str(worker.operand)
+    );
+    return null;
+}

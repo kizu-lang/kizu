@@ -1,0 +1,125 @@
+import std::array;
+import std::io;
+import std::mem;
+import std::testing;
+import std::thread;
+
+// A pool round's contract as the caller sees it: every element lands in
+// exactly one chunk, a chunk is `chunk` elements except the last, the index
+// counts chunks, and every chunk has run by the time `each` returns.
+//
+// That the chunks run at the same time is not visible from here: a worker has
+// nothing to report through except its own chunk. It is what the timing in
+// `examples/thread_each.kizu`'s comment is about.
+
+error Failure = thread::Error or mem::Error;
+
+struct Sample {
+    value: f64,
+    chunk: i64,
+    size: i64,
+    flag: u8,
+}
+
+// Writes into every element which chunk it was in and how long that chunk was.
+fn stamp(part: &var []i64, index: i64) -> void {
+    let size = mem::count<i64>(part);
+    for 0..size |i| {
+        part[i] = part[i] + index * 1000 + size * 1000000;
+    }
+    return;
+}
+
+fn stamp_sample(part: &var []Sample, index: i64) -> void {
+    let size = mem::count<Sample>(part);
+    for 0..size |i| {
+        let old = part[i];
+        part[i] = Sample { value: old.value * 2.0, chunk: index, size: size, flag: old.flag };
+    }
+    return;
+}
+
+fn count_up(values: &var array::Array<i64>, allocator: Allocator, n: i64) -> mem::Error!void {
+    for 0..n |i| {
+        try values.append(allocator, i);
+    }
+    return;
+}
+
+fn check_stamps(pool: &var thread::Pool, allocator: Allocator, n: i64, chunk: i64) -> Failure!void {
+    var values = array::new<i64>(allocator);
+    defer values.deinit(allocator);
+    try count_up(&var values, allocator, n);
+    let cells = values.as_mut_slice();
+    thread::each<i64>(pool, cells, chunk, stamp);
+    for 0..n |i| {
+        let index = i / chunk;
+        var size = chunk;
+        if (index + 1) * chunk > n {
+            size = n - index * chunk;
+        }
+        testing::expect_equal<i64>(i + index * 1000 + size * 1000000, values.get_or_panic(i));
+    }
+    return;
+}
+
+test "every element lands in exactly one chunk" {
+    let allocator = mem::page_allocator();
+    var pool = try thread::init(io::blocking(), allocator, 4);
+    defer pool.deinit(allocator);
+    try check_stamps(&var pool, allocator, 100, 7);
+}
+
+test "a chunk wider than the slice is the whole slice" {
+    let allocator = mem::page_allocator();
+    var pool = try thread::init(io::blocking(), allocator, 4);
+    defer pool.deinit(allocator);
+    try check_stamps(&var pool, allocator, 5, 64);
+}
+
+test "a pool of one thread is the caller alone" {
+    let allocator = mem::page_allocator();
+    var pool = try thread::init(io::blocking(), allocator, 1);
+    defer pool.deinit(allocator);
+    try check_stamps(&var pool, allocator, 30, 4);
+}
+
+test "one pool runs round after round" {
+    let allocator = mem::page_allocator();
+    var pool = try thread::init(io::blocking(), allocator, 3);
+    defer pool.deinit(allocator);
+    for 0..50 |round| {
+        try check_stamps(&var pool, allocator, 40 + round, 3);
+    }
+}
+
+test "an empty slice runs no chunk" {
+    let allocator = mem::page_allocator();
+    var pool = try thread::init(io::blocking(), allocator, 2);
+    defer pool.deinit(allocator);
+    try check_stamps(&var pool, allocator, 0, 3);
+}
+
+test "chunks are cut by the element's own size" {
+    let allocator = mem::page_allocator();
+    var pool = try thread::init(io::blocking(), allocator, 4);
+    defer pool.deinit(allocator);
+    var samples = array::new<Sample>(allocator);
+    defer samples.deinit(allocator);
+    for 0..10 |i| {
+        try samples.append(allocator, Sample { value: cast<f64>(i), chunk: -1, size: 0, flag: 7 });
+    }
+    let cells = samples.as_mut_slice();
+    thread::each<Sample>(&var pool, cells, 4, stamp_sample);
+    for 0..10 |i| {
+        let sample = samples.get_or_panic(i);
+        testing::expect_equal<i64>(i / 4, sample.chunk);
+        testing::expect(sample.value == cast<f64>(i) * 2.0);
+        testing::expect_equal<u8>(7, sample.flag);
+    }
+    testing::expect_equal<i64>(2, samples.get_or_panic(9).size);
+}
+
+test "the processor count is at least one" {
+    testing::expect(thread::cpu_count(io::blocking()) >= 1);
+}

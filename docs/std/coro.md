@@ -101,5 +101,5 @@ context の切り替えは `ucontext`(`getcontext` / `makecontext` / `swapcontex
 です。macOS では deprecated ですが動きます。architecture ごとの手書き switch に
 差し替えるときは、`runtime.c` の coroutine 節が置き換え箇所です。
 
-thread はまだありません。現在走っている coroutine は 1 プロセスに 1 つで、thread が
-入ればそれは thread ごとになります。
+現在走っている coroutine は thread ごとに 1 つです。`std::thread` の pool の thread
+も、自分の coroutine を resume できます。

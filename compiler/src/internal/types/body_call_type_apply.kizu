@@ -1523,6 +1523,10 @@ fn (self: &var Checker) check_builtin_type_apply(
         handled.* = true;
         return self.check_task_set_spawn(tree, scope, type_arg, args, out);
     }
+    if mem::equal_bytes(name, "std::internal::builtin::thread_pool_each") {
+        handled.* = true;
+        return self.check_thread_pool_each(tree, scope, type_arg, args, out);
+    }
     return self.check_builtin_array_method_type_apply(
         tree,
         scope,
@@ -1673,6 +1677,72 @@ fn (self: &var Checker) check_task_set_spawn(
         return move problem;
     }
     out.* = try self.types.intern("std::io::Error!void");
+    return null;
+}
+
+/// Validates `thread_pool_each<T>(pool, data, chunk, worker)`. The runtime
+/// hands each chunk of data to the worker as its own `&var []T`, so the
+/// worker's parameter is exactly that; what T may hold is the ownership
+/// checker's rule, because it is about what a chunk can reach.
+fn (self: &var Checker) check_thread_pool_each(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    type_arg: []u8,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let label = "std::thread::each";
+    if args.len(tree) != 4 {
+        return try self.checker_error_at(
+            "type error",
+            ast::zero_span(),
+            "`std::thread::each` expects pool, data, chunk and worker"
+        );
+    }
+    let pool_arg = args.get_or_panic(tree, 0);
+    if try self.check_core_arg(
+        tree, scope, label, 0, stdprim::ArgKind::I64, pool_arg
+    ) |problem| {
+        return move problem;
+    }
+    var data_want = try string::from_bytes(self.allocator, "&var []");
+    defer data_want.deinit(self.allocator);
+    try data_want.append_bytes(self.allocator, type_arg);
+    let data_bytes = data_want.as_bytes();
+    let data_type = try self.types.intern(data_bytes);
+    let view_bytes = data_bytes[5..mem::len(data_bytes)];
+    let view_type = try self.types.intern(view_bytes);
+    let data_arg = args.get_or_panic(tree, 1);
+    var got_data = empty_type();
+    if try self.check_expr(tree, scope, data_arg, &var got_data) |problem| {
+        return move problem;
+    }
+    if !same_type(got_data, data_type) and !same_type(got_data, view_type) {
+        return try self.task_arg_error(label, "data", data_type, got_data);
+    }
+    let chunk_arg = args.get_or_panic(tree, 2);
+    if try self.check_core_arg(
+        tree, scope, label, 2, stdprim::ArgKind::I64, chunk_arg
+    ) |problem| {
+        return move problem;
+    }
+    var worker_want = try string::from_bytes(self.allocator, "fn(");
+    defer worker_want.deinit(self.allocator);
+    try worker_want.append_bytes(self.allocator, data_bytes);
+    try worker_want.append_bytes(self.allocator, ", i64) -> void");
+    let worker_bytes = worker_want.as_bytes();
+    let worker_type = try self.types.intern(worker_bytes);
+    let worker_arg = args.get_or_panic(tree, 3);
+    var got_worker = empty_type();
+    if try self.check_contextual_expr(
+        tree, scope, worker_arg, worker_type, &var got_worker
+    ) |problem| {
+        return move problem;
+    }
+    if !same_type(got_worker, worker_type) {
+        return try self.task_arg_error(label, "worker", worker_type, got_worker);
+    }
+    out.* = try self.types.intern("void");
     return null;
 }
 

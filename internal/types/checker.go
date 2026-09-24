@@ -5056,6 +5056,10 @@ func (c *Checker) checkBuiltinTypeApply(
 		typ, err := c.checkTaskSetSpawn(typeArg, args, env, unsafe)
 		return typ, true, err
 	}
+	if name == "std::internal::builtin::thread_pool_each" {
+		typ, err := c.checkThreadPoolEach(typeArg, args, env, unsafe)
+		return typ, true, err
+	}
 	return c.checkBuiltinArrayMethodTypeApply(name, typeArg, args, env, unsafe)
 }
 
@@ -5192,6 +5196,40 @@ func (c *Checker) checkTaskSetSpawn(
 		return "", err
 	}
 	return Type("std::io::Error!void"), nil
+}
+
+// checkThreadPoolEach validates `thread_pool_each<T>(pool, data, chunk,
+// worker)`. The runtime hands each chunk of data to the worker as its own
+// `&var []T`, so the worker's parameter is exactly that; what T may hold is
+// the ownership checker's rule, because it is about what a chunk can reach.
+func (c *Checker) checkThreadPoolEach(
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	const label = "std::thread::each"
+	if len(args) != 4 {
+		return "", errorf("type error: `%s` expects pool, data, chunk and worker", label)
+	}
+	if err := c.checkCoreArg(label, 0, stdprim.ArgI64, args[0], env, unsafe); err != nil {
+		return "", err
+	}
+	if err := c.checkBorrowedStateArg(label, "[]"+typeArg, args[1], env, unsafe); err != nil {
+		return "", err
+	}
+	if err := c.checkCoreArg(label, 2, stdprim.ArgI64, args[2], env, unsafe); err != nil {
+		return "", err
+	}
+	want := Type("fn(&var []" + typeArg + ", i64) -> void")
+	got, err := c.checkContextualExpr(args[3], want, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if !sameType(got, want) {
+		return "", errorf("type error: `%s` worker expects %s, got %s", label, want, got)
+	}
+	return Type("void"), nil
 }
 
 // checkBorrowedStateArg validates the `&var T` a primitive writes through.

@@ -268,6 +268,9 @@ fn (self: &var Checker) check_type_apply_call_expr(
     if self.names.is(name, "std::internal::builtin::task_set_spawn") {
         return self.check_task_set_spawn(tree, env, args, out);
     }
+    if self.names.is(name, "std::internal::builtin::thread_pool_each") {
+        return self.check_thread_pool_each(tree, env, args, out);
+    }
     return try self.error1(
         tree, ast::zero_span(), "move error: `%s` does not take static arguments", Arg::Str(name)
     );
@@ -339,6 +342,27 @@ fn (self: &var Checker) check_task_set_spawn(
         index = index + 1;
     }
     out.* = try self.names.intern("std::io::Error!void");
+    return null;
+}
+
+/// Reads every argument of `thread_pool_each`. The slice stays lent for the
+/// call, which is all it is lent for: the runtime has joined every chunk
+/// before the call returns.
+fn (self: &var Checker) check_thread_pool_each(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    while arg_at(tree, args, index) |argument| {
+        var ignored = empty_name();
+        if try self.read_expr(tree, env, argument, &var ignored) |failed| {
+            return move failed;
+        }
+        index = index + 1;
+    }
+    out.* = try self.names.intern("void");
     return null;
 }
 
@@ -1657,6 +1681,19 @@ fn (self: &var Checker) check_generic_wrapper_type_args(
                 tree, ast::zero_span(),
                 "borrow error: `std::io::spawn` state `%s` must own its data and contain no Io or Allocator",
                 Arg::Str(state)
+            );
+        }
+    }
+    if self.names.is(name, "std::thread::each") {
+        // Every chunk goes to another thread. An Io or Allocator copied into
+        // two chunks would be one capability used from two threads at once,
+        // and a view would reach past the chunk it came in.
+        let elem = type_args.get_or_panic(0);
+        if try self.view_carrying_type(elem) or try self.capability_carrying_type(elem) {
+            return try self.error1(
+                tree, ast::zero_span(),
+                "borrow error: `std::thread::each` element `%s` must own its data and contain no Io or Allocator",
+                Arg::Str(elem)
             );
         }
     }

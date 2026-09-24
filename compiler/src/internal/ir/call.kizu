@@ -152,6 +152,10 @@ fn (self: &var Lowerer) lower_type_apply_call(
         let resolved = try self.resolve_type_args(type_arg);
         return self.lower_task_set_spawn(tree, resolved, args, out);
     }
+    if self.name_is(callee_name, "std::internal::builtin::thread_pool_each") {
+        let resolved = try self.resolve_type_args(type_arg);
+        return self.lower_thread_pool_each(tree, resolved, args, out);
+    }
     var handled = false;
     if try self.lower_meta_apply(tree, callee_name, type_arg, args, out, &var handled) |failed| {
         return move failed;
@@ -493,6 +497,45 @@ fn (self: &var Lowerer) lower_task_set_spawn(
     let owner = values.get_or_panic(4);
     let allocator = values.get_or_panic(2);
     return self.release_owner_on_failure(tree, spawned, owner, allocator, out);
+}
+
+/// Lowers one pool round. The `&var []T` the wrapper was lent is a view value
+/// in IR; the backend adds what T measures, which is how the runtime finds
+/// where each chunk starts.
+fn (self: &var Lowerer) lower_thread_pool_each(
+    tree: &var ast::Ast,
+    elem: Name,
+    args: ast::ExpressionList,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var values = array::new<Value>(self.allocator);
+    defer values.deinit(self.allocator);
+    var index = 0;
+    while ownership::arg_at(tree, args, index) |arg| {
+        var want = self.common.i64_type;
+        if index == 1 {
+            var view = try string::from_bytes(self.allocator, "[]");
+            errdefer view.deinit(self.allocator);
+            try self.module.names.append_to(&var view, elem);
+            want = try self.module.names.intern_owned(move view);
+        }
+        if index == 3 {
+            var worker = try string::from_bytes(self.allocator, "fn(&var []");
+            errdefer worker.deinit(self.allocator);
+            try self.module.names.append_to(&var worker, elem);
+            try worker.append_bytes(self.allocator, ", i64) -> void");
+            want = try self.module.names.intern_owned(move worker);
+        }
+        index = index + 1;
+        var value = empty_value();
+        if try self.lower_contextual_expr(tree, arg, want, &var value) |failed| {
+            return move failed;
+        }
+        try values.append(self.allocator, value);
+    }
+    let symbol = try self.name("std::internal::builtin::thread_pool_each");
+    out.* = try self.emit_with(Op::Call, symbol, self.common.void_type, empty_name(), &values);
+    return null;
 }
 
 /// Spells `&var T` for the state an allocator is built from.
