@@ -1,13 +1,27 @@
 import compiler::internal::diagnostic;
 import compiler::internal::ir;
+import std::array;
 import std::mem;
+import std::string;
 
-// Mechanical port of internal/llvm/thread.go: the one pool-round call and the
-// thunk it calls every worker through.
+// Mechanical port of internal/llvm/thread.go: the pool-round calls and the
+// thunk they call every worker through.
+
+/// Returns where a pool round's `[]T` operand is, or null when name starts no
+/// pool round, the Go `threadRoundData`.
+fn thread_round_data(names: &ir::NameTable, name: ir::Name) -> ?i64 {
+    if names.is(name, "std::internal::builtin::thread_pool_each") {
+        return 1;
+    }
+    if names.is(name, "std::internal::builtin::thread_pool_each_lane") {
+        return 2;
+    }
+    return null;
+}
 
 /// Reports whether any function starts a pool round, the Go
-/// `usesThreadPoolEach`.
-fn (self: &Emitter) uses_thread_pool_each(module: &ir::Module) -> bool {
+/// `usesThreadPoolRound`.
+fn (self: &Emitter) uses_thread_pool_round(module: &ir::Module) -> bool {
     var function_index = 0;
     while module.functions.get(function_index) |function| {
         function_index = function_index + 1;
@@ -20,8 +34,10 @@ fn (self: &Emitter) uses_thread_pool_each(module: &ir::Module) -> bool {
             while block_node.instrs.get(instr_index) |instr| {
                 instr_index = instr_index + 1;
                 let node = module.instrs.at(instr.node);
-                if node.op == ir::Op::Call and
-                    module.names.is(node.operand, "std::internal::builtin::thread_pool_each") {
+                if node.op != ir::Op::Call {
+                    continue;
+                }
+                if thread_round_data(&module.names, node.operand) |_| {
                     return true;
                 }
             }
@@ -36,7 +52,7 @@ fn (self: &Emitter) uses_thread_pool_each(module: &ir::Module) -> bool {
 /// the one call with Kizu's own ABI. Every view is the same pair whatever T
 /// is, so one thunk serves every element type.
 fn (self: &var Emitter) write_thread_each_invoke_thunk(module: &ir::Module) -> !void {
-    if !self.uses_thread_pool_each(module) {
+    if !self.uses_thread_pool_round(module) {
         return;
     }
     try self.line(
@@ -50,42 +66,88 @@ fn (self: &var Emitter) write_thread_each_invoke_thunk(module: &ir::Module) -> !
     return self.line("");
 }
 
-/// Lowers one pool round, the Go `writeThreadPoolEach`. The runtime does not
+/// Declares a pool round the way write_thread_pool_round calls it, the Go
+/// `threadPoolRoundDecl`.
+fn (self: &var Emitter) thread_pool_round_decl(
+    module: &ir::Module,
+    name: ir::Name,
+    node: &ir::InstrNode,
+    data_index: i64
+) -> !string::String {
+    var params = array::new<string::String>(self.allocator);
+    defer params.deinit(self.allocator);
+    if !module.names.is(node.result.type_name, "void") {
+        try params.append(self.allocator, try string::from_bytes(self.allocator, "ptr"));
+    }
+    var index = 0;
+    while node.args.get(index) |arg| {
+        if index == data_index {
+            try params.append(self.allocator, try string::from_bytes(self.allocator, "ptr"));
+            try params.append(self.allocator, try string::from_bytes(self.allocator, "i64"));
+        } else {
+            let arg_type = try self.llvm_type_of(module, arg.type_name);
+            try params.append(self.allocator, try self.names.copy(arg_type));
+        }
+        index = index + 1;
+    }
+    try params.append(self.allocator, try string::from_bytes(self.allocator, "ptr"));
+    let symbol = try self.callee_symbol(module, name);
+    let joined = try string::join(self.allocator, &params, ", ");
+    return self.sprint2("declare void @%s(%s)", Arg::Str(symbol), Arg::Owned(move joined));
+}
+
+/// Lowers one pool round, the Go `writeThreadPoolRound`. The runtime does not
 /// know T, so the call carries the slice behind a pointer, what T measures,
 /// and the thunk that calls the worker.
-fn (self: &var Emitter) write_thread_pool_each(
+fn (self: &var Emitter) write_thread_pool_round(
     module: &ir::Module,
-    node: &ir::InstrNode
+    node: &ir::InstrNode,
+    data_index: i64
 ) -> !?diagnostic::Diagnostic {
-    if node.args.len() != 4 {
-        return try self.fail0("llvm error: thread_pool_each expects pool, data, chunk and worker");
-    }
-    let data = node.args.get_or_panic(1);
+    let data = node.args.get(data_index) orelse
+        return try self.fail_name1(module, "llvm error: %s expects a slice operand", node.operand);
     let data_text = ir::name_text(&module.names, data.type_name);
     let data_bytes = data_text.as_bytes();
     if mem::len(data_bytes) < 2 or data_bytes[0] != cast<u8>(91) or data_bytes[1] != cast<u8>(93) {
-        return try self.fail_name1(
-            module, "llvm error: thread_pool_each data is %s, not a view", data.type_name);
+        return try self.fail_name2(
+            module, "llvm error: %s data is %s, not a view", node.operand, data.type_name);
     }
     let elem_size = try self.element_size_operand_bytes(
         module, data_bytes[2..mem::len(data_bytes)]);
-    let slot = try self.text1("%%kizu.thread.each.%d.data", Arg::Int(self.next_thread_each));
+    let slot = try self.text1("%%kizu.thread.round.%d", Arg::Int(self.next_thread_each));
     self.next_thread_each = self.next_thread_each + 1;
-    try self.line1("  %s = alloca %%kizu.slice.u8", Arg::Str(slot));
-    let data_value = try self.operand(module, data);
-    try self.line2("  store %%kizu.slice.u8 %s, ptr %s", Arg::Str(data_value.operand), Arg::Str(slot));
-    let pool = try self.operand(module, node.args.get_or_panic(0));
-    let chunk = try self.operand(module, node.args.get_or_panic(2));
-    let worker = try self.operand(module, node.args.get_or_panic(3));
+    let returns = !module.names.is(node.result.type_name, "void");
+    var args = array::new<string::String>(self.allocator);
+    defer args.deinit(self.allocator);
+    if returns {
+        let result_type = try self.llvm_type_of(module, node.result.type_name);
+        try self.line2("  %s.result = alloca %s", Arg::Str(slot), Arg::Str(result_type));
+        try args.append(self.allocator, try self.sprint2("ptr %s.result", Arg::Str(slot), Arg::None));
+    }
+    var index = 0;
+    while node.args.get(index) |arg| {
+        let value = try self.operand(module, arg);
+        if index == data_index {
+            try self.line1("  %s.data = alloca %%kizu.slice.u8", Arg::Str(slot));
+            try self.line2("  store %%kizu.slice.u8 %s, ptr %s.data", Arg::Str(value.operand), Arg::Str(slot));
+            try args.append(self.allocator, try self.sprint2("ptr %s.data", Arg::Str(slot), Arg::None));
+            try args.append(self.allocator, try self.sprint2("i64 %s", Arg::Str(elem_size), Arg::None));
+        } else {
+            let arg_type = try self.llvm_type_of(module, arg.type_name);
+            try args.append(self.allocator, try self.sprint2("%s %s", Arg::Str(arg_type), Arg::Str(value.operand)));
+        }
+        index = index + 1;
+    }
+    try args.append(self.allocator, try string::from_bytes(self.allocator, "ptr @kizu.thread.each.invoke"));
     let symbol = try self.callee_symbol(module, node.operand);
-    try self.line6(
-        "  call void @%s(i64 %s, ptr %s, i64 %s, i64 %s, ptr %s, ptr @kizu.thread.each.invoke)",
-        Arg::Str(symbol),
-        Arg::Str(pool.operand),
-        Arg::Str(slot),
-        Arg::Str(elem_size),
-        Arg::Str(chunk.operand),
-        Arg::Str(worker.operand)
-    );
+    let joined = try string::join(self.allocator, &args, ", ");
+    try self.line2("  call void @%s(%s)", Arg::Str(symbol), Arg::Owned(move joined));
+    if !returns {
+        return null;
+    }
+    let result_name = try self.local_name(module, node.result.name);
+    let result_type = try self.llvm_type_of(module, node.result.type_name);
+    try self.line3("  %s = load %s, ptr %s.result", Arg::Str(result_name), Arg::Str(result_type), Arg::Str(slot));
+    try self.set_value(module, node.result, result_name);
     return null;
 }

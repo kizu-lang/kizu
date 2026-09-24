@@ -1,0 +1,57 @@
+import std::array;
+import std::io;
+import std::mem;
+import std::thread;
+
+// Turns a run of numbers into its running totals.
+fn running_total(lane: &var []i64, index: i64) -> void {
+    for 1..mem::count<i64>(lane) |i| {
+        lane[i] = lane[i] + lane[i - 1];
+    }
+    return;
+}
+
+fn print_rows(table: &array::Array<i64>, width: i64) -> void {
+    for 0..table.len() / width |row| {
+        var line = 0;
+        for 0..width |column| {
+            line = line * 100 + table.get_or_panic(row * width + column);
+        }
+        print(line);
+    }
+    return;
+}
+
+// A 3 x 4 table stored row by row. A row is 4 elements side by side, so a
+// lane of length 4 and stride 1 is a row. A column is 3 elements 4 apart:
+// length 3, stride 4. `each_lane` hands the worker a column as an ordinary
+// `&var []i64` of 3 -- gathered into the thread's own run and copied back
+// afterwards -- so the same worker adds up rows and columns alike.
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    var pool = try thread::init(io::blocking(), allocator, 4);
+    defer pool.deinit(allocator);
+
+    var table = array::new<i64>(allocator);
+    defer table.deinit(allocator);
+    for 0..12 |i| {
+        try table.append(allocator, 1);
+    }
+    let cells = table.as_mut_slice();
+    try thread::each_lane<i64>(&var pool, allocator, cells, 3, 4, running_total);
+    print_rows(&table, 4);
+    let rows = table.as_mut_slice();
+    try thread::each_lane<i64>(&var pool, allocator, rows, 4, 1, running_total);
+    print_rows(&table, 4);
+    return;
+}
+
+// run
+// features: thread
+// output:
+// 1010101
+// 2020202
+// 3030303
+// 1020304
+// 2040608
+// 3060912

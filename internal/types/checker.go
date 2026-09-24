@@ -5060,6 +5060,10 @@ func (c *Checker) checkBuiltinTypeApply(
 		typ, err := c.checkThreadPoolEach(typeArg, args, env, unsafe)
 		return typ, true, err
 	}
+	if name == "std::internal::builtin::thread_pool_each_lane" {
+		typ, err := c.checkThreadPoolEachLane(typeArg, args, env, unsafe)
+		return typ, true, err
+	}
 	return c.checkBuiltinArrayMethodTypeApply(name, typeArg, args, env, unsafe)
 }
 
@@ -5221,15 +5225,64 @@ func (c *Checker) checkThreadPoolEach(
 	if err := c.checkCoreArg(label, 2, stdprim.ArgI64, args[2], env, unsafe); err != nil {
 		return "", err
 	}
-	want := Type("fn(&var []" + typeArg + ", i64) -> void")
-	got, err := c.checkContextualExpr(args[3], want, env, unsafe)
-	if err != nil {
+	if err := c.checkThreadWorkerArg(label, typeArg, args[3], env, unsafe); err != nil {
 		return "", err
 	}
-	if !sameType(got, want) {
-		return "", errorf("type error: `%s` worker expects %s, got %s", label, want, got)
-	}
 	return Type("void"), nil
+}
+
+// checkThreadPoolEachLane validates `thread_pool_each_lane<T>(pool,
+// allocator, data, length, stride, worker)`. The worker is the one `each`
+// takes: a lane reaches it as its own contiguous `&var []T`.
+func (c *Checker) checkThreadPoolEachLane(
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	const label = "std::thread::each_lane"
+	if len(args) != 6 {
+		return "", errorf(
+			"type error: `%s` expects pool, allocator, data, length, stride and worker", label)
+	}
+	kinds := []stdprim.ArgKind{stdprim.ArgI64, stdprim.ArgAllocator}
+	for index, kind := range kinds {
+		if err := c.checkCoreArg(label, index, kind, args[index], env, unsafe); err != nil {
+			return "", err
+		}
+	}
+	if err := c.checkBorrowedStateArg(label, "[]"+typeArg, args[2], env, unsafe); err != nil {
+		return "", err
+	}
+	for index := 3; index < 5; index++ {
+		if err := c.checkCoreArg(label, index, stdprim.ArgI64, args[index], env, unsafe); err != nil {
+			return "", err
+		}
+	}
+	if err := c.checkThreadWorkerArg(label, typeArg, args[5], env, unsafe); err != nil {
+		return "", err
+	}
+	return Type("std::thread::Error!void"), nil
+}
+
+// checkThreadWorkerArg validates the `fn(&var []T, i64) -> void` a pool round
+// calls once per chunk or lane.
+func (c *Checker) checkThreadWorkerArg(
+	label string,
+	typeArg string,
+	arg ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) error {
+	want := Type("fn(&var []" + typeArg + ", i64) -> void")
+	got, err := c.checkContextualExpr(arg, want, env, unsafe)
+	if err != nil {
+		return err
+	}
+	if !sameType(got, want) {
+		return errorf("type error: `%s` worker expects %s, got %s", label, want, got)
+	}
+	return nil
 }
 
 // checkBorrowedStateArg validates the `&var T` a primitive writes through.

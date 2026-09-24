@@ -156,6 +156,10 @@ fn (self: &var Lowerer) lower_type_apply_call(
         let resolved = try self.resolve_type_args(type_arg);
         return self.lower_thread_pool_each(tree, resolved, args, out);
     }
+    if self.name_is(callee_name, "std::internal::builtin::thread_pool_each_lane") {
+        let resolved = try self.resolve_type_args(type_arg);
+        return self.lower_thread_pool_each_lane(tree, resolved, args, out);
+    }
     var handled = false;
     if try self.lower_meta_apply(tree, callee_name, type_arg, args, out, &var handled) |failed| {
         return move failed;
@@ -535,6 +539,48 @@ fn (self: &var Lowerer) lower_thread_pool_each(
     }
     let symbol = try self.name("std::internal::builtin::thread_pool_each");
     out.* = try self.emit_with(Op::Call, symbol, self.common.void_type, empty_name(), &values);
+    return null;
+}
+
+/// Lowers one lane round, the chunk round's operands with the allocator the
+/// scratch runs come from and the lane's shape.
+fn (self: &var Lowerer) lower_thread_pool_each_lane(
+    tree: &var ast::Ast,
+    elem: Name,
+    args: ast::ExpressionList,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var values = array::new<Value>(self.allocator);
+    defer values.deinit(self.allocator);
+    var index = 0;
+    while ownership::arg_at(tree, args, index) |arg| {
+        var want = self.common.i64_type;
+        if index == 1 {
+            want = try self.name("Allocator");
+        }
+        if index == 2 {
+            var view = try string::from_bytes(self.allocator, "[]");
+            errdefer view.deinit(self.allocator);
+            try self.module.names.append_to(&var view, elem);
+            want = try self.module.names.intern_owned(move view);
+        }
+        if index == 5 {
+            var worker = try string::from_bytes(self.allocator, "fn(&var []");
+            errdefer worker.deinit(self.allocator);
+            try self.module.names.append_to(&var worker, elem);
+            try worker.append_bytes(self.allocator, ", i64) -> void");
+            want = try self.module.names.intern_owned(move worker);
+        }
+        index = index + 1;
+        var value = empty_value();
+        if try self.lower_contextual_expr(tree, arg, want, &var value) |failed| {
+            return move failed;
+        }
+        try values.append(self.allocator, value);
+    }
+    let result = try self.name("std::thread::Error!void");
+    let symbol = try self.name("std::internal::builtin::thread_pool_each_lane");
+    out.* = try self.emit_with(Op::Call, symbol, result, empty_name(), &values);
     return null;
 }
 

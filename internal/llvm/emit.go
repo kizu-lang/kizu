@@ -713,8 +713,8 @@ func cleanupInstruction(cleanup ir.Cleanup) *ir.Instr {
 
 // externalCallDecl formats one external call declaration from typed IR operands.
 func (e *emitter) externalCallDecl(name string, instr *ir.Instr) string {
-	if name == threadPoolEachName {
-		return "declare void @" + llvmFunctionName(name) + "(i64, ptr, i64, i64, ptr, ptr)"
+	if isThreadPoolRound(name) {
+		return e.threadPoolRoundDecl(name, instr)
 	}
 	if e.usesHostedRuntimeABI(name, instr) {
 		params := []string{"ptr"}
@@ -1870,8 +1870,8 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	if foreignC {
 		name = instr.ExternName
 	}
-	if !foreignC && name == threadPoolEachName {
-		return e.writeThreadPoolEach(instr)
+	if !foreignC && isThreadPoolRound(name) {
+		return e.writeThreadPoolRound(name, instr)
 	}
 	if !foreignC && e.usesHostedRuntimeABI(name, instr) {
 		return e.writeHostedRuntimeCall(name, instr)

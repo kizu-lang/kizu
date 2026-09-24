@@ -269,7 +269,10 @@ fn (self: &var Checker) check_type_apply_call_expr(
         return self.check_task_set_spawn(tree, env, args, out);
     }
     if self.names.is(name, "std::internal::builtin::thread_pool_each") {
-        return self.check_thread_pool_each(tree, env, args, out);
+        return self.check_thread_pool_round(tree, env, args, "void", out);
+    }
+    if self.names.is(name, "std::internal::builtin::thread_pool_each_lane") {
+        return self.check_thread_pool_round(tree, env, args, "std::thread::Error!void", out);
     }
     return try self.error1(
         tree, ast::zero_span(), "move error: `%s` does not take static arguments", Arg::Str(name)
@@ -345,13 +348,14 @@ fn (self: &var Checker) check_task_set_spawn(
     return null;
 }
 
-/// Reads every argument of `thread_pool_each`. The slice stays lent for the
-/// call, which is all it is lent for: the runtime has joined every chunk
+/// Reads every argument of a pool round. The slice stays lent for the call,
+/// which is all it is lent for: the runtime has joined every chunk or lane
 /// before the call returns.
-fn (self: &var Checker) check_thread_pool_each(
+fn (self: &var Checker) check_thread_pool_round(
     tree: &var ast::Ast,
     env: ScopeHandle,
     args: ast::ExpressionList,
+    result: []u8,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
     var index = 0;
@@ -362,7 +366,7 @@ fn (self: &var Checker) check_thread_pool_each(
         }
         index = index + 1;
     }
-    out.* = try self.names.intern("void");
+    out.* = try self.names.intern(result);
     return null;
 }
 
@@ -1684,16 +1688,16 @@ fn (self: &var Checker) check_generic_wrapper_type_args(
             );
         }
     }
-    if self.names.is(name, "std::thread::each") {
+    if self.names.is(name, "std::thread::each") or self.names.is(name, "std::thread::each_lane") {
         // Every chunk goes to another thread. An Io or Allocator copied into
         // two chunks would be one capability used from two threads at once,
         // and a view would reach past the chunk it came in.
         let elem = type_args.get_or_panic(0);
         if try self.view_carrying_type(elem) or try self.capability_carrying_type(elem) {
-            return try self.error1(
+            return try self.error2(
                 tree, ast::zero_span(),
-                "borrow error: `std::thread::each` element `%s` must own its data and contain no Io or Allocator",
-                Arg::Str(elem)
+                "borrow error: `%s` element `%s` must own its data and contain no Io or Allocator",
+                Arg::Str(name), Arg::Str(elem)
             );
         }
     }

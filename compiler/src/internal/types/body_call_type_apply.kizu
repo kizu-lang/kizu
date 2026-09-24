@@ -1527,6 +1527,10 @@ fn (self: &var Checker) check_builtin_type_apply(
         handled.* = true;
         return self.check_thread_pool_each(tree, scope, type_arg, args, out);
     }
+    if mem::equal_bytes(name, "std::internal::builtin::thread_pool_each_lane") {
+        handled.* = true;
+        return self.check_thread_pool_each_lane(tree, scope, type_arg, args, out);
+    }
     return self.check_builtin_array_method_type_apply(
         tree,
         scope,
@@ -1705,20 +1709,9 @@ fn (self: &var Checker) check_thread_pool_each(
     ) |problem| {
         return move problem;
     }
-    var data_want = try string::from_bytes(self.allocator, "&var []");
-    defer data_want.deinit(self.allocator);
-    try data_want.append_bytes(self.allocator, type_arg);
-    let data_bytes = data_want.as_bytes();
-    let data_type = try self.types.intern(data_bytes);
-    let view_bytes = data_bytes[5..mem::len(data_bytes)];
-    let view_type = try self.types.intern(view_bytes);
     let data_arg = args.get_or_panic(tree, 1);
-    var got_data = empty_type();
-    if try self.check_expr(tree, scope, data_arg, &var got_data) |problem| {
+    if try self.check_thread_data_arg(tree, scope, label, type_arg, data_arg) |problem| {
         return move problem;
-    }
-    if !same_type(got_data, data_type) and !same_type(got_data, view_type) {
-        return try self.task_arg_error(label, "data", data_type, got_data);
     }
     let chunk_arg = args.get_or_panic(tree, 2);
     if try self.check_core_arg(
@@ -1726,13 +1719,107 @@ fn (self: &var Checker) check_thread_pool_each(
     ) |problem| {
         return move problem;
     }
-    var worker_want = try string::from_bytes(self.allocator, "fn(");
+    let worker_arg = args.get_or_panic(tree, 3);
+    if try self.check_thread_worker_arg(tree, scope, label, type_arg, worker_arg) |problem| {
+        return move problem;
+    }
+    out.* = try self.types.intern("void");
+    return null;
+}
+
+/// Validates `thread_pool_each_lane<T>(pool, allocator, data, length, stride,
+/// worker)`. The worker is the one `each` takes: a lane reaches it as its own
+/// contiguous `&var []T`.
+fn (self: &var Checker) check_thread_pool_each_lane(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    type_arg: []u8,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let label = "std::thread::each_lane";
+    if args.len(tree) != 6 {
+        return try self.checker_error_at(
+            "type error",
+            ast::zero_span(),
+            "`std::thread::each_lane` expects pool, allocator, data, length, stride and worker"
+        );
+    }
+    let pool_arg = args.get_or_panic(tree, 0);
+    if try self.check_core_arg(
+        tree, scope, label, 0, stdprim::ArgKind::I64, pool_arg
+    ) |problem| {
+        return move problem;
+    }
+    let allocator_arg = args.get_or_panic(tree, 1);
+    if try self.check_core_arg(
+        tree, scope, label, 1, stdprim::ArgKind::Allocator, allocator_arg
+    ) |problem| {
+        return move problem;
+    }
+    let data_arg = args.get_or_panic(tree, 2);
+    if try self.check_thread_data_arg(tree, scope, label, type_arg, data_arg) |problem| {
+        return move problem;
+    }
+    var index = 3;
+    while index < 5 {
+        let shape_arg = args.get_or_panic(tree, index);
+        if try self.check_core_arg(
+            tree, scope, label, index, stdprim::ArgKind::I64, shape_arg
+        ) |problem| {
+            return move problem;
+        }
+        index = index + 1;
+    }
+    let worker_arg = args.get_or_panic(tree, 5);
+    if try self.check_thread_worker_arg(tree, scope, label, type_arg, worker_arg) |problem| {
+        return move problem;
+    }
+    out.* = try self.types.intern("std::thread::Error!void");
+    return null;
+}
+
+/// Validates the `&var []T` a pool round cuts, which a std wrapper forwards
+/// already lent.
+fn (self: &var Checker) check_thread_data_arg(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    label: []u8,
+    type_arg: []u8,
+    data_arg: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    var data_want = try string::from_bytes(self.allocator, "&var []");
+    defer data_want.deinit(self.allocator);
+    try data_want.append_bytes(self.allocator, type_arg);
+    let data_bytes = data_want.as_bytes();
+    let data_type = try self.types.intern(data_bytes);
+    let view_bytes = data_bytes[5..mem::len(data_bytes)];
+    let view_type = try self.types.intern(view_bytes);
+    var got_data = empty_type();
+    if try self.check_expr(tree, scope, data_arg, &var got_data) |problem| {
+        return move problem;
+    }
+    if !same_type(got_data, data_type) and !same_type(got_data, view_type) {
+        return try self.task_arg_error(label, "data", data_type, got_data);
+    }
+    return null;
+}
+
+/// Validates the `fn(&var []T, i64) -> void` a pool round calls once per
+/// chunk or lane.
+fn (self: &var Checker) check_thread_worker_arg(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    label: []u8,
+    type_arg: []u8,
+    worker_arg: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    var worker_want = try string::from_bytes(self.allocator, "fn(&var []");
     defer worker_want.deinit(self.allocator);
-    try worker_want.append_bytes(self.allocator, data_bytes);
+    try worker_want.append_bytes(self.allocator, type_arg);
     try worker_want.append_bytes(self.allocator, ", i64) -> void");
     let worker_bytes = worker_want.as_bytes();
     let worker_type = try self.types.intern(worker_bytes);
-    let worker_arg = args.get_or_panic(tree, 3);
     var got_worker = empty_type();
     if try self.check_contextual_expr(
         tree, scope, worker_arg, worker_type, &var got_worker
@@ -1742,7 +1829,6 @@ fn (self: &var Checker) check_thread_pool_each(
     if !same_type(got_worker, worker_type) {
         return try self.task_arg_error(label, "worker", worker_type, got_worker);
     }
-    out.* = try self.types.intern("void");
     return null;
 }
 

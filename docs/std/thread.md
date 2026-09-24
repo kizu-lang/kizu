@@ -42,6 +42,15 @@ pub fn each<T>(
     chunk: i64,
     worker: fn(&var []T, i64) -> void
 ) -> void
+
+pub fn each_lane<T>(
+    pool: &var std::thread::Pool,
+    allocator: Allocator,
+    data: &var []T,
+    length: i64,
+    stride: i64,
+    worker: fn(&var []T, i64) -> void
+) -> std::thread::Error!void
 ```
 
 `cpu_count` は、この process がいま使える processor の数です。1 以上です。
@@ -53,12 +62,37 @@ panic です。thread の stack(8 MiB と、その下の guard page)は `allocat
 取り、`deinit` が同じ allocator へ返します。
 
 thread は `init` で起こし、`each` の間は待たせておきます。1 回の `each` が短い
-仕事では、thread を起こす時間のほうが仕事より長いためです。
+仕事では、thread を起こす時間のほうが仕事より長いためです。仕事の無くなった thread
+は次の round を少しの間 spin して待ち、来なければ寝ます。
 
 `each` は `data` を `chunk` 要素ずつに切ります。最後の塊だけは短いことがあります。
 `worker(part, index)` の `index` は 0 から数えた塊の番号です。塊がどの thread で、
 どの順に走るかは約束しません。`chunk` が 1 未満なら panic です。空の `data` では
 worker を呼びません。
+
+## 飛び飛びの要素: `each_lane`
+
+`each_lane` は `data` を `length * stride` 要素の block の並びとして読みます。
+block は `stride` 本の lane を持ち、lane `i` はその block の要素 `i`、`i + stride`、
+…、`i + (length - 1) * stride` です。行優先の格子なら、ある軸に沿った lane は
+`length` がその軸の大きさ、`stride` がそれより後ろの軸の大きさの積です。`stride` が
+1 なら lane は行です。
+
+```kizu
+// 3 行 4 列の表を行優先で持つとき、列は 4 つおきの 3 要素
+try thread::each_lane<i64>(&var pool, allocator, cells, 3, 4, running_total);
+```
+
+worker は `each` と同じ形で、lane を `length` 要素の普通の `&var []T` として
+受け取ります。`stride` が 1 より大きい lane は、取った thread の領域へ集めて渡し、
+worker が返ったら元の位置へ書き戻します。そのため他の thread がその要素を持つことは
+ありません。領域は thread ごとに 1 つで、`allocator` から呼び出しの間だけ取り、返る
+前に戻します。確保できなければ `OutOfMemory` です。`stride` が 1 の lane は集めずに
+その場で渡すので、領域も取りません。
+
+`index` は lane の番号で、block の順、block の中では `i` の順に 0 から数えます。
+`length` か `stride` が 1 未満、または `data` の長さが block の整数倍でなければ
+panic です。
 
 ## worker に届くもの
 
@@ -78,6 +112,4 @@ worker の中の panic は process を止めます。worker は失敗を返せ�
 ## まだ無いもの
 
 - 失敗を返す worker(`fn(&var []T, i64) -> E!void`)
-- 飛び飛びの位置にある要素を塊にすること(行列の列など)。std が塊を集めて
-  worker に連続した `&var []T` として渡し、終わったら書き戻す形にします
 - thread handle、channel、mutex、atomic

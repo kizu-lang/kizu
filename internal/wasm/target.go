@@ -184,6 +184,7 @@ var threadBuiltins = []string{
 	"std::internal::builtin::thread_cpu_count",
 	"std::internal::builtin::thread_pool_new",
 	"std::internal::builtin::thread_pool_each",
+	"std::internal::builtin::thread_pool_each_lane",
 	"std::internal::builtin::thread_pool_close",
 }
 

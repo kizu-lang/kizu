@@ -1725,6 +1725,29 @@ func (l *lowerer) lowerThreadPoolEach(elem string, args []ast.Expression) (Value
 	return l.emit("call.std::internal::builtin::thread_pool_each", "void", values, ""), nil
 }
 
+// lowerThreadPoolEachLane lowers one lane round, the chunk round's operands
+// with the allocator the scratch runs come from and the lane's shape.
+func (l *lowerer) lowerThreadPoolEachLane(elem string, args []ast.Expression) (Value, error) {
+	params := []Param{
+		{Type: "i64"},
+		{Type: "Allocator"},
+		{Type: "[]" + elem},
+		{Type: "i64"},
+		{Type: "i64"},
+		{Type: "fn(&var []" + elem + ", i64) -> void"},
+	}
+	values, err := l.lowerCallArgsAs(params, args)
+	if err != nil {
+		return Value{}, err
+	}
+	return l.emit(
+		"call.std::internal::builtin::thread_pool_each_lane",
+		"std::thread::Error!void",
+		values,
+		"",
+	), nil
+}
+
 // lowerTypeApplyCall lowers calls whose callee carries a static argument list.
 // The std storage constructors lower to one instruction each, so their std
 // bodies are never walked. Every other generic call resolves by name.
@@ -1753,6 +1776,8 @@ func (l *lowerer) lowerTypeApplyCall(
 		return l.lowerTaskSetSpawn(l.resolveType(typeApply.TypeArg), args)
 	case "std::internal::builtin::thread_pool_each":
 		return l.lowerThreadPoolEach(l.resolveType(typeApply.TypeArg), args)
+	case "std::internal::builtin::thread_pool_each_lane":
+		return l.lowerThreadPoolEachLane(l.resolveType(typeApply.TypeArg), args)
 	}
 	if value, ok, err := l.lowerMetaApply(
 		typeApply.Callee.String(), typeApply.TypeArg, args,
