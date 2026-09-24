@@ -3651,12 +3651,15 @@ stdio operation が `Io` capability を必ず要求し、I/O failure を error u
 `std::thread::each<T>(&var pool, data, chunk, worker)` は `data: &var []T` を
 `chunk` 要素ずつの重ならない塊に切り、各塊を `worker: fn(&var []T, i64) -> void`
 に 1 回ずつ渡します。塊は pool の thread(呼び出し側を含む)で同時に走り、
-`each` は全部の塊が終わってから返ります。API の形は `docs/std/thread.md` にあります。
+`each` は全部の塊が終わってから返ります。`std::thread::each_lane<T>` は同じことを
+飛び飛びの要素の列(lane)に対して行います。std が lane を thread ごとの領域に集めて
+連続した `&var []T` として worker に渡し、worker が返ったら元の位置へ書き戻します。
+API の形は `docs/std/thread.md` にあります。
 
 compiler が知っている規則は次の 2 つです。
 
-* `data` の借用は `each` の呼び出しの間だけです。thread に渡った塊が呼び出しより
-  長く生きることはないので、借用の規則は普通の呼び出しと同じです
+* `data` の借用は呼び出しの間だけです。thread に渡った塊が呼び出しより長く生きる
+  ことはないので、借用の規則は普通の呼び出しと同じです
 * `T` は view と `Io` / `Allocator` を含めません。2 つの塊に同じ capability が
   複製されると、1 つの allocator や Io を 2 つの thread が同時に使うことになるため
   です(`std::io::spawn` の state と同じ述語)

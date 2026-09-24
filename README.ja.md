@@ -66,7 +66,7 @@ lowering は 1 本しかないため、同じプログラムが `run` と `build
 | std::fs / path / io / process | 33 | ✅ | ✅ | ✅ | 14/33 | 14/33 | 14/33 | 4/33 |
 | std::net / http | 23 | ✅ | ✅ | ✅ | 4/23 | 4/23 | 4/23 | 4/23 |
 | async / coro | 2 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| std::thread | 1 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| std::thread | 2 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 
 `✅` はその行の example が全て通ること、分数は一部だけ通ること、`❌` は 1 つも
 通らないことを表します。各行は自分の feature tag を宣言した example を数えるので、
@@ -115,7 +115,7 @@ no-libc / freestanding build は build policy としては受理済みですが�
 
 | 機能 | 状態 |
 | --- | --- |
-| 並列処理のための thread | **進行中。** `std::thread::Pool` は slice を重ならない塊に切って 1 つの関数を複数の thread で同時に走らせ、全部の塊が終わってから返ります(native のみ)。失敗を返す worker と連続していない要素の塊が次です(ADR-0025)。coroutine(`std::coro`)と evented な `Io` は 1 thread 上の並行性であって並列性ではありません(ADR-0145、ADR-0146) |
+| 並列処理のための thread | **進行中。** `std::thread::Pool` は slice を重ならない塊に切って 1 つの関数を複数の thread で同時に走らせ、全部の塊が終わってから返ります(native のみ)。`each_lane` は行列の列のように一定間隔で並ぶ要素の列に対して同じことをします。失敗を返す worker が次です(ADR-0025)。coroutine(`std::coro`)と evented な `Io` は 1 thread 上の並行性であって並列性ではありません(ADR-0145、ADR-0146) |
 | 現在の subset を超える wasm backend | **進行中。** Wasm の経路で動かない example は、すべて target が持たない capability として拒否されます |
 | raw pointer の実行時操作 | **check のみ。** `pointer_policy.kizu` と `raw_pointer_deref.kizu` は検査だけで実行しません |
 | type alias | **未着手** |

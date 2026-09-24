@@ -74,3 +74,36 @@ pub fn each<T>(
     std::internal::builtin::thread_pool_each<T>(pool.handle, data, chunk, worker);
     return;
 }
+
+// each_lane runs `worker` once per lane of `data`, on the pool's threads.
+// `data` is blocks of `length * stride` elements, and each block holds
+// `stride` lanes: lane i of a block is its elements i, i + stride, ...,
+// i + (length - 1) * stride. For a row-major grid, a lane along an axis is
+// `length` = that axis's size and `stride` = the product of the sizes after
+// it; a stride of 1 is a row.
+//
+// The worker is handed each lane as an ordinary `&var []T` of `length`
+// elements. A lane whose elements are not side by side is copied into a run
+// of the taking thread's own, handed over, and copied back when the worker
+// returns, so no other thread holds any element of it. Those runs, one per
+// thread, come from `allocator` for the call and go back before it returns.
+// `index` counts lanes from 0 in the order of their first elements' blocks,
+// then i. `data` whose length is not whole blocks is a panic.
+pub fn each_lane<T>(
+    pool: &var std::thread::Pool,
+    allocator: Allocator,
+    data: &var []T,
+    length: i64,
+    stride: i64,
+    worker: fn(&var []T, i64) -> void
+) -> std::thread::Error!void {
+    if length < 1 or stride < 1 {
+        std::internal::builtin::panic("thread each_lane: length and stride must be at least 1");
+    }
+    if std::mem::count<T>(data) % (length * stride) != 0 {
+        std::internal::builtin::panic("thread each_lane: data must be whole blocks of length * stride");
+    }
+    try std::internal::builtin::thread_pool_each_lane<T>(
+        pool.handle, allocator, data, length, stride, worker);
+    return;
+}

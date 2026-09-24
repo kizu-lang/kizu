@@ -7,19 +7,30 @@ import (
 	"github.com/kizu-lang/kizu/internal/ir"
 )
 
-// threadPoolEachName is the primitive behind std::thread::each.
-const threadPoolEachName = "std::internal::builtin::thread_pool_each"
+// threadRoundData names the primitives that start a pool round and where
+// each one's `[]T` operand is. The runtime is untyped, so both carry what T
+// measures right after that operand and the thunk that calls the worker last.
+var threadRoundData = map[string]int{
+	"std::internal::builtin::thread_pool_each":      1,
+	"std::internal::builtin::thread_pool_each_lane": 2,
+}
 
 // threadEachInvokeThunk is the one adapter every pool round calls its worker
 // through.
 const threadEachInvokeThunk = "kizu.thread.each.invoke"
 
-// usesThreadPoolEach reports whether any function starts a pool round.
-func (e *emitter) usesThreadPoolEach() bool {
+// isThreadPoolRound reports whether name starts a pool round.
+func isThreadPoolRound(name string) bool {
+	_, ok := threadRoundData[name]
+	return ok
+}
+
+// usesThreadPoolRound reports whether any function starts a pool round.
+func (e *emitter) usesThreadPoolRound() bool {
 	for _, fn := range e.module.Functions {
 		for _, block := range fn.Blocks {
 			for _, instr := range block.Instrs {
-				if instr.Op == "call."+threadPoolEachName {
+				if isThreadPoolRound(strings.TrimPrefix(instr.Op, "call.")) {
 					return true
 				}
 			}
@@ -35,7 +46,7 @@ func (e *emitter) usesThreadPoolEach() bool {
 // instead, and this thunk makes the one call with Kizu's own ABI. Every view
 // is the same pair whatever T is, so one thunk serves every element type.
 func (e *emitter) writeThreadEachInvokeThunk() {
-	if !e.usesThreadPoolEach() {
+	if !e.usesThreadPoolRound() {
 		return
 	}
 	fmt.Fprintf(&e.out,
@@ -47,32 +58,61 @@ func (e *emitter) writeThreadEachInvokeThunk() {
 	e.out.WriteString("  ret void\n}\n\n")
 }
 
-// writeThreadPoolEach lowers one pool round. The runtime does not know T, so
+// threadPoolRoundDecl declares a pool round the way writeThreadPoolRound
+// calls it: a failure comes back through a leading slot, the slice behind a
+// pointer followed by its element size, and the thunk last.
+func (e *emitter) threadPoolRoundDecl(name string, instr *ir.Instr) string {
+	params := []string{}
+	if instr.Result.Type != "void" {
+		params = append(params, "ptr")
+	}
+	for index, arg := range instr.Args {
+		if index == threadRoundData[name] {
+			params = append(params, "ptr", "i64")
+			continue
+		}
+		params = append(params, e.llvmType(arg.Type))
+	}
+	params = append(params, "ptr")
+	return fmt.Sprintf("declare void @%s(%s)", llvmFunctionName(name), strings.Join(params, ", "))
+}
+
+// writeThreadPoolRound lowers one pool round. The runtime does not know T, so
 // the call carries the slice behind a pointer, what T measures, and the thunk
-// that calls the worker; the runtime cuts chunks by that size.
-func (e *emitter) writeThreadPoolEach(instr *ir.Instr) error {
-	if len(instr.Args) != 4 {
-		return fmt.Errorf("llvm error: thread_pool_each expects pool, data, chunk and worker")
+// that calls the worker; the runtime cuts chunks and lanes by that size.
+func (e *emitter) writeThreadPoolRound(name string, instr *ir.Instr) error {
+	dataIndex := threadRoundData[name]
+	if len(instr.Args) <= dataIndex {
+		return fmt.Errorf("llvm error: %s expects a slice operand", name)
 	}
-	elem, ok := strings.CutPrefix(instr.Args[1].Type, "[]")
+	elem, ok := strings.CutPrefix(instr.Args[dataIndex].Type, "[]")
 	if !ok {
-		return fmt.Errorf("llvm error: thread_pool_each data is %s, not a view", instr.Args[1].Type)
+		return fmt.Errorf("llvm error: %s data is %s, not a view", name, instr.Args[dataIndex].Type)
 	}
-	resultName := localName(fmt.Sprintf("%%thread.each.%d", e.nextThreadEach))
+	slot := localName(fmt.Sprintf("%%thread.round.%d", e.nextThreadEach))
 	e.nextThreadEach++
-	dataSlot := resultName + ".data"
-	fmt.Fprintf(&e.out, "  %s = alloca %%kizu.slice.u8\n", dataSlot)
-	fmt.Fprintf(&e.out, "  store %%kizu.slice.u8 %s, ptr %s\n",
-		e.value(instr.Args[1]).operand, dataSlot)
-	fmt.Fprintf(&e.out,
-		"  call void @%s(i64 %s, ptr %s, i64 %s, i64 %s, ptr %s, ptr @%s)\n",
-		llvmFunctionName(threadPoolEachName),
-		e.value(instr.Args[0]).operand,
-		dataSlot,
-		e.elementSizeOperand(elem),
-		e.value(instr.Args[2]).operand,
-		e.value(instr.Args[3]).operand,
-		threadEachInvokeThunk,
-	)
+	args := []string{}
+	if instr.Result.Type != "void" {
+		fmt.Fprintf(&e.out, "  %s.result = alloca %s\n", slot, e.llvmType(instr.Result.Type))
+		args = append(args, "ptr "+slot+".result")
+	}
+	for index, arg := range instr.Args {
+		if index != dataIndex {
+			args = append(args, e.llvmType(arg.Type)+" "+e.value(arg).operand)
+			continue
+		}
+		fmt.Fprintf(&e.out, "  %s.data = alloca %%kizu.slice.u8\n", slot)
+		fmt.Fprintf(&e.out, "  store %%kizu.slice.u8 %s, ptr %s.data\n", e.value(arg).operand, slot)
+		args = append(args, "ptr "+slot+".data", "i64 "+e.elementSizeOperand(elem))
+	}
+	args = append(args, "ptr @"+threadEachInvokeThunk)
+	fmt.Fprintf(&e.out, "  call void @%s(%s)\n", llvmFunctionName(name), strings.Join(args, ", "))
+	if instr.Result.Type == "void" {
+		return nil
+	}
+	resultName := localName(instr.Result.Name)
+	resultType := e.llvmType(instr.Result.Type)
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s.result\n", resultName, resultType, slot)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }

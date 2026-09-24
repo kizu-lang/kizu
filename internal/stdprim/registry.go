@@ -336,6 +336,7 @@ var primitives = map[string]bool{
 	"std::internal::builtin::thread_cpu_count":             true,
 	"std::internal::builtin::thread_pool_close":            true,
 	"std::internal::builtin::thread_pool_each":             true,
+	"std::internal::builtin::thread_pool_each_lane":        true,
 	"std::internal::builtin::thread_pool_new":              true,
 }
 

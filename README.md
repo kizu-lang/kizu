@@ -69,7 +69,7 @@ not in any one execution path.
 | std::fs / path / io / process | 33 | ✅ | ✅ | ✅ | 14/33 | 14/33 | 14/33 | 4/33 |
 | std::net / http | 23 | ✅ | ✅ | ✅ | 4/23 | 4/23 | 4/23 | 4/23 |
 | async / coro | 2 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| std::thread | 1 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| std::thread | 2 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 
 `✅` means every example in the row passes, a fraction means only some do, and
 `❌` means none do. A row counts every example that declares one of its feature
@@ -124,7 +124,7 @@ deliberately excluded, so the two are not confused.
 
 | Feature | State |
 | --- | --- |
-| threads for parallel work | **in progress.** `std::thread::Pool` runs one function over the non-overlapping chunks of a slice on several threads and returns after every chunk ran (native only). Workers that return failures and chunks of elements that are not contiguous are next (ADR-0025). Coroutines (`std::coro`) and an evented `Io` are concurrency on one thread, not parallelism (ADR-0145, ADR-0146) |
+| threads for parallel work | **in progress.** `std::thread::Pool` runs one function over the non-overlapping chunks of a slice on several threads and returns after every chunk ran (native only). `each_lane` does the same for lanes whose elements are a fixed distance apart, such as a matrix's columns. Workers that return failures are next (ADR-0025). Coroutines (`std::coro`) and an evented `Io` are concurrency on one thread, not parallelism (ADR-0145, ADR-0146) |
 | wasm beyond the current target subsets | **in progress.** Every example the Wasm routes do not run is refused as a capability the target lacks |
 | raw pointer runtime operations | **check-only.** `pointer_policy.kizu` and `raw_pointer_deref.kizu` are checked but not executed |
 | type alias | **not started** |

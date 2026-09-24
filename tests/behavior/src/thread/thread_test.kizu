@@ -120,6 +120,57 @@ test "chunks are cut by the element's own size" {
     testing::expect_equal<i64>(2, samples.get_or_panic(9).size);
 }
 
+// Keeps what the element held, and adds which lane it was in and where.
+fn mark_lane(lane: &var []i64, index: i64) -> void {
+    for 0..mem::count<i64>(lane) |j| {
+        lane[j] = lane[j] * 1000000 + index * 1000 + j;
+    }
+    return;
+}
+
+// Fills a nx * ny * nz grid, x fastest, with each element's own offset, runs
+// one lane round along the axis `length` and `stride` name, and checks every
+// element came back to its own place marked with its lane and position.
+fn check_lanes(
+    pool: &var thread::Pool,
+    allocator: Allocator,
+    n: i64,
+    length: i64,
+    stride: i64
+) -> Failure!void {
+    var values = array::new<i64>(allocator);
+    defer values.deinit(allocator);
+    try count_up(&var values, allocator, n);
+    let cells = values.as_mut_slice();
+    try thread::each_lane<i64>(pool, allocator, cells, length, stride, mark_lane);
+    for 0..n |offset| {
+        let block = offset / (length * stride);
+        let within = offset % (length * stride);
+        let lane = block * stride + within % stride;
+        let position = within / stride;
+        testing::expect_equal<i64>(
+            offset * 1000000 + lane * 1000 + position, values.get_or_panic(offset));
+    }
+    return;
+}
+
+test "lanes along each axis of a grid come back in place" {
+    let allocator = mem::page_allocator();
+    var pool = try thread::init(io::blocking(), allocator, 4);
+    defer pool.deinit(allocator);
+    // A 4 x 3 x 5 grid, x fastest: rows, then columns, then the slowest axis.
+    try check_lanes(&var pool, allocator, 60, 4, 1);
+    try check_lanes(&var pool, allocator, 60, 3, 4);
+    try check_lanes(&var pool, allocator, 60, 5, 12);
+}
+
+test "a pool of one thread runs lanes alone" {
+    let allocator = mem::page_allocator();
+    var pool = try thread::init(io::blocking(), allocator, 1);
+    defer pool.deinit(allocator);
+    try check_lanes(&var pool, allocator, 24, 6, 4);
+}
+
 test "the processor count is at least one" {
     testing::expect(thread::cpu_count(io::blocking()) >= 1);
 }

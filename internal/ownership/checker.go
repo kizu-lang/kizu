@@ -6224,7 +6224,9 @@ func (c *Checker) checkRuntimeTypeApply(
 	case "std::internal::builtin::task_set_spawn":
 		return c.checkTaskSetSpawn(args, env)
 	case "std::internal::builtin::thread_pool_each":
-		return c.checkThreadPoolEach(args, env)
+		return c.checkThreadPoolRound(args, env, "void")
+	case "std::internal::builtin::thread_pool_each_lane":
+		return c.checkThreadPoolRound(args, env, "std::thread::Error!void")
 	}
 	return "", errorf("move error: `%s` does not take static arguments", name)
 }
@@ -6283,19 +6285,20 @@ func (c *Checker) checkTaskSetSpawn(
 	return "std::io::Error!void", nil
 }
 
-// checkThreadPoolEach reads every argument of `thread_pool_each`. The slice
-// stays lent for the call, which is all it is lent for: the runtime has
-// joined every chunk before the call returns.
-func (c *Checker) checkThreadPoolEach(
+// checkThreadPoolRound reads every argument of a pool round. The slice stays
+// lent for the call, which is all it is lent for: the runtime has joined
+// every chunk or lane before the call returns.
+func (c *Checker) checkThreadPoolRound(
 	args []ast.Expression,
 	env *scope,
+	result string,
 ) (string, error) {
 	for _, arg := range args {
 		if _, err := c.readExpr(arg, env); err != nil {
 			return "", err
 		}
 	}
-	return "void", nil
+	return result, nil
 }
 
 // checkArenaTypeApply validates std::arena::new<T>(allocator) ownership.
@@ -7246,16 +7249,16 @@ func (c *Checker) checkGenericWrapperTypeArgs(name string, typeArgs []string) er
 				"borrow error: `std::io::spawn` state `%s` must own its data and contain no Io or Allocator",
 				state)
 		}
-	case "std::thread::each":
+	case "std::thread::each", "std::thread::each_lane":
 		// Every chunk goes to another thread. An Io or Allocator copied into
 		// two chunks would be one capability used from two threads at once,
 		// and a view would reach past the chunk it came in.
 		elem := typeArgs[0]
 		if c.viewCarryingType(elem) || c.capabilityCarryingType(elem) {
 			return errorf(
-				"borrow error: `std::thread::each` element `%s` must own its data"+
+				"borrow error: `%s` element `%s` must own its data"+
 					" and contain no Io or Allocator",
-				elem)
+				name, elem)
 		}
 	}
 	return nil
