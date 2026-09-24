@@ -11,6 +11,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/quote"
 	"github.com/kizu-lang/kizu/internal/staticexpr"
 	"github.com/kizu-lang/kizu/internal/stdlib"
+	"github.com/kizu-lang/kizu/internal/stdmath"
 	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/stdprim"
@@ -1578,9 +1579,7 @@ func (l *lowerer) returnVoidValue() Value {
 // lowerExpr lowers an expression and returns its typed SSA value.
 func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 	if inner, ok := ast.MarkerValue(expr); ok {
-		// A marker is a claim about the expression, not an operation, so it
-		// lowers to whatever it covers.
-		return l.lowerExpr(inner)
+		return l.lowerMarkedExpr(expr, inner)
 	}
 	switch e := expr.(type) {
 	case *ast.IntExpr, *ast.FloatExpr, *ast.StringExpr, *ast.BoolExpr, *ast.NullExpr:
@@ -2107,6 +2106,21 @@ func (l *lowerer) lowerIdentExpr(expr *ast.IdentExpr) (Value, error) {
 		return l.emit("func.addr."+name, functionPointerType(sig), nil, ""), nil
 	}
 	return Value{}, fmt.Errorf("ir error: undefined value `%s`", expr.Name)
+}
+
+// lowerMarkedExpr lowers an expression under a marker. A marker is a claim
+// about the expression, not an operation, so it lowers to whatever it
+// covers -- except that a float comptime expression is folded here, not left
+// to the optimizer: sin and cos are calls into std, which no backend folds,
+// and the literal is the bits the call computes on this target
+// (internal/stdmath).
+func (l *lowerer) lowerMarkedExpr(marked ast.Expression, inner ast.Expression) (Value, error) {
+	if _, ok := marked.(*ast.ComptimeExpr); ok {
+		if value, ok := l.constFloat(inner); ok {
+			return l.emitConst("f64", stdmath.Literal(value)), nil
+		}
+	}
+	return l.lowerExpr(inner)
 }
 
 // functionByValueName resolves the declaration a name used as a value refers

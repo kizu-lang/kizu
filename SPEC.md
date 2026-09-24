@@ -2688,7 +2688,22 @@ comptime if 1 + 1 == 2 {
 ```
 
 `comptime` expression は、整数、真偽値、文字列、compile-time type value、
-単項演算、二項演算、および §13.1 の `std::meta` 述語だけを評価します。
+f64、単項演算、二項演算、および §13.1 の `std::meta` 述語だけを評価します。
+
+f64 で評価できるのは、float literal、単項 `-`、`+ - * /`、比較、comptime 整数の
+`cast<f64>`、および `std::math` の `sin` / `cos` / `sqrt` / `pi` / `tau`(型引数
+`f64`)です。結果は literal に畳まれ、その bit は build 中の target で同じ式が
+実行時に計算する値と一致します: `sin` / `cos` は compiler の host の数学ライブラリ
+ではなく std の実装そのもの(native は fused multiply-add あり、wasm はなし)で
+評価します。`comptime` を付けて変わるのは計算する時点であり、値ではありません。
+無限大と NaN は literal にならないので compile error です。f32 と、他の `std::math`
+関数は評価しません。
+
+```kizu
+comptime for 0..24 |m| {
+    let w = comptime math::cos<f64>(-math::tau<f64>() * cast<f64>(m) / 24.0);
+}
+```
 整数・bool の static parameter(`<n: i64>`、`<first: bool>`)も、その
 instance が受け取った値として読めます。値ごとに別の instance なので、
 `comptime if n % 2 == 0` の選ばれなかった branch はその値では検査も lowering も

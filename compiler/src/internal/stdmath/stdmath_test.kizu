@@ -1,0 +1,92 @@
+import std::float;
+import std::mem;
+import std::testing;
+
+// expect_literal checks one spelling Go's strconv.FormatFloat(v, 'x', -1, 64)
+// writes, and that parse_literal reads it back to the same bits.
+fn expect_literal(bits: u64, want: []u8) -> !void {
+    let allocator = mem::page_allocator();
+    let value = float::from_bits(bits);
+    let spelled = try literal(allocator, value);
+    defer spelled.deinit(allocator);
+    let bytes = spelled.as_bytes();
+    testing::expect(mem::equal_bytes(bytes, want));
+    if parse_literal(want) |parsed| {
+        testing::expect(float::bits(parsed) == bits);
+    } else {
+        testing::fail("hex float literal did not parse");
+    }
+    return;
+}
+
+fn expect_rejected(text: []u8) -> void {
+    if parse_literal(text) |_| {
+        testing::fail("spelling should not parse as a hex float");
+    }
+    return;
+}
+
+// high_low builds a u64 from two 32-bit halves, since a hex literal above the
+// i64 range is not one Kizu reads.
+fn high_low(high: u64, low: u64) -> u64 {
+    return (high << 32) | low;
+}
+
+test "stdmath spells a float as Go's shortest hex and reads it back" {
+    try expect_literal(float::bits(1.0), "0x1p+00");
+    try expect_literal(float::bits(-2.5), "-0x1.4p+01");
+    try expect_literal(float::bits(3.141592653589793), "0x1.921fb54442d18p+01");
+    try expect_literal(float::bits(0.1), "0x1.999999999999ap-04");
+    try expect_literal(float::bits(1e308), "0x1.1ccf385ebc8ap+1023");
+    try expect_literal(1, "0x1p-1074");
+    try expect_literal(0, "0x0p+00");
+    try expect_literal(high_low(0x80000000, 0), "-0x0p+00");
+    try expect_literal(high_low(0x000fffff, 0xffffffff), "0x1.ffffffffffffep-1023");
+    try expect_literal(high_low(0x7fefffff, 0xffffffff), "0x1.fffffffffffffp+1023");
+    return;
+}
+
+test "stdmath parses hex floats with ties to even" {
+    // 1 + 2^-53 is halfway between 1 and its successor: even stays at 1.
+    if parse_literal("0x1.00000000000008p+00") |value| {
+        testing::expect(value == 1.0);
+    } else {
+        testing::fail("tie did not parse");
+    }
+    // A nonzero digit past the tie rounds it up.
+    if parse_literal("0x1.000000000000080000000001p+00") |value| {
+        testing::expect(float::bits(value) == float::bits(1.0) + 1);
+    } else {
+        testing::fail("tie with sticky digit did not parse");
+    }
+    // Half the smallest subnormal ties to zero; three quarters rounds up.
+    if parse_literal("0x1p-1075") |value| {
+        testing::expect(float::bits(value) == 0);
+    } else {
+        testing::fail("half subnormal did not parse");
+    }
+    if parse_literal("0x1.8p-1075") |value| {
+        testing::expect(float::bits(value) == 1);
+    } else {
+        testing::fail("three quarters subnormal did not parse");
+    }
+    expect_rejected("0x1p+1024");
+    expect_rejected("0x1");
+    expect_rejected("1.5");
+    return;
+}
+
+test "stdmath folds std::math for the target it is told" {
+    if call("std::math::sqrt", 1, 2.0, true) |value| {
+        testing::expect(value == 1.4142135623730951);
+    } else {
+        testing::fail("sqrt did not fold");
+    }
+    if call("std::math::sin", 2, 1.0, true) |_| {
+        testing::fail("sin folded two arguments");
+    }
+    testing::expect(!names("std::math::exp"));
+    testing::expect(!finite(1.0 / 0.0));
+    testing::expect(mem::equal_bytes(non_finite_spelling(-1.0 / 0.0), "-Inf"));
+    return;
+}

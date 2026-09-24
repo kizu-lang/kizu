@@ -2,6 +2,7 @@ import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::ownership;
 import compiler::internal::staticexpr;
+import compiler::internal::stdmath;
 import compiler::internal::stdtarget;
 import compiler::internal::typ;
 import std::mem;
@@ -68,7 +69,7 @@ fn (self: &Lowerer) static_bool(name: Name, out: &var bool) -> bool {
 }
 
 /// Evaluates a constant logical operator, a type comparison, or an integer
-/// comparison, the Go `constBinaryBool`.
+/// or float comparison, the Go `constBinaryBool`.
 fn (self: &var Lowerer) const_binary_bool(
     tree: &var ast::Ast,
     binary: ast::BinaryExpr,
@@ -93,7 +94,89 @@ fn (self: &var Lowerer) const_binary_bool(
         let operator = retained.as_bytes();
         return compare_const_ints(operator, left, right, out);
     }
-    return false;
+    let left_float = try self.const_float(tree, binary.left) orelse return false;
+    let right_float = try self.const_float(tree, binary.right) orelse return false;
+    let retained = tree.texts.at(binary.operator.node);
+    let operator = retained.as_bytes();
+    let compared = stdmath::compare(operator, left_float, right_float) orelse return false;
+    out.* = compared;
+    return true;
+}
+
+/// Evaluates f64 compile-time arithmetic, the Go `constFloat`: literals,
+/// negation, + - * /, `cast<f64>` of a constant integer, and the std::math
+/// calls stdmath computes for this target. The checker has already refused
+/// whatever does not evaluate, so null means "not a float expression", not
+/// an error.
+fn (self: &var Lowerer) const_float(tree: &ast::Ast, expression: ast::Expression) -> !?f64 {
+    if ownership::comptime_expr(tree, expression) |inner| {
+        return self.const_float(tree, inner.expr);
+    }
+    if ownership::float_expr(tree, expression) |literal| {
+        let retained = tree.texts.at(literal.value.node);
+        let bytes = retained.as_bytes();
+        return typ::parse_float_literal(self.allocator, bytes);
+    }
+    if ownership::cast_expr(tree, expression) |converted| {
+        let target = try typ::render(self.allocator, &tree.types, converted.target_type);
+        defer target.deinit(self.allocator);
+        let target_bytes = target.as_bytes();
+        if !mem::equal_bytes(target_bytes, "f64") {
+            return null;
+        }
+        var integer = 0;
+        if try self.const_int(tree, converted.value, &var integer) {
+            return cast<f64>(integer);
+        }
+        return self.const_float(tree, converted.value);
+    }
+    if ownership::prefix_expr(tree, expression) |prefix| {
+        let value = try self.const_float(tree, prefix.right) orelse return null;
+        if !text_is(tree, prefix.operator, "-") {
+            return null;
+        }
+        return -value;
+    }
+    if ownership::binary_expr(tree, expression) |binary| {
+        let left = try self.const_float(tree, binary.left) orelse return null;
+        let right = try self.const_float(tree, binary.right) orelse return null;
+        let retained = tree.texts.at(binary.operator.node);
+        let operator = retained.as_bytes();
+        return stdmath::binary(operator, left, right);
+    }
+    if ownership::call_expr(tree, expression) |call| {
+        return self.const_math_call(tree, call);
+    }
+    return null;
+}
+
+/// Evaluates a std::math call on constant f64 arguments, the Go
+/// `constMathCall`.
+fn (self: &var Lowerer) const_math_call(tree: &ast::Ast, call: ast::CallExpr) -> !?f64 {
+    let apply = ownership::type_apply_expr(tree, call.callee) orelse return null;
+    if !text_is(tree, apply.type_arg, "f64") {
+        return null;
+    }
+    let name = try self.expression_name(tree, apply.callee);
+    let retained = name_text(&self.module.names, name);
+    let name_bytes = retained.as_bytes();
+    if !stdmath::names(name_bytes) {
+        return null;
+    }
+    var count = 0;
+    var first = 0.0;
+    while ownership::arg_at(tree, call.args, count) |argument| {
+        let value = try self.const_float(tree, argument) orelse return null;
+        if count == 0 {
+            first = value;
+        }
+        count = count + 1;
+    }
+    // Evaluating an argument may intern names, so the spelling is read again
+    // rather than held across the loop.
+    let again = name_text(&self.module.names, name);
+    let again_bytes = again.as_bytes();
+    return stdmath::call(again_bytes, count, first, stdtarget::is_native(self.target));
 }
 
 /// Answers a compiler-defined std::target predicate and reports whether the

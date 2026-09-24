@@ -1,0 +1,355 @@
+import std::float;
+import std::fmt;
+import std::math;
+import std::mem;
+import std::string;
+
+// Port of internal/stdmath: the f64 arithmetic a comptime expression folds.
+// Where the Go seed carries a port of std's sine and cosine, this compiler is
+// a Kizu program and calls std itself: `sin_with<true>` is the fused kernel a
+// native build runs and `sin_with<false>` the one a wasm build runs, both
+// computed here on the host, so the folded bits are the build target's
+// whichever host folds them. A call's arguments come as their count and the
+// first value, which is all the five functions read; the callers still
+// evaluate every argument, so an error in a surplus one is reported.
+
+/// Evaluates one std::math function a compile-time float expression may call,
+/// by its qualified name, the Go `Call`; null when the name is not one of
+/// them or the argument count does not fit it.
+pub fn call(name: []u8, count: i64, first: f64, native: bool) -> ?f64 {
+    if mem::equal_bytes(name, "std::math::pi") and count == 0 {
+        return math::pi<f64>();
+    }
+    if mem::equal_bytes(name, "std::math::tau") and count == 0 {
+        return math::tau<f64>();
+    }
+    if mem::equal_bytes(name, "std::math::sqrt") and count == 1 {
+        return math::sqrt<f64>(first);
+    }
+    if mem::equal_bytes(name, "std::math::sin") and count == 1 {
+        if native {
+            return math::sin_with<true>(first);
+        }
+        return math::sin_with<false>(first);
+    }
+    if mem::equal_bytes(name, "std::math::cos") and count == 1 {
+        if native {
+            return math::cos_with<true>(first);
+        }
+        return math::cos_with<false>(first);
+    }
+    return null;
+}
+
+/// Reports whether name is a std::math function `call` evaluates, the Go
+/// `Names`.
+pub fn names(name: []u8) -> bool {
+    return mem::equal_bytes(name, "std::math::pi") or
+        mem::equal_bytes(name, "std::math::tau") or
+        mem::equal_bytes(name, "std::math::sqrt") or
+        mem::equal_bytes(name, "std::math::sin") or
+        mem::equal_bytes(name, "std::math::cos");
+}
+
+/// Evaluates + - * / on two floats, each rounded once, the Go `Binary`; null
+/// when op is not one of them.
+pub fn binary(op: []u8, left: f64, right: f64) -> ?f64 {
+    if mem::equal_bytes(op, "+") {
+        return left + right;
+    }
+    if mem::equal_bytes(op, "-") {
+        return left - right;
+    }
+    if mem::equal_bytes(op, "*") {
+        return left * right;
+    }
+    if mem::equal_bytes(op, "/") {
+        return left / right;
+    }
+    return null;
+}
+
+/// Evaluates a float comparison, the Go `Compare`; null when op is not one.
+pub fn compare(op: []u8, left: f64, right: f64) -> ?bool {
+    if mem::equal_bytes(op, "==") {
+        return left == right;
+    }
+    if mem::equal_bytes(op, "!=") {
+        return left != right;
+    }
+    if mem::equal_bytes(op, "<") {
+        return left < right;
+    }
+    if mem::equal_bytes(op, "<=") {
+        return left <= right;
+    }
+    if mem::equal_bytes(op, ">") {
+        return left > right;
+    }
+    if mem::equal_bytes(op, ">=") {
+        return left >= right;
+    }
+    return null;
+}
+
+/// Reports whether a folded value can be a constant, the Go `Finite`: a
+/// literal names a finite float, so an infinity or NaN at compile time is
+/// the program's error.
+pub fn finite(value: f64) -> bool {
+    return !float::is_nan(value) and !float::is_infinite(value);
+}
+
+/// Spells a value not `finite` the way Go's `%v` does, which is how the
+/// diagnostic both compilers print names it.
+pub fn non_finite_spelling(value: f64) -> []u8 {
+    if float::is_nan(value) {
+        return "NaN";
+    }
+    if value < 0.0 {
+        return "-Inf";
+    }
+    return "+Inf";
+}
+
+/// Spells a folded float as IR constant text, the Go `Literal`: C99
+/// hexadecimal as Go's `strconv.FormatFloat(v, 'x', -1, 64)` writes it
+/// (`0x1.921fb54442d18p+01`), so both compilers emit the same IR. It names
+/// the bits exactly, which a decimal spelling can only do through a
+/// correctly rounded conversion each compiler would have to agree on. A
+/// subnormal is normalized, so every nonzero value leads with `1`.
+pub fn literal(allocator: Allocator, value: f64) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    let raw = float::bits(value);
+    if raw >> 63 != 0 {
+        try out.append_byte(allocator, cast<u8>(45));
+    }
+    var fraction = raw & fraction_mask();
+    var exponent = cast<i64>((raw >> 52) & 2047) - 1023;
+    var lead = cast<u8>(49);
+    if (raw >> 52) & 2047 == 0 {
+        if fraction == 0 {
+            lead = cast<u8>(48);
+            exponent = 0;
+        } else {
+            // A subnormal is fraction * 2^-1074; shift its leading bit up to
+            // the hidden position, where a normal value keeps it.
+            exponent = -1022;
+            while fraction & hidden_bit() == 0 {
+                fraction = fraction << 1;
+                exponent = exponent - 1;
+            }
+            fraction = fraction & fraction_mask();
+        }
+    }
+    try out.append_bytes(allocator, "0x");
+    try out.append_byte(allocator, lead);
+    if fraction != 0 {
+        try out.append_byte(allocator, cast<u8>(46));
+        // Thirteen hex digits hold the 52 fraction bits; the shortest
+        // spelling drops the trailing zeros.
+        var shift = 48;
+        while shift >= 0 and fraction != 0 {
+            let digit = (fraction >> cast<u64>(shift)) & 15;
+            try out.append_byte(allocator, hex_digit(digit));
+            fraction = fraction & ((cast<u64>(1) << cast<u64>(shift)) - 1);
+            shift = shift - 4;
+        }
+    }
+    try out.append_byte(allocator, cast<u8>(112));
+    if exponent < 0 {
+        try out.append_byte(allocator, cast<u8>(45));
+        exponent = 0 - exponent;
+    } else {
+        try out.append_byte(allocator, cast<u8>(43));
+    }
+    if exponent < 10 {
+        try out.append_byte(allocator, cast<u8>(48));
+    }
+    try fmt::append_i64(allocator, &var out, exponent);
+    return move out;
+}
+
+/// Reads a C99 hexadecimal float, `[-]0x<hex>[.<hex>]p[+-]<decimal>`, to the
+/// nearest f64 with ties to even, the part of Go's `strconv.ParseFloat` the
+/// backends need to read `literal`'s spelling back. Null for any other
+/// spelling, and for a magnitude no f64 holds.
+pub fn parse_literal(text: []u8) -> ?f64 {
+    var index = 0;
+    var negative = false;
+    if index < mem::len(text) and text[index] == cast<u8>(45) {
+        negative = true;
+        index = 1;
+    } else {
+        if index < mem::len(text) and text[index] == cast<u8>(43) {
+            index = 1;
+        }
+    }
+    if index + 2 > mem::len(text) or text[index] != cast<u8>(48) or
+        (text[index + 1] != cast<u8>(120) and text[index + 1] != cast<u8>(88)) {
+        return null;
+    }
+    index = index + 2;
+    // The value is mantissa * 2^exponent. Digits past 60 bits cannot reach
+    // the 53 a double keeps, but a nonzero one still decides a tie.
+    var mantissa = cast<u64>(0);
+    var exponent = 0;
+    var sticky = false;
+    var seen_digit = false;
+    var seen_dot = false;
+    while index < mem::len(text) {
+        let ch = text[index];
+        if ch == cast<u8>(46) {
+            if seen_dot {
+                return null;
+            }
+            seen_dot = true;
+            index = index + 1;
+            continue;
+        }
+        var digit = cast<u64>(0);
+        if hex_value(ch) |value| {
+            digit = value;
+        } else {
+            break;
+        }
+        seen_digit = true;
+        index = index + 1;
+        if mantissa >> 60 == 0 {
+            mantissa = mantissa * 16 + digit;
+            if seen_dot {
+                exponent = exponent - 4;
+            }
+        } else {
+            sticky = sticky or digit != 0;
+            if !seen_dot {
+                exponent = exponent + 4;
+            }
+        }
+    }
+    if !seen_digit or index >= mem::len(text) or
+        (text[index] != cast<u8>(112) and text[index] != cast<u8>(80)) {
+        return null;
+    }
+    index = index + 1;
+    var exponent_negative = false;
+    if index < mem::len(text) and text[index] == cast<u8>(45) {
+        exponent_negative = true;
+        index = index + 1;
+    } else {
+        if index < mem::len(text) and text[index] == cast<u8>(43) {
+            index = index + 1;
+        }
+    }
+    if index >= mem::len(text) {
+        return null;
+    }
+    var written = 0;
+    while index < mem::len(text) {
+        let ch = text[index];
+        if ch < cast<u8>(48) or ch > cast<u8>(57) {
+            return null;
+        }
+        // Past this bound every value is zero or overflows either way.
+        if written < 100000 {
+            written = written * 10 + cast<i64>(ch - cast<u8>(48));
+        }
+        index = index + 1;
+    }
+    if exponent_negative {
+        exponent = exponent - written;
+    } else {
+        exponent = exponent + written;
+    }
+    let magnitude = round_to_f64(mantissa, exponent, sticky) orelse return null;
+    if negative {
+        return float::from_bits(magnitude | (cast<u64>(1) << 63));
+    }
+    return float::from_bits(magnitude);
+}
+
+/// Rounds mantissa * 2^exponent (plus a sticky bit below it) to the nearest
+/// binary64 with ties to even and returns its bits; null when it overflows.
+fn round_to_f64(mantissa: u64, exponent: i64, sticky: bool) -> ?u64 {
+    if mantissa == 0 {
+        return cast<u64>(0);
+    }
+    var length = 0;
+    while length < 64 and mantissa >> cast<u64>(length) != 0 {
+        length = length + 1;
+    }
+    // The leading bit is 2^(exponent + length - 1); a double keeps 53 bits
+    // below it, or fewer where the result is subnormal.
+    var scale = exponent + length - 1 - 52;
+    if scale < -1074 {
+        scale = -1074;
+    }
+    var significand = mantissa;
+    let drop = scale - exponent;
+    if drop <= 0 {
+        significand = mantissa << cast<u64>(0 - drop);
+    } else {
+        var rest = mantissa;
+        var half = cast<u64>(0);
+        if drop > 64 {
+            significand = 0;
+            half = 0;
+        } else {
+            if drop == 64 {
+                significand = 0;
+            } else {
+                rest = mantissa & ((cast<u64>(1) << cast<u64>(drop)) - 1);
+                significand = mantissa >> cast<u64>(drop);
+            }
+            half = cast<u64>(1) << cast<u64>(drop - 1);
+        }
+        // Past 64 dropped bits the whole mantissa sits below half a unit.
+        let above = drop <= 64 and (rest > half or
+            (rest == half and (sticky or significand & 1 == 1)));
+        if above {
+            significand = significand + 1;
+        }
+        if significand == hidden_bit() << 1 {
+            significand = significand >> 1;
+            scale = scale + 1;
+        }
+    }
+    if significand < hidden_bit() {
+        // Subnormal, or rounded up into the smallest normal, whose bits are
+        // the same integer.
+        return significand;
+    }
+    let biased = scale + 52 + 1023;
+    if biased >= 2047 {
+        return null;
+    }
+    return (cast<u64>(biased) << 52) | (significand & fraction_mask());
+}
+
+fn hidden_bit() -> u64 {
+    return cast<u64>(1) << 52;
+}
+
+fn fraction_mask() -> u64 {
+    return hidden_bit() - 1;
+}
+
+fn hex_digit(value: u64) -> u8 {
+    if value < 10 {
+        return cast<u8>(48 + value);
+    }
+    return cast<u8>(87 + value);
+}
+
+fn hex_value(ch: u8) -> ?u64 {
+    if ch >= cast<u8>(48) and ch <= cast<u8>(57) {
+        return cast<u64>(ch - cast<u8>(48));
+    }
+    if ch >= cast<u8>(97) and ch <= cast<u8>(102) {
+        return cast<u64>(ch - cast<u8>(87));
+    }
+    if ch >= cast<u8>(65) and ch <= cast<u8>(70) {
+        return cast<u64>(ch - cast<u8>(55));
+    }
+    return null;
+}
