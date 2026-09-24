@@ -1,6 +1,7 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::ownership;
+import compiler::internal::stdmath;
 import compiler::internal::typ;
 import std::array;
 import std::fmt;
@@ -20,9 +21,7 @@ fn (self: &var Lowerer) lower_expr(
     out: &var Value
 ) -> !?diagnostic::Diagnostic {
     if ast::marker_value(tree, expression) |inner| {
-        // A marker is a claim about the expression, not an operation, so it
-        // lowers to whatever it covers.
-        return self.lower_expr(tree, inner, out);
+        return self.lower_marked_expr(tree, expression, inner, out);
     }
     if ownership::int_expr(tree, expression) |_| {
         return self.lower_literal_expr(tree, expression, out);
@@ -323,6 +322,30 @@ fn (self: &Lowerer) narrows_integer_literal(type_name: Name) -> bool {
         mem::equal_bytes(bytes, "u16") or mem::equal_bytes(bytes, "u32") or
         mem::equal_bytes(bytes, "u64") or mem::equal_bytes(bytes, "usize") or
         mem::equal_bytes(bytes, "isize");
+}
+
+/// Lowers an expression under a marker, the Go `lowerMarkedExpr`. A marker
+/// is a claim about the expression, not an operation, so it lowers to
+/// whatever it covers -- except that a float comptime expression is folded
+/// here, not left to the optimizer: sin and cos are calls into std, which no
+/// backend folds, and the literal is the bits the call computes on this
+/// target (stdmath).
+fn (self: &var Lowerer) lower_marked_expr(
+    tree: &var ast::Ast,
+    marked: ast::Expression,
+    inner: ast::Expression,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if ownership::comptime_expr(tree, marked) |_| {
+        if try self.const_float(tree, inner) |value| {
+            let text = try stdmath::literal(self.allocator, value);
+            defer text.deinit(self.allocator);
+            let bytes = text.as_bytes();
+            out.* = try self.emit_const_text(self.common.f64_type, bytes);
+            return null;
+        }
+    }
+    return self.lower_expr(tree, inner, out);
 }
 
 /// Lowers scalar literals, the Go `lowerLiteralExpr`.

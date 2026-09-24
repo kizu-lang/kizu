@@ -4,6 +4,7 @@ import (
 	"strconv"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/stdmath"
 	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/stdtarget"
 	"github.com/kizu-lang/kizu/internal/typ"
@@ -154,14 +155,13 @@ func (c *Checker) readComptimeOnly(expr ast.Expression) (string, error) {
 			return "", err
 		}
 		return left, nil
+	case *ast.CastExpr:
+		if _, err := c.readComptimeOnly(e.Value); err != nil {
+			return "", err
+		}
+		return typ.Text(e.TargetType), nil
 	case *ast.CallExpr:
-		if _, ok := c.targetPredicateCall(e); ok {
-			return "bool", nil
-		}
-		if _, ok := c.metaPredicateCall(e); ok {
-			return "bool", nil
-		}
-		return "", errorf("borrow error: runtime value cannot cross comptime boundary")
+		return c.readComptimeCall(e)
 	default:
 		return "", errorf("borrow error: runtime value cannot cross comptime boundary")
 	}
@@ -296,7 +296,87 @@ func (c *Checker) comptimeBinaryBool(e *ast.BinaryExpr) (bool, bool) {
 	if leftOK && rightOK {
 		return compareComptimeInts(e.Operator, left, right)
 	}
+	leftFloat, leftFloatOK := c.floatLiteral(e.Left)
+	rightFloat, rightFloatOK := c.floatLiteral(e.Right)
+	if leftFloatOK && rightFloatOK {
+		return stdmath.Compare(e.Operator, leftFloat, rightFloat)
+	}
 	return false, false
+}
+
+// readComptimeCall reads a call a comptime expression may make: a target or
+// meta predicate, or a std::math function of comptime arguments.
+func (c *Checker) readComptimeCall(e *ast.CallExpr) (string, error) {
+	if _, ok := c.targetPredicateCall(e); ok {
+		return "bool", nil
+	}
+	if _, ok := c.metaPredicateCall(e); ok {
+		return "bool", nil
+	}
+	if !comptimeMathCall(e) {
+		return "", errorf("borrow error: runtime value cannot cross comptime boundary")
+	}
+	for _, arg := range e.Args {
+		if _, err := c.readComptimeOnly(arg); err != nil {
+			return "", err
+		}
+	}
+	return "f64", nil
+}
+
+// comptimeMathCall reports whether a call is one of the std::math functions
+// a float comptime expression may make.
+func comptimeMathCall(expr *ast.CallExpr) bool {
+	apply, ok := expr.Callee.(*ast.TypeApplyExpr)
+	if !ok {
+		return false
+	}
+	name, ok := qualifiedName(apply.Callee)
+	return ok && stdmath.Names(name)
+}
+
+// floatLiteral evaluates f64 compile-time arithmetic for ownership branch
+// selection, with the same bits the type checker and the lowerer compute.
+func (c *Checker) floatLiteral(expr ast.Expression) (float64, bool) {
+	switch e := expr.(type) {
+	case *ast.ComptimeExpr:
+		return c.floatLiteral(e.Expr)
+	case *ast.FloatExpr:
+		return typ.ParseFloatLiteral(e.Value)
+	case *ast.CastExpr:
+		if typ.Text(e.TargetType) != "f64" {
+			return 0, false
+		}
+		if value, ok := c.intLiteral(e.Value); ok {
+			return float64(value), true
+		}
+		return c.floatLiteral(e.Value)
+	case *ast.PrefixExpr:
+		value, ok := c.floatLiteral(e.Right)
+		return -value, ok && e.Operator == "-"
+	case *ast.BinaryExpr:
+		left, leftOK := c.floatLiteral(e.Left)
+		right, rightOK := c.floatLiteral(e.Right)
+		if !leftOK || !rightOK {
+			return 0, false
+		}
+		return stdmath.Binary(e.Operator, left, right)
+	case *ast.CallExpr:
+		if !comptimeMathCall(e) {
+			return 0, false
+		}
+		args := make([]float64, 0, len(e.Args))
+		for _, arg := range e.Args {
+			value, ok := c.floatLiteral(arg)
+			if !ok {
+				return 0, false
+			}
+			args = append(args, value)
+		}
+		name, _ := qualifiedName(e.Callee.(*ast.TypeApplyExpr).Callee)
+		return stdmath.Call(name, args, c.target.IsNative())
+	}
+	return 0, false
 }
 
 // comptimeTypeValue returns a type value from the minimal compile-time type subset.

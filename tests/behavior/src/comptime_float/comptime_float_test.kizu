@@ -1,0 +1,44 @@
+import std::float;
+import std::math;
+import std::testing;
+
+// A float comptime expression folds to the bits the same expression computes
+// at run time on the target being built: sin and cos are std's, evaluated at
+// compile time by a port of the same reduction and tables. Each check is one
+// expansion, so the folded literal and the runtime call sit side by side.
+
+test "comptime sin and cos equal the runtime value below 2^17" {
+    comptime for 0..400 |i| {
+        let folded_cos = comptime math::cos<f64>(cast<f64>(i) * 0.37 - 50.0);
+        let folded_sin = comptime math::sin<f64>(cast<f64>(i) * 0.37 - 50.0);
+        let x = cast<f64>(i) * 0.37 - 50.0;
+        testing::expect_equal<u64>(float::bits(math::cos<f64>(x)), float::bits(folded_cos));
+        testing::expect_equal<u64>(float::bits(math::sin<f64>(x)), float::bits(folded_sin));
+    }
+}
+
+// Above 2^17 the reduction is Payne-Hanek, a different path through the
+// same code.
+test "comptime sin and cos equal the runtime value above 2^17" {
+    comptime for 0..200 |i| {
+        let folded_cos = comptime math::cos<f64>(cast<f64>(i) * 123456789.123 + 131072.0);
+        let folded_sin = comptime math::sin<f64>(cast<f64>(i) * -9876543210.5 - 131072.0);
+        let a = cast<f64>(i) * 123456789.123 + 131072.0;
+        let b = cast<f64>(i) * -9876543210.5 - 131072.0;
+        testing::expect_equal<u64>(float::bits(math::cos<f64>(a)), float::bits(folded_cos));
+        testing::expect_equal<u64>(float::bits(math::sin<f64>(b)), float::bits(folded_sin));
+    }
+}
+
+test "comptime arithmetic, sqrt and constants" {
+    let root = comptime math::sqrt<f64>(2.0) * 3.0 - 1.0 / 7.0;
+    let y = math::sqrt<f64>(2.0) * 3.0 - 1.0 / 7.0;
+    testing::expect_equal<u64>(float::bits(y), float::bits(root));
+    let turn = comptime math::tau<f64>() / 2.0;
+    testing::expect_equal<u64>(float::bits(math::pi<f64>()), float::bits(turn));
+    comptime if math::cos<f64>(0.0) == 1.0 and -0.5 < 0.0 {
+        testing::expect(true);
+    } else {
+        testing::fail("comptime float comparison");
+    }
+}

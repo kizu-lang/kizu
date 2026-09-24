@@ -30,6 +30,8 @@ std::math::ldexp<T>(fraction: T, exponent: i64) -> T
 std::math::sin<T>(value: T) -> T
 std::math::cos<T>(value: T) -> T
 std::math::sin_cos<T>(value: T) -> SinCos     // { sin: f64, cos: f64 }
+std::math::sin_with<fused: bool>(value: f64) -> f64
+std::math::cos_with<fused: bool>(value: f64) -> f64
 std::math::tan<T>(value: T) -> T
 std::math::asin<T>(value: T) -> T
 std::math::acos<T>(value: T) -> T
@@ -97,6 +99,11 @@ double-double で持って指数を掛け、それを `exp` の核に渡しま�
   未満です(`fmod(-5.5, 2.0)` は `-1.5`)。0 で割ると NaN です。
 - `ldexp` は `fraction * 2^exponent` で、範囲を超えれば無限大か 0、正規化数の
   下は 1 回だけ丸めて非正規化数にします。
+
+`sin_with` / `cos_with` は、fused multiply-add 命令のある target(`fused = true`、
+native)とない target(`false`、wasm)がそれぞれ計算する bit を、どの target の上でも
+返します。`sin<f64>` は native では `sin_with<true>`、wasm では `sin_with<false>` です。
+compiler はこれで `comptime math::sin<f64>(x)` を build 中の target の値に畳みます。
 
 `sin` / `cos` も table 駆動です。引数を円の 128 点 k pi/64 の最寄りに落とし
 (2^17 未満は 30 bit ずつの pi/64 を引く msun の形、それ以上は 4/pi を 1217 bit

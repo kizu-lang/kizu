@@ -2,8 +2,10 @@ package types
 
 import (
 	"strconv"
+	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/stdmath"
 	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/stdtarget"
 	"github.com/kizu-lang/kizu/internal/typ"
@@ -12,6 +14,7 @@ import (
 type comptimeValue struct {
 	typ Type
 	i   int64
+	f   float64
 	b   bool
 	s   string
 }
@@ -86,15 +89,10 @@ func (c *Checker) evalComptime(expr ast.Expression) (comptimeValue, error) {
 	switch e := expr.(type) {
 	case *ast.ComptimeExpr:
 		return c.evalComptime(e.Expr)
-	case *ast.IntExpr:
-		value, err := strconv.ParseInt(e.Value, 10, 64)
-		if err != nil {
-			return comptimeValue{}, errorf("comptime error: invalid integer `%s`", e.Value)
-		}
-		return comptimeValue{typ: typeI64, i: value}, nil
-	case *ast.FloatExpr:
-		return comptimeValue{}, errorf(
-			"comptime error: a floating-point value is not evaluated at compile time")
+	case *ast.IntExpr, *ast.FloatExpr:
+		return evalComptimeNumber(e)
+	case *ast.CastExpr:
+		return c.evalComptimeCast(e)
 	case *ast.BoolExpr:
 		return comptimeValue{typ: typeBool, b: e.Value}, nil
 	case *ast.StringExpr:
@@ -125,6 +123,23 @@ func (c *Checker) evalComptime(expr ast.Expression) (comptimeValue, error) {
 	}
 }
 
+// evalComptimeNumber reads an integer or float literal.
+func evalComptimeNumber(expr ast.Expression) (comptimeValue, error) {
+	if e, ok := expr.(*ast.FloatExpr); ok {
+		value, ok := typ.ParseFloatLiteral(e.Value)
+		if !ok {
+			return comptimeValue{}, errorf("comptime error: invalid float `%s`", e.Value)
+		}
+		return comptimeValue{typ: typeF64, f: value}, nil
+	}
+	text := expr.(*ast.IntExpr).Value
+	value, err := strconv.ParseInt(text, 10, 64)
+	if err != nil {
+		return comptimeValue{}, errorf("comptime error: invalid integer `%s`", text)
+	}
+	return comptimeValue{typ: typeI64, i: value}, nil
+}
+
 // evalComptimeCall evaluates the compiler-defined std predicates. Everything
 // else a call could name runs at run time (SPEC §13.1).
 func (c *Checker) evalComptimeCall(expr *ast.CallExpr) (comptimeValue, error) {
@@ -140,7 +155,103 @@ func (c *Checker) evalComptimeCall(expr *ast.CallExpr) (comptimeValue, error) {
 			}, nil
 		}
 	}
+	if value, ok, err := c.evalComptimeMathCall(expr); ok {
+		return value, err
+	}
 	return c.evalComptimeMetaCall(expr)
+}
+
+// evalComptimeMathCall evaluates a std::math call a float comptime expression
+// may make -- sin, cos, sqrt, pi, tau at f64 -- to the bits std computes on
+// the target being built (internal/stdmath), and reports whether the call is
+// one.
+func (c *Checker) evalComptimeMathCall(expr *ast.CallExpr) (comptimeValue, bool, error) {
+	apply, ok := expr.Callee.(*ast.TypeApplyExpr)
+	if !ok {
+		return comptimeValue{}, false, nil
+	}
+	name, ok := qualifiedName(apply.Callee)
+	if !ok || !strings.HasPrefix(name, "std::math::") {
+		return comptimeValue{}, false, nil
+	}
+	if !stdmath.Names(name) {
+		return comptimeValue{}, true, errorf(
+			"comptime error: `%s` is not evaluated at compile time "+
+				"(std::math sin, cos, sqrt, pi and tau are)", name)
+	}
+	if apply.TypeArg != "f64" {
+		return comptimeValue{}, true, errorf(
+			"comptime error: `%s` is evaluated at compile time for f64 only, got `%s`",
+			name, apply.TypeArg)
+	}
+	args := make([]float64, 0, len(expr.Args))
+	for _, arg := range expr.Args {
+		value, err := c.evalComptime(arg)
+		if err != nil {
+			return comptimeValue{}, true, err
+		}
+		if value.typ != typeF64 {
+			return comptimeValue{}, true, errorf("comptime error: `%s` expects f64, got %s", name, value.typ)
+		}
+		args = append(args, value.f)
+	}
+	result, ok := stdmath.Call(name, args, c.target.IsNative())
+	if !ok {
+		return comptimeValue{}, true, errorf(
+			"comptime error: `%s` takes %d arguments here", name, len(args))
+	}
+	value, err := finiteComptimeFloat(result)
+	return value, true, err
+}
+
+// evalComptimeCast evaluates `cast<f64>(n)` of a comptime integer or float.
+// It is the one conversion a float comptime expression needs: a capture or
+// a static value is an integer, and the angle it names is a float.
+func (c *Checker) evalComptimeCast(expr *ast.CastExpr) (comptimeValue, error) {
+	value, err := c.evalComptime(expr.Value)
+	if err != nil {
+		return comptimeValue{}, err
+	}
+	if typ.Text(expr.TargetType) != "f64" {
+		return comptimeValue{}, errorf(
+			"comptime error: only `cast<f64>` is evaluated at compile time, got `cast<%s>`",
+			typ.Text(expr.TargetType))
+	}
+	switch value.typ {
+	case typeI64:
+		return comptimeValue{typ: typeF64, f: float64(value.i)}, nil
+	case typeF64:
+		return value, nil
+	default:
+		return comptimeValue{}, errorf("comptime error: `cast<f64>` expects a number, got %s", value.typ)
+	}
+}
+
+// evalComptimeFloatBinary evaluates arithmetic and comparison on two f64
+// comptime values. Kizu converts no number implicitly, so an integer on
+// either side is an error, as it is at run time.
+func evalComptimeFloatBinary(op string, left, right comptimeValue) (comptimeValue, error) {
+	if left.typ != typeF64 || right.typ != typeF64 {
+		return comptimeValue{}, errorf(
+			"comptime error: operator `%s` expects two f64 values, got %s and %s", op, left.typ, right.typ)
+	}
+	if result, ok := stdmath.Compare(op, left.f, right.f); ok {
+		return comptimeValue{typ: typeBool, b: result}, nil
+	}
+	result, ok := stdmath.Binary(op, left.f, right.f)
+	if !ok {
+		return comptimeValue{}, errorf("comptime error: operator `%s` is not defined on f64", op)
+	}
+	return finiteComptimeFloat(result)
+}
+
+// finiteComptimeFloat wraps a folded float, refusing a value no literal can
+// name: an infinity or NaN at compile time is the program's error.
+func finiteComptimeFloat(value float64) (comptimeValue, error) {
+	if !stdmath.Finite(value) {
+		return comptimeValue{}, errorf("comptime error: the value is not finite (%v)", value)
+	}
+	return comptimeValue{typ: typeF64, f: value}, nil
 }
 
 // evalComptimeMetaCall evaluates the type-directed `std::meta` predicates.
@@ -176,8 +287,11 @@ func (c *Checker) evalComptimePrefix(expr *ast.PrefixExpr) (comptimeValue, error
 	}
 	switch expr.Operator {
 	case "-":
+		if right.typ == typeF64 {
+			return comptimeValue{typ: typeF64, f: -right.f}, nil
+		}
 		if right.typ != typeI64 {
-			return comptimeValue{}, errorf("comptime error: unary - expects integer")
+			return comptimeValue{}, errorf("comptime error: unary - expects a number")
 		}
 		return comptimeValue{typ: typeI64, i: -right.i}, nil
 	case "~":
@@ -207,6 +321,9 @@ func (c *Checker) evalComptimeBinary(expr *ast.BinaryExpr) (comptimeValue, error
 	right, err := c.evalComptime(expr.Right)
 	if err != nil {
 		return comptimeValue{}, err
+	}
+	if left.typ == typeF64 || right.typ == typeF64 {
+		return evalComptimeFloatBinary(expr.Operator, left, right)
 	}
 	if expr.Operator == "==" || expr.Operator == "!=" {
 		return evalComptimeEquality(expr.Operator, left, right)

@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/stdmath"
 	"github.com/kizu-lang/kizu/internal/stdtarget"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
@@ -73,7 +74,64 @@ func (l *lowerer) constBinaryBool(e *ast.BinaryExpr) (bool, bool) {
 	if leftOK && rightOK {
 		return compareConstInts(e.Operator, left, right)
 	}
+	leftFloat, leftFloatOK := l.constFloat(e.Left)
+	rightFloat, rightFloatOK := l.constFloat(e.Right)
+	if leftFloatOK && rightFloatOK {
+		return stdmath.Compare(e.Operator, leftFloat, rightFloat)
+	}
 	return false, false
+}
+
+// constFloat evaluates f64 compile-time arithmetic: literals, negation,
+// + - * /, `cast<f64>` of a constant integer, and the std::math calls
+// internal/stdmath computes for this target. The checker has already
+// refused whatever does not evaluate, so false means "not a float
+// expression", not an error.
+func (l *lowerer) constFloat(expr ast.Expression) (float64, bool) {
+	switch e := expr.(type) {
+	case *ast.ComptimeExpr:
+		return l.constFloat(e.Expr)
+	case *ast.FloatExpr:
+		return typ.ParseFloatLiteral(e.Value)
+	case *ast.CastExpr:
+		if typ.Text(e.TargetType) != "f64" {
+			return 0, false
+		}
+		if value, ok := l.constInt(e.Value); ok {
+			return float64(value), true
+		}
+		return l.constFloat(e.Value)
+	case *ast.PrefixExpr:
+		value, ok := l.constFloat(e.Right)
+		return -value, ok && e.Operator == "-"
+	case *ast.BinaryExpr:
+		left, leftOK := l.constFloat(e.Left)
+		right, rightOK := l.constFloat(e.Right)
+		if !leftOK || !rightOK {
+			return 0, false
+		}
+		return stdmath.Binary(e.Operator, left, right)
+	case *ast.CallExpr:
+		return l.constMathCall(e)
+	}
+	return 0, false
+}
+
+// constMathCall evaluates a std::math call on constant f64 arguments.
+func (l *lowerer) constMathCall(expr *ast.CallExpr) (float64, bool) {
+	apply, ok := expr.Callee.(*ast.TypeApplyExpr)
+	if !ok || apply.TypeArg != "f64" || !stdmath.Names(apply.Callee.String()) {
+		return 0, false
+	}
+	args := make([]float64, 0, len(expr.Args))
+	for _, arg := range expr.Args {
+		value, ok := l.constFloat(arg)
+		if !ok {
+			return 0, false
+		}
+		args = append(args, value)
+	}
+	return stdmath.Call(apply.Callee.String(), args, l.target.IsNative())
 }
 
 // targetPredicateCall answers a compiler-defined `std::target` predicate and

@@ -1,8 +1,10 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::staticexpr;
+import compiler::internal::stdmath;
 import compiler::internal::stdmeta;
 import compiler::internal::stdtarget;
+import compiler::internal::typ;
 
 // Mechanical port of internal/ownership/comptime.go: the compile-time branch
 // selection of `comptime if` and the minimal constant evaluation it needs.
@@ -192,24 +194,121 @@ fn (self: &var Checker) read_comptime_only(
             out.* = left;
             return null;
         },
-        Call(value) => {
+        Cast(value) => {
             let copied = value;
-            if try self.target_predicate_call(tree, copied) |_| {
-                out.* = self.common.bool_name;
-                return null;
+            var inner = empty_name();
+            if try self.read_comptime_only(tree, copied.value, &var inner) |failed| {
+                return move failed;
             }
-            if try self.meta_predicate_call(tree, copied) |_| {
-                out.* = self.common.bool_name;
-                return null;
-            }
-            return try self.error0(
-                ast::zero_span(), "borrow error: runtime value cannot cross comptime boundary"
-            );
+            out.* = try self.names.intern_type(tree, copied.target_type);
+            return null;
         },
+        Call(value) => return self.read_comptime_call(tree, value, out),
         _ => return try self.error0(
             ast::zero_span(), "borrow error: runtime value cannot cross comptime boundary"
         ),
     }
+}
+
+/// Reads a call a comptime expression may make, the Go `readComptimeCall`:
+/// a target or meta predicate, or a std::math function of comptime
+/// arguments.
+fn (self: &var Checker) read_comptime_call(
+    tree: &ast::Ast,
+    call: ast::CallExpr,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if try self.target_predicate_call(tree, call) |_| {
+        out.* = self.common.bool_name;
+        return null;
+    }
+    if try self.meta_predicate_call(tree, call) |_| {
+        out.* = self.common.bool_name;
+        return null;
+    }
+    if !try self.comptime_math_call(tree, call) {
+        return try self.error0(
+            ast::zero_span(), "borrow error: runtime value cannot cross comptime boundary"
+        );
+    }
+    var index = 0;
+    while arg_at(tree, call.args, index) |argument| {
+        var argument_type = empty_name();
+        if try self.read_comptime_only(tree, argument, &var argument_type) |failed| {
+            return move failed;
+        }
+        index = index + 1;
+    }
+    out.* = self.common.f64_name;
+    return null;
+}
+
+/// Reports whether a call is one of the std::math functions a float comptime
+/// expression may make, the Go `comptimeMathCall`.
+fn (self: &var Checker) comptime_math_call(tree: &ast::Ast, call: ast::CallExpr) -> !bool {
+    let apply = type_apply_expr(tree, call.callee) orelse return false;
+    let name = try self.qualified_name(tree, apply.callee) orelse return false;
+    let retained = name_text(&self.names, name);
+    let bytes = retained.as_bytes();
+    return stdmath::names(bytes);
+}
+
+/// Evaluates f64 compile-time arithmetic for ownership branch selection, the
+/// Go `floatLiteral`, with the same bits the type checker and the lowerer
+/// compute.
+fn (self: &var Checker) float_literal(tree: &ast::Ast, expression: ast::Expression) -> !?f64 {
+    if comptime_expr(tree, expression) |wrapped| {
+        return self.float_literal(tree, wrapped.expr);
+    }
+    if float_expr(tree, expression) |literal| {
+        let retained = tree.texts.at(literal.value.node);
+        let bytes = retained.as_bytes();
+        return typ::parse_float_literal(self.allocator, bytes);
+    }
+    if cast_expr(tree, expression) |converted| {
+        let target = try self.names.intern_type(tree, converted.target_type);
+        if !self.names.is(target, "f64") {
+            return null;
+        }
+        if self.int_literal(tree, converted.value) |integer| {
+            return cast<f64>(integer);
+        }
+        return self.float_literal(tree, converted.value);
+    }
+    if prefix_expr(tree, expression) |prefix| {
+        let value = try self.float_literal(tree, prefix.right) orelse return null;
+        if !text_equals(tree, prefix.operator, "-") {
+            return null;
+        }
+        return -value;
+    }
+    if binary_expr(tree, expression) |binary| {
+        let left = try self.float_literal(tree, binary.left) orelse return null;
+        let right = try self.float_literal(tree, binary.right) orelse return null;
+        let retained = tree.texts.at(binary.operator.node);
+        let operator = retained.as_bytes();
+        return stdmath::binary(operator, left, right);
+    }
+    if call_expr(tree, expression) |call| {
+        if !try self.comptime_math_call(tree, call) {
+            return null;
+        }
+        var count = 0;
+        var first = 0.0;
+        while arg_at(tree, call.args, count) |argument| {
+            let value = try self.float_literal(tree, argument) orelse return null;
+            if count == 0 {
+                first = value;
+            }
+            count = count + 1;
+        }
+        let apply = type_apply_expr(tree, call.callee) orelse return null;
+        let name = try self.qualified_name(tree, apply.callee) orelse return null;
+        let retained = name_text(&self.names, name);
+        let bytes = retained.as_bytes();
+        return stdmath::call(bytes, count, first, stdtarget::is_native(self.target));
+    }
+    return null;
 }
 
 /// Answers a compiler-defined std::target predicate; null reports that the
@@ -341,7 +440,7 @@ fn (self: &var Checker) comptime_bool(tree: &ast::Ast, expression: ast::Expressi
 }
 
 /// Evaluates a compile-time logical operator, a type comparison, or an
-/// integer comparison, the Go `comptimeBinaryBool`.
+/// integer or float comparison, the Go `comptimeBinaryBool`.
 fn (self: &var Checker) comptime_binary_bool(tree: &ast::Ast, binary: ast::BinaryExpr) -> !?bool {
     let logical = text_equals(tree, binary.operator, "and") or
         text_equals(tree, binary.operator, "or");
@@ -353,9 +452,16 @@ fn (self: &var Checker) comptime_binary_bool(tree: &ast::Ast, binary: ast::Binar
             return compare_comptime_types(tree, binary.operator, left_type, right_type);
         }
     }
-    let left = self.int_literal(tree, binary.left) orelse return null;
-    let right = self.int_literal(tree, binary.right) orelse return null;
-    return compare_comptime_ints(tree, binary.operator, left, right);
+    if self.int_literal(tree, binary.left) |left| {
+        if self.int_literal(tree, binary.right) |right| {
+            return compare_comptime_ints(tree, binary.operator, left, right);
+        }
+    }
+    let left_float = try self.float_literal(tree, binary.left) orelse return null;
+    let right_float = try self.float_literal(tree, binary.right) orelse return null;
+    let retained = tree.texts.at(binary.operator.node);
+    let operator = retained.as_bytes();
+    return stdmath::compare(operator, left_float, right_float);
 }
 
 /// Returns a type value from the minimal compile-time type subset, the Go

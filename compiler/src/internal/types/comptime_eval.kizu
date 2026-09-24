@@ -1,5 +1,6 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
+import compiler::internal::stdmath;
 import compiler::internal::stdmeta;
 import compiler::internal::stdtarget;
 import compiler::internal::typ;
@@ -12,6 +13,7 @@ import std::string;
 // copy-only; a semantic failure is constructed once and moved to the caller.
 union ComptimeValue {
     Integer(i64),
+    Float(f64),
     Boolean(bool),
     Bytes(ast::Text),
     TypeValue(Type),
@@ -39,9 +41,21 @@ fn (self: &var Checker) eval_comptime(
             try message.append_byte(self.allocator, cast<u8>(96));
             return try self.comptime_message(move message);
         },
-        Float(_) => {
-            return try self.comptime_error("a floating-point value is not evaluated at compile time");
+        Float(value) => {
+            let retained = tree.texts.at(value.value.node);
+            let bytes = retained.as_bytes();
+            if try typ::parse_float_literal(self.allocator, bytes) |parsed| {
+                out.* = ComptimeValue::Float(parsed);
+                return null;
+            }
+            var message = string::new(self.allocator);
+            errdefer message.deinit(self.allocator);
+            try message.append_bytes(self.allocator, "invalid float `");
+            try message.append_bytes(self.allocator, bytes);
+            try message.append_byte(self.allocator, cast<u8>(96));
+            return try self.comptime_message(move message);
         },
+        Cast(value) => return self.eval_comptime_cast(tree, value, out),
         Bool(value) => {
             out.* = ComptimeValue::Boolean(value.value);
             return null;
@@ -114,12 +128,215 @@ fn (self: &var Checker) eval_comptime_call(
         TypeApply(applied) => {
             if try qualified_name(self.allocator, tree, applied.callee) |name| {
                 defer name.deinit(self.allocator);
+                let name_bytes = name.as_bytes();
+                if mem::starts_with(name_bytes, "std::math::") {
+                    return self.eval_comptime_math_call(tree, expression, applied, name_bytes, out);
+                }
                 return self.eval_comptime_named_meta_call(tree, expression, applied, &name, out);
             }
         },
         _ => {},
     }
     return try self.comptime_error("runtime value cannot be used");
+}
+
+// Evaluates a std::math call a float comptime expression may make -- sin,
+// cos, sqrt, pi, tau at f64 -- to the bits std computes on the target being
+// built (stdmath), the Go `evalComptimeMathCall`.
+fn (self: &var Checker) eval_comptime_math_call(
+    tree: &ast::Ast,
+    expression: &ast::CallExpr,
+    applied: &ast::TypeApplyExpr,
+    name: []u8,
+    out: &var ComptimeValue
+) -> !?diagnostic::Diagnostic {
+    if !stdmath::names(name) {
+        var message = string::new(self.allocator);
+        errdefer message.deinit(self.allocator);
+        try message.append_byte(self.allocator, cast<u8>(96));
+        try message.append_bytes(self.allocator, name);
+        try message.append_bytes(
+            self.allocator,
+            "` is not evaluated at compile time (std::math sin, cos, sqrt, pi and tau are)"
+        );
+        return try self.comptime_message(move message);
+    }
+    let type_arg_retained = tree.texts.at(applied.type_arg.node);
+    let type_arg = type_arg_retained.as_bytes();
+    if !mem::equal_bytes(type_arg, "f64") {
+        var message = string::new(self.allocator);
+        errdefer message.deinit(self.allocator);
+        try message.append_byte(self.allocator, cast<u8>(96));
+        try message.append_bytes(self.allocator, name);
+        try message.append_bytes(self.allocator, "` is evaluated at compile time for f64 only, got `");
+        try message.append_bytes(self.allocator, type_arg);
+        try message.append_byte(self.allocator, cast<u8>(96));
+        return try self.comptime_message(move message);
+    }
+    let arguments = tree.expression_lists.at(expression.args.node);
+    var count = 0;
+    var first = 0.0;
+    while arguments.get(count) |argument| {
+        var value = ComptimeValue::Integer(0);
+        if try self.eval_comptime(tree, argument, &var value) |problem| {
+            return move problem;
+        }
+        match value {
+            Float(float_value) => {
+                if count == 0 {
+                    first = float_value;
+                }
+            },
+            _ => {
+                let got = try self.comptime_value_type(value);
+                var message = string::new(self.allocator);
+                errdefer message.deinit(self.allocator);
+                try message.append_byte(self.allocator, cast<u8>(96));
+                try message.append_bytes(self.allocator, name);
+                try message.append_bytes(self.allocator, "` expects f64, got ");
+                try self.append_checker_type(&var message, got);
+                return try self.comptime_message(move message);
+            },
+        }
+        count = count + 1;
+    }
+    if stdmath::call(name, count, first, stdtarget::is_native(self.target)) |result| {
+        return self.finite_comptime_float(result, out);
+    }
+    var message = string::new(self.allocator);
+    errdefer message.deinit(self.allocator);
+    try message.append_byte(self.allocator, cast<u8>(96));
+    try message.append_bytes(self.allocator, name);
+    try message.append_bytes(self.allocator, "` takes ");
+    try fmt::append_i64(self.allocator, &var message, count);
+    try message.append_bytes(self.allocator, " arguments here");
+    return try self.comptime_message(move message);
+}
+
+// Evaluates `cast<f64>(n)` of a comptime integer or float, the Go
+// `evalComptimeCast`. It is the one conversion a float comptime expression
+// needs: a capture or a static value is an integer, and the angle it names
+// is a float.
+fn (self: &var Checker) eval_comptime_cast(
+    tree: &ast::Ast,
+    expression: &ast::CastExpr,
+    out: &var ComptimeValue
+) -> !?diagnostic::Diagnostic {
+    var value = ComptimeValue::Integer(0);
+    if try self.eval_comptime(tree, expression.value, &var value) |problem| {
+        return move problem;
+    }
+    let target = try typ::render(self.allocator, &tree.types, expression.target_type);
+    defer target.deinit(self.allocator);
+    let target_bytes = target.as_bytes();
+    if !mem::equal_bytes(target_bytes, "f64") {
+        var message = string::new(self.allocator);
+        errdefer message.deinit(self.allocator);
+        try message.append_bytes(self.allocator, "only `cast<f64>` is evaluated at compile time, got `cast<");
+        try message.append_bytes(self.allocator, target_bytes);
+        try message.append_bytes(self.allocator, ">`");
+        return try self.comptime_message(move message);
+    }
+    match value {
+        Integer(integer) => {
+            out.* = ComptimeValue::Float(cast<f64>(integer));
+            return null;
+        },
+        Float(_) => {
+            out.* = value;
+            return null;
+        },
+        _ => {
+            let got = try self.comptime_value_type(value);
+            var message = string::new(self.allocator);
+            errdefer message.deinit(self.allocator);
+            try message.append_bytes(self.allocator, "`cast<f64>` expects a number, got ");
+            try self.append_checker_type(&var message, got);
+            return try self.comptime_message(move message);
+        },
+    }
+}
+
+// Evaluates arithmetic and comparison on two f64 comptime values, the Go
+// `evalComptimeFloatBinary`. Kizu converts no number implicitly, so an
+// integer on either side is an error, as it is at run time.
+fn (self: &var Checker) eval_comptime_float_binary(
+    operator: []u8,
+    left: ComptimeValue,
+    right: ComptimeValue,
+    out: &var ComptimeValue
+) -> !?diagnostic::Diagnostic {
+    var left_float = 0.0;
+    var right_float = 0.0;
+    var both = true;
+    match left {
+        Float(value) => {
+            left_float = value;
+        },
+        _ => {
+            both = false;
+        },
+    }
+    match right {
+        Float(value) => {
+            right_float = value;
+        },
+        _ => {
+            both = false;
+        },
+    }
+    if !both {
+        let left_type = try self.comptime_value_type(left);
+        let right_type = try self.comptime_value_type(right);
+        var message = string::new(self.allocator);
+        errdefer message.deinit(self.allocator);
+        try message.append_bytes(self.allocator, "operator `");
+        try message.append_bytes(self.allocator, operator);
+        try message.append_bytes(self.allocator, "` expects two f64 values, got ");
+        try self.append_checker_type(&var message, left_type);
+        try message.append_bytes(self.allocator, " and ");
+        try self.append_checker_type(&var message, right_type);
+        return try self.comptime_message(move message);
+    }
+    if stdmath::compare(operator, left_float, right_float) |result| {
+        out.* = ComptimeValue::Boolean(result);
+        return null;
+    }
+    if stdmath::binary(operator, left_float, right_float) |result| {
+        return self.finite_comptime_float(result, out);
+    }
+    var message = string::new(self.allocator);
+    errdefer message.deinit(self.allocator);
+    try message.append_bytes(self.allocator, "operator `");
+    try message.append_bytes(self.allocator, operator);
+    try message.append_bytes(self.allocator, "` is not defined on f64");
+    return try self.comptime_message(move message);
+}
+
+// Stores a folded float, refusing a value no literal can name, the Go
+// `finiteComptimeFloat`: an infinity or NaN at compile time is the program's
+// error.
+fn (self: &Checker) finite_comptime_float(
+    value: f64,
+    out: &var ComptimeValue
+) -> !?diagnostic::Diagnostic {
+    if !stdmath::finite(value) {
+        var message = string::new(self.allocator);
+        errdefer message.deinit(self.allocator);
+        try message.append_bytes(self.allocator, "the value is not finite (");
+        try message.append_bytes(self.allocator, stdmath::non_finite_spelling(value));
+        try message.append_byte(self.allocator, cast<u8>(41));
+        return try self.comptime_message(move message);
+    }
+    out.* = ComptimeValue::Float(value);
+    return null;
+}
+
+fn is_comptime_float(value: ComptimeValue) -> bool {
+    match value {
+        Float(_) => return true,
+        _ => return false,
+    }
 }
 
 fn (self: &var Checker) eval_comptime_named_meta_call(
@@ -176,8 +393,12 @@ fn (self: &var Checker) eval_comptime_prefix(
                 out.* = ComptimeValue::Integer(-integer);
                 return null;
             },
+            Float(float_value) => {
+                out.* = ComptimeValue::Float(-float_value);
+                return null;
+            },
             _ => {
-                return try self.comptime_error("unary - expects integer");
+                return try self.comptime_error("unary - expects a number");
             },
         }
     }
@@ -229,6 +450,9 @@ fn (self: &var Checker) eval_comptime_binary(
     var right = ComptimeValue::Integer(0);
     if try self.eval_comptime(tree, expression.right, &var right) |problem| {
         return move problem;
+    }
+    if is_comptime_float(left) or is_comptime_float(right) {
+        return self.eval_comptime_float_binary(operator, left, right, out);
     }
     if mem::equal_bytes(operator, "==") or
         mem::equal_bytes(operator, "!=") {
@@ -305,6 +529,7 @@ fn comptime_equality(
             },
             _ => return null,
         },
+        Float(_) => return null,
         Boolean(left_value) => match right {
             Boolean(right_value) => {
                 equal = left_value == right_value;
