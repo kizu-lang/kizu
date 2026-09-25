@@ -3,8 +3,12 @@ import std::io;
 import std::mem;
 import std::thread;
 
+// A lane round can run out of memory for the runs it gathers lanes into, so
+// the set the worker fails with includes std::thread::Error.
+error Failure = thread::Error or mem::Error;
+
 // Turns a run of numbers into its running totals.
-fn running_total(lane: &var []i64, index: i64) -> void {
+fn running_total(lane: &var []i64, index: i64) -> Failure!void {
     for 1..mem::count<i64>(lane) |i| {
         lane[i] = lane[i] + lane[i - 1];
     }
@@ -27,7 +31,7 @@ fn print_rows(table: &array::Array<i64>, width: i64) -> void {
 // length 3, stride 4. `each_lane` hands the worker a column as an ordinary
 // `&var []i64` of 3 -- gathered into the thread's own run and copied back
 // afterwards -- so the same worker adds up rows and columns alike.
-fn main() -> !void {
+fn main() -> Failure!void {
     let allocator = mem::page_allocator();
     var pool = try thread::init(io::blocking(), allocator, 4);
     defer pool.deinit(allocator);
@@ -38,10 +42,10 @@ fn main() -> !void {
         try table.append(allocator, 1);
     }
     let cells = table.as_mut_slice();
-    try thread::each_lane<i64>(&var pool, allocator, cells, 3, 4, running_total);
+    try thread::each_lane<i64, Failure>(&var pool, allocator, cells, 3, 4, running_total);
     print_rows(&table, 4);
     let rows = table.as_mut_slice();
-    try thread::each_lane<i64>(&var pool, allocator, rows, 4, 1, running_total);
+    try thread::each_lane<i64, Failure>(&var pool, allocator, rows, 4, 1, running_total);
     print_rows(&table, 4);
     return;
 }

@@ -22,7 +22,7 @@ struct Sample {
 }
 
 // Writes into every element which chunk it was in and how long that chunk was.
-fn stamp(part: &var []i64, index: i64) -> void {
+fn stamp(part: &var []i64, index: i64) -> Failure!void {
     let size = mem::count<i64>(part);
     for 0..size |i| {
         part[i] = part[i] + index * 1000 + size * 1000000;
@@ -30,7 +30,7 @@ fn stamp(part: &var []i64, index: i64) -> void {
     return;
 }
 
-fn stamp_sample(part: &var []Sample, index: i64) -> void {
+fn stamp_sample(part: &var []Sample, index: i64) -> Failure!void {
     let size = mem::count<Sample>(part);
     for 0..size |i| {
         let old = part[i];
@@ -51,7 +51,7 @@ fn check_stamps(pool: &var thread::Pool, allocator: Allocator, n: i64, chunk: i6
     defer values.deinit(allocator);
     try count_up(&var values, allocator, n);
     let cells = values.as_mut_slice();
-    thread::each<i64>(pool, cells, chunk, stamp);
+    try thread::each<i64, Failure>(pool, cells, chunk, stamp);
     for 0..n |i| {
         let index = i / chunk;
         var size = chunk;
@@ -110,7 +110,7 @@ test "chunks are cut by the element's own size" {
         try samples.append(allocator, Sample { value: cast<f64>(i), chunk: -1, size: 0, flag: 7 });
     }
     let cells = samples.as_mut_slice();
-    thread::each<Sample>(&var pool, cells, 4, stamp_sample);
+    try thread::each<Sample, Failure>(&var pool, cells, 4, stamp_sample);
     for 0..10 |i| {
         let sample = samples.get_or_panic(i);
         testing::expect_equal<i64>(i / 4, sample.chunk);
@@ -121,7 +121,7 @@ test "chunks are cut by the element's own size" {
 }
 
 // Keeps what the element held, and adds which lane it was in and where.
-fn mark_lane(lane: &var []i64, index: i64) -> void {
+fn mark_lane(lane: &var []i64, index: i64) -> Failure!void {
     for 0..mem::count<i64>(lane) |j| {
         lane[j] = lane[j] * 1000000 + index * 1000 + j;
     }
@@ -142,7 +142,7 @@ fn check_lanes(
     defer values.deinit(allocator);
     try count_up(&var values, allocator, n);
     let cells = values.as_mut_slice();
-    try thread::each_lane<i64>(pool, allocator, cells, length, stride, mark_lane);
+    try thread::each_lane<i64, Failure>(pool, allocator, cells, length, stride, mark_lane);
     for 0..n |offset| {
         let block = offset / (length * stride);
         let within = offset % (length * stride);
@@ -181,6 +181,60 @@ test "a pool of one thread runs lanes alone" {
     var pool = try thread::init(io::blocking(), allocator, 1);
     defer pool.deinit(allocator);
     try check_lanes(&var pool, allocator, 24, 6, 4);
+}
+
+// Fails on the chunk numbered `bad`, after writing 1 into it; every other
+// chunk writes 1 too.
+fn fail_on(part: &var []i64, index: i64) -> Failure!void {
+    for 0..mem::count<i64>(part) |i| {
+        part[i] = 1;
+    }
+    if index == part[0] * 3 {
+        return mem::Error::OutOfMemory;
+    }
+    return;
+}
+
+fn fails(pool: &var thread::Pool, cells: &var []i64) -> bool {
+    thread::each<i64, Failure>(pool, cells, 1, fail_on) catch return true;
+    return false;
+}
+
+fn lane_fails(pool: &var thread::Pool, allocator: Allocator, cells: &var []i64) -> bool {
+    thread::each_lane<i64, Failure>(pool, allocator, cells, 2, 4, fail_on) catch return true;
+    return false;
+}
+
+test "a worker's failure is the round's result" {
+    let allocator = mem::page_allocator();
+    var pool = try thread::init(io::blocking(), allocator, 4);
+    defer pool.deinit(allocator);
+    var values = array::new<i64>(allocator);
+    defer values.deinit(allocator);
+    try count_up(&var values, allocator, 64);
+    // Chunk 3 fails. Chunks already running finish and what they wrote
+    // stays; the round reports the failure instead of returning normally.
+    let cells = values.as_mut_slice();
+    testing::expect(fails(&var pool, cells));
+    testing::expect_equal<i64>(1, values.get_or_panic(3));
+    // A lane that fails is still copied back.
+    let lanes = values.as_mut_slice();
+    testing::expect(lane_fails(&var pool, allocator, lanes));
+    testing::expect_equal<i64>(1, values.get_or_panic(3));
+}
+
+test "the pool runs rounds after a failure" {
+    let allocator = mem::page_allocator();
+    var pool = try thread::init(io::blocking(), allocator, 4);
+    defer pool.deinit(allocator);
+    for 0..20 |round| {
+        var values = array::new<i64>(allocator);
+        defer values.deinit(allocator);
+        try count_up(&var values, allocator, 32);
+        let cells = values.as_mut_slice();
+        testing::expect(fails(&var pool, cells));
+        try check_stamps(&var pool, allocator, 40 + round, 3);
+    }
 }
 
 test "the processor count is at least one" {

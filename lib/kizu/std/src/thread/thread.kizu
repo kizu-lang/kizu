@@ -62,16 +62,21 @@ fn (self: std::thread::Pool) deinit(allocator: Allocator) -> void {
 // counts chunks from 0. The chunks run on the pool's threads in no promised
 // order and return when all of them have. T holds no Io, Allocator, or view:
 // those would reach past the chunk they came in.
-pub fn each<T>(
+//
+// A worker fails with a member of E, the set `each` returns. The first
+// failure recorded is the result: no chunk starts after it, the chunks
+// already running finish, and whatever the others wrote stays written. With
+// more than one failing at once, which one is first is not promised.
+pub fn each<T, E>(
     pool: &var std::thread::Pool,
     data: &var []T,
     chunk: i64,
-    worker: fn(&var []T, i64) -> void
-) -> void {
+    worker: fn(&var []T, i64) -> E!void
+) -> E!void {
     if chunk < 1 {
         std::internal::builtin::panic("thread each: chunk must be at least 1");
     }
-    std::internal::builtin::thread_pool_each<T>(pool.handle, data, chunk, worker);
+    try std::internal::builtin::thread_pool_each<T, E>(pool.handle, data, chunk, worker);
     return;
 }
 
@@ -85,25 +90,27 @@ pub fn each<T>(
 // The worker is handed each lane as an ordinary `&var []T` of `length`
 // elements. A lane whose elements are not side by side is copied into a run
 // of the taking thread's own, handed over, and copied back when the worker
-// returns, so no other thread holds any element of it. Those runs, one per
-// thread, come from `allocator` for the call and go back before it returns.
+// returns -- failed or not -- so no other thread holds any element of it.
+// Those runs, one per thread, come from `allocator` for the call and go back
+// before it returns; not getting them is std::thread::Error::OutOfMemory, so
+// E has to include std::thread::Error. Failures are those of `each`.
 // `index` counts lanes from 0 in the order of their first elements' blocks,
 // then i. `data` whose length is not whole blocks is a panic.
-pub fn each_lane<T>(
+pub fn each_lane<T, E>(
     pool: &var std::thread::Pool,
     allocator: Allocator,
     data: &var []T,
     length: i64,
     stride: i64,
-    worker: fn(&var []T, i64) -> void
-) -> std::thread::Error!void {
+    worker: fn(&var []T, i64) -> E!void
+) -> E!void {
     if length < 1 or stride < 1 {
         std::internal::builtin::panic("thread each_lane: length and stride must be at least 1");
     }
     if std::mem::count<T>(data) % (length * stride) != 0 {
         std::internal::builtin::panic("thread each_lane: data must be whole blocks of length * stride");
     }
-    try std::internal::builtin::thread_pool_each_lane<T>(
+    try std::internal::builtin::thread_pool_each_lane<T, E>(
         pool.handle, allocator, data, length, stride, worker);
     return;
 }

@@ -95,7 +95,7 @@ func (e *emitter) emit() error {
 	}
 	e.writeHeader()
 	e.writeTaskInvokeThunks()
-	e.writeThreadEachInvokeThunk()
+	e.writeThreadEachInvokeThunks()
 	for _, fn := range e.module.Functions {
 		if err := e.writeFunction(fn); err != nil {
 			return err

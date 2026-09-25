@@ -268,11 +268,9 @@ fn (self: &var Checker) check_type_apply_call_expr(
     if self.names.is(name, "std::internal::builtin::task_set_spawn") {
         return self.check_task_set_spawn(tree, env, args, out);
     }
-    if self.names.is(name, "std::internal::builtin::thread_pool_each") {
-        return self.check_thread_pool_round(tree, env, args, "void", out);
-    }
-    if self.names.is(name, "std::internal::builtin::thread_pool_each_lane") {
-        return self.check_thread_pool_round(tree, env, args, "std::thread::Error!void", out);
+    if self.names.is(name, "std::internal::builtin::thread_pool_each") or
+        self.names.is(name, "std::internal::builtin::thread_pool_each_lane") {
+        return self.check_thread_pool_round(tree, env, args, type_arg, out);
     }
     return try self.error1(
         tree, ast::zero_span(), "move error: `%s` does not take static arguments", Arg::Str(name)
@@ -355,7 +353,7 @@ fn (self: &var Checker) check_thread_pool_round(
     tree: &var ast::Ast,
     env: ScopeHandle,
     args: ast::ExpressionList,
-    result: []u8,
+    type_arg: Name,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
     var index = 0;
@@ -366,7 +364,16 @@ fn (self: &var Checker) check_thread_pool_round(
         }
         index = index + 1;
     }
-    out.* = try self.names.intern(result);
+    // The round returns `E!void`, E the second of its `<T, E>`.
+    let parts = try self.names.split_generic_args(type_arg) orelse
+        return try self.error0(ast::zero_span(),
+        "move error: a pool round expects an element type and an error set");
+    defer parts.deinit(self.allocator);
+    if parts.len() != 2 {
+        return try self.error0(ast::zero_span(),
+            "move error: a pool round expects an element type and an error set");
+    }
+    out.* = try self.names.wrapped("", parts.get_or_panic(1), "!void");
     return null;
 }
 

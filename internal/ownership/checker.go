@@ -6206,13 +6206,14 @@ func (c *Checker) checkTypeApplyCallExpr(
 	); ok || err != nil {
 		return typ, err
 	}
-	return c.checkRuntimeTypeApply(name, args, env)
+	return c.checkRuntimeTypeApply(name, typeArg, args, env)
 }
 
 // checkRuntimeTypeApply walks the typed primitives the runtime is handed a
 // function and state through.
 func (c *Checker) checkRuntimeTypeApply(
 	name string,
+	typeArg string,
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
@@ -6223,10 +6224,9 @@ func (c *Checker) checkRuntimeTypeApply(
 		return c.checkTaskNew(args, env)
 	case "std::internal::builtin::task_set_spawn":
 		return c.checkTaskSetSpawn(args, env)
-	case "std::internal::builtin::thread_pool_each":
-		return c.checkThreadPoolRound(args, env, "void")
-	case "std::internal::builtin::thread_pool_each_lane":
-		return c.checkThreadPoolRound(args, env, "std::thread::Error!void")
+	case "std::internal::builtin::thread_pool_each",
+		"std::internal::builtin::thread_pool_each_lane":
+		return c.checkThreadPoolRound(args, env, typeArg)
 	}
 	return "", errorf("move error: `%s` does not take static arguments", name)
 }
@@ -6291,14 +6291,18 @@ func (c *Checker) checkTaskSetSpawn(
 func (c *Checker) checkThreadPoolRound(
 	args []ast.Expression,
 	env *scope,
-	result string,
+	typeArg string,
 ) (string, error) {
 	for _, arg := range args {
 		if _, err := c.readExpr(arg, env); err != nil {
 			return "", err
 		}
 	}
-	return result, nil
+	parts, err := typ.SplitArgs(typeArg)
+	if err != nil || len(parts) != 2 {
+		return "", errorf("move error: a pool round expects an element type and an error set")
+	}
+	return strings.TrimSpace(parts[1]) + "!void", nil
 }
 
 // checkArenaTypeApply validates std::arena::new<T>(allocator) ownership.
