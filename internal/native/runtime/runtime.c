@@ -2733,6 +2733,38 @@ static KizuPool *kizu_pool_from(int64_t handle) {
     return pool;
 }
 
+/* Copies `count` elements of `size` bytes from every `from_step` bytes to
+   every `to_step` bytes. The common element sizes get a copy of a constant
+   size, which the C compiler turns into loads and stores; a call to memcpy
+   per element would cost more than the element. */
+#define KIZU_POOL_COPY(bytes) \
+    for (int64_t j = 0; j < count; j++) { \
+        memcpy(to + j * to_step, from + j * from_step, bytes); \
+    }
+
+static void kizu_pool_copy_strided(
+    unsigned char *to, int64_t to_step,
+    const unsigned char *from, int64_t from_step,
+    int64_t count, int64_t size) {
+    switch (size) {
+    case 4:
+        KIZU_POOL_COPY(4)
+        return;
+    case 8:
+        KIZU_POOL_COPY(8)
+        return;
+    case 16:
+        KIZU_POOL_COPY(16)
+        return;
+    case 32:
+        KIZU_POOL_COPY(32)
+        return;
+    default:
+        KIZU_POOL_COPY((size_t)size)
+        return;
+    }
+}
+
 /* Runs one lane. A lane whose elements sit side by side is handed over where
    it is; any other is copied into this thread's scratch, handed over as one
    contiguous run, and copied back, so the worker sees an ordinary `&var []T`
@@ -2750,14 +2782,10 @@ static void kizu_pool_run_lane(KizuPool *pool, int64_t participant, int64_t inde
     }
     unsigned char *scratch = pool->scratch + participant * pool->length * size;
     int64_t step = pool->stride * size;
-    for (int64_t j = 0; j < pool->length; j++) {
-        memcpy(scratch + j * size, first + j * step, (size_t)size);
-    }
+    kizu_pool_copy_strided(scratch, size, first, step, pool->length, size);
     KizuSliceU8 part = {scratch, pool->length};
     pool->invoke(pool->worker, &part, index);
-    for (int64_t j = 0; j < pool->length; j++) {
-        memcpy(first + j * step, scratch + j * size, (size_t)size);
-    }
+    kizu_pool_copy_strided(first, step, scratch, size, pool->length, size);
 }
 
 /* Takes items until none are left. Every thread in the round, the caller
