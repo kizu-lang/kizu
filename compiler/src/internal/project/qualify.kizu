@@ -1053,7 +1053,7 @@ fn (self: &var Loader) qualify_type_or_control_expr(
             };
         },
         StructLiteral(value) => return self.qualify_struct_literal(tree, file, value),
-        Field(value) => return self.qualify_field_expr(tree, file, value),
+        Field(value) => return self.qualify_field_value(tree, file, expr, value),
         Index(value) => return self.qualify_index_expr(tree, file, value),
         Deref(value) => return self.qualify_deref_expr(tree, file, value),
         If(value) => {
@@ -1389,6 +1389,37 @@ fn (self: &Loader) declares_function(file: arena::Handle<ModuleFile>, name: []u8
     let qualified = try self.qualify_in(file, name);
     defer qualified.deinit(self.allocator);
     return index_holds(&self.functions, &qualified);
+}
+
+/// Rewrites a namespace path used as a value, the Go `qualifyFieldValue`. A
+/// path that names an imported function -- `helper::double` handed to a
+/// parameter of function type -- is that function's package name, the way
+/// the same path is when it is called; anything else keeps its field shape.
+fn (self: &var Loader) qualify_field_value(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    expr: ast::Expression,
+    node: ast::FieldExpr
+) -> !ExpressionResult {
+    if !node.namespace {
+        return self.qualify_field_expr(tree, file, node);
+    }
+    if try self.resolve_type_namespace_receiver(tree, file, node.receiver) |receiver| {
+        receiver.deinit(self.allocator);
+        return self.qualify_field_expr(tree, file, node);
+    }
+    let outcome = try self.resolve_namespace_path(tree, file, expr);
+    match outcome {
+        Name(name) => {
+            let retained = try tree.add_text(move name);
+            return ExpressionResult::Expression(try tree.add_expression(
+                ast::ExpressionNode::Ident(ast::IdentExpr { name: retained, span: node.span })
+            ));
+        },
+        Missing => {},
+        Failed(failed) => return ExpressionResult::Failed(move failed),
+    }
+    return self.qualify_field_expr(tree, file, node);
 }
 
 /// Rewrites namespace receivers while preserving field names.

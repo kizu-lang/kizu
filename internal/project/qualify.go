@@ -573,7 +573,7 @@ func (c *graphChecker) qualifyTypeOrControlExpr(
 	case *ast.StructLiteralExpr:
 		return c.qualifyStructLiteral(module, e)
 	case *ast.FieldExpr:
-		return c.qualifyFieldExpr(module, e)
+		return c.qualifyFieldValue(module, e)
 	case *ast.IndexExpr:
 		return c.qualifyIndexExpr(module, e)
 	case *ast.DerefExpr:
@@ -788,6 +788,30 @@ func (c *graphChecker) qualifyCallee(
 func (c *graphChecker) declaresFunction(module *moduleFile, name string) bool {
 	_, ok := c.functions[module.qualify(name)]
 	return ok
+}
+
+// qualifyFieldValue rewrites a namespace path used as a value. A path that
+// names an imported function -- `helper::double` handed to a parameter of
+// function type -- is that function's package name, the way the same path is
+// when it is called; anything else keeps its field shape.
+func (c *graphChecker) qualifyFieldValue(
+	module *moduleFile,
+	expr *ast.FieldExpr,
+) (ast.Expression, error) {
+	if !expr.Namespace {
+		return c.qualifyFieldExpr(module, expr)
+	}
+	if _, ok := c.resolveTypeNamespaceReceiver(module, expr); ok {
+		return c.qualifyFieldExpr(module, expr)
+	}
+	name, ok, err := c.resolveNamespacePath(module, expr)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		return &ast.IdentExpr{Name: name, Span: expr.Span}, nil
+	}
+	return c.qualifyFieldExpr(module, expr)
 }
 
 // qualifyFieldExpr rewrites namespace receivers while preserving field names.
