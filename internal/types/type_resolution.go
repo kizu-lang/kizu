@@ -245,7 +245,10 @@ func (c *Checker) resolveErrorUnionType(
 		if issue.present() {
 			return "", issue
 		}
-		if c.errorSets[string(errName)] == nil {
+		// A static type parameter may stand for the set; each instance
+		// substitutes the set it was given and resolves again, which is where
+		// an argument that is not an error set is refused.
+		if c.errorSets[string(errName)] == nil && !c.typeParams.contains(string(errName)) {
 			return "", typeResolutionIssue{
 				kind: typeResolutionErrorSetRequired, subject: errName,
 			}

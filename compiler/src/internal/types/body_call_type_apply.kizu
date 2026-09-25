@@ -455,7 +455,23 @@ fn (self: &var Checker) check_generic_user_type_apply_checked(
     if args.len(tree) != facts.parameter_count {
         return try self.user_call_arity_error(handle, name, args.len(tree));
     }
+    // A type argument that stands for the set of an `E!T` has to be a set.
+    // Said here, before any argument is compared against a signature that
+    // could not be spelled, the Go `revalidateSubstituted` loop.
     var index = 0;
+    while index < facts.parameter_count {
+        let declared = self.callable_param_facts(handle, index) orelse
+            return try self.undefined_function_error(name);
+        let want = try self.types.substitute_type_params(
+            self.allocator, declared.typ, &checked.substitutions);
+        if try self.types.mints_wrapper(self.allocator, want) {
+            if try self.revalidate_substituted(tree, want) |problem| {
+                return move problem;
+            }
+        }
+        index = index + 1;
+    }
+    index = 0;
     while index < facts.parameter_count {
         let argument = args.get_or_panic(tree, index);
         if try self.check_generic_user_arg(
@@ -1684,10 +1700,11 @@ fn (self: &var Checker) check_task_set_spawn(
     return null;
 }
 
-/// Validates `thread_pool_each<T>(pool, data, chunk, worker)`. The runtime
-/// hands each chunk of data to the worker as its own `&var []T`, so the
-/// worker's parameter is exactly that; what T may hold is the ownership
-/// checker's rule, because it is about what a chunk can reach.
+/// Validates `thread_pool_each<T, E>(pool, data, chunk, worker)`, the Go
+/// `checkThreadPoolEach`. The runtime hands each chunk of data to the worker
+/// as its own `&var []T` and returns the first failure a worker reported;
+/// what T may hold is the ownership checker's rule, because it is about what
+/// a chunk can reach.
 fn (self: &var Checker) check_thread_pool_each(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1696,6 +1713,11 @@ fn (self: &var Checker) check_thread_pool_each(
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
     let label = "std::thread::each";
+    var parts = try self.thread_round_type_args(label, type_arg) orelse
+        return try self.thread_round_type_args_error(label, type_arg);
+    defer parts.deinit(self.allocator);
+    let elem = parts.elem.as_bytes();
+    let set = parts.set.as_bytes();
     if args.len(tree) != 4 {
         return try self.checker_error_at(
             "type error",
@@ -1710,7 +1732,7 @@ fn (self: &var Checker) check_thread_pool_each(
         return move problem;
     }
     let data_arg = args.get_or_panic(tree, 1);
-    if try self.check_thread_data_arg(tree, scope, label, type_arg, data_arg) |problem| {
+    if try self.check_thread_data_arg(tree, scope, label, elem, data_arg) |problem| {
         return move problem;
     }
     let chunk_arg = args.get_or_panic(tree, 2);
@@ -1720,16 +1742,17 @@ fn (self: &var Checker) check_thread_pool_each(
         return move problem;
     }
     let worker_arg = args.get_or_panic(tree, 3);
-    if try self.check_thread_worker_arg(tree, scope, label, type_arg, worker_arg) |problem| {
+    if try self.check_thread_worker_arg(tree, scope, label, elem, set, worker_arg) |problem| {
         return move problem;
     }
-    out.* = try self.types.intern("void");
+    out.* = try self.thread_round_result(set);
     return null;
 }
 
-/// Validates `thread_pool_each_lane<T>(pool, allocator, data, length, stride,
-/// worker)`. The worker is the one `each` takes: a lane reaches it as its own
-/// contiguous `&var []T`.
+/// Validates `thread_pool_each_lane<T, E>(pool, allocator, data, length,
+/// stride, worker)`, the Go `checkThreadPoolEachLane`. The round can also run
+/// out of memory for the lane runs, so E has to hold std::thread::Error as
+/// well as whatever the worker fails with.
 fn (self: &var Checker) check_thread_pool_each_lane(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1738,6 +1761,20 @@ fn (self: &var Checker) check_thread_pool_each_lane(
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
     let label = "std::thread::each_lane";
+    var parts = try self.thread_round_type_args(label, type_arg) orelse
+        return try self.thread_round_type_args_error(label, type_arg);
+    defer parts.deinit(self.allocator);
+    let elem = parts.elem.as_bytes();
+    let set = parts.set.as_bytes();
+    let thread_error = try self.types.intern("std::thread::Error");
+    let set_type = try self.types.intern(set);
+    if !self.error_set_fits(thread_error, set_type) {
+        var message = try string::from_bytes(self.allocator, "`std::thread::each_lane` needs its error set `");
+        errdefer message.deinit(self.allocator);
+        try message.append_bytes(self.allocator, set);
+        try message.append_bytes(self.allocator, "` to include std::thread::Error");
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
     if args.len(tree) != 6 {
         return try self.checker_error_at(
             "type error",
@@ -1758,7 +1795,7 @@ fn (self: &var Checker) check_thread_pool_each_lane(
         return move problem;
     }
     let data_arg = args.get_or_panic(tree, 2);
-    if try self.check_thread_data_arg(tree, scope, label, type_arg, data_arg) |problem| {
+    if try self.check_thread_data_arg(tree, scope, label, elem, data_arg) |problem| {
         return move problem;
     }
     var index = 3;
@@ -1772,11 +1809,78 @@ fn (self: &var Checker) check_thread_pool_each_lane(
         index = index + 1;
     }
     let worker_arg = args.get_or_panic(tree, 5);
-    if try self.check_thread_worker_arg(tree, scope, label, type_arg, worker_arg) |problem| {
+    if try self.check_thread_worker_arg(tree, scope, label, elem, set, worker_arg) |problem| {
         return move problem;
     }
-    out.* = try self.types.intern("std::thread::Error!void");
+    out.* = try self.thread_round_result(set);
     return null;
+}
+
+/// A pool round's `<T, E>`: the element, and the error set its worker fails
+/// with.
+struct ThreadRoundTypeArgs {
+    elem: string::String,
+    set: string::String,
+}
+
+fn (self: ThreadRoundTypeArgs) deinit(allocator: Allocator) -> void {
+    self.elem.deinit(allocator);
+    self.set.deinit(allocator);
+    return;
+}
+
+/// Splits a pool round's `<T, E>`, the Go `threadRoundTypeArgs`; null when
+/// there are not two arguments or the second is not an error set.
+fn (self: &var Checker) thread_round_type_args(label: []u8, type_arg: []u8) -> !?ThreadRoundTypeArgs {
+    var parts = try split_generic_args(self.allocator, type_arg) orelse return null;
+    defer parts.deinit(self.allocator);
+    if parts.len() != 2 {
+        return null;
+    }
+    var is_set = false;
+    if parts.at(1) |text| {
+        let bytes = text.as_bytes();
+        let set_type = try self.types.intern(bytes);
+        is_set = self.has_error_set(set_type);
+    }
+    if !is_set {
+        return null;
+    }
+    var elem = string::new(self.allocator);
+    errdefer elem.deinit(self.allocator);
+    var set = string::new(self.allocator);
+    errdefer set.deinit(self.allocator);
+    if parts.at(0) |text| {
+        let bytes = text.as_bytes();
+        try elem.append_bytes(self.allocator, bytes);
+    }
+    if parts.at(1) |text| {
+        let bytes = text.as_bytes();
+        try set.append_bytes(self.allocator, bytes);
+    }
+    return ThreadRoundTypeArgs { elem: move elem, set: move set };
+}
+
+fn (self: &var Checker) thread_round_type_args_error(
+    label: []u8,
+    type_arg: []u8
+) -> !?diagnostic::Diagnostic {
+    var message = try string::from_bytes(self.allocator, "`");
+    errdefer message.deinit(self.allocator);
+    try message.append_bytes(self.allocator, label);
+    try message.append_bytes(self.allocator, "` expects an element type and an error set, got `");
+    try message.append_bytes(self.allocator, type_arg);
+    try message.append_bytes(self.allocator, "`");
+    return try self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+/// Names `E!void`, what a pool round returns.
+fn (self: &var Checker) thread_round_result(set: []u8) -> !Type {
+    var result = try string::from_bytes(self.allocator, set);
+    defer result.deinit(self.allocator);
+    try result.append_bytes(self.allocator, "!void");
+    let bytes = result.as_bytes();
+    return self.types.intern(bytes);
 }
 
 /// Validates the `&var []T` a pool round cuts, which a std wrapper forwards
@@ -1805,19 +1909,22 @@ fn (self: &var Checker) check_thread_data_arg(
     return null;
 }
 
-/// Validates the `fn(&var []T, i64) -> void` a pool round calls once per
+/// Validates the `fn(&var []T, i64) -> E!void` a pool round calls once per
 /// chunk or lane.
 fn (self: &var Checker) check_thread_worker_arg(
     tree: &var ast::Ast,
     scope: ScopeHandle,
     label: []u8,
     type_arg: []u8,
+    set: []u8,
     worker_arg: ast::Expression
 ) -> !?diagnostic::Diagnostic {
     var worker_want = try string::from_bytes(self.allocator, "fn(&var []");
     defer worker_want.deinit(self.allocator);
     try worker_want.append_bytes(self.allocator, type_arg);
-    try worker_want.append_bytes(self.allocator, ", i64) -> void");
+    try worker_want.append_bytes(self.allocator, ", i64) -> ");
+    try worker_want.append_bytes(self.allocator, set);
+    try worker_want.append_bytes(self.allocator, "!void");
     let worker_bytes = worker_want.as_bytes();
     let worker_type = try self.types.intern(worker_bytes);
     var got_worker = empty_type();

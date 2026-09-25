@@ -290,8 +290,7 @@ These are known areas to keep conservative:
 - Numeric casts and integer-width runtime semantics are incomplete.
 - Containers are `Array` / `Map` / `String` / `Arena` / `Box`; a general
   container contract for user-written ones does not exist yet.
-- Threads run only through `std::thread::each` and `each_lane`; workers cannot
-  return failures yet (ADR-0025).
+- Threads run only through `std::thread::each` and `each_lane` (ADR-0025).
 - Raw pointer runtime operations are not implemented as a safe guarantee.
 
 Do not describe these areas as memory-safe until their invariants and regression

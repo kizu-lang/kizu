@@ -1708,44 +1708,33 @@ func (l *lowerer) lowerTaskSetSpawn(state string, args []ast.Expression) (Value,
 	return l.releaseOwnerOnFailure(result, values[4], values[2])
 }
 
-// lowerThreadPoolEach lowers one pool round. The `&var []T` the wrapper was
-// lent is a view value in IR; the backend adds what T measures, which is how
-// the runtime finds where each chunk starts.
-func (l *lowerer) lowerThreadPoolEach(elem string, args []ast.Expression) (Value, error) {
-	params := []Param{
-		{Type: "i64"},
-		{Type: "[]" + elem},
-		{Type: "i64"},
-		{Type: "fn(&var []" + elem + ", i64) -> void"},
+// lowerThreadPoolRound lowers one pool round. `typeArgs` is the round's
+// `T, E`. The `&var []T` the wrapper was lent is a view value in IR; the
+// backend adds what T measures, which is how the runtime finds where each
+// chunk or lane starts, and the round returns the first failure as E.
+func (l *lowerer) lowerThreadPoolRound(
+	name string,
+	typeArgs string,
+	args []ast.Expression,
+) (Value, error) {
+	parts, err := typ.SplitArgs(typeArgs)
+	if err != nil || len(parts) != 2 {
+		return Value{}, fmt.Errorf("ir error: `%s` expects an element type and an error set", name)
+	}
+	elem, set := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+	worker := Param{Type: "fn(&var []" + elem + ", i64) -> " + set + "!void"}
+	params := []Param{{Type: "i64"}, {Type: "[]" + elem}, {Type: "i64"}, worker}
+	if name == "std::internal::builtin::thread_pool_each_lane" {
+		params = []Param{
+			{Type: "i64"}, {Type: "Allocator"}, {Type: "[]" + elem},
+			{Type: "i64"}, {Type: "i64"}, worker,
+		}
 	}
 	values, err := l.lowerCallArgsAs(params, args)
 	if err != nil {
 		return Value{}, err
 	}
-	return l.emit("call.std::internal::builtin::thread_pool_each", "void", values, ""), nil
-}
-
-// lowerThreadPoolEachLane lowers one lane round, the chunk round's operands
-// with the allocator the scratch runs come from and the lane's shape.
-func (l *lowerer) lowerThreadPoolEachLane(elem string, args []ast.Expression) (Value, error) {
-	params := []Param{
-		{Type: "i64"},
-		{Type: "Allocator"},
-		{Type: "[]" + elem},
-		{Type: "i64"},
-		{Type: "i64"},
-		{Type: "fn(&var []" + elem + ", i64) -> void"},
-	}
-	values, err := l.lowerCallArgsAs(params, args)
-	if err != nil {
-		return Value{}, err
-	}
-	return l.emit(
-		"call.std::internal::builtin::thread_pool_each_lane",
-		"std::thread::Error!void",
-		values,
-		"",
-	), nil
+	return l.emit("call."+name, set+"!void", values, ""), nil
 }
 
 // lowerTypeApplyCall lowers calls whose callee carries a static argument list.
@@ -1774,10 +1763,10 @@ func (l *lowerer) lowerTypeApplyCall(
 		return l.lowerTaskNew(l.resolveType(typeApply.TypeArg), args)
 	case "std::internal::builtin::task_set_spawn":
 		return l.lowerTaskSetSpawn(l.resolveType(typeApply.TypeArg), args)
-	case "std::internal::builtin::thread_pool_each":
-		return l.lowerThreadPoolEach(l.resolveType(typeApply.TypeArg), args)
-	case "std::internal::builtin::thread_pool_each_lane":
-		return l.lowerThreadPoolEachLane(l.resolveType(typeApply.TypeArg), args)
+	case "std::internal::builtin::thread_pool_each",
+		"std::internal::builtin::thread_pool_each_lane":
+		return l.lowerThreadPoolRound(
+			typeApply.Callee.String(), l.resolveTypeArgs(typeApply.TypeArg), args)
 	}
 	if value, ok, err := l.lowerMetaApply(
 		typeApply.Callee.String(), typeApply.TypeArg, args,

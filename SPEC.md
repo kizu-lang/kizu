@@ -2148,7 +2148,19 @@ member でもあるので、`CacheError!T` の関数は `FsError!T` の呼び出
 
 * `try` は `!T` を返す関数内でだけ使える
 * `try` の operand は `!T` でなければならない
-* `E!T` の `E` は宣言済みの `error` set でなければならない
+* `E!T` の `E` は宣言済みの `error` set か、関数の型引数でなければならない。
+  型引数なら、実体化で渡された型が `error` set であることを検査し、その
+  instance では `E` をその set として扱う。失敗しうる関数を受け取る generic
+  関数が、その失敗を set のまま呼び出し側へ返せる
+
+  ```kizu
+  fn run_all<E>(f: fn(i64) -> E!void, n: i64) -> E!void {
+      for 0..n |i| {
+          try f(i);
+      }
+      return;
+  }
+  ```
 * `E!T` では `E` の member または `T` を返せる
 * `!T` は set を宣言しないので、body はどの set の member でも伝播・返却できる
 * `E!T` と宣言した場合、`try` で伝播できるのは member 集合が `E` の部分集合で
@@ -3648,10 +3660,11 @@ stdio operation が `Io` capability を必ず要求し、I/O failure を error u
 
 ### 15.3 thread pool
 
-`std::thread::each<T>(&var pool, data, chunk, worker)` は `data: &var []T` を
-`chunk` 要素ずつの重ならない塊に切り、各塊を `worker: fn(&var []T, i64) -> void`
+`std::thread::each<T, E>(&var pool, data, chunk, worker)` は `data: &var []T` を
+`chunk` 要素ずつの重ならない塊に切り、各塊を `worker: fn(&var []T, i64) -> E!void`
 に 1 回ずつ渡します。塊は pool の thread(呼び出し側を含む)で同時に走り、
-`each` は全部の塊が終わってから返ります。`std::thread::each_lane<T>` は同じことを
+`each` は全部の塊が終わってから返ります。worker の最初の失敗が `each` の戻り値
+`E!void` になり、それ以降の塊は始まりません。`std::thread::each_lane<T, E>` は同じことを
 飛び飛びの要素の列(lane)に対して行います。std が lane を thread ごとの領域に集めて
 連続した `&var []T` として worker に渡し、worker が返ったら元の位置へ書き戻します。
 API の形は `docs/std/thread.md` にあります。

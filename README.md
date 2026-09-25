@@ -43,7 +43,7 @@ not in any one execution path.
 | while / break / continue / for / label | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | if / match | 19 | ✅ | ✅ | ✅ | 18/19 | 18/19 | 18/19 | 16/19 |
 | enum / union | 18 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 15/18 |
-| error union `!T` / try / errdefer | 58 | ✅ | ✅ | ✅ | 37/58 | 37/58 | 37/58 | 34/58 |
+| error union `!T` / try / errdefer | 59 | ✅ | ✅ | ✅ | 38/59 | 38/59 | 38/59 | 35/59 |
 | optional `?T` / orelse / capture | 28 | ✅ | ✅ | ✅ | 27/28 | 27/28 | 27/28 | 25/28 |
 | move / borrow | 70 | ✅ | ✅ | ✅ | 68/70 | 68/70 | 68/70 | 68/70 |
 | deinit / defer | 25 | ✅ | ✅ | ✅ | 24/25 | 24/25 | 24/25 | 24/25 |
@@ -51,7 +51,7 @@ not in any one execution path.
 | comptime / reflection | 20 | ✅ | ✅ | ✅ | 18/20 | 18/20 | 18/20 | 18/20 |
 | cast / slice / stack buffer / box | 17 | ✅ | ✅ | ✅ | 16/17 | 16/17 | 16/17 | 16/17 |
 | unsafe / raw pointer / extern C | 11 | ✅ | ✅ | ✅ | 2/11 | 2/11 | 2/11 | 2/11 |
-| contract / generics | 23 | ✅ | ✅ | ✅ | 22/23 | 22/23 | 22/23 | 19/23 |
+| contract / generics | 24 | ✅ | ✅ | ✅ | 23/24 | 23/24 | 23/24 | 20/24 |
 | std::array | 26 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::string | 32 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::map | 17 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 16/17 |
@@ -124,7 +124,7 @@ deliberately excluded, so the two are not confused.
 
 | Feature | State |
 | --- | --- |
-| threads for parallel work | **in progress.** `std::thread::Pool` runs one function over the non-overlapping chunks of a slice on several threads and returns after every chunk ran (native only). `each_lane` does the same for lanes whose elements are a fixed distance apart, such as a matrix's columns. Workers that return failures are next (ADR-0025). Coroutines (`std::coro`) and an evented `Io` are concurrency on one thread, not parallelism (ADR-0145, ADR-0146) |
+| threads for parallel work | **in progress.** `std::thread::Pool` runs one function over the non-overlapping chunks of a slice on several threads and returns after every chunk ran (native only). `each_lane` does the same for lanes whose elements are a fixed distance apart, such as a matrix's columns. A worker fails with a member of the set the call names, and the first failure is what the call returns (ADR-0025). Coroutines (`std::coro`) and an evented `Io` are concurrency on one thread, not parallelism (ADR-0145, ADR-0146) |
 | wasm beyond the current target subsets | **in progress.** Every example the Wasm routes do not run is refused as a capability the target lacks |
 | raw pointer runtime operations | **check-only.** `pointer_policy.kizu` and `raw_pointer_deref.kizu` are checked but not executed |
 | type alias | **not started** |

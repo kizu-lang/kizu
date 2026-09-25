@@ -5202,10 +5202,11 @@ func (c *Checker) checkTaskSetSpawn(
 	return Type("std::io::Error!void"), nil
 }
 
-// checkThreadPoolEach validates `thread_pool_each<T>(pool, data, chunk,
+// checkThreadPoolEach validates `thread_pool_each<T, E>(pool, data, chunk,
 // worker)`. The runtime hands each chunk of data to the worker as its own
-// `&var []T`, so the worker's parameter is exactly that; what T may hold is
-// the ownership checker's rule, because it is about what a chunk can reach.
+// `&var []T` and returns the first failure a worker reported; what T may hold
+// is the ownership checker's rule, because it is about what a chunk can
+// reach.
 func (c *Checker) checkThreadPoolEach(
 	typeArg string,
 	args []ast.Expression,
@@ -5213,27 +5214,33 @@ func (c *Checker) checkThreadPoolEach(
 	unsafe unsafeMark,
 ) (Type, error) {
 	const label = "std::thread::each"
+	elem, set, err := c.threadRoundTypeArgs(label, typeArg)
+	if err != nil {
+		return "", err
+	}
 	if len(args) != 4 {
 		return "", errorf("type error: `%s` expects pool, data, chunk and worker", label)
 	}
 	if err := c.checkCoreArg(label, 0, stdprim.ArgI64, args[0], env, unsafe); err != nil {
 		return "", err
 	}
-	if err := c.checkBorrowedStateArg(label, "[]"+typeArg, args[1], env, unsafe); err != nil {
+	if err := c.checkBorrowedStateArg(label, "[]"+elem, args[1], env, unsafe); err != nil {
 		return "", err
 	}
 	if err := c.checkCoreArg(label, 2, stdprim.ArgI64, args[2], env, unsafe); err != nil {
 		return "", err
 	}
-	if err := c.checkThreadWorkerArg(label, typeArg, args[3], env, unsafe); err != nil {
+	if err := c.checkThreadWorkerArg(label, elem, set, args[3], env, unsafe); err != nil {
 		return "", err
 	}
-	return Type("void"), nil
+	return Type(set + "!void"), nil
 }
 
-// checkThreadPoolEachLane validates `thread_pool_each_lane<T>(pool,
+// checkThreadPoolEachLane validates `thread_pool_each_lane<T, E>(pool,
 // allocator, data, length, stride, worker)`. The worker is the one `each`
-// takes: a lane reaches it as its own contiguous `&var []T`.
+// takes: a lane reaches it as its own contiguous `&var []T`. The round can
+// also run out of memory for the lane runs, so E has to hold
+// std::thread::Error as well as whatever the worker fails with.
 func (c *Checker) checkThreadPoolEachLane(
 	typeArg string,
 	args []ast.Expression,
@@ -5241,6 +5248,14 @@ func (c *Checker) checkThreadPoolEachLane(
 	unsafe unsafeMark,
 ) (Type, error) {
 	const label = "std::thread::each_lane"
+	elem, set, err := c.threadRoundTypeArgs(label, typeArg)
+	if err != nil {
+		return "", err
+	}
+	if !c.errorSetFits("std::thread::Error", Type(set)) {
+		return "", errorf(
+			"type error: `%s` needs its error set `%s` to include std::thread::Error", label, set)
+	}
 	if len(args) != 6 {
 		return "", errorf(
 			"type error: `%s` expects pool, allocator, data, length, stride and worker", label)
@@ -5251,7 +5266,7 @@ func (c *Checker) checkThreadPoolEachLane(
 			return "", err
 		}
 	}
-	if err := c.checkBorrowedStateArg(label, "[]"+typeArg, args[2], env, unsafe); err != nil {
+	if err := c.checkBorrowedStateArg(label, "[]"+elem, args[2], env, unsafe); err != nil {
 		return "", err
 	}
 	for index := 3; index < 5; index++ {
@@ -5259,22 +5274,37 @@ func (c *Checker) checkThreadPoolEachLane(
 			return "", err
 		}
 	}
-	if err := c.checkThreadWorkerArg(label, typeArg, args[5], env, unsafe); err != nil {
+	if err := c.checkThreadWorkerArg(label, elem, set, args[5], env, unsafe); err != nil {
 		return "", err
 	}
-	return Type("std::thread::Error!void"), nil
+	return Type(set + "!void"), nil
 }
 
-// checkThreadWorkerArg validates the `fn(&var []T, i64) -> void` a pool round
-// calls once per chunk or lane.
+// threadRoundTypeArgs splits a pool round's `<T, E>`: the element, and the
+// error set its worker fails with.
+func (c *Checker) threadRoundTypeArgs(label string, typeArg string) (string, string, error) {
+	parts, ok := splitGenericArgs(typeArg)
+	if !ok || len(parts) != 2 {
+		return "", "", errorf("type error: `%s` expects an element type and an error set", label)
+	}
+	elem, set := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+	if c.errorSets[set] == nil {
+		return "", "", errorf("type error: `%s` needs an error set, got `%s`", label, set)
+	}
+	return elem, set, nil
+}
+
+// checkThreadWorkerArg validates the `fn(&var []T, i64) -> E!void` a pool
+// round calls once per chunk or lane.
 func (c *Checker) checkThreadWorkerArg(
 	label string,
-	typeArg string,
+	elem string,
+	set string,
 	arg ast.Expression,
 	env *scope,
 	unsafe unsafeMark,
 ) error {
-	want := Type("fn(&var []" + typeArg + ", i64) -> void")
+	want := Type("fn(&var []" + elem + ", i64) -> " + set + "!void")
 	got, err := c.checkContextualExpr(arg, want, env, unsafe)
 	if err != nil {
 		return err
@@ -5990,10 +6020,8 @@ func (c *Checker) checkGenericUserTypeApply(
 	for idx, param := range fn.sig.TypeParamNames() {
 		subst[param] = typeArgs[idx]
 	}
-	for idx, expr := range args {
-		if err := c.checkGenericUserArg(name, fn, subst, idx, expr, env, unsafe); err != nil {
-			return "", true, err
-		}
+	if err := c.checkGenericUserArgs(name, fn, subst, args, env, unsafe); err != nil {
+		return "", true, err
 	}
 	if err := c.checkGenericInstantiation(fn, subst, bindings); err != nil {
 		return "", true, c.annotateInstantiation(err, span, fn, typeArgs)
@@ -6008,6 +6036,31 @@ func (c *Checker) checkGenericUserTypeApply(
 		return "", true, err
 	}
 	return result, true, nil
+}
+
+// checkGenericUserArgs checks a generic call's arguments against the
+// signature with this call's type arguments bound. A type argument that
+// stands for the set of an `E!T` has to be a set, which is said first, before
+// any argument is compared against a signature that could not be spelled.
+func (c *Checker) checkGenericUserArgs(
+	name string,
+	fn *functionType,
+	subst map[string]Type,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) error {
+	for _, param := range fn.params {
+		if err := c.revalidateSubstituted(c.types.substituteTypeParams(param, subst)); err != nil {
+			return err
+		}
+	}
+	for idx, expr := range args {
+		if err := c.checkGenericUserArg(name, fn, subst, idx, expr, env, unsafe); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // checkStaticArgs validates each `<...>` argument against what its parameter
@@ -7726,12 +7779,13 @@ func (c *Checker) checkStdMethod(
 }
 
 // revalidateSubstituted re-parses a type text after generic substitution when
-// it carries an optional. Declaration-time checking sees only `?T`, so a
-// substitution can mint spellings the source could never write -- `pop<!i64>`
-// would return `?!i64` -- and those must fail the same way the literal
-// spelling does.
+// it carries an optional or an error union. Declaration-time checking sees
+// only `?T` and `E!T` with E a parameter, so a substitution can mint
+// spellings the source could never write -- `pop<!i64>` would return
+// `?!i64`, and `<i64>` for E would make `i64!void` -- and those must fail
+// the same way the literal spelling does.
 func (c *Checker) revalidateSubstituted(t Type) error {
-	if !strings.Contains(string(t), "?") {
+	if !strings.ContainsAny(string(t), "?!") {
 		return nil
 	}
 	_, err := c.parseType(string(t))

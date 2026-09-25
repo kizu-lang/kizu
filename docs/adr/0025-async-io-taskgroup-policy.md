@@ -11,17 +11,15 @@ runtime も無かった。`kizu check` は通り、`kizu run` は落ちた。安
 ## 決定
 
 thread API は `std::thread::Pool` の round だけにする(SPEC §15.3)。
-`each<T>(&var pool, data, chunk, worker)` は `&var []T` を重ならない塊に切り、
-pool の thread と呼び出し側で同時に処理し、全部の塊が終わってから返る。
-`each_lane` は一定間隔で並ぶ要素の列(lane)を同じ worker に渡す。間隔が 1 より
-大きい lane は、取った thread の領域へ集めて連続した `&var []T` で渡し、返ったら
-書き戻す。
+`each<T, E>` は `&var []T` を重ならない塊に切って pool の thread と呼び出し側で
+同時に処理し、全部の塊が終わってから返る。`each_lane` は一定間隔の要素の列(lane)を
+thread ごとの領域へ集めて連続した `&var []T` で渡し、返ったら書き戻す。
 
 - thread は `init` で起こし、round の間は少し spin してから寝かせる。塊は round の
   tag 付きの ticket から数個ずつ取り、round は全部の塊が終わった時点で終わる
-- stack は `init` に渡した allocator から取り、coroutine と同じ guard page を置く
-- worker は `fn(&var []T, i64) -> void`。backend の thunk 1 つが Kizu の ABI で呼ぶ
-- lane を集める領域は `each_lane` に渡した allocator から呼び出しの間だけ取る
+- stack と lane の領域は渡された allocator から取る。stack には guard page を置く
+- worker は `fn(&var []T, i64) -> E!void`。最初の失敗が round の戻り値になり、残りの
+  塊は始めない。backend が set ごとの thunk で Kizu の ABI で呼び、error code を受け取る
 - `T` は view と `Io` / `Allocator` を含めない(`std::io::spawn` と同じ述語)
 - wasm target は build 時に拒否する
 
@@ -47,4 +45,6 @@ data race を型で防ぐ条件が、Kizu にはもう揃っている。closure 
 | 入力を共有して別 buffer に書く `each_from` | buffer が 1 本余計に要る。集めて書き戻す形で同じことができる |
 | worker に `Allocator` を渡す | fixed buffer と `allocator_from` の allocator は thread 間で共有できない |
 | wasm では 1 thread で走らせる | 隠れた fallback になる。並列を頼んだ program が黙って直列になる |
+| 失敗の型を set なしの `!void` にする | 呼び出し側が `catch` できず、set を宣言した関数から `try` できない。型引数を set に取れるようにした |
+| 失敗しない worker(`-> void`)も残す | 同じことに 2 つの書き方ができる |
 | runtime の C から worker を slice の値渡しで呼ぶ | target の aggregate ABI に頼る。slice は型によらず同じ {ptr, len} なので thunk 1 つで済む |

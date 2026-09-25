@@ -40,7 +40,7 @@ lowering は 1 本しかないため、同じプログラムが `run` と `build
 | while / break / continue / for / label | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | if / match | 19 | ✅ | ✅ | ✅ | 18/19 | 18/19 | 18/19 | 16/19 |
 | enum / union | 18 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 15/18 |
-| error union `!T` / try / errdefer | 58 | ✅ | ✅ | ✅ | 37/58 | 37/58 | 37/58 | 34/58 |
+| error union `!T` / try / errdefer | 59 | ✅ | ✅ | ✅ | 38/59 | 38/59 | 38/59 | 35/59 |
 | optional `?T` / orelse / capture | 28 | ✅ | ✅ | ✅ | 27/28 | 27/28 | 27/28 | 25/28 |
 | move / borrow | 70 | ✅ | ✅ | ✅ | 68/70 | 68/70 | 68/70 | 68/70 |
 | deinit / defer | 25 | ✅ | ✅ | ✅ | 24/25 | 24/25 | 24/25 | 24/25 |
@@ -48,7 +48,7 @@ lowering は 1 本しかないため、同じプログラムが `run` と `build
 | comptime / reflection | 20 | ✅ | ✅ | ✅ | 18/20 | 18/20 | 18/20 | 18/20 |
 | cast / slice / stack buffer / box | 17 | ✅ | ✅ | ✅ | 16/17 | 16/17 | 16/17 | 16/17 |
 | unsafe / raw pointer / extern C | 11 | ✅ | ✅ | ✅ | 2/11 | 2/11 | 2/11 | 2/11 |
-| contract / generics | 23 | ✅ | ✅ | ✅ | 22/23 | 22/23 | 22/23 | 19/23 |
+| contract / generics | 24 | ✅ | ✅ | ✅ | 23/24 | 23/24 | 23/24 | 20/24 |
 | std::array | 26 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::string | 32 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::map | 17 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 16/17 |
@@ -115,7 +115,7 @@ no-libc / freestanding build は build policy としては受理済みですが�
 
 | 機能 | 状態 |
 | --- | --- |
-| 並列処理のための thread | **進行中。** `std::thread::Pool` は slice を重ならない塊に切って 1 つの関数を複数の thread で同時に走らせ、全部の塊が終わってから返ります(native のみ)。`each_lane` は行列の列のように一定間隔で並ぶ要素の列に対して同じことをします。失敗を返す worker が次です(ADR-0025)。coroutine(`std::coro`)と evented な `Io` は 1 thread 上の並行性であって並列性ではありません(ADR-0145、ADR-0146) |
+| 並列処理のための thread | **進行中。** `std::thread::Pool` は slice を重ならない塊に切って 1 つの関数を複数の thread で同時に走らせ、全部の塊が終わってから返ります(native のみ)。`each_lane` は行列の列のように一定間隔で並ぶ要素の列に対して同じことをします。worker は呼び出しが名指した set で失敗でき、最初の失敗が呼び出しの戻り値になります(ADR-0025)。coroutine(`std::coro`)と evented な `Io` は 1 thread 上の並行性であって並列性ではありません(ADR-0145、ADR-0146) |
 | 現在の subset を超える wasm backend | **進行中。** Wasm の経路で動かない example は、すべて target が持たない capability として拒否されます |
 | raw pointer の実行時操作 | **check のみ。** `pointer_policy.kizu` と `raw_pointer_deref.kizu` は検査だけで実行しません |
 | type alias | **未着手** |

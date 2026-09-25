@@ -3,7 +3,9 @@
 A pool runs one function over a slice on several threads at once.
 
 ```kizu
-fn square(part: &var []i64, index: i64) -> void {
+error Failure = thread::Error or mem::Error;
+
+fn square(part: &var []i64, index: i64) -> Failure!void {
     for 0..mem::count<i64>(part) |i| {
         part[i] = part[i] * part[i];
     }
@@ -13,7 +15,7 @@ fn square(part: &var []i64, index: i64) -> void {
 var pool = try thread::init(io, allocator, thread::cpu_count(io));
 defer pool.deinit(allocator);
 let cells = values.as_mut_slice();
-thread::each<i64>(&var pool, cells, 1024, square);
+try thread::each<i64, Failure>(&var pool, cells, 1024, square);
 ```
 
 **これは並列です。** `std::coro` や `std::io::async` と違い、塊は複数の CPU で
@@ -36,21 +38,21 @@ pub fn cpu_count(io: Io) -> i64
 pub fn init(io: Io, allocator: Allocator, threads: i64) -> std::thread::Error!std::thread::Pool
 fn (self: Pool) deinit(allocator: Allocator) -> void
 
-pub fn each<T>(
+pub fn each<T, E>(
     pool: &var std::thread::Pool,
     data: &var []T,
     chunk: i64,
-    worker: fn(&var []T, i64) -> void
-) -> void
+    worker: fn(&var []T, i64) -> E!void
+) -> E!void
 
-pub fn each_lane<T>(
+pub fn each_lane<T, E>(
     pool: &var std::thread::Pool,
     allocator: Allocator,
     data: &var []T,
     length: i64,
     stride: i64,
-    worker: fn(&var []T, i64) -> void
-) -> std::thread::Error!void
+    worker: fn(&var []T, i64) -> E!void
+) -> E!void
 ```
 
 `cpu_count` は、この process がいま使える processor の数です。1 以上です。
@@ -80,15 +82,16 @@ block は `stride` 本の lane を持ち、lane `i` はその block の要素 `i
 
 ```kizu
 // 3 行 4 列の表を行優先で持つとき、列は 4 つおきの 3 要素
-try thread::each_lane<i64>(&var pool, allocator, cells, 3, 4, running_total);
+try thread::each_lane<i64, Failure>(&var pool, allocator, cells, 3, 4, running_total);
 ```
 
 worker は `each` と同じ形で、lane を `length` 要素の普通の `&var []T` として
 受け取ります。`stride` が 1 より大きい lane は、取った thread の領域へ集めて渡し、
 worker が返ったら元の位置へ書き戻します。そのため他の thread がその要素を持つことは
 ありません。領域は thread ごとに 1 つで、`allocator` から呼び出しの間だけ取り、返る
-前に戻します。確保できなければ `OutOfMemory` です。`stride` が 1 の lane は集めずに
-その場で渡すので、領域も取りません。
+前に戻します。確保できなければ `std::thread::Error::OutOfMemory` なので、`E` は
+`std::thread::Error` を含む set でなければなりません(含まなければ compile error)。
+`stride` が 1 の lane は集めずにその場で渡すので、領域も取りません。
 
 `index` は lane の番号で、block の順、block の中では `i` の順に 0 から数えます。
 `length` か `stride` が 1 未満、または `data` の長さが block の整数倍でなければ
@@ -107,9 +110,20 @@ worker が触れるのは、渡された塊だけです。
 worker 自身が `std::mem::page_allocator()` や `std::io::blocking()` を作って使う
 ことはできます。どちらも thread ごとの状態を持ちません。
 
-worker の中の panic は process を止めます。worker は失敗を返せません。
+worker の中の panic は process を止めます。
+
+## worker の失敗
+
+worker は `each` の第 2 static 引数 `E` の member で失敗できます(SPEC §11 の、型引数を
+set に取る `E!T`)。記録された最初の失敗が `each` / `each_lane` の戻り値になり、
+
+- それ以降、新しい塊は始まりません
+- 走っている塊は最後まで走ります
+- 他の塊が書いたものはそのまま残ります。集めて渡した lane は、失敗しても書き戻します
+- 複数の塊がほぼ同時に失敗したとき、どれが「最初」かは約束しません
+
+失敗しない worker も `E!void` を返し、`return;` で終わります。書き方は 1 つです。
 
 ## まだ無いもの
 
-- 失敗を返す worker(`fn(&var []T, i64) -> E!void`)
 - thread handle、channel、mutex、atomic
