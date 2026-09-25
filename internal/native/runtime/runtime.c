@@ -2680,6 +2680,9 @@ void std__internal__builtin__coro_close(int64_t handle) {
 
 #define KIZU_POOL_TAG INT64_C(0x4b495a55504f4f4c)
 #define KIZU_POOL_THREADS_MAX 1024
+/* The widest cache line of a target Kizu ships (Apple's arm64 cores). A
+   narrower line only makes the padding generous. */
+#define KIZU_CACHE_LINE 128
 
 typedef struct KizuPool KizuPool;
 
@@ -2696,11 +2699,14 @@ struct KizuPool {
     pthread_mutex_t lock;
     /* Signalled when a round starts or the pool shuts down. */
     pthread_cond_t start;
-    /* Signalled when the last helper leaves a round. */
+    /* Signalled when the last item of a round is done and the caller sleeps. */
     pthread_cond_t finish;
-    int64_t round;
     int shutdown;
-    int64_t helpers_in_round;
+    /* Helpers asleep on `start`, and whether the caller is asleep on
+       `finish`. Both change only under the lock, so a waker that holds it
+       knows whether anyone needs the syscall. */
+    int64_t sleepers;
+    int caller_sleeping;
     /* The round. Written by the caller under the lock before it starts the
        round, and only read after that. */
     void *worker;
@@ -2716,14 +2722,44 @@ struct KizuPool {
     int64_t stride;
     unsigned char *scratch;
     int64_t items;
-    /* Items are taken `batch` at a time, so threads meet on the counter a few
+    /* Items are taken `batch` at a time, so threads meet on the ticket a few
        times per round rather than once per item. */
     int64_t batch;
-    /* The next item nobody has taken. */
-    int64_t next;
     int64_t helper_count;
     KizuPoolHelper *helpers;
+    /* Bytes between two threads' scratch runs: a run rounded up to whole
+       cache lines, so no two threads write one line. */
+    int64_t scratch_step;
+    /* The two words every thread writes during a round sit a line apart from
+       everything else. Waiting threads read `round` in a loop, and a line
+       they share with a counter the others write moves between cores on
+       every write. */
+    unsigned char pad_ticket[KIZU_CACHE_LINE];
+    /* The round's tag, its number of batches, and the next batch nobody has
+       taken, in one word (see kizu_pool_ticket). A thread takes a batch by
+       moving the word on only while it still carries the tag it expects, so
+       a thread that arrives late cannot take a batch of the next round. */
+    uint64_t ticket;
+    unsigned char pad_done[KIZU_CACHE_LINE];
+    /* Items finished this round. The round is over when every item is, not
+       when every thread has looked in: a thread the OS has put aside with no
+       item in hand does not hold the others up. */
+    int64_t done;
+    unsigned char pad_end[KIZU_CACHE_LINE];
 };
+
+/* A ticket is tag (24 bits) | batches (20 bits) | next (20 bits). A round
+   has at most KIZU_POOL_BATCHES_MAX batches; the tag only has to tell one
+   round from the next, and wraps. */
+#define KIZU_POOL_BATCHES_MAX ((INT64_C(1) << 20) - 1)
+
+static uint64_t kizu_pool_ticket(uint64_t tag, uint64_t batches, uint64_t next) {
+    return ((tag & 0xFFFFFF) << 40) | (batches << 20) | next;
+}
+
+static uint64_t kizu_pool_ticket_tag(uint64_t ticket) {
+    return ticket >> 40;
+}
 
 static KizuPool *kizu_pool_from(int64_t handle) {
     KizuPool *pool = (KizuPool *)(intptr_t)handle;
@@ -2780,7 +2816,7 @@ static void kizu_pool_run_lane(KizuPool *pool, int64_t participant, int64_t inde
         pool->invoke(pool->worker, &part, index);
         return;
     }
-    unsigned char *scratch = pool->scratch + participant * pool->length * size;
+    unsigned char *scratch = pool->scratch + participant * pool->scratch_step;
     int64_t step = pool->stride * size;
     kizu_pool_copy_strided(scratch, size, first, step, pool->length, size);
     KizuSliceU8 part = {scratch, pool->length};
@@ -2790,29 +2826,58 @@ static void kizu_pool_run_lane(KizuPool *pool, int64_t participant, int64_t inde
 
 /* Takes items until none are left. Every thread in the round, the caller
    included, runs this. */
-static void kizu_pool_run_items(KizuPool *pool, int64_t participant) {
+/* Runs one item of the round in hand. */
+static void kizu_pool_run_item(KizuPool *pool, int64_t participant, int64_t index) {
+    if (pool->stride > 0) {
+        kizu_pool_run_lane(pool, participant, index);
+        return;
+    }
+    int64_t start = index * pool->chunk;
+    int64_t count = pool->len - start;
+    if (count > pool->chunk) {
+        count = pool->chunk;
+    }
+    KizuSliceU8 part = {pool->base + start * pool->elem_size, count};
+    pool->invoke(pool->worker, &part, index);
+}
+
+/* Takes batches of the round tagged `tag` until none are left. The round's
+   fields are read only after a batch is taken: the round cannot end, and the
+   caller cannot write the next one, while that batch is not done. */
+static void kizu_pool_run_items(KizuPool *pool, int64_t participant, uint64_t tag) {
+    uint64_t ticket = __atomic_load_n(&pool->ticket, __ATOMIC_ACQUIRE);
     for (;;) {
-        int64_t first = __atomic_fetch_add(&pool->next, pool->batch, __ATOMIC_RELAXED);
-        if (first >= pool->items) {
+        uint64_t batches = (ticket >> 20) & KIZU_POOL_BATCHES_MAX;
+        uint64_t next = ticket & KIZU_POOL_BATCHES_MAX;
+        if (kizu_pool_ticket_tag(ticket) != tag || next >= batches) {
             return;
         }
+        if (!__atomic_compare_exchange_n(
+                &pool->ticket, &ticket, ticket + 1, 1,
+                __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE)) {
+            continue;
+        }
+        int64_t items = pool->items;
+        int64_t first = (int64_t)next * pool->batch;
         int64_t end = first + pool->batch;
-        if (end > pool->items) {
-            end = pool->items;
+        if (end > items) {
+            end = items;
         }
         for (int64_t index = first; index < end; index++) {
-            if (pool->stride > 0) {
-                kizu_pool_run_lane(pool, participant, index);
-                continue;
-            }
-            int64_t start = index * pool->chunk;
-            int64_t count = pool->len - start;
-            if (count > pool->chunk) {
-                count = pool->chunk;
-            }
-            KizuSliceU8 part = {pool->base + start * pool->elem_size, count};
-            pool->invoke(pool->worker, &part, index);
+            kizu_pool_run_item(pool, participant, index);
         }
+        int64_t done = __atomic_add_fetch(&pool->done, end - first, __ATOMIC_ACQ_REL);
+        if (done == items) {
+            /* The last item: wake the caller if it went to sleep. Under the
+               lock, so the wake cannot land between its check and its sleep. */
+            pthread_mutex_lock(&pool->lock);
+            if (pool->caller_sleeping) {
+                pthread_cond_signal(&pool->finish);
+            }
+            pthread_mutex_unlock(&pool->lock);
+            return;
+        }
+        ticket = __atomic_load_n(&pool->ticket, __ATOMIC_ACQUIRE);
     }
 }
 
@@ -2832,71 +2897,80 @@ static inline void kizu_pool_pause(void) {
 }
 
 static void kizu_pool_round(KizuPool *pool) {
-    pool->next = 0;
-    /* About eight takes per thread: few enough that the counter is not what
+    if (pool->items <= 0) {
+        return;
+    }
+    /* About eight takes per thread: few enough that the ticket is not what
        the round waits on, enough that a thread that finishes early helps. */
-    pool->batch = pool->items / ((pool->helper_count + 1) * 8);
-    if (pool->batch < 1) {
-        pool->batch = 1;
+    int64_t batches = (pool->helper_count + 1) * 8;
+    if (batches > pool->items) {
+        batches = pool->items;
     }
+    if (batches > KIZU_POOL_BATCHES_MAX) {
+        batches = KIZU_POOL_BATCHES_MAX;
+    }
+    pool->batch = (pool->items + batches - 1) / batches;
+    batches = (pool->items + pool->batch - 1) / pool->batch;
+    __atomic_store_n(&pool->done, 0, __ATOMIC_RELAXED);
+    uint64_t tag = kizu_pool_ticket_tag(__atomic_load_n(&pool->ticket, __ATOMIC_RELAXED)) + 1;
+    __atomic_store_n(
+        &pool->ticket, kizu_pool_ticket(tag, (uint64_t)batches, 0), __ATOMIC_RELEASE);
+    tag &= 0xFFFFFF;
     if (pool->helper_count > 0) {
         pthread_mutex_lock(&pool->lock);
-        __atomic_store_n(&pool->helpers_in_round, pool->helper_count, __ATOMIC_RELAXED);
-        __atomic_store_n(&pool->round, pool->round + 1, __ATOMIC_RELEASE);
-        pthread_cond_broadcast(&pool->start);
-        pthread_mutex_unlock(&pool->lock);
-    }
-    kizu_pool_run_items(pool, 0);
-    if (pool->helper_count > 0) {
-        for (int spin = 0; spin < KIZU_POOL_SPINS; spin++) {
-            if (__atomic_load_n(&pool->helpers_in_round, __ATOMIC_ACQUIRE) == 0) {
-                return;
-            }
-            kizu_pool_pause();
-        }
-        pthread_mutex_lock(&pool->lock);
-        while (__atomic_load_n(&pool->helpers_in_round, __ATOMIC_ACQUIRE) > 0) {
-            pthread_cond_wait(&pool->finish, &pool->lock);
+        if (pool->sleepers > 0) {
+            pthread_cond_broadcast(&pool->start);
         }
         pthread_mutex_unlock(&pool->lock);
     }
+    kizu_pool_run_items(pool, 0, tag);
+    for (int spin = 0; spin < KIZU_POOL_SPINS; spin++) {
+        if (__atomic_load_n(&pool->done, __ATOMIC_ACQUIRE) == pool->items) {
+            return;
+        }
+        kizu_pool_pause();
+    }
+    pthread_mutex_lock(&pool->lock);
+    pool->caller_sleeping = 1;
+    while (__atomic_load_n(&pool->done, __ATOMIC_ACQUIRE) != pool->items) {
+        pthread_cond_wait(&pool->finish, &pool->lock);
+    }
+    pool->caller_sleeping = 0;
+    pthread_mutex_unlock(&pool->lock);
 }
 
-/* Waits until the round moves past `seen` or the pool shuts down, watching
-   for a while before sleeping. */
-static void kizu_pool_await_round(KizuPool *pool, int64_t seen) {
+/* Waits for a round newer than `seen_tag` or for shutdown, watching the
+   ticket a while before sleeping on the round count. */
+static void kizu_pool_await_round(KizuPool *pool, uint64_t seen_tag) {
     for (int spin = 0; spin < KIZU_POOL_SPINS; spin++) {
-        if (__atomic_load_n(&pool->round, __ATOMIC_ACQUIRE) != seen ||
+        uint64_t ticket = __atomic_load_n(&pool->ticket, __ATOMIC_ACQUIRE);
+        if (kizu_pool_ticket_tag(ticket) != seen_tag ||
             __atomic_load_n(&pool->shutdown, __ATOMIC_ACQUIRE)) {
             return;
         }
         kizu_pool_pause();
     }
     pthread_mutex_lock(&pool->lock);
-    while (!pool->shutdown && __atomic_load_n(&pool->round, __ATOMIC_ACQUIRE) == seen) {
+    pool->sleepers += 1;
+    while (!pool->shutdown &&
+           kizu_pool_ticket_tag(__atomic_load_n(&pool->ticket, __ATOMIC_ACQUIRE)) == seen_tag) {
         pthread_cond_wait(&pool->start, &pool->lock);
     }
+    pool->sleepers -= 1;
     pthread_mutex_unlock(&pool->lock);
 }
 
 static void *kizu_pool_helper_main(void *arg) {
     KizuPoolHelper *helper = (KizuPoolHelper *)arg;
     KizuPool *pool = helper->pool;
-    int64_t seen = 0;
+    uint64_t seen_tag = 0;
     for (;;) {
-        kizu_pool_await_round(pool, seen);
+        kizu_pool_await_round(pool, seen_tag);
         if (__atomic_load_n(&pool->shutdown, __ATOMIC_ACQUIRE)) {
             return NULL;
         }
-        seen = __atomic_load_n(&pool->round, __ATOMIC_ACQUIRE);
-        kizu_pool_run_items(pool, helper->participant);
-        /* The last helper out wakes the caller, under the lock so the wake
-           cannot land between the caller's check and its sleep. */
-        if (__atomic_sub_fetch(&pool->helpers_in_round, 1, __ATOMIC_ACQ_REL) == 0) {
-            pthread_mutex_lock(&pool->lock);
-            pthread_cond_signal(&pool->finish);
-            pthread_mutex_unlock(&pool->lock);
-        }
+        seen_tag = kizu_pool_ticket_tag(__atomic_load_n(&pool->ticket, __ATOMIC_ACQUIRE));
+        kizu_pool_run_items(pool, helper->participant, seen_tag);
     }
 }
 
@@ -3034,9 +3108,12 @@ void std__internal__builtin__thread_pool_each_lane(
         return;
     }
     int64_t scratch_bytes = 0;
+    int64_t scratch_step = 0;
     unsigned char *scratch = NULL;
     if (stride > 1 && elem_size > 0) {
-        scratch_bytes = (pool->helper_count + 1) * length * elem_size;
+        scratch_step = (length * elem_size + KIZU_CACHE_LINE - 1) /
+            KIZU_CACHE_LINE * KIZU_CACHE_LINE;
+        scratch_bytes = (pool->helper_count + 1) * scratch_step;
         scratch = (unsigned char *)kizu_rt_alloc(allocator, scratch_bytes);
         if (!scratch) {
             *out = kizu_err_void(KIZU_ERR_STD_THREAD_ERROR_OUT_OF_MEMORY);
@@ -3051,6 +3128,7 @@ void std__internal__builtin__thread_pool_each_lane(
     pool->length = length;
     pool->stride = stride;
     pool->scratch = scratch;
+    pool->scratch_step = scratch_step;
     pool->items = data->len / length;
     kizu_pool_round(pool);
     pool->scratch = NULL;

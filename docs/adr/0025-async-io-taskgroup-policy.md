@@ -17,8 +17,8 @@ pool の thread と呼び出し側で同時に処理し、全部の塊が終わ�
 大きい lane は、取った thread の領域へ集めて連続した `&var []T` で渡し、返ったら
 書き戻す。
 
-- thread は `init` で起こし、round の間は少し spin してから寝かせる。塊は atomic な
-  counter で数個ずつ取る
+- thread は `init` で起こし、round の間は少し spin してから寝かせる。塊は round の
+  tag 付きの ticket から数個ずつ取り、round は全部の塊が終わった時点で終わる
 - stack は `init` に渡した allocator から取り、coroutine と同じ guard page を置く
 - worker は `fn(&var []T, i64) -> void`。backend の thunk 1 つが Kizu の ABI で呼ぶ
 - lane を集める領域は `each_lane` に渡した allocator から呼び出しの間だけ取る
@@ -41,6 +41,7 @@ data race を型で防ぐ条件が、Kizu にはもう揃っている。closure 
 | Rust の `Send` / `Sync` trait | 利用者が読めない手書きの whitelist になる。規則は要素型の述語 1 つにする |
 | Zig 風の `spawn` と handle の `join` | 「必ず join する」と「借用を thread へ持ち出さない」を checker に新しく足す必要がある |
 | `each` のたびに thread を起こす | 1 回の round が短いと、thread を起こす時間が仕事を上回る |
+| round の終わりを「全 helper が一度入って抜けた」で判定する | OS に止められた helper が仕事を持たないまま round 全体を止める。thread が空いている core より多いと 16 thread で 4 倍遅く、8 thread でも伸びが止まった |
 | round の間は condition variable でだけ待つ | 起こす時間が短い round を上回る。24 × 24 × 24 の格子を 3 方向の lane で回す計測で、8 thread の速さが 1 thread の 2.5 倍から 4.5 倍になった |
 | 飛び飛びの要素を指す `Lane<T>` view 型 | borrow は struct field に置けない。checker が知る view 型と SPEC の規則が増える。std が集めて連続した `&var []T` で渡し、書き戻せば足りる |
 | 入力を共有して別 buffer に書く `each_from` | buffer が 1 本余計に要る。集めて書き戻す形で同じことができる |
