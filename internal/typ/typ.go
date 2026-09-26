@@ -97,15 +97,18 @@ type Optional struct{ Elem Type }
 // Const is `const T`, which only a static argument list writes.
 type Const struct{ Elem Type }
 
-// ErrorUnion is `!T`, or `E!T` when Err is set.
 // Func is a function pointer type: `fn(i64) -> i64`, or `unsafe fn(...) -> T`
 // when the function it points at carries an obligation (SPEC §12). The two are
-// different types, so an unsafe function cannot reach a safe call.
+// different types, so an unsafe function cannot reach a safe call. ABI "c" is
+// `extern "c" fn(...) -> T`, the address of a function C calls or C defined.
 type Func struct {
 	Params []Type
 	Result Type
 	Unsafe bool
+	ABI    string
 }
+
+// ErrorUnion is `!T`, or `E!T` when Err is set.
 
 type ErrorUnion struct {
 	Err Type
@@ -179,6 +182,13 @@ func (t *ErrorUnion) String() string {
 	return t.Err.String() + "!" + t.Ok.String()
 }
 
+// IsFuncSpelling reports whether text spells a function pointer type, which
+// its head says without parsing the rest.
+func IsFuncSpelling(text string) bool {
+	return strings.HasPrefix(text, "fn(") || strings.HasPrefix(text, "unsafe fn(") ||
+		strings.HasPrefix(text, "extern \"c\" fn(")
+}
+
 // String returns the spelling of a function pointer type.
 func (t *Func) String() string {
 	params := make([]string, 0, len(t.Params))
@@ -188,6 +198,9 @@ func (t *Func) String() string {
 	head := "fn("
 	if t.Unsafe {
 		head = "unsafe fn("
+	}
+	if t.ABI != "" {
+		head = "extern \"" + t.ABI + "\" fn("
 	}
 	return head + strings.Join(params, ", ") + ") -> " + t.Result.String()
 }
@@ -381,7 +394,7 @@ func MapNames(t Type, rename func(path []string) ([]string, error)) (Type, error
 
 // mapFuncNode rewrites the parameter and result types of a function pointer.
 func mapFuncNode(node *Func, rename func(path []string) ([]string, error)) (Type, error) {
-	out := &Func{Params: make([]Type, 0, len(node.Params)), Unsafe: node.Unsafe}
+	out := &Func{Params: make([]Type, 0, len(node.Params)), Unsafe: node.Unsafe, ABI: node.ABI}
 	for _, param := range node.Params {
 		mapped, err := MapNames(param, rename)
 		if err != nil {
@@ -571,7 +584,7 @@ func substituteName(node *Name, subst map[string]Type) Type {
 // substituteFunc instantiates the parameter and result types of a function
 // pointer.
 func substituteFunc(node *Func, subst map[string]Type) Type {
-	out := &Func{Result: Substitute(node.Result, subst), Unsafe: node.Unsafe}
+	out := &Func{Result: Substitute(node.Result, subst), Unsafe: node.Unsafe, ABI: node.ABI}
 	for _, param := range node.Params {
 		out.Params = append(out.Params, Substitute(param, subst))
 	}

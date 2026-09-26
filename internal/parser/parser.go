@@ -1757,6 +1757,8 @@ func (p *Parser) parseTypeName() typ.Type {
 		return p.parseFuncTypeName(false)
 	case token.Unsafe:
 		return p.parseUnsafeFuncTypeName()
+	case token.Extern:
+		return p.parseExternFuncTypeName()
 	case token.Ident:
 		return p.parseNamedTypeName()
 	default:
@@ -1775,6 +1777,29 @@ func (p *Parser) parseUnsafeFuncTypeName() typ.Type {
 	}
 	p.nextToken()
 	return p.parseFuncTypeName(true)
+}
+
+// parseExternFuncTypeName parses the `extern "c" fn(...) -> T` spelling: the
+// address of a function with the C calling convention, which is the one ABI a
+// type can name.
+func (p *Parser) parseExternFuncTypeName() typ.Type {
+	if !p.expectPeek(token.String) {
+		return nil
+	}
+	if p.cur.Literal != "c" {
+		p.errorf("a function type names only the `c` ABI")
+		return nil
+	}
+	if p.peek.Type != token.Function {
+		p.errorf("expected `fn` after the ABI in a type, got %s", tokenDescription(p.peek))
+		return nil
+	}
+	p.nextToken()
+	out := p.parseFuncTypeName(false)
+	if out != nil {
+		out.(*typ.Func).ABI = "c"
+	}
+	return out
 }
 
 // parseFuncTypeName parses `fn(T, ...) -> R` with p.cur on the `fn`.

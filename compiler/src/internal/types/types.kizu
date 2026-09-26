@@ -768,6 +768,17 @@ pub fn (self: &TypeTable) function_pointer_is_unsafe(value: Type) -> bool {
     return false;
 }
 
+/// Reports whether a function pointer type is `extern "c" fn(...)`.
+pub fn (self: &TypeTable) function_pointer_is_c(value: Type) -> bool {
+    if self.lookup(value) |parsed| {
+        match typ::root_node(&self.parsed, parsed) {
+            Func(node) => return node.c_abi,
+            _ => return false,
+        }
+    }
+    return false;
+}
+
 /// Returns the type at one position of a function pointer: index 0 .. n-1 name
 /// the parameters, and -1 names the result.
 pub fn (self: &var TypeTable) function_pointer_part(value: Type, index: i64) -> !Type {
@@ -800,6 +811,105 @@ pub fn (self: &TypeTable) is_pointer_type(value: Type) -> bool {
         }
     }
     return false;
+}
+
+/// Reports whether value spells `extern "c" fn(...)`, or the nullable
+/// `?extern "c" fn(...)`, over types C can name.
+pub fn (self: &TypeTable) is_c_function_pointer(value: Type) -> bool {
+    if self.lookup(value) |parsed| {
+        return parsed_c_function_pointer(&self.parsed, parsed);
+    }
+    return false;
+}
+
+/// Reports whether a cast reads a C function's address as a raw pointer or the
+/// other way: C hands a callback around as `void *` as often as by its own
+/// type. Both sides are nullable or neither is, so the cast never decides
+/// whether a null can reach a call.
+pub fn (self: &TypeTable) casts_c_function_address(source: Type, target: Type) -> bool {
+    let source_parsed = self.lookup(source) orelse return false;
+    let target_parsed = self.lookup(target) orelse return false;
+    if is_optional_root(&self.parsed, source_parsed) !=
+        is_optional_root(&self.parsed, target_parsed) {
+        return false;
+    }
+    let source_func = parsed_c_function_pointer(&self.parsed, source_parsed);
+    let target_func = parsed_c_function_pointer(&self.parsed, target_parsed);
+    if !source_func and !target_func {
+        return false;
+    }
+    let source_address = source_func or parsed_is_pointer(&self.parsed, source_parsed);
+    let target_address = target_func or parsed_is_pointer(&self.parsed, target_parsed);
+    return source_address and target_address;
+}
+
+fn parsed_is_pointer(table: &typ::Table, value: typ::Type) -> bool {
+    if parsed_pointer_element(table, value) |_| {
+        return true;
+    }
+    return false;
+}
+
+fn parsed_c_function_pointer(table: &typ::Table, value: typ::Type) -> bool {
+    var candidate = value;
+    match typ::root_node(table, candidate) {
+        Optional(node) => {
+            candidate = typ::child_type(candidate, node.elem);
+        },
+        _ => {},
+    }
+    match typ::root_node(table, candidate) {
+        Func(node) => {
+            if !node.c_abi {
+                return false;
+            }
+            var index = 0;
+            while node.params.get(index) |param| {
+                index = index + 1;
+                if !parsed_c_scalar(table, typ::child_type(candidate, param)) {
+                    return false;
+                }
+            }
+            let result = typ::child_type(candidate, node.result);
+            return parsed_name_is(table, result, "void") or parsed_c_scalar(table, result);
+        },
+        _ => return false,
+    }
+}
+
+// parsed_c_scalar is the parsed half of `c_host_scalar`, for the types a C
+// function pointer passes, which have no Type handle of their own.
+fn parsed_c_scalar(table: &typ::Table, value: typ::Type) -> bool {
+    if parsed_is_pointer(table, value) {
+        return true;
+    }
+    if parsed_c_function_pointer(table, value) {
+        return true;
+    }
+    return parsed_name_is(table, value, "bool") or parsed_name_is(table, value, "f32") or
+        parsed_name_is(table, value, "f64") or parsed_name_is(table, value, "i8") or
+        parsed_name_is(table, value, "i16") or parsed_name_is(table, value, "i32") or
+        parsed_name_is(table, value, "i64") or parsed_name_is(table, value, "u8") or
+        parsed_name_is(table, value, "u16") or parsed_name_is(table, value, "u32") or
+        parsed_name_is(table, value, "u64") or parsed_name_is(table, value, "usize") or
+        parsed_name_is(table, value, "isize");
+}
+
+// parsed_name_is reports whether value is the plain name expected.
+fn parsed_name_is(table: &typ::Table, value: typ::Type, expected: []u8) -> bool {
+    match typ::root_node(table, value) {
+        Name(node) => {
+            if node.path.len() != 1 or node.args.len() != 0 {
+                return false;
+            }
+            if node.path.at(0) |part| {
+                let bytes = part.as_bytes();
+                return equal(bytes, expected);
+            }
+            return false;
+        },
+        _ => return false,
+    }
 }
 
 fn parsed_pointer_element(table: &typ::Table, value: typ::Type) -> ?typ::Type {

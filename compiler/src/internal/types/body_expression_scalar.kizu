@@ -178,7 +178,8 @@ fn (self: &var Checker) function_pointer_value(name: []u8) -> !?Type {
 }
 
 // Writes `fn(T, ...) -> R` for one declared function, with the borrow markers
-// its parameters were declared with.
+// its parameters were declared with. A function C calls or C defined has the
+// C calling convention, which its pointer type names: `extern "c" fn(...)`.
 fn (self: &var Checker) append_function_pointer_text(
     out: &var string::String,
     handle: FunctionHandle
@@ -188,8 +189,12 @@ fn (self: &var Checker) append_function_pointer_text(
     var result = string::new(self.allocator);
     defer result.deinit(self.allocator);
     var unsafe_call = false;
+    var c_abi = false;
     if self.metadata.functions.at(handle.index) |function| {
         unsafe_call = function.signature.requires_unsafe;
+        let extern_abi = function.signature.extern_abi.as_bytes();
+        let export_abi = function.signature.export_abi.as_bytes();
+        c_abi = mem::equal_bytes(extern_abi, "c") or mem::equal_bytes(export_abi, "c");
         var copied = try self.types.copy_text(self.allocator, function.return_type);
         errdefer copied.deinit(self.allocator);
         try result.append_string(self.allocator, &copied);
@@ -213,7 +218,9 @@ fn (self: &var Checker) append_function_pointer_text(
             index = index + 1;
         }
     }
-    if unsafe_call {
+    if c_abi {
+        try out.append_bytes(self.allocator, typ::c_func_head());
+    } else if unsafe_call {
         try out.append_bytes(self.allocator, "unsafe fn(");
     } else {
         try out.append_bytes(self.allocator, "fn(");

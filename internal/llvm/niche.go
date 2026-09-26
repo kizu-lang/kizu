@@ -4,14 +4,16 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	typpkg "github.com/kizu-lang/kizu/internal/typ"
 )
 
 // A niche is a bit pattern a type never writes for a live value, and `?T`
 // spends no tag when T has one: absence is that pattern and presence is
-// everything else. Three types have one. A Box handle is the address of its
-// payload and a borrow is the address of what it borrows, so neither is null
-// while it exists; an arena handle is an index biased by one, so it is never
-// zero either (ADR-0133).
+// everything else. Four types have one. A Box handle is the address of its
+// payload, a borrow is the address of what it borrows, and a function pointer
+// is the address of a function, so none is null while it exists; an arena
+// handle is an index biased by one, so it is never zero either (ADR-0133).
 //
 // The pattern is always zero, which is what lets a niche sit at a depth rather
 // than only at the surface: `zeroinitializer` spells absence for a struct that
@@ -29,7 +31,7 @@ import (
 
 // hasNiche reports whether a value of typ leaves one bit pattern unwritten.
 func (e *emitter) hasNiche(typ string) bool {
-	if isBoxLLVMType(typ) || strings.HasPrefix(typ, "&") || isArenaHandleType(typ) {
+	if isAddressType(typ) || isArenaHandleType(typ) {
 		return true
 	}
 	if _, ok := optionalElemLLVM(typ); ok {
@@ -52,7 +54,7 @@ func (e *emitter) hasNiche(typ string) bool {
 // the word. It is what writeNichePresence reads; every other caller asks
 // hasNiche, which walks the same shape without building the path.
 func (e *emitter) nichePath(typ string) ([]int, string, bool) {
-	if isBoxLLVMType(typ) || strings.HasPrefix(typ, "&") {
+	if isAddressType(typ) {
 		return nil, "ptr", true
 	}
 	if isArenaHandleType(typ) {
@@ -97,7 +99,13 @@ func nicheAbsent(elem string) string {
 
 // nicheAbsentIsNull reports whether an element's zero is spelled `null`.
 func nicheAbsentIsNull(elem string) bool {
-	return isBoxLLVMType(elem) || strings.HasPrefix(elem, "&")
+	return isAddressType(elem)
+}
+
+// isAddressType reports whether typ is an address that is never null while
+// the value exists: a Box handle, a borrow, or a function pointer.
+func isAddressType(typ string) bool {
+	return isBoxLLVMType(typ) || strings.HasPrefix(typ, "&") || typpkg.IsFuncSpelling(typ)
 }
 
 // writeNichePresence tests whether a niche optional holds a value by reading

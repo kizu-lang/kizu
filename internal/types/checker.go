@@ -1055,9 +1055,43 @@ func cHostTypeError(span ast.Span, message string) error {
 			" for bytes, `ptr<T>` for a value C reads or writes in place")
 }
 
-// cHostScalar reports whether value has one C representation.
+// cHostScalar reports whether value has one C representation. A C function
+// pointer is one when every type it passes is: C holds it as the address of a
+// function, null when optional.
 func cHostScalar(value Type) bool {
-	return browserHostScalar(value) || value == "f32" || value == "f64"
+	return browserHostScalar(value) || value == "f32" || value == "f64" ||
+		cFunctionPointer(value)
+}
+
+// cFunctionPointer reports whether value spells `extern "c" fn(...)`, or the
+// nullable `?extern "c" fn(...)`, over types C can name.
+func cFunctionPointer(value Type) bool {
+	parsed, err := typ.Parse(string(value))
+	if err != nil {
+		return false
+	}
+	if optional, ok := parsed.(*typ.Optional); ok {
+		parsed = optional.Elem
+	}
+	node, ok := parsed.(*typ.Func)
+	if !ok || node.ABI != "c" {
+		return false
+	}
+	return cFunctionPointerSignature(node) == ""
+}
+
+// cFunctionPointerSignature returns the first type an `extern "c" fn(...)`
+// passes that C cannot name, or "" when C can name them all.
+func cFunctionPointerSignature(node *typ.Func) Type {
+	for _, param := range node.Params {
+		if spelled := Type(param.String()); !cHostScalar(spelled) {
+			return spelled
+		}
+	}
+	if result := Type(node.Result.String()); result != typeVoid && !cHostScalar(result) {
+		return result
+	}
+	return ""
 }
 
 // validateHostFunctionABI accepts only the host boundaries the compiler and
@@ -4027,13 +4061,20 @@ func borrowedParamType(param ast.Param) typ.Type {
 
 // functionPointerValue returns the function pointer type a declared function's
 // name has as a value, and reports whether the name declares one. A generic
-// function has no single signature, so its name is not a value.
+// function has no single signature, so its name is not a value. A function C
+// calls or C defined has the C calling convention, which its pointer type
+// names: `extern "c" fn(...)`.
 func (c *Checker) functionPointerValue(name string) (Type, bool) {
 	fn, ok := c.lookupFunctionByValueName(name)
 	if !ok || len(fn.sig.StaticParams) > 0 {
 		return "", false
 	}
-	node := &typ.Func{Unsafe: fn.sig.RequiresUnsafe, Result: fn.sig.ReturnType}
+	abi := fn.sig.PointerABI()
+	node := &typ.Func{
+		Unsafe: fn.sig.RequiresUnsafe && abi == "",
+		Result: fn.sig.ReturnType,
+		ABI:    abi,
+	}
 	for _, param := range fn.sig.Params {
 		node.Params = append(node.Params, borrowedParamType(param))
 	}
@@ -4353,7 +4394,37 @@ func (c *Checker) checkCastExpr(expr *ast.CastExpr, env *scope, unsafe unsafeMar
 		}
 		return target, nil
 	}
+	if castsCFunctionAddress(source, target) {
+		if err := requireUnsafeCapabilityAt(
+			unsafe,
+			unsafePtrCast,
+			"function pointer cast",
+			expr.KeywordSpan,
+		); err != nil {
+			return "", err
+		}
+		return target, nil
+	}
 	return "", errorf("type error: cannot cast %s to %s", source, target)
+}
+
+// castsCFunctionAddress reports whether a cast reads a C function's address as
+// a raw pointer or the other way: C hands a callback around as `void *` as
+// often as by its own type. Both sides are nullable or neither is, so the
+// cast never decides whether a null can reach a call.
+func castsCFunctionAddress(source Type, target Type) bool {
+	sourceInner, sourceNullable := strings.CutPrefix(string(source), "?")
+	targetInner, targetNullable := strings.CutPrefix(string(target), "?")
+	if sourceNullable != targetNullable {
+		return false
+	}
+	sourceFunc := cFunctionPointer(Type(sourceInner))
+	targetFunc := cFunctionPointer(Type(targetInner))
+	if !sourceFunc && !targetFunc {
+		return false
+	}
+	return (sourceFunc || isPointerType(Type(sourceInner))) &&
+		(targetFunc || isPointerType(Type(targetInner)))
 }
 
 // checkUnsafeExpr checks the expression an `unsafe` marker covers. The marker
@@ -4520,6 +4591,16 @@ func (c *Checker) checkFuncPointerCall(
 		operation := fmt.Sprintf("call through `%s`", name.Name)
 		if err := requireUnsafeCapabilityAt(
 			unsafe, unsafeUnsafeCall, operation, name.Span,
+		); err != nil {
+			return "", err
+		}
+	}
+	// The pointee of an `extern "c" fn` may be C, which no check reached, so
+	// the call carries the obligation a direct extern call does.
+	if node.ABI == "c" {
+		operation := fmt.Sprintf("C call through `%s`", name.Name)
+		if err := requireUnsafeCapabilityAt(
+			unsafe, unsafeExternCall, operation, name.Span,
 		); err != nil {
 			return "", err
 		}

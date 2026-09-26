@@ -5267,7 +5267,8 @@ func (c *Checker) lookupFunctionByValueName(name string) (*functionInfo, bool) {
 // functionPointerText spells the function pointer type a declaration's name
 // has as a value.
 func functionPointerText(sig ast.FunctionSignature) string {
-	node := &typ.Func{Unsafe: sig.RequiresUnsafe, Result: sig.ReturnType}
+	abi := sig.PointerABI()
+	node := &typ.Func{Unsafe: sig.RequiresUnsafe && abi == "", Result: sig.ReturnType, ABI: abi}
 	for _, param := range sig.Params {
 		node.Params = append(node.Params, borrowedParamType(param))
 	}
@@ -5289,7 +5290,7 @@ func borrowedParamType(param ast.Param) typ.Type {
 // funcPointerNode parses a function pointer spelling, and reports whether the
 // text is one.
 func funcPointerNode(text string) (*typ.Func, bool) {
-	if !strings.HasPrefix(text, "fn(") && !strings.HasPrefix(text, "unsafe fn(") {
+	if !typ.IsFuncSpelling(text) {
 		return nil, false
 	}
 	parsed, err := typ.Parse(text)

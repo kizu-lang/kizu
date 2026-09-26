@@ -186,6 +186,15 @@ type StaticParam struct {
 // IsType reports whether this entry declares a type parameter.
 func (p StaticParam) IsType() bool { return p.Type == nil }
 
+// PointerABI is the calling convention the function's pointer type names:
+// "c" for a function C defined or C calls, "" for a Kizu function.
+func (s FunctionSignature) PointerABI() string {
+	if s.ExternABI == "c" || s.ExportABI == "c" {
+		return "c"
+	}
+	return ""
+}
+
 // HasValueStaticParam reports whether the signature takes a compile-time
 // value in `<...>`. Such a body means something only once the value is bound:
 // a `Function` names the callee, and an integer or bool can decide a

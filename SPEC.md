@@ -1230,6 +1230,10 @@ borrow を返す関数 pointer の結果は、signature 上の borrow parameter 
 `unsafe fn` のときは `unsafe fn(...) -> ...` という別の型になり、その呼び出しに
 だけ `unsafe` が要ります(§12)。`?fn(...) -> ...` は nullable で、直接呼べません。
 
+C の呼び出し規約を持つ関数の address は `extern "c" fn(...) -> ...` という別の型です
+(§12)。`extern "c" fn` と `export "c" fn` の名前はこの型の値で、`fn(...)` の値には
+なりません。
+
 type alias は持ちません。導入するかどうかは未検討です。
 
 **optional 型 `?T`** は「値が無いかもしれない」を型にします(ADR-0101)。
@@ -2270,7 +2274,7 @@ extern "c" fn puts(s: ptr<const u8>) -> i32
 ```
 
 `extern "c" fn` の引数と戻り値は C が名指しできる型だけです: 整数、浮動小数、
-`bool`、`ptr<T>` / `ptr<const T>` / nullable raw pointer、戻り値の `void`。
+`bool`、`ptr<T>` / `ptr<const T>` / nullable raw pointer、C 関数 pointer、戻り値の `void`。
 引数はこれに加えて `extern "c" struct`(§12.2)の borrow `&S` / `&var S` を
 取れます。`[]u8`、それ以外の borrow、owner、通常の struct、error union は
 C 側に表現が無いので拒否します。byte 列は `ptr<const u8>` と `usize` の長さで
@@ -2288,6 +2292,7 @@ C 側に表現が無いので拒否します。byte 列は `ptr<const u8>` と `
 * `unsafe fn` の本体は暗黙に覆われない
 * `fn(...) -> T` を通した呼び出しに `unsafe` は要らない
 * `unsafe fn(...) -> T` を通した呼び出しには `unsafe` が要る
+* `extern "c" fn(...) -> T` を通した呼び出しには `unsafe` が要る
 * `ptr<T>` は non-null mutable raw pointer
 * `ptr<const T>` は non-null const raw pointer
 * `?ptr<T>` / `?ptr<const T>` は nullable raw pointer
@@ -2348,11 +2353,11 @@ fn update(node: ptr<Node>) -> void {
 | `ptr_read` | `ptr_read(p)` |
 | `ptr_write` | `ptr_write(p, value)` |
 | `ptr_deref` | `p.*` / `p.* = value` / `p.*.field` |
-| `ptr_cast` | raw pointer 間の `cast<ptr<...>>(value)` |
+| `ptr_cast` | raw pointer 間、および raw pointer と C 関数 pointer の間の `cast<...>(value)` |
 | `ptr_int_cast` | `ptr_from_int<ptr<...>>(value)` / `int_from_ptr<usize>(value)` |
 | `ptr_offset` | `ptr_offset(p, count)` |
 | `ptr_view` | `view_from_ptr(p, count)` / `mut_view_from_ptr(p, count)` |
-| `extern_call` | `extern "..." fn` call |
+| `extern_call` | `extern "..." fn` call / C 関数 pointer を通した call |
 | `unsafe_call` | `unsafe fn` call |
 | `struct_invariant` | `unsafe struct` の構築 / field write |
 | `volatile` | volatile read/write primitive |
@@ -2389,6 +2394,8 @@ isize      intptr_t 相当
 ptr<T>     T*
 ptr<const T> const T*
 ?ptr<T>    nullable T*
+extern "c" fn(A) -> R   R (*)(A)
+?extern "c" fn(A) -> R  nullable R (*)(A)
 ```
 
 ### 12.1 browser host ABI
@@ -2582,7 +2589,7 @@ export "c" fn lib_sum(bytes: ptr<const u8>, len: usize) -> u64 {
 ```
 
 * 引数と戻り値は C が名指しできる型だけです: 整数、浮動小数、`bool`、
-  `ptr<T>` / `ptr<const T>` / nullable raw pointer、戻り値の `void`。
+  `ptr<T>` / `ptr<const T>` / nullable raw pointer、C 関数 pointer、戻り値の `void`。
   borrow は `extern "c" struct` のものも取れません。C が渡す address が生きていて
   alias されていないことを compiler は証明できないので、raw pointer で受け取り、
   読む側の `unsafe` がその契約を負います。
@@ -2607,6 +2614,39 @@ object 1 つを書き、host の link に渡します。
 * object は `kizu_` runtime symbol を含むので、1 回の link に入れる Kizu object は
   1 つです。
 * runtime は `main` を通らないので、`std::process::arg` は引数を持ちません。
+
+### 12.4 C 関数 pointer
+
+C へ callback を渡す引数、C から受け取る callback は `extern "c" fn(...) -> T` と
+書きます(ADR-0151)。C の呼び出し規約を持つ関数の address です。
+
+```kizu
+extern "c" fn qsort(
+    base: ptr<u8>,
+    count: usize,
+    size: usize,
+    compare: extern "c" fn(ptr<const u8>, ptr<const u8>) -> i32,
+) -> void
+
+export "c" fn ascending(left: ptr<const u8>, right: ptr<const u8>) -> i32 {
+    // ...
+}
+
+// SAFETY: base は count 個の i64 を持つ
+unsafe qsort(base, count, 8, ascending);
+```
+
+* 値は `extern "c" fn` と `export "c" fn` の名前です。どちらの名前も `fn(...)` の値に
+  はならず、Kizu の関数の名前は `extern "c" fn(...)` の値になりません。
+* 引数と結果は C が名指しできる型だけです。型自身も C が名指しできる型なので、
+  `extern "c" fn` / `export "c" fn` の引数・戻り値と `extern "c" struct` の field に
+  置けます。
+* 呼び出しには `unsafe`(`extern_call`)が要ります。指す先が C かもしれないからです。
+* `?extern "c" fn(...)` は null 可能な C の関数 pointer です。関数の address は null に
+  ならないので、不在は null で表します(`?fn(...)` も同じ)。
+* `void *` で callback を受け渡す API には `cast<ptr<const u8>>(f)` と
+  `cast<extern "c" fn(...) -> T>(p)` で渡します(`ptr_cast`)。両辺の null 可能性は
+  揃えます。
 
 ## 13. comptime
 

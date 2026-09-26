@@ -157,11 +157,29 @@ pub struct ErrorUnion {
 
 /// Is `fn(T, ...) -> R`, or `unsafe fn(...) -> R` when the function it points
 /// at carries an obligation. The two are different types, so an unsafe
-/// function cannot reach a safe call.
+/// function cannot reach a safe call. c_abi is `extern "c" fn(...) -> R`, the
+/// address of a function C calls or C defined.
 pub struct Func {
     pub params: array::Array<arena::Handle<Node>>,
     pub result: arena::Handle<Node>,
     pub unsafe_call: bool,
+    pub c_abi: bool,
+}
+
+/// Is the head of the `extern "c" fn(...) -> R` spelling, which a quoted
+/// literal cannot hold.
+pub fn c_func_head() -> []u8 {
+    let head =
+        \\extern "c" fn(
+    ;
+    return head;
+}
+
+/// Reports whether text spells a function pointer type, which its head says
+/// without parsing the rest.
+pub fn is_func_spelling(text: []u8) -> bool {
+    return mem::starts_with(text, "fn(") or mem::starts_with(text, "unsafe fn(") or
+        mem::starts_with(text, c_func_head());
 }
 
 /// Is the payload and mutability of a borrow optional spelling.
@@ -360,17 +378,20 @@ fn (self: &var Parser) parse_prefix() -> !arena::Handle<Node> {
         return try self.nodes.add(self.allocator, Node::Const(Const { elem: elem }));
     }
     if self.accept("unsafe fn(") {
-        return self.parse_func(true);
+        return self.parse_func(true, false);
+    }
+    if self.accept(c_func_head()) {
+        return self.parse_func(false, true);
     }
     if self.accept("fn(") {
-        return self.parse_func(false);
+        return self.parse_func(false, false);
     }
     return self.parse_name();
 }
 
 // parse_func reads a function pointer spelling once its `fn(` is consumed. An
 // empty parameter list is the `fn() -> T` a nullary function points at.
-fn (self: &var Parser) parse_func(unsafe_call: bool) -> !arena::Handle<Node> {
+fn (self: &var Parser) parse_func(unsafe_call: bool, c_abi: bool) -> !arena::Handle<Node> {
     var params = array::new<arena::Handle<Node>>(self.allocator);
     errdefer params.deinit(self.allocator);
     if !self.accept(")") {
@@ -393,7 +414,8 @@ fn (self: &var Parser) parse_func(unsafe_call: bool) -> !arena::Handle<Node> {
     return try self.nodes.add(self.allocator, Node::Func(Func {
         params: move params,
         result: result,
-        unsafe_call: unsafe_call
+        unsafe_call: unsafe_call,
+        c_abi: c_abi
     }));
 }
 
@@ -829,7 +851,9 @@ fn append_func_with<R>(
     node: &Func,
     lookup: &R
 ) -> !void {
-    if node.unsafe_call {
+    if node.c_abi {
+        try out.append_bytes(allocator, c_func_head());
+    } else if node.unsafe_call {
         try out.append_bytes(allocator, "unsafe fn(");
     } else {
         try out.append_bytes(allocator, "fn(");
@@ -1131,7 +1155,8 @@ fn map_func_names<M, F>(builder: &var Builder, value: &TypeTree, node: &Func, ma
     return try builder.nodes.add(allocator, Node::Func(Func {
         params: move params,
         result: result,
-        unsafe_call: node.unsafe_call
+        unsafe_call: node.unsafe_call,
+        c_abi: node.c_abi
     }));
 }
 
@@ -1302,7 +1327,8 @@ fn substitute_func(
     return try builder.nodes.add(allocator, Node::Func(Func {
         params: move params,
         result: result,
-        unsafe_call: node.unsafe_call
+        unsafe_call: node.unsafe_call,
+        c_abi: node.c_abi
     }));
 }
 

@@ -1349,11 +1349,15 @@ fn (self: &var Lowerer) lower_signature(decl: FactsHandle) -> !SignatureHandle {
     let resolved = try self.resolve_bound_type(declared_return);
     let returned = try self.lower_return_type(resolved);
     let requires_unsafe = self.decl_facts.at(decl.node).requires_unsafe;
+    let export_abi = self.decl_facts.at(decl.node).export_abi;
+    let c_abi = self.name_is(extern_abi, "c") or self.name_is(export_abi, "c");
     var pointer_return = resolved;
     if is_empty(pointer_return) {
         pointer_return = self.common.void_type;
     }
-    let pointer = try self.declared_function_pointer_type(decl, pointer_return, requires_unsafe);
+    let pointer = try self.declared_function_pointer_type(
+        decl, pointer_return, requires_unsafe, c_abi
+    );
     let handle = try self.signature_nodes.add(self.allocator, Signature {
         params: move params,
         return_type: returned,
@@ -1365,15 +1369,19 @@ fn (self: &var Lowerer) lower_signature(decl: FactsHandle) -> !SignatureHandle {
 
 /// Spells the source-level callable type of a declaration. Runtime Params
 /// cannot answer this: `x: &i64` and `x: i64` both travel as i64, while only
-/// the former carries a borrow effect.
+/// the former carries a borrow effect. A function C calls or C defined is
+/// `extern "c" fn(...)`.
 fn (self: &var Lowerer) declared_function_pointer_type(
     decl: FactsHandle,
     declared_return: Name,
-    requires_unsafe: bool
+    requires_unsafe: bool,
+    c_abi: bool
 ) -> !Name {
     var text = string::new(self.allocator);
     errdefer text.deinit(self.allocator);
-    if requires_unsafe {
+    if c_abi {
+        try text.append_bytes(self.allocator, typ::c_func_head());
+    } else if requires_unsafe {
         try text.append_bytes(self.allocator, "unsafe fn(");
     } else {
         try text.append_bytes(self.allocator, "fn(");

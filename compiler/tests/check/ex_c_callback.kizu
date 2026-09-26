@@ -1,0 +1,81 @@
+// A C function that takes a callback declares the parameter as
+// `extern "c" fn(...) -> T`: the address of a function with the C calling
+// convention. An `export "c" fn` is one, and so is an `extern "c" fn` C
+// defined, so either name is a value of that type. Calling through one needs
+// `unsafe`, as a direct extern call does, because the pointee may be C.
+//
+// A C API that stores a callback as `void *` gets it through
+// `cast<ptr<const u8>>(f)`, and `?extern "c" fn(...)` is the nullable pointer
+// C writes as a callback it may leave unset.
+extern "c" fn qsort(
+    base: ptr<u8>,
+    count: usize,
+    size: usize,
+    compare: extern "c" fn(ptr<const u8>, ptr<const u8>) -> i32,
+) -> void
+extern "c" fn abs(value: i32) -> i32
+export "c" fn ascending(left: ptr<const u8>, right: ptr<const u8>) -> i32 {
+    // SAFETY: qsort hands two elements of the i64 buffer it sorts.
+    let a = unsafe ptr_read(unsafe cast<ptr<const i64>>(left));
+    // SAFETY: as above.
+    let b = unsafe ptr_read(unsafe cast<ptr<const i64>>(right));
+    if a < b {
+        return -1;
+    }
+    if a > b {
+        return 1;
+    }
+    return 0;
+}
+
+fn apply(f: ?extern "c" fn(i32) -> i32, value: i32) -> i32 {
+    if f |call| {
+        // SAFETY: every function this program passes is defined for all i32.
+        return unsafe call(value);
+    }
+    return value;
+}
+
+fn main() -> void {
+    var buffer = [4]i64{};
+    let values = buffer.as_mut_slice();
+    values[0] = 30;
+    values[1] = 10;
+    values[2] = 40;
+    values[3] = 20;
+    // SAFETY: base holds four i64 values, the element size ascending reads.
+    unsafe qsort(unsafe cast<ptr<u8>>(mut_ptr_of(values)), 4, 8, ascending);
+    for 0..4 |index| {
+        print(values[index]);
+    }
+    print(apply(abs, -7));
+    print(apply(null, -7));
+    // SAFETY: the address goes back to the type it came from.
+    let erased = unsafe cast<ptr<const u8>>(abs);
+    // SAFETY: erased is abs, which takes and returns i32.
+    let restored = unsafe cast<extern "c" fn(i32) -> i32>(erased);
+    // SAFETY: abs is defined for every i32.
+    print(unsafe restored(-9));
+    return;
+}
+
+// run
+// features: extern-c function-pointer raw-pointer unsafe
+// output:
+// 10
+// 20
+// 30
+// 40
+// 7
+// -7
+// 9
+
+// check
+// load:
+// extern "c" fn qsort(base: ptr<u8>, count: usize, size: usize, compare: extern "c" fn(ptr<const u8>, ptr<const u8>) -> i32) -> void
+// extern "c" fn abs(value: i32) -> i32
+// export "c" fn ascending(left: ptr<const u8>, right: ptr<const u8>) -> i32 { let a = unsafe ptr_read(unsafe cast<ptr<const i64>>(left)); let b = unsafe ptr_read(unsafe cast<ptr<const i64>>(right)); if (a < b) { return (-1); } if (a > b) { return 1; } return 0; }
+// fn apply(f: ?extern "c" fn(i32) -> i32, value: i32) -> i32 { if f { return unsafe call(value); } return value; }
+// fn main() -> void { var buffer = [4]i64{}; let values = buffer.as_mut_slice(); values[0] = 30; values[1] = 10; values[2] = 40; values[3] = 20; unsafe qsort(unsafe cast<ptr<u8>>(mut_ptr_of(values)), 4, 8, ascending); for 0..4 |index| { print(values[index]); } print(apply(abs, (-7))); print(apply(null, (-7))); let erased = unsafe cast<ptr<const u8>>(abs); let restored = unsafe cast<extern "c" fn(i32) -> i32>(erased); print(unsafe restored((-9))); return; }
+// check:
+// ok

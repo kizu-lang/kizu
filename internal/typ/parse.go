@@ -59,9 +59,11 @@ func (p *parser) parsePrefix() (Type, error) {
 		}
 		return &Optional{Elem: elem}, nil
 	case p.accept("unsafe fn("):
-		return p.parseFunc(true)
+		return p.parseFunc(true, "")
+	case p.accept("extern \"c\" fn("):
+		return p.parseFunc(false, "c")
 	case p.accept("fn("):
-		return p.parseFunc(false)
+		return p.parseFunc(false, "")
 	case p.accept("const "):
 		elem, err := p.parsePrefix()
 		if err != nil {
@@ -75,8 +77,8 @@ func (p *parser) parsePrefix() (Type, error) {
 
 // parseFunc reads a function pointer spelling once its `fn(` is consumed. An
 // empty parameter list is the `fn() -> T` a nullary function points at.
-func (p *parser) parseFunc(unsafeFn bool) (Type, error) {
-	out := &Func{Unsafe: unsafeFn}
+func (p *parser) parseFunc(unsafeFn bool, abi string) (Type, error) {
+	out := &Func{Unsafe: unsafeFn, ABI: abi}
 	if !p.accept(")") {
 		for {
 			param, err := p.parseType()

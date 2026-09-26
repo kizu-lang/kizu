@@ -1,0 +1,492 @@
+// A C function that takes a callback declares the parameter as
+// `extern "c" fn(...) -> T`: the address of a function with the C calling
+// convention. An `export "c" fn` is one, and so is an `extern "c" fn` C
+// defined, so either name is a value of that type. Calling through one needs
+// `unsafe`, as a direct extern call does, because the pointee may be C.
+//
+// A C API that stores a callback as `void *` gets it through
+// `cast<ptr<const u8>>(f)`, and `?extern "c" fn(...)` is the nullable pointer
+// C writes as a callback it may leave unset.
+extern "c" fn qsort(
+    base: ptr<u8>,
+    count: usize,
+    size: usize,
+    compare: extern "c" fn(ptr<const u8>, ptr<const u8>) -> i32,
+) -> void
+extern "c" fn abs(value: i32) -> i32
+export "c" fn ascending(left: ptr<const u8>, right: ptr<const u8>) -> i32 {
+    // SAFETY: qsort hands two elements of the i64 buffer it sorts.
+    let a = unsafe ptr_read(unsafe cast<ptr<const i64>>(left));
+    // SAFETY: as above.
+    let b = unsafe ptr_read(unsafe cast<ptr<const i64>>(right));
+    if a < b {
+        return -1;
+    }
+    if a > b {
+        return 1;
+    }
+    return 0;
+}
+
+fn apply(f: ?extern "c" fn(i32) -> i32, value: i32) -> i32 {
+    if f |call| {
+        // SAFETY: every function this program passes is defined for all i32.
+        return unsafe call(value);
+    }
+    return value;
+}
+
+fn main() -> void {
+    var buffer = [4]i64{};
+    let values = buffer.as_mut_slice();
+    values[0] = 30;
+    values[1] = 10;
+    values[2] = 40;
+    values[3] = 20;
+    // SAFETY: base holds four i64 values, the element size ascending reads.
+    unsafe qsort(unsafe cast<ptr<u8>>(mut_ptr_of(values)), 4, 8, ascending);
+    for 0..4 |index| {
+        print(values[index]);
+    }
+    print(apply(abs, -7));
+    print(apply(null, -7));
+    // SAFETY: the address goes back to the type it came from.
+    let erased = unsafe cast<ptr<const u8>>(abs);
+    // SAFETY: erased is abs, which takes and returns i32.
+    let restored = unsafe cast<extern "c" fn(i32) -> i32>(erased);
+    // SAFETY: abs is defined for every i32.
+    print(unsafe restored(-9));
+    return;
+}
+
+// run
+// features: extern-c function-pointer raw-pointer unsafe
+// output:
+// 10
+// 20
+// 30
+// 40
+// 7
+// -7
+// 9
+
+// ir
+// lower:
+// export "c" fn ascending(%left: ptr<const u8>, %right: ptr<const u8>) -> i32 {
+// entry:
+//   %1: ptr<const i64> = cast %left: ptr<const u8>, ptr<const i64>
+//   %2: i64 = ref.load %1: ptr<const i64>
+//   %3: ptr<const i64> = cast %right: ptr<const u8>, ptr<const i64>
+//   %4: i64 = ref.load %3: ptr<const i64>
+//   %5: bool = binary.< %2: i64, %4: i64
+//   branch %5: bool, if.then.1, if.else.2
+// if.then.1:
+//   %6: i32 = const 1
+//   %7: i32 = unary.- %6: i32
+//   return %7: i32
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %8: bool = binary.> %2: i64, %4: i64
+//   branch %8: bool, if.then.4, if.else.5
+// if.then.4:
+//   %9: i32 = const 1
+//   return %9: i32
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   %10: i32 = const 0
+//   return %10: i32
+// }
+// fn apply(%f: ?extern "c" fn(i32) -> i32, %value: i32) -> i32 {
+// entry:
+//   %1: extern "c" fn(i32) -> i32 = opt.value %f: ?extern "c" fn(i32) -> i32
+//   %2: bool = opt.has %f: ?extern "c" fn(i32) -> i32
+//   branch %2: bool, if.then.1, if.else.2
+// if.then.1:
+//   %3: i32 = call.indirect %1: extern "c" fn(i32) -> i32, %value: i32
+//   return %3: i32
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return %value: i32
+// }
+// fn main() -> void {
+// entry:
+//   %1: [4]i64 = buffer.new
+//   %2: &var [4]i64 = local.slot %1: [4]i64
+//   %3: [4]i64 = ref.load %2: &var [4]i64
+//   %4: []i64 = buffer.as_bytes %3: [4]i64
+//   %5: i64 = const 30
+//   %6: i64 = const 0
+//   %7: i64 = slice.len %4: []i64
+//   %8: u64 = cast %6: i64, u64
+//   %9: u64 = cast %7: i64, u64
+//   %10: bool = binary.>= %8: u64, %9: u64
+//   cond_fail %10: bool, bounds(%6: i64, %7: i64)
+//   slice.store %4: []i64, %6: i64, %5: i64
+//   %12: i64 = const 10
+//   %13: i64 = const 1
+//   %14: i64 = slice.len %4: []i64
+//   %15: u64 = cast %13: i64, u64
+//   %16: u64 = cast %14: i64, u64
+//   %17: bool = binary.>= %15: u64, %16: u64
+//   cond_fail %17: bool, bounds(%13: i64, %14: i64)
+//   slice.store %4: []i64, %13: i64, %12: i64
+//   %19: i64 = const 40
+//   %20: i64 = const 2
+//   %21: i64 = slice.len %4: []i64
+//   %22: u64 = cast %20: i64, u64
+//   %23: u64 = cast %21: i64, u64
+//   %24: bool = binary.>= %22: u64, %23: u64
+//   cond_fail %24: bool, bounds(%20: i64, %21: i64)
+//   slice.store %4: []i64, %20: i64, %19: i64
+//   %26: i64 = const 20
+//   %27: i64 = const 3
+//   %28: i64 = slice.len %4: []i64
+//   %29: u64 = cast %27: i64, u64
+//   %30: u64 = cast %28: i64, u64
+//   %31: bool = binary.>= %29: u64, %30: u64
+//   cond_fail %31: bool, bounds(%27: i64, %28: i64)
+//   slice.store %4: []i64, %27: i64, %26: i64
+//   %33: ptr<i64> = slice.ptr %4: []i64
+//   %34: ptr<u8> = cast %33: ptr<i64>, ptr<u8>
+//   %35: usize = const 4
+//   %36: usize = const 8
+//   %37: extern "c" fn(ptr<const u8>, ptr<const u8>) -> i32 = func.addr.ascending
+//   extern "c" call.qsort %34: ptr<u8>, %35: usize, %36: usize, %37: extern "c" fn(ptr<const u8>, ptr<const u8>) -> i32
+//   %39: i64 = const 0
+//   %40: i64 = const 4
+//   jump for.header.1
+// for.header.1:
+//   %41: i64 = phi [entry, %39: i64], [for.step.3, %50: i64]
+//   %42: bool = binary.< %41: i64, %40: i64
+//   branch %42: bool, for.body.2, for.end.4
+// for.body.2:
+//   %43: i64 = slice.len %4: []i64
+//   %44: u64 = cast %41: i64, u64
+//   %45: u64 = cast %43: i64, u64
+//   %46: bool = binary.>= %44: u64, %45: u64
+//   cond_fail %46: bool, bounds(%41: i64, %43: i64)
+//   %47: i64 = slice.index %4: []i64, %41: i64
+//   call.std::fmt::print.i64 %47: i64
+//   jump for.step.3
+// for.step.3:
+//   %49: i64 = const 1
+//   %50: i64 = binary.+ %41: i64, %49: i64
+//   jump for.header.1
+// for.end.4:
+//   %51: extern "c" fn(i32) -> i32 = extern "c" func.addr.abs
+//   %52: ?extern "c" fn(i32) -> i32 = opt.some %51: extern "c" fn(i32) -> i32
+//   %53: i32 = const 7
+//   %54: i32 = unary.- %53: i32
+//   %55: i32 = call.apply %52: ?extern "c" fn(i32) -> i32, %54: i32
+//   call.std::fmt::print.i32 %55: i32
+//   %57: ?extern "c" fn(i32) -> i32 = opt.null
+//   %58: i32 = const 7
+//   %59: i32 = unary.- %58: i32
+//   %60: i32 = call.apply %57: ?extern "c" fn(i32) -> i32, %59: i32
+//   call.std::fmt::print.i32 %60: i32
+//   %62: extern "c" fn(i32) -> i32 = extern "c" func.addr.abs
+//   %63: ptr<const u8> = cast %62: extern "c" fn(i32) -> i32, ptr<const u8>
+//   %64: extern "c" fn(i32) -> i32 = cast %63: ptr<const u8>, extern "c" fn(i32) -> i32
+//   %65: i32 = const 9
+//   %66: i32 = unary.- %65: i32
+//   %67: i32 = call.indirect %64: extern "c" fn(i32) -> i32, %66: i32
+//   call.std::fmt::print.i32 %67: i32
+//   return void: void
+// }
+// opt:
+// export "c" fn ascending(%left: ptr<const u8>, %right: ptr<const u8>) -> i32 {
+// entry:
+//   %1: ptr<const i64> = cast %left: ptr<const u8>, ptr<const i64>
+//   %2: i64 = ref.load %1: ptr<const i64>
+//   %3: ptr<const i64> = cast %right: ptr<const u8>, ptr<const i64>
+//   %4: i64 = ref.load %3: ptr<const i64>
+//   %5: bool = binary.< %2: i64, %4: i64
+//   branch %5: bool, if.then.1, if.else.2
+// if.then.1:
+//   %6: i32 = const 1
+//   %7: i32 = unary.- %6: i32
+//   return %7: i32
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %8: bool = binary.> %2: i64, %4: i64
+//   branch %8: bool, if.then.4, if.else.5
+// if.then.4:
+//   %9: i32 = const 1
+//   return %9: i32
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   %10: i32 = const 0
+//   return %10: i32
+// }
+// fn apply(%f: ?extern "c" fn(i32) -> i32, %value: i32) -> i32 {
+// entry:
+//   %1: extern "c" fn(i32) -> i32 = opt.value %f: ?extern "c" fn(i32) -> i32
+//   %2: bool = opt.has %f: ?extern "c" fn(i32) -> i32
+//   branch %2: bool, if.then.1, if.else.2
+// if.then.1:
+//   %3: i32 = call.indirect %1: extern "c" fn(i32) -> i32, %value: i32
+//   return %3: i32
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return %value: i32
+// }
+// fn main() -> void {
+// entry:
+//   %1: [4]i64 = buffer.new
+//   %2: &var [4]i64 = local.slot %1: [4]i64
+//   %3: [4]i64 = ref.load %2: &var [4]i64
+//   %4: []i64 = buffer.as_bytes %3: [4]i64
+//   %5: i64 = const 30
+//   %6: i64 = const 0
+//   %7: i64 = slice.len %4: []i64
+//   %8: u64 = cast %6: i64, u64
+//   %9: u64 = cast %7: i64, u64
+//   %10: bool = binary.>= %8: u64, %9: u64
+//   cond_fail %10: bool, bounds(%6: i64, %7: i64)
+//   slice.store %4: []i64, %6: i64, %5: i64
+//   %12: i64 = const 10
+//   %13: i64 = const 1
+//   %15: u64 = cast %13: i64, u64
+//   %16: u64 = cast %7: i64, u64
+//   %17: bool = binary.>= %15: u64, %16: u64
+//   cond_fail %17: bool, bounds(%13: i64, %7: i64)
+//   slice.store %4: []i64, %13: i64, %12: i64
+//   %19: i64 = const 40
+//   %20: i64 = const 2
+//   %22: u64 = cast %20: i64, u64
+//   %23: u64 = cast %7: i64, u64
+//   %24: bool = binary.>= %22: u64, %23: u64
+//   cond_fail %24: bool, bounds(%20: i64, %7: i64)
+//   slice.store %4: []i64, %20: i64, %19: i64
+//   %26: i64 = const 20
+//   %27: i64 = const 3
+//   %29: u64 = cast %27: i64, u64
+//   %30: u64 = cast %7: i64, u64
+//   %31: bool = binary.>= %29: u64, %30: u64
+//   cond_fail %31: bool, bounds(%27: i64, %7: i64)
+//   slice.store %4: []i64, %27: i64, %26: i64
+//   %33: ptr<i64> = slice.ptr %4: []i64
+//   %34: ptr<u8> = cast %33: ptr<i64>, ptr<u8>
+//   %35: usize = const 4
+//   %36: usize = const 8
+//   %37: extern "c" fn(ptr<const u8>, ptr<const u8>) -> i32 = func.addr.ascending
+//   extern "c" call.qsort %34: ptr<u8>, %35: usize, %36: usize, %37: extern "c" fn(ptr<const u8>, ptr<const u8>) -> i32
+//   %39: i64 = const 0
+//   %40: i64 = const 4
+//   jump for.header.1
+// for.header.1:
+//   %41: i64 = phi [entry, %39: i64], [for.step.3, %50: i64]
+//   %42: bool = binary.< %41: i64, %40: i64
+//   branch %42: bool, for.body.2, for.end.4
+// for.body.2:
+//   %44: u64 = cast %41: i64, u64
+//   %45: u64 = cast %7: i64, u64
+//   %46: bool = binary.>= %44: u64, %45: u64
+//   cond_fail %46: bool, bounds(%41: i64, %7: i64)
+//   %47: i64 = slice.index %4: []i64, %41: i64
+//   %in1.1: i64 = cast %47: i64, i64
+//   call.std::fmt::write_i64 %in1.1: i64
+//   jump for.step.3
+// for.step.3:
+//   %49: i64 = const 1
+//   %50: i64 = binary.+ %41: i64, %49: i64
+//   jump for.header.1
+// for.end.4:
+//   %51: extern "c" fn(i32) -> i32 = extern "c" func.addr.abs
+//   %52: ?extern "c" fn(i32) -> i32 = opt.some %51: extern "c" fn(i32) -> i32
+//   %53: i32 = const 7
+//   %54: i32 = unary.- %53: i32
+//   jump in2.entry
+// in2.entry:
+//   %in2.1: extern "c" fn(i32) -> i32 = opt.value %52: ?extern "c" fn(i32) -> i32
+//   %in2.2: bool = opt.has %52: ?extern "c" fn(i32) -> i32
+//   branch %in2.2: bool, in2.if.then.1, in2.if.else.2
+// in2.if.then.1:
+//   %in2.3: i32 = call.indirect %in2.1: extern "c" fn(i32) -> i32, %54: i32
+//   jump in2.cont
+// in2.if.else.2:
+//   jump in2.if.end.3
+// in2.if.end.3:
+//   jump in2.cont
+// in2.cont:
+//   %55: i32 = phi [in2.if.then.1, %in2.3: i32], [in2.if.end.3, %54: i32]
+//   %in3.1: i64 = cast %55: i32, i64
+//   call.std::fmt::write_i64 %in3.1: i64
+//   %57: ?extern "c" fn(i32) -> i32 = opt.null
+//   %58: i32 = const 7
+//   %59: i32 = unary.- %58: i32
+//   jump in4.entry
+// in4.entry:
+//   %in4.1: extern "c" fn(i32) -> i32 = opt.value %57: ?extern "c" fn(i32) -> i32
+//   %in4.2: bool = opt.has %57: ?extern "c" fn(i32) -> i32
+//   branch %in4.2: bool, in4.if.then.1, in4.if.else.2
+// in4.if.then.1:
+//   %in4.3: i32 = call.indirect %in4.1: extern "c" fn(i32) -> i32, %59: i32
+//   jump in4.cont
+// in4.if.else.2:
+//   jump in4.if.end.3
+// in4.if.end.3:
+//   jump in4.cont
+// in4.cont:
+//   %60: i32 = phi [in4.if.then.1, %in4.3: i32], [in4.if.end.3, %59: i32]
+//   %in5.1: i64 = cast %60: i32, i64
+//   call.std::fmt::write_i64 %in5.1: i64
+//   %62: extern "c" fn(i32) -> i32 = extern "c" func.addr.abs
+//   %63: ptr<const u8> = cast %62: extern "c" fn(i32) -> i32, ptr<const u8>
+//   %64: extern "c" fn(i32) -> i32 = cast %63: ptr<const u8>, extern "c" fn(i32) -> i32
+//   %65: i32 = const 9
+//   %66: i32 = unary.- %65: i32
+//   %67: i32 = call.indirect %64: extern "c" fn(i32) -> i32, %66: i32
+//   %in6.1: i64 = cast %67: i32, i64
+//   call.std::fmt::write_i64 %in6.1: i64
+//   return void: void
+// }
+// opt wasm:
+// export "c" fn ascending(%left: ptr<const u8>, %right: ptr<const u8>) -> i32 {
+// entry:
+//   %1: ptr<const i64> = cast %left: ptr<const u8>, ptr<const i64>
+//   %2: i64 = ref.load %1: ptr<const i64>
+//   %3: ptr<const i64> = cast %right: ptr<const u8>, ptr<const i64>
+//   %4: i64 = ref.load %3: ptr<const i64>
+//   %5: bool = binary.< %2: i64, %4: i64
+//   branch %5: bool, if.then.1, if.else.2
+// if.then.1:
+//   %6: i32 = const 1
+//   %7: i32 = unary.- %6: i32
+//   return %7: i32
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %8: bool = binary.> %2: i64, %4: i64
+//   branch %8: bool, if.then.4, if.else.5
+// if.then.4:
+//   %9: i32 = const 1
+//   return %9: i32
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   %10: i32 = const 0
+//   return %10: i32
+// }
+// fn apply(%f: ?extern "c" fn(i32) -> i32, %value: i32) -> i32 {
+// entry:
+//   %1: extern "c" fn(i32) -> i32 = opt.value %f: ?extern "c" fn(i32) -> i32
+//   %2: bool = opt.has %f: ?extern "c" fn(i32) -> i32
+//   branch %2: bool, if.then.1, if.else.2
+// if.then.1:
+//   %3: i32 = call.indirect %1: extern "c" fn(i32) -> i32, %value: i32
+//   return %3: i32
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return %value: i32
+// }
+// fn main() -> void {
+// entry:
+//   %1: [4]i64 = buffer.new
+//   %2: &var [4]i64 = local.slot %1: [4]i64
+//   %3: [4]i64 = ref.load %2: &var [4]i64
+//   %4: []i64 = buffer.as_bytes %3: [4]i64
+//   %5: i64 = const 30
+//   %6: i64 = const 0
+//   %7: i64 = slice.len %4: []i64
+//   %8: u64 = cast %6: i64, u64
+//   %9: u64 = cast %7: i64, u64
+//   %10: bool = binary.>= %8: u64, %9: u64
+//   cond_fail %10: bool, bounds(%6: i64, %7: i64)
+//   slice.store %4: []i64, %6: i64, %5: i64
+//   %12: i64 = const 10
+//   %13: i64 = const 1
+//   %15: u64 = cast %13: i64, u64
+//   %17: bool = binary.>= %15: u64, %9: u64
+//   cond_fail %17: bool, bounds(%13: i64, %7: i64)
+//   slice.store %4: []i64, %13: i64, %12: i64
+//   %19: i64 = const 40
+//   %20: i64 = const 2
+//   %22: u64 = cast %20: i64, u64
+//   %24: bool = binary.>= %22: u64, %9: u64
+//   cond_fail %24: bool, bounds(%20: i64, %7: i64)
+//   slice.store %4: []i64, %20: i64, %19: i64
+//   %26: i64 = const 20
+//   %27: i64 = const 3
+//   %29: u64 = cast %27: i64, u64
+//   %31: bool = binary.>= %29: u64, %9: u64
+//   cond_fail %31: bool, bounds(%27: i64, %7: i64)
+//   slice.store %4: []i64, %27: i64, %26: i64
+//   %33: ptr<i64> = slice.ptr %4: []i64
+//   %34: ptr<u8> = cast %33: ptr<i64>, ptr<u8>
+//   %35: usize = const 4
+//   %36: usize = const 8
+//   %37: extern "c" fn(ptr<const u8>, ptr<const u8>) -> i32 = func.addr.ascending
+//   extern "c" call.qsort %34: ptr<u8>, %35: usize, %36: usize, %37: extern "c" fn(ptr<const u8>, ptr<const u8>) -> i32
+//   %40: i64 = const 4
+//   jump for.header.1
+// for.header.1:
+//   jump for.body.2
+// for.body.2:
+//   %rot1.b.41: i64 = phi [for.header.1, %6: i64], [for.step.3, %50: i64]
+//   %44: u64 = cast %rot1.b.41: i64, u64
+//   %46: bool = binary.>= %44: u64, %9: u64
+//   cond_fail %46: bool, bounds(%rot1.b.41: i64, %7: i64)
+//   %47: i64 = slice.index %4: []i64, %rot1.b.41: i64
+//   %in1.1: i64 = cast %47: i64, i64
+//   call.std::fmt::write_i64 %in1.1: i64
+//   jump for.step.3
+// for.step.3:
+//   %50: i64 = binary.+ %rot1.b.41: i64, %13: i64
+//   %rot1.l0.42: bool = binary.< %50: i64, %40: i64
+//   branch %rot1.l0.42: bool, for.body.2, for.end.4
+// for.end.4:
+//   %51: extern "c" fn(i32) -> i32 = extern "c" func.addr.abs
+//   %52: ?extern "c" fn(i32) -> i32 = opt.some %51: extern "c" fn(i32) -> i32
+//   %53: i32 = const 7
+//   %54: i32 = unary.- %53: i32
+//   jump in2.entry
+// in2.entry:
+//   %in2.1: extern "c" fn(i32) -> i32 = opt.value %52: ?extern "c" fn(i32) -> i32
+//   %in2.2: bool = opt.has %52: ?extern "c" fn(i32) -> i32
+//   branch %in2.2: bool, in2.if.then.1, in2.if.else.2
+// in2.if.then.1:
+//   %in2.3: i32 = call.indirect %in2.1: extern "c" fn(i32) -> i32, %54: i32
+//   jump in2.cont
+// in2.if.else.2:
+//   jump in2.if.end.3
+// in2.if.end.3:
+//   jump in2.cont
+// in2.cont:
+//   %55: i32 = phi [in2.if.then.1, %in2.3: i32], [in2.if.end.3, %54: i32]
+//   %in3.1: i64 = cast %55: i32, i64
+//   call.std::fmt::write_i64 %in3.1: i64
+//   %57: ?extern "c" fn(i32) -> i32 = opt.null
+//   jump in4.entry
+// in4.entry:
+//   %in4.1: extern "c" fn(i32) -> i32 = opt.value %57: ?extern "c" fn(i32) -> i32
+//   %in4.2: bool = opt.has %57: ?extern "c" fn(i32) -> i32
+//   branch %in4.2: bool, in4.if.then.1, in4.if.else.2
+// in4.if.then.1:
+//   %in4.3: i32 = call.indirect %in4.1: extern "c" fn(i32) -> i32, %54: i32
+//   jump in4.cont
+// in4.if.else.2:
+//   jump in4.if.end.3
+// in4.if.end.3:
+//   jump in4.cont
+// in4.cont:
+//   %60: i32 = phi [in4.if.then.1, %in4.3: i32], [in4.if.end.3, %54: i32]
+//   %in5.1: i64 = cast %60: i32, i64
+//   call.std::fmt::write_i64 %in5.1: i64
+//   %62: extern "c" fn(i32) -> i32 = extern "c" func.addr.abs
+//   %63: ptr<const u8> = cast %62: extern "c" fn(i32) -> i32, ptr<const u8>
+//   %64: extern "c" fn(i32) -> i32 = cast %63: ptr<const u8>, extern "c" fn(i32) -> i32
+//   %65: i32 = const 9
+//   %66: i32 = unary.- %65: i32
+//   %67: i32 = call.indirect %64: extern "c" fn(i32) -> i32, %66: i32
+//   %in6.1: i64 = cast %67: i32, i64
+//   call.std::fmt::write_i64 %in6.1: i64
+//   return void: void
+// }

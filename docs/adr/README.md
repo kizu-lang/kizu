@@ -144,3 +144,4 @@ ADR には積みません。残す価値が無くなったら消します。番�
 - [ADR-0148: 抱える接続の数は accept を止めて守る](0148-a-full-server-stops-accepting.md)
 - [ADR-0149: SIMD は固定名の 128-bit vector 型で明示する](0149-explicit-simd-vector-types.md)
 - [ADR-0150: native target は OS を darwin / linux の 1 語で名乗る](0150-native-target-names-its-os.md)
+- [ADR-0151: C の callback は呼び出し規約を型で名乗る](0151-a-c-callback-names-its-calling-convention.md)
