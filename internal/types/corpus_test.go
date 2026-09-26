@@ -137,6 +137,11 @@ func writeDiagnostic(out *bytes.Buffer, d *diag.Diagnostic) {
 		out.WriteString("//   help: ")
 		writeFolded(out, d.Help)
 	}
+	for _, related := range d.Related {
+		fmt.Fprintf(out, "//   related %d:%d-%d:%d: ", related.Span.Start.Line, related.Span.Start.Column,
+			related.Span.End.Line, related.Span.End.Column)
+		writeFolded(out, related.Label)
+	}
 }
 
 // writeErrorLines renders an unstructured error, one `// ` line per text line.

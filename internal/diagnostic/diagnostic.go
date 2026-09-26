@@ -3,6 +3,7 @@ package diagnostic
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -30,6 +31,15 @@ type Diagnostic struct {
 	Span     ast.Span
 	Notes    []string
 	Help     string
+	// Related are other places the diagnostic points at, each with what
+	// happened there: where a value was borrowed, where it was moved.
+	Related []Related
+}
+
+// Related is a second place a diagnostic points at and what happened there.
+type Related struct {
+	Span  ast.Span
+	Label string
 }
 
 // QuoteBytes returns the deterministic ASCII byte-literal form used by
@@ -116,8 +126,9 @@ func (d *Diagnostic) summary() string {
 }
 
 // CLIError renders the diagnostic for a terminal (ADR-0072): the severity and
-// summary, then where it is -- the path and position, the source line, and a
-// marker under the span -- then the notes and help under the same gutter.
+// summary, then where it is -- the path and position, the source lines, and
+// a marker under each span, `^` for where it went wrong and `-` for a related
+// place with its label -- then the notes and help under the same gutter.
 func (d *Diagnostic) CLIError() string {
 	var out strings.Builder
 	if d.Severity != SeverityWarning {
@@ -126,8 +137,16 @@ func (d *Diagnostic) CLIError() string {
 	out.WriteString(d.summary())
 	gutter := ""
 	if !d.Span.IsZero() {
-		gutter = strings.Repeat(" ", len(strconv.Itoa(d.Span.Start.Line)))
-		writeSnippet(&out, d.Span, gutter)
+		marks, others := d.snippetMarks()
+		width := 0
+		for _, mark := range append(append([]snippetMark{}, marks...), others...) {
+			width = max(width, len(strconv.Itoa(mark.span.Start.Line)))
+		}
+		gutter = strings.Repeat(" ", width)
+		writeSnippet(&out, d.Span, marks, gutter)
+		for _, other := range others {
+			writeRelatedSnippet(&out, other, gutter)
+		}
 	}
 	for _, note := range d.Notes {
 		out.WriteString("\n" + gutter + "= note: " + note)
@@ -140,26 +159,98 @@ func (d *Diagnostic) CLIError() string {
 	return out.String()
 }
 
-// writeSnippet writes where span is and, when its source text is at hand,
-// the line it starts on with a marker under it:
+// snippetMark is one span the snippet draws a marker under.
+type snippetMark struct {
+	span    ast.Span
+	label   string
+	primary bool
+}
+
+// snippetMarks answers the marks drawn in the primary span's file, in source
+// order, and the related places in other files, which get snippets of their
+// own.
+func (d *Diagnostic) snippetMarks() ([]snippetMark, []snippetMark) {
+	marks := []snippetMark{{span: d.Span, primary: true}}
+	var others []snippetMark
+	for _, related := range d.Related {
+		mark := snippetMark{span: related.Span, label: related.Label}
+		if related.Span.Source == d.Span.Source {
+			marks = append(marks, mark)
+		} else {
+			others = append(others, mark)
+		}
+	}
+	sort.SliceStable(marks, func(i, j int) bool {
+		left, right := marks[i].span.Start, marks[j].span.Start
+		if left.Line != right.Line {
+			return left.Line < right.Line
+		}
+		return left.Column < right.Column
+	})
+	return marks, others
+}
+
+// writeSnippet writes where the primary span is and, when its source text is
+// at hand, each marked line with its markers under it; lines between marks
+// that are not next to each other fold into `...`:
 //
-//	  --> src/main.kizu:10:9
+//	  --> src/main.kizu:16:5
 //	   |
-//	10 |     try anything();
-//	   |         ^^^^^^^^
-func writeSnippet(out *strings.Builder, span ast.Span, gutter string) {
+//	14 |     let first = users.at(alice);
+//	   |                 -------- `users` is borrowed here by `first`
+//	...
+//	16 |     users.add(allocator, bob);
+//	   |     ^^^^^^^^^
+func writeSnippet(out *strings.Builder, primary ast.Span, marks []snippetMark, gutter string) {
 	out.WriteString("\n" + gutter + "--> ")
+	writePosition(out, primary)
+	text := primary.Source.Text()
+	if _, ok := sourceLine(text, primary.Start.Line); !ok {
+		return
+	}
+	writeMarkedLines(out, text, marks, gutter)
+}
+
+// writeRelatedSnippet writes a related place in another file under `:::`.
+func writeRelatedSnippet(out *strings.Builder, mark snippetMark, gutter string) {
+	out.WriteString("\n" + gutter + "::: ")
+	writePosition(out, mark.span)
+	writeMarkedLines(out, mark.span.Source.Text(), []snippetMark{mark}, gutter)
+}
+
+// writePosition writes a span's path, when it has one, and its start.
+func writePosition(out *strings.Builder, span ast.Span) {
 	if path := span.Source.Path(); path != "" {
 		out.WriteString(path + ":")
 	}
 	fmt.Fprintf(out, "%d:%d", span.Start.Line, span.Start.Column)
-	line, ok := sourceLine(span.Source.Text(), span.Start.Line)
-	if !ok {
-		return
-	}
+}
+
+// writeMarkedLines writes each line the marks start on, once, with a marker
+// line per mark under it.
+func writeMarkedLines(out *strings.Builder, text string, marks []snippetMark, gutter string) {
 	out.WriteString("\n" + gutter + " |")
-	fmt.Fprintf(out, "\n%d | %s", span.Start.Line, line)
-	out.WriteString("\n" + gutter + " | " + markerLine(line, span))
+	previous := 0
+	for _, mark := range marks {
+		number := mark.span.Start.Line
+		line, ok := sourceLine(text, number)
+		if !ok {
+			continue
+		}
+		if number != previous {
+			if previous != 0 && number > previous+1 {
+				out.WriteString("\n...")
+			}
+			number := strconv.Itoa(number)
+			out.WriteString("\n" + number + gutter[len(number):] + " | " + line)
+			previous = mark.span.Start.Line
+		}
+		marker := markerLine(line, mark.span, mark.primary)
+		if mark.label != "" {
+			marker += " " + mark.label
+		}
+		out.WriteString("\n" + gutter + " | " + marker)
+	}
 }
 
 // sourceLine answers the text of the one-based line, without its newline.
@@ -182,11 +273,12 @@ func sourceLine(text string, number int) (string, bool) {
 	}
 }
 
-// markerLine answers the carets under span on its first line. Columns count
+// markerLine answers the marker under span on its first line: carets for the
+// primary span, dashes for a related one. Columns count
 // bytes, so the lead-in keeps the line's tabs and gives every other character
 // one space, not one per byte; the carets cover the span on that line, or to
 // the line's last visible character when the span goes on past it.
-func markerLine(line string, span ast.Span) string {
+func markerLine(line string, span ast.Span, primary bool) string {
 	start := span.Start.Column - 1
 	if start > len(line) {
 		start = len(line)
@@ -212,7 +304,11 @@ func markerLine(line string, span ast.Span) string {
 	if rest := utf8.RuneCountInString(line[start:]); width > rest && rest > 0 {
 		width = rest
 	}
-	marker.WriteString(strings.Repeat("^", width))
+	mark := "-"
+	if primary {
+		mark = "^"
+	}
+	marker.WriteString(strings.Repeat(mark, width))
 	return marker.String()
 }
 
@@ -235,6 +331,16 @@ func (d *Diagnostic) WithCode(code string) *Diagnostic {
 // WithNote appends one structured note line and returns the same diagnostic.
 func (d *Diagnostic) WithNote(note string) *Diagnostic {
 	d.Notes = append(d.Notes, note)
+	return d
+}
+
+// WithRelated adds a second place the diagnostic points at, labelled with
+// what happened there, and returns the same diagnostic. A place with no
+// position adds nothing.
+func (d *Diagnostic) WithRelated(span ast.Span, label string) *Diagnostic {
+	if !span.IsZero() {
+		d.Related = append(d.Related, Related{Span: span, Label: label})
+	}
 	return d
 }
 

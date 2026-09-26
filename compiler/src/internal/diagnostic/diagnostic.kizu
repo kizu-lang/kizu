@@ -24,6 +24,9 @@ pub struct Diagnostic {
     pub span: ast::Span,
     pub notes: array::Array<string::String>,
     pub help: string::String,
+    /// Other places the diagnostic points at, each with what happened there,
+    /// the Go `Related`.
+    pub related: array::Array<Related>,
 }
 
 // Holds borrowed parts of one already-split input line.
@@ -31,6 +34,18 @@ struct FirstLineParts {
     severity: Severity,
     category: []u8,
     message: []u8,
+}
+
+/// Is a second place a diagnostic points at and what happened there, the Go
+/// `Related`.
+pub struct Related {
+    pub span: ast::Span,
+    pub label: string::String,
+}
+
+fn (self: Related) deinit(allocator: Allocator) -> void {
+    self.label.deinit(allocator);
+    return;
 }
 
 /// Constructs one structured diagnostic from its summary fields.
@@ -48,7 +63,8 @@ pub fn new(
         message: string::new(allocator),
         span: span,
         notes: array::new<string::String>(allocator),
-        help: string::new(allocator)
+        help: string::new(allocator),
+        related: array::new<Related>(allocator)
     };
     errdefer diagnostic.deinit(allocator);
     try diagnostic.category.append_bytes(allocator, category);
@@ -210,8 +226,9 @@ fn (self: &Diagnostic) append_summary(allocator: Allocator, out: &var string::St
 
 /// Renders the diagnostic for a terminal (ADR-0072), the Go `CLIError`: the
 /// severity and summary, then where it is -- the path and position, the
-/// source line, and a marker under the span -- then the notes and help under
-/// the same gutter.
+/// source lines, and a marker under each span, `^` for where it went wrong
+/// and `-` for a related place with its label -- then the notes and help
+/// under the same gutter.
 fn (self: &Diagnostic) cli_error(
     allocator: Allocator,
     sources: &source::SourceMap
@@ -224,8 +241,25 @@ fn (self: &Diagnostic) cli_error(
     try self.append_summary(allocator, &var out);
     var gutter = 0;
     if !self.span.is_zero() {
+        var marks = try self.snippet_marks(allocator);
+        defer marks.deinit(allocator);
         gutter = digit_count(self.span.start.line);
-        try append_snippet(allocator, &var out, sources, self.span, gutter);
+        var index = 0;
+        while self.related.at(index) |related| {
+            let digits = digit_count(related.span.start.line);
+            if digits > gutter {
+                gutter = digits;
+            }
+            index = index + 1;
+        }
+        try self.append_snippet(allocator, &var out, sources, &marks, gutter);
+        index = 0;
+        while self.related.at(index) |related| {
+            if !same_source(related.span.source, self.span.source) {
+                try self.append_related_snippet(allocator, &var out, sources, index, gutter);
+            }
+            index = index + 1;
+        }
     }
     var index = 0;
     while self.notes.at(index) |note| {
@@ -270,53 +304,171 @@ fn append_gutter_line(allocator: Allocator, out: &var string::String, gutter: i6
     return;
 }
 
-/// Writes where span is and, when its source text is at hand, the line it
-/// starts on with a marker under it, the Go `writeSnippet`.
-fn append_snippet(
+/// Is one span the snippet draws a marker under, the Go `snippetMark`:
+/// `related` is its index in Diagnostic.related, or -1 for the primary span.
+struct SnippetMark {
+    span: ast::Span,
+    related: i64,
+}
+
+fn same_source(left: ?source::SourceId, right: ?source::SourceId) -> bool {
+    if left |a| {
+        if right |b| {
+            return a.index == b.index;
+        }
+        return false;
+    }
+    if right |_| {
+        return false;
+    }
+    return true;
+}
+
+fn span_before(left: ast::Span, right: ast::Span) -> bool {
+    if left.start.line != right.start.line {
+        return left.start.line < right.start.line;
+    }
+    return left.start.column < right.start.column;
+}
+
+/// Answers the marks drawn in the primary span's file in source order, the
+/// Go `snippetMarks`; related places in other files get snippets of their own.
+fn (self: &Diagnostic) snippet_marks(allocator: Allocator) -> !array::Array<SnippetMark> {
+    var marks = array::new<SnippetMark>(allocator);
+    errdefer marks.deinit(allocator);
+    try marks.append(allocator, SnippetMark { span: self.span, related: -1 });
+    var index = 0;
+    while self.related.at(index) |related| {
+        if same_source(related.span.source, self.span.source) {
+            let mark = SnippetMark { span: related.span, related: index };
+            // Insert after every mark that does not start later: a stable sort.
+            var at = marks.len();
+            while at > 0 and span_before(mark.span, marks.get_or_panic(at - 1).span) {
+                at = at - 1;
+            }
+            try marks.append(allocator, mark);
+            var move_to = marks.len() - 1;
+            while move_to > at {
+                try marks.swap(move_to, move_to - 1);
+                move_to = move_to - 1;
+            }
+        }
+        index = index + 1;
+    }
+    return move marks;
+}
+
+/// Writes where the primary span is and, when its source text is at hand,
+/// each marked line with its markers under it, the Go `writeSnippet`.
+fn (self: &Diagnostic) append_snippet(
     allocator: Allocator,
     out: &var string::String,
     sources: &source::SourceMap,
-    span: ast::Span,
+    marks: &array::Array<SnippetMark>,
     gutter: i64
 ) -> !void {
     try append_gutter_line(allocator, out, gutter, "--> ");
+    try append_position(allocator, out, sources, self.span);
+    let id = self.span.source orelse return;
+    if sources.at(id) |file| {
+        let text = file.text.as_bytes();
+        if source_line(text, self.span.start.line) |_| {
+            return self.append_marked_lines(allocator, out, text, marks, gutter);
+        }
+    }
+    return;
+}
+
+/// Writes a related place in another file under `:::`, the Go
+/// `writeRelatedSnippet`.
+fn (self: &Diagnostic) append_related_snippet(
+    allocator: Allocator,
+    out: &var string::String,
+    sources: &source::SourceMap,
+    index: i64,
+    gutter: i64
+) -> !void {
+    var span = ast::zero_span();
+    if self.related.at(index) |related| {
+        span = related.span;
+    }
+    try append_gutter_line(allocator, out, gutter, "::: ");
+    try append_position(allocator, out, sources, span);
+    var marks = array::new<SnippetMark>(allocator);
+    defer marks.deinit(allocator);
+    try marks.append(allocator, SnippetMark { span: span, related: index });
+    if span.source |id| {
+        if sources.at(id) |file| {
+            let bytes = file.text.as_bytes();
+            return self.append_marked_lines(allocator, out, bytes, &marks, gutter);
+        }
+    }
+    return self.append_marked_lines(allocator, out, "", &marks, gutter);
+}
+
+/// Writes a span's path, when it has one, and its start, the Go
+/// `writePosition`.
+fn append_position(
+    allocator: Allocator,
+    out: &var string::String,
+    sources: &source::SourceMap,
+    span: ast::Span
+) -> !void {
     if span.source |id| {
         if sources.at(id) |file| {
             if file.path.len() > 0 {
                 try out.append_string(allocator, &file.path);
                 try out.append_bytes(allocator, ":");
             }
-            try append_position(allocator, out, span);
-            let text = file.text.as_bytes();
-            return append_source_line(allocator, out, text, span, gutter);
         }
     }
-    return append_position(allocator, out, span);
-}
-
-fn append_position(allocator: Allocator, out: &var string::String, span: ast::Span) -> !void {
     try fmt::append_i64(allocator, out, span.start.line);
     try out.append_bytes(allocator, ":");
     try fmt::append_i64(allocator, out, span.start.column);
     return;
 }
 
-/// Appends the line span starts on and the marker under it, when text has it.
-fn append_source_line(
+/// Writes each line the marks start on, once, with a marker line per mark
+/// under it; lines that are not next to each other fold into `...`, the Go
+/// `writeMarkedLines`.
+fn (self: &Diagnostic) append_marked_lines(
     allocator: Allocator,
     out: &var string::String,
     text: []u8,
-    span: ast::Span,
+    marks: &array::Array<SnippetMark>,
     gutter: i64
 ) -> !void {
-    let line = source_line(text, span.start.line) orelse return;
     try append_gutter_line(allocator, out, gutter, " |");
-    try out.append_byte(allocator, cast<u8>(10));
-    try fmt::append_i64(allocator, out, span.start.line);
-    try out.append_bytes(allocator, " | ");
-    try out.append_bytes(allocator, text[line.start..line.end]);
-    try append_gutter_line(allocator, out, gutter, " | ");
-    try append_marker(allocator, out, text[line.start..line.end], span);
+    var previous = 0;
+    var index = 0;
+    while marks.get(index) |mark| {
+        index = index + 1;
+        let number = mark.span.start.line;
+        let line = source_line(text, number) orelse continue;
+        let bytes = text[line.start..line.end];
+        if number != previous {
+            if previous != 0 and number > previous + 1 {
+                try out.append_byte(allocator, cast<u8>(10));
+                try out.append_bytes(allocator, "...");
+            }
+            try out.append_byte(allocator, cast<u8>(10));
+            try fmt::append_i64(allocator, out, number);
+            for digit_count(number)..gutter |_i| {
+                try out.append_byte(allocator, cast<u8>(32));
+            }
+            try out.append_bytes(allocator, " | ");
+            try out.append_bytes(allocator, bytes);
+            previous = number;
+        }
+        try append_gutter_line(allocator, out, gutter, " | ");
+        try append_marker(allocator, out, bytes, mark.span, mark.related < 0);
+        if self.related.at(mark.related) |related| {
+            if related.label.len() > 0 {
+                try out.append_bytes(allocator, " ");
+                try out.append_string(allocator, &related.label);
+            }
+        }
+    }
     return;
 }
 
@@ -354,7 +506,13 @@ fn source_line(text: []u8, number: i64) -> ?LineRange {
 /// other character one space, not one per byte; the carets cover the span on
 /// that line, or to the line's last visible character when the span goes on
 /// past it.
-fn append_marker(allocator: Allocator, out: &var string::String, line: []u8, span: ast::Span) -> !void {
+fn append_marker(
+    allocator: Allocator,
+    out: &var string::String,
+    line: []u8,
+    span: ast::Span,
+    primary: bool
+) -> !void {
     let length = mem::len(line);
     var start = span.start.column - 1;
     if start > length {
@@ -396,8 +554,12 @@ fn append_marker(allocator: Allocator, out: &var string::String, line: []u8, spa
     if width > rest and rest > 0 {
         width = rest;
     }
+    var mark = cast<u8>(45);
+    if primary {
+        mark = cast<u8>(94);
+    }
     for 0..width |_i| {
-        try out.append_byte(allocator, cast<u8>(94));
+        try out.append_byte(allocator, mark);
     }
     return;
 }
@@ -448,7 +610,25 @@ fn (self: &Diagnostic) clone(allocator: Allocator) -> !Diagnostic {
         try copied.with_note(allocator, note_bytes);
         index = index + 1;
     }
+    index = 0;
+    while self.related.at(index) |related| {
+        let label = related.label.as_bytes();
+        try copied.with_related(allocator, related.span, label);
+        index = index + 1;
+    }
     return move copied;
+}
+
+/// Adds a second place the diagnostic points at, labelled with what
+/// happened there, the Go `WithRelated`. A place with no position adds
+/// nothing.
+pub fn (self: &var Diagnostic) with_related(allocator: Allocator, span: ast::Span, label: []u8) -> !void {
+    if span.is_zero() {
+        return;
+    }
+    let text = try string::from_bytes(allocator, label);
+    errdefer text.deinit(allocator);
+    return self.related.append(allocator, Related { span: span, label: move text });
 }
 
 fn split_first_line(

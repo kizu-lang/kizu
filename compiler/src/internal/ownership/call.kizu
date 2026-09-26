@@ -1408,7 +1408,7 @@ fn (self: &var Checker) activate_borrow_args(
             );
         }
         let mutable = param.mut_borrow;
-        if try self.check_borrow_conflict_for_field(tree, value, target.field, mutable) |failed| {
+        if try self.check_borrow_conflict_for_field(tree, env, value, target.field, mutable) |failed| {
             errdefer failed.deinit(self.allocator);
             try self.release_activated_args(borrowed);
             return move failed;
@@ -1472,10 +1472,11 @@ fn (self: &var Checker) call_borrow_target(
 /// `checkBorrowConflict`.
 fn (self: &var Checker) check_borrow_conflict(
     tree: &ast::Ast,
+    env: ?ScopeHandle,
     value: BindingHandle,
     mutable: bool
 ) -> !?diagnostic::Diagnostic {
-    return self.check_borrow_conflict_for_field(tree, value, empty_name(), mutable);
+    return self.check_borrow_conflict_for_field(tree, env, value, empty_name(), mutable);
 }
 
 /// Rejects overlapping whole-value or field borrows, the Go
@@ -1483,6 +1484,21 @@ fn (self: &var Checker) check_borrow_conflict(
 /// path names the other or a struct containing it, so `a.b` collides with
 /// `a.b.c` while `a.b` and `a.c` stay disjoint.
 fn (self: &var Checker) check_borrow_conflict_for_field(
+    tree: &ast::Ast,
+    env: ?ScopeHandle,
+    value: BindingHandle,
+    field: Name,
+    mutable: bool
+) -> !?diagnostic::Diagnostic {
+    if try self.borrow_conflict_for_field(tree, value, field, mutable) |problem| {
+        return try self.with_borrower(move problem, env, value);
+    }
+    return null;
+}
+
+/// Answers the conflict check_borrow_conflict_for_field reports, without
+/// where the live borrow was taken, the Go `borrowConflictForField`.
+fn (self: &var Checker) borrow_conflict_for_field(
     tree: &ast::Ast,
     value: BindingHandle,
     field: Name,

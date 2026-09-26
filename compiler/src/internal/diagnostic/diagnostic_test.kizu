@@ -266,3 +266,44 @@ test "diagnostic mutators retain caller bytes" {
     }
     expect_string(&value.help, "replacement help");
 }
+
+// A related place in the same file is drawn on its own line with dashes and
+// its label, in source order before the primary span, and the lines between
+// them fold into `...`.
+test "the CLI form shows related places" {
+    let allocator = mem::page_allocator();
+    var sources = source::new(allocator);
+    defer sources.deinit(allocator);
+    let path = try string::from_bytes(allocator, "src/main.kizu");
+    errdefer path.deinit(allocator);
+    var text = try string::from_bytes(allocator, "fn main() -> void {");
+    errdefer text.deinit(allocator);
+    try append_raw(allocator, &var text, "\n    let first = users.at(alice);\n    print(1);\n    users.add(bob);\n}\n");
+    let id = try sources.add(move path, move text);
+    let span = ast::Span {
+        source: id,
+        start: ast::Position { line: 4, column: 5 },
+        end: ast::Position { line: 4, column: 14 }
+    };
+    var value = try new(
+        allocator, Severity::Error, "borrow error", span, "value `users` cannot be mutably borrowed while borrowed");
+    defer value.deinit(allocator);
+    let related = ast::Span {
+        source: id,
+        start: ast::Position { line: 2, column: 17 },
+        end: ast::Position { line: 2, column: 25 }
+    };
+    try value.with_related(allocator, related, "`users` is borrowed here by `first`");
+    let cli = try value.cli_error(allocator, &sources);
+    defer cli.deinit(allocator);
+    var expected = try string::from_bytes(
+        allocator, "error: borrow error: value `users` cannot be mutably borrowed while borrowed");
+    defer expected.deinit(allocator);
+    try append_raw(
+        allocator,
+        &var expected,
+        "\n --> src/main.kizu:4:5\n  |\n2 |     let first = users.at(alice);\n  |                 -------- `users` is borrowed here by `first`\n...\n4 |     users.add(bob);\n  |     ^^^^^^^^^"
+    );
+    let expected_bytes = expected.as_bytes();
+    expect_string(&cli, expected_bytes);
+}

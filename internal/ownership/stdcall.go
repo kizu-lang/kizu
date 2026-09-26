@@ -32,7 +32,7 @@ func (c *Checker) checkStdMethodCall(
 		return "", errorf("%s error: %s has no method `%s`", container.Kind, container.Label, name)
 	}
 	if err := checkContainerMethodAccess(base, receiver, name); err != nil {
-		return "", err
+		return "", withBorrower(err, env, receiver)
 	}
 	method := c.stdMethodInfo(base, receiver.typeName, name)
 	if method == nil {

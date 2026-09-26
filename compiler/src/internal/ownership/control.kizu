@@ -22,10 +22,11 @@ fn (self: &var Checker) check_assign_stmt(
             return move failed;
         }
         if self.store.has_any_borrow(target) {
-            return try self.error1(
+            let problem = try self.error1(
                 tree, ast::zero_span(), "borrow error: value `%s` cannot be assigned while borrowed",
                 Arg::Str(self.binding(target).name)
             );
+            return try self.with_borrower(move problem, env, target);
         }
         // Overwriting a live owner silently drops it (ADR-0091). A `&var`
         // parameter always points at a live value the caller still owns, so
@@ -818,7 +819,7 @@ fn (self: &var Checker) tie_view_capture(
     }
     var index = 0;
     while sources.get(index) |source| {
-        if try self.check_borrow_conflict_for_field(tree, source.target, source.field, false) |failed| {
+        if try self.check_borrow_conflict_for_field(tree, env, source.target, source.field, false) |failed| {
             return move failed;
         }
         try self.activate_borrow(source.target, source.field, false);
@@ -1309,12 +1310,14 @@ fn (self: &var Checker) consume_moved_from_scrutinee(
         return null;
     }
     if self.store.has_any_borrow(owner) {
-        return try self.error1(
+        let problem = try self.error1(
             tree, expression_span(tree, value), "borrow error: value `%s` cannot be moved while borrowed",
             Arg::Str(self.binding(owner).name)
         );
+        return try self.with_borrower(move problem, env, owner);
     }
     try self.store.set_moved(owner, true);
+    try self.store.set_moved_at(owner, value);
     return null;
 }
 
@@ -1346,7 +1349,8 @@ fn (self: &var Checker) match_moves_payload(
 /// use-after-move.
 fn (self: &var Checker) consume_owner_union_receiver(tree: &ast::Ast, env: ScopeHandle, value: ast::Expression) -> !void {
     let owner = self.lookup_ident(tree, env, value) orelse return;
-    return self.store.set_moved(owner, true);
+    try self.store.set_moved(owner, true);
+    return self.store.set_moved_at(owner, value);
 }
 
 /// Binds one union variant payload for a match arm, the Go
@@ -1418,14 +1422,14 @@ fn (self: &var Checker) tie_match_payload_reference(
         if !self.binding(holder).borrowed_param or !self.binding(holder).mut_borrow {
             return null;
         }
-        if try self.check_borrow_conflict(tree, holder, true) |failed| {
+        if try self.check_borrow_conflict(tree, null, holder, true) |failed| {
             return move failed;
         }
     } else {
         if !self.mutable_place(holder) {
             return null;
         }
-        if try self.check_borrow_conflict_for_field(tree, holder, found.path, true) |failed| {
+        if try self.check_borrow_conflict_for_field(tree, null, holder, found.path, true) |failed| {
             return move failed;
         }
     }

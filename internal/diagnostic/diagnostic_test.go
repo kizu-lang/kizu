@@ -116,3 +116,33 @@ func TestQuoteBytesMatchesSelfhostFmt(t *testing.T) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
+
+// TestCLIErrorShowsRelatedPlaces draws a related place in the same file on
+// its own line with dashes and its label, in source order before the primary
+// span, and folds the lines between them into `...`.
+func TestCLIErrorShowsRelatedPlaces(t *testing.T) {
+	sources := source.NewMap()
+	text := "fn main() -> void {\n    let first = users.at(alice);\n" +
+		"    print(1);\n    users.add(bob);\n}\n"
+	id := sources.Add("src/main.kizu", text)
+	diag := New(SeverityError, "borrow error", ast.Span{
+		Source: id,
+		Start:  ast.Position{Line: 4, Column: 5},
+		End:    ast.Position{Line: 4, Column: 14},
+	}, "value `users` cannot be mutably borrowed while borrowed").WithRelated(ast.Span{
+		Source: id,
+		Start:  ast.Position{Line: 2, Column: 17},
+		End:    ast.Position{Line: 2, Column: 25},
+	}, "`users` is borrowed here by `first`")
+	want := "error: borrow error: value `users` cannot be mutably borrowed while borrowed\n" +
+		" --> src/main.kizu:4:5\n" +
+		"  |\n" +
+		"2 |     let first = users.at(alice);\n" +
+		"  |                 -------- `users` is borrowed here by `first`\n" +
+		"...\n" +
+		"4 |     users.add(bob);\n" +
+		"  |     ^^^^^^^^^"
+	if got := diag.CLIError(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
