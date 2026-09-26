@@ -11,11 +11,7 @@ fn (self: &var Checker) collect_functions(
     if try self.collect_types_and_methods(tree, program) |value| {
         return move value;
     }
-    if try self.collect_top_level_functions(self.allocator, tree, program) |issue| {
-        let value = try self.type_collection_diagnostic(tree, issue);
-        return move value;
-    }
-    return null;
+    return self.collect_top_level_functions(self.allocator, tree, program);
 }
 
 // Registers top-level function signatures after all type and method metadata.
@@ -23,38 +19,51 @@ fn (self: &var Checker) collect_top_level_functions(
     allocator: Allocator,
     tree: &ast::Ast,
     program: &ast::Program
-) -> !?TypeCollectionIssue {
+) -> !?diagnostic::Diagnostic {
     var index = 0;
     while program.declarations.get(index) |declaration| {
-        match tree.declarations.at(declaration.node) {
-            Function(function) => {
-                let retained_name = tree.texts.at(function.signature.name.node);
-                let name = retained_name.as_bytes();
-                if self.metadata.functions_by_name.contains(name) {
-                    return TypeCollectionIssue::DuplicateFunction(function.signature.name);
-                }
-                if self.metadata.is_type_name(name) {
-                    return TypeCollectionIssue::FunctionNameIsType(function.signature.name);
-                }
-                if function.signature.receiver {
-                    if stdmethod::split_method_name(name) |parts| {
-                        if self.impl_method(parts.receiver, parts.method) |handle| {
-                            try self.metadata.functions_by_name.insert(allocator, name, handle);
-                            index = index + 1;
-                            continue;
-                        }
-                    }
-                }
-                match try self.new_declared_function_type(tree, function) {
-                    Value(handle) => {
-                        try self.metadata.functions_by_name.insert(allocator, name, handle);
-                    },
-                    Issue(issue) => return issue,
-                }
-            },
-            _ => {},
+        if try self.collect_top_level_function(allocator, tree, declaration) |issue| {
+            let value = try self.type_collection_diagnostic(tree, issue);
+            return locate_decl(tree, move value, declaration);
         }
         index = index + 1;
+    }
+    return null;
+}
+
+// Registers one top-level function signature, the body of the Go
+// `collectTopLevelFunctions` loop.
+fn (self: &var Checker) collect_top_level_function(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    declaration: ast::Declaration
+) -> !?TypeCollectionIssue {
+    match tree.declarations.at(declaration.node) {
+        Function(function) => {
+            let retained_name = tree.texts.at(function.signature.name.node);
+            let name = retained_name.as_bytes();
+            if self.metadata.functions_by_name.contains(name) {
+                return TypeCollectionIssue::DuplicateFunction(function.signature.name);
+            }
+            if self.metadata.is_type_name(name) {
+                return TypeCollectionIssue::FunctionNameIsType(function.signature.name);
+            }
+            if function.signature.receiver {
+                if stdmethod::split_method_name(name) |parts| {
+                    if self.impl_method(parts.receiver, parts.method) |handle| {
+                        try self.metadata.functions_by_name.insert(allocator, name, handle);
+                        return null;
+                    }
+                }
+            }
+            match try self.new_declared_function_type(tree, function) {
+                Value(handle) => {
+                    try self.metadata.functions_by_name.insert(allocator, name, handle);
+                },
+                Issue(issue) => return issue,
+            }
+        },
+        _ => {},
     }
     return null;
 }

@@ -184,8 +184,8 @@ func sourceLine(text string, number int) (string, bool) {
 
 // markerLine answers the carets under span on its first line. Columns count
 // bytes, so the lead-in keeps the line's tabs and gives every other character
-// one space, not one per byte; the carets cover the span on that line, or
-// one character when the span goes on past it.
+// one space, not one per byte; the carets cover the span on that line, or to
+// the line's last visible character when the span goes on past it.
 func markerLine(line string, span ast.Span) string {
 	start := span.Start.Column - 1
 	if start > len(line) {
@@ -202,9 +202,12 @@ func markerLine(line string, span ast.Span) string {
 			marker.WriteByte(' ')
 		}
 	}
-	width := 1
+	width := utf8.RuneCountInString(strings.TrimRight(line[start:], " \t"))
 	if span.End.Line == span.Start.Line && span.End.Column > span.Start.Column {
 		width = span.End.Column - span.Start.Column
+	}
+	if width < 1 {
+		width = 1
 	}
 	if rest := utf8.RuneCountInString(line[start:]); width > rest && rest > 0 {
 		width = rest

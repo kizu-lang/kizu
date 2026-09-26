@@ -35,8 +35,9 @@ error: <category>: <summary>                        # CLI(CLIError)
 - `note:` は判断の理由だけ、`help:` は次の行動が明確なときだけ
 - 検査が位置を知らない diagnostic は、それが起きた文(最初の token から最後まで)を
   指す。std の body の中では指さず、呼び出した program の行に任せる
-- 位置の無い front-end diagnostic は `cmd/kizu/testdata/unlocated_diagnostics.txt`
-  に載っているものだけ許す(conformance test)。一覧は減るだけ
+- 検査が位置を知らない diagnostic は、それが起きた宣言を指す
+- front-end の diagnostic は必ず位置を持つ(conformance test が `check` / `parse` の
+  失敗に `--> ` を求める)
 
 避けるもの: `mismatch` だけの message、`IDENT` のような lexer 内部名、原因と対処を
 1 つの summary に詰めること、CLI と LSP で別々の message builder を持つこと。
@@ -47,6 +48,6 @@ error: <category>: <summary>                        # CLI(CLIError)
 | --- | --- |
 | 1 行目の `at <line>:<column>` を CLI にも残す | 位置が 2 回出る。`-->` の行が path と位置を持つ |
 | marker を byte 数だけ空白で揃える | 多 byte の文字の後ろでずれる。文字ごとに 1 つにする |
-| 位置の無い診断を一括で直してから検査を入れる | 直している間に新しい位置無しが入る。検査と一覧を先に置く |
+| 位置の無い診断を一括で直してから検査を入れる | 直している間に新しい位置無しが入る。検査と、減るだけの例外一覧を先に置いた(一覧は 273 件から 0 件になって消した) |
 | Kizu の `Statement` handle に `Span` を直接持たせる | handle が 8 byte から 56 byte になり、写しのたびに増えて 1 文あたり約 580 byte、`check compiler` で +65MB。Span は Ast の arena に 1 回だけ置き、handle は 8 byte の参照を持つ(+7MB) |
 | `Error()` も CLI の形にする | LSP は range を別に持ち、test oracle は 1 行目で照合している |

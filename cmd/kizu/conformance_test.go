@@ -134,25 +134,6 @@ func runFailingCase(t *testing.T, tt conformance.Case, runner conformanceRunner)
 	checkDiagnosticLocated(t, tt, out)
 }
 
-// unlocatedPath lists the failing cases whose diagnostic does not yet say
-// where the problem is. The list only shrinks: a case not on it has to point
-// at its source, and a case on it that has started to is a stale line.
-const unlocatedPath = "testdata/unlocated_diagnostics.txt"
-
-var unlocatedCases = sync.OnceValue(func() map[string]bool {
-	data, err := os.ReadFile(unlocatedPath)
-	if err != nil {
-		panic(err)
-	}
-	cases := map[string]bool{}
-	for _, line := range strings.Split(string(data), "\n") {
-		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
-			cases[line] = true
-		}
-	}
-	return cases
-})
-
 // checkDiagnosticLocated holds a front-end failure to the CLI form that
 // points into the source: a `-->` line naming the path and position.
 func checkDiagnosticLocated(t *testing.T, tt conformance.Case, out string) {
@@ -160,14 +141,8 @@ func checkDiagnosticLocated(t *testing.T, tt conformance.Case, out string) {
 	if tt.Command != "check" && tt.Command != "parse" {
 		return
 	}
-	path := filepath.ToSlash(tt.Path)
-	located := strings.Contains(out, "--> ")
-	listed := unlocatedCases()[path]
-	switch {
-	case !located && !listed:
-		t.Fatalf("UNLOCATED %s: the diagnostic says no location:\n%s", path, out)
-	case located && listed:
-		t.Fatalf("the diagnostic now has a location; remove %s from %s", path, unlocatedPath)
+	if !strings.Contains(out, "--> ") {
+		t.Fatalf("the diagnostic says no location:\n%s", out)
 	}
 }
 

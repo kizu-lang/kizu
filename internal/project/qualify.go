@@ -1,10 +1,12 @@
 package project
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	diag "github.com/kizu-lang/kizu/internal/diagnostic"
 	"github.com/kizu-lang/kizu/internal/staticexpr"
 	"github.com/kizu-lang/kizu/internal/stdlib"
 	"github.com/kizu-lang/kizu/internal/stdmeta"
@@ -27,8 +29,16 @@ func (c *graphChecker) qualifyModule(module *moduleFile) (*ast.Program, error) {
 	return out, nil
 }
 
-// qualifyDecl rewrites declaration type references for a package check.
+// qualifyDecl rewrites declaration type references for a package check. A
+// name it cannot resolve is reported at the declaration, or at the statement
+// inside it that wrote the name.
 func (c *graphChecker) qualifyDecl(module *moduleFile, decl ast.Decl) (ast.Decl, error) {
+	qualified, err := c.qualifyDeclForm(module, decl)
+	return qualified, locate(err, decl.DeclarationSpan())
+}
+
+// qualifyDeclForm rewrites one declaration by its form.
+func (c *graphChecker) qualifyDeclForm(module *moduleFile, decl ast.Decl) (ast.Decl, error) {
 	switch d := decl.(type) {
 	case *ast.ImportDecl:
 		return nil, nil
@@ -254,6 +264,15 @@ func (c *graphChecker) qualifyBlock(
 
 // qualifyStmt rewrites type-bearing expressions inside one statement.
 func (c *graphChecker) qualifyStmt(module *moduleFile, stmt ast.Statement) (ast.Statement, error) {
+	qualified, err := c.qualifyStmtForm(module, stmt)
+	return qualified, locate(err, stmt.StatementSpan())
+}
+
+// qualifyStmtForm rewrites one statement by its form.
+func (c *graphChecker) qualifyStmtForm(
+	module *moduleFile,
+	stmt ast.Statement,
+) (ast.Statement, error) {
 	switch s := stmt.(type) {
 	case *ast.LetStmt:
 		cp := *s
@@ -889,4 +908,18 @@ func (c *graphChecker) qualifyStructLiteral(
 		cp.Fields[idx].Value = value
 	}
 	return &cp, nil
+}
+
+// locate gives a resolution error the place it was found at. The resolver
+// answers plain `module error: ...` text; it becomes a diagnostic here, where
+// the declaration or statement that wrote the name is known.
+func locate(err error, span ast.Span) error {
+	if err == nil || span.IsZero() {
+		return err
+	}
+	var structured *diag.Diagnostic
+	if errors.As(err, &structured) {
+		return diag.Locate(err, span)
+	}
+	return diag.FromText(diag.SeverityError, span, err.Error())
 }

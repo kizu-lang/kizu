@@ -318,7 +318,8 @@ func (c *graphChecker) collectTypes() error {
 				}
 				qualified := module.qualify(name)
 				if _, exists := c.types[qualified]; exists {
-					return fmt.Errorf("module error: duplicate type `%s`", qualified)
+					return locate(fmt.Errorf("module error: duplicate type `%s`", qualified),
+						decl.DeclarationSpan())
 				}
 				c.types[qualified] = typeExport{module: module.path, public: public}
 			}

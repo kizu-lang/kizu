@@ -32,9 +32,9 @@ pub struct Ast {
     pub declarations: arena::Arena<DeclarationNode>,
     pub expressions: arena::Arena<ExpressionNode>,
     pub statements: arena::Arena<StatementNode>,
-    /// Where the parser read each statement, kept once here so a Statement
-    /// handle carries 8 bytes for it rather than the span itself.
-    pub statement_spans: arena::Arena<Span>,
+    /// Where the parser read each statement and declaration, kept once here
+    /// so a handle carries 8 bytes for it rather than the span itself.
+    pub spans: arena::Arena<Span>,
 }
 
 /// Is the root of one parsed Kizu source file.
@@ -42,9 +42,12 @@ pub struct Program {
     pub declarations: array::Array<Declaration>,
 }
 
-/// Identifies one declaration retained by an Ast.
+/// Identifies one declaration retained by an Ast, and where the parser read
+/// it from its first token to its last (null for one the compiler made), the
+/// Go `DeclSpan`. `Ast.declaration_span` reads it.
 pub struct Declaration {
     pub node: arena::Handle<DeclarationNode>,
+    pub span: ?arena::Handle<Span>,
 }
 
 /// Identifies one expression retained by an Ast.
@@ -670,7 +673,7 @@ pub fn new(allocator: Allocator) -> Ast {
         declarations: arena::new<DeclarationNode>(allocator),
         expressions: arena::new<ExpressionNode>(allocator),
         statements: arena::new<StatementNode>(allocator),
-        statement_spans: arena::new<Span>(allocator)
+        spans: arena::new<Span>(allocator)
     };
 }
 
@@ -733,7 +736,8 @@ fn expression_list_get_or_panic(
 /// Retains one declaration node and returns its typed handle.
 fn (self: &var Ast) add_declaration(node: DeclarationNode) -> !Declaration {
     return Declaration {
-        node: try self.declarations.add(self.allocator, move node)
+        node: try self.declarations.add(self.allocator, move node),
+        span: null
     };
 }
 
@@ -760,16 +764,26 @@ fn (self: &var Ast) add_statement(node: StatementNode) -> !Statement {
     };
 }
 
-/// Records where the parser read a statement and returns the handle its
-/// Statement keeps.
-fn (self: &var Ast) add_statement_span(span: Span) -> !arena::Handle<Span> {
-    return self.statement_spans.add(self.allocator, span);
+/// Records where the parser read a statement or declaration and returns the
+/// handle it keeps.
+fn (self: &var Ast) add_span(span: Span) -> !arena::Handle<Span> {
+    return self.spans.add(self.allocator, span);
 }
 
 /// Returns where the parser read a statement; zero for one the compiler made.
 fn (self: &Ast) statement_span(statement: Statement) -> Span {
-    if statement.span |handle| {
-        return self.statement_spans.at(handle).*;
+    return self.span_at(statement.span);
+}
+
+/// Returns where the parser read a declaration, the Go `DeclarationSpan`;
+/// zero for one the compiler made.
+fn (self: &Ast) declaration_span(declaration: Declaration) -> Span {
+    return self.span_at(declaration.span);
+}
+
+fn (self: &Ast) span_at(handle: ?arena::Handle<Span>) -> Span {
+    if handle |found| {
+        return self.spans.at(found).*;
     }
     return zero_span();
 }
@@ -1474,7 +1488,7 @@ pub fn render_program(
         try append_declaration(allocator,
             &var out,
             ast,
-            Declaration { node: declaration.node }
+            Declaration { node: declaration.node, span: declaration.span }
         );
         index = index + 1;
     }
