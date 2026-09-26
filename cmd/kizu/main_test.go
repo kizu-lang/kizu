@@ -446,8 +446,8 @@ fn main() {
 	}
 	// The diagnostic names the file it points into, and that path is a temp dir
 	// here, so match the parts the test is actually about.
-	want := "error: move error: moved value `name` was used at "
-	if !strings.HasPrefix(out, want) || !strings.HasSuffix(out, ":16:11\n") {
+	want := "error: move error: moved value `name` was used\n  --> "
+	if !strings.HasPrefix(out, want) || !strings.Contains(out, ":16:11\n") {
 		t.Fatalf("got %q, want %q ... :16:11", out, want)
 	}
 }
@@ -478,8 +478,8 @@ fn main() {
 	}
 	// The diagnostic names the file it points into, and that path is a temp dir
 	// here, so match the parts the test is actually about.
-	want := "error: move error: moved value `name` was used at "
-	if !strings.HasPrefix(out, want) || !strings.HasSuffix(out, ":16:11\n") {
+	want := "error: move error: moved value `name` was used\n  --> "
+	if !strings.HasPrefix(out, want) || !strings.Contains(out, ":16:11\n") {
 		t.Fatalf("got %q, want %q ... :16:11", out, want)
 	}
 }
@@ -533,8 +533,8 @@ fn main() {
 	}
 	// The diagnostic names the file it points into, and that path is a temp dir
 	// here, so match the parts the test is actually about.
-	want := "error: move error: moved value `name` was used at "
-	if !strings.HasPrefix(out, want) || !strings.HasSuffix(out, ":14:11\n") {
+	want := "error: move error: moved value `name` was used\n  --> "
+	if !strings.HasPrefix(out, want) || !strings.Contains(out, ":14:11\n") {
 		t.Fatalf("got %q, want %q ... :14:11", out, want)
 	}
 }

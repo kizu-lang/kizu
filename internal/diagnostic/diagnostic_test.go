@@ -40,8 +40,14 @@ func TestFromTextKeepsADRPartsStructured(t *testing.T) {
 	if diag.Error() != want {
 		t.Fatalf("got %q, want %q", diag.Error(), want)
 	}
-	if diag.CLIError() != "error: "+want {
-		t.Fatalf("got %q, want %q", diag.CLIError(), "error: "+want)
+	// With no source text at hand, the CLI form still says where.
+	cli := "error: type error: operator `==` operands must have same type\n" +
+		" --> 6:14\n" +
+		" = note: left operand has type Color\n" +
+		" = note: right operand has type Animal\n" +
+		" = help: compare values of the same enum"
+	if diag.CLIError() != cli {
+		t.Fatalf("got %q, want %q", diag.CLIError(), cli)
 	}
 }
 
@@ -72,8 +78,32 @@ func TestWarningRendersSeverity(t *testing.T) {
 	if diag.Error() != want {
 		t.Fatalf("got %q, want %q", diag.Error(), want)
 	}
-	if diag.CLIError() != want {
-		t.Fatalf("got %q, want %q", diag.CLIError(), want)
+	cli := "warning: deprecated syntax will be removed\n --> 1:1"
+	if diag.CLIError() != cli {
+		t.Fatalf("got %q, want %q", diag.CLIError(), cli)
+	}
+}
+
+// TestCLIErrorShowsTheLineUnderAMarker renders the source line a span starts
+// on with carets under the span. Columns count bytes; the lead-in keeps tabs
+// and gives a multi-byte character one space.
+func TestCLIErrorShowsTheLineUnderAMarker(t *testing.T) {
+	sources := source.NewMap()
+	text := "fn main() -> void {\n\tlet \u00e9 = y;\n}\n"
+	id := sources.Add("src/main.kizu", text)
+	diag := New(SeverityError, "type error", ast.Span{
+		Source: id,
+		Start:  ast.Position{Line: 2, Column: 11},
+		End:    ast.Position{Line: 2, Column: 12},
+	}, "undefined variable `y`").WithHelp("declare `y` before this line")
+	want := "error: type error: undefined variable `y`\n" +
+		" --> src/main.kizu:2:11\n" +
+		"  |\n" +
+		"2 | \tlet \u00e9 = y;\n" +
+		"  | \t        ^\n" +
+		" = help: declare `y` before this line"
+	if got := diag.CLIError(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 
