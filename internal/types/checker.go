@@ -3108,6 +3108,17 @@ func missingMatchVariants(
 
 // checkExpr computes the static type of an expression.
 func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe unsafeMark) (Type, error) {
+	typ, err := c.checkExprForm(expr, env, unsafe)
+	if err != nil && !c.checkingStd() {
+		// The innermost expression that knows where it is and raised the
+		// diagnostic -- a call, an operator, a name -- is where to look.
+		err = diag.Locate(err, expressionSpan(expr))
+	}
+	return typ, err
+}
+
+// checkExprForm checks one expression by its form.
+func (c *Checker) checkExprForm(expr ast.Expression, env *scope, unsafe unsafeMark) (Type, error) {
 	switch e := expr.(type) {
 	case *ast.IntExpr, *ast.FloatExpr, *ast.StringExpr, *ast.BoolExpr, *ast.TypeExpr, *ast.NullExpr:
 		return c.checkScalarExpr(e)
