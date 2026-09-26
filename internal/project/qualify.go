@@ -238,7 +238,10 @@ func (c *graphChecker) qualifyBlock(
 	if block == nil {
 		return nil, nil
 	}
-	cp := &ast.BlockStmt{Statements: append([]ast.Statement(nil), block.Statements...)}
+	cp := &ast.BlockStmt{
+		StmtSpan:   block.StmtSpan,
+		Statements: append([]ast.Statement(nil), block.Statements...),
+	}
 	for idx, stmt := range cp.Statements {
 		qualified, err := c.qualifyStmt(module, stmt)
 		if err != nil {

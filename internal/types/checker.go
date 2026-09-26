@@ -1438,6 +1438,27 @@ func (c *Checker) checkStmt(
 	wantReturn Type,
 	unsafe unsafeMark,
 ) (bool, error) {
+	returns, err := c.checkStmtForm(stmt, env, wantReturn, unsafe)
+	return returns, c.locateStmt(err, stmt)
+}
+
+// locateStmt points a diagnostic that says no place at the statement it was
+// raised in. Not in a std body: annotateInstantiation gives that one the
+// program's own call, the line the reader can change.
+func (c *Checker) locateStmt(err error, stmt ast.Statement) error {
+	if c.checkingStd() {
+		return err
+	}
+	return diag.Locate(err, stmt.StatementSpan())
+}
+
+// checkStmtForm checks one statement by its form.
+func (c *Checker) checkStmtForm(
+	stmt ast.Statement,
+	env *scope,
+	wantReturn Type,
+	unsafe unsafeMark,
+) (bool, error) {
 	switch s := stmt.(type) {
 	case *ast.LetStmt:
 		return c.checkLetStmt(s, env, unsafe)
@@ -3241,6 +3262,16 @@ func (c *Checker) checkBlockValue(
 
 // checkStmtValue computes the value type of a statement in expression-tail position.
 func (c *Checker) checkStmtValue(stmt ast.Statement, env *scope, unsafe unsafeMark) (Type, error) {
+	typ, err := c.checkStmtValueForm(stmt, env, unsafe)
+	return typ, c.locateStmt(err, stmt)
+}
+
+// checkStmtValueForm computes a tail statement's value type by its form.
+func (c *Checker) checkStmtValueForm(
+	stmt ast.Statement,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
 	switch s := stmt.(type) {
 	case *ast.ExprStmt:
 		if s.Semicolon {

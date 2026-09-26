@@ -1,6 +1,7 @@
 package diagnostic
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -252,4 +253,17 @@ func splitFirstLine(defaultSeverity Severity, first string) (Severity, string, s
 		}
 	}
 	return defaultSeverity, "", first
+}
+
+// Locate gives err the span when it is a diagnostic that says no place. A
+// check deep inside a statement often knows what is wrong but not where, and
+// the statement it is in is where to look; a diagnostic that already points
+// somewhere keeps its place.
+func Locate(err error, span ast.Span) error {
+	var structured *Diagnostic
+	if err == nil || span.IsZero() || !errors.As(err, &structured) || !structured.Span.IsZero() {
+		return err
+	}
+	structured.Span = span
+	return err
 }
