@@ -774,6 +774,12 @@ fn (self: &var Parser) parse_error_set_reference(
     return try tree.add_text(move name);
 }
 
+// Reports whether one token's literal is text.
+fn token_literal_is(current: &token::Token, text: []u8) -> bool {
+    let bytes = current.literal.as_bytes();
+    return mem::equal_bytes(bytes, text);
+}
+
 // Appends one token's literal bytes to an owned spelling.
 fn append_token_literal(allocator: Allocator, name: &var string::String, current: &token::Token) -> !void {
     let bytes = current.literal.as_bytes();
@@ -3086,6 +3092,7 @@ fn (self: &var Parser) parse_type_node(
         Question => return self.parse_optional_type(builder),
         Function => return self.parse_func_type(builder, false),
         Unsafe => return self.parse_unsafe_func_type(builder),
+        Extern => return self.parse_extern_func_type(builder),
         Ident => return self.parse_named_type(builder),
         _ => {
             try self.error_token("expected type, got ", self.current_token());
@@ -3109,10 +3116,40 @@ fn (self: &var Parser) parse_unsafe_func_type(
     return self.parse_func_type(builder, true);
 }
 
+// parse_extern_func_type reads `extern "c" fn(...) -> T`: the address of a
+// function with the C calling convention, which is the one ABI a type can name.
+fn (self: &var Parser) parse_extern_func_type(
+    builder: &var typ::Builder
+) -> !?arena::Handle<typ::Node> {
+    if !try self.expect_peek(token::Kind::String) {
+        return null;
+    }
+    if !token_literal_is(self.current_token(), "c") {
+        try self.error_text("a function type names only the `c` ABI");
+        return null;
+    }
+    if self.peek_kind() != token::Kind::Function {
+        try self.error_token("expected `fn` after the ABI in a type, got ", self.peek_token());
+        return null;
+    }
+    try self.next_token();
+    return self.parse_func_type_with(builder, false, true);
+}
+
 // parse_func_type reads `fn(T, ...) -> R` with the current token on the `fn`.
 fn (self: &var Parser) parse_func_type(
     builder: &var typ::Builder,
     unsafe_call: bool
+) -> !?arena::Handle<typ::Node> {
+    return self.parse_func_type_with(builder, unsafe_call, false);
+}
+
+// parse_func_type_with reads the function pointer spelling once its ABI and
+// obligation are known.
+fn (self: &var Parser) parse_func_type_with(
+    builder: &var typ::Builder,
+    unsafe_call: bool,
+    c_abi: bool
 ) -> !?arena::Handle<typ::Node> {
     if self.peek_kind() != token::Kind::LParen {
         try self.error_token("expected `(` after `fn` in a type, got ", self.peek_token());
@@ -3155,7 +3192,8 @@ fn (self: &var Parser) parse_func_type(
         return try builder.add(typ::Node::Func(typ::Func {
             params: move params,
             result: result,
-            unsafe_call: unsafe_call
+            unsafe_call: unsafe_call,
+            c_abi: c_abi
         }));
     }
     params.deinit(self.allocator);

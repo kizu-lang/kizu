@@ -33,6 +33,7 @@ const (
 	typeResolutionMetaVariantNoPayload
 	typeResolutionMetaElementArity
 	typeResolutionMetaElementUnsupported
+	typeResolutionCFunction
 )
 
 // typeResolutionIssue carries copy values needed by the checker diagnostic
@@ -97,6 +98,9 @@ func typeResolutionError(issue typeResolutionIssue) error {
 		return errorf(
 			"type error: optional cannot wrap an error union `%s`; spell it `E!?T`",
 			issue.subject)
+	case typeResolutionCFunction:
+		return errorf(
+			"type error: `%s` passes `%s`, which C cannot name", issue.subject, issue.related)
 	default:
 		return metaTypeResolutionError(issue)
 	}
@@ -204,6 +208,13 @@ func (c *Checker) resolveFuncType(
 	}
 	if _, issue := c.resolveTypeNode(node.Result); issue.present() {
 		return "", issue
+	}
+	if node.ABI == "c" {
+		if refused := cFunctionPointerSignature(node); refused != "" {
+			return "", typeResolutionIssue{
+				kind: typeResolutionCFunction, subject: name, related: refused,
+			}
+		}
 	}
 	return name, typeResolutionIssue{}
 }

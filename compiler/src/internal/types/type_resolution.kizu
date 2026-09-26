@@ -18,6 +18,11 @@ struct TypeArityIssue {
     pub expected: i64,
 }
 
+struct CFunctionIssue {
+    pub subject: Type,
+    pub refused: Type,
+}
+
 struct MetaArityIssue {
     pub form: stdmeta::Form,
     pub expected: i64,
@@ -68,6 +73,7 @@ union TypeResolutionIssue {
     MetaVariantNoPayload(MetaFieldHandle),
     MetaElementArity,
     MetaElementUnsupported(Type),
+    CFunction(CFunctionIssue),
 }
 
 union TypeResolution {
@@ -340,6 +346,8 @@ fn (self: &var Checker) resolve_func_type(
     parsed: typ::Type,
     node: &typ::Func
 ) -> !TypeResolution {
+    var refused = empty_type();
+    var refuses = false;
     var index = 0;
     while node.params.get(index) |param| {
         index = index + 1;
@@ -349,12 +357,29 @@ fn (self: &var Checker) resolve_func_type(
             Issue(issue) => return TypeResolution::Issue(issue),
             Value(_) => {},
         }
+        if node.c_abi and !refuses and !c_host_scalar(&self.types, elem) {
+            refused = elem;
+            refuses = true;
+        }
     }
     let result_child = typ::child_type(parsed, node.result);
     let result = try self.types.retain_parsed(result_child);
     match try self.resolve_type_value(tree, result) {
         Issue(issue) => return TypeResolution::Issue(issue),
         Value(_) => {},
+    }
+    if node.c_abi and !refuses and !self.types.is_text(result, "void") and
+        !c_host_scalar(&self.types, result) {
+        refused = result;
+        refuses = true;
+    }
+    // A C function pointer passes only what C can name, as the C function
+    // it points at does.
+    if refuses {
+        return TypeResolution::Issue(TypeResolutionIssue::CFunction(CFunctionIssue {
+            subject: value,
+            refused: refused
+        }));
     }
     return TypeResolution::Value(value);
 }

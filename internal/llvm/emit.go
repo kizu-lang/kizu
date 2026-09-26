@@ -673,7 +673,7 @@ func (e *emitter) externalCallDecls() []string {
 				}
 				if instr.ExternABI != "" {
 					if instr.ExternABI == "c" {
-						seen[instr.ExternName] = e.externalCallDecl(instr.ExternName, instr)
+						seen[instr.ExternName] = e.externalDecl(instr)
 					}
 					continue
 				}
@@ -712,6 +712,30 @@ func cleanupInstruction(cleanup ir.Cleanup) *ir.Instr {
 		ExternABI:  cleanup.ExternABI,
 		ExternName: cleanup.ExternName,
 	}
+}
+
+// externalDecl declares the C symbol one instruction names. A call spells the
+// signature with its operands; taking the address spells it with the
+// `extern "c" fn(...)` type the address has.
+func (e *emitter) externalDecl(instr *ir.Instr) string {
+	if !strings.HasPrefix(instr.Op, "func.addr.") {
+		return e.externalCallDecl(instr.ExternName, instr)
+	}
+	parsed, err := typpkg.Parse(instr.Result.Type)
+	node, ok := parsed.(*typpkg.Func)
+	if err != nil || !ok {
+		return e.externalCallDecl(instr.ExternName, instr)
+	}
+	params := make([]string, 0, len(node.Params))
+	for _, param := range node.Params {
+		params = append(params, e.llvmType(typpkg.Text(param)))
+	}
+	return fmt.Sprintf(
+		"declare %s @%s(%s)",
+		e.llvmType(typpkg.Text(node.Result)),
+		llvmFunctionName(instr.ExternName),
+		strings.Join(params, ", "),
+	)
 }
 
 // externalCallDecl formats one external call declaration from typed IR operands.
@@ -1844,7 +1868,9 @@ func (e *emitter) writeCallableInstr(instr *ir.Instr) error {
 // instruction is emitted for it.
 func (e *emitter) writeFuncAddr(instr *ir.Instr) error {
 	name := strings.TrimPrefix(instr.Op, "func.addr.")
-	if !e.functionNames[name] {
+	if instr.ExternABI == "c" {
+		name = instr.ExternName
+	} else if !e.functionNames[name] {
 		return fmt.Errorf("llvm error: `%s` is not a declared function", name)
 	}
 	e.values[instr.Result.Name] = valueInfo{

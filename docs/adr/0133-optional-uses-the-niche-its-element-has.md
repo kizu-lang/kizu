@@ -39,6 +39,7 @@ handle は opaque な ID で等値比較しかされない(SPEC §10)ので、�
 ```text
 ?std::mem::Box<T>          ->  ptr    (null が不在)
 ?&T / ?&var T              ->  ptr    (null が不在)
+?fn(...) / ?extern "c" fn(...) -> ptr (null が不在。関数の address は null にならない)
 ?std::arena::Handle<T>     ->  i64    (0 が不在。handle は index + arena の origin)
 ?T (T が niche を持つ field を持つ struct) -> T
 その他の ?T                 ->  { i8, T }  (従来どおり)

@@ -1,5 +1,6 @@
 import compiler::internal::diagnostic;
 import compiler::internal::ir;
+import compiler::internal::typ;
 import std::array;
 import std::mem;
 import std::string;
@@ -57,6 +58,12 @@ fn (self: &var Emitter) write_call(module: &ir::Module, node: &ir::InstrNode) ->
 /// pointer in LLVM, so the value is the symbol itself and no instruction is
 /// emitted for it.
 fn (self: &var Emitter) write_func_addr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if module.names.is(node.extern_abi, "c") {
+        let symbol = try self.callee_symbol(module, node.extern_name);
+        let operand = try self.text1("@%s", Arg::Str(symbol));
+        try self.set_value(module, node.result, operand);
+        return null;
+    }
     if self.function_named(module, node.operand) |_| {
         let symbol = try self.callee_symbol(module, node.operand);
         let operand = try self.text1("@%s", Arg::Str(symbol));
@@ -361,6 +368,52 @@ fn (self: &var Emitter) task_invoke_thunk_name_bytes(type_name: []u8) -> !ir::Na
     errdefer out.deinit(self.allocator);
     try append_llvm_name_part(self.allocator, &var out, type_name);
     return self.names.intern_owned(move out);
+}
+
+/// Declares the C symbol one instruction names, the Go `externalDecl`. A call
+/// spells the signature with its operands; taking the address spells it with
+/// the `extern "c" fn(...)` type the address has.
+fn (self: &var Emitter) external_decl(module: &ir::Module, node: &ir::InstrNode) -> !string::String {
+    if node.op != ir::Op::FuncAddr {
+        return self.external_call_decl(module, node.extern_name, node);
+    }
+    let pointer = ir::name_text(&module.names, node.result.type_name);
+    let pointer_bytes = pointer.as_bytes();
+    let parsed = try self.types.parse(pointer_bytes);
+    var declared = array::new<typ::Type>(self.allocator);
+    defer declared.deinit(self.allocator);
+    var result = parsed;
+    match typ::root_node(&self.types, parsed) {
+        Func(func) => {
+            var index = 0;
+            while func.params.get(index) |param| {
+                index = index + 1;
+                try declared.append(self.allocator, typ::child_type(parsed, param));
+            }
+            result = typ::child_type(parsed, func.result);
+        },
+        _ => return self.external_call_decl(module, node.extern_name, node),
+    }
+    var params = array::new<string::String>(self.allocator);
+    defer params.deinit(self.allocator);
+    var index = 0;
+    while declared.get(index) |part| {
+        index = index + 1;
+        let param_type = try self.rendered_llvm_type(module, part);
+        try params.append(self.allocator, try self.names.copy(param_type));
+    }
+    let result_type = try self.rendered_llvm_type(module, result);
+    let symbol = try self.callee_symbol(module, node.extern_name);
+    let joined = try string::join(self.allocator, &params, ", ");
+    return self.sprint3("declare %s @%s(%s)", Arg::Str(result_type), Arg::Str(symbol), Arg::Owned(move joined));
+}
+
+/// Names the LLVM type of one parsed Kizu type.
+fn (self: &var Emitter) rendered_llvm_type(module: &ir::Module, value: typ::Type) -> !ir::Name {
+    let rendered = try typ::render(self.allocator, &self.types, value);
+    defer rendered.deinit(self.allocator);
+    let bytes = rendered.as_bytes();
+    return self.llvm_type(module, bytes);
 }
 
 /// Formats one external call declaration from typed IR operands, the Go

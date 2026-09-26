@@ -1026,7 +1026,8 @@ func (l *lowerer) declaredFunctionPointerType(
 	sig ast.FunctionSignature,
 	declaredReturn string,
 ) string {
-	node := &typ.Func{Unsafe: sig.RequiresUnsafe}
+	abi := sig.PointerABI()
+	node := &typ.Func{Unsafe: sig.RequiresUnsafe && abi == "", ABI: abi}
 	for _, param := range sig.Params {
 		parsed, err := typ.Parse(l.resolveType(typ.Text(param.TypeName)))
 		if err != nil {
@@ -2143,7 +2144,15 @@ func (l *lowerer) lowerIdentExpr(expr *ast.IdentExpr) (Value, error) {
 	// an instruction rather than a constant so the backend names the symbol
 	// once, in the one place that knows how symbols are spelled.
 	if name, sig, ok := l.functionByValueName(expr.Name); ok {
-		return l.emit("func.addr."+name, functionPointerType(sig), nil, ""), nil
+		value := l.emit("func.addr."+name, functionPointerType(sig), nil, "")
+		// A C function has no body here: its address is the symbol C
+		// defines, which the backend declares the way it declares a call.
+		if external, foreign := l.externDecls[name]; foreign {
+			instr := l.block.Instrs[len(l.block.Instrs)-1]
+			instr.ExternABI = external.abi
+			instr.ExternName = external.name
+		}
+		return value, nil
 	}
 	return Value{}, fmt.Errorf("ir error: undefined value `%s`", expr.Name)
 }
@@ -2417,7 +2426,7 @@ func (l *lowerer) lowerFuncPointerSignature(node *typ.Func) ([]Param, string, er
 // funcPointerNode parses a function pointer spelling, and reports whether the
 // text is one.
 func funcPointerNode(text string) (*typ.Func, bool) {
-	if !strings.HasPrefix(text, "fn(") && !strings.HasPrefix(text, "unsafe fn(") {
+	if !typ.IsFuncSpelling(text) {
 		return nil, false
 	}
 	parsed, err := typ.Parse(text)
