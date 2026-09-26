@@ -2,10 +2,8 @@
 
 ## 背景
 
-最初の並行 API(`std::task::Group`、`Channel<T>`、`Mutex<T>`、`Atomic<T>` など
-8 個の型と `std::io::threaded()`)は、checker rule だけがあって IR lowering も
-runtime も無かった。`kizu check` は通り、`kizu run` は落ちた。安全規則が実行で
-反証されないまま、同じ規則が 2 つの checker に 14 関数で手書きされていた。
+最初の並行 API(`std::task::Group`、`Channel<T>`、`Mutex<T>` など 8 個の型)は
+checker rule だけがあって runtime が無く、`kizu check` は通り `kizu run` は落ちた。
 これを撤回し、**実行系を先に作り、安全規則は動く thread の上でだけ書く**順番にした。
 
 ## 決定
@@ -14,13 +12,14 @@ thread API は `std::thread::Pool` の round だけにする(SPEC §15.3)。
 `each<T, E>` は `&var []T` を重ならない塊に切って pool の thread と呼び出し側で
 同時に処理し、全部の塊が終わってから返る。`each_lane` は一定間隔の要素の列(lane)を
 thread ごとの領域へ集めて連続した `&var []T` で渡し、返ったら書き戻す。
+`_with` 形は thread ごとの state `&var S` も渡す(表や scratch を塊ごとに作らない)。
 
 - thread は `init` で起こし、round の間は少し spin してから寝かせる。塊は round の
   tag 付きの ticket から数個ずつ取り、round は全部の塊が終わった時点で終わる
-- stack と lane の領域は渡された allocator から取る。stack には guard page を置く
+- stack と lane の領域は渡された allocator から取る(stack には guard page)
 - worker は `fn(&var []T, i64) -> E!void`。最初の失敗が round の戻り値になり、残りの
   塊は始めない。backend が set ごとの thunk で Kizu の ABI で呼び、error code を受け取る
-- `T` は view と `Io` / `Allocator` を含めない(`std::io::spawn` と同じ述語)
+- `T` と `S` は view と `Io` / `Allocator` を含めない(`std::io::spawn` と同じ述語)
 - wasm target は build 時に拒否する
 
 ## なぜこの形か
@@ -47,4 +46,7 @@ data race を型で防ぐ条件が、Kizu にはもう揃っている。closure 
 | wasm では 1 thread で走らせる | 隠れた fallback になる。並列を頼んだ program が黙って直列になる |
 | 失敗の型を set なしの `!void` にする | 呼び出し側が `catch` できず、set を宣言した関数から `try` できない。型引数を set に取れるようにした |
 | 失敗しない worker(`-> void`)も残す | 同じことに 2 つの書き方ができる |
+| 全 thread で読むだけの `&C` を共有する | 型引数と「thread 間で共有してよい型」の規則が増える。表は thread ごとに持てば足りる |
+| state を `&var []S` で受け取る | owner を要素に持つ view は作れない。plan のように memory を持つ state が渡せない |
+| state を必須にして `_with` を作らない | state の要らない worker にも空の state を書かせる |
 | runtime の C から worker を slice の値渡しで呼ぶ | target の aggregate ABI に頼る。slice は型によらず同じ {ptr, len} なので thunk 1 つで済む |

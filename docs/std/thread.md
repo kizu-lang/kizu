@@ -37,6 +37,7 @@ pub struct Pool { }
 pub fn cpu_count(io: Io) -> i64
 pub fn init(io: Io, allocator: Allocator, threads: i64) -> std::thread::Error!std::thread::Pool
 fn (self: Pool) deinit(allocator: Allocator) -> void
+pub fn (self: &Pool) threads() -> i64
 
 pub fn each<T, E>(
     pool: &var std::thread::Pool,
@@ -53,6 +54,24 @@ pub fn each_lane<T, E>(
     stride: i64,
     worker: fn(&var []T, i64) -> E!void
 ) -> E!void
+
+pub fn each_with<T, S, E>(
+    pool: &var std::thread::Pool,
+    data: &var []T,
+    chunk: i64,
+    states: &var std::array::Array<S>,
+    worker: fn(&var S, &var []T, i64) -> E!void
+) -> E!void
+
+pub fn each_lane_with<T, S, E>(
+    pool: &var std::thread::Pool,
+    allocator: Allocator,
+    data: &var []T,
+    length: i64,
+    stride: i64,
+    states: &var std::array::Array<S>,
+    worker: fn(&var S, &var []T, i64) -> E!void
+) -> E!void
 ```
 
 `cpu_count` は、この process がいま使える processor の数です。1 以上です。
@@ -60,7 +79,7 @@ pub fn each_lane<T, E>(
 `init` は**呼び出し側を数に含めて** `threads` 本の pool を作ります。起こすのは
 `threads - 1` 本で、呼び出し側も `each` の中で塊を処理します。`threads` が 1 なら
 thread を 1 本も起こさず、`each` は呼び出し側だけで走ります。1 から 1024 の外は
-panic です。thread の stack(8 MiB と、その下の guard page)は `allocator` から
+panic です。`threads()` はその数です。thread の stack(8 MiB と、その下の guard page)は `allocator` から
 取り、`deinit` が同じ allocator へ返します。
 
 thread は `init` で起こし、`each` の間は待たせておきます。1 回の `each` が短い
@@ -97,9 +116,44 @@ worker が返ったら元の位置へ書き戻します。そのため他の thr
 `length` か `stride` が 1 未満、または `data` の長さが block の整数倍でなければ
 panic です。
 
+## thread ごとの state: `each_with` / `each_lane_with`
+
+塊ごとに作り直したくないもの(表、scratch buffer)は、thread ごとの state として
+持たせます。`states` は pool の thread 数(`pool.threads()`)と同じ数の `S` を
+持つ Array で、worker は塊と一緒に、その塊を走らせている thread の `&var S` を
+受け取ります。1 つの state を使うのは 1 つの thread だけなので、worker は state を
+自由に書き換えられ、書いたものは次の塊や次の round に残ります。どの塊がどの state に
+当たるかは約束しません。
+
+```kizu
+// 列ごとの移動平均。平均を書く前の値を thread の scratch に取っておく
+struct Smoother { scratch: array::Array<f64> }
+
+fn smooth(state: &var Smoother, column: &var []f64, index: i64) -> Failure!void {
+    let before = state.scratch.as_mut_slice();
+    let n = mem::count<f64>(column);
+    for 0..n |i| {
+        before[i] = column[i];
+    }
+    for 1..n - 1 |i| {
+        column[i] = (before[i - 1] + before[i] + before[i + 1]) / 3.0;
+    }
+    return;
+}
+
+try thread::each_lane_with<f64, Smoother, Failure>(
+    &var pool, allocator, cells, rows, columns, &var smoothers, smooth);
+```
+
+`S` は memory を持ってよく(Array を field に持つ struct など)、`T` と同じく view と
+`Io` / `Allocator` は含められません。state の並びを `&var []S` ではなく Array で
+受け取るのは、owner を要素に持つ view は作れないためです(SPEC §7.1)。`states` の
+長さが `pool.threads()` でなければ panic です。それ以外は `each` / `each_lane` と
+同じです。
+
 ## worker に届くもの
 
-worker が触れるのは、渡された塊だけです。
+worker が触れるのは、渡された塊と、`_with` ならその thread の state だけです。
 
 - worker は top-level function なので、何も捕捉しません
 - 書き換えられる global はありません

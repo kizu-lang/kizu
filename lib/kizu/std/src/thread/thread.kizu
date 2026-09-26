@@ -8,6 +8,10 @@
 // reach is its own chunk and nothing else, and the borrow of the slice ends
 // when `each` returns, the way any call's does.
 //
+// A worker that needs something of its own across chunks -- a table, a
+// scratch buffer -- gets it from `each_with` / `each_lane_with`: one state
+// per thread, and a thread only ever holds its own.
+//
 // There are no handles to join, no channels and no locks here. ADR-0025
 // withdrew those shapes and set the order this follows: the thing that runs
 // comes first, and a rule is written only on top of it.
@@ -22,6 +26,7 @@ pub error Error {
 // returns their memory to the allocator the pool was made with.
 pub struct Pool {
     handle: i64,
+    count: i64,
 }
 
 // A pool thread runs the same code the caller does, so it gets the stack a
@@ -49,7 +54,14 @@ pub fn init(
     }
     let handle = try std::internal::builtin::thread_pool_new(
         allocator, threads, thread_stack_bytes());
-    return Pool { handle: handle };
+    return Pool { handle: handle, count: threads };
+}
+
+// threads is how many threads run a round, the caller included: the
+// `threads` the pool was made with, and how many states a round with states
+// takes.
+pub fn (self: &std::thread::Pool) threads() -> i64 {
+    return self.count;
 }
 
 fn (self: std::thread::Pool) deinit(allocator: Allocator) -> void {
@@ -77,6 +89,30 @@ pub fn each<T, E>(
         std::internal::builtin::panic("thread each: chunk must be at least 1");
     }
     try std::internal::builtin::thread_pool_each<T, E>(pool.handle, data, chunk, worker);
+    return;
+}
+
+// each_with is `each` whose worker also gets a state of its thread's:
+// `states` holds one per thread of the pool, and each thread passes its own
+// to every chunk it takes as `&var S`, so a state is never used by two
+// threads and may keep what the worker builds between chunks. Which chunks
+// meet which state is not promised. S may own memory -- a plan's tables, a
+// scratch buffer -- but holds no Io, Allocator, or view, like T. `states`
+// whose len is not `pool.threads()` is a panic.
+pub fn each_with<T, S, E>(
+    pool: &var std::thread::Pool,
+    data: &var []T,
+    chunk: i64,
+    states: &var std::array::Array<S>,
+    worker: fn(&var S, &var []T, i64) -> E!void
+) -> E!void {
+    if chunk < 1 {
+        std::internal::builtin::panic("thread each_with: chunk must be at least 1");
+    }
+    if states.len() != pool.count {
+        std::internal::builtin::panic("thread each_with: states must be one per thread");
+    }
+    try std::internal::builtin::thread_pool_each<T, S, E>(pool.handle, data, chunk, states, worker);
     return;
 }
 
@@ -112,5 +148,30 @@ pub fn each_lane<T, E>(
     }
     try std::internal::builtin::thread_pool_each_lane<T, E>(
         pool.handle, allocator, data, length, stride, worker);
+    return;
+}
+
+// each_lane_with is `each_lane` whose worker also gets a state of its
+// thread's, the way `each_with`'s does.
+pub fn each_lane_with<T, S, E>(
+    pool: &var std::thread::Pool,
+    allocator: Allocator,
+    data: &var []T,
+    length: i64,
+    stride: i64,
+    states: &var std::array::Array<S>,
+    worker: fn(&var S, &var []T, i64) -> E!void
+) -> E!void {
+    if length < 1 or stride < 1 {
+        std::internal::builtin::panic("thread each_lane_with: length and stride must be at least 1");
+    }
+    if std::mem::count<T>(data) % (length * stride) != 0 {
+        std::internal::builtin::panic("thread each_lane_with: data must be whole blocks of length * stride");
+    }
+    if states.len() != pool.count {
+        std::internal::builtin::panic("thread each_lane_with: states must be one per thread");
+    }
+    try std::internal::builtin::thread_pool_each_lane<T, S, E>(
+        pool.handle, allocator, data, length, stride, states, worker);
     return;
 }

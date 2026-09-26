@@ -3360,7 +3360,7 @@ std::set::Set<T>      後続 phase
 
 Kizu は `async fn` / `await` syntax を実装しません。thread handle / channel /
 mutex / atomic API も持ちません。複数 CPU で同時に走るのは `std::thread::Pool` の
-`each` だけです(§15.3、ADR-0025)。
+round だけです(§15.3、ADR-0025)。
 
 一方、**1 thread 上で待ちの間に別の worker を進める API は持ちます。**
 `std::io::Future` は caller の state を借りる 1 worker、`std::io::TaskSet` は move
@@ -3667,15 +3667,19 @@ stdio operation が `Io` capability を必ず要求し、I/O failure を error u
 `E!void` になり、それ以降の塊は始まりません。`std::thread::each_lane<T, E>` は同じことを
 飛び飛びの要素の列(lane)に対して行います。std が lane を thread ごとの領域に集めて
 連続した `&var []T` として worker に渡し、worker が返ったら元の位置へ書き戻します。
+`each_with<T, S, E>` / `each_lane_with<T, S, E>` は、pool の thread 数と同じ数の
+state を持つ `states: &var std::array::Array<S>` も受け取り、worker
+`fn(&var S, &var []T, i64) -> E!void` に、その呼び出しを走らせている thread の
+state を渡します。1 つの state を使うのは 1 つの thread だけです。
 API の形は `docs/std/thread.md` にあります。
 
 compiler が知っている規則は次の 2 つです。
 
-* `data` の借用は呼び出しの間だけです。thread に渡った塊が呼び出しより長く生きる
-  ことはないので、借用の規則は普通の呼び出しと同じです
-* `T` は view と `Io` / `Allocator` を含めません。2 つの塊に同じ capability が
-  複製されると、1 つの allocator や Io を 2 つの thread が同時に使うことになるため
-  です(`std::io::spawn` の state と同じ述語)
+* `data` と `states` の借用は呼び出しの間だけです。thread に渡った塊や state が
+  呼び出しより長く生きることはないので、借用の規則は普通の呼び出しと同じです
+* `T` と `S` は view と `Io` / `Allocator` を含めません。2 つの塊や state に同じ
+  capability が複製されると、1 つの allocator や Io を 2 つの thread が同時に使う
+  ことになるためです(`std::io::spawn` の state と同じ述語)
 
 worker は top-level function なので何も捕捉しません。書き換えられる global も
 無いので、worker が触れるのは渡された塊だけです。

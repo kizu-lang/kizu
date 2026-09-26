@@ -183,15 +183,17 @@ unguarded fallback. Crossing the boundary terminates the process before an
 out-of-range write and does not attempt to unwind on the exhausted stack.
 
 Kizu runs work in parallel through one pool call, `std::thread::each` or
-`each_lane` (SPEC §15.3, ADR-0025). It cuts a `&var []T` into chunks, or lanes
+`each_lane`, or their `_with` forms (SPEC §15.3, ADR-0025). It cuts a `&var []T` into chunks, or lanes
 of elements a fixed distance apart, that do not overlap, runs them on the pool's
 threads, and returns only after every one ran. A lane that is not contiguous is
-copied into the taking thread's own run and back. A worker is a
+copied into the taking thread's own run and back. The `_with` forms also hand
+the worker the state of the thread running it, one state per thread, lent
+from an Array for the call. A worker is a
 top-level function with no captures and there are no mutable globals, so a
-worker reaches its own chunk and nothing else; the slice's borrow ends when the
-call returns, as any call's does. The element type may not carry a view, an
-`Io`, or an `Allocator`, which would reach past its chunk or put one capability
-in two threads. There is no thread handle, channel, mutex, or atomic API.
+worker reaches its own chunk and its thread's state and nothing else; the
+borrows end when the call returns, as any call's does. The element and state
+types may not carry a view, an `Io`, or an `Allocator`, which would reach past
+its chunk or put one capability in two threads. There is no thread handle, channel, mutex, or atomic API.
 
 `std::fs`, `std::io`, and `std::process` keep requiring an explicit `Io`
 capability and return I/O failures as `!T` values that propagate through `try`.
@@ -246,7 +248,7 @@ memory-safety invariants to representative examples.
 | shared and mutable borrows cannot conflict | `examples/mutable_borrow.kizu` | `examples/negative/mut_borrow_conflict.kizu` |
 | shared borrow cannot mutate | | `examples/negative/shared_borrow_assignment.kizu` |
 | `&var v[a..b]` lends a range of a writable view and borrows the whole view | `examples/writable_subview.kizu` | `examples/negative/subview_shared_source.kizu`, `examples/negative/subview_source_read.kizu`, `examples/negative/subview_overlap_args.kizu`, `examples/negative/subview_shared_prefix.kizu`, `examples/negative/subview_escape.kizu` |
-| a pool round hands each thread a chunk or lane it alone holds, and nothing past the call | `examples/thread_each.kizu`, `examples/thread_each_lane.kizu`, `tests/behavior/src/thread/thread_test.kizu` | `examples/negative/thread_each_capability_element.kizu`, `examples/negative/thread_each_lane_capability_element.kizu`, `examples/negative/thread_pool_not_deinit.kizu` |
+| a pool round hands each thread a chunk or lane, and a state, it alone holds, and nothing past the call | `examples/thread_each.kizu`, `examples/thread_each_lane.kizu`, `examples/thread_each_with.kizu`, `tests/behavior/src/thread/thread_test.kizu` | `examples/negative/thread_each_capability_element.kizu`, `examples/negative/thread_each_lane_capability_element.kizu`, `examples/negative/thread_each_with_capability_state.kizu`, `examples/negative/thread_each_with_states_while_borrowed.kizu`, `examples/negative/thread_pool_not_deinit.kizu` |
 | `&var self` method requires a mutable receiver | `examples/mutable_self_method.kizu`, `tests/behavior/src/mutable_self_method/mutable_self_method_test.kizu` | `examples/negative/mutable_self_method_let_receiver.kizu` |
 | a call result receives a by-value method only as a copy value | `examples/method_on_call_result.kizu` | `examples/negative/method_on_call_result_borrow.kizu`, `examples/negative/method_on_call_result_mut.kizu`, `examples/negative/method_on_call_result_owner.kizu` |
 | arena construction requires explicit allocator | `examples/arena.kizu` | `examples/negative/arena_missing_allocator.kizu`, `examples/negative/arena_extra_allocator_arg.kizu`, `examples/negative/arena_non_allocator_arg.kizu` |
@@ -290,7 +292,7 @@ These are known areas to keep conservative:
 - Numeric casts and integer-width runtime semantics are incomplete.
 - Containers are `Array` / `Map` / `String` / `Arena` / `Box`; a general
   container contract for user-written ones does not exist yet.
-- Threads run only through `std::thread::each` and `each_lane` (ADR-0025).
+- Threads run only through the `std::thread::Pool` rounds (ADR-0025).
 - Raw pointer runtime operations are not implemented as a safe guarantee.
 
 Do not describe these areas as memory-safe until their invariants and regression

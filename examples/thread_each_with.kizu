@@ -1,0 +1,79 @@
+import std::array;
+import std::io;
+import std::mem;
+import std::thread;
+
+error Failure = thread::Error or mem::Error;
+
+// What one thread keeps between the chunks it takes: a table it built once,
+// and how many chunks it has looked up in it.
+struct Squares {
+    table: array::Array<i64>,
+    chunks: i64,
+}
+
+fn squares(allocator: Allocator) -> mem::Error!Squares {
+    var table = array::new<i64>(allocator);
+    errdefer table.deinit(allocator);
+    for 0..10 |i| {
+        try table.append(allocator, i * i);
+    }
+    return Squares { table: move table, chunks: 0 };
+}
+
+fn (self: Squares) deinit(allocator: Allocator) -> void {
+    self.table.deinit(allocator);
+    return;
+}
+
+// Replaces every digit of the chunk by its square, from the thread's table.
+fn square_chunk(state: &var Squares, chunk: &var []i64, index: i64) -> Failure!void {
+    for 0..mem::count<i64>(chunk) |i| {
+        chunk[i] = state.table.get_or_panic(chunk[i]);
+    }
+    state.chunks = state.chunks + 1;
+    return;
+}
+
+// `each_with` hands every worker call the state of the thread running it.
+// There is one state per thread, so a state is only ever written by one
+// thread, and it outlives the chunks: which chunks a thread took is not
+// promised, but together the states counted every one.
+fn main() -> Failure!void {
+    let allocator = mem::page_allocator();
+    var pool = try thread::init(io::blocking(), allocator, 4);
+    defer pool.deinit(allocator);
+
+    var states = array::new<Squares>(allocator);
+    defer states.deinit(allocator);
+    for 0..pool.threads() |_i| {
+        try states.append(allocator, try squares(allocator));
+    }
+    var digits = array::new<i64>(allocator);
+    defer digits.deinit(allocator);
+    for 0..20 |i| {
+        try digits.append(allocator, i % 10);
+    }
+
+    let data = digits.as_mut_slice();
+    try thread::each_with<i64, Squares, Failure>(&var pool, data, 3, &var states, square_chunk);
+    var line = 0;
+    for 0..10 |i| {
+        line = line + digits.get_or_panic(i);
+    }
+    print(line);
+    var chunks = 0;
+    for 0..states.len() |i| {
+        if states.at(i) |state| {
+            chunks = chunks + state.chunks;
+        }
+    }
+    print(chunks);
+    return;
+}
+
+// run
+// features: thread
+// output:
+// 285
+// 7

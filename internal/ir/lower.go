@@ -1709,27 +1709,34 @@ func (l *lowerer) lowerTaskSetSpawn(state string, args []ast.Expression) (Value,
 }
 
 // lowerThreadPoolRound lowers one pool round. `typeArgs` is the round's
-// `T, E`. The `&var []T` the wrapper was lent is a view value in IR; the
-// backend adds what T measures, which is how the runtime finds where each
-// chunk or lane starts, and the round returns the first failure as E.
+// `T, E` or `T, S, E`. The `&var []T` the wrapper was lent is a view value in
+// IR, and the states are the Array the wrapper was lent; the backend adds
+// what T and S measure, which is how the runtime finds where each chunk, lane
+// and state starts, and the round returns the first failure as E.
 func (l *lowerer) lowerThreadPoolRound(
 	name string,
 	typeArgs string,
 	args []ast.Expression,
 ) (Value, error) {
 	parts, err := typ.SplitArgs(typeArgs)
-	if err != nil || len(parts) != 2 {
-		return Value{}, fmt.Errorf("ir error: `%s` expects an element type and an error set", name)
+	if err != nil || (len(parts) != 2 && len(parts) != 3) {
+		return Value{}, fmt.Errorf(
+			"ir error: `%s` expects an element type, an optional state type and an error set", name)
 	}
-	elem, set := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
-	worker := Param{Type: "fn(&var []" + elem + ", i64) -> " + set + "!void"}
-	params := []Param{{Type: "i64"}, {Type: "[]" + elem}, {Type: "i64"}, worker}
+	elem, set := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[len(parts)-1])
+	params := []Param{{Type: "i64"}, {Type: "[]" + elem}, {Type: "i64"}}
 	if name == "std::internal::builtin::thread_pool_each_lane" {
 		params = []Param{
-			{Type: "i64"}, {Type: "Allocator"}, {Type: "[]" + elem},
-			{Type: "i64"}, {Type: "i64"}, worker,
+			{Type: "i64"}, {Type: "Allocator"}, {Type: "[]" + elem}, {Type: "i64"}, {Type: "i64"},
 		}
 	}
+	worker := "fn(&var []" + elem + ", i64) -> " + set + "!void"
+	if len(parts) == 3 {
+		state := strings.TrimSpace(parts[1])
+		params = append(params, Param{Type: "&var std::array::Array<" + state + ">"})
+		worker = "fn(&var " + state + ", &var []" + elem + ", i64) -> " + set + "!void"
+	}
+	params = append(params, Param{Type: worker})
 	values, err := l.lowerCallArgsAs(params, args)
 	if err != nil {
 		return Value{}, err

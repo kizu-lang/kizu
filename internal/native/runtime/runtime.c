@@ -2710,8 +2710,14 @@ struct KizuPool {
     /* The round. Written by the caller under the lock before it starts the
        round, and only read after that. */
     void *worker;
-    /* Calls the worker and answers its failure code, 0 for success. */
-    int64_t (*invoke)(void *, KizuSliceU8 *, int64_t);
+    /* Calls the worker and answers its failure code, 0 for success. The
+       second argument is the taking thread's state, NULL in a round that
+       has none. */
+    int64_t (*invoke)(void *, unsigned char *, KizuSliceU8 *, int64_t);
+    /* A round with states hands thread `participant` the state at
+       states + participant * state_size and no other. */
+    unsigned char *states;
+    int64_t state_size;
     unsigned char *base;
     int64_t len;
     int64_t elem_size;
@@ -2804,6 +2810,14 @@ static void kizu_pool_copy_strided(
     }
 }
 
+/* The state thread `participant` works with this round, or NULL. */
+static unsigned char *kizu_pool_state(KizuPool *pool, int64_t participant) {
+    if (!pool->states) {
+        return NULL;
+    }
+    return pool->states + participant * pool->state_size;
+}
+
 /* Runs one lane. A lane whose elements sit side by side is handed over where
    it is; any other is copied into this thread's scratch, handed over as one
    contiguous run, and copied back, so the worker sees an ordinary `&var []T`
@@ -2816,21 +2830,19 @@ static int64_t kizu_pool_run_lane(KizuPool *pool, int64_t participant, int64_t i
         pool->base + (block * pool->length * pool->stride + lane) * size;
     if (pool->stride == 1) {
         KizuSliceU8 part = {first, pool->length};
-        return pool->invoke(pool->worker, &part, index);
+        return pool->invoke(pool->worker, kizu_pool_state(pool, participant), &part, index);
     }
     unsigned char *scratch = pool->scratch + participant * pool->scratch_step;
     int64_t step = pool->stride * size;
     kizu_pool_copy_strided(scratch, size, first, step, pool->length, size);
     KizuSliceU8 part = {scratch, pool->length};
-    int64_t failure = pool->invoke(pool->worker, &part, index);
+    int64_t failure = pool->invoke(pool->worker, kizu_pool_state(pool, participant), &part, index);
     /* Copied back whether or not the worker failed: what it wrote before it
        failed stays, the way a chunk's writes do. */
     kizu_pool_copy_strided(first, step, scratch, size, pool->length, size);
     return failure;
 }
 
-/* Takes items until none are left. Every thread in the round, the caller
-   included, runs this. */
 /* Runs one item of the round in hand. */
 static int64_t kizu_pool_run_item(KizuPool *pool, int64_t participant, int64_t index) {
     if (pool->stride > 0) {
@@ -2842,7 +2854,7 @@ static int64_t kizu_pool_run_item(KizuPool *pool, int64_t participant, int64_t i
         count = pool->chunk;
     }
     KizuSliceU8 part = {pool->base + start * pool->elem_size, count};
-    return pool->invoke(pool->worker, &part, index);
+    return pool->invoke(pool->worker, kizu_pool_state(pool, participant), &part, index);
 }
 
 /* Records the round's first failure and takes every batch nobody has taken
@@ -2871,6 +2883,8 @@ static int64_t kizu_pool_fail(KizuPool *pool, uint64_t tag, int64_t failure, int
 /* Takes batches of the round tagged `tag` until none are left. The round's
    fields are read only after a batch is taken: the round cannot end, and the
    caller cannot write the next one, while that batch is not done. */
+/* Takes items until none are left. Every thread in the round, the caller
+   included, runs this. */
 static void kizu_pool_run_items(KizuPool *pool, int64_t participant, uint64_t tag) {
     uint64_t ticket = __atomic_load_n(&pool->ticket, __ATOMIC_ACQUIRE);
     for (;;) {
@@ -3097,26 +3111,47 @@ void std__internal__builtin__thread_pool_new(
     *out = kizu_ok_i64((int64_t)(intptr_t)pool);
 }
 
+/* Records the round's states: none, or exactly one per thread. The std
+   wrapper has checked the count; a round that got another is not run. */
+static int kizu_pool_take_states(KizuPool *pool, KizuArray *states, int64_t state_size) {
+    pool->states = NULL;
+    pool->state_size = 0;
+    if (!states) {
+        return 1;
+    }
+    if (states->len != pool->helper_count + 1) {
+        return 0;
+    }
+    pool->states = states->data;
+    pool->state_size = state_size;
+    return 1;
+}
+
 /* Runs one round: every chunk of `data` goes to `worker` once, on whichever
    thread takes it, until one fails. `data` arrives as the address of the
    caller's {ptr, len}; elem_size is what the backend measured T at, and
    `invoke` is the backend's thunk that calls a Kizu worker with its own ABI
-   and answers its failure code. The first failure is the round's result. */
+   and answers its failure code. The first failure is the round's result.
+   `states`, NULL for a round without them, is the Array holding one state
+   of `state_size` bytes per thread of the pool, the caller's first. */
 void std__internal__builtin__thread_pool_each(
     KizuErrorVoid *out,
     int64_t handle,
     KizuSliceU8 *data,
     int64_t elem_size,
     int64_t chunk,
+    KizuArray *states,
+    int64_t state_size,
     void *worker,
     void *invoke) {
     *out = kizu_ok_void();
     KizuPool *pool = kizu_pool_from(handle);
-    if (!pool || !data || !worker || !invoke || chunk < 1 || data->len <= 0) {
+    if (!pool || !data || !worker || !invoke || chunk < 1 || data->len <= 0 ||
+        !kizu_pool_take_states(pool, states, state_size)) {
         return;
     }
     pool->worker = worker;
-    pool->invoke = (int64_t (*)(void *, KizuSliceU8 *, int64_t))invoke;
+    pool->invoke = (int64_t (*)(void *, unsigned char *, KizuSliceU8 *, int64_t))invoke;
     pool->base = data->ptr;
     pool->len = data->len;
     pool->elem_size = elem_size;
@@ -3134,7 +3169,7 @@ void std__internal__builtin__thread_pool_each(
    each block holds `stride` lanes, and lane i of a block is its elements i,
    i + stride, ... The caller has checked that shape. A stride above 1 needs a
    scratch run of `length` elements per thread, bought from `allocator` for
-   the round and returned after it. */
+   the round and returned after it. `states` is each's. */
 void std__internal__builtin__thread_pool_each_lane(
     KizuErrorVoid *out,
     int64_t handle,
@@ -3143,12 +3178,15 @@ void std__internal__builtin__thread_pool_each_lane(
     int64_t elem_size,
     int64_t length,
     int64_t stride,
+    KizuArray *states,
+    int64_t state_size,
     void *worker,
     void *invoke) {
     *out = kizu_ok_void();
     KizuPool *pool = kizu_pool_from(handle);
     if (!pool || !data || !worker || !invoke || length < 1 || stride < 1 ||
-        data->len <= 0 || data->len % (length * stride) != 0) {
+        data->len <= 0 || data->len % (length * stride) != 0 ||
+        !kizu_pool_take_states(pool, states, state_size)) {
         return;
     }
     int64_t scratch_bytes = 0;
@@ -3165,7 +3203,7 @@ void std__internal__builtin__thread_pool_each_lane(
         }
     }
     pool->worker = worker;
-    pool->invoke = (int64_t (*)(void *, KizuSliceU8 *, int64_t))invoke;
+    pool->invoke = (int64_t (*)(void *, unsigned char *, KizuSliceU8 *, int64_t))invoke;
     pool->base = data->ptr;
     pool->len = data->len;
     pool->elem_size = elem_size;
