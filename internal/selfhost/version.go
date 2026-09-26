@@ -4,6 +4,7 @@
 package selfhost
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -68,7 +69,23 @@ func WriteVersionSource(root string) error {
 
 // repositoryVCS reads the revision, its time, and whether the tree carries
 // uncommitted changes, the three values Go stamps into a binary it builds.
+//
+// Go stamps them only where it finds the repository: a `.git` directory. A
+// linked worktree has a `.git` file instead, and `go build` there stamps
+// nothing, so the Go binary names itself `kizu devel`. Reading git anyway
+// would give the selfhost compiler a line the Go binary built from the same
+// tree does not print.
 func repositoryVCS(root string) (string, string, bool, error) {
+	info, err := os.Stat(filepath.Join(root, ".git"))
+	if errors.Is(err, os.ErrNotExist) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	if !info.IsDir() {
+		return "", "", false, nil
+	}
 	revision, err := gitOutput(root, "rev-parse", "HEAD")
 	if err != nil {
 		return "", "", false, err
@@ -91,12 +108,30 @@ func gitOutput(root string, args ...string) (string, error) {
 	command := exec.Command("git", args...)
 	command.Dir = root
 	// The commit time is asked for in local form, so pin the zone to UTC.
-	command.Env = append(os.Environ(), "TZ=UTC")
+	command.Env = append(RepositoryEnv(), "TZ=UTC")
 	out, err := command.Output()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// RepositoryEnv returns the environment with the variables that point git at
+// a repository removed, so a git command reads the repository of the
+// directory it runs in. A git hook runs with GIT_DIR set to the repository it was fired for,
+// and that would otherwise win over the directory the command runs in.
+func RepositoryEnv() []string {
+	env := []string{}
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		switch name {
+		case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+			"GIT_OBJECT_DIRECTORY", "GIT_PREFIX":
+			continue
+		}
+		env = append(env, entry)
+	}
+	return env
 }
 
 // kizuStringLiteral renders one text as a Kizu single-line literal. Kizu reads
