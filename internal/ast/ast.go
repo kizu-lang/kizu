@@ -41,6 +41,26 @@ type Node interface {
 type Statement interface {
 	Node
 	statementNode()
+	// StatementSpan is where the statement is in the source, from its first
+	// token to its last; zero for one the compiler made.
+	StatementSpan() Span
+}
+
+// StmtSpan carries a statement's place in the source. Every statement embeds
+// it and the parser fills it, so a diagnostic raised inside a statement can
+// point at the statement when nothing finer is known.
+type StmtSpan struct {
+	At Span
+}
+
+// StatementSpan returns where the parser read the statement.
+func (s *StmtSpan) StatementSpan() Span {
+	return s.At
+}
+
+// SetStatementSpan records where the parser read the statement.
+func (s *StmtSpan) SetStatementSpan(span Span) {
+	s.At = span
 }
 
 // Expression is implemented by nodes that produce a value.
@@ -511,6 +531,7 @@ func borrowPrefix(mutable bool) string {
 
 // BlockStmt represents a sequence of statements.
 type BlockStmt struct {
+	StmtSpan
 	Statements []Statement
 }
 
@@ -528,6 +549,7 @@ func (s *BlockStmt) String() string {
 
 // LetStmt represents a let or var declaration.
 type LetStmt struct {
+	StmtSpan
 	Mutable bool
 	Name    string
 	// TypeName is the type the binding declares, or nil when the initializer
@@ -555,6 +577,7 @@ func (s *LetStmt) String() string {
 
 // AssignStmt represents assignment to an existing binding.
 type AssignStmt struct {
+	StmtSpan
 	Target Expression
 	Value  Expression
 }
@@ -569,6 +592,7 @@ func (s *AssignStmt) String() string {
 
 // ReturnStmt represents an explicit return statement.
 type ReturnStmt struct {
+	StmtSpan
 	Value Expression
 }
 
@@ -585,6 +609,7 @@ func (s *ReturnStmt) String() string {
 
 // DeferStmt registers one cleanup expression for the current lexical block.
 type DeferStmt struct {
+	StmtSpan
 	Expr Expression
 }
 
@@ -599,6 +624,7 @@ func (s *DeferStmt) String() string {
 // ErrDeferStmt registers one cleanup expression that runs only when the current
 // lexical block exits through an error-return path.
 type ErrDeferStmt struct {
+	StmtSpan
 	Expr Expression
 }
 
@@ -612,6 +638,7 @@ func (s *ErrDeferStmt) String() string {
 
 // IfStmt represents a conditional branch.
 type IfStmt struct {
+	StmtSpan
 	Condition   Expression
 	Consequence *BlockStmt
 	Alternative *BlockStmt
@@ -640,6 +667,7 @@ func (s *IfStmt) String() string {
 
 // WhileStmt represents a loop guarded by a condition expression.
 type WhileStmt struct {
+	StmtSpan
 	Label     string
 	Condition Expression
 	Body      *BlockStmt
@@ -662,6 +690,7 @@ func (s *WhileStmt) String() string {
 
 // ForStmt represents a bounded integer range loop.
 type ForStmt struct {
+	StmtSpan
 	Label string
 	Name  string
 	Start Expression
@@ -684,6 +713,7 @@ func (s *ForStmt) String() string {
 
 // BreakStmt exits the nearest loop or a named enclosing loop.
 type BreakStmt struct {
+	StmtSpan
 	Label string
 }
 
@@ -700,6 +730,7 @@ func (s *BreakStmt) String() string {
 
 // ContinueStmt skips to the next iteration of the nearest or named loop.
 type ContinueStmt struct {
+	StmtSpan
 	Label string
 }
 
@@ -722,6 +753,7 @@ func (s *ContinueStmt) String() string {
 // the arms can bind the capture the arm body is written against. A match
 // written by hand carries neither.
 type MatchStmt struct {
+	StmtSpan
 	Value       Expression
 	Arms        []MatchArm
 	MetaCapture string
@@ -778,6 +810,7 @@ func (a MatchArm) String() string {
 
 // ComptimeIfStmt represents a branch selected during compilation.
 type ComptimeIfStmt struct {
+	StmtSpan
 	Condition   Expression
 	Consequence *BlockStmt
 	Alternative *BlockStmt
@@ -799,6 +832,7 @@ func (s *ComptimeIfStmt) String() string {
 // The list is a `std::meta` form, or a half-open integer range written as
 // Start..End with List nil, and Name binds one element per expansion.
 type ComptimeForStmt struct {
+	StmtSpan
 	List  Expression
 	Start Expression
 	End   Expression
@@ -825,6 +859,7 @@ func (s *ComptimeForStmt) String() string {
 // the body written once for every variant. Name binds the variant of the arm
 // being expanded, and Binding names the payload the way a match arm does.
 type ComptimeMatchStmt struct {
+	StmtSpan
 	Value   Expression
 	Name    string
 	Binding string
@@ -845,6 +880,7 @@ func (s *ComptimeMatchStmt) String() string {
 
 // ExprStmt wraps an expression used as a statement.
 type ExprStmt struct {
+	StmtSpan
 	Expr      Expression
 	Semicolon bool
 }

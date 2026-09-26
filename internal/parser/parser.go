@@ -869,8 +869,14 @@ func (p *Parser) parseStatement() ast.Statement {
 	// what makes a nested statement need its own comment rather than inherit.
 	enclosing := p.safety
 	p.safety = commentText(p.cur.Safety)
+	first := tokenSpan(p.cur)
 	stmt := p.parseStatementForm()
 	p.safety = enclosing
+	if stmt != nil {
+		last := tokenSpan(p.cur)
+		stmt.(interface{ SetStatementSpan(ast.Span) }).SetStatementSpan(
+			ast.Span{Source: first.Source, Start: first.Start, End: last.End})
+	}
 	return stmt
 }
 

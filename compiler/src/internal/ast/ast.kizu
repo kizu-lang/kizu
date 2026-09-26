@@ -32,6 +32,9 @@ pub struct Ast {
     pub declarations: arena::Arena<DeclarationNode>,
     pub expressions: arena::Arena<ExpressionNode>,
     pub statements: arena::Arena<StatementNode>,
+    /// Where the parser read each statement, kept once here so a Statement
+    /// handle carries 8 bytes for it rather than the span itself.
+    pub statement_spans: arena::Arena<Span>,
 }
 
 /// Is the root of one parsed Kizu source file.
@@ -49,9 +52,13 @@ pub struct Expression {
     pub node: arena::Handle<ExpressionNode>,
 }
 
-/// Identifies one statement retained by an Ast.
+/// Identifies one statement retained by an Ast, and where the parser read it
+/// from its first token to its last (null for one the compiler made), the Go
+/// `StmtSpan`: a diagnostic raised inside the statement can point at it when
+/// nothing finer is known. `Ast.statement_span` reads it.
 pub struct Statement {
     pub node: arena::Handle<StatementNode>,
+    pub span: ?arena::Handle<Span>,
 }
 
 /// Identifies one block retained by an Ast.
@@ -662,7 +669,8 @@ pub fn new(allocator: Allocator) -> Ast {
         expression_lists: arena::new<array::Array<Expression>>(allocator),
         declarations: arena::new<DeclarationNode>(allocator),
         expressions: arena::new<ExpressionNode>(allocator),
-        statements: arena::new<StatementNode>(allocator)
+        statements: arena::new<StatementNode>(allocator),
+        statement_spans: arena::new<Span>(allocator)
     };
 }
 
@@ -747,8 +755,23 @@ fn (self: &var Ast) add_expression(node: ExpressionNode) -> !Expression {
 /// Retains one statement node and returns its typed handle.
 fn (self: &var Ast) add_statement(node: StatementNode) -> !Statement {
     return Statement {
-        node: try self.statements.add(self.allocator, move node)
+        node: try self.statements.add(self.allocator, move node),
+        span: null
     };
+}
+
+/// Records where the parser read a statement and returns the handle its
+/// Statement keeps.
+fn (self: &var Ast) add_statement_span(span: Span) -> !arena::Handle<Span> {
+    return self.statement_spans.add(self.allocator, span);
+}
+
+/// Returns where the parser read a statement; zero for one the compiler made.
+fn (self: &Ast) statement_span(statement: Statement) -> Span {
+    if statement.span |handle| {
+        return self.statement_spans.at(handle).*;
+    }
+    return zero_span();
 }
 
 /// Retains one block and returns its typed handle.
@@ -788,7 +811,7 @@ fn (self: &var Ast) add_empty_block() -> !Block {
 
 /// Views a retained block as the statement node with the same identity.
 fn (self: Block) as_statement() -> Statement {
-    return Statement { node: self.node };
+    return Statement { node: self.node, span: null };
 }
 
 /// Reports whether a span has no source position.
@@ -1247,7 +1270,7 @@ fn append_block_value(
         try append_statement(allocator,
             out,
             ast,
-            Statement { node: statement.node }
+            Statement { node: statement.node, span: statement.span }
         );
         index = index + 1;
     }

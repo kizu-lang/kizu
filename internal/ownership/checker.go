@@ -835,6 +835,11 @@ func (c *Checker) checkBlock(block *ast.BlockStmt, env *scope) error {
 
 // checkStmt validates one statement.
 func (c *Checker) checkStmt(stmt ast.Statement, env *scope) error {
+	return diag.Locate(c.checkStmtForm(stmt, env), stmt.StatementSpan())
+}
+
+// checkStmtForm validates one statement by its form.
+func (c *Checker) checkStmtForm(stmt ast.Statement, env *scope) error {
 	switch s := stmt.(type) {
 	case *ast.LetStmt:
 		return c.checkLetStmt(s, env)
@@ -4858,6 +4863,16 @@ func (c *Checker) checkBlockValue(block *ast.BlockStmt, env *scope, moveTail boo
 
 // checkStmtValue checks a value-producing tail statement.
 func (c *Checker) checkStmtValue(stmt ast.Statement, env *scope, moveTail bool) (string, error) {
+	typ, err := c.checkStmtValueForm(stmt, env, moveTail)
+	return typ, diag.Locate(err, stmt.StatementSpan())
+}
+
+// checkStmtValueForm checks a tail statement by its form.
+func (c *Checker) checkStmtValueForm(
+	stmt ast.Statement,
+	env *scope,
+	moveTail bool,
+) (string, error) {
 	switch s := stmt.(type) {
 	case *ast.ExprStmt:
 		if s.Semicolon {
