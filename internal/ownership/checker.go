@@ -524,7 +524,7 @@ func (c *Checker) checkStructs(program *ast.Program) error {
 		public := make([]string, 0, len(st.Fields))
 		for _, field := range st.Fields {
 			if field.Borrow {
-				return errorf("borrow error: struct field `%s.%s` cannot store borrow",
+				return errorAt(field.Span, "borrow error: struct field `%s.%s` cannot store borrow",
 					st.Name, field.Name)
 			}
 			fields[field.Name] = stdmeta.ResolveElementTypeForms(fieldOwnershipType(field))

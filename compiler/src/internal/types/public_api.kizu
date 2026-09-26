@@ -85,7 +85,7 @@ fn check_public_struct_fields(tree: &ast::Ast, declaration: &ast::StructDecl,
     while declaration.fields.at(index) |field| {
         if field.public {
             let member = CollectionMemberIssue {
-                owner: declaration.name, member: field.name
+                owner: declaration.name, member: field.name, span: field.span
             };
             if declaration.requires_unsafe {
                 return PublicAPIIssue::UnsafeStructField(member);
@@ -108,7 +108,7 @@ fn check_public_union_variants(tree: &ast::Ast, declaration: &ast::UnionDecl,
     while declaration.variants.at(index) |variant| {
         if variant.payload |payload| {
             let member = CollectionMemberIssue {
-                owner: declaration.name, member: variant.name
+                owner: declaration.name, member: variant.name, span: ast::zero_span()
             };
             if reject_private_type(&tree.types, payload, private_names, PublicAPIContext::UnionVariant(member)) |issue| {
                 return issue;
@@ -336,10 +336,18 @@ fn (self: &Checker) public_api_diagnostic(tree: &ast::Ast,
     var value = try new_checker_diagnostic(self.allocator, category, move message);
     errdefer value.deinit(self.allocator);
     match issue {
-        UnsafeStructField(_) => try value.with_help(self.allocator,
-            "drop `pub` so only this file can break the invariant"
-        ),
-        _ => {},
+        UnsafeStructField(member) => {
+            try value.with_help(self.allocator,
+                "drop `pub` so only this file can break the invariant"
+            );
+            return diagnostic::locate(move value, member.span);
+        },
+        PrivateExposure(exposure) => {
+            match exposure.context {
+                Field(member) => return diagnostic::locate(move value, member.span),
+                _ => {},
+            }
+        },
     }
     return move value;
 }

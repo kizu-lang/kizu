@@ -577,6 +577,7 @@ func (p *Parser) parseStructField() (ast.Field, bool) {
 		return field, false
 	}
 	field.Name = p.cur.Literal
+	first := tokenSpan(p.cur)
 	if !p.expectPeek(token.Colon) {
 		return field, false
 	}
@@ -593,6 +594,7 @@ func (p *Parser) parseStructField() (ast.Field, bool) {
 	if field.TypeName == nil {
 		return field, false
 	}
+	field.Span = spanThrough(first, p.cur)
 	return field, true
 }
 
@@ -785,6 +787,8 @@ func (p *Parser) parseUnionVariant() (ast.UnionVariant, bool) {
 		return variant, false
 	}
 	variant.Name = p.cur.Literal
+	first := tokenSpan(p.cur)
+	variant.Span = first
 	if p.peek.Type != token.LParen {
 		return variant, true
 	}
@@ -794,6 +798,7 @@ func (p *Parser) parseUnionVariant() (ast.UnionVariant, bool) {
 	if variant.Payload == nil || !p.expectPeek(token.RParen) {
 		return variant, false
 	}
+	variant.Span = spanThrough(first, p.cur)
 	return variant, true
 }
 
@@ -817,6 +822,7 @@ func (p *Parser) parseParams() []ast.Param {
 			return params
 		}
 		param.Name = p.cur.Literal
+		first := tokenSpan(p.cur)
 		if !p.expectPeek(token.Colon) {
 			return params
 		}
@@ -833,6 +839,7 @@ func (p *Parser) parseParams() []ast.Param {
 		if param.TypeName == nil {
 			return params
 		}
+		param.Span = spanThrough(first, p.cur)
 		params = append(params, param)
 
 		if p.peek.Type != token.Comma {
@@ -2262,6 +2269,11 @@ func digitValue(ch byte) (int64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// spanThrough runs from the start of first to the end of last.
+func spanThrough(first ast.Span, last token.Token) ast.Span {
+	return ast.Span{Source: first.Source, Start: first.Start, End: tokenSpan(last).End}
 }
 
 // tokenSpan converts a token position into a half-open AST span.
