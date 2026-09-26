@@ -1,0 +1,104 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import std::string;
+
+// The second places a borrow or move diagnostic points at, the Go
+// `withBorrower` / `withMove` and the scope search behind them.
+
+/// Adds to a borrow conflict where the live borrow of value was taken, when a
+/// binding still holds it, the Go `withBorrower`: the reader sees both ends
+/// of the conflict. Of several holders the earliest in the source is named,
+/// so the answer does not depend on how the scope stores them.
+fn (self: &var Checker) with_borrower(
+    problem: diagnostic::Diagnostic,
+    env: ?ScopeHandle,
+    value: BindingHandle
+) -> !diagnostic::Diagnostic {
+    var located = move problem;
+    errdefer located.deinit(self.allocator);
+    let scope = env orelse return move located;
+    let holder = self.borrower_of(scope, value) orelse return move located;
+    var label = try string::from_bytes(self.allocator, "`");
+    defer label.deinit(self.allocator);
+    let target = name_text(&self.names, self.binding(value).name);
+    try label.append_string(self.allocator, target);
+    if self.binding(holder).mut_borrow {
+        try label.append_bytes(self.allocator, "` is mutably borrowed here by `");
+    } else {
+        try label.append_bytes(self.allocator, "` is borrowed here by `");
+    }
+    let holder_name = name_text(&self.names, self.binding(holder).name);
+    try label.append_string(self.allocator, holder_name);
+    try label.append_bytes(self.allocator, "`");
+    let bytes = label.as_bytes();
+    try located.with_related(self.allocator, self.binding(holder).decl_span, bytes);
+    return move located;
+}
+
+/// Answers a live binding that holds a borrow of target, searching the scope
+/// chain, or null when only a temporary holds it, the Go `scope.borrowerOf`.
+fn (self: &Checker) borrower_of(scope: ScopeHandle, target: BindingHandle) -> ?BindingHandle {
+    var found: ?BindingHandle = null;
+    var found_span = ast::zero_span();
+    var walker = self.store.walk(scope);
+    while walker.next(&self.store) |handle| {
+        if handle.node == target.node {
+            continue;
+        }
+        let value = self.binding(handle);
+        if value.decl_span.is_zero() or !borrows(value, target) {
+            continue;
+        }
+        var earlier = true;
+        if found |_| {
+            earlier = span_before(value.decl_span, found_span);
+        }
+        if earlier {
+            found = handle;
+            found_span = value.decl_span;
+        }
+    }
+    return found;
+}
+
+/// Reports whether value holds a live borrow of target, the Go
+/// `binding.borrows`.
+fn borrows(value: &Binding, target: BindingHandle) -> bool {
+    var index = 0;
+    while value.borrow_targets.get(index) |source| {
+        if source.target.node == target.node {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+/// Reports whether left starts before right in the source, the Go
+/// `spanBefore`.
+fn span_before(left: ast::Span, right: ast::Span) -> bool {
+    if left.start.line != right.start.line {
+        return left.start.line < right.start.line;
+    }
+    return left.start.column < right.start.column;
+}
+
+/// Adds to a use-after-move where the value was handed off, when that place
+/// is known, the Go `withMove`.
+fn (self: &var Checker) with_move(
+    tree: &ast::Ast,
+    problem: diagnostic::Diagnostic,
+    value: BindingHandle
+) -> !diagnostic::Diagnostic {
+    var located = move problem;
+    errdefer located.deinit(self.allocator);
+    let place = self.binding(value).moved_at orelse return move located;
+    var label = try string::from_bytes(self.allocator, "`");
+    defer label.deinit(self.allocator);
+    let name = name_text(&self.names, self.binding(value).name);
+    try label.append_string(self.allocator, name);
+    try label.append_bytes(self.allocator, "` was moved here");
+    let bytes = label.as_bytes();
+    try located.with_related(self.allocator, expression_span(tree, place), bytes);
+    return move located;
+}

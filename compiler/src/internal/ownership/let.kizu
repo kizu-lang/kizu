@@ -28,6 +28,33 @@ fn (self: &var Checker) check_let_stmt(
     env: ScopeHandle,
     statement: ast::LetStmt
 ) -> !?diagnostic::Diagnostic {
+    if try self.check_let_stmt_form(tree, env, statement) |failed| {
+        return move failed;
+    }
+    // Every form of `let` makes its binding here; the ones that did not say
+    // where take the initializer, which is what a later diagnostic about the
+    // binding -- where it borrowed a value -- points at, the Go `checkLetStmt`.
+    let retained = tree.texts.at(statement.name.node);
+    let name = retained.as_bytes();
+    if self.store.lookup_local(env, name) |handle| {
+        let known = self.binding(handle).decl_span;
+        if known.is_zero() {
+            let span = expression_span(tree, statement.value);
+            if self.store.binding_mut(handle) |value| {
+                value.decl_span = span;
+            }
+        }
+    }
+    return null;
+}
+
+/// Validates one `let` by the shape of its initializer, the Go
+/// `checkLetStmtForm`.
+fn (self: &var Checker) check_let_stmt_form(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    statement: ast::LetStmt
+) -> !?diagnostic::Diagnostic {
     if borrow_prefix(tree, statement.value) |borrow| {
         return self.check_borrow_let_stmt(tree, env, statement, borrow);
     }
@@ -399,7 +426,7 @@ fn (self: &var Checker) bind_borrow_sources(
 ) -> !?diagnostic::Diagnostic {
     var index = 0;
     while sources.get(index) |source| {
-        if try self.check_borrow_conflict_for_field(tree, source.target, source.field, mutable) |failed| {
+        if try self.check_borrow_conflict_for_field(tree, null, source.target, source.field, mutable) |failed| {
             return move failed;
         }
         try self.activate_borrow(source.target, source.field, mutable);
@@ -905,7 +932,7 @@ fn (self: &var Checker) check_string_view_let_stmt(
             Arg::Str(kind_name), Arg::Str(method), Arg::Str(kind_name)
         );
     }
-    if try self.check_borrow_conflict_for_field(tree, view.target, view.path, view.mutable) |failed| {
+    if try self.check_borrow_conflict_for_field(tree, env, view.target, view.path, view.mutable) |failed| {
         return move failed;
     }
     try self.activate_borrow(view.target, view.path, view.mutable);
@@ -1074,7 +1101,7 @@ fn (self: &var Checker) check_box_borrow_let_stmt(
     if try self.check_box_borrow_initializer_shape(tree, statement.value) |failed| {
         return move failed;
     }
-    if try self.check_borrow_conflict_for_field(tree, box.target, box.field, box.mutable) |failed| {
+    if try self.check_borrow_conflict_for_field(tree, env, box.target, box.field, box.mutable) |failed| {
         return move failed;
     }
     try self.activate_borrow(box.target, box.field, box.mutable);
@@ -1175,7 +1202,7 @@ fn (self: &var Checker) check_borrow_let_stmt(
         return move failed;
     }
     let mutable = text_equals(tree, borrow.operator, "&var");
-    if try self.check_borrow_conflict_for_field(tree, target.value, target.field, mutable) |failed| {
+    if try self.check_borrow_conflict_for_field(tree, env, target.value, target.field, mutable) |failed| {
         return move failed;
     }
     var type_name = empty_name();

@@ -21,7 +21,41 @@ fn (self: &var Checker) read_expr(
         // Go `readExpr`.
         return diagnostic::locate(move problem, expression_span(tree, expression));
     }
+    try self.note_method_consume(tree, env, expression);
     return null;
+}
+
+/// Records where a method call consumed its receiver -- `values.deinit(...)`,
+/// `stream.close()` -- so a later use of it can point back at the call, the
+/// Go `noteMethodConsume`. The method checks mark the binding moved without
+/// knowing where the call is; the call is known here.
+fn (self: &var Checker) note_method_consume(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    expression: ast::Expression
+) -> !void {
+    match tree.expressions.at(expression.node) {
+        Call(call) => {
+            match tree.expressions.at(call.callee.node) {
+                Field(field) => {
+                    match tree.expressions.at(field.receiver.node) {
+                        Ident(ident) => {
+                            let value = self.lookup_text(tree, env, ident.name) orelse return;
+                            if self.binding(value).moved {
+                                if self.binding(value).moved_at |_| {} else {
+                                    try self.store.set_moved_at(value, call.callee);
+                                }
+                            }
+                        },
+                        _ => {},
+                    }
+                },
+                _ => {},
+            }
+        },
+        _ => {},
+    }
+    return;
 }
 
 /// Reads one expression by its form, the Go `readExprForm`.
@@ -565,7 +599,8 @@ fn (self: &var Checker) move_place_expr(
     }
     let ident = ident_expr(tree, expression) orelse return self.move_non_ident_expr(tree, env, expression, out);
     if self.lookup_text(tree, env, ident.name) |value| {
-        return self.move_bound_ident(tree, env, ident, value, self.returned_view(expression), handed_off, out);
+        return self.move_bound_ident(
+            tree, env, expression, ident, value, self.returned_view(expression), handed_off, out);
     }
     if text_equals(tree, ident.name, "void") {
         return try self.error0(ident.span, "move error: void is not a value");
@@ -585,6 +620,7 @@ fn (self: &var Checker) move_place_expr(
 fn (self: &var Checker) move_bound_ident(
     tree: &var ast::Ast,
     env: ScopeHandle,
+    place: ast::Expression,
     ident: ast::IdentExpr,
     value: BindingHandle,
     returned: bool,
@@ -595,7 +631,8 @@ fn (self: &var Checker) move_bound_ident(
         return move failed;
     }
     if self.binding(value).moved {
-        return try self.error1(tree, ident.span, "move error: moved value `%s` was used", Arg::Text(ident.name));
+        let problem = try self.error1(tree, ident.span, "move error: moved value `%s` was used", Arg::Text(ident.name));
+        return try self.with_move(tree, move problem, value);
     }
     if self.binding(value).borrowed_param and !returned {
         return try self.error1(tree, ident.span, "borrow error: borrowed value `%s` cannot escape", Arg::Text(ident.name));
@@ -631,9 +668,10 @@ fn (self: &var Checker) move_bound_ident(
         );
     }
     if self.store.has_any_borrow(value) {
-        return try self.error1(
+        let problem = try self.error1(
             tree, ident.span, "borrow error: value `%s` cannot be moved while borrowed", Arg::Text(ident.name)
         );
+        return try self.with_borrower(move problem, env, value);
     }
     if try self.partially_consumed_field(value) |field| {
         return try self.error3(
@@ -646,6 +684,7 @@ fn (self: &var Checker) move_bound_ident(
         return move failed;
     }
     try self.store.set_moved(value, true);
+    try self.store.set_moved_at(value, place);
     try self.release_consumed_borrows(value);
     handed_off.* = true;
     return null;

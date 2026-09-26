@@ -62,6 +62,10 @@ pub struct Binding {
     pub owns_tied: bool,
     pub defer_cleanup: bool,
     pub decl_span: ast::Span,
+    /// The expression that handed the value off, when that place is known; a
+    /// use after the move points back at it, the Go `movedAt`. The handle is
+    /// 8 bytes where a span is 48, and a binding is copied with every scope.
+    pub moved_at: ?ast::Expression,
     // field_owner and field_owner_name link a direct-field receiver
     // projection back to the owner binding and its field.
     pub field_owner: ?BindingHandle,
@@ -139,6 +143,7 @@ fn (self: &ScopeStore) blank_binding(id: i64, name: Name, type_name: Name) -> Bi
         owns_tied: false,
         defer_cleanup: false,
         decl_span: ast::zero_span(),
+        moved_at: null,
         field_owner: null,
         field_owner_name: empty_name()
     };
@@ -580,6 +585,7 @@ fn (self: &ScopeStore) clone_binding(handle: BindingHandle) -> !Binding {
         owns_tied: value.owns_tied,
         defer_cleanup: value.defer_cleanup,
         decl_span: value.decl_span,
+        moved_at: value.moved_at,
         field_owner: value.field_owner,
         field_owner_name: value.field_owner_name
     };
@@ -625,9 +631,13 @@ fn (self: &var ScopeStore) merge_moved_from(scope: ScopeHandle, other: ScopeHand
 
 fn (self: &var ScopeStore) merge_binding(target: BindingHandle, value: BindingHandle) -> !void {
     let moved = self.at(value).moved;
+    let moved_at = self.at(value).moved_at;
     let deinitialized = self.at(value).deinitialized;
     if moved {
         try self.set_moved(target, true);
+        if self.at(target).moved_at |_| {} else if moved_at |place| {
+            try self.set_moved_at(target, place);
+        }
     }
     if deinitialized {
         try self.set_deinitialized(target, true);
@@ -665,6 +675,14 @@ fn (self: &var ScopeStore) mark_field_deinit_from(target: BindingHandle, source:
 fn (self: &var ScopeStore) set_moved(handle: BindingHandle, moved: bool) -> !void {
     if self.binding_mut(handle) |value| {
         value.moved = moved;
+    }
+    return;
+}
+
+/// Records the expression that handed a binding off, the Go `movedAt`.
+fn (self: &var ScopeStore) set_moved_at(handle: BindingHandle, place: ast::Expression) -> !void {
+    if self.binding_mut(handle) |value| {
+        value.moved_at = place;
     }
     return;
 }

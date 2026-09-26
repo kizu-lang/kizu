@@ -46,6 +46,9 @@ func nestedExpressionSpan(expr ast.Expression) ast.Span {
 		return expressionSpan(e.Callee)
 	case *ast.TryExpr:
 		return expressionSpan(e.Value)
+	case *ast.PrefixExpr:
+		// `&users` has no span of its own; the place it borrows is where.
+		return expressionSpan(e.Right)
 	case *ast.IndexExpr:
 		return firstNonZeroSpan(e.Target, e.Index, e.Start, e.End)
 	case *ast.StructLiteralExpr:

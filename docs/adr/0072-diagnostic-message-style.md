@@ -33,6 +33,8 @@ error: <category>: <summary>                        # CLI(CLIError)
   `expected ..., got ...`
 - summary は 1 行で原因を直接書く。期待と実際は `expects <want>, got <got>`
 - `note:` は判断の理由だけ、`help:` は次の行動が明確なときだけ
+- 原因が別の行にある diagnostic は、その場所をラベル付きで併記する(`-` の下線)。
+  借用の衝突は「どの束縛がどこで借りたか」、use-after-move は「どこで move したか」
 - 検査が位置を知らない diagnostic は、それが起きた文(最初の token から最後まで)を
   指す。std の body の中では指さず、呼び出した program の行に任せる
 - 検査が位置を知らない diagnostic は、それが起きた宣言を指す
@@ -50,4 +52,6 @@ error: <category>: <summary>                        # CLI(CLIError)
 | marker を byte 数だけ空白で揃える | 多 byte の文字の後ろでずれる。文字ごとに 1 つにする |
 | 位置の無い診断を一括で直してから検査を入れる | 直している間に新しい位置無しが入る。検査と、減るだけの例外一覧を先に置いた(一覧は 273 件から 0 件になって消した) |
 | Kizu の `Statement` handle に `Span` を直接持たせる | handle が 8 byte から 56 byte になり、写しのたびに増えて 1 文あたり約 580 byte、`check compiler` で +65MB。Span は Ast の arena に 1 回だけ置き、handle は 8 byte の参照を持つ(+7MB) |
+| 安定した error code と `kizu explain` | 文言が 700 種あり、code と説明文を保守する費用に見合わない。位置とラベルで足りる |
+| Kizu の束縛に move した位置の span を持たせる | 束縛は scope ごとに複製され、`check compiler` が +23MB。式の 8 byte handle を持ち、報告時に span にする(+4.5MB) |
 | `Error()` も CLI の形にする | LSP は range を別に持ち、test oracle は 1 行目で照合している |

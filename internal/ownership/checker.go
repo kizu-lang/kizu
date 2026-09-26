@@ -1,6 +1,7 @@
 package ownership
 
 import (
+	"errors"
 	"fmt"
 	diag "github.com/kizu-lang/kizu/internal/diagnostic"
 	"strconv"
@@ -184,6 +185,9 @@ type binding struct {
 	ownsTied     bool
 	deferCleanup bool
 	declSpan     ast.Span
+	// movedAt is where the value was handed off, when that place is known;
+	// a use after the move points back at it.
+	movedAt ast.Span
 	// fieldOwner and fieldOwnerName link a direct-field receiver projection
 	// back to the owner binding and its field, so a call-duration receiver
 	// borrow lands where argument borrows of the same place land.
@@ -1681,6 +1685,20 @@ func (c *Checker) borrowedReturnAllowed(name string, value *binding) bool {
 
 // checkLetStmt moves the initializer into a new binding when needed.
 func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
+	if err := c.checkLetStmtForm(stmt, env); err != nil {
+		return err
+	}
+	// Every form of `let` makes its binding here; the ones that did not say
+	// where take the initializer, which is what a later diagnostic about the
+	// binding -- where it borrowed a value -- points at.
+	if value, ok := env.values[stmt.Name]; ok && value.declSpan.IsZero() {
+		value.declSpan = expressionSpan(stmt.Value)
+	}
+	return nil
+}
+
+// checkLetStmtForm validates one `let` by the shape of its initializer.
+func (c *Checker) checkLetStmtForm(stmt *ast.LetStmt, env *scope) error {
 	if borrow, ok := borrowPrefix(stmt.Value); ok {
 		return c.checkBorrowLetStmt(stmt, borrow, env)
 	}
@@ -1961,7 +1979,7 @@ func (c *Checker) bindBorrowSources(
 	mutable bool,
 ) error {
 	for _, source := range sources {
-		if err := checkBorrowConflictForField(source.target, source.field, mutable); err != nil {
+		if err := checkBorrowConflictForField(nil, source.target, source.field, mutable); err != nil {
 			return err
 		}
 		c.activateBorrow(source.target, source.field, mutable)
@@ -2351,7 +2369,7 @@ func (c *Checker) checkStringViewLetStmt(
 		return errorf("string error: `%s.%s` requires mutable %s binding",
 			kind, viewMethodName(stmt.Value), kind)
 	}
-	if err := checkBorrowConflictForField(target, path, mutable); err != nil {
+	if err := checkBorrowConflictForField(env, target, path, mutable); err != nil {
 		return err
 	}
 	c.activateBorrow(target, path, mutable)
@@ -2671,10 +2689,10 @@ func (c *Checker) tieContainerBorrowCapture(
 			return nil, errorf("move error: unknown value `%s`", target.name)
 		}
 		if target.field != "" {
-			if err := checkBorrowConflictForField(holder, target.field, target.mutable); err != nil {
+			if err := checkBorrowConflictForField(nil, holder, target.field, target.mutable); err != nil {
 				return nil, err
 			}
-		} else if err := checkBorrowConflict(holder, target.mutable); err != nil {
+		} else if err := checkBorrowConflict(nil, holder, target.mutable); err != nil {
 			return nil, err
 		}
 		c.activateBorrow(holder, target.field, target.mutable)
@@ -2699,7 +2717,7 @@ func (c *Checker) checkBoxBorrowLetStmt(
 	if err := c.checkBoxBorrowInitializerShape(stmt.Value); err != nil {
 		return err
 	}
-	if err := checkBorrowConflictForField(target, field, mutable); err != nil {
+	if err := checkBorrowConflictForField(env, target, field, mutable); err != nil {
 		return err
 	}
 	c.activateBorrow(target, field, mutable)
@@ -2776,7 +2794,7 @@ func (c *Checker) checkBorrowLetStmt(
 		return err
 	}
 	mutable := borrow.Operator == "&var"
-	if err := checkBorrowConflictForField(target, field, mutable); err != nil {
+	if err := checkBorrowConflictForField(env, target, field, mutable); err != nil {
 		return err
 	}
 	typeName, err := c.readExpr(borrow.Right, env)
@@ -2895,8 +2913,8 @@ func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope) error {
 			return err
 		}
 		if target.hasAnyBorrow() {
-			return errorf("borrow error: value `%s` cannot be assigned while borrowed",
-				target.name)
+			return withBorrower(errorf("borrow error: value `%s` cannot be assigned while borrowed",
+				target.name), env, target)
 		}
 		// Overwriting a live owner silently drops it (ADR-0091). A `&var`
 		// parameter always points at a live value the caller still owns, so
@@ -3530,7 +3548,7 @@ func (c *Checker) tieViewCapture(
 		return err
 	}
 	for _, source := range sources {
-		if err := checkBorrowConflictForField(source.target, source.field, false); err != nil {
+		if err := checkBorrowConflictForField(env, source.target, source.field, false); err != nil {
 			return err
 		}
 		c.activateBorrow(source.target, source.field, false)
@@ -3929,10 +3947,11 @@ func (c *Checker) consumeMovedFromScrutinee(
 		return nil
 	}
 	if owner.hasAnyBorrow() {
-		return errorAt(expressionSpan(stmt.Value),
-			"borrow error: value `%s` cannot be moved while borrowed", owner.name)
+		return withBorrower(errorAt(expressionSpan(stmt.Value),
+			"borrow error: value `%s` cannot be moved while borrowed", owner.name), env, owner)
 	}
 	owner.moved = true
+	owner.movedAt = expressionSpan(stmt.Value)
 	return nil
 }
 
@@ -3961,6 +3980,7 @@ func (c *Checker) consumeOwnerUnionReceiver(value ast.Expression, env *scope) {
 	}
 	if self, found := env.lookup(ident.Name); found {
 		self.moved = true
+		self.movedAt = ident.Span
 	}
 }
 
@@ -4035,14 +4055,14 @@ func (c *Checker) tieMatchPayloadReference(
 		if !holder.borrowedParam || !holder.mutBorrow {
 			return false, nil
 		}
-		if err := checkBorrowConflict(holder, true); err != nil {
+		if err := checkBorrowConflict(nil, holder, true); err != nil {
 			return false, err
 		}
 	} else {
 		if !holder.mutable && !(holder.borrowedParam && holder.mutBorrow) {
 			return false, nil
 		}
-		if err := checkBorrowConflictForField(holder, path, true); err != nil {
+		if err := checkBorrowConflictForField(nil, holder, path, true); err != nil {
 			return false, err
 		}
 	}
@@ -4137,9 +4157,34 @@ func (c *Checker) matchTags(typeName string) (map[string]bool, map[string]string
 // readExpr checks an expression without consuming owned values.
 func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 	typeName, err := c.readExprForm(expr, env)
+	if err == nil {
+		noteMethodConsume(expr, env)
+	}
 	// The innermost expression that knows where it is and raised the
 	// diagnostic -- a call, an operator, a name -- is where to look.
 	return typeName, diag.Locate(err, expressionSpan(expr))
+}
+
+// noteMethodConsume records where a method call consumed its receiver --
+// `values.deinit(allocator)`, `stream.close()` -- so a later use of it can
+// point back at the call. The method checks mark the binding moved without
+// knowing where the call is; the call is known here.
+func noteMethodConsume(expr ast.Expression, env *scope) {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return
+	}
+	method, ok := call.Callee.(*ast.FieldExpr)
+	if !ok {
+		return
+	}
+	receiver, ok := method.Receiver.(*ast.IdentExpr)
+	if !ok {
+		return
+	}
+	if value, found := env.lookup(receiver.Name); found && value.moved && value.movedAt.IsZero() {
+		value.movedAt = expressionSpan(method)
+	}
 }
 
 // readExprForm reads one expression by its form.
@@ -4547,7 +4592,7 @@ func checkMovePlaceBinding(ident *ast.IdentExpr, value *binding, env *scope, ret
 		return err
 	}
 	if value.moved {
-		return errorAt(ident.Span, "move error: moved value `%s` was used", ident.Name)
+		return withMove(errorAt(ident.Span, "move error: moved value `%s` was used", ident.Name), value)
 	}
 	if value.borrowedParam && !returned {
 		return errorAt(ident.Span,
@@ -4600,8 +4645,8 @@ func (c *Checker) movePlaceExpr(expr ast.Expression, env *scope) (string, bool, 
 			ident.Name)
 	}
 	if value.hasAnyBorrow() {
-		return "", false, errorAt(ident.Span,
-			"borrow error: value `%s` cannot be moved while borrowed", ident.Name)
+		return "", false, withBorrower(errorAt(ident.Span,
+			"borrow error: value `%s` cannot be moved while borrowed", ident.Name), env, value)
 	}
 	if field, ok := partiallyConsumedField(value); ok {
 		return "", false, errorAt(ident.Span,
@@ -4612,6 +4657,7 @@ func (c *Checker) movePlaceExpr(expr ast.Expression, env *scope) (string, bool, 
 		return "", false, err
 	}
 	value.moved = true
+	value.movedAt = ident.Span
 	releaseConsumedBorrows(value)
 	return value.typeName, true, nil
 }
@@ -7750,7 +7796,7 @@ func (c *Checker) consumeOwnerField(expr *ast.FieldExpr, env *scope) error {
 			root.typeName, expr.String())
 	}
 	if root.moved || root.deinitialized {
-		return errorAt(expr.Span, "move error: moved value `%s` was used", root.name)
+		return withMove(errorAt(expr.Span, "move error: moved value `%s` was used", root.name), root)
 	}
 	if err := c.checkLazyDefaultConsume(root.name+"."+path, "handed off", expr.Span); err != nil {
 		return err
@@ -7775,7 +7821,8 @@ func (c *Checker) checkAssignmentBorrowConflict(expr ast.Expression, env *scope)
 	}
 	if field == "" {
 		if root.hasAnyBorrow() {
-			return errorf("borrow error: value `%s` cannot be assigned while borrowed", root.name)
+			return withBorrower(errorf("borrow error: value `%s` cannot be assigned while borrowed",
+				root.name), env, root)
 		}
 		return nil
 	}
@@ -7788,8 +7835,8 @@ func (c *Checker) checkAssignmentBorrowConflict(expr ast.Expression, env *scope)
 	}
 	if overlappingFieldCount(root.fieldBorrows, field) > 0 ||
 		overlappingFieldCount(root.fieldMutBorrows, field) > 0 {
-		return errorf("borrow error: field `%s.%s` cannot be assigned while borrowed",
-			root.name, field)
+		return withBorrower(errorf("borrow error: field `%s.%s` cannot be assigned while borrowed",
+			root.name, field), env, root)
 	}
 	return nil
 }
@@ -8040,7 +8087,7 @@ func (c *Checker) checkArenaAtReceiverMethod(
 	if err != nil || !ok {
 		return "", ok, err
 	}
-	if err := checkBorrowConflictForField(source.target, source.field, false); err != nil {
+	if err := checkBorrowConflictForField(env, source.target, source.field, false); err != nil {
 		return "", true, err
 	}
 	c.activateBorrow(source.target, source.field, false)
@@ -8074,7 +8121,8 @@ func (c *Checker) checkLocalReceiverMethod(
 			receiver.Name)
 	}
 	if arena.moved {
-		return "", errorAt(receiver.Span, "move error: moved value `%s` was used", receiver.Name)
+		return "", withMove(
+			errorAt(receiver.Span, "move error: moved value `%s` was used", receiver.Name), arena)
 	}
 	if base, ok := stdContainerBase(arena.typeName); ok {
 		return c.checkStdMethodCall(arena, base, field.Name, args, env)
@@ -8182,8 +8230,8 @@ func (c *Checker) directFieldReceiver(
 		return nil, err
 	}
 	if owner.moved {
-		return nil, errorAt(ownerIdent.Span,
-			"move error: moved value `%s` was used", ownerIdent.Name)
+		return nil, withMove(errorAt(ownerIdent.Span,
+			"move error: moved value `%s` was used", ownerIdent.Name), owner)
 	}
 	typeName, err := c.readFieldExpr(field, env)
 	if err != nil {
@@ -8342,8 +8390,8 @@ func (c *Checker) checkImplMethodCall(
 	}
 	if cleanup {
 		if value.hasAnyBorrow() {
-			return "", true, errorf(
-				"borrow error: value `%s` cannot be moved while borrowed", value.name)
+			return "", true, withBorrower(errorf(
+				"borrow error: value `%s` cannot be moved while borrowed", value.name), env, value)
 		}
 		// Inside the type's own deinit the fields are what the body consumes,
 		// and consuming them is how it finishes: the receiver's own cleanup
@@ -8456,7 +8504,7 @@ func (c *Checker) checkMethodArgs(
 		if err == nil {
 			// Activation: argument borrows still live at the call must not
 			// overlap the receiver's exclusive borrow.
-			err = checkBorrowConflictForField(target, targetField, true)
+			err = checkBorrowConflictForField(env, target, targetField, true)
 		}
 	}
 	releaseTemporaryBorrows(borrowed)
@@ -8680,7 +8728,7 @@ func (c *Checker) activateBorrowArgs(
 				)
 			}
 			mutable := fn.params[idx].mutBorrow
-			if err := checkBorrowConflictForField(value, field, mutable); err != nil {
+			if err := checkBorrowConflictForField(env, value, field, mutable); err != nil {
 				releaseTemporaryBorrows(borrowed)
 				return nil, err
 			}
@@ -8713,15 +8761,21 @@ func (c *Checker) callBorrowTarget(
 }
 
 // checkBorrowConflict rejects aliasing that would overlap a mutable borrow.
-func checkBorrowConflict(value *binding, mutable bool) error {
-	return checkBorrowConflictForField(value, "", mutable)
+func checkBorrowConflict(env *scope, value *binding, mutable bool) error {
+	return checkBorrowConflictForField(env, value, "", mutable)
 }
 
 // checkBorrowConflictForField rejects overlapping whole-value or field borrows.
 // Field paths conflict when they alias: one path names the other or a struct
 // containing it, so `a.b` collides with `a.b.c` while `a.b` and `a.c` stay
 // disjoint.
-func checkBorrowConflictForField(value *binding, field string, mutable bool) error {
+func checkBorrowConflictForField(env *scope, value *binding, field string, mutable bool) error {
+	return withBorrower(borrowConflictForField(value, field, mutable), env, value)
+}
+
+// borrowConflictForField answers the conflict checkBorrowConflictForField
+// reports, without where the live borrow was taken.
+func borrowConflictForField(value *binding, field string, mutable bool) error {
 	// A value one of whose fields has been taken out no longer matches its own
 	// type, and a borrow hands the whole of it to someone who will read the
 	// field that is gone.
@@ -9094,7 +9148,8 @@ func readIdentAliasing(ident *ast.IdentExpr, env *scope, path string) (string, e
 			return "", err
 		}
 		if value.moved {
-			return "", errorAt(ident.Span, "move error: moved value `%s` was used", ident.Name)
+			return "", withMove(
+				errorAt(ident.Span, "move error: moved value `%s` was used", ident.Name), value)
 		}
 		blocked := value.activeMutBorrows > 0
 		if path == "" {
@@ -9103,9 +9158,9 @@ func readIdentAliasing(ident *ast.IdentExpr, env *scope, path string) (string, e
 			blocked = blocked || overlappingFieldCount(value.fieldMutBorrows, path) > 0
 		}
 		if blocked {
-			return "", errorAt(ident.Span,
+			return "", withBorrower(errorAt(ident.Span,
 				"borrow error: value `%s` cannot be read while mutably borrowed",
-				ident.Name)
+				ident.Name), env, value)
 		}
 		return value.typeName, nil
 	}
@@ -9876,6 +9931,9 @@ func (s *scope) mergeMovedFrom(other *scope) {
 		}
 		if value.moved {
 			target.moved = true
+			if target.movedAt.IsZero() {
+				target.movedAt = value.movedAt
+			}
 		}
 		if value.deinitialized {
 			target.deinitialized = true
@@ -9916,4 +9974,71 @@ func (s *scope) walkBindings(visit func(*binding)) {
 			visit(value)
 		}
 	}
+}
+
+// withBorrower adds to a borrow conflict where the live borrow of value was
+// taken, when a binding still holds it: the reader sees both ends of the
+// conflict. Of several holders the earliest in the source is named, so the
+// answer does not depend on how the scope stores them.
+func withBorrower(err error, env *scope, value *binding) error {
+	var structured *diag.Diagnostic
+	if err == nil || env == nil || !errors.As(err, &structured) {
+		return err
+	}
+	holder := env.borrowerOf(value)
+	if holder == nil {
+		return err
+	}
+	how := "borrowed"
+	if holder.mutBorrow {
+		how = "mutably borrowed"
+	}
+	_ = structured.WithRelated(holder.declSpan,
+		fmt.Sprintf("`%s` is %s here by `%s`", value.name, how, holder.name))
+	return err
+}
+
+// borrowerOf answers a live binding that holds a borrow of target, searching
+// the scope chain, or nil when only a temporary holds it.
+func (s *scope) borrowerOf(target *binding) *binding {
+	var found *binding
+	for current := s; current != nil; current = current.parent {
+		for _, value := range current.values {
+			if value == target || value.declSpan.IsZero() || !value.borrows(target) {
+				continue
+			}
+			if found == nil || spanBefore(value.declSpan, found.declSpan) {
+				found = value
+			}
+		}
+	}
+	return found
+}
+
+// borrows reports whether b holds a live borrow of target.
+func (b *binding) borrows(target *binding) bool {
+	for _, source := range b.borrowTargets {
+		if source.target == target {
+			return true
+		}
+	}
+	return false
+}
+
+// spanBefore reports whether left starts before right in the source.
+func spanBefore(left, right ast.Span) bool {
+	if left.Start.Line != right.Start.Line {
+		return left.Start.Line < right.Start.Line
+	}
+	return left.Start.Column < right.Start.Column
+}
+
+// withMove adds to a use-after-move where the value was handed off, when
+// that place is known.
+func withMove(err error, value *binding) error {
+	var structured *diag.Diagnostic
+	if errors.As(err, &structured) {
+		_ = structured.WithRelated(value.movedAt, fmt.Sprintf("`%s` was moved here", value.name))
+	}
+	return err
 }
