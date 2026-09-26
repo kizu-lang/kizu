@@ -4278,9 +4278,25 @@ func (c *Checker) checkTryExpr(expr *ast.TryExpr, env *scope, unsafe unsafeMark)
 	// member values are a subset of E: E itself and the sets it combines
 	// (ADR-0127).
 	if targetError != "" && !c.errorSetFits(sourceError, targetError) {
-		return "", errorf("type error: try cannot propagate %s from %s", sourceError, source)
+		return "", tryPropagateError(expr, sourceError, source, c.currentReturn)
 	}
 	return success, nil
+}
+
+// tryPropagateError names both ends of a `try` that cannot hand its failure
+// on: the set it fails with and the union the function returns. A callee
+// that returns `!T` declares no set, which is said in words rather than as
+// an empty name.
+func tryPropagateError(expr *ast.TryExpr, sourceError, source, target Type) error {
+	span := expressionSpan(expr.Value)
+	if sourceError == "" {
+		return errorAt(span,
+			"type error: try cannot propagate an error of %s into %s: "+
+				"%s declares no error set, so its failures cannot be checked against it",
+			source, target, source)
+	}
+	return errorAt(span, "type error: try cannot propagate %s from %s into %s",
+		sourceError, source, target)
 }
 
 // checkCallExpr validates builtin and user function calls.
