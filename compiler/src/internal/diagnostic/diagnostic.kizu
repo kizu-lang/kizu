@@ -132,15 +132,7 @@ fn (self: &Diagnostic) error(
 ) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
-    if self.category.len() > 0 {
-        try out.append_string(allocator, &self.category);
-        try out.append_bytes(allocator, ": ");
-    } else {
-        if self.severity == Severity::Warning {
-            try out.append_bytes(allocator, "warning: ");
-        }
-    }
-    try out.append_string(allocator, &self.message);
+    try self.append_summary(allocator, &var out);
     if !self.span.is_zero() {
         try out.append_bytes(allocator, " at ");
         var wrote_path = false;
@@ -201,21 +193,200 @@ fn append_help(allocator: Allocator,
     return;
 }
 
-/// Renders the diagnostic with the CLI severity prefix when needed.
+/// Appends the first line without its position, the Go `summary`: the
+/// category and message, or the warning and message.
+fn (self: &Diagnostic) append_summary(allocator: Allocator, out: &var string::String) -> !void {
+    if self.category.len() > 0 {
+        try out.append_string(allocator, &self.category);
+        try out.append_bytes(allocator, ": ");
+    } else {
+        if self.severity == Severity::Warning {
+            try out.append_bytes(allocator, "warning: ");
+        }
+    }
+    try out.append_string(allocator, &self.message);
+    return;
+}
+
+/// Renders the diagnostic for a terminal (ADR-0072), the Go `CLIError`: the
+/// severity and summary, then where it is -- the path and position, the
+/// source line, and a marker under the span -- then the notes and help under
+/// the same gutter.
 fn (self: &Diagnostic) cli_error(
     allocator: Allocator,
     sources: &source::SourceMap
 ) -> !string::String {
-    let rendered = try self.error(allocator, sources);
-    if self.severity == Severity::Warning {
-        return move rendered;
-    }
-    defer rendered.deinit(allocator);
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
-    try out.append_bytes(allocator, "error: ");
-    try out.append_string(allocator, &rendered);
+    if self.severity != Severity::Warning {
+        try out.append_bytes(allocator, "error: ");
+    }
+    try self.append_summary(allocator, &var out);
+    var gutter = 0;
+    if !self.span.is_zero() {
+        gutter = digit_count(self.span.start.line);
+        try append_snippet(allocator, &var out, sources, self.span, gutter);
+    }
+    var index = 0;
+    while self.notes.at(index) |note| {
+        try append_gutter_line(allocator, &var out, gutter, "= note: ");
+        try out.append_string(allocator, note);
+        index = index + 1;
+    }
+    if self.help.len() > 0 {
+        let bytes = self.help.as_bytes();
+        let length = mem::len(bytes);
+        var start = 0;
+        while start <= length {
+            let end = line_end(bytes, start);
+            try append_gutter_line(allocator, &var out, gutter, "= help: ");
+            try out.append_bytes(allocator, bytes[start..end]);
+            if end == length {
+                break;
+            }
+            start = end + 1;
+        }
+    }
     return move out;
+}
+
+fn digit_count(value: i64) -> i64 {
+    var count = 1;
+    var rest = value;
+    while rest >= 10 {
+        rest = rest / 10;
+        count = count + 1;
+    }
+    return count;
+}
+
+/// Starts a new line with `gutter` spaces and then `text`.
+fn append_gutter_line(allocator: Allocator, out: &var string::String, gutter: i64, text: []u8) -> !void {
+    try out.append_byte(allocator, cast<u8>(10));
+    for 0..gutter |_i| {
+        try out.append_byte(allocator, cast<u8>(32));
+    }
+    try out.append_bytes(allocator, text);
+    return;
+}
+
+/// Writes where span is and, when its source text is at hand, the line it
+/// starts on with a marker under it, the Go `writeSnippet`.
+fn append_snippet(
+    allocator: Allocator,
+    out: &var string::String,
+    sources: &source::SourceMap,
+    span: ast::Span,
+    gutter: i64
+) -> !void {
+    try append_gutter_line(allocator, out, gutter, "--> ");
+    if span.source |id| {
+        if sources.at(id) |file| {
+            if file.path.len() > 0 {
+                try out.append_string(allocator, &file.path);
+                try out.append_bytes(allocator, ":");
+            }
+            try append_position(allocator, out, span);
+            let text = file.text.as_bytes();
+            return append_source_line(allocator, out, text, span, gutter);
+        }
+    }
+    return append_position(allocator, out, span);
+}
+
+fn append_position(allocator: Allocator, out: &var string::String, span: ast::Span) -> !void {
+    try fmt::append_i64(allocator, out, span.start.line);
+    try out.append_bytes(allocator, ":");
+    try fmt::append_i64(allocator, out, span.start.column);
+    return;
+}
+
+/// Appends the line span starts on and the marker under it, when text has it.
+fn append_source_line(
+    allocator: Allocator,
+    out: &var string::String,
+    text: []u8,
+    span: ast::Span,
+    gutter: i64
+) -> !void {
+    let line = source_line(text, span.start.line) orelse return;
+    try append_gutter_line(allocator, out, gutter, " |");
+    try out.append_byte(allocator, cast<u8>(10));
+    try fmt::append_i64(allocator, out, span.start.line);
+    try out.append_bytes(allocator, " | ");
+    try out.append_bytes(allocator, text[line.start..line.end]);
+    try append_gutter_line(allocator, out, gutter, " | ");
+    try append_marker(allocator, out, text[line.start..line.end], span);
+    return;
+}
+
+/// Where one line sits in a source text, without its newline.
+struct LineRange {
+    start: i64,
+    end: i64,
+}
+
+/// Finds the one-based line, the Go `sourceLine`.
+fn source_line(text: []u8, number: i64) -> ?LineRange {
+    let length = mem::len(text);
+    if length == 0 or number < 1 {
+        return null;
+    }
+    var start = 0;
+    var current = 1;
+    while current < number {
+        let end = line_end(text, start);
+        if end == length {
+            return null;
+        }
+        start = end + 1;
+        current = current + 1;
+    }
+    var end = line_end(text, start);
+    if end > start and text[end - 1] == cast<u8>(13) {
+        end = end - 1;
+    }
+    return LineRange { start: start, end: end };
+}
+
+/// Appends the carets under span on its first line, the Go `markerLine`.
+/// Columns count bytes, so the lead-in keeps the line's tabs and gives every
+/// other character one space, not one per byte; the carets cover the span on
+/// that line, or one character when the span goes on past it.
+fn append_marker(allocator: Allocator, out: &var string::String, line: []u8, span: ast::Span) -> !void {
+    let length = mem::len(line);
+    var start = span.start.column - 1;
+    if start > length {
+        start = length;
+    }
+    if start < 0 {
+        start = 0;
+    }
+    for 0..start |i| {
+        let byte = line[i];
+        if byte == cast<u8>(9) {
+            try out.append_byte(allocator, byte);
+        } else if (byte & cast<u8>(192)) != cast<u8>(128) {
+            try out.append_byte(allocator, cast<u8>(32));
+        }
+    }
+    var width = 1;
+    if span.end.line == span.start.line and span.end.column > span.start.column {
+        width = span.end.column - span.start.column;
+    }
+    var rest = 0;
+    for start..length |i| {
+        if (line[i] & cast<u8>(192)) != cast<u8>(128) {
+            rest = rest + 1;
+        }
+    }
+    if width > rest and rest > 0 {
+        width = rest;
+    }
+    for 0..width |_i| {
+        try out.append_byte(allocator, cast<u8>(94));
+    }
+    return;
 }
 
 /// Returns the primary source span for the diagnostic.

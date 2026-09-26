@@ -1,69 +1,49 @@
 # ADR-0072: diagnostic message style
 
-Status: 採用
-
 ## 背景
 
-Kizu の diagnostics は CLI、LSP、selfhost compiler、test oracle をまたぐ user
-interface です。文言が場当たり的だと、同じ原因でも command ごとに違う説明になり、
-LSP と CLI の修正もずれます。
-
-Kizu は strict な language なので、diagnostic は長い説明で隠すのではなく、
-失敗理由、位置、次の行動を短く出す必要があります。
+Diagnostic は CLI、LSP、selfhost compiler、test oracle をまたぐ user interface で、
+読むのは人間と AI の両方です。文言が場当たり的だと、同じ原因でも command ごとに違う
+説明になります。strict な言語なので、失敗理由、位置、次の行動を短く出します。
 
 ## 決定
 
-User-facing diagnostic は次の形を標準にします。
+message の文言は 1 つで、形は 2 つです。
 
 ```text
-<category>: <summary> at <line>:<column>
+<category>: <summary> at <path>:<line>:<column>     # Error()、LSP と test oracle
 note: <context>
 help: <action>
 ```
 
-`at <line>:<column>` は primary span を持つ diagnostic に付けます。File path、
-caret、色、related span の表示は renderer の責務です。LSP は同じ primary span を
-range として送ります。
-
-Category は短く固定します。
-
-- `type error:`: type checker の失敗
-- `move error:`: ownership / move checker の失敗
-- `unsafe error:`: unsafe capability boundary の失敗
-- parse diagnostics: `expected ..., got ...` の summary を使い、CLI renderer が
-  `error:` severity を付けます
-
-Summary は 1 行で、原因を直接書きます。期待値と実値がある場合は
-`expects <want>, got <got>` または `expected <want>, got <got>` を使います。
-Binary operator の型不一致は可能なら operand ごとに `note:` を出します。
-
-`note:` は「なぜそう判断されたか」の補足にだけ使います。
-
 ```text
-note: left operand has type Color
-note: right operand has type Animal
+error: <category>: <summary>                        # CLI(CLIError)
+  --> <path>:<line>:<column>
+   |
+10 |     try anything();
+   |         ^^^^^^^^
+   = note: <context>
+   = help: <action>
 ```
 
-`help:` は「次に何をすればよいか」が明確な場合だけ使います。
+- CLI は primary span の行を source から引いて marker を付ける。column は byte で
+  数え、marker の前置きは tab を残して他の文字を 1 つの空白にする。source が無ければ
+  `-->` の行まで。LSP は同じ primary span を range で送る
+- category は `type error` / `move error` / `unsafe error` など短く固定。parse は
+  `expected ..., got ...`
+- summary は 1 行で原因を直接書く。期待と実際は `expects <want>, got <got>`
+- `note:` は判断の理由だけ、`help:` は次の行動が明確なときだけ
+- 位置の無い front-end diagnostic は `cmd/kizu/testdata/unlocated_diagnostics.txt`
+  に載っているものだけ許す(conformance test)。一覧は減るだけ
 
-```text
-help: `@unsafe(ptr_read)` permits raw pointer reads with `ptr_read(p)`.
-```
+避けるもの: `mismatch` だけの message、`IDENT` のような lexer 内部名、原因と対処を
+1 つの summary に詰めること、CLI と LSP で別々の message builder を持つこと。
 
-`warning:` は compile / run を止めないが、将来壊れる可能性が高い、危険、
-または未使用であるものに限定します。v0 では warning infrastructure を広げず、
-warning を追加する場合はこの ADR の形に揃えます。
+## 却下した案
 
-## 避ける表現
-
-- `mismatch` だけで終わる message
-- `IDENT` / `RBRACE` のような lexer 内部名を user-facing message に出すこと
-- 原因と対処を同じ長い summary に詰め込むこと
-- CLI と LSP で別々の message builder を持つこと
-
-## 影響
-
-- Go compiler と LSP は同じ diagnostic text / primary span を共有します。
-- Selfhost 側も新しい diagnostic を追加するときはこの style に合わせます。
-- Existing selfhost golden は一括 rewrite せず、触る diagnostic slice ごとに
-  oracle と一緒に移行します。
+| 案 | 理由 |
+| --- | --- |
+| 1 行目の `at <line>:<column>` を CLI にも残す | 位置が 2 回出る。`-->` の行が path と位置を持つ |
+| marker を byte 数だけ空白で揃える | 多 byte の文字の後ろでずれる。文字ごとに 1 つにする |
+| 位置の無い診断を一括で直してから検査を入れる | 直している間に新しい位置無しが入る。検査と一覧を先に置く |
+| `Error()` も CLI の形にする | LSP は range を別に持ち、test oracle は 1 行目で照合している |
