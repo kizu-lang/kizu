@@ -524,7 +524,7 @@ func (c *Checker) checkStructs(program *ast.Program) error {
 		public := make([]string, 0, len(st.Fields))
 		for _, field := range st.Fields {
 			if field.Borrow {
-				return errorf("borrow error: struct field `%s.%s` cannot store borrow",
+				return errorAt(field.Span, "borrow error: struct field `%s.%s` cannot store borrow",
 					st.Name, field.Name)
 			}
 			fields[field.Name] = stdmeta.ResolveElementTypeForms(fieldOwnershipType(field))
@@ -4136,6 +4136,14 @@ func (c *Checker) matchTags(typeName string) (map[string]bool, map[string]string
 
 // readExpr checks an expression without consuming owned values.
 func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
+	typeName, err := c.readExprForm(expr, env)
+	// The innermost expression that knows where it is and raised the
+	// diagnostic -- a call, an operator, a name -- is where to look.
+	return typeName, diag.Locate(err, expressionSpan(expr))
+}
+
+// readExprForm reads one expression by its form.
+func (c *Checker) readExprForm(expr ast.Expression, env *scope) (string, error) {
 	if inner, ok := transparentExprValue(expr); ok {
 		return c.readExpr(inner, env)
 	}
@@ -4455,6 +4463,12 @@ func (c *Checker) readCastExpr(expr *ast.CastExpr, env *scope) (string, error) {
 // obligation leaves the place, and where an errdefer covering it retires
 // (ADR-0114). A temporary has no place to leave, so it carries no marker.
 func (c *Checker) moveExpr(expr ast.Expression, env *scope) (string, error) {
+	typeName, err := c.moveExprForm(expr, env)
+	return typeName, diag.Locate(err, expressionSpan(expr))
+}
+
+// moveExprForm moves one expression by its form.
+func (c *Checker) moveExprForm(expr ast.Expression, env *scope) (string, error) {
 	marker, place := splitMoveMarker(expr)
 	typeName, handedOff, err := c.movePlaceExpr(place, env)
 	if err != nil {

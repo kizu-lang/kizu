@@ -424,13 +424,14 @@ func (c *Checker) checkPublicStructFields(decl *ast.StructDecl) error {
 		// code able to break its invariant to its declaration file even when a
 		// directory module has other implementation files (SPEC §12).
 		if decl.RequiresUnsafe {
-			return errorf("unsafe error: `unsafe struct %s` cannot have `pub` field `%s`"+
-				"\nhelp: drop `pub` so only this file can break the invariant",
+			return errorAt(field.Span,
+				"unsafe error: `unsafe struct %s` cannot have `pub` field `%s`"+
+					"\nhelp: drop `pub` so only this file can break the invariant",
 				decl.Name, field.Name)
 		}
 		context := "field `" + decl.Name + "." + field.Name + "`"
 		if err := c.rejectPrivateType(typ.Text(field.TypeName), context); err != nil {
-			return err
+			return diag.Locate(err, field.Span)
 		}
 	}
 	return nil
@@ -592,33 +593,33 @@ func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
 	}
 	for _, variant := range decl.Variants {
 		if _, exists := union.variants[variant.Name]; exists {
-			return errorf("type error: duplicate union variant `%s::%s`",
-				decl.Name, variant.Name)
+			return diag.Locate(errorf("type error: duplicate union variant `%s::%s`",
+				decl.Name, variant.Name), variant.Span)
 		}
 		payloadType := Type("")
 		if variant.Payload != nil {
 			parsed, err := c.parseTypeNode(variant.Payload)
 			if err != nil {
-				return err
+				return diag.Locate(err, variant.Span)
 			}
 			written := typ.Text(variant.Payload)
 			if payload := stdmeta.ResolveElementTypeForms(written); payload != written {
 				parsed, err = c.parseType(payload)
 				if err != nil {
-					return err
+					return diag.Locate(err, variant.Span)
 				}
 			}
 			if _, ok := optionalElem(parsed); ok {
-				return errorf("type error: union payload `%s::%s` cannot store an optional yet",
-					decl.Name, variant.Name)
+				return diag.Locate(errorf("type error: union payload `%s::%s` cannot store an optional yet",
+					decl.Name, variant.Name), variant.Span)
 			}
 			if isBorrowPayload(variant.Payload) {
-				return errorf("type error: borrow payload `%s.%s` cannot store borrow",
-					decl.Name, variant.Name)
+				return diag.Locate(errorf("type error: borrow payload `%s.%s` cannot store borrow",
+					decl.Name, variant.Name), variant.Span)
 			}
 			if c.types.containsTypeValue(parsed) {
-				return errorf("type error: union variant `%s::%s` cannot store type value",
-					decl.Name, variant.Name)
+				return diag.Locate(errorf("type error: union variant `%s::%s` cannot store type value",
+					decl.Name, variant.Name), variant.Span)
 			}
 			payloadType = parsed
 		}
@@ -647,11 +648,11 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 	for _, field := range decl.Fields {
 		typ, err := c.parseTypeNode(field.TypeName)
 		if err != nil {
-			return err
+			return diag.Locate(err, field.Span)
 		}
 		if field.Borrow {
-			return errorf("type error: borrow field `%s.%s` cannot store borrow",
-				decl.Name, field.Name)
+			return diag.Locate(errorf("type error: borrow field `%s.%s` cannot store borrow",
+				decl.Name, field.Name), field.Span)
 		}
 		if decl.ExternABI != "" {
 			// The foreign side reads the raw pointer fields; the struct's own
@@ -659,28 +660,28 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 			continue
 		}
 		if rawPointerFieldRequiresUnsafe(&c.types, decl.RequiresUnsafe, typ) {
-			return errorf("unsafe error: struct `%s` holds a raw pointer in field `%s`, "+
+			return diag.Locate(errorf("unsafe error: struct `%s` holds a raw pointer in field `%s`, "+
 				"so it must be declared `unsafe struct`"+
 				"\nhelp: write `unsafe struct %s` and document the invariant its fields carry",
-				decl.Name, field.Name, decl.Name)
+				decl.Name, field.Name, decl.Name), field.Span)
 		}
 		if compileTimeOnlyType(&c.types, typ) {
-			return errorf("type error: struct field `%s.%s` cannot store %s",
-				decl.Name, field.Name, typ)
+			return diag.Locate(errorf("type error: struct field `%s.%s` cannot store %s",
+				decl.Name, field.Name, typ), field.Span)
 		}
 		if c.types.containsTypeValue(typ) {
-			return errorf("type error: struct field `%s.%s` cannot store type value",
-				decl.Name, field.Name)
+			return diag.Locate(errorf("type error: struct field `%s.%s` cannot store type value",
+				decl.Name, field.Name), field.Span)
 		}
 		if c.types.containsBufferType(typ) {
-			return errorf("type error: struct field `%s.%s` cannot store stack buffer",
-				decl.Name, field.Name)
+			return diag.Locate(errorf("type error: struct field `%s.%s` cannot store stack buffer",
+				decl.Name, field.Name), field.Span)
 		}
 		if elem, ok := optionalElem(typ); ok && !c.optionalFieldElemAllowed(elem) {
-			return errorf(
+			return diag.Locate(errorf(
 				"type error: struct field `%s.%s` cannot store an optional view;"+
 					" a capture would be hidden from the rules that read field types",
-				decl.Name, field.Name)
+				decl.Name, field.Name), field.Span)
 		}
 	}
 	return nil
@@ -1110,15 +1111,15 @@ func (c *Checker) collectFunctionParams(fn ast.FunctionSignature) (functionParam
 	for _, param := range fn.Params {
 		paramType, err := c.parseTypeNode(param.TypeName)
 		if err != nil {
-			return functionParamInfo{}, err
+			return functionParamInfo{}, diag.Locate(err, param.Span)
 		}
 		if !fn.Std && c.types.containsBorrowOptional(paramType) {
-			return functionParamInfo{}, errorf(
+			return functionParamInfo{}, diag.Locate(errorf(
 				"type error: parameter `%s` cannot hold a borrow optional;"+
-					" `?&T` exists only as a capture condition", param.Name)
+					" `?&T` exists only as a capture condition", param.Name), param.Span)
 		}
 		if err := c.checkFunctionParam(param, paramType); err != nil {
-			return functionParamInfo{}, err
+			return functionParamInfo{}, diag.Locate(err, param.Span)
 		}
 		info.params = append(info.params, paramType)
 		info.borrowParams = append(info.borrowParams, param.Borrow)
@@ -3108,6 +3109,17 @@ func missingMatchVariants(
 
 // checkExpr computes the static type of an expression.
 func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe unsafeMark) (Type, error) {
+	typ, err := c.checkExprForm(expr, env, unsafe)
+	if err != nil && !c.checkingStd() {
+		// The innermost expression that knows where it is and raised the
+		// diagnostic -- a call, an operator, a name -- is where to look.
+		err = diag.Locate(err, expressionSpan(expr))
+	}
+	return typ, err
+}
+
+// checkExprForm checks one expression by its form.
+func (c *Checker) checkExprForm(expr ast.Expression, env *scope, unsafe unsafeMark) (Type, error) {
 	switch e := expr.(type) {
 	case *ast.IntExpr, *ast.FloatExpr, *ast.StringExpr, *ast.BoolExpr, *ast.TypeExpr, *ast.NullExpr:
 		return c.checkScalarExpr(e)

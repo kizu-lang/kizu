@@ -438,6 +438,9 @@ func (d *UnionDecl) String() string {
 
 // UnionVariant represents one tagged union variant.
 type UnionVariant struct {
+	// Span runs from the name to the end of the type, for a diagnostic about
+	// this one part of the declaration.
+	Span    Span
 	Name    string
 	Doc     string
 	Payload typ.Type
@@ -494,6 +497,9 @@ func (d *ImplDecl) String() string {
 
 // Field represents a named struct field.
 type Field struct {
+	// Span runs from the name to the end of the type, for a diagnostic about
+	// this one part of the declaration.
+	Span      Span
 	Name      string
 	Doc       string
 	TypeName  typ.Type
@@ -519,6 +525,9 @@ func (f Field) String() string {
 
 // Param represents a function parameter.
 type Param struct {
+	// Span runs from the name to the end of the type, for a diagnostic about
+	// this one part of the declaration.
+	Span      Span
 	Name      string
 	TypeName  typ.Type
 	Borrow    bool

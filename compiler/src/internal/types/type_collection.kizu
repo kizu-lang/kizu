@@ -14,6 +14,9 @@ import std::string;
 
 struct CollectionMemberIssue {
     owner: ast::Text, member: ast::Text,
+    /// Where the field or variant is, zero for a member that has none; the
+    /// diagnostic points there, the Go loops that `diag.Locate` at `field.Span`.
+    span: ast::Span,
 }
 
 struct CollectionNamedTypeIssue {
@@ -121,7 +124,7 @@ fn (self: &var Checker) collect_types_and_methods(tree: &ast::Ast, program: &ast
         if try self.collect_type_decl(tree, declaration, &owners) |issue| {
             let value = try self.type_collection_diagnostic(tree, issue);
             owners.deinit(self.allocator);
-            return locate_decl(tree, move value, declaration);
+            return self.locate_member(tree, move value, declaration);
         }
         index = index + 1;
     }
@@ -138,7 +141,7 @@ fn (self: &var Checker) collect_types_and_methods(tree: &ast::Ast, program: &ast
         if try self.validate_extern_struct_fields(tree, declaration) |issue| {
             let value = try self.type_collection_diagnostic(tree, issue);
             owners.deinit(self.allocator);
-            return locate_decl(tree, move value, declaration);
+            return self.locate_member(tree, move value, declaration);
         }
         index = index + 1;
     }
@@ -147,7 +150,7 @@ fn (self: &var Checker) collect_types_and_methods(tree: &ast::Ast, program: &ast
         if try self.collect_method_decl(tree, declaration) |issue| {
             let value = try self.type_collection_diagnostic(tree, issue);
             owners.deinit(self.allocator);
-            return locate_decl(tree, move value, declaration);
+            return self.locate_member(tree, move value, declaration);
         }
         index = index + 1;
     }
@@ -158,7 +161,7 @@ fn (self: &var Checker) collect_types_and_methods(tree: &ast::Ast, program: &ast
                 if try self.collect_impl(tree, value) |issue| {
                     let value = try self.type_collection_diagnostic(tree, issue);
                     owners.deinit(self.allocator);
-                    return locate_decl(tree, move value, declaration);
+                    return self.locate_member(tree, move value, declaration);
                 }
             },
             _ => {},
@@ -251,10 +254,11 @@ fn (self: &var Checker) collect_struct_fields(
     let extern_struct = is_extern_struct_decl(tree, declaration);
     var index = 0;
     while declaration.fields.at(index) |field| {
+        self.member_span = field.span;
         match try self.resolve_type_node(self.allocator, tree, field.type_name) {
             Value(field_type) => {
                 let member = CollectionMemberIssue {
-                    owner: declaration.name, member: field.name
+                    owner: declaration.name, member: field.name, span: field.span
                 };
                 if field.borrow {
                     return TypeCollectionIssue::StructBorrow(member);
@@ -273,6 +277,7 @@ fn (self: &var Checker) collect_struct_fields(
         }
         index = index + 1;
     }
+    self.member_span = ast::zero_span();
     return null;
 }
 
@@ -323,7 +328,7 @@ fn (self: &var Checker) validate_extern_struct_fields(
                 if !c_host_scalar(&self.types, field_type) and
                     !try self.is_extern_struct(tree, field_type) {
                     let member = CollectionMemberIssue {
-                        owner: declaration.name, member: field.name
+                        owner: declaration.name, member: field.name, span: ast::zero_span()
                     };
                     return TypeCollectionIssue::ExternStructField(CollectionExternFieldIssue {
                         member: member, type_name: field_type, span: declaration.span
@@ -490,10 +495,11 @@ fn (self: &var Checker) collect_union_in_scope(allocator: Allocator, tree: &ast:
     }
     index = 0;
     while declaration.variants.at(index) |variant| {
+        self.member_span = variant.span;
         let retained_variant = tree.texts.at(variant.name.node);
         let variant_name = retained_variant.as_bytes();
         let member = CollectionMemberIssue {
-            owner: declaration.name, member: variant.name
+            owner: declaration.name, member: variant.name, span: variant.span
         };
         if value.variants.contains(variant_name) {
             let issue = TypeCollectionIssue::DuplicateUnionVariant(member);
@@ -537,6 +543,7 @@ fn (self: &var Checker) collect_union_in_scope(allocator: Allocator, tree: &ast:
         try value.order.append(self.allocator, move copied);
         index = index + 1;
     }
+    self.member_span = ast::zero_span();
     let handle = UnionHandle { index: self.metadata.unions.len() };
     try self.metadata.unions.append(self.allocator, move value);
     try self.metadata.unions_by_name.insert(allocator, name, handle);
@@ -577,7 +584,7 @@ fn (self: &var Checker) collect_contract(allocator: Allocator, tree: &ast::Ast, 
         if value.methods.contains(method_name) {
             value.deinit(self.allocator);
             let issue = CollectionMemberIssue {
-                owner: declaration.name, member: method.signature.name
+                owner: declaration.name, member: method.signature.name, span: ast::zero_span()
             };
             return TypeCollectionIssue::DuplicateContractMethod(issue);
         }
@@ -626,6 +633,7 @@ fn (self: &var Checker) new_declared_function_type_in_scope(tree: &ast::Ast, dec
     errdefer storage.deinit(self.allocator);
     var index = 0;
     while signature.params.at(index) |parameter| {
+        self.member_span = parameter.span;
         match try self.resolve_type_node(self.allocator, tree, parameter.type_name) {
             Value(parameter_type) => {
                 if try self.collect_function_parameter(
@@ -641,6 +649,7 @@ fn (self: &var Checker) new_declared_function_type_in_scope(tree: &ast::Ast, dec
         }
         index = index + 1;
     }
+    self.member_span = ast::zero_span();
     var return_type = try self.types.void_type();
     if signature.return_type |written_return| {
         match try self.resolve_type_node(self.allocator, tree, written_return) {
