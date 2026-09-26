@@ -614,7 +614,7 @@ fn validate_options(
         return try fail_parts(allocator, "native error: --runtime ", runtime_mode, " is not implemented yet");
     }
     let emit = options.emit.as_bytes();
-    if !mem::equal_bytes(emit, "exe") {
+    if !mem::equal_bytes(emit, "exe") and !mem::equal_bytes(emit, "obj") {
         return try fail_parts(allocator, "native error: --emit ", emit, " is not implemented yet");
     }
     if options.cpu.len() != 0 {
@@ -959,6 +959,11 @@ fn camel_to_snake(allocator: Allocator, name: []u8) -> !string::String {
 
 /// Invokes the configured C/LLVM toolchain with explicit inputs, the Go
 /// `runClang`, and leaves the command it ran in command for the caller.
+///
+/// An object is the program and the runtime joined by a relocatable link. It
+/// resolves nothing outside itself, the C library included: the libraries
+/// its extern declarations name are the host link's to pass, and the build
+/// metadata lists them.
 fn run_clang(
     io: Io,
     allocator: Allocator,
@@ -973,11 +978,19 @@ fn run_clang(
     let linker = options.linker.as_bytes();
     try append_copy(allocator, command, linker);
     try clang_flags(allocator, options, arm64, command);
+    let emit = options.emit.as_bytes();
+    let object = mem::equal_bytes(emit, "obj");
+    if object {
+        try append_copy(allocator, command, "-r");
+        try append_copy(allocator, command, "-nostdlib");
+    }
     try append_copy(allocator, command, ir_path);
     try append_copy(allocator, command, runtime_path);
     try append_copy(allocator, command, "-o");
     try append_copy(allocator, command, output);
-    try link_flags(allocator, options, command);
+    if !object {
+        try link_flags(allocator, options, command);
+    }
     return spawn_clang(io, allocator, dir, options, command);
 }
 

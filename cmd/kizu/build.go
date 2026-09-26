@@ -36,7 +36,7 @@ func linkModule(module *ir.Module, path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	ir.KeepTargetReachableFunctions(module, "", "main")
+	ir.KeepTargetReachableFunctions(module, "c", "main")
 	llvmIR, err := llvm.EmitNative(module, host == stdtarget.NativeDarwin)
 	if err != nil {
 		return "", err
@@ -145,7 +145,7 @@ func emitLLVMFile(path string, opt bool) error {
 	if err != nil {
 		return err
 	}
-	ir.KeepTargetReachableFunctions(module, "", "main")
+	ir.KeepTargetReachableFunctions(module, "c", "main")
 	output, err := llvm.Emit(module)
 	if err != nil {
 		return err
@@ -374,7 +374,9 @@ func emitNativeFile(args []string) error {
 	if err != nil {
 		return err
 	}
-	ir.KeepTargetReachableFunctions(module, "", "main")
+	if err := keepNativeRoots(module, options.Emit); err != nil {
+		return err
+	}
 	llvmIR, err := llvm.EmitNative(module, target == stdtarget.NativeDarwin)
 	if err != nil {
 		return err
@@ -397,6 +399,32 @@ func emitNativeFile(args []string) error {
 		return err
 	}
 	_, _ = fmt.Println(options.Output)
+	return nil
+}
+
+// keepNativeRoots keeps what the artifact is entered by. An executable is
+// entered at `main` and at each C export; an object is linked into a host that
+// has its own entry, so its C exports are all it has, and a `main` would be a
+// second entry the host's link refuses.
+func keepNativeRoots(module *ir.Module, emit string) error {
+	if emit != "obj" {
+		ir.KeepTargetReachableFunctions(module, "c", "main")
+		return nil
+	}
+	exports := 0
+	for _, function := range module.Functions {
+		if function.Name == "main" {
+			return fmt.Errorf("native error: --emit obj builds an object a host links, " +
+				"and `main` is an executable's entry; remove it or build --emit exe")
+		}
+		if function.ExportABI == "c" {
+			exports++
+		}
+	}
+	if exports == 0 {
+		return fmt.Errorf("native error: --emit obj needs an `export \"c\" fn` for the host to call")
+	}
+	ir.KeepTargetReachableFunctions(module, "c")
 	return nil
 }
 

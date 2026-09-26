@@ -206,7 +206,7 @@ func validateOptions(options Options) error {
 	if options.Runtime != "hosted" {
 		return fmt.Errorf("native error: --runtime %s is not implemented yet", options.Runtime)
 	}
-	if options.Emit != "exe" {
+	if options.Emit != "exe" && options.Emit != "obj" {
 		return fmt.Errorf("native error: --emit %s is not implemented yet", options.Emit)
 	}
 	if options.CPU != "" {
@@ -375,9 +375,20 @@ func camelToSnake(name string) string {
 // link names libm because a float intrinsic the target has no instruction for
 // (floor on x86-64 without SSE4.1, say) is lowered to the C library's
 // function; on Darwin libm is part of libSystem and the name is harmless.
+//
+// An object is the program and the runtime joined by a relocatable link. It
+// resolves nothing outside itself, the C library included: the libraries its
+// extern declarations name are the host link's to pass, and the build
+// metadata lists them.
 func runClang(irPath string, runtimePath string, output string, options Options) ([]string, error) {
-	args := append(clangFlags(options), irPath, runtimePath, "-o", output)
-	args = append(args, linkFlags(options)...)
+	args := clangFlags(options)
+	if options.Emit == "obj" {
+		args = append(args, "-r", "-nostdlib")
+	}
+	args = append(args, irPath, runtimePath, "-o", output)
+	if options.Emit != "obj" {
+		args = append(args, linkFlags(options)...)
+	}
 	cmd := exec.Command(options.Linker, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

@@ -311,6 +311,49 @@ fn keep_target_program(
     );
 }
 
+/// Keeps what the artifact is entered by, the Go `keepNativeRoots`. An
+/// executable is entered at `main` and at each C export; an object is linked
+/// into a host that has its own entry, so its C exports are all it has, and a
+/// `main` would be a second entry the host's link refuses.
+fn keep_native_roots(
+    allocator: Allocator,
+    module: &var ir::Module,
+    emit: []u8
+) -> !?diagnostic::Diagnostic {
+    if !mem::equal_bytes(emit, "obj") {
+        try keep_target_program(allocator, module, "c");
+        return null;
+    }
+    if module.function_named("main") |_| {
+        return try diagnostic::from_text(allocator, diagnostic::Severity::Error, ast::zero_span(),
+            "native error: --emit obj builds an object a host links, and `main` is an executable's entry; remove it or build --emit exe"
+        );
+    }
+    var exports = 0;
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        if module.names.is(node.export_abi, "c") {
+            exports = exports + 1;
+        }
+    }
+    if exports == 0 {
+        var message = try string::from_bytes(allocator, "native error: --emit obj needs an `export ");
+        defer message.deinit(allocator);
+        try message.append_byte(allocator, cast<u8>(34));
+        try message.append_byte(allocator, cast<u8>(99));
+        try message.append_byte(allocator, cast<u8>(34));
+        try message.append_bytes(allocator, " fn` for the host to call");
+        let text = message.as_bytes();
+        return try diagnostic::from_text(allocator, diagnostic::Severity::Error, ast::zero_span(), text);
+    }
+    var roots = array::new<string::String>(allocator);
+    defer roots.deinit(allocator);
+    try ir::keep_target_reachable_functions(allocator, module, &roots, "c");
+    return null;
+}
+
 /// Runs one `[--opt] <target>` command, the Go `parseOptFileArgs` and the
 /// command it feeds: `ir`, `build --emit-llvm` and `build --target wasm32-wasi`
 /// take the same shape. A lone `--opt` names the flag, not a file.
@@ -1615,7 +1658,7 @@ fn lower_target(
                     }
                     if output == Output::Llvm or output == Output::Check {
                         try keep_target_program(
-                            allocator, &var lowerer.module, ""
+                            allocator, &var lowerer.module, "c"
                         );
                         var text = string::new(allocator);
                         defer text.deinit(allocator);
@@ -1635,7 +1678,7 @@ fn lower_target(
                     // The dump shows what a build would keep: std::fmt is
                     // loaded for every program (SPEC §14.1), and its
                     // unreached bodies are not the program's.
-                    try keep_target_program(allocator, &var lowerer.module, "");
+                    try keep_target_program(allocator, &var lowerer.module, "c");
                     let rendered = try ir::render(allocator, &lowerer.module);
                     defer rendered.deinit(allocator);
                     let rendered_bytes = rendered.as_bytes();
@@ -2274,9 +2317,12 @@ fn native_target(
                             return 1;
                         }
                     }
-                    try keep_target_program(
-                        allocator, &var lowerer.module, ""
-                    );
+                    let emit = options.emit.as_bytes();
+                    if try keep_native_roots(allocator, &var lowerer.module, emit) |failed| {
+                        defer failed.deinit(allocator);
+                        try report(io, allocator, &loader.sources, &failed);
+                        return 1;
+                    }
                     if try set_link_inputs(io, allocator, &lowerer.module, target, options) |failed| {
                         defer failed.deinit(allocator);
                         try report(io, allocator, &loader.sources, &failed);

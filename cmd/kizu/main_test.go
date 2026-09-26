@@ -1749,9 +1749,9 @@ func TestBuildTargetNativeRejectsUnsupportedModes(t *testing.T) {
 			want: "native error: --runtime freestanding is not implemented yet",
 		},
 		{
-			name: "object",
+			name: "object with an entry",
 			args: []string{"build", "--target", "native", "--emit", "obj", "../../examples/hello.kizu"},
-			want: "native error: --emit obj is not implemented yet",
+			want: "`main` is an executable's entry",
 		},
 		{
 			name: "cpu",
@@ -1780,6 +1780,106 @@ func TestBuildTargetNativeRejectsUnsupportedModes(t *testing.T) {
 				t.Fatalf("got %q, want substring %q", out, tt.want)
 			}
 		})
+	}
+}
+
+// TestBuildTargetNativeObjectCHostSmoke links an `--emit obj` build into a C
+// program. The host enters Kizu only through the C exports: one a module path
+// qualifies, so C reaches it through its bare name, and ones that pass values
+// narrower than a register, which C widens by the platform's rule.
+func TestBuildTargetNativeObjectCHostSmoke(t *testing.T) {
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang is required for native build smoke")
+	}
+	root := t.TempDir()
+	files := map[string]string{
+		"kizu.toml": "[package]\nname = \"lib\"\nversion = \"0.1.0\"\n\n[modules]\npaths = [\"src\"]\n",
+		"src/lib.kizu": `import lib::bytes;
+
+export "c" fn lib_negate(value: i8) -> i8 {
+    return 0 - value;
+}
+
+export "c" fn lib_is_small(value: u16) -> bool {
+    return value < 10;
+}
+
+export "c" fn lib_sum_twice(data: ptr<const u8>, len: usize) -> u64 {
+    return bytes::lib_sum(data, len) * 2;
+}
+`,
+		"src/bytes/bytes.kizu": `pub export "c" fn lib_sum(data: ptr<const u8>, len: usize) -> u64 {
+    // SAFETY: the host passes len readable bytes at data.
+    let view = unsafe view_from_ptr(data, cast<i64>(len));
+    var total: u64 = 0;
+    for 0..cast<i64>(len) |index| {
+        total = total + cast<u64>(view[index]);
+    }
+    return total;
+}
+`,
+		"host.c": `#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+int8_t lib_negate(int8_t);
+bool lib_is_small(uint16_t);
+uint64_t lib_sum(const uint8_t *, size_t);
+uint64_t lib_sum_twice(const uint8_t *, size_t);
+int main(void) {
+    uint8_t data[] = {1, 2, 250};
+    printf("%d %d %d %llu %llu\n", lib_negate(-5), lib_is_small(3), lib_is_small(300),
+           (unsigned long long)lib_sum(data, 3), (unsigned long long)lib_sum_twice(data, 3));
+    return 0;
+}
+`,
+	}
+	writeFileTree(t, root, files)
+	object := filepath.Join(root, "lib.o")
+	build := kizuCommand("build", "--target", "native", "--emit", "obj", "-o", object, root)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("native object build failed: %v\n%s", err, out)
+	}
+	host := filepath.Join(root, "host")
+	link := exec.Command("clang", filepath.Join(root, "host.c"), object, "-o", host)
+	if out, err := link.CombinedOutput(); err != nil {
+		t.Fatalf("host link failed: %v\n%s", err, out)
+	}
+	out, err := exec.Command(host).CombinedOutput()
+	if err != nil {
+		t.Fatalf("host failed: %v\n%s", err, out)
+	}
+	if got := string(out); got != "5 1 0 253 506\n" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// writeFileTree writes each named file under root, making its directories.
+func writeFileTree(t *testing.T, root string, files map[string]string) {
+	t.Helper()
+	for name, text := range files {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestBuildTargetNativeObjectNeedsExportSmoke refuses an object nothing can
+// call: without a C export the host has no way in.
+func TestBuildTargetNativeObjectNeedsExportSmoke(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "no_export.kizu")
+	if err := os.WriteFile(source, []byte("fn helper() -> void {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := kizuCommand("build", "--target", "native", "--emit", "obj", source).CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected command to fail\n%s", out)
+	}
+	if want := "needs an `export \"c\" fn`"; !strings.Contains(string(out), want) {
+		t.Fatalf("got %q, want substring %q", out, want)
 	}
 }
 

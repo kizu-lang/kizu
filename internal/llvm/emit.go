@@ -108,8 +108,11 @@ func (e *emitter) emit() error {
 // validateForeignBoundary rejects explicit imports and exports the native
 // backend cannot provide, including calls attached to deferred error paths.
 func (e *emitter) validateForeignBoundary() error {
+	if err := e.validateCExportSymbols(); err != nil {
+		return err
+	}
 	for _, function := range e.module.Functions {
-		if function.ExportABI != "" {
+		if function.ExportABI != "" && function.ExportABI != "c" {
 			return fmt.Errorf(
 				"llvm error: target native does not support export `%s`",
 				function.ExportABI,
@@ -1008,20 +1011,22 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 	returnType := e.llvmType(fn.Return)
 	_, returnsErrorUnion := e.errorUnionSuccessType(fn.Return)
 	e.mainReturnsInt = fn.Name == "main" && (fn.Return == "void" || returnsErrorUnion)
-	params := make([]string, 0, len(fn.Params))
 	if e.mainReturnsInt {
 		returnType = "i32"
-		params = []string{"i32 %kizu.argc", "ptr %kizu.argv"}
-	} else {
-		for _, param := range fn.Params {
-			params = append(params, e.functionParamABI(param))
-			e.values[param.Name] = valueInfo{typ: param.Type, operand: localName(param.Name)}
+	}
+	params := e.definitionParams(fn)
+	returnAttrs := ""
+	if fn.ExportABI == "c" {
+		returnAttrs = strings.TrimPrefix(cIntegerExtension(fn.Return), " ")
+		if returnAttrs != "" {
+			returnAttrs += " "
 		}
 	}
 	e.registerForwardedValues(fn)
 	fmt.Fprintf(&e.out,
-		"define %s%s @%s(%s) #0 {\n",
-		functionLinkage(fn.Name),
+		"define %s%s%s @%s(%s) #0 {\n",
+		e.functionLinkage(fn),
+		returnAttrs,
 		returnType,
 		llvmFunctionName(fn.Name),
 		strings.Join(params, ", "),
@@ -1045,12 +1050,33 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 	e.out.Truncate(bodyStart)
 	e.out.WriteString(hoisted)
 	e.out.WriteString("}\n\n")
+	e.writeCExportAlias(fn, returnType)
 	e.mainReturnsInt = false
 	e.currentReturn = ""
 	e.currentBlock = ""
 	e.entryParamLoads = nil
 	e.wroteParamLoads = false
 	return nil
+}
+
+// definitionParams spells the parameter list of the function being written and
+// registers each parameter as a value of the body. The entry point takes the
+// C arguments it is started with, and a C export takes each value as C passes it.
+func (e *emitter) definitionParams(fn *ir.Function) []string {
+	if e.mainReturnsInt {
+		return []string{"i32 %kizu.argc", "ptr %kizu.argv"}
+	}
+	params := make([]string, 0, len(fn.Params))
+	for _, param := range fn.Params {
+		spelled := e.functionParamABI(param)
+		if fn.ExportABI == "c" {
+			spelled = e.llvmType(param.Type) + cIntegerExtension(param.Type) + " " +
+				localName(param.Name)
+		}
+		params = append(params, spelled)
+		e.values[param.Name] = valueInfo{typ: param.Type, operand: localName(param.Name)}
+	}
+	return params
 }
 
 // functionParamABI returns the LLVM ABI parameter spelling for one Kizu value.
@@ -1906,21 +1932,77 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	return nil
 }
 
-// functionLinkage gives every function but the entry point internal linkage.
+// functionLinkage gives every function internal linkage but the entry point
+// and a C export defined under its own symbol.
 //
-// A Kizu program exports nothing: `extern "c" fn` imports a C symbol and there
-// is no way to spell the other direction, so the only name the outside world
-// needs is `main`. Left external, a Kizu function's name would be the symbol
-// the linker offers everyone -- including the C runtime linked beside it. A
-// program with `fn send(...)` in it would have the runtime's socket write call
-// that instead of libc's, which is a program that compiles and then recurses
-// until the stack ends. Internal linkage is what keeps a name a program chose
-// for itself from being an answer to somebody else's question.
-func functionLinkage(name string) string {
-	if name == "main" {
+// Left external, a Kizu function's name would be the symbol the linker offers
+// everyone -- including the C runtime linked beside it. A program with
+// `fn send(...)` in it would have the runtime's socket write call that instead
+// of libc's, which is a program that compiles and then recurses until the
+// stack ends. Internal linkage is what keeps a name a program chose for itself
+// from being an answer to somebody else's question. `export "c" fn` is the one
+// way a program offers a name, and it is spelled where review finds it.
+func (e *emitter) functionLinkage(fn *ir.Function) string {
+	if fn.Name == "main" || fn.ExportABI == "c" && llvmFunctionName(fn.Name) == fn.ExportName {
 		return ""
 	}
 	return "internal "
+}
+
+// writeCExportAlias gives a C export whose module path qualifies its name
+// the symbol C calls it by. The body keeps its module name, which is what
+// every call from Kizu names; the alias is the one name the host sees.
+func (e *emitter) writeCExportAlias(fn *ir.Function, returnType string) {
+	if fn.ExportABI != "c" || llvmFunctionName(fn.Name) == fn.ExportName {
+		return
+	}
+	paramTypes := make([]string, 0, len(fn.Params))
+	for _, param := range fn.Params {
+		paramTypes = append(paramTypes, e.llvmType(param.Type))
+	}
+	fmt.Fprintf(&e.out, "@%s = alias %s (%s), ptr @%s\n\n",
+		fn.ExportName, returnType, strings.Join(paramTypes, ", "), llvmFunctionName(fn.Name))
+}
+
+// validateCExportSymbols refuses a C export whose symbol another export or
+// another function of the module already names. The linker would report the
+// clash too, but by a name the source does not spell.
+func (e *emitter) validateCExportSymbols() error {
+	owners := map[string]string{}
+	for _, function := range e.module.Functions {
+		owners[llvmFunctionName(function.Name)] = function.Name
+	}
+	exported := map[string]string{}
+	for _, function := range e.module.Functions {
+		if function.ExportABI != "c" {
+			continue
+		}
+		symbol := function.ExportName
+		if other, ok := exported[symbol]; ok {
+			return fmt.Errorf("llvm error: C exports `%s` and `%s` both name symbol `%s`",
+				other, function.Name, symbol)
+		}
+		exported[symbol] = function.Name
+		if owner, ok := owners[symbol]; ok && owner != function.Name {
+			return fmt.Errorf("llvm error: C export `%s` names symbol `%s`, which `%s` already uses",
+				function.Name, symbol, owner)
+		}
+	}
+	return nil
+}
+
+// cIntegerExtension is the attribute C gives a boundary value narrower than
+// its register: the C side widens it as the platform ABI says, and the
+// attribute is what tells LLVM which way.
+func cIntegerExtension(value string) string {
+	switch value {
+	case "bool", "u8", "u16":
+		return " zeroext"
+	case "i8", "i16":
+		return " signext"
+	default:
+		return ""
+	}
 }
 
 // writeInternalCall adapts module-local struct values to Kizu's explicit

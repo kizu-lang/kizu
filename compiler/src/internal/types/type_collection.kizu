@@ -40,6 +40,12 @@ struct CollectionImplMethodIssue {
     contract_name: ast::Text, type_name: ast::Text, method: FunctionHandle,
 }
 
+/// One declaration a rule refuses as a whole, reported where it was written.
+struct CollectionSpanIssue {
+    name: ast::Text,
+    span: ast::Span,
+}
+
 struct CollectionHostParamIssue {
     name: ast::Text, index: i64, type_name: Type,
     mut_borrow: bool,
@@ -106,6 +112,13 @@ union TypeCollectionIssue {
     CHostStructByValue(CollectionHostParamIssue),
     CHostParam(CollectionHostParamIssue),
     CHostReturn(CollectionNamedTypeIssue),
+    CExportMethod(CollectionSpanIssue),
+    CExportStaticParams(CollectionSpanIssue),
+    CExportMain(ast::Span),
+    CExportReserved(CollectionSpanIssue),
+    CExportBorrowParam(CollectionHostParamIssue),
+    CExportParam(CollectionHostParamIssue),
+    CExportReturn(CollectionNamedTypeIssue),
 }
 
 union DeclaredFunctionResult {
@@ -734,7 +747,9 @@ fn (self: &Checker) validate_host_function_signature(
         !mem::equal_bytes(extern_abi, "browser") {
         return TypeCollectionIssue::UnsupportedExternAbi(signature.extern_abi);
     }
-    if mem::len(export_abi) > 0 and !mem::equal_bytes(export_abi, "browser") {
+    if mem::len(export_abi) > 0 and
+        !mem::equal_bytes(export_abi, "c") and
+        !mem::equal_bytes(export_abi, "browser") {
         return TypeCollectionIssue::UnsupportedExportAbi(signature.export_abi);
     }
     let retained_library = tree.texts.at(signature.link_library.node);
@@ -745,6 +760,9 @@ fn (self: &Checker) validate_host_function_signature(
     }
     if mem::equal_bytes(extern_abi, "c") {
         return self.validate_c_host_function_types(tree, signature, params, return_type);
+    }
+    if mem::equal_bytes(export_abi, "c") {
+        return self.validate_c_export_function(tree, signature, params, return_type);
     }
     let browser_import = mem::equal_bytes(extern_abi, "browser");
     let browser_export = mem::equal_bytes(export_abi, "browser");
@@ -822,6 +840,55 @@ fn (self: &Checker) validate_c_host_function_types(
     return null;
 }
 
+/// Limits a function C calls to what C can hand it and read back, the Go
+/// `validateCExportFunction`: integers, floats, bool and raw pointers. A
+/// borrow is refused even of an extern struct: C passes an address the
+/// compiler never saw made, and a safe borrow would promise it is live and
+/// unaliased. The symbol is the declaration's own identifier, so it may not
+/// be one the program entry or the runtime already names.
+fn (self: &Checker) validate_c_export_function(
+    tree: &ast::Ast,
+    signature: &ast::FunctionSignature,
+    params: &array::Array<Type>,
+    return_type: Type
+) -> !?TypeCollectionIssue {
+    let spanned = CollectionSpanIssue { name: signature.name, span: signature.span };
+    if signature.receiver {
+        return TypeCollectionIssue::CExportMethod(spanned);
+    }
+    if signature.static_params.len() > 0 {
+        return TypeCollectionIssue::CExportStaticParams(spanned);
+    }
+    let retained_name = tree.texts.at(signature.name.node);
+    let name = retained_name.as_bytes();
+    if collection_name_has_leaf(name, "main") {
+        return TypeCollectionIssue::CExportMain(signature.span);
+    }
+    if collection_leaf_starts_with(name, "kizu_") {
+        return TypeCollectionIssue::CExportReserved(spanned);
+    }
+    var index = 0;
+    while params.get(index) |parameter_type| {
+        let issue = self.host_param_issue(signature, index, parameter_type);
+        if signature.params.at(index) |parameter| {
+            if parameter.borrow or parameter.mut_borrow {
+                return TypeCollectionIssue::CExportBorrowParam(issue);
+            }
+        }
+        if !c_host_scalar(&self.types, parameter_type) {
+            return TypeCollectionIssue::CExportParam(issue);
+        }
+        index = index + 1;
+    }
+    if !self.types.is_text(return_type, "void") and !c_host_scalar(&self.types, return_type) {
+        let issue = CollectionNamedTypeIssue {
+            name: signature.name, type_name: return_type, span: signature.span
+        };
+        return TypeCollectionIssue::CExportReturn(issue);
+    }
+    return null;
+}
+
 /// Reports what keeps one parameter off the C boundary, or null when C can
 /// receive it.
 fn (self: &Checker) c_host_param_issue(
@@ -880,6 +947,19 @@ fn browser_host_scalar(types: &TypeTable, value: Type) -> bool {
         types.is_text(value, "u8") or types.is_text(value, "u16") or
         types.is_text(value, "u32") or types.is_text(value, "u64") or
         types.is_text(value, "usize") or types.is_text(value, "isize");
+}
+
+/// Reports whether the identifier after the last `::` of a resolved name
+/// starts with prefix, the Go `strings.HasPrefix(unqualifiedFunctionName(..))`.
+fn collection_leaf_starts_with(name: []u8, prefix: []u8) -> bool {
+    var index = mem::len(name);
+    while index > 1 {
+        index = index - 1;
+        if name[index] == cast<u8>(58) and name[index - 1] == cast<u8>(58) {
+            return mem::starts_with(name[index + 1..mem::len(name)], prefix);
+        }
+    }
+    return mem::starts_with(name, prefix);
 }
 
 fn collection_name_has_leaf(name: []u8, leaf: []u8) -> bool {
@@ -1350,6 +1430,52 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
             try self.append_checker_type(&var message, named.type_name);
             try message.append_bytes(self.allocator, "`, which C cannot produce");
         },
+        CExportMethod(spanned) => {
+            span = spanned.span;
+            try message.append_bytes(self.allocator, "C export `");
+            try append_collection_text(self.allocator, &var message, tree, spanned.name);
+            try message.append_bytes(self.allocator, "` cannot be a method");
+        },
+        CExportStaticParams(spanned) => {
+            span = spanned.span;
+            try message.append_bytes(self.allocator, "C export `");
+            try append_collection_text(self.allocator, &var message, tree, spanned.name);
+            try message.append_bytes(self.allocator, "` cannot have static parameters");
+        },
+        CExportMain(at) => {
+            span = at;
+            try message.append_bytes(self.allocator,
+                "C export `main` conflicts with the program entry"
+            );
+        },
+        CExportReserved(spanned) => {
+            span = spanned.span;
+            try message.append_bytes(self.allocator, "C export `");
+            try append_collection_text(self.allocator, &var message, tree, spanned.name);
+            try message.append_bytes(self.allocator,
+                "` uses the `kizu_` prefix the runtime reserves"
+            );
+        },
+        CExportBorrowParam(host_param) => {
+            span = host_param.span;
+            try self.append_c_export_param_head(&var message, tree, host_param);
+            try self.append_c_host_param_spelling(&var message, tree, host_param);
+            try message.append_bytes(self.allocator, "`, which C cannot pass");
+        },
+        CExportParam(host_param) => {
+            span = host_param.span;
+            try self.append_c_export_param_head(&var message, tree, host_param);
+            try self.append_checker_type(&var message, host_param.type_name);
+            try message.append_bytes(self.allocator, "`, which C cannot pass");
+        },
+        CExportReturn(named) => {
+            span = named.span;
+            try message.append_bytes(self.allocator, "C export `");
+            try append_collection_text(self.allocator, &var message, tree, named.name);
+            try message.append_bytes(self.allocator, "` returns `");
+            try self.append_checker_type(&var message, named.type_name);
+            try message.append_bytes(self.allocator, "`, which C cannot receive");
+        },
     }
     var value = try new_checker_diagnostic_at(self.allocator, category, span, move message);
     errdefer value.deinit(self.allocator);
@@ -1373,6 +1499,9 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
         CHostStructByValue(_) => try add_c_host_advice(self.allocator, &var value),
         CHostParam(_) => try add_c_host_advice(self.allocator, &var value),
         CHostReturn(_) => try add_c_host_advice(self.allocator, &var value),
+        CExportBorrowParam(_) => try add_c_export_advice(self.allocator, &var value),
+        CExportParam(_) => try add_c_export_advice(self.allocator, &var value),
+        CExportReturn(_) => try add_c_export_advice(self.allocator, &var value),
         _ => {},
     }
     return move value;
@@ -1387,6 +1516,28 @@ fn add_c_host_advice(allocator: Allocator, value: &var diagnostic::Diagnostic) -
     return value.with_help(allocator,
         "spell the value as C sees it: `ptr<const u8>` with a `usize` length for bytes, `ptr<T>` for a value C reads or writes in place"
     );
+}
+
+/// Adds what a C export can carry and how to take an address, the Go
+/// `cExportTypeError` note and help.
+fn add_c_export_advice(allocator: Allocator, value: &var diagnostic::Diagnostic) -> !void {
+    try value.with_note(allocator,
+        "a C export passes only what C can name: an integer, a float, `bool`, `ptr<T>`, `ptr<const T>`, or a nullable pointer"
+    );
+    return value.with_help(allocator, "take an address C hands over as `ptr<T>` and read it under `unsafe`");
+}
+
+/// Writes `C export `name` parameter N has type `` for a parameter C cannot pass.
+fn (self: &Checker) append_c_export_param_head(
+    message: &var string::String,
+    tree: &ast::Ast,
+    host_param: CollectionHostParamIssue
+) -> !void {
+    try message.append_bytes(self.allocator, "C export `");
+    try append_collection_text(self.allocator, message, tree, host_param.name);
+    try message.append_bytes(self.allocator, "` parameter ");
+    try fmt::append_i64(self.allocator, message, host_param.index);
+    return message.append_bytes(self.allocator, " has type `");
 }
 
 /// Spells a borrowed C parameter the way its declaration does, the Go
