@@ -364,16 +364,17 @@ fn (self: &var Checker) check_thread_pool_round(
         }
         index = index + 1;
     }
-    // The round returns `E!void`, E the second of its `<T, E>`.
+    // The round returns `E!void`, E the last of its `<T, E>` or `<T, S, E>`.
     let parts = try self.names.split_generic_args(type_arg) orelse
         return try self.error0(ast::zero_span(),
-        "move error: a pool round expects an element type and an error set");
+        "move error: a pool round expects an element type, an optional state type and an error set");
     defer parts.deinit(self.allocator);
-    if parts.len() != 2 {
+    let count = parts.len();
+    if count != 2 and count != 3 {
         return try self.error0(ast::zero_span(),
-            "move error: a pool round expects an element type and an error set");
+            "move error: a pool round expects an element type, an optional state type and an error set");
     }
-    out.* = try self.names.wrapped("", parts.get_or_panic(1), "!void");
+    out.* = try self.names.wrapped("", parts.get_or_panic(count - 1), "!void");
     return null;
 }
 
@@ -1696,17 +1697,35 @@ fn (self: &var Checker) check_generic_wrapper_type_args(
         }
     }
     if self.names.is(name, "std::thread::each") or self.names.is(name, "std::thread::each_lane") {
-        // Every chunk goes to another thread. An Io or Allocator copied into
-        // two chunks would be one capability used from two threads at once,
-        // and a view would reach past the chunk it came in.
-        let elem = type_args.get_or_panic(0);
-        if try self.view_carrying_type(elem) or try self.capability_carrying_type(elem) {
-            return try self.error2(
-                tree, ast::zero_span(),
-                "borrow error: `%s` element `%s` must own its data and contain no Io or Allocator",
-                Arg::Str(name), Arg::Str(elem)
-            );
+        return self.check_thread_round_type_arg(tree, name, "element", type_args.get_or_panic(0));
+    }
+    if self.names.is(name, "std::thread::each_with") or self.names.is(name, "std::thread::each_lane_with") {
+        if try self.check_thread_round_type_arg(tree, name, "element", type_args.get_or_panic(0)) |failed| {
+            return move failed;
         }
+        return self.check_thread_round_type_arg(tree, name, "state", type_args.get_or_panic(1));
+    }
+    return null;
+}
+
+/// Refuses an element or state a pool round would hand to another thread
+/// with something still shared, the Go `checkThreadRoundTypeArg`. Every chunk
+/// and every state goes to one thread; an Io or Allocator copied into two of
+/// them would be one capability used from two threads at once, and a view
+/// would reach past the chunk or state it came in.
+fn (self: &var Checker) check_thread_round_type_arg(
+    tree: &ast::Ast,
+    name: Name,
+    role: []u8,
+    type_arg: Name
+) -> !?diagnostic::Diagnostic {
+    if try self.view_carrying_type(type_arg) or try self.capability_carrying_type(type_arg) {
+        var message = try string::from_bytes(self.allocator, "borrow error: `%s` ");
+        defer message.deinit(self.allocator);
+        try message.append_bytes(self.allocator, role);
+        try message.append_bytes(self.allocator, " `%s` must own its data and contain no Io or Allocator");
+        let format = message.as_bytes();
+        return try self.error2(tree, ast::zero_span(), format, Arg::Str(name), Arg::Str(type_arg));
     }
     return null;
 }

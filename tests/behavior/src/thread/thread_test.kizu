@@ -237,6 +237,111 @@ test "the pool runs rounds after a failure" {
     }
 }
 
+// A thread's own state: a scratch run it owns, and how many lanes it took.
+struct Reverser {
+    scratch: array::Array<i64>,
+    lanes: i64,
+}
+
+fn (self: Reverser) deinit(allocator: Allocator) -> void {
+    self.scratch.deinit(allocator);
+    return;
+}
+
+// Reverses a lane through the state's scratch run, which the thread keeps
+// from lane to lane.
+fn reverse_lane(state: &var Reverser, lane: &var []i64, index: i64) -> Failure!void {
+    let n = mem::count<i64>(lane);
+    let scratch = state.scratch.as_mut_slice();
+    for 0..n |i| {
+        scratch[i] = lane[n - 1 - i];
+    }
+    for 0..n |i| {
+        lane[i] = scratch[i];
+    }
+    state.lanes = state.lanes + 1;
+    return;
+}
+
+fn reversers(allocator: Allocator, threads: i64, n: i64) -> mem::Error!array::Array<Reverser> {
+    var states = array::new<Reverser>(allocator);
+    errdefer states.deinit(allocator);
+    for 0..threads |_t| {
+        var scratch = array::new<i64>(allocator);
+        errdefer scratch.deinit(allocator);
+        try count_up(&var scratch, allocator, n);
+        try states.append(allocator, Reverser { scratch: move scratch, lanes: 0 });
+    }
+    return move states;
+}
+
+fn fail_in_state(state: &var i64, part: &var []i64, index: i64) -> Failure!void {
+    state.* = state.* + 1;
+    if index == 3 {
+        return thread::Error::SpawnFailed;
+    }
+    return;
+}
+
+fn fails_with_states(
+    pool: &var thread::Pool,
+    cells: &var []i64,
+    states: &var array::Array<i64>
+) -> bool {
+    thread::each_with<i64, i64, Failure>(pool, cells, 1, states, fail_in_state) catch return true;
+    return false;
+}
+
+test "each_lane_with hands every lane its thread's own state" {
+    let allocator = mem::page_allocator();
+    var pool = try thread::init(io::blocking(), allocator, 4);
+    defer pool.deinit(allocator);
+    var states = try reversers(allocator, pool.threads(), 5);
+    defer states.deinit(allocator);
+    for 0..20 |_round| {
+        var values = array::new<i64>(allocator);
+        defer values.deinit(allocator);
+        try count_up(&var values, allocator, 5 * 6);
+        let cells = values.as_mut_slice();
+        // Six columns of five, 6 apart: column c is c, c + 6, ..., c + 24.
+        try thread::each_lane_with<i64, Reverser, Failure>(
+            &var pool, allocator, cells, 5, 6, &var states, reverse_lane);
+        for 0..30 |i| {
+            let row = i / 6;
+            let column = i % 6;
+            testing::expect(values.get_or_panic(i) == (4 - row) * 6 + column);
+        }
+    }
+    var lanes = 0;
+    for 0..states.len() |i| {
+        if states.at(i) |state| {
+            lanes = lanes + state.lanes;
+        }
+    }
+    testing::expect(lanes == 20 * 6);
+}
+
+test "each_with returns a worker's failure and keeps the states' writes" {
+    let allocator = mem::page_allocator();
+    var pool = try thread::init(io::blocking(), allocator, 3);
+    defer pool.deinit(allocator);
+    var states = array::new<i64>(allocator);
+    defer states.deinit(allocator);
+    for 0..pool.threads() |_t| {
+        try states.append(allocator, 0);
+    }
+    var values = array::new<i64>(allocator);
+    defer values.deinit(allocator);
+    try count_up(&var values, allocator, 12);
+    let cells = values.as_mut_slice();
+    testing::expect(fails_with_states(&var pool, cells, &var states));
+    var calls = 0;
+    for 0..states.len() |i| {
+        calls = calls + states.get_or_panic(i);
+    }
+    testing::expect(calls >= 1 and calls <= 12);
+}
+
 test "the processor count is at least one" {
     testing::expect(thread::cpu_count(io::blocking()) >= 1);
 }

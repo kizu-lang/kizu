@@ -1700,11 +1700,12 @@ fn (self: &var Checker) check_task_set_spawn(
     return null;
 }
 
-/// Validates `thread_pool_each<T, E>(pool, data, chunk, worker)`, the Go
-/// `checkThreadPoolEach`. The runtime hands each chunk of data to the worker
-/// as its own `&var []T` and returns the first failure a worker reported;
-/// what T may hold is the ownership checker's rule, because it is about what
-/// a chunk can reach.
+/// Validates `thread_pool_each<T, E>(pool, data, chunk, worker)` and, with
+/// states, `thread_pool_each<T, S, E>(pool, data, chunk, states, worker)`,
+/// the Go `checkThreadPoolEach`. The runtime hands each chunk of data to the
+/// worker as its own `&var []T` and returns the first failure a worker
+/// reported; what T and S may hold is the ownership checker's rule, because
+/// it is about what a chunk can reach.
 fn (self: &var Checker) check_thread_pool_each(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1712,47 +1713,32 @@ fn (self: &var Checker) check_thread_pool_each(
     args: ast::ExpressionList,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
-    let label = "std::thread::each";
-    var parts = try self.thread_round_type_args(label, type_arg) orelse
+    var label = "std::thread::each";
+    var parts = try self.thread_round_type_args(type_arg) orelse
         return try self.thread_round_type_args_error(label, type_arg);
     defer parts.deinit(self.allocator);
-    let elem = parts.elem.as_bytes();
+    if parts.state.len() > 0 {
+        label = "std::thread::each_with";
+    }
+    var shape = array::new<stdprim::ArgKind>(self.allocator);
+    defer shape.deinit(self.allocator);
+    // The data's slot is checked as a view, not by its kind.
+    try shape.append(self.allocator, stdprim::ArgKind::I64);
+    try shape.append(self.allocator, stdprim::ArgKind::I64);
+    try shape.append(self.allocator, stdprim::ArgKind::I64);
+    if try self.check_thread_round_args(tree, scope, label, &parts, &shape, 1, args) |problem| {
+        return move problem;
+    }
     let set = parts.set.as_bytes();
-    if args.len(tree) != 4 {
-        return try self.checker_error_at(
-            "type error",
-            ast::zero_span(),
-            "`std::thread::each` expects pool, data, chunk and worker"
-        );
-    }
-    let pool_arg = args.get_or_panic(tree, 0);
-    if try self.check_core_arg(
-        tree, scope, label, 0, stdprim::ArgKind::I64, pool_arg
-    ) |problem| {
-        return move problem;
-    }
-    let data_arg = args.get_or_panic(tree, 1);
-    if try self.check_thread_data_arg(tree, scope, label, elem, data_arg) |problem| {
-        return move problem;
-    }
-    let chunk_arg = args.get_or_panic(tree, 2);
-    if try self.check_core_arg(
-        tree, scope, label, 2, stdprim::ArgKind::I64, chunk_arg
-    ) |problem| {
-        return move problem;
-    }
-    let worker_arg = args.get_or_panic(tree, 3);
-    if try self.check_thread_worker_arg(tree, scope, label, elem, set, worker_arg) |problem| {
-        return move problem;
-    }
     out.* = try self.thread_round_result(set);
     return null;
 }
 
 /// Validates `thread_pool_each_lane<T, E>(pool, allocator, data, length,
-/// stride, worker)`, the Go `checkThreadPoolEachLane`. The round can also run
-/// out of memory for the lane runs, so E has to hold std::thread::Error as
-/// well as whatever the worker fails with.
+/// stride, worker)` and its `<T, S, E>` form with states before the worker,
+/// the Go `checkThreadPoolEachLane`. The round can also run out of memory for
+/// the lane runs, so E has to hold std::thread::Error as well as whatever the
+/// worker fails with.
 fn (self: &var Checker) check_thread_pool_each_lane(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1760,85 +1746,65 @@ fn (self: &var Checker) check_thread_pool_each_lane(
     args: ast::ExpressionList,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
-    let label = "std::thread::each_lane";
-    var parts = try self.thread_round_type_args(label, type_arg) orelse
+    var label = "std::thread::each_lane";
+    var parts = try self.thread_round_type_args(type_arg) orelse
         return try self.thread_round_type_args_error(label, type_arg);
     defer parts.deinit(self.allocator);
-    let elem = parts.elem.as_bytes();
+    if parts.state.len() > 0 {
+        label = "std::thread::each_lane_with";
+    }
     let set = parts.set.as_bytes();
     let thread_error = try self.types.intern("std::thread::Error");
     let set_type = try self.types.intern(set);
     if !self.error_set_fits(thread_error, set_type) {
-        var message = try string::from_bytes(self.allocator, "`std::thread::each_lane` needs its error set `");
+        var message = try string::from_bytes(self.allocator, "`");
         errdefer message.deinit(self.allocator);
+        try message.append_bytes(self.allocator, label);
+        try message.append_bytes(self.allocator, "` needs its error set `");
         try message.append_bytes(self.allocator, set);
         try message.append_bytes(self.allocator, "` to include std::thread::Error");
         return try self.checker_message_at("type error", ast::zero_span(), move message);
     }
-    if args.len(tree) != 6 {
-        return try self.checker_error_at(
-            "type error",
-            ast::zero_span(),
-            "`std::thread::each_lane` expects pool, allocator, data, length, stride and worker"
-        );
-    }
-    let pool_arg = args.get_or_panic(tree, 0);
-    if try self.check_core_arg(
-        tree, scope, label, 0, stdprim::ArgKind::I64, pool_arg
-    ) |problem| {
-        return move problem;
-    }
-    let allocator_arg = args.get_or_panic(tree, 1);
-    if try self.check_core_arg(
-        tree, scope, label, 1, stdprim::ArgKind::Allocator, allocator_arg
-    ) |problem| {
-        return move problem;
-    }
-    let data_arg = args.get_or_panic(tree, 2);
-    if try self.check_thread_data_arg(tree, scope, label, elem, data_arg) |problem| {
-        return move problem;
-    }
-    var index = 3;
-    while index < 5 {
-        let shape_arg = args.get_or_panic(tree, index);
-        if try self.check_core_arg(
-            tree, scope, label, index, stdprim::ArgKind::I64, shape_arg
-        ) |problem| {
-            return move problem;
-        }
-        index = index + 1;
-    }
-    let worker_arg = args.get_or_panic(tree, 5);
-    if try self.check_thread_worker_arg(tree, scope, label, elem, set, worker_arg) |problem| {
+    var shape = array::new<stdprim::ArgKind>(self.allocator);
+    defer shape.deinit(self.allocator);
+    try shape.append(self.allocator, stdprim::ArgKind::I64);
+    try shape.append(self.allocator, stdprim::ArgKind::Allocator);
+    try shape.append(self.allocator, stdprim::ArgKind::I64);
+    try shape.append(self.allocator, stdprim::ArgKind::I64);
+    try shape.append(self.allocator, stdprim::ArgKind::I64);
+    if try self.check_thread_round_args(tree, scope, label, &parts, &shape, 2, args) |problem| {
         return move problem;
     }
     out.* = try self.thread_round_result(set);
     return null;
 }
 
-/// A pool round's `<T, E>`: the element, and the error set its worker fails
-/// with.
+/// A pool round's `<T, E>` or `<T, S, E>`: the element, the per-thread state
+/// (empty without one), and the error set its worker fails with.
 struct ThreadRoundTypeArgs {
     elem: string::String,
+    state: string::String,
     set: string::String,
 }
 
 fn (self: ThreadRoundTypeArgs) deinit(allocator: Allocator) -> void {
     self.elem.deinit(allocator);
+    self.state.deinit(allocator);
     self.set.deinit(allocator);
     return;
 }
 
-/// Splits a pool round's `<T, E>`, the Go `threadRoundTypeArgs`; null when
-/// there are not two arguments or the second is not an error set.
-fn (self: &var Checker) thread_round_type_args(label: []u8, type_arg: []u8) -> !?ThreadRoundTypeArgs {
+/// Splits a pool round's static arguments, the Go `threadRoundTypeArgs`;
+/// null when there are not two or three or the last is not an error set.
+fn (self: &var Checker) thread_round_type_args(type_arg: []u8) -> !?ThreadRoundTypeArgs {
     var parts = try split_generic_args(self.allocator, type_arg) orelse return null;
     defer parts.deinit(self.allocator);
-    if parts.len() != 2 {
+    let count = parts.len();
+    if count != 2 and count != 3 {
         return null;
     }
     var is_set = false;
-    if parts.at(1) |text| {
+    if parts.at(count - 1) |text| {
         let bytes = text.as_bytes();
         let set_type = try self.types.intern(bytes);
         is_set = self.has_error_set(set_type);
@@ -1848,17 +1814,25 @@ fn (self: &var Checker) thread_round_type_args(label: []u8, type_arg: []u8) -> !
     }
     var elem = string::new(self.allocator);
     errdefer elem.deinit(self.allocator);
+    var state = string::new(self.allocator);
+    errdefer state.deinit(self.allocator);
     var set = string::new(self.allocator);
     errdefer set.deinit(self.allocator);
     if parts.at(0) |text| {
         let bytes = text.as_bytes();
         try elem.append_bytes(self.allocator, bytes);
     }
-    if parts.at(1) |text| {
+    if count == 3 {
+        if parts.at(1) |text| {
+            let bytes = text.as_bytes();
+            try state.append_bytes(self.allocator, bytes);
+        }
+    }
+    if parts.at(count - 1) |text| {
         let bytes = text.as_bytes();
         try set.append_bytes(self.allocator, bytes);
     }
-    return ThreadRoundTypeArgs { elem: move elem, set: move set };
+    return ThreadRoundTypeArgs { elem: move elem, state: move state, set: move set };
 }
 
 fn (self: &var Checker) thread_round_type_args_error(
@@ -1868,7 +1842,8 @@ fn (self: &var Checker) thread_round_type_args_error(
     var message = try string::from_bytes(self.allocator, "`");
     errdefer message.deinit(self.allocator);
     try message.append_bytes(self.allocator, label);
-    try message.append_bytes(self.allocator, "` expects an element type and an error set, got `");
+    try message.append_bytes(
+        self.allocator, "` expects an element type, an optional state type and an error set, got `");
     try message.append_bytes(self.allocator, type_arg);
     try message.append_bytes(self.allocator, "`");
     return try self.checker_message_at("type error", ast::zero_span(), move message);
@@ -1883,45 +1858,116 @@ fn (self: &var Checker) thread_round_result(set: []u8) -> !Type {
     return self.types.intern(bytes);
 }
 
-/// Validates the `&var []T` a pool round cuts, which a std wrapper forwards
-/// already lent.
-fn (self: &var Checker) check_thread_data_arg(
+/// Validates a round's arguments, the Go `checkThreadRoundArgs`: `shape` up
+/// to the worker, with the data at data_index, then the states when the round
+/// has them, then the worker.
+fn (self: &var Checker) check_thread_round_args(
     tree: &var ast::Ast,
     scope: ScopeHandle,
     label: []u8,
-    type_arg: []u8,
-    data_arg: ast::Expression
+    parts: &ThreadRoundTypeArgs,
+    shape: &array::Array<stdprim::ArgKind>,
+    data_index: i64,
+    args: ast::ExpressionList
 ) -> !?diagnostic::Diagnostic {
+    let has_state = parts.state.len() > 0;
+    var want = shape.len() + 1;
+    if has_state {
+        want = want + 1;
+    }
+    if args.len(tree) != want {
+        var message = try string::from_bytes(self.allocator, "`");
+        errdefer message.deinit(self.allocator);
+        try message.append_bytes(self.allocator, label);
+        try message.append_bytes(self.allocator, "` expects ");
+        try fmt::append_i64(self.allocator, &var message, want);
+        try message.append_bytes(self.allocator, " arguments, got ");
+        try fmt::append_i64(self.allocator, &var message, args.len(tree));
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    var index = 0;
+    while shape.get(index) |kind| {
+        if index != data_index {
+            let argument = args.get_or_panic(tree, index);
+            if try self.check_core_arg(tree, scope, label, index, kind, argument) |problem| {
+                return move problem;
+            }
+        }
+        index = index + 1;
+    }
     var data_want = try string::from_bytes(self.allocator, "&var []");
     defer data_want.deinit(self.allocator);
-    try data_want.append_bytes(self.allocator, type_arg);
+    let elem = parts.elem.as_bytes();
+    try data_want.append_bytes(self.allocator, elem);
     let data_bytes = data_want.as_bytes();
-    let data_type = try self.types.intern(data_bytes);
-    let view_bytes = data_bytes[5..mem::len(data_bytes)];
-    let view_type = try self.types.intern(view_bytes);
-    var got_data = empty_type();
-    if try self.check_expr(tree, scope, data_arg, &var got_data) |problem| {
+    let data_arg = args.get_or_panic(tree, data_index);
+    if try self.check_thread_borrowed_arg(tree, scope, label, "data", data_bytes, data_arg) |problem| {
         return move problem;
     }
-    if !same_type(got_data, data_type) and !same_type(got_data, view_type) {
-        return try self.task_arg_error(label, "data", data_type, got_data);
+    if has_state {
+        // An Array rather than a view: S may own memory, and a view over
+        // owners is not something a program holds (SPEC §7.1).
+        var states_want = try string::from_bytes(self.allocator, "&var std::array::Array<");
+        defer states_want.deinit(self.allocator);
+        let state = parts.state.as_bytes();
+        try states_want.append_bytes(self.allocator, state);
+        try states_want.append_bytes(self.allocator, ">");
+        let states_bytes = states_want.as_bytes();
+        let states_arg = args.get_or_panic(tree, shape.len());
+        if try self.check_thread_borrowed_arg(
+            tree, scope, label, "states", states_bytes, states_arg
+        ) |problem| {
+            return move problem;
+        }
+    }
+    let worker_arg = args.get_or_panic(tree, want - 1);
+    return self.check_thread_worker_arg(tree, scope, label, parts, worker_arg);
+}
+
+/// Validates an `&var X` a pool round writes through, which a std wrapper
+/// forwards already lent, so X alone is accepted too.
+fn (self: &var Checker) check_thread_borrowed_arg(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    label: []u8,
+    role: []u8,
+    want_bytes: []u8,
+    arg: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    let want_type = try self.types.intern(want_bytes);
+    let bare_type = try self.types.intern(want_bytes[5..mem::len(want_bytes)]);
+    var got = empty_type();
+    if try self.check_expr(tree, scope, arg, &var got) |problem| {
+        return move problem;
+    }
+    if !same_type(got, want_type) and !same_type(got, bare_type) {
+        return try self.task_arg_error(label, role, want_type, got);
     }
     return null;
 }
 
-/// Validates the `fn(&var []T, i64) -> E!void` a pool round calls once per
-/// chunk or lane.
+/// Validates the `fn(&var []T, i64) -> E!void`, or with a state
+/// `fn(&var S, &var []T, i64) -> E!void`, a pool round calls once per chunk
+/// or lane.
 fn (self: &var Checker) check_thread_worker_arg(
     tree: &var ast::Ast,
     scope: ScopeHandle,
     label: []u8,
-    type_arg: []u8,
-    set: []u8,
+    parts: &ThreadRoundTypeArgs,
     worker_arg: ast::Expression
 ) -> !?diagnostic::Diagnostic {
-    var worker_want = try string::from_bytes(self.allocator, "fn(&var []");
+    var worker_want = try string::from_bytes(self.allocator, "fn(");
     defer worker_want.deinit(self.allocator);
-    try worker_want.append_bytes(self.allocator, type_arg);
+    if parts.state.len() > 0 {
+        let state = parts.state.as_bytes();
+        try worker_want.append_bytes(self.allocator, "&var ");
+        try worker_want.append_bytes(self.allocator, state);
+        try worker_want.append_bytes(self.allocator, ", ");
+    }
+    let elem = parts.elem.as_bytes();
+    let set = parts.set.as_bytes();
+    try worker_want.append_bytes(self.allocator, "&var []");
+    try worker_want.append_bytes(self.allocator, elem);
     try worker_want.append_bytes(self.allocator, ", i64) -> ");
     try worker_want.append_bytes(self.allocator, set);
     try worker_want.append_bytes(self.allocator, "!void");

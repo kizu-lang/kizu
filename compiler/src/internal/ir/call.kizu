@@ -501,8 +501,9 @@ fn (self: &var Lowerer) lower_task_set_spawn(
 }
 
 /// Lowers one pool round, the Go `lowerThreadPoolRound`. `type_args` is the
-/// round's `T, E`. The `&var []T` the wrapper was lent is a view value in IR;
-/// the backend adds what T measures, and the round returns the first failure
+/// round's `T, E` or `T, S, E`. The `&var []T` the wrapper was lent is a view
+/// value in IR, and the states are the Array the wrapper was lent; the
+/// backend adds what T and S measure, and the round returns the first failure
 /// as E.
 fn (self: &var Lowerer) lower_thread_pool_round(
     tree: &var ast::Ast,
@@ -513,17 +514,27 @@ fn (self: &var Lowerer) lower_thread_pool_round(
 ) -> !?diagnostic::Diagnostic {
     let parts = try self.split_static_args(type_args);
     defer parts.deinit(self.allocator);
-    if parts.len() != 2 {
-        return try self.fail1(tree, "ir error: `%s` expects an element type and an error set", Arg::Str(callee_name));
+    let count = parts.len();
+    if count != 2 and count != 3 {
+        return try self.fail1(
+            tree,
+            "ir error: `%s` expects an element type, an optional state type and an error set",
+            Arg::Str(callee_name)
+        );
     }
     let elem = parts.get_or_panic(0);
-    let set = parts.get_or_panic(1);
+    let set = parts.get_or_panic(count - 1);
+    let has_state = count == 3;
     let lane = self.name_is(callee_name, "std::internal::builtin::thread_pool_each_lane");
     var data_index = 1;
-    var worker_index = 3;
+    var states_index = 3;
     if lane {
         data_index = 2;
-        worker_index = 5;
+        states_index = 5;
+    }
+    var worker_index = states_index;
+    if has_state {
+        worker_index = states_index + 1;
     }
     var values = array::new<Value>(self.allocator);
     defer values.deinit(self.allocator);
@@ -539,9 +550,22 @@ fn (self: &var Lowerer) lower_thread_pool_round(
             try self.module.names.append_to(&var view, elem);
             want = try self.module.names.intern_owned(move view);
         }
+        if has_state and index == states_index {
+            var states = try string::from_bytes(self.allocator, "&var std::array::Array<");
+            errdefer states.deinit(self.allocator);
+            try self.module.names.append_to(&var states, parts.get_or_panic(1));
+            try states.append_bytes(self.allocator, ">");
+            want = try self.module.names.intern_owned(move states);
+        }
         if index == worker_index {
-            var worker = try string::from_bytes(self.allocator, "fn(&var []");
+            var worker = try string::from_bytes(self.allocator, "fn(");
             errdefer worker.deinit(self.allocator);
+            if has_state {
+                try worker.append_bytes(self.allocator, "&var ");
+                try self.module.names.append_to(&var worker, parts.get_or_panic(1));
+                try worker.append_bytes(self.allocator, ", ");
+            }
+            try worker.append_bytes(self.allocator, "&var []");
             try self.module.names.append_to(&var worker, elem);
             try worker.append_bytes(self.allocator, ", i64) -> ");
             try self.module.names.append_to(&var worker, set);

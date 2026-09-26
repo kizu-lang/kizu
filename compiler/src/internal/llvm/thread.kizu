@@ -9,7 +9,7 @@ import std::string;
 // thunks they call every worker through, one per worker error set.
 
 /// Returns where a pool round's `[]T` operand is, or null when name starts no
-/// pool round, the Go `threadRoundData`.
+/// pool round, the Go `threadRoundShapes` data.
 fn thread_round_data(names: &ir::NameTable, name: ir::Name) -> ?i64 {
     if names.is(name, "std::internal::builtin::thread_pool_each") {
         return 1;
@@ -18,6 +18,19 @@ fn thread_round_data(names: &ir::NameTable, name: ir::Name) -> ?i64 {
         return 2;
     }
     return null;
+}
+
+/// How many operands a round has without states, the Go `threadRoundShapes`
+/// plain: the data's round is two before its worker, a lane round four.
+fn thread_round_plain(data_index: i64) -> i64 {
+    return data_index * 2 + 2;
+}
+
+/// Reports whether a round hands each thread a state, the Go
+/// `threadRoundHasStates`: its states' Array sits between the shape's
+/// operands and the worker.
+fn thread_round_has_states(node: &ir::InstrNode, data_index: i64) -> bool {
+    return node.args.len() > thread_round_plain(data_index);
 }
 
 /// Names the error set a pool round's worker fails with, the Go
@@ -30,18 +43,23 @@ fn (self: &var Emitter) thread_round_set(module: &ir::Module, node: &ir::InstrNo
     return move parts.err;
 }
 
-/// Names the adapter a round whose worker fails with `set` calls that worker
-/// through, the Go `threadInvokeThunkName`.
-fn (self: &var Emitter) thread_invoke_thunk_name(set: []u8) -> !ir::Name {
-    var out = try string::from_bytes(self.allocator, "kizu.thread.each.invoke.");
+/// Names the adapter a round whose worker fails with `set`, and takes a state
+/// first when `states`, calls that worker through, the Go
+/// `threadInvokeThunkName`.
+fn (self: &var Emitter) thread_invoke_thunk_name(set: []u8, states: bool) -> !ir::Name {
+    var prefix = "kizu.thread.each.invoke.";
+    if states {
+        prefix = "kizu.thread.each.state.invoke.";
+    }
+    var out = try string::from_bytes(self.allocator, prefix);
     errdefer out.deinit(self.allocator);
     try append_llvm_name_part(self.allocator, &var out, set);
     return self.names.intern_owned(move out);
 }
 
-/// Lists the worker error sets the module's pool rounds use, the Go
-/// `threadRoundSets`.
-fn (self: &var Emitter) thread_round_sets(module: &ir::Module) -> !array::Array<string::String> {
+/// Lists the worker error sets the module's pool rounds use with states, or
+/// without when `states` is false, the Go `threadRoundInvokes`.
+fn (self: &var Emitter) thread_round_sets(module: &ir::Module, states: bool) -> !array::Array<string::String> {
     var seen = map::new<[]u8, bool>(self.allocator);
     defer seen.deinit(self.allocator);
     var function_index = 0;
@@ -59,7 +77,10 @@ fn (self: &var Emitter) thread_round_sets(module: &ir::Module) -> !array::Array<
                 if node.op != ir::Op::Call {
                     continue;
                 }
-                if thread_round_data(&module.names, node.operand) |_| {
+                if thread_round_data(&module.names, node.operand) |data_index| {
+                    if thread_round_has_states(&node, data_index) != states {
+                        continue;
+                    }
                     let set = try self.thread_round_set(module, &node);
                     defer set.deinit(self.allocator);
                     let bytes = set.as_bytes();
@@ -75,13 +96,24 @@ fn (self: &var Emitter) thread_round_sets(module: &ir::Module) -> !array::Array<
 }
 
 /// Emits the typed side of the pool's callback ABI, one adapter per worker
-/// error set, the Go `writeThreadEachInvokeThunks`. A worker takes its view
-/// as the {ptr, len} value and returns E's union; the runtime hands the chunk
-/// behind a pointer and is told the failure code -- zero for success -- and
-/// nothing else. Every view is the same pair whatever T is.
+/// error set and state or none, the Go `writeThreadEachInvokeThunks`. A
+/// worker takes its view as the {ptr, len} value and returns E's union; the
+/// runtime hands the chunk behind a pointer, the state as the pointer
+/// `&var S` already is, and is told the failure code -- zero for success --
+/// and nothing else. Every view is the same pair whatever T is.
 fn (self: &var Emitter) write_thread_each_invoke_thunks(module: &ir::Module) -> !void {
-    var sets = try self.thread_round_sets(module);
+    try self.write_thread_invoke_thunks(module, false);
+    try self.write_thread_invoke_thunks(module, true);
+    return;
+}
+
+fn (self: &var Emitter) write_thread_invoke_thunks(module: &ir::Module, states: bool) -> !void {
+    var sets = try self.thread_round_sets(module, states);
     defer sets.deinit(self.allocator);
+    var state_arg = "";
+    if states {
+        state_arg = "ptr %kizu.state, ";
+    }
     var index = 0;
     while sets.at(index) |set| {
         index = index + 1;
@@ -91,16 +123,17 @@ fn (self: &var Emitter) write_thread_each_invoke_thunks(module: &ir::Module) -> 
         try union_text.append_bytes(self.allocator, "!void");
         let union_bytes = union_text.as_bytes();
         let union_type = try self.llvm_type(module, union_bytes);
-        let thunk = try self.thread_invoke_thunk_name(set_bytes);
+        let thunk = try self.thread_invoke_thunk_name(set_bytes, states);
         try self.line1(
-            "define internal i64 @%s(ptr %%kizu.worker, ptr %%kizu.part, i64 %%kizu.index) #0 {",
+            "define internal i64 @%s(ptr %%kizu.worker, ptr %%kizu.state, ptr %%kizu.part, i64 %%kizu.index) #0 {",
             Arg::Str(thunk)
         );
         try self.line("entry:");
         try self.line("  %kizu.part.value = load %kizu.slice.u8, ptr %kizu.part");
-        try self.line1(
-            "  %%kizu.result = call %s %%kizu.worker(%%kizu.slice.u8 %%kizu.part.value, i64 %%kizu.index)",
-            Arg::Str(union_type)
+        try self.line2(
+            "  %%kizu.result = call %s %%kizu.worker(%s%%kizu.slice.u8 %%kizu.part.value, i64 %%kizu.index)",
+            Arg::Str(union_type),
+            Arg::Lit(state_arg)
         );
         try self.line1("  %%kizu.code = extractvalue %s %%kizu.result, 0", Arg::Str(union_type));
         try self.line("  ret i64 %kizu.code");
@@ -111,7 +144,9 @@ fn (self: &var Emitter) write_thread_each_invoke_thunks(module: &ir::Module) -> 
 }
 
 /// Declares a pool round the way write_thread_pool_round calls it, the Go
-/// `threadPoolRoundDecl`.
+/// `threadPoolRoundDecl`: the result through a leading slot, the slice
+/// behind a pointer followed by its element size, the states' Array and what
+/// S measures, and the thunk last.
 fn (self: &var Emitter) thread_pool_round_decl(
     module: &ir::Module,
     name: ir::Name,
@@ -121,8 +156,10 @@ fn (self: &var Emitter) thread_pool_round_decl(
     var params = array::new<string::String>(self.allocator);
     defer params.deinit(self.allocator);
     try params.append(self.allocator, try string::from_bytes(self.allocator, "ptr"));
+    let shaped = thread_round_plain(data_index) - 1;
     var index = 0;
-    while node.args.get(index) |arg| {
+    while index < shaped {
+        let arg = node.args.get_or_panic(index);
         if index == data_index {
             try params.append(self.allocator, try string::from_bytes(self.allocator, "ptr"));
             try params.append(self.allocator, try string::from_bytes(self.allocator, "i64"));
@@ -133,22 +170,29 @@ fn (self: &var Emitter) thread_pool_round_decl(
         index = index + 1;
     }
     try params.append(self.allocator, try string::from_bytes(self.allocator, "ptr"));
+    try params.append(self.allocator, try string::from_bytes(self.allocator, "i64"));
+    try params.append(self.allocator, try string::from_bytes(self.allocator, "ptr"));
+    try params.append(self.allocator, try string::from_bytes(self.allocator, "ptr"));
     let symbol = try self.callee_symbol(module, name);
     let joined = try string::join(self.allocator, &params, ", ");
     return self.sprint2("declare void @%s(%s)", Arg::Str(symbol), Arg::Owned(move joined));
 }
 
 /// Lowers one pool round, the Go `writeThreadPoolRound`. The runtime does not
-/// know T, so the call carries the slice behind a pointer, what T measures,
-/// and the thunk that calls the worker, and writes the round's `E!void` into
-/// the leading slot.
+/// know T or S, so the call carries the slice behind a pointer and what T
+/// measures, the address of the states' Array and what S measures (a null
+/// pointer when the round has none), and the thunk that calls the worker,
+/// and writes the round's `E!void` into the leading slot.
 fn (self: &var Emitter) write_thread_pool_round(
     module: &ir::Module,
     node: &ir::InstrNode,
     data_index: i64
 ) -> !?diagnostic::Diagnostic {
-    let data = node.args.get(data_index) orelse
-        return try self.fail_name1(module, "llvm error: %s expects a slice operand", node.operand);
+    let shaped = thread_round_plain(data_index) - 1;
+    if node.args.len() <= shaped {
+        return try self.fail_name1(module, "llvm error: %s expects its operands", node.operand);
+    }
+    let data = node.args.get_or_panic(data_index);
     let data_text = ir::name_text(&module.names, data.type_name);
     let data_bytes = data_text.as_bytes();
     if mem::len(data_bytes) < 2 or data_bytes[0] != cast<u8>(91) or data_bytes[1] != cast<u8>(93) {
@@ -161,8 +205,9 @@ fn (self: &var Emitter) write_thread_pool_round(
         return try self.fail_name2(
             module, "llvm error: %s returns %s, not E!void", node.operand, node.result.type_name);
     }
+    let states = thread_round_has_states(node, data_index);
     let set_bytes = set.as_bytes();
-    let thunk = try self.thread_invoke_thunk_name(set_bytes);
+    let thunk = try self.thread_invoke_thunk_name(set_bytes, states);
     let elem_size = try self.element_size_operand_bytes(
         module, data_bytes[2..mem::len(data_bytes)]);
     let slot = try self.text1("%%kizu.thread.round.%d", Arg::Int(self.next_thread_each));
@@ -173,7 +218,8 @@ fn (self: &var Emitter) write_thread_pool_round(
     defer args.deinit(self.allocator);
     try args.append(self.allocator, try self.sprint2("ptr %s.result", Arg::Str(slot), Arg::None));
     var index = 0;
-    while node.args.get(index) |arg| {
+    while index < shaped {
+        let arg = node.args.get_or_panic(index);
         let value = try self.operand(module, arg);
         if index == data_index {
             try self.line1("  %s.data = alloca %%kizu.slice.u8", Arg::Str(slot));
@@ -186,6 +232,30 @@ fn (self: &var Emitter) write_thread_pool_round(
         }
         index = index + 1;
     }
+    if states {
+        let states_arg = node.args.get_or_panic(shaped);
+        let states_text = ir::name_text(&module.names, states_arg.type_name);
+        let states_bytes = states_text.as_bytes();
+        let prefix = "&var std::array::Array<";
+        let prefix_len = mem::len(prefix);
+        let states_len = mem::len(states_bytes);
+        if states_len <= prefix_len or !mem::equal_bytes(states_bytes[0..prefix_len], prefix) {
+            return try self.fail_name2(
+                module, "llvm error: %s states are %s, not an Array", node.operand, states_arg.type_name);
+        }
+        let state_size = try self.element_size_operand_bytes(
+            module, states_bytes[prefix_len..states_len - 1]);
+        let states_value = try self.operand(module, states_arg);
+        try args.append(self.allocator, try self.sprint2(
+            "ptr %s, i64 %s", Arg::Str(states_value.operand), Arg::Str(state_size)));
+    } else {
+        try args.append(self.allocator, try string::from_bytes(self.allocator, "ptr null, i64 0"));
+    }
+    let worker = node.args.get_or_panic(node.args.len() - 1);
+    let worker_type = try self.llvm_type_of(module, worker.type_name);
+    let worker_value = try self.operand(module, worker);
+    try args.append(self.allocator, try self.sprint2(
+        "%s %s", Arg::Str(worker_type), Arg::Str(worker_value.operand)));
     try args.append(self.allocator, try self.sprint2("ptr @%s", Arg::Str(thunk), Arg::None));
     let symbol = try self.callee_symbol(module, node.operand);
     let joined = try string::join(self.allocator, &args, ", ");

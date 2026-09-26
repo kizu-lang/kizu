@@ -5203,108 +5203,147 @@ func (c *Checker) checkTaskSetSpawn(
 }
 
 // checkThreadPoolEach validates `thread_pool_each<T, E>(pool, data, chunk,
-// worker)`. The runtime hands each chunk of data to the worker as its own
-// `&var []T` and returns the first failure a worker reported; what T may hold
-// is the ownership checker's rule, because it is about what a chunk can
-// reach.
+// worker)` and, with states, `thread_pool_each<T, S, E>(pool, data, chunk,
+// states, worker)`. The runtime hands each chunk of data to the worker as its
+// own `&var []T` and returns the first failure a worker reported; what T and
+// S may hold is the ownership checker's rule, because it is about what a
+// chunk can reach.
 func (c *Checker) checkThreadPoolEach(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
-	const label = "std::thread::each"
-	elem, set, err := c.threadRoundTypeArgs(label, typeArg)
+	label := "std::thread::each"
+	round, err := c.threadRoundTypeArgs(label, typeArg)
 	if err != nil {
 		return "", err
 	}
-	if len(args) != 4 {
-		return "", errorf("type error: `%s` expects pool, data, chunk and worker", label)
+	if round.state != "" {
+		label = "std::thread::each_with"
 	}
-	if err := c.checkCoreArg(label, 0, stdprim.ArgI64, args[0], env, unsafe); err != nil {
+	// The data's slot is checked as a view, not by its kind.
+	shape := []stdprim.ArgKind{stdprim.ArgI64, stdprim.ArgI64, stdprim.ArgI64}
+	if err := c.checkThreadRoundArgs(label, round, shape, 1, args, env, unsafe); err != nil {
 		return "", err
 	}
-	if err := c.checkBorrowedStateArg(label, "[]"+elem, args[1], env, unsafe); err != nil {
-		return "", err
-	}
-	if err := c.checkCoreArg(label, 2, stdprim.ArgI64, args[2], env, unsafe); err != nil {
-		return "", err
-	}
-	if err := c.checkThreadWorkerArg(label, elem, set, args[3], env, unsafe); err != nil {
-		return "", err
-	}
-	return Type(set + "!void"), nil
+	return Type(round.set + "!void"), nil
 }
 
 // checkThreadPoolEachLane validates `thread_pool_each_lane<T, E>(pool,
-// allocator, data, length, stride, worker)`. The worker is the one `each`
-// takes: a lane reaches it as its own contiguous `&var []T`. The round can
-// also run out of memory for the lane runs, so E has to hold
-// std::thread::Error as well as whatever the worker fails with.
+// allocator, data, length, stride, worker)` and its `<T, S, E>` form with
+// states before the worker. The worker is the one `each` takes: a lane
+// reaches it as its own contiguous `&var []T`. The round can also run out of
+// memory for the lane runs, so E has to hold std::thread::Error as well as
+// whatever the worker fails with.
 func (c *Checker) checkThreadPoolEachLane(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
-	const label = "std::thread::each_lane"
-	elem, set, err := c.threadRoundTypeArgs(label, typeArg)
+	label := "std::thread::each_lane"
+	round, err := c.threadRoundTypeArgs(label, typeArg)
 	if err != nil {
 		return "", err
 	}
-	if !c.errorSetFits("std::thread::Error", Type(set)) {
+	if round.state != "" {
+		label = "std::thread::each_lane_with"
+	}
+	if !c.errorSetFits("std::thread::Error", Type(round.set)) {
 		return "", errorf(
-			"type error: `%s` needs its error set `%s` to include std::thread::Error", label, set)
+			"type error: `%s` needs its error set `%s` to include std::thread::Error", label, round.set)
 	}
-	if len(args) != 6 {
-		return "", errorf(
-			"type error: `%s` expects pool, allocator, data, length, stride and worker", label)
+	shape := []stdprim.ArgKind{
+		stdprim.ArgI64, stdprim.ArgAllocator, stdprim.ArgI64, stdprim.ArgI64, stdprim.ArgI64,
 	}
-	kinds := []stdprim.ArgKind{stdprim.ArgI64, stdprim.ArgAllocator}
-	for index, kind := range kinds {
-		if err := c.checkCoreArg(label, index, kind, args[index], env, unsafe); err != nil {
-			return "", err
-		}
-	}
-	if err := c.checkBorrowedStateArg(label, "[]"+elem, args[2], env, unsafe); err != nil {
+	if err := c.checkThreadRoundArgs(label, round, shape, 2, args, env, unsafe); err != nil {
 		return "", err
 	}
-	for index := 3; index < 5; index++ {
-		if err := c.checkCoreArg(label, index, stdprim.ArgI64, args[index], env, unsafe); err != nil {
-			return "", err
-		}
-	}
-	if err := c.checkThreadWorkerArg(label, elem, set, args[5], env, unsafe); err != nil {
-		return "", err
-	}
-	return Type(set + "!void"), nil
+	return Type(round.set + "!void"), nil
 }
 
-// threadRoundTypeArgs splits a pool round's `<T, E>`: the element, and the
-// error set its worker fails with.
-func (c *Checker) threadRoundTypeArgs(label string, typeArg string) (string, string, error) {
+// threadRound is a pool round's `<T, E>` or `<T, S, E>`: the element, the
+// per-thread state (empty without one), and the error set its worker fails
+// with.
+type threadRound struct {
+	elem, state, set string
+}
+
+// threadRoundTypeArgs splits a pool round's static arguments.
+func (c *Checker) threadRoundTypeArgs(label string, typeArg string) (threadRound, error) {
 	parts, ok := splitGenericArgs(typeArg)
-	if !ok || len(parts) != 2 {
-		return "", "", errorf("type error: `%s` expects an element type and an error set", label)
+	if !ok || (len(parts) != 2 && len(parts) != 3) {
+		return threadRound{}, errorf(
+			"type error: `%s` expects an element type, an optional state type and an error set", label)
 	}
-	elem, set := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
-	if c.errorSets[set] == nil {
-		return "", "", errorf("type error: `%s` needs an error set, got `%s`", label, set)
+	round := threadRound{
+		elem: strings.TrimSpace(parts[0]),
+		set:  strings.TrimSpace(parts[len(parts)-1]),
 	}
-	return elem, set, nil
+	if len(parts) == 3 {
+		round.state = strings.TrimSpace(parts[1])
+	}
+	if c.errorSets[round.set] == nil {
+		return threadRound{}, errorf("type error: `%s` needs an error set, got `%s`", label, round.set)
+	}
+	return round, nil
 }
 
-// checkThreadWorkerArg validates the `fn(&var []T, i64) -> E!void` a pool
-// round calls once per chunk or lane.
+// checkThreadRoundArgs validates a round's arguments: `shape` up to the
+// worker, with the data at dataIndex, then the states when the round has
+// them, then the worker.
+func (c *Checker) checkThreadRoundArgs(
+	label string,
+	round threadRound,
+	shape []stdprim.ArgKind,
+	dataIndex int,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) error {
+	want := len(shape) + 1
+	if round.state != "" {
+		want++
+	}
+	if len(args) != want {
+		return errorf("type error: `%s` expects %d arguments, got %d", label, want, len(args))
+	}
+	for index, kind := range shape {
+		if index == dataIndex {
+			continue
+		}
+		if err := c.checkCoreArg(label, index, kind, args[index], env, unsafe); err != nil {
+			return err
+		}
+	}
+	data := args[dataIndex]
+	if err := c.checkBorrowedStateArg(label, "[]"+round.elem, data, env, unsafe); err != nil {
+		return err
+	}
+	if round.state != "" {
+		// An Array rather than a view: S may own memory, and a view over
+		// owners is not something a program holds (SPEC §7.1).
+		states := "std::array::Array<" + round.state + ">"
+		err := c.checkBorrowedStateArg(label, states, args[len(shape)], env, unsafe)
+		if err != nil {
+			return err
+		}
+	}
+	return c.checkThreadWorkerArg(label, round, args[want-1], env, unsafe)
+}
+
+// checkThreadWorkerArg validates the `fn(&var []T, i64) -> E!void`, or with
+// a state `fn(&var S, &var []T, i64) -> E!void`, a pool round calls once per
+// chunk or lane.
 func (c *Checker) checkThreadWorkerArg(
 	label string,
-	elem string,
-	set string,
+	round threadRound,
 	arg ast.Expression,
 	env *scope,
 	unsafe unsafeMark,
 ) error {
-	want := Type("fn(&var []" + elem + ", i64) -> " + set + "!void")
+	want := Type(threadWorkerType(round.elem, round.state, round.set))
 	got, err := c.checkContextualExpr(arg, want, env, unsafe)
 	if err != nil {
 		return err
@@ -5313,6 +5352,16 @@ func (c *Checker) checkThreadWorkerArg(
 		return errorf("type error: `%s` worker expects %s, got %s", label, want, got)
 	}
 	return nil
+}
+
+// threadWorkerType spells the worker of a round over T with state S (empty
+// for none) failing with E.
+func threadWorkerType(elem, state, set string) string {
+	params := "&var []" + elem + ", i64"
+	if state != "" {
+		params = "&var " + state + ", " + params
+	}
+	return "fn(" + params + ") -> " + set + "!void"
 }
 
 // checkBorrowedStateArg validates the `&var T` a primitive writes through.

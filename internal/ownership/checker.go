@@ -6298,11 +6298,13 @@ func (c *Checker) checkThreadPoolRound(
 			return "", err
 		}
 	}
+	// The round returns `E!void`, E the last of its `<T, E>` or `<T, S, E>`.
 	parts, err := typ.SplitArgs(typeArg)
-	if err != nil || len(parts) != 2 {
-		return "", errorf("move error: a pool round expects an element type and an error set")
+	if err != nil || (len(parts) != 2 && len(parts) != 3) {
+		return "", errorf("move error: a pool round expects an element type," +
+			" an optional state type and an error set")
 	}
-	return strings.TrimSpace(parts[1]) + "!void", nil
+	return strings.TrimSpace(parts[len(parts)-1]) + "!void", nil
 }
 
 // checkArenaTypeApply validates std::arena::new<T>(allocator) ownership.
@@ -7254,16 +7256,26 @@ func (c *Checker) checkGenericWrapperTypeArgs(name string, typeArgs []string) er
 				state)
 		}
 	case "std::thread::each", "std::thread::each_lane":
-		// Every chunk goes to another thread. An Io or Allocator copied into
-		// two chunks would be one capability used from two threads at once,
-		// and a view would reach past the chunk it came in.
-		elem := typeArgs[0]
-		if c.viewCarryingType(elem) || c.capabilityCarryingType(elem) {
-			return errorf(
-				"borrow error: `%s` element `%s` must own its data"+
-					" and contain no Io or Allocator",
-				name, elem)
+		return c.checkThreadRoundTypeArg(name, "element", typeArgs[0])
+	case "std::thread::each_with", "std::thread::each_lane_with":
+		if err := c.checkThreadRoundTypeArg(name, "element", typeArgs[0]); err != nil {
+			return err
 		}
+		return c.checkThreadRoundTypeArg(name, "state", typeArgs[1])
+	}
+	return nil
+}
+
+// checkThreadRoundTypeArg refuses an element or state a pool round would
+// hand to another thread with something still shared. Every chunk and every
+// state goes to one thread; an Io or Allocator copied into two of them would
+// be one capability used from two threads at once, and a view would reach
+// past the chunk or state it came in.
+func (c *Checker) checkThreadRoundTypeArg(name, role, typeArg string) error {
+	if c.viewCarryingType(typeArg) || c.capabilityCarryingType(typeArg) {
+		return errorf(
+			"borrow error: `%s` %s `%s` must own its data and contain no Io or Allocator",
+			name, role, typeArg)
 	}
 	return nil
 }
