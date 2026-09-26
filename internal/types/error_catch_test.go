@@ -165,7 +165,7 @@ fn load() -> CacheError!i64 {
     return v;
 }
 fn main() -> void { return; }`,
-		want: "try cannot propagate NetError from NetError!i64",
+		want: "try cannot propagate NetError from NetError!i64 into CacheError!i64",
 	},
 	{
 		name: "return rejects a non subset member",

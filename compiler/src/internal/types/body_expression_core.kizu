@@ -855,13 +855,30 @@ fn (self: &var Checker) check_try_expr(
     // E: E itself and the sets it combines (ADR-0127).
     if !same_type(target_error, empty_type()) and
         !self.error_set_fits(source_error, target_error) {
+        // Both ends are named, the Go `tryPropagateError`; a callee that
+        // returns `!T` declares no set, which is said in words rather than as
+        // an empty name.
         var message = string::new(self.allocator);
         errdefer message.deinit(self.allocator);
-        try message.append_bytes(self.allocator, "try cannot propagate ");
-        try self.append_checker_type(&var message, source_error);
-        try message.append_bytes(self.allocator, " from ");
-        try self.append_checker_type(&var message, source);
-        return try self.checker_message_at("type error", ast::zero_span(), move message);
+        if same_type(source_error, empty_type()) {
+            try message.append_bytes(self.allocator, "try cannot propagate an error of ");
+            try self.append_checker_type(&var message, source);
+            try message.append_bytes(self.allocator, " into ");
+            try self.append_checker_type(&var message, current_return);
+            try message.append_bytes(self.allocator, ": ");
+            try self.append_checker_type(&var message, source);
+            try message.append_bytes(
+                self.allocator, " declares no error set, so its failures cannot be checked against it");
+        } else {
+            try message.append_bytes(self.allocator, "try cannot propagate ");
+            try self.append_checker_type(&var message, source_error);
+            try message.append_bytes(self.allocator, " from ");
+            try self.append_checker_type(&var message, source);
+            try message.append_bytes(self.allocator, " into ");
+            try self.append_checker_type(&var message, current_return);
+        }
+        let span = expression_span(tree, expression.value);
+        return try self.checker_message_at("type error", span, move message);
     }
     out.* = success;
     return null;
