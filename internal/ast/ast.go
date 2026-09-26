@@ -76,6 +76,7 @@ type Program struct {
 
 // ImportDecl represents one explicit top-level module import.
 type ImportDecl struct {
+	DeclSpan
 	Path []string
 }
 
@@ -91,6 +92,26 @@ func (d *ImportDecl) String() string {
 type Decl interface {
 	Node
 	declNode()
+	// DeclarationSpan is where the declaration is in the source, from its
+	// first token to its last; zero for one the compiler made.
+	DeclarationSpan() Span
+}
+
+// DeclSpan carries a declaration's place in the source, the way StmtSpan
+// carries a statement's: a diagnostic about a declaration that knows no finer
+// place points at it.
+type DeclSpan struct {
+	At Span
+}
+
+// DeclarationSpan returns where the parser read the declaration.
+func (s *DeclSpan) DeclarationSpan() Span {
+	return s.At
+}
+
+// SetDeclarationSpan records where the parser read the declaration.
+func (s *DeclSpan) SetDeclarationSpan(span Span) {
+	s.At = span
 }
 
 // String returns a compact debug representation of the program.
@@ -144,6 +165,7 @@ type FunctionSignature struct {
 
 // FunctionDecl represents a function declaration.
 type FunctionDecl struct {
+	DeclSpan
 	FunctionSignature
 	Doc string
 	// Derived marks a body the compiler wrote rather than an author. Only a
@@ -257,6 +279,7 @@ func linkAttributeText(sig FunctionSignature) string {
 
 // TestDecl represents a top-level test block.
 type TestDecl struct {
+	DeclSpan
 	Name string
 	Body *BlockStmt
 	// Module is the package module the block was written in, empty for a
@@ -278,6 +301,7 @@ func (d *TestDecl) String() string {
 
 // StructDecl represents a top-level struct declaration.
 type StructDecl struct {
+	DeclSpan
 	Name       string
 	Doc        string
 	TypeParams []string
@@ -326,6 +350,7 @@ func (d *StructDecl) String() string {
 
 // EnumDecl represents a Zig/C-style tag enum declaration.
 type EnumDecl struct {
+	DeclSpan
 	Name    string
 	Doc     string
 	Tags    []string
@@ -353,6 +378,7 @@ func (d *EnumDecl) String() string {
 // while an error set is a set that grows by union as callers propagate what
 // they call, which is what lets `!T` be inferred from a function body.
 type ErrorSetDecl struct {
+	DeclSpan
 	Name       string
 	Doc        string
 	Members    []string
@@ -381,6 +407,7 @@ func (d *ErrorSetDecl) String() string {
 
 // UnionDecl represents a tagged union declaration.
 type UnionDecl struct {
+	DeclSpan
 	Name       string
 	Doc        string
 	TypeParams []string
@@ -426,6 +453,7 @@ func (v UnionVariant) String() string {
 
 // ContractDecl represents required method signatures.
 type ContractDecl struct {
+	DeclSpan
 	Name    string
 	Methods []*FunctionDecl
 	Public  bool
@@ -451,6 +479,7 @@ func (d *ContractDecl) String() string {
 // satisfies a contract by having the methods, so this carries no body: it asks
 // for the check to run where it is written.
 type ImplDecl struct {
+	DeclSpan
 	ContractName string
 	TypeName     string
 }

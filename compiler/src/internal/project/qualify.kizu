@@ -89,6 +89,29 @@ fn (self: &var Loader) qualify_decl(
     file: arena::Handle<ModuleFile>,
     declaration: ast::Declaration
 ) -> !DeclarationResult {
+    // The rewrite is a new node, read where the declaration it replaces was;
+    // a name it cannot resolve is reported there, the Go `qualifyDecl`.
+    let outcome = try self.qualify_decl_form(tree, file, declaration);
+    match outcome {
+        Declaration(qualified) => {
+            var placed = qualified;
+            placed.span = declaration.span;
+            return DeclarationResult::Declaration(placed);
+        },
+        Skipped => return DeclarationResult::Skipped,
+        Failed(failed) => {
+            let span = tree.declaration_span(declaration);
+            return DeclarationResult::Failed(diagnostic::locate(move failed, span));
+        },
+    }
+}
+
+/// Rewrites one declaration by its form.
+fn (self: &var Loader) qualify_decl_form(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    declaration: ast::Declaration
+) -> !DeclarationResult {
     match tree.declarations.at(declaration.node) {
         Import(_) => return DeclarationResult::Skipped,
         Struct(value) => return self.qualify_struct(tree, file, value),
@@ -538,7 +561,10 @@ fn (self: &var Loader) qualify_stmt(
             placed.span = stmt.span;
             return StatementResult::Statement(placed);
         },
-        Failed(failed) => return StatementResult::Failed(move failed),
+        Failed(failed) => {
+            let span = tree.statement_span(stmt);
+            return StatementResult::Failed(diagnostic::locate(move failed, span));
+        },
     }
 }
 

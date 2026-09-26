@@ -136,6 +136,9 @@ func (c *Checker) Check(program *ast.Program) error {
 	if err := c.collectFunctions(program); err != nil {
 		return err
 	}
+	if err := c.checkInlineRecursion(program); err != nil {
+		return err
+	}
 	if err := c.checkPublicAPI(program); err != nil {
 		return err
 	}
@@ -149,11 +152,11 @@ func (c *Checker) Check(program *ast.Program) error {
 				continue
 			}
 			if err := c.checkFunction(c.functions[d.Name]); err != nil {
-				return err
+				return locateDecl(err, decl)
 			}
 		case *ast.TestDecl:
 			if err := c.checkTestDecl(d); err != nil {
-				return err
+				return locateDecl(err, decl)
 			}
 		}
 	}
@@ -171,6 +174,9 @@ func (c *Checker) CheckAll(program *ast.Program) []error {
 	if err := c.collectFunctions(program); err != nil {
 		return []error{err}
 	}
+	if err := c.checkInlineRecursion(program); err != nil {
+		return []error{err}
+	}
 	if err := c.checkPublicAPI(program); err != nil {
 		return []error{err}
 	}
@@ -185,11 +191,11 @@ func (c *Checker) CheckAll(program *ast.Program) []error {
 				continue
 			}
 			if err := c.checkFunction(c.functions[d.Name]); err != nil {
-				errs = append(errs, err)
+				errs = append(errs, locateDecl(err, decl))
 			}
 		case *ast.TestDecl:
 			if err := c.checkTestDecl(d); err != nil {
-				errs = append(errs, err)
+				errs = append(errs, locateDecl(err, decl))
 			}
 		}
 	}
@@ -214,7 +220,7 @@ func (c *Checker) collectTypesAndMethods(program *ast.Program) error {
 	}
 	for _, decl := range program.Decls {
 		if err := c.collectTypeDecl(decl); err != nil {
-			return err
+			return locateDecl(err, decl)
 		}
 	}
 	// Combined error sets resolve after every set is collected, so the sets
@@ -226,12 +232,12 @@ func (c *Checker) collectTypesAndMethods(program *ast.Program) error {
 	// their C representation is checked once every struct is known.
 	for _, decl := range program.Decls {
 		if err := c.validateExternStructFields(decl); err != nil {
-			return err
+			return locateDecl(err, decl)
 		}
 	}
 	for _, decl := range program.Decls {
 		if err := c.collectMethodDecl(decl); err != nil {
-			return err
+			return locateDecl(err, decl)
 		}
 	}
 	// Assertions run last: `impl Writer for File;` says what File already is, so
@@ -243,10 +249,16 @@ func (c *Checker) collectTypesAndMethods(program *ast.Program) error {
 			continue
 		}
 		if err := c.collectImpl(impl); err != nil {
-			return err
+			return locateDecl(err, decl)
 		}
 	}
 	return nil
+}
+
+// locateDecl points a diagnostic that says no place at the declaration it
+// was raised about.
+func locateDecl(err error, decl ast.Decl) error {
+	return diag.Locate(err, decl.DeclarationSpan())
 }
 
 // validateExternStructShape refuses the parts of a struct declaration a
@@ -358,19 +370,19 @@ func (c *Checker) checkPublicAPI(program *ast.Program) error {
 				continue
 			}
 			if err := c.checkPublicSignature(d.FunctionSignature); err != nil {
-				return err
+				return locateDecl(err, decl)
 			}
 		case *ast.StructDecl:
 			if err := c.checkPublicStructFields(d); err != nil {
-				return err
+				return locateDecl(err, decl)
 			}
 		case *ast.UnionDecl:
 			if err := c.checkPublicUnionVariants(d); err != nil {
-				return err
+				return locateDecl(err, decl)
 			}
 		case *ast.ContractDecl:
 			if err := c.checkPublicContract(d); err != nil {
-				return err
+				return locateDecl(err, decl)
 			}
 		}
 	}
@@ -466,11 +478,11 @@ func (c *Checker) collectTopLevelFunctions(program *ast.Program) error {
 			continue
 		}
 		if _, exists := c.functions[fn.Name]; exists {
-			return errorf("type error: duplicate function `%s`", fn.Name)
+			return locateDecl(errorf("type error: duplicate function `%s`", fn.Name), decl)
 		}
 		if c.isTypeName(fn.Name) {
-			return errorf("type error: `%s` is a type and cannot name a function",
-				fn.Name)
+			return locateDecl(errorf("type error: `%s` is a type and cannot name a function",
+				fn.Name), decl)
 		}
 		if fn.Receiver {
 			receiver, name, ok := stdmethod.SplitMethodName(fn.Name)
@@ -484,7 +496,7 @@ func (c *Checker) collectTopLevelFunctions(program *ast.Program) error {
 		}
 		fnType, err := c.newDeclaredFunctionType(fn)
 		if err != nil {
-			return err
+			return locateDecl(err, decl)
 		}
 		c.functions[fn.Name] = fnType
 	}
@@ -711,7 +723,7 @@ func (c *Checker) checkOwnerUnionContracts(program *ast.Program) error {
 			continue
 		}
 		if err := c.validateOwnerUnionCleanup(union); err != nil {
-			return err
+			return locateDecl(err, decl)
 		}
 	}
 	return nil

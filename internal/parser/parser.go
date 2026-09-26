@@ -61,49 +61,50 @@ func commentText(lines []string) string {
 func (p *Parser) ParseProgram() *ast.Program {
 	program := &ast.Program{}
 	for p.cur.Type != token.EOF {
-		switch p.cur.Type {
-		case token.Import:
-			program.Decls = append(program.Decls, p.parseImportDecl())
-			p.nextToken()
-		case token.Public:
-			program.Decls = append(program.Decls, p.parsePublicDecl())
-			p.nextToken()
-		case token.Ident:
-			program.Decls = append(program.Decls, p.parseIdentLedDecl()...)
-			p.nextToken()
-		case token.Function:
-			program.Decls = append(program.Decls, p.parseFunctionDecl())
-			p.nextToken()
-		case token.Unsafe:
-			program.Decls = append(program.Decls, p.parseUnsafeDecl(commentText(p.cur.DocComments)))
-			p.nextToken()
-		case token.Extern, token.At:
-			program.Decls = append(program.Decls, p.parseExternDecl())
-			p.nextToken()
-		case token.Export:
-			program.Decls = append(program.Decls, p.parseExportDecl())
-			p.nextToken()
-		case token.Struct:
-			program.Decls = append(program.Decls, p.parseStructDecl())
-			p.nextToken()
-		case token.Enum:
-			program.Decls = append(program.Decls, p.parseEnumDecl())
-			p.nextToken()
-		case token.Union:
-			program.Decls = append(program.Decls, p.parseUnionDecl())
-			p.nextToken()
-		case token.Contract:
-			program.Decls = append(program.Decls, p.parseContractDecl())
-			p.nextToken()
-		case token.Impl:
-			program.Decls = append(program.Decls, p.parseImplDecl())
-			p.nextToken()
-		default:
-			p.errorExpectedDeclaration()
-			p.nextToken()
+		first, start := tokenSpan(p.cur), len(program.Decls)
+		program.Decls = p.parseTopLevel(program.Decls)
+		last := tokenSpan(p.cur)
+		span := ast.Span{Source: first.Source, Start: first.Start, End: last.End}
+		for _, decl := range program.Decls[start:] {
+			decl.(interface{ SetDeclarationSpan(ast.Span) }).SetDeclarationSpan(span)
 		}
+		p.nextToken()
 	}
 	return program
+}
+
+// parseTopLevel appends the declarations one top-level form declares and
+// leaves the parser on its last token.
+func (p *Parser) parseTopLevel(decls []ast.Decl) []ast.Decl {
+	switch p.cur.Type {
+	case token.Import:
+		decls = append(decls, p.parseImportDecl())
+	case token.Public:
+		decls = append(decls, p.parsePublicDecl())
+	case token.Ident:
+		decls = append(decls, p.parseIdentLedDecl()...)
+	case token.Function:
+		decls = append(decls, p.parseFunctionDecl())
+	case token.Unsafe:
+		decls = append(decls, p.parseUnsafeDecl(commentText(p.cur.DocComments)))
+	case token.Extern, token.At:
+		decls = append(decls, p.parseExternDecl())
+	case token.Export:
+		decls = append(decls, p.parseExportDecl())
+	case token.Struct:
+		decls = append(decls, p.parseStructDecl())
+	case token.Enum:
+		decls = append(decls, p.parseEnumDecl())
+	case token.Union:
+		decls = append(decls, p.parseUnionDecl())
+	case token.Contract:
+		decls = append(decls, p.parseContractDecl())
+	case token.Impl:
+		decls = append(decls, p.parseImplDecl())
+	default:
+		p.errorExpectedDeclaration()
+	}
+	return decls
 }
 
 // parseImportDecl parses an explicit top-level module import.

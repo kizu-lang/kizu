@@ -1,0 +1,251 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::typ;
+import std::array;
+import std::map;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/types/recursion.go.
+
+/// Refuses a struct or union that holds itself by value, directly or through
+/// other structs and unions, the Go `checkInlineRecursion`: its size would
+/// have no end. A value held through `std::mem::Box<T>`, an Array, a view, or
+/// a pointer is behind a fixed-size handle and ends the chain; a stack buffer,
+/// an optional, and an error union hold their element inline and continue it.
+fn (self: &Checker) check_inline_recursion(
+    tree: &ast::Ast,
+    program: &ast::Program
+) -> !?diagnostic::Diagnostic {
+    var declared = map::new<[]u8, ast::Declaration>(self.allocator);
+    defer declared.deinit(self.allocator);
+    var index = 0;
+    while program.declarations.get(index) |declaration| {
+        index = index + 1;
+        if inline_type_decl_name(tree, declaration) |name| {
+            let retained = tree.texts.at(name.node);
+            let bytes = retained.as_bytes();
+            try declared.insert(self.allocator, bytes, declaration);
+        }
+    }
+    index = 0;
+    while program.declarations.get(index) |declaration| {
+        index = index + 1;
+        let name = inline_type_decl_name(tree, declaration) orelse continue;
+        let retained = tree.texts.at(name.node);
+        let target = retained.as_bytes();
+        var seen = map::new<[]u8, bool>(self.allocator);
+        defer seen.deinit(self.allocator);
+        var path = array::new<string::String>(self.allocator);
+        defer path.deinit(self.allocator);
+        if try inline_path_to(self.allocator, tree, &declared, target, target, &var seen, &var path) {
+            var message = try string::from_bytes(self.allocator, "`");
+            errdefer message.deinit(self.allocator);
+            try message.append_bytes(self.allocator, target);
+            try message.append_bytes(self.allocator, "` holds itself by value (");
+            let joined = try string::join(self.allocator, &path, ", then ");
+            defer joined.deinit(self.allocator);
+            try message.append_string(self.allocator, &joined);
+            try message.append_bytes(self.allocator, "), so its size has no end");
+            var help = try string::from_bytes(self.allocator, "hold the inner `");
+            defer help.deinit(self.allocator);
+            try help.append_bytes(self.allocator, target);
+            try help.append_bytes(self.allocator, "` through `std::mem::Box<");
+            try help.append_bytes(self.allocator, target);
+            try help.append_bytes(self.allocator, ">` or an arena handle");
+            var problem = try self.checker_message_at("type error", tree.declaration_span(declaration), move message);
+            errdefer problem.deinit(self.allocator);
+            let help_bytes = help.as_bytes();
+            try problem.with_help(self.allocator, help_bytes);
+            return move problem;
+        }
+    }
+    return null;
+}
+
+/// Returns the name of a non-generic struct or union a declaration declares.
+fn inline_type_decl_name(tree: &ast::Ast, declaration: ast::Declaration) -> ?ast::Text {
+    match tree.declarations.at(declaration.node) {
+        Struct(value) => {
+            if value.type_params.len() == 0 {
+                return value.name;
+            }
+            return null;
+        },
+        Union(value) => {
+            if value.type_params.len() == 0 {
+                return value.name;
+            }
+            return null;
+        },
+        _ => return null,
+    }
+}
+
+/// Appends to `path` the fields and payloads that lead from `from` to
+/// `target` by value and answers true, or answers false when none does, the
+/// Go `inlinePathTo`. `seen` stops a chain that loops without reaching target.
+fn inline_path_to(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    declared: &map::Map<[]u8, ast::Declaration>,
+    from: []u8,
+    target: []u8,
+    seen: &var map::Map<[]u8, bool>,
+    path: &var array::Array<string::String>
+) -> !bool {
+    if seen.contains(from) {
+        return false;
+    }
+    try seen.insert(allocator, from, true);
+    let declaration = declared.get(from) orelse return false;
+    var parts = try inline_parts(allocator, tree, declaration);
+    defer parts.deinit(allocator);
+    var index = 0;
+    while parts.at(index) |part| {
+        index = index + 1;
+        let text = part.type_text.as_bytes();
+        let found = inline_type_name(text, 0) orelse continue;
+        let inner = text[found.start..found.end];
+        var step = string::new(allocator);
+        errdefer step.deinit(allocator);
+        try step.append_string(allocator, &part.label);
+        try step.append_bytes(allocator, ": ");
+        try step.append_bytes(allocator, text);
+        try path.append(allocator, move step);
+        if mem::equal_bytes(inner, target) {
+            return true;
+        }
+        if declared_name(tree, declared, inner) |retained| {
+            if try inline_path_to(allocator, tree, declared, retained, target, seen, path) {
+                return true;
+            }
+        }
+        if path.pop() |dropped| {
+            dropped.deinit(allocator);
+        }
+    }
+    return false;
+}
+
+/// Returns the declared type name with the tree's lifetime, so the walk does
+/// not hold a borrow of a part's text across the recursive call.
+fn declared_name(
+    tree: &ast::Ast,
+    declared: &map::Map<[]u8, ast::Declaration>,
+    name: []u8
+) -> ?[]u8 {
+    let declaration = declared.get(name) orelse return null;
+    let text = inline_type_decl_name(tree, declaration) orelse return null;
+    let retained = tree.texts.at(text.node);
+    let bytes = retained.as_bytes();
+    return bytes;
+}
+
+/// Is one field of a struct or payload of a union variant, the Go
+/// `inlinePart`.
+struct InlinePart {
+    label: string::String,
+    type_text: string::String,
+}
+
+fn (self: InlinePart) deinit(allocator: Allocator) -> void {
+    self.label.deinit(allocator);
+    self.type_text.deinit(allocator);
+    return;
+}
+
+/// Lists what a struct or union stores, in declaration order, the Go
+/// `inlineParts`.
+fn inline_parts(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    declaration: ast::Declaration
+) -> !array::Array<InlinePart> {
+    var parts = array::new<InlinePart>(allocator);
+    errdefer parts.deinit(allocator);
+    match tree.declarations.at(declaration.node) {
+        Struct(value) => {
+            let owner = tree.texts.at(value.name.node);
+            var index = 0;
+            while value.fields.at(index) |field| {
+                index = index + 1;
+                let field_name = tree.texts.at(field.name.node);
+                var label = try string::from_bytes(allocator, "field `");
+                errdefer label.deinit(allocator);
+                try label.append_string(allocator, owner);
+                try label.append_bytes(allocator, ".");
+                try label.append_string(allocator, field_name);
+                try label.append_bytes(allocator, "`");
+                let type_text = try typ::render(allocator, &tree.types, field.type_name);
+                try parts.append(allocator, InlinePart { label: move label, type_text: move type_text });
+            }
+        },
+        Union(value) => {
+            let owner = tree.texts.at(value.name.node);
+            var index = 0;
+            while value.variants.at(index) |variant| {
+                index = index + 1;
+                let payload = variant.payload orelse continue;
+                let variant_name = tree.texts.at(variant.name.node);
+                var label = try string::from_bytes(allocator, "payload `");
+                errdefer label.deinit(allocator);
+                try label.append_string(allocator, owner);
+                try label.append_bytes(allocator, "::");
+                try label.append_string(allocator, variant_name);
+                try label.append_bytes(allocator, "`");
+                let type_text = try typ::render(allocator, &tree.types, payload);
+                try parts.append(allocator, InlinePart { label: move label, type_text: move type_text });
+            }
+        },
+        _ => {},
+    }
+    return move parts;
+}
+
+/// Where the declared type name a field type stores by value sits in its
+/// spelling.
+struct InlineName {
+    start: i64,
+    end: i64,
+}
+
+/// Returns where the declared type a field type stores by value is named, if
+/// any, the Go `inlineTypeName`: through stack buffers, optionals, and error
+/// unions, but not through a view, borrow, function, or generic application
+/// such as Box or Array.
+fn inline_type_name(text: []u8, start: i64) -> ?InlineName {
+    let length = mem::len(text);
+    let rest = text[start..length];
+    if typ::optional_elem(rest) |_| {
+        return inline_type_name(text, start + 1);
+    }
+    if typ::error_union_success(rest) |success| {
+        return inline_type_name(text, length - mem::len(success));
+    }
+    let size = length - start;
+    if size > 1 and rest[0] == cast<u8>(91) and rest[1] != cast<u8>(93) {
+        var index = 1;
+        while index < size {
+            if rest[index] == cast<u8>(93) {
+                return inline_type_name(text, start + index + 1);
+            }
+            index = index + 1;
+        }
+        return null;
+    }
+    if size == 0 or rest[0] == cast<u8>(91) or rest[0] == cast<u8>(38) or rest[0] == cast<u8>(63) {
+        return null;
+    }
+    if mem::starts_with(rest, "fn(") or mem::starts_with(rest, "unsafe fn(") {
+        return null;
+    }
+    var index = 0;
+    while index < size {
+        if rest[index] == cast<u8>(60) {
+            return null;
+        }
+        index = index + 1;
+    }
+    return InlineName { start: start, end: length };
+}

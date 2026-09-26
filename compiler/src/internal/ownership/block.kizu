@@ -39,7 +39,7 @@ fn (self: &var Checker) check_block_statements(
 ) -> !?diagnostic::Diagnostic {
     var last_uses = try block_last_uses(self.allocator, tree, block);
     defer last_uses.deinit(self.allocator);
-    var defers = array::new<ast::Expression>(self.allocator);
+    var defers = array::new<ast::Statement>(self.allocator);
     defer defers.deinit(self.allocator);
     // Bindings declared inside this block carry ids above the watermark; the
     // fall-through leak check below is scoped to exactly those.
@@ -55,16 +55,16 @@ fn (self: &var Checker) check_block_statements(
         self.truncate_moved_places(places_mark);
         if defer_stmt(tree, statement) |deferred| {
             if try self.check_defer_stmt(tree, env, deferred) |failed| {
-                return move failed;
+                return diagnostic::locate(move failed, tree.statement_span(statement));
             }
-            try defers.append(self.allocator, deferred.expr);
+            try defers.append(self.allocator, statement);
             try self.release_last_use_borrows(env, index, &last_uses);
             index = index + 1;
             continue;
         }
         if errdefer_stmt(tree, statement) |deferred| {
             if try self.check_err_defer_stmt(tree, env, deferred) |failed| {
-                return move failed;
+                return diagnostic::locate(move failed, tree.statement_span(statement));
             }
             try self.release_last_use_borrows(env, index, &last_uses);
             index = index + 1;
@@ -755,20 +755,22 @@ fn (self: &Checker) match_arm_body(tree: &ast::Ast, statement: ast::Statement, i
 }
 
 /// Applies deferred cleanup effects in reverse order, the Go
-/// `checkDeferredCleanups`.
+/// `checkDeferredCleanups`. A cleanup runs where its block ends but was
+/// written at its `defer`, which is where a diagnostic about it points.
 fn (self: &var Checker) check_deferred_cleanups(
     tree: &var ast::Ast,
     env: ScopeHandle,
-    defers: &array::Array<ast::Expression>
+    defers: &array::Array<ast::Statement>
 ) -> !?diagnostic::Diagnostic {
     var no_later_uses = map::new<[]u8, i64>(self.allocator);
     defer no_later_uses.deinit(self.allocator);
     var index = defers.len();
     while index > 0 {
         index = index - 1;
-        let deferred = defers.get_or_panic(index);
-        if try self.check_expr_stmt(tree, env, deferred) |failed| {
-            return move failed;
+        let statement = defers.get_or_panic(index);
+        let deferred = defer_stmt(tree, statement) orelse continue;
+        if try self.check_expr_stmt(tree, env, deferred.expr) |failed| {
+            return diagnostic::locate(move failed, tree.statement_span(statement));
         }
         // A later defer may release a source retained by the value just
         // consumed. Model runtime's reverse order one cleanup at a time.

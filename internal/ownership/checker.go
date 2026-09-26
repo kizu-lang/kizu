@@ -295,7 +295,7 @@ func (c *Checker) Check(program *ast.Program) error {
 	c.collectEnums(program)
 	c.collectErrorSets(program)
 	c.collectUnions(program)
-	if err := c.checkUnionPayloads(); err != nil {
+	if err := c.checkUnionPayloads(program); err != nil {
 		return err
 	}
 	if err := c.collectFunctions(program); err != nil {
@@ -362,7 +362,7 @@ func (c *Checker) CheckAll(program *ast.Program) []error {
 	c.collectEnums(program)
 	c.collectErrorSets(program)
 	c.collectUnions(program)
-	if err := c.checkUnionPayloads(); err != nil {
+	if err := c.checkUnionPayloads(program); err != nil {
 		return []error{err}
 	}
 	if err := c.collectFunctions(program); err != nil {
@@ -493,14 +493,19 @@ func (c *Checker) collectUnions(program *ast.Program) {
 // owner. An owner inside `E!T` is released only by the `if` that opens it,
 // and a union's cleanup arm is one direct call (SPEC §6.12): there is no
 // place to open the payload, so the value could never be released.
-func (c *Checker) checkUnionPayloads() error {
-	for name, variants := range c.unions {
-		for _, variant := range c.unionOrder[name] {
+func (c *Checker) checkUnionPayloads(program *ast.Program) error {
+	for _, decl := range program.Decls {
+		union, ok := decl.(*ast.UnionDecl)
+		if !ok {
+			continue
+		}
+		variants := c.unions[union.Name]
+		for _, variant := range c.unionOrder[union.Name] {
 			elem, wrapper, ok := c.wrappedPayloadElem(variants[variant])
 			if ok && wrapper == "error union" && c.valueTypeNeedsConsume(elem) {
-				return errorf(
+				return errorAt(union.DeclarationSpan(),
 					"move error: union payload `%s::%s` cannot store an error union around an owner",
-					name, variant)
+					union.Name, variant)
 			}
 		}
 	}
@@ -778,7 +783,7 @@ func (c *Checker) checkTestDecl(decl *ast.TestDecl) error {
 // checkBlock validates statements in a lexical block.
 func (c *Checker) checkBlock(block *ast.BlockStmt, env *scope) error {
 	lastUses := blockLastUses(block)
-	defers := []ast.Expression{}
+	defers := []*ast.DeferStmt{}
 	errDeferMark := len(c.liveErrDefers)
 	defer c.restoreErrDefers(errDeferMark)
 	// Bindings declared inside this block carry IDs above the watermark; the
@@ -800,15 +805,15 @@ func (c *Checker) checkBlock(block *ast.BlockStmt, env *scope) error {
 		c.pendingMovedPlaces = c.pendingMovedPlaces[:placesMark]
 		if deferStmt, ok := stmt.(*ast.DeferStmt); ok {
 			if err := c.checkDeferStmt(deferStmt, env); err != nil {
-				return err
+				return diag.Locate(err, stmt.StatementSpan())
 			}
-			defers = append(defers, deferStmt.Expr)
+			defers = append(defers, deferStmt)
 			env.releaseLastUseBorrows(idx, lastUses)
 			continue
 		}
 		if errDeferStmt, ok := stmt.(*ast.ErrDeferStmt); ok {
 			if err := c.checkErrDeferStmt(errDeferStmt, env); err != nil {
-				return err
+				return diag.Locate(err, stmt.StatementSpan())
 			}
 			env.releaseLastUseBorrows(idx, lastUses)
 			continue
@@ -1365,13 +1370,15 @@ func stmtTerminates(stmt ast.Statement) bool {
 	}
 }
 
-// checkDeferredCleanups applies deferred cleanup effects in reverse order.
-func (c *Checker) checkDeferredCleanups(defers []ast.Expression, env *scope) error {
+// checkDeferredCleanups applies deferred cleanup effects in reverse order. A
+// cleanup runs where its block ends but was written at its `defer`, which is
+// where a diagnostic about it points.
+func (c *Checker) checkDeferredCleanups(defers []*ast.DeferStmt, env *scope) error {
 	noLaterUses := map[string]int{}
 	for idx := len(defers) - 1; idx >= 0; idx-- {
-		stmt := &ast.ExprStmt{Expr: defers[idx], Semicolon: true}
+		stmt := &ast.ExprStmt{Expr: defers[idx].Expr, Semicolon: true}
 		if err := c.checkExprStmt(stmt, env); err != nil {
-			return err
+			return diag.Locate(err, defers[idx].StatementSpan())
 		}
 		// A later defer may release a source retained by the value just
 		// consumed. Model runtime's reverse order one cleanup at a time.
@@ -4814,7 +4821,7 @@ func (c *Checker) checkBlockValue(block *ast.BlockStmt, env *scope, moveTail boo
 		return "", errorf("move error: expression block must end with a value")
 	}
 	lastUses := blockLastUses(block)
-	defers := []ast.Expression{}
+	defers := []*ast.DeferStmt{}
 	errDeferMark := len(c.liveErrDefers)
 	defer c.restoreErrDefers(errDeferMark)
 	bindingMark := c.nextID
@@ -4827,15 +4834,15 @@ func (c *Checker) checkBlockValue(block *ast.BlockStmt, env *scope, moveTail boo
 		c.pendingMovedPlaces = c.pendingMovedPlaces[:placesMark]
 		if deferStmt, ok := stmt.(*ast.DeferStmt); ok {
 			if err := c.checkDeferStmt(deferStmt, env); err != nil {
-				return "", err
+				return "", diag.Locate(err, stmt.StatementSpan())
 			}
-			defers = append(defers, deferStmt.Expr)
+			defers = append(defers, deferStmt)
 			env.releaseLastUseBorrows(idx, lastUses)
 			continue
 		}
 		if errDeferStmt, ok := stmt.(*ast.ErrDeferStmt); ok {
 			if err := c.checkErrDeferStmt(errDeferStmt, env); err != nil {
-				return "", err
+				return "", diag.Locate(err, stmt.StatementSpan())
 			}
 			env.releaseLastUseBorrows(idx, lastUses)
 			continue
