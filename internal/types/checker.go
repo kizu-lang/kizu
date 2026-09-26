@@ -928,6 +928,9 @@ func validateHostFunctionSignature(
 	if fn.ExternABI == "c" {
 		return validateCHostFunctionTypes(fn, params, ret, isExternStruct)
 	}
+	if fn.ExportABI == "c" {
+		return validateCExportFunction(fn, params, ret)
+	}
 	if fn.ExternABI != "browser" && fn.ExportABI != "browser" {
 		return nil
 	}
@@ -986,6 +989,62 @@ func validateCHostFunctionTypes(
 	return nil
 }
 
+// validateCExportFunction limits a function C calls to what C can hand it and
+// read back: integers, floats, bool and raw pointers. A borrow is refused even
+// of an extern struct: C passes an address the compiler never saw made, and a
+// safe borrow would promise it is live and unaliased. The body takes such an
+// address as a raw pointer and says what it relies on at the `unsafe` that
+// reads it. The symbol is the declaration's own identifier, so it may not be
+// one the program entry or the runtime already names.
+func validateCExportFunction(fn ast.FunctionSignature, params []Type, ret Type) error {
+	if fn.Receiver {
+		return errorAt(fn.Span, "type error: C export `%s` cannot be a method", fn.Name)
+	}
+	if len(fn.StaticParams) > 0 {
+		return errorAt(fn.Span,
+			"type error: C export `%s` cannot have static parameters", fn.Name)
+	}
+	symbol := unqualifiedFunctionName(fn.Name)
+	if symbol == "main" {
+		return errorAt(fn.Span, "type error: C export `main` conflicts with the program entry")
+	}
+	if strings.HasPrefix(symbol, "kizu_") {
+		return errorAt(fn.Span,
+			"type error: C export `%s` uses the `kizu_` prefix the runtime reserves", fn.Name)
+	}
+	for index, param := range params {
+		if fn.Params[index].Borrow || fn.Params[index].MutBorrow || !cHostScalar(param) {
+			return cExportTypeError(fn.Span, fmt.Sprintf(
+				"C export `%s` parameter %d has type `%s`, which C cannot pass",
+				fn.Name, index+1, exportParamSpelling(fn.Params[index], param)))
+		}
+	}
+	if ret != typeVoid && !cHostScalar(ret) {
+		return cExportTypeError(fn.Span, fmt.Sprintf(
+			"C export `%s` returns `%s`, which C cannot receive", fn.Name, ret))
+	}
+	return nil
+}
+
+// exportParamSpelling spells a parameter type the way its declaration wrote it.
+func exportParamSpelling(param ast.Param, value Type) string {
+	if param.MutBorrow {
+		return "&var " + string(value)
+	}
+	if param.Borrow {
+		return "&" + string(value)
+	}
+	return string(value)
+}
+
+// cExportTypeError spells a C export refusal with what C can carry.
+func cExportTypeError(span ast.Span, message string) error {
+	return diag.FromText(diag.SeverityError, span, "type error: "+message).
+		WithNote("a C export passes only what C can name: an integer, a float, `bool`," +
+			" `ptr<T>`, `ptr<const T>`, or a nullable pointer").
+		WithHelp("take an address C hands over as `ptr<T>` and read it under `unsafe`")
+}
+
 // cHostTypeError spells a C boundary refusal with what C can carry and how
 // to hand it the value.
 func cHostTypeError(span ast.Span, message string) error {
@@ -1014,7 +1073,7 @@ func validateHostFunctionABI(fn ast.FunctionSignature) error {
 		return errorf("type error: link attributes on `%s` apply to extern \"c\" fn declarations",
 			fn.Name)
 	}
-	if fn.ExportABI != "" && fn.ExportABI != "browser" {
+	if fn.ExportABI != "" && fn.ExportABI != "c" && fn.ExportABI != "browser" {
 		return errorf("type error: unsupported export ABI %q", fn.ExportABI)
 	}
 	return nil

@@ -18,7 +18,7 @@ func irCommand(args []string) error {
 	}
 	// The dump shows what a build would keep: std::fmt is loaded for every
 	// program (SPEC §14.1), and its unreached bodies are not the program's.
-	ir.KeepTargetReachableFunctions(module, "", "main")
+	ir.KeepTargetReachableFunctions(module, "c", "main")
 	_, _ = fmt.Println(ir.Dump(module))
 	return nil
 }

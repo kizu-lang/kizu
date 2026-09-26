@@ -21,7 +21,7 @@ func checkFile(path string) error {
 	if err != nil {
 		return err
 	}
-	ir.KeepTargetReachableFunctions(module, "", "main")
+	ir.KeepTargetReachableFunctions(module, "c", "main")
 	if _, err := llvm.Emit(module); err != nil {
 		return err
 	}

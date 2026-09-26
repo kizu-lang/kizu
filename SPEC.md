@@ -2564,6 +2564,50 @@ LLVM IR backend では、extern C call は `declare` と `call` に lower しま
 native executable generation は、LLVM lowering 済み subset と `kizu_` runtime shim に
 限定して扱います。C layout 完全対応は別 phase で扱います。
 
+### 12.3 C export
+
+C の host が呼ぶ関数は `export "c" fn` で宣言します。本体は通常の Kizu 関数で、
+Kizu からも普通の関数として呼べます。
+
+```kizu
+export "c" fn lib_sum(bytes: ptr<const u8>, len: usize) -> u64 {
+    // SAFETY: host は bytes から len バイトを読める状態で渡す
+    let view = unsafe view_from_ptr(bytes, cast<i64>(len));
+    var total: u64 = 0;
+    for 0..cast<i64>(len) |index| {
+        total = total + cast<u64>(view[index]);
+    }
+    return total;
+}
+```
+
+* 引数と戻り値は C が名指しできる型だけです: 整数、浮動小数、`bool`、
+  `ptr<T>` / `ptr<const T>` / nullable raw pointer、戻り値の `void`。
+  borrow は `extern "c" struct` のものも取れません。C が渡す address が生きていて
+  alias されていないことを compiler は証明できないので、raw pointer で受け取り、
+  読む側の `unsafe` がその契約を負います。
+* symbol は宣言の末尾の source identifier です(`app::ui::lib_sum` なら `lib_sum`)。
+  `main` と `kizu_` prefix は予約されていて使えません。同じ symbol を 2 つの export が
+  名乗れば build error です。export は process 全体の名前空間に入るので、C library と
+  同じ名前を選べば link された全体でその関数を置き換えます。
+* method、static parameter を持つ関数は export できません。
+* `i8` / `i16` / `u8` / `u16` / `bool` は C の規則どおり register 幅へ拡張して
+  受け渡します。
+* export は native build の到達可能性 root です。wasm target は `export "c"` を、
+  native target は `export "browser"` を build 時に拒否します。
+
+`kizu build --target native --emit obj` は program と runtime を relocatable link した
+object 1 つを書き、host の link に渡します。
+
+* 入口は `export "c" fn` だけです。`main` を持つ program と、export を 1 つも持たない
+  program は拒否します。
+* object は外の symbol を解決しません。`@link_library` / `@link_framework` の
+  library と runtime が使う C library は host の link が渡します。build metadata
+  (`<output>.kizu-build.json`)がその一覧を持ちます。
+* object は `kizu_` runtime symbol を含むので、1 回の link に入れる Kizu object は
+  1 つです。
+* runtime は `main` を通らないので、`std::process::arg` は引数を持ちません。
+
 ## 13. comptime
 
 `comptime` は、限定的なコンパイル時評価です。

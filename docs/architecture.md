@@ -94,8 +94,8 @@ backendを増やしません。moduleのimportだけではinstantiateも`main`�
 
 同じ package に target 別 adapter がある場合、`std::target` を条件にした
 `comptime if` は選ばれた branch だけを type / ownership / IR が扱います。その後、
-native / WASI は `main`、browser は `main` と `export "browser"` から到達できる関数だけを
-backend へ渡します。実行例は
+native は `main` と `export "c"`(`--emit obj` は `export "c"` だけ)、WASI は `main`、
+browser は `main` と `export "browser"` から到達できる関数だけを backend へ渡します。実行例は
 [`examples/modules/target_adapters`](../examples/modules/target_adapters) です。
 
 `wasm32-wasi` の host boundary は WASI Preview1 です。blocking stdin / stdout / stderr、
@@ -106,8 +106,8 @@ backend へ渡します。実行例は
 [`docs/wasm-browser.md`](wasm-browser.md) が持ちます。
 
 CLI のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
-`build`(`--emit-llvm` / `--target native|wasm32-wasi|wasm32-browser`、browserの
-`--emit esm`)`cache` `import-c-header`
+`build`(`--emit-llvm` / `--target native|wasm32-wasi|wasm32-browser`、nativeの
+`--emit obj`、browserの`--emit esm`)`cache` `import-c-header`
 `version`。基本の実行経路は `kizu run examples/hello.kizu`。どのコマンドがどこへ
 流れるかは `cmd/kizu/main.go` の `dispatch`(移植側は `compiler/src/main.kizu`)
 が全てです。

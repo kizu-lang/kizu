@@ -434,18 +434,17 @@ fn format_args6(
     return append_format_rest(allocator, out, format, position);
 }
 
-/// Gives every function but the entry point internal linkage, the Go
-/// `functionLinkage`.
+/// Gives every function internal linkage but the entry point and a C export
+/// defined under its own symbol, the Go `functionLinkage`.
 ///
-/// A Kizu program exports nothing: `extern "c" fn` imports a C symbol and
-/// there is no way to spell the other direction, so the only name the outside
-/// world needs is `main`. Left external, a Kizu function's name would be the
-/// symbol the linker offers everyone -- including the C runtime linked beside
-/// it. A program with `fn send(...)` in it would have the runtime's socket
-/// write call that instead of libc's, which is a program that compiles and
-/// then recurses until the stack ends.
-fn function_linkage(is_entry_point: bool) -> []u8 {
-    if is_entry_point {
+/// Left external, a Kizu function's name would be the symbol the linker
+/// offers everyone -- including the C runtime linked beside it. A program
+/// with `fn send(...)` in it would have the runtime's socket write call that
+/// instead of libc's, which is a program that compiles and then recurses
+/// until the stack ends. `export "c" fn` is the one way a program offers a
+/// name, and it is spelled where review finds it.
+fn function_linkage(is_external: bool) -> []u8 {
+    if is_external {
         return "";
     }
     return "internal ";
@@ -724,11 +723,15 @@ fn (self: &var Emitter) emit_module(module: &ir::Module) -> !?diagnostic::Diagno
 fn (self: &var Emitter) validate_foreign_boundary(
     module: &ir::Module
 ) -> !?diagnostic::Diagnostic {
+    if try self.validate_c_export_symbols(module) |failed| {
+        return move failed;
+    }
     var function_index = 0;
     while module.functions.get(function_index) |function| {
         function_index = function_index + 1;
         let function_node = module.function_nodes.at(function.node);
-        if !ir::is_empty(function_node.export_abi) {
+        if !ir::is_empty(function_node.export_abi) and
+            !module.names.is(function_node.export_abi, "c") {
             let abi = try self.own(module, function_node.export_abi);
             return try self.fail1(
                 "llvm error: target native does not support export `%s`",
@@ -1127,6 +1130,7 @@ fn (self: &var Emitter) write_function(module: &ir::Module, function: ir::Functi
     }
     self.main_returns_int = module.names.is(node.name, "main") and
         (module.names.is(node.return_type, "void") or returns_error_union);
+    let exports_c = module.names.is(node.export_abi, "c");
     var params = array::new<string::String>(self.allocator);
     defer params.deinit(self.allocator);
     if self.main_returns_int {
@@ -1137,20 +1141,32 @@ fn (self: &var Emitter) write_function(module: &ir::Module, function: ir::Functi
         var index = 0;
         while node.params.get(index) |param| {
             index = index + 1;
-            try params.append(self.allocator, try self.function_param_abi(module, param));
+            if exports_c {
+                try params.append(self.allocator, try self.c_export_param_abi(module, param));
+            } else {
+                try params.append(self.allocator, try self.function_param_abi(module, param));
+            }
             let operand = try self.local_name(module, param.name);
             try self.set_value(module, param.value(), operand);
         }
+    }
+    var return_attrs = "";
+    if exports_c {
+        return_attrs = c_return_attribute(c_extension(return_bytes));
     }
     try self.register_forwarded_values(self.allocator, module, node);
     let name_text = ir::name_text(&module.names, node.name);
     let name_bytes = name_text.as_bytes();
     let symbol = try self.llvm_function_name(name_bytes);
-    let linkage = function_linkage(module.names.is(node.name, "main"));
+    let export_text = ir::name_text(&module.names, node.export_name);
+    let export_bytes = export_text.as_bytes();
+    let exported_in_place = exports_c and self.names.is(symbol, export_bytes);
+    let linkage = function_linkage(module.names.is(node.name, "main") or exported_in_place);
     let joined = try string::join(self.allocator, &params, ", ");
-    try self.line4(
-        "define %s%s @%s(%s) #0 {",
+    try self.line5(
+        "define %s%s%s @%s(%s) #0 {",
         Arg::Lit(linkage),
+        Arg::Lit(return_attrs),
         Arg::Str(return_type),
         Arg::Str(symbol),
         Arg::Owned(move joined)
@@ -1200,6 +1216,9 @@ fn (self: &var Emitter) write_function(module: &ir::Module, function: ir::Functi
     try self.out.append_string(self.allocator, &hoisted);
     try self.line("}");
     try self.out.append_byte(self.allocator, cast<u8>(10));
+    if exports_c and !exported_in_place {
+        try self.write_c_export_alias(module, node, return_type, symbol);
+    }
     self.main_returns_int = false;
     self.current_return = ir::empty_name();
     self.current_block = ir::empty_name();
@@ -1234,6 +1253,141 @@ fn (self: &var Emitter) function_param_abi(module: &ir::Module, param: ir::Param
     );
     try self.entry_param_loads.append_byte(self.allocator, cast<u8>(10));
     return self.sprint2("ptr noalias nocapture readonly %s", Arg::Str(addr_name), Arg::None);
+}
+
+/// Spells one C export parameter with the extension C gives a value narrower
+/// than its register, the Go C export branch of `definitionParams`.
+fn (self: &var Emitter) c_export_param_abi(module: &ir::Module, param: ir::Param) -> !string::String {
+    let param_type = try self.llvm_type_of(module, param.type_name);
+    let param_name = try self.local_name(module, param.name);
+    let type_text = ir::name_text(&module.names, param.type_name);
+    let type_bytes = type_text.as_bytes();
+    let extension = c_param_attribute(c_extension(type_bytes));
+    return self.sprint3("%s%s %s", Arg::Str(param_type), Arg::Lit(extension), Arg::Str(param_name));
+}
+
+/// Gives a C export whose module path qualifies its name the symbol C calls
+/// it by, the Go `writeCExportAlias`. The body keeps its module name, which
+/// is what every call from Kizu names; the alias is the one name the host
+/// sees.
+fn (self: &var Emitter) write_c_export_alias(
+    module: &ir::Module,
+    node: &ir::FunctionNode,
+    return_type: ir::Name,
+    symbol: ir::Name
+) -> !void {
+    var types = array::new<string::String>(self.allocator);
+    defer types.deinit(self.allocator);
+    var index = 0;
+    while node.params.get(index) |param| {
+        index = index + 1;
+        let param_type = try self.llvm_type_of(module, param.type_name);
+        try types.append(self.allocator, try self.names.copy(param_type));
+    }
+    let export_symbol = try self.own(module, node.export_name);
+    let joined = try string::join(self.allocator, &types, ", ");
+    try self.line4(
+        "@%s = alias %s (%s), ptr @%s",
+        Arg::Str(export_symbol),
+        Arg::Str(return_type),
+        Arg::Owned(move joined),
+        Arg::Str(symbol)
+    );
+    return self.out.append_byte(self.allocator, cast<u8>(10));
+}
+
+/// Refuses a C export whose symbol another export or another function of the
+/// module already names, the Go `validateCExportSymbols`. The linker would
+/// report the clash too, but by a name the source does not spell.
+fn (self: &var Emitter) validate_c_export_symbols(
+    module: &ir::Module
+) -> !?diagnostic::Diagnostic {
+    var export_index = 0;
+    while module.functions.get(export_index) |exported| {
+        export_index = export_index + 1;
+        let exported_node = module.function_nodes.at(exported.node);
+        if !module.names.is(exported_node.export_abi, "c") {
+            continue;
+        }
+        let symbol_text = ir::name_text(&module.names, exported_node.export_name);
+        let symbol_bytes = symbol_text.as_bytes();
+        var other_index = 0;
+        while module.functions.get(other_index) |other| {
+            other_index = other_index + 1;
+            if other_index == export_index {
+                continue;
+            }
+            let other_node = module.function_nodes.at(other.node);
+            if module.names.is(other_node.export_abi, "c") and
+                module.names.is(other_node.export_name, symbol_bytes) {
+                if other_index < export_index {
+                    let first = try self.own(module, other_node.name);
+                    let second = try self.own(module, exported_node.name);
+                    let symbol = try self.own(module, exported_node.export_name);
+                    return try self.fail3(
+                        "llvm error: C exports `%s` and `%s` both name symbol `%s`",
+                        Arg::Str(first), Arg::Str(second), Arg::Str(symbol)
+                    );
+                }
+                continue;
+            }
+            let other_text = ir::name_text(&module.names, other_node.name);
+            let other_bytes = other_text.as_bytes();
+            let other_symbol = try self.llvm_function_name(other_bytes);
+            if self.names.is(other_symbol, symbol_bytes) {
+                let name = try self.own(module, exported_node.name);
+                let symbol = try self.own(module, exported_node.export_name);
+                let owner = try self.own(module, other_node.name);
+                return try self.fail3(
+                    "llvm error: C export `%s` names symbol `%s`, which `%s` already uses",
+                    Arg::Str(name), Arg::Str(symbol), Arg::Str(owner)
+                );
+            }
+        }
+    }
+    return null;
+}
+
+/// How C widens a boundary value narrower than its register, the Go
+/// `cIntegerExtension`: the C side widens it as the platform ABI says, and
+/// the attribute is what tells LLVM which way.
+enum CExtension {
+    None,
+    Zero,
+    Sign,
+}
+
+fn c_extension(value: []u8) -> CExtension {
+    if mem::equal_bytes(value, "bool") or mem::equal_bytes(value, "u8") or
+        mem::equal_bytes(value, "u16") {
+        return CExtension::Zero;
+    }
+    if mem::equal_bytes(value, "i8") or mem::equal_bytes(value, "i16") {
+        return CExtension::Sign;
+    }
+    return CExtension::None;
+}
+
+/// Spells an extension to follow a parameter type.
+fn c_param_attribute(extension: CExtension) -> []u8 {
+    if extension == CExtension::Zero {
+        return " zeroext";
+    }
+    if extension == CExtension::Sign {
+        return " signext";
+    }
+    return "";
+}
+
+/// Spells an extension to sit before a result type.
+fn c_return_attribute(extension: CExtension) -> []u8 {
+    if extension == CExtension::Zero {
+        return "zeroext ";
+    }
+    if extension == CExtension::Sign {
+        return "signext ";
+    }
+    return "";
 }
 
 /// Builds one text the Go `fmt.Sprintf` way, for a text kept as its own
