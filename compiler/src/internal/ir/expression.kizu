@@ -555,7 +555,10 @@ fn (self: &var Lowerer) lower_prefix_expr(
     prefix: ast::PrefixExpr,
     out: &var Value
 ) -> !?diagnostic::Diagnostic {
-    if text_is(tree, prefix.operator, "&") or text_is(tree, prefix.operator, "&var") {
+    if text_is(tree, prefix.operator, "&var") {
+        return self.lower_mutable_borrow_expr(tree, prefix.right, out);
+    }
+    if text_is(tree, prefix.operator, "&") {
         return self.lower_expr(tree, prefix.right, out);
     }
     var right = empty_value();
@@ -564,6 +567,34 @@ fn (self: &var Lowerer) lower_prefix_expr(
     }
     let operator = try self.text_name(tree, prefix.operator);
     out.* = try self.emit_op1(Op::Unary, operator, right.type_name, right);
+    return null;
+}
+
+/// Lowers `&var target`, the `&var` half of the Go `lowerBorrowExpr`.
+/// `&var p.*` is the one borrow whose storage is already an address: the raw
+/// pointer is the `&var T` itself, so writes through the binding reach the
+/// pointee rather than a copy of it.
+fn (self: &var Lowerer) lower_mutable_borrow_expr(
+    tree: &var ast::Ast,
+    target: ast::Expression,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var receiver: ?ast::Expression = null;
+    match tree.expressions.at(target.node) {
+        Deref(deref) => {
+            receiver = deref.receiver;
+        },
+        _ => {},
+    }
+    let pointer_expr = receiver orelse return self.lower_expr(tree, target, out);
+    var pointer = empty_value();
+    if try self.lower_expr(tree, pointer_expr, &var pointer) |failed| {
+        return move failed;
+    }
+    let elem = try self.raw_pointer_elem(pointer.type_name) orelse
+        return self.lower_expr(tree, target, out);
+    let borrowed = try self.module.names.prefixed("&var ", elem);
+    out.* = try self.emit_imm1(Op::Cast, borrowed, borrowed, pointer);
     return null;
 }
 

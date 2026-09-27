@@ -1819,7 +1819,61 @@ func (c *Checker) defineSpecialLetInitializer(
 		return true, requireScopeDefinition(stmt.Name,
 			env.defineParamWithSource(stmt.Name, rawView, true, mutable, nil, false))
 	}
+	pointee, mutable, ok, err := c.checkRawPointerBorrowInitializer(stmt.Value, env, unsafe)
+	if ok || err != nil {
+		if err != nil {
+			return true, err
+		}
+		return true, requireScopeDefinition(stmt.Name,
+			env.defineParamWithSource(stmt.Name, pointee, true, mutable, nil, false))
+	}
 	return false, nil
+}
+
+// checkRawPointerBorrowInitializer recognizes `let v = unsafe &p.*` and
+// `let v = unsafe &var p.*`: a local borrow of the value a raw pointer points
+// at. Like a raw view it borrows no binding the checker can name, so it is a
+// local borrow that cannot be returned or stored; that the value is there,
+// initialized, and touched by nothing else while the borrow lasts is what the
+// `unsafe` marker answers for. The marker is the one `p.*` already asks for.
+func (c *Checker) checkRawPointerBorrowInitializer(
+	expr ast.Expression,
+	env *scope,
+	_ unsafeMark,
+) (Type, bool, bool, error) {
+	marked, ok := expr.(*ast.UnsafeExpr)
+	if !ok {
+		return "", false, false, nil
+	}
+	borrow, ok := borrowPrefix(marked.Value)
+	if !ok {
+		return "", false, false, nil
+	}
+	deref, ok := borrow.Right.(*ast.DerefExpr)
+	if !ok {
+		return "", false, false, nil
+	}
+	mutable := borrow.Operator == "&var"
+	pointee, err := c.underMark(marked, func(inner unsafeMark) (Type, error) {
+		pointer, err := c.checkExpr(deref.Receiver, env, inner)
+		if err != nil {
+			return "", err
+		}
+		if !isPointerType(pointer) {
+			return "", errorAt(expressionSpan(deref.Receiver),
+				"type error: `%s` is not a raw pointer; `&var x.*` borrows through one", pointer)
+		}
+		if err := requireUnsafeCapabilityAt(
+			inner, unsafePtrDeref, "raw pointer borrow", deref.OperatorSpan,
+		); err != nil {
+			return "", err
+		}
+		if mutable {
+			return assignableRawPointerDerefType(pointer)
+		}
+		return rawPointerDerefType(pointer)
+	})
+	return pointee, mutable, true, err
 }
 
 // checkBoxBorrowInitializer recognizes box.borrow/borrow_mut local borrow initializers.
@@ -8657,6 +8711,11 @@ func prepareBorrowArgument(
 	if !wantBorrow {
 		return nil, errorf("type error: borrow argument cannot be passed to owning parameter")
 	}
+	if _, ok := prefix.Right.(*ast.DerefExpr); ok {
+		return nil, errorAt(expressionSpan(prefix.Right),
+			"type error: a raw pointer's value is borrowed by an `unsafe` binding:"+
+				" `let v = unsafe &var p.*;`, then pass `v`")
+	}
 	if err := checkBorrowTargetShape(prefix.Right, prefix.Operator == "&var"); err != nil {
 		return nil, err
 	}
@@ -8703,6 +8762,11 @@ func checkBorrowTargetShape(expr ast.Expression, mutable bool) error {
 		return errorAt(expressionSpan(expr),
 			"type error: a shared view of a range is the slice itself (`v[a..b]`);"+
 				" `&var` lends it for writing")
+	}
+	if _, ok := expr.(*ast.DerefExpr); ok {
+		return errorAt(expressionSpan(expr),
+			"type error: a raw pointer's value is borrowed by an `unsafe` binding:"+
+				" `let v = unsafe &var p.*;`")
 	}
 	return errorAt(expressionSpan(expr),
 		"type error: borrow target must be a local binding or field path")

@@ -1527,11 +1527,24 @@ fn (self: &var Checker) check_pointer_builtin(
     call: ast::CallExpr,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
+    var writes = false;
+    if ident_text(tree, call.callee) |name| {
+        writes = text_equals(tree, name, "ptr_write") or text_equals(tree, name, "volatile_write");
+    }
     var ignored = empty_name();
     var index = 0;
     while arg_at(tree, call.args, index) |arg| {
-        if try self.read_expr(tree, env, arg, &var ignored) |failed| {
-            return move failed;
+        // The value a write stores is handed to the pointee: an owner leaves
+        // its binding with `move`, as it would into a call, so nothing is left
+        // behind to release or leak.
+        if writes and index == 1 {
+            if try self.move_expr(tree, env, arg, &var ignored) |failed| {
+                return move failed;
+            }
+        } else {
+            if try self.read_expr(tree, env, arg, &var ignored) |failed| {
+                return move failed;
+            }
         }
         index = index + 1;
     }

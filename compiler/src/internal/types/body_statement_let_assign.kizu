@@ -273,8 +273,132 @@ fn (self: &var Checker) define_special_let_initializer(
         let defined = try self.define_scope_param(scope, name, raw_view, true, mutable, false);
         return self.require_scope_definition(name, defined);
     }
+    var pointee = empty_type();
+    if try self.check_raw_pointer_borrow_initializer(
+        tree,
+        scope,
+        statement.value,
+        &var pointee,
+        &var mutable,
+        &var raw_handled
+    ) |problem| {
+        return move problem;
+    }
+    if raw_handled {
+        let defined = try self.define_scope_param(scope, name, pointee, true, mutable, false);
+        return self.require_scope_definition(name, defined);
+    }
     handled.* = false;
     return null;
+}
+
+// Recognizes `let v = unsafe &p.*` and `let v = unsafe &var p.*`, the Go
+// `checkRawPointerBorrowInitializer`: a local borrow of the value a raw
+// pointer points at. Like a raw view it borrows no binding the checker can
+// name, so it is a local borrow that cannot be returned or stored; that the
+// value is there, initialized, and touched by nothing else while the borrow
+// lasts is what the `unsafe` marker answers for.
+fn (self: &var Checker) check_raw_pointer_borrow_initializer(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    expression: ast::Expression,
+    pointee_out: &var Type,
+    mutable_out: &var bool,
+    handled: &var bool
+) -> !?diagnostic::Diagnostic {
+    handled.* = false;
+    var marker: ?ast::UnsafeExpr = null;
+    var inner = expression;
+    match tree.expressions.at(expression.node) {
+        Unsafe(value) => {
+            inner = value.value;
+            marker = ast::UnsafeExpr { value: value.value, safety: value.safety, span: value.span };
+        },
+        _ => {},
+    }
+    let unsafe_marker = marker orelse return null;
+    var borrow_parts: ?ast::PrefixExpr = null;
+    match borrow_prefix(tree, inner) {
+        Value(borrow) => {
+            borrow_parts = borrow;
+        },
+        None => {},
+    }
+    let borrow = borrow_parts orelse return null;
+    var deref_parts: ?ast::DerefExpr = null;
+    match tree.expressions.at(borrow.right.node) {
+        Deref(value) => {
+            deref_parts = ast::DerefExpr {
+                receiver: value.receiver,
+                operator_span: value.operator_span
+            };
+        },
+        _ => {},
+    }
+    let deref = deref_parts orelse return null;
+    handled.* = true;
+    let retained = tree.texts.at(borrow.operator.node);
+    let operator = retained.as_bytes();
+    let mutable = mem::equal_bytes(operator, "&var");
+    mutable_out.* = mutable;
+    let saved_mark = self.mark;
+    self.mark = UnsafeMark { used: false };
+    if try self.check_raw_pointer_borrow_target(tree, scope, &deref, mutable, pointee_out) |problem| {
+        self.mark = saved_mark;
+        return move problem;
+    }
+    let inner_mark = self.mark;
+    self.mark = saved_mark;
+    return self.check_under_mark(tree, &unsafe_marker, &inner_mark);
+}
+
+// Types the pointee a raw pointer borrow lends: `T` for `ptr<T>`, and for a
+// shared borrow `ptr<const T>` too. The borrow is the `p.*` it spells, so it
+// asks for the marker `p.*` asks for.
+fn (self: &var Checker) check_raw_pointer_borrow_target(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    deref: &ast::DerefExpr,
+    mutable: bool,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    var pointer = empty_type();
+    if try self.check_expr(tree, scope, deref.receiver, &var pointer) |problem| {
+        return move problem;
+    }
+    if !self.types.is_pointer_type(pointer) {
+        var message = string::new(self.allocator);
+        errdefer message.deinit(self.allocator);
+        try message.append_byte(self.allocator, cast<u8>(96));
+        try self.append_checker_type(&var message, pointer);
+        try message.append_bytes(self.allocator, "` is not a raw pointer; `&var x.*` borrows through one");
+        return try self.checker_message_at(
+            "type error", expression_span(tree, deref.receiver), move message
+        );
+    }
+    if try self.require_unsafe_capability_at(
+        UnsafeCapability::PtrDeref,
+        "raw pointer borrow",
+        deref.operator_span
+    ) |problem| {
+        return move problem;
+    }
+    if mutable {
+        match try self.types.assignable_raw_pointer_deref_type(pointer) {
+            Value(value) => {
+                out.* = value;
+                return null;
+            },
+            Error(reason) => return try self.pointer_deref_error(pointer, reason, true),
+        }
+    }
+    match try self.types.raw_pointer_deref_type(pointer) {
+        Value(value) => {
+            out.* = value;
+            return null;
+        },
+        Error(reason) => return try self.pointer_deref_error(pointer, reason, false),
+    }
 }
 
 // Recognizes a raw view initializer under the `unsafe` marker it is written

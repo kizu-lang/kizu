@@ -7527,7 +7527,18 @@ func (c *Checker) readTryExpr(expr *ast.TryExpr, env *scope) (string, error) {
 
 // checkPointerBuiltin reads raw pointer builtin arguments without moving values.
 func (c *Checker) checkPointerBuiltin(expr *ast.CallExpr, env *scope) (string, error) {
-	for _, arg := range expr.Args {
+	name, _ := expr.Callee.(*ast.IdentExpr)
+	writes := name != nil && (name.Name == "ptr_write" || name.Name == "volatile_write")
+	for index, arg := range expr.Args {
+		// The value a write stores is handed to the pointee: an owner leaves
+		// its binding with `move`, as it would into a call, so nothing is left
+		// behind to release or leak.
+		if writes && index == 1 {
+			if _, err := c.moveExpr(arg, env); err != nil {
+				return "", err
+			}
+			continue
+		}
 		if _, err := c.readExpr(arg, env); err != nil {
 			return "", err
 		}
@@ -7587,7 +7598,39 @@ func (c *Checker) checkViewLetStmt(stmt *ast.LetStmt, env *scope) (bool, error) 
 	if target, path, mutable, ok := c.stringViewInitializer(stmt.Value, env); ok {
 		return true, c.checkStringViewLetStmt(stmt, target, path, mutable, env)
 	}
+	if ok, err := c.checkRawPointerBorrowLetStmt(stmt, env); ok || err != nil {
+		return true, err
+	}
 	return c.checkRawViewLetStmt(stmt, env)
+}
+
+// checkRawPointerBorrowLetStmt binds `let v = unsafe &p.*` or its `&var`
+// form: a borrow of the value a raw pointer points at. Like a raw view it
+// borrows no binding, so it lends nothing the checker tracks, and it is a
+// local borrow all the same: it cannot be returned or stored.
+func (c *Checker) checkRawPointerBorrowLetStmt(stmt *ast.LetStmt, env *scope) (bool, error) {
+	prefix, ok := unwrapExpressionMarkers(stmt.Value).(*ast.PrefixExpr)
+	if !ok || (prefix.Operator != "&" && prefix.Operator != "&var") {
+		return false, nil
+	}
+	deref, ok := prefix.Right.(*ast.DerefExpr)
+	if !ok {
+		return false, nil
+	}
+	ptrType, err := c.readExpr(deref.Receiver, env)
+	if err != nil {
+		return true, err
+	}
+	elem, ok := rawPointerElement(ptrType)
+	if !ok {
+		return false, nil
+	}
+	value := c.newBinding(stmt.Name, strings.TrimPrefix(elem, "const "))
+	value.borrowedParam = true
+	value.localBorrow = true
+	value.mutBorrow = prefix.Operator == "&var"
+	env.define(value)
+	return true, nil
 }
 
 // checkRawViewLetStmt binds `let v = view_from_ptr(p, count)` or its
