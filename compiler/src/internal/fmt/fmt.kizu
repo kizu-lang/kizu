@@ -1405,16 +1405,40 @@ fn (self: &Builder) closes_type_brackets(tokens: &array::Array<token::Token>) ->
 }
 
 /// Returns the index of the `[` that the `]` at index closes when the two
-/// hold nothing or a length, or -1, the Go `openingTypeBracket`.
+/// hold nothing or a length -- a number, a static name, or a parenthesized
+/// static expression -- or -1, the Go `openingTypeBracket`.
 fn opening_type_bracket(tokens: &array::Array<token::Token>, index: i64) -> i64 {
     var open = index - 1;
-    if open >= 0 and kind_at(tokens, open) == token::Kind::Int {
+    let inner = kind_at(tokens, open);
+    if open >= 0 and (inner == token::Kind::Int or inner == token::Kind::Ident) {
         open = open - 1;
+    } else if open >= 0 and inner == token::Kind::RParen {
+        open = opening_paren(tokens, open) - 1;
     }
     if open < 0 or kind_at(tokens, open) != token::Kind::LBracket {
         return -1;
     }
     return open;
+}
+
+/// Returns the index of the `(` that the `)` at index closes, or -1, the Go
+/// `openingParen`.
+fn opening_paren(tokens: &array::Array<token::Token>, index: i64) -> i64 {
+    var depth = 0;
+    var i = index;
+    while i >= 0 {
+        let kind = kind_at(tokens, i);
+        if kind == token::Kind::RParen {
+            depth = depth + 1;
+        } else if kind == token::Kind::LParen {
+            depth = depth - 1;
+            if depth == 0 {
+                return i;
+            }
+        }
+        i = i - 1;
+    }
+    return -1;
 }
 
 /// Reports whether the `:` just written names a loop after `break` or
@@ -1447,11 +1471,13 @@ fn (self: &Builder) stack_buffer_brace(tokens: &array::Array<token::Token>) -> b
     }
     var i = self.prev_index;
     var lengths = 0;
-    while i >= 3 and kind_at(tokens, i - 1) == token::Kind::RBracket and
-        kind_at(tokens, i - 2) == token::Kind::Int and
-        kind_at(tokens, i - 3) == token::Kind::LBracket {
+    while i >= 1 and kind_at(tokens, i - 1) == token::Kind::RBracket {
+        let open = opening_type_bracket(tokens, i - 1);
+        if open < 0 or kind_at(tokens, open + 1) == token::Kind::RBracket {
+            break;
+        }
         lengths = lengths + 1;
-        i = i - 3;
+        i = open;
     }
     return lengths > 0 and (i == 0 or kind_at(tokens, i - 1) != token::Kind::Arrow);
 }

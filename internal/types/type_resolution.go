@@ -3,6 +3,7 @@ package types
 import (
 	"strings"
 
+	"github.com/kizu-lang/kizu/internal/staticexpr"
 	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
@@ -34,6 +35,8 @@ const (
 	typeResolutionMetaElementArity
 	typeResolutionMetaElementUnsupported
 	typeResolutionCFunction
+	typeResolutionLengthUnbound
+	typeResolutionLength
 )
 
 // typeResolutionIssue carries copy values needed by the checker diagnostic
@@ -101,9 +104,22 @@ func typeResolutionError(issue typeResolutionIssue) error {
 	case typeResolutionCFunction:
 		return errorf(
 			"type error: `%s` passes `%s`, which C cannot name", issue.subject, issue.related)
+	case typeResolutionLengthUnbound, typeResolutionLength:
+		return lengthResolutionError(issue)
 	default:
 		return metaTypeResolutionError(issue)
 	}
+}
+
+// lengthResolutionError constructs the diagnostic for an array length that is
+// no static integer, or that evaluates to no length.
+func lengthResolutionError(issue typeResolutionIssue) error {
+	if issue.kind == typeResolutionLength {
+		return errorf("type error: %s", issue.related)
+	}
+	return errorf(
+		"type error: the length of `%s` reads `%s`, which is not a static integer here",
+		issue.subject, issue.related)
 }
 
 // metaTypeResolutionError constructs the std::meta half of the same closed
@@ -166,8 +182,15 @@ func (c *Checker) resolveTypeNode(parsed typ.Type) (Type, typeResolutionIssue) {
 	if parsed == nil {
 		return "", typeResolutionIssue{kind: typeResolutionMissing}
 	}
-	c.types.remember(parsed)
 	name := Type(parsed.String())
+	if typ.HasStaticLengthText(string(name)) {
+		bound, issue := c.bindLengths(parsed)
+		if issue.present() {
+			return "", issue
+		}
+		parsed, name = bound, Type(bound.String())
+	}
+	c.types.remember(parsed)
 	switch node := parsed.(type) {
 	case *typ.ErrorUnion:
 		return c.resolveErrorUnionType(name, node)
@@ -176,7 +199,7 @@ func (c *Checker) resolveTypeNode(parsed typ.Type) (Type, typeResolutionIssue) {
 	case *typ.Slice:
 		return c.resolveWrappingType(name, node.Elem)
 	case *typ.Buffer:
-		return c.resolveWrappingType(name, node.Elem)
+		return c.resolveBufferType(name, node)
 	case *typ.Optional:
 		return c.resolveNullableType(name, node.Elem)
 	case *typ.Func:
@@ -192,6 +215,30 @@ func (c *Checker) resolveTypeNode(parsed typ.Type) (Type, typeResolutionIssue) {
 			kind: typeResolutionUnknown, subject: name,
 		}
 	}
+}
+
+// bindLengths evaluates the array lengths a type reads from static integers
+// bound here: an instance's static values and `comptime for` captures.
+func (c *Checker) bindLengths(parsed typ.Type) (typ.Type, typeResolutionIssue) {
+	bound, err := typ.BindLengths(parsed, c.comptimeInt)
+	if err != nil {
+		return nil, typeResolutionIssue{kind: typeResolutionLength, related: Type(err.Error())}
+	}
+	return bound, typeResolutionIssue{}
+}
+
+// resolveBufferType validates an array. A length left waiting may only name an
+// integer static parameter of the signature being declared, which each
+// instance binds.
+func (c *Checker) resolveBufferType(name Type, node *typ.Buffer) (Type, typeResolutionIssue) {
+	for _, length := range staticexpr.Names(node.Len) {
+		if !c.typeParams.containsLength(length) {
+			return "", typeResolutionIssue{
+				kind: typeResolutionLengthUnbound, subject: name, related: Type(length),
+			}
+		}
+	}
+	return c.resolveWrappingType(name, node.Elem)
 }
 
 // resolveFuncType validates the parameter and result types a function pointer

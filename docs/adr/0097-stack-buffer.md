@@ -2,13 +2,10 @@
 
 ## 背景
 
-`[N]T` は heap を使わない buffer として、local 限定で入った。値は alloca の
-pointer そのもので、frame より長く生きる経路を全部検査せずに済むよう、struct
-field・引数・返り値・container の要素に置くことを禁じた。
-
-数値計算のコードを書くと、この制限が形を崩す。3 次元の座標 `[3]f64` や 3×3 の
-行列 `[3][3]f64` は struct の field として至る所に現れ、struct に崩すと添字の
-読み書きが全部 accessor になる。
+`[N]T` は heap を使わない local 限定の buffer として入った。値は alloca の pointer
+そのもので、frame より長く生きる経路を検査せずに済むよう、field・引数・返り値・
+要素に置くことを禁じた。数値計算ではこの制限が形を崩す。座標 `[3]f64` や行列
+`[3][3]f64` は field として至る所に現れ、struct に崩すと添字が全部 accessor になる。
 
 ## 決定
 
@@ -26,6 +23,8 @@ struct field・union payload・引数・返り値・container の要素に置け
 - 要素は添字で直接読み書きする(`a[i]`、`s.m[i] = x`)。範囲外は trap、literal の
   添字は compile 時に弾く。書き込みは配列の place への書き込みとして、field の
   書き込みと同じ借用規則に掛ける。view は長さを消して関数へ渡すときに使う
+- 長さは literal か static な整数(static parameter、`comptime for` の capture、
+  その括弧つき整数演算 `[(n * 2)]f64`)。instance ごとに評価し、1 未満は呼び出しの誤り
 
 ## なぜこの形か
 

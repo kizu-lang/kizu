@@ -1406,7 +1406,7 @@ writable slice place(`&var []T` binding)への indexed assignment
 layout 結合か隠れ call になるため)。
 
 固定長配列は `[N]T` です(ADR-0097)。N 個の T を inline に並べた値で、N は正の
-整数 literal です。T は copy data です: 数値型、`bool`、enum、error set、
+整数です。T は copy data です: 数値型、`bool`、enum、error set、
 `std::arena::Handle<T>`、copy aggregate、それらの `[M]U`(入れ子)。view、
 `Allocator`、raw pointer、owner は要素にできません。
 
@@ -1423,6 +1423,30 @@ let cell = [2][2]f64{
     [2]f64{ 1.0, 0.0 },
     [2]f64{ 0.0, 1.0 },
 };
+```
+
+N は整数 literal のほか、static な整数でも書けます。整数の static parameter と
+整数 range の `comptime for` の capture(§13)の名前か、それらと literal を括弧で
+囲んだ整数演算(`[(n * 2)]f64`)で、括弧の中は static 引数の式(§13)と同じ規則
+です。長さは instance ごと・capture の値ごとに評価し、1 未満になるとその
+instance を作った呼び出しが compile error です。literal だけの式はその値と同じ型
+です(`[(2 * 4)]u8` は `[8]u8`)。長さが読む名前は宣言中の関数の static parameter
+に限るので、static parameter を持たない struct の field には書けません。
+
+```kizu
+fn dot<n: i64>(a: &[n]f64, b: &[n]f64) -> f64 {
+    var sum = 0.0;
+    for 0..n |i| {
+        sum = sum + a[i] * b[i];
+    }
+    return sum;
+}
+
+fn joined<n: i64, m: i64>(left: [n]i64, right: [m]i64) -> [(n + m)]i64 {
+    var out = [(n + m)]i64{};
+    // ...
+    return out;
+}
 ```
 
 `[N]T` は copy 型(§8)で、struct field、union payload、関数 parameter、返り値、
@@ -2774,11 +2798,6 @@ mem::box<Item>(allocator, value)  // std::mem は Allocator も持つので型�
 型名で名付けた module は構築できる型を 1 つだけ持ちます。2 つ目の storage type は
 module を分けます。variant は `array::with_capacity<T>(allocator, 64)` のように
 横に並べ、`new_` を接頭辞にしません。
-
-`<...>` を type-only 構文として固定しません。将来 fixed-size buffer の長さや
-format string など、type 以外の comptime value が必要になった場合は、同じ
-`<...>` を static argument list として拡張します。ただし syntax の意味を
-予約するだけで、整数や文字列の static argument は受理しません。
 
 Generic function body は未 instantiation のまま top-level runtime code としては検査せず、
 明示 static 引数付き call が発生した時に、その static 引数集合で type / ownership /

@@ -716,7 +716,7 @@ func (c *Checker) defineParams(fn *functionInfo, env *scope, subst map[string]st
 	for idx, param := range fn.sig.Params {
 		typeName := fn.params[idx].typeName
 		if subst != nil {
-			typeName = substituteOwnershipType(typeName, subst)
+			typeName = bindOwnershipLengths(substituteOwnershipType(typeName, subst), c.comptimeValues)
 		}
 		// A parameter is storage, so it obeys the same rule as a binding:
 		// an optional whose payload owns memory or carries a view cannot
@@ -2315,14 +2315,14 @@ func (c *Checker) calledFunction(
 			return "", nil
 		}
 		fn := c.functions[name]
-		if fn == nil || len(fn.sig.TypeParamNames()) == 0 {
+		if fn == nil || len(fn.sig.StaticParams) == 0 {
 			return name, fn
 		}
 		subst, err := c.genericCallSubst(name, fn, typeArg)
 		if err != nil {
 			return name, fn
 		}
-		return name, instantiateFunctionInfo(fn, subst)
+		return name, instantiateFunctionInfo(fn, subst, c.genericCallValues(fn, typeArg))
 	default:
 		return "", nil
 	}
@@ -4421,7 +4421,7 @@ func (c *Checker) readArrayLiteral(expr *ast.BufferLiteralExpr, env *scope) (str
 			return "", err
 		}
 	}
-	return expr.TypeText(), nil
+	return bindOwnershipLengths(expr.TypeText(), c.comptimeValues), nil
 }
 
 // readVectorLiteral reads the lanes of `f64x2{a, b}`; the value is the
@@ -7115,11 +7115,12 @@ func (c *Checker) checkGenericUserTypeApply(
 	// The call site sees the instantiated signature and nothing else: with
 	// `T` spelled out, an owner argument moves, a view lends or is refused,
 	// and two borrows of one value collide, exactly as for a direct call.
-	result, err := c.checkCallableCall(name, instantiateFunctionInfo(fn, subst), args, env, sanctioned)
+	values := c.genericCallValues(fn, typeArg)
+	result, err := c.checkCallableCall(
+		name, instantiateFunctionInfo(fn, subst, values), args, env, sanctioned)
 	if err != nil {
 		return "", true, err
 	}
-	values := c.genericCallValues(fn, typeArg)
 	restore := c.bindMetaFields(c.genericCallFields(fn, typeArg))
 	restoreFunctions := c.bindFunctionArgs(c.genericCallFunctions(fn, typeArg))
 	err = c.checkGenericInstantiation(fn, subst, values)
@@ -7133,16 +7134,21 @@ func (c *Checker) checkGenericUserTypeApply(
 
 // instantiateFunctionInfo is the signature one generic call sees: the
 // declaration's, with every type parameter replaced by the static argument
-// the call spelled. Only the ownership-facing parts are substituted; the
-// body and static parameter list stay the declaration's.
-func instantiateFunctionInfo(fn *functionInfo, subst map[string]string) *functionInfo {
+// the call spelled, and every array length read from a static value bound to
+// the value the call gave. Only the ownership-facing parts are substituted;
+// the body and static parameter list stay the declaration's.
+func instantiateFunctionInfo(
+	fn *functionInfo,
+	subst map[string]string,
+	values map[string]string,
+) *functionInfo {
 	inst := *fn
 	inst.params = make([]paramInfo, len(fn.params))
 	for idx, param := range fn.params {
-		param.typeName = substituteOwnershipType(param.typeName, subst)
+		param.typeName = bindOwnershipLengths(substituteOwnershipType(param.typeName, subst), values)
 		inst.params[idx] = param
 	}
-	inst.returnType = substituteOwnershipType(returnTypeName(fn), subst)
+	inst.returnType = bindOwnershipLengths(substituteOwnershipType(returnTypeName(fn), subst), values)
 	return &inst
 }
 
@@ -7340,10 +7346,6 @@ func (c *Checker) checkGenericInstantiation(
 		return err
 	}
 	defer func() { c.instantiationDepth-- }()
-	env := newScope(nil)
-	if err := c.defineParams(fn, env, subst); err != nil {
-		return err
-	}
 	previousLoopStarts := c.loopStarts
 	previousPending := c.pendingOwnerTemps
 	previousPlaces := c.pendingMovedPlaces
@@ -7354,6 +7356,11 @@ func (c *Checker) checkGenericInstantiation(
 	c.comptimeValues = make(map[string]string, len(values))
 	for name, value := range values {
 		c.comptimeValues[name] = value
+	}
+	env := newScope(nil)
+	if err := c.defineParams(fn, env, subst); err != nil {
+		c.comptimeValues = previousComptimeValues
+		return err
 	}
 	c.loopStarts = nil
 	c.pendingOwnerTemps = nil
@@ -9365,6 +9372,15 @@ func (c *Checker) implMethod(typeName string, method string) *functionInfo {
 		return nil
 	}
 	return methods[method]
+}
+
+// bindOwnershipLengths evaluates the array lengths a type reads from the
+// static integers in values.
+func bindOwnershipLengths(typeName string, values map[string]string) string {
+	return typ.BindLengthsText(typeName, func(name string) (int64, bool) {
+		value, err := strconv.ParseInt(values[name], 10, 64)
+		return value, err == nil
+	})
 }
 
 // substituteOwnershipType instantiates simple generic wrapper type spellings.

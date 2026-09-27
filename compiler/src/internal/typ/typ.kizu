@@ -1,3 +1,4 @@
+import compiler::internal::staticexpr;
 import compiler::internal::stdmath;
 import std::arena;
 import std::array;
@@ -116,9 +117,12 @@ pub fn is_vector(name: []u8) -> bool {
     return vector_lanes(name) != 0;
 }
 
-/// Is `[N]T`.
+/// Is `[N]T`. len holds a length that is a static integer name or
+/// expression, such as `n` or `(n * 2)`, until an instance binds it; size is
+/// the length once len is empty.
 pub struct Buffer {
     pub size: i64,
+    pub len: string::String,
     pub elem: arena::Handle<Node>,
 }
 
@@ -408,7 +412,8 @@ fn (self: &var Parser) parse_func(unsafe_call: bool, c_abi: bool) -> !arena::Han
     }));
 }
 
-// parse_bracketed reads the `[]T` and `[N]T` spellings.
+// parse_bracketed reads the `[]T` and `[N]T` spellings. N is a number, a
+// static name, or a static expression in its canonical parenthesized spelling.
 fn (self: &var Parser) parse_bracketed() -> !arena::Handle<Node> {
     if self.accept("[]") {
         let elem = try self.parse_prefix();
@@ -416,27 +421,57 @@ fn (self: &var Parser) parse_bracketed() -> !arena::Handle<Node> {
     }
     self.position = self.position + 1;
     let start = self.position;
-    var size = 0;
-    while self.position < mem::len(self.input) and
-        is_digit(self.input[self.position]) {
-        let digit = cast<i64>(self.input[self.position] - cast<u8>(48));
-        if size > (9223372036854775807 - digit) / 10 {
-            return Error::BufferSizeOverflow;
-        }
-        size = size * 10 + digit;
-        self.position = self.position + 1;
-    }
-    if start == self.position {
-        return Error::ExpectedBufferSize;
-    }
+    try self.skip_length();
+    let length = self.input[start..self.position];
     if !self.accept("]") {
         return Error::ExpectedBufferClose;
     }
     let elem = try self.parse_prefix();
+    if !is_digit(length[0]) {
+        let len = try owned_text(self.allocator, length);
+        errdefer len.deinit(self.allocator);
+        return try self.nodes.add(self.allocator, Node::Buffer(Buffer {
+            size: 0,
+            len: move len,
+            elem: elem
+        }));
+    }
+    let size = staticexpr::parse_i64(length) orelse return Error::BufferSizeOverflow;
     return try self.nodes.add(self.allocator, Node::Buffer(Buffer {
         size: size,
+        len: string::new(self.allocator),
         elem: elem
     }));
+}
+
+// skip_length moves past a length: a run of name bytes, or a parenthesized
+// expression, whose parentheses balance.
+fn (self: &var Parser) skip_length() -> !void {
+    var depth = 0;
+    let start = self.position;
+    while self.position < mem::len(self.input) {
+        let byte = self.input[self.position];
+        if byte == cast<u8>(40) {
+            depth = depth + 1;
+        } else if byte == cast<u8>(41) and depth > 0 {
+            depth = depth - 1;
+        } else if depth == 0 and !is_length_byte(byte) {
+            if start == self.position {
+                return Error::ExpectedBufferSize;
+            }
+            return;
+        }
+        self.position = self.position + 1;
+    }
+    return Error::ExpectedBufferClose;
+}
+
+// is_length_byte reports whether byte may appear in a length outside
+// parentheses.
+fn is_length_byte(byte: u8) -> bool {
+    return byte == cast<u8>(95) or is_digit(byte) or
+        (byte >= cast<u8>(97) and byte <= cast<u8>(122)) or
+        (byte >= cast<u8>(65) and byte <= cast<u8>(90));
 }
 
 // parse_name reads a `::` separated name and its static arguments.
@@ -801,7 +836,12 @@ fn append_tree_node_with<R>(
         },
         Buffer(node) => {
             try out.append_byte(allocator, cast<u8>(91));
-            try fmt::append_i64(allocator, out, node.size);
+            if node.len.len() > 0 {
+                let len = node.len.as_bytes();
+                try out.append_bytes(allocator, len);
+            } else {
+                try fmt::append_i64(allocator, out, node.size);
+            }
             try out.append_byte(allocator, cast<u8>(93));
             try append_tree_node_with<R>(allocator, out, tree, node.elem, lookup);
         },
@@ -934,6 +974,12 @@ pub fn equal(
     );
 }
 
+fn equal_len(left: &string::String, right: &string::String) -> bool {
+    let left_bytes = left.as_bytes();
+    let right_bytes = right.as_bytes();
+    return mem::equal_bytes(left_bytes, right_bytes);
+}
+
 fn equal_node(
     left: &TypeTree,
     left_handle: arena::Handle<Node>,
@@ -950,7 +996,8 @@ fn equal_node(
             _ => false,
         },
         Buffer(a) => match right.nodes.at(right_handle) {
-            Buffer(b) => a.size == b.size and equal_node(left, a.elem, right, b.elem),
+            Buffer(b) => a.size == b.size and equal_len(&a.len, &b.len) and
+                equal_node(left, a.elem, right, b.elem),
             _ => false,
         },
         Borrow(a) => match right.nodes.at(right_handle) {
@@ -1109,7 +1156,7 @@ fn map_names_node<M, F>(allocator: Allocator, builder: &var Builder, value: &Typ
         },
         Buffer(node) => {
             let elem = try map_names_node<M, F>(allocator, builder, value, node.elem, mapper, folder);
-            try builder.nodes.add(allocator, Node::Buffer(Buffer { size: node.size, elem: elem }))
+            try add_buffer(builder, node, elem)
         },
         Borrow(node) => {
             let elem = try map_names_node<M, F>(allocator, builder, value, node.elem, mapper, folder);
@@ -1250,7 +1297,7 @@ fn substitute_node(
             let elem = try substitute_node(allocator,
                 builder, table, tree, node.elem, substitutions, replace_names
             );
-            try builder.nodes.add(allocator, Node::Buffer(Buffer { size: node.size, elem: elem }))
+            try add_buffer(builder, node, elem)
         },
         Borrow(node) => {
             let elem = try substitute_node(allocator,
@@ -1290,6 +1337,14 @@ fn substitute_node(
             replace_names
         ),
     };
+}
+
+// add_buffer copies a buffer node's length around a rewritten element.
+fn add_buffer(builder: &var Builder, node: &Buffer, elem: arena::Handle<Node>) -> !arena::Handle<Node> {
+    let source = node.len.as_bytes();
+    let len = try owned_text(builder.allocator, source);
+    errdefer len.deinit(builder.allocator);
+    return builder.add(Node::Buffer(Buffer { size: node.size, len: move len, elem: elem }));
 }
 
 fn substitute_func(
@@ -1383,6 +1438,195 @@ fn substitute_error_union(
         return try builder.nodes.add(allocator, Node::ErrorUnion(ErrorUnion { err: err, ok: ok }));
     }
     return try builder.nodes.add(allocator, Node::ErrorUnion(ErrorUnion { err: null, ok: ok }));
+}
+
+/// Is what binding a type's lengths gives: the bound type, or why a length
+/// the names bind is not one.
+pub union Bound {
+    Type(Type),
+    Problem(string::String),
+}
+
+/// Evaluates each array length that waits on static names against the
+/// integers env binds, the Go `BindLengths`: `[(n * 2)]f64` is `[8]f64` where
+/// n is 4. A length naming anything env does not bind stays as written,
+/// because that is how a generic's own declaration spells it. A bound length
+/// is at least 1, as a written one is.
+pub fn bind_lengths(table: &var Table, value: Type, env: &staticexpr::Env) -> !Bound {
+    let allocator = table.allocator;
+    var builder = new_builder(allocator);
+    errdefer builder.deinit(allocator);
+    var problem = string::new(allocator);
+    errdefer problem.deinit(allocator);
+    let root = try bind_node(&var builder, table.trees.at(value.tree), value.root, env, &var problem);
+    if problem.len() > 0 {
+        builder.deinit(allocator);
+        return Bound::Problem(move problem);
+    }
+    problem.deinit(allocator);
+    return Bound::Type(try finish_builder(allocator, move builder, table, root));
+}
+
+fn bind_node(
+    builder: &var Builder,
+    tree: &TypeTree,
+    handle: arena::Handle<Node>,
+    env: &staticexpr::Env,
+    problem: &var string::String
+) -> !arena::Handle<Node> {
+    let allocator = builder.allocator;
+    return match tree.nodes.at(handle) {
+        Name(node) => {
+            var args = array::new<arena::Handle<Node>>(allocator);
+            errdefer args.deinit(allocator);
+            var index = 0;
+            while node.args.get(index) |arg| {
+                try args.append(allocator, try bind_node(builder, tree, arg, env, problem));
+                index = index + 1;
+            }
+            let path = try copy_path(allocator, &node.path);
+            try builder.add(Node::Name(Name { path: move path, args: move args }))
+        },
+        Slice(node) => {
+            let elem = try bind_node(builder, tree, node.elem, env, problem);
+            try builder.add(Node::Slice(Slice { elem: elem }))
+        },
+        Buffer(node) => try bind_buffer(builder, tree, handle, node, env, problem),
+        Borrow(node) => {
+            let elem = try bind_node(builder, tree, node.elem, env, problem);
+            try builder.add(Node::Borrow(Borrow { elem: elem, mutable: node.mutable }))
+        },
+        Optional(node) => {
+            let elem = try bind_node(builder, tree, node.elem, env, problem);
+            try builder.add(Node::Optional(Optional { elem: elem }))
+        },
+        Const(node) => {
+            let elem = try bind_node(builder, tree, node.elem, env, problem);
+            try builder.add(Node::Const(Const { elem: elem }))
+        },
+        ErrorUnion(node) => {
+            let ok = try bind_node(builder, tree, node.ok, env, problem);
+            if node.err |source_err| {
+                let err = try bind_node(builder, tree, source_err, env, problem);
+                try builder.add(Node::ErrorUnion(ErrorUnion { err: err, ok: ok }))
+            } else {
+                try builder.add(Node::ErrorUnion(ErrorUnion { err: null, ok: ok }))
+            }
+        },
+        Func(node) => {
+            var params = array::new<arena::Handle<Node>>(allocator);
+            errdefer params.deinit(allocator);
+            var index = 0;
+            while node.params.get(index) |param| {
+                try params.append(allocator, try bind_node(builder, tree, param, env, problem));
+                index = index + 1;
+            }
+            let result = try bind_node(builder, tree, node.result, env, problem);
+            try builder.add(Node::Func(Func {
+                params: move params,
+                result: result,
+                unsafe_call: node.unsafe_call,
+                c_abi: node.c_abi
+            }))
+        },
+    };
+}
+
+// bind_buffer evaluates one array's length and binds its element's. The first
+// length that fails is the problem; the rest still copy, so the tree stays
+// whole for the caller to release.
+fn bind_buffer(
+    builder: &var Builder,
+    tree: &TypeTree,
+    handle: arena::Handle<Node>,
+    node: &Buffer,
+    env: &staticexpr::Env,
+    problem: &var string::String
+) -> !arena::Handle<Node> {
+    let allocator = builder.allocator;
+    let elem = try bind_node(builder, tree, node.elem, env, problem);
+    let len = node.len.as_bytes();
+    if mem::len(len) == 0 or !try staticexpr::binds_all(allocator, len, env) {
+        return add_buffer(builder, node, elem);
+    }
+    let outcome = try staticexpr::eval(allocator, len, env);
+    match outcome {
+        Value(size) => {
+            if size >= 1 {
+                return builder.add(Node::Buffer(Buffer {
+                    size: size, len: string::new(allocator), elem: elem
+                }));
+            }
+            if problem.len() == 0 {
+                try problem.append_bytes(allocator, "length of `");
+                try append_tree_node(allocator, problem, tree, handle);
+                try problem.append_bytes(allocator, "` is ");
+                try fmt::append_i64(allocator, problem, size);
+                try problem.append_bytes(allocator, "; an array holds at least 1 element");
+            }
+        },
+        Problem(message) => {
+            defer message.deinit(allocator);
+            if problem.len() == 0 {
+                try problem.append_bytes(allocator, "length of `");
+                try append_tree_node(allocator, problem, tree, handle);
+                try problem.append_bytes(allocator, "`: ");
+                let bytes = message.as_bytes();
+                try problem.append_bytes(allocator, bytes);
+            }
+        },
+    }
+    return add_buffer(builder, node, elem);
+}
+
+/// Is bind_lengths for a caller that holds a type as text, the Go
+/// `BindLengthsText`. A length env makes no array stays as written: the type
+/// checker refused the program that wrote it.
+pub fn bind_lengths_text(allocator: Allocator, text: []u8, env: &staticexpr::Env) -> !string::String {
+    if !has_static_length(text) {
+        return owned_text(allocator, text);
+    }
+    var table = new(allocator);
+    defer table.deinit(allocator);
+    let parsed = try table.parse(text);
+    let bound = try bind_lengths(&var table, parsed, env);
+    match bound {
+        Type(value) => return render(allocator, &table, value),
+        Problem(problem) => {
+            problem.deinit(allocator);
+            return owned_text(allocator, text);
+        },
+    }
+}
+
+/// Returns why a length in a spelling that env binds is no length, or null
+/// when every such length is one.
+pub fn length_problem(allocator: Allocator, text: []u8, env: &staticexpr::Env) -> !?string::String {
+    var table = new(allocator);
+    defer table.deinit(allocator);
+    let parsed = try table.parse(text);
+    let bound = try bind_lengths(&var table, parsed, env);
+    match bound {
+        Type(_) => return null,
+        Problem(problem) => return move problem,
+    }
+}
+
+/// Reports whether a spelling holds an array whose length waits on a static
+/// name or expression, the Go `HasStaticLengthText`: a `[` that neither
+/// closes at once, as `[]T` does, nor opens a number.
+pub fn has_static_length(text: []u8) -> bool {
+    var index = 0;
+    while index + 1 < mem::len(text) {
+        if text[index] == cast<u8>(91) {
+            let next = text[index + 1];
+            if next != cast<u8>(93) and !is_digit(next) {
+                return true;
+            }
+        }
+        index = index + 1;
+    }
+    return false;
 }
 
 /// Replaces type parameters in a spelling and renders the owned result.

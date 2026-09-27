@@ -121,6 +121,26 @@ func apply(op byte, left int64, right int64) (int64, error) {
 	}
 }
 
+// Names lists the compile-time names the text reads, in the order it reads
+// them. A literal is not a name: a name starts with a letter or `_`.
+func Names(text string) []string {
+	var names []string
+	for i := 0; i < len(text); {
+		if !isNameByte(text[i]) {
+			i++
+			continue
+		}
+		start := i
+		for i < len(text) && isNameByte(text[i]) {
+			i++
+		}
+		if text[start] < '0' || text[start] > '9' {
+			names = append(names, text[start:i])
+		}
+	}
+	return names
+}
+
 // isNameByte reports whether c may appear in a compile-time name.
 func isNameByte(c byte) bool {
 	return c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'

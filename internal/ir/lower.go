@@ -244,14 +244,16 @@ func (l *lowerer) resolveType(name string) string {
 	if bound, ok := l.typeBindings[name]; ok {
 		return bound
 	}
-	if len(l.typeBindings) == 0 {
-		return name
-	}
 	resolved, err := typ.SubstituteText(name, l.typeBindings)
 	if err != nil {
 		return name
 	}
-	return resolved
+	if len(l.staticValues) == 0 {
+		return resolved
+	}
+	// An array length reads the static integers in force: an instance's
+	// values and `comptime for` captures.
+	return typ.BindLengthsText(resolved, l.staticInt)
 }
 
 // resolveTypeArgs binds the type parameters in force across a static argument
@@ -289,7 +291,7 @@ func (l *lowerer) requestGenericInstance(name string, typeArgs string) (string, 
 	if err != nil {
 		return "", Signature{}, err
 	}
-	signature := l.instanceSignature(decl.FunctionSignature, instance.bindings)
+	signature := l.instanceSignature(decl.FunctionSignature, instance)
 	restore()
 	return symbol, signature, nil
 }
@@ -355,20 +357,21 @@ func (l *lowerer) declaredInstanceParams(name string, typeArgs string) ([]Param,
 	if err != nil {
 		return nil, err
 	}
-	return l.instanceSignature(decl.FunctionSignature, instance.bindings).Params, nil
+	return l.instanceSignature(decl.FunctionSignature, instance).Params, nil
 }
 
 // instanceSignature returns the signature a generic declaration has once its
-// type arguments are bound. The caller sees the instance's types, not the
-// declaration's: `!T` has to come back as `!i64`, and a `u8` parameter has to be
-// handed a u8, or the call carries a parameter that no longer exists.
+// static arguments are bound. The caller sees the instance's types, not the
+// declaration's: `!T` has to come back as `!i64`, a `u8` parameter has to be
+// handed a u8, and `[n]f64` is `[3]f64`, or the call carries a parameter that
+// no longer exists.
 func (l *lowerer) instanceSignature(
 	sig ast.FunctionSignature,
-	bindings map[string]string,
+	instance genericArguments,
 ) Signature {
-	previous := l.typeBindings
-	l.typeBindings = bindings
-	defer func() { l.typeBindings = previous }()
+	previousTypes, previousValues := l.typeBindings, l.staticValues
+	l.typeBindings, l.staticValues = instance.bindings, instance.values
+	defer func() { l.typeBindings, l.staticValues = previousTypes, previousValues }()
 	return l.lowerSignature(sig)
 }
 
@@ -3652,13 +3655,14 @@ func (l *lowerer) lowerBuiltinLiteral(expr ast.Expression) (Value, error) {
 // array is what the slot holds after the last one. Each element is lowered
 // under the element type, the way an argument is under its parameter.
 func (l *lowerer) lowerArrayLiteral(expr *ast.BufferLiteralExpr) (Value, error) {
-	zero := l.emit("buffer.new", expr.TypeText(), nil, "")
+	zero := l.emit("buffer.new", l.resolveType(expr.TypeText()), nil, "")
 	if expr.Elements == nil {
 		return zero, nil
 	}
+	elem := l.resolveType(expr.Elem)
 	values := make([]Value, 0, len(expr.Elements))
 	for _, element := range expr.Elements {
-		value, err := l.lowerContextualExpr(element, expr.Elem)
+		value, err := l.lowerContextualExpr(element, elem)
 		if err != nil {
 			return Value{}, err
 		}

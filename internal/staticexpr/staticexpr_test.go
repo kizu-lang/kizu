@@ -28,3 +28,11 @@ func TestEval(t *testing.T) {
 		}
 	}
 }
+
+// TestNames lists the names an expression reads and skips its literals.
+func TestNames(t *testing.T) {
+	got := Names("((n1 * 24) + (0 - k2))")
+	if len(got) != 2 || got[0] != "n1" || got[1] != "k2" {
+		t.Fatalf("Names = %v; want [n1 k2]", got)
+	}
+}

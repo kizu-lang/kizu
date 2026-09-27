@@ -9,7 +9,7 @@ var roundTrip = []string{
 	"Io", "Allocator", "Function", "Self", "T",
 	"Point", "std::map::Map", "std::arena::Handle",
 	"[]u8", "[][]u8", "[]Point",
-	"[4]u8", "[32]Array<Point>",
+	"[4]u8", "[32]Array<Point>", "[n]f64", "[(n * 2)][m]f64",
 	"&i64", "&var i64", "&[]u8", "&var Point",
 	"?ptr<u8>", "?i64",
 	"!void", "!i64", "![]u8", "!&i64", "!&var i64",
@@ -180,6 +180,36 @@ func TestSplitArgsKeepsNestedSpellingsWhole(t *testing.T) {
 	for _, text := range []string{"i64,", ",i64", "Map<i64", "i64>"} {
 		if parts, err := SplitArgs(text); err == nil {
 			t.Fatalf("SplitArgs(%q) = %q, want error", text, parts)
+		}
+	}
+}
+
+// TestBindLengths evaluates the lengths the names bind and leaves the others
+// waiting, the way a generic's own declaration spells them.
+func TestBindLengths(t *testing.T) {
+	value := func(name string) (int64, bool) {
+		return 4, name == "n"
+	}
+	cases := map[string]string{
+		"[n]f64":                    "[4]f64",
+		"&[(n * 2)][(n - 1)]f64":    "&[8][3]f64",
+		"Array<[n]u8>":              "Array<[4]u8>",
+		"[m]f64":                    "[m]f64",
+		"fn([n]i64) -> [(n + m)]u8": "fn([4]i64) -> [(n + m)]u8",
+		"[3]u8":                     "[3]u8",
+	}
+	for text, want := range cases {
+		if got := BindLengthsText(text, value); got != want {
+			t.Fatalf("BindLengthsText(%q) = %q; want %q", text, got, want)
+		}
+	}
+	for _, text := range []string{"[(n - 4)]f64", "[(1 / (n - 4))]f64"} {
+		parsed, err := Parse(text)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", text, err)
+		}
+		if _, err := BindLengths(parsed, value); err == nil {
+			t.Fatalf("BindLengths(%q) succeeded; want an error", text)
 		}
 	}
 }

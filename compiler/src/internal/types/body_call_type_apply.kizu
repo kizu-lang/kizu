@@ -455,6 +455,11 @@ fn (self: &var Checker) check_generic_user_type_apply_checked(
     if args.len(tree) != facts.parameter_count {
         return try self.user_call_arity_error(handle, name, args.len(tree));
     }
+    if try self.check_instance_lengths(
+        handle, facts.parameter_count, &checked.substitutions, &checked.bindings.values, span
+    ) |problem| {
+        return move problem;
+    }
     // A type argument that stands for the set of an `E!T` has to be a set.
     // Said here, before any argument is compared against a signature that
     // could not be spelled, the Go `revalidateSubstituted` loop.
@@ -462,8 +467,7 @@ fn (self: &var Checker) check_generic_user_type_apply_checked(
     while index < facts.parameter_count {
         let declared = self.callable_param_facts(handle, index) orelse
             return try self.undefined_function_error(name);
-        let want = try self.types.substitute_type_params(
-            self.allocator, declared.typ, &checked.substitutions);
+        let want = try self.instance_type(declared.typ, &checked.substitutions, &checked.bindings.values);
         if try self.types.mints_wrapper(self.allocator, want) {
             if try self.revalidate_substituted(tree, want) |problem| {
                 return move problem;
@@ -480,6 +484,7 @@ fn (self: &var Checker) check_generic_user_type_apply_checked(
             handle,
             name,
             &checked.substitutions,
+            &checked.bindings.values,
             index,
             argument
         ) |problem| {
@@ -498,8 +503,8 @@ fn (self: &var Checker) check_generic_user_type_apply_checked(
     let previous_meta = self.meta_bindings.current;
     try self.bind_static_meta_fields(&checked.bindings.fields);
     let declared_return = self.function_return_type(handle);
-    let substituted = try self.types.substitute_type_params(self.allocator,
-        declared_return, &checked.substitutions
+    let substituted = try self.instance_type(
+        declared_return, &checked.substitutions, &checked.bindings.values
     );
     if try self.resolve_instance_type(tree, substituted, out) |problem| {
         self.meta_bindings.restore(previous_meta);
@@ -718,12 +723,13 @@ fn (self: &var Checker) check_generic_user_arg(
     function: FunctionHandle,
     name: []u8,
     substitutions: &map::Map<[]u8, Type>,
+    values: &map::Map<[]u8, ComptimeValue>,
     index: i64,
     argument: ast::Expression
 ) -> !?diagnostic::Diagnostic {
     let declared = self.callable_param_facts(function, index) orelse
         return try self.undefined_function_error(name);
-    let want = try self.types.substitute_type_params(self.allocator, declared.typ, substitutions);
+    let want = try self.instance_type(declared.typ, substitutions, values);
     var checked_argument = argument;
     if try self.prepare_borrow_argument(
         tree,
@@ -972,8 +978,16 @@ fn (self: &Checker) check_static_expr_arg(
 // the one in force, so the walk from the current binding outward binds it
 // first.
 fn (self: &Checker) eval_static_expr(argument: []u8) -> !staticexpr::Outcome {
-    var env = staticexpr::new_env(self.allocator);
+    let env = try self.comptime_env();
     defer env.deinit(self.allocator);
+    return staticexpr::eval(self.allocator, argument, &env);
+}
+
+// comptime_env binds the integers the comptime-readable names stand for, the
+// Go `c.comptimeInt`.
+fn (self: &Checker) comptime_env() -> !staticexpr::Env {
+    var env = staticexpr::new_env(self.allocator);
+    errdefer env.deinit(self.allocator);
     var current = self.comptime_values.current;
     while current |handle| {
         let binding = self.comptime_values.bindings.at(handle);
@@ -985,7 +999,85 @@ fn (self: &Checker) eval_static_expr(argument: []u8) -> !staticexpr::Outcome {
         }
         current = binding.parent;
     }
-    return staticexpr::eval(self.allocator, argument, &env);
+    return move env;
+}
+
+// values_env binds the integers one call gives its static value parameters.
+fn (self: &Checker) values_env(values: &map::Map<[]u8, ComptimeValue>) -> !staticexpr::Env {
+    var env = staticexpr::new_env(self.allocator);
+    errdefer env.deinit(self.allocator);
+    var index = 0;
+    while values.key_at(index) |name| {
+        if values.get(name) |bound| {
+            match bound {
+                Integer(value) => try env.bind(self.allocator, name, value),
+                _ => try env.hide(self.allocator, name),
+            }
+        }
+        index = index + 1;
+    }
+    return move env;
+}
+
+// instance_type is a signature type as one instance sees it, the Go
+// `instanceType`: the type arguments substituted, and each array length that
+// reads a static value evaluated against values. A length values make no
+// array stays as written; check_instance_lengths refused the call that made
+// it.
+fn (self: &var Checker) instance_type(
+    declared: Type,
+    substitutions: &map::Map<[]u8, Type>,
+    values: &map::Map<[]u8, ComptimeValue>
+) -> !Type {
+    let substituted = try self.types.substitute_type_params(self.allocator, declared, substitutions);
+    if !self.types.has_static_length(substituted) {
+        return substituted;
+    }
+    let env = try self.values_env(values);
+    defer env.deinit(self.allocator);
+    let bound = try self.types.bind_lengths(substituted, &env);
+    match bound {
+        Value(value) => return value,
+        Problem(problem) => {
+            problem.deinit(self.allocator);
+            return substituted;
+        },
+    }
+}
+
+// check_instance_lengths evaluates the array lengths the instance's signature
+// reads from its static values, so a length the call makes 0 or negative is
+// refused at the call that made it.
+fn (self: &var Checker) check_instance_lengths(
+    handle: FunctionHandle,
+    parameter_count: i64,
+    substitutions: &map::Map<[]u8, Type>,
+    values: &map::Map<[]u8, ComptimeValue>,
+    span: ast::Span
+) -> !?diagnostic::Diagnostic {
+    var index = -1;
+    while index < parameter_count {
+        var declared = self.function_return_type(handle);
+        if index >= 0 {
+            let facts = self.callable_param_facts(handle, index) orelse return null;
+            declared = facts.typ;
+        }
+        index = index + 1;
+        // Only the declaration writes a length that waits: a type argument
+        // is a type of the caller's, whose lengths are bound.
+        if !self.types.has_static_length(declared) {
+            continue;
+        }
+        let substituted = try self.types.substitute_type_params(self.allocator, declared, substitutions);
+        let env = try self.values_env(values);
+        defer env.deinit(self.allocator);
+        let bound = try self.types.bind_lengths(substituted, &env);
+        match bound {
+            Value(_) => {},
+            Problem(problem) => return try self.checker_message_at("type error", span, move problem),
+        }
+    }
+    return null;
 }
 
 // accepts_comptime_value reports whether a name bound to a comptime value --
@@ -2697,7 +2789,9 @@ fn (self: &var Checker) check_generic_instantiation(
     try self.bind_static_meta_fields(&bindings.fields);
     try self.bind_static_functions(&bindings.functions);
     let previous_values = try self.comptime_values.enter(&bindings.values);
-    if try self.check_generic_instantiation_bound(self.allocator, tree, function, substitutions) |problem| {
+    if try self.check_generic_instantiation_bound(
+        self.allocator, tree, function, substitutions, &bindings.values
+    ) |problem| {
         self.comptime_values.restore(previous_values);
         self.function_bindings.restore(previous_functions);
         self.meta_bindings.restore(previous_meta);
@@ -2731,7 +2825,8 @@ fn (self: &var Checker) check_generic_instantiation_bound(
     allocator: Allocator,
     tree: &var ast::Ast,
     function: FunctionHandle,
-    substitutions: &map::Map<[]u8, Type>
+    substitutions: &map::Map<[]u8, Type>,
+    values: &map::Map<[]u8, ComptimeValue>
 ) -> !?diagnostic::Diagnostic {
     let facts = try self.copy_instance_function_facts(function) orelse
         return try self.checker_error_at(
@@ -2782,6 +2877,11 @@ fn (self: &var Checker) check_generic_instantiation_bound(
         if parameter.is_type {
             try type_params.insert(allocator, parameter_name, true);
         } else {
+            if !self.types.is_text(parameter.type_name, "bool") and
+                !self.types.is_text(parameter.type_name, "Function") and
+                !self.types.is_text(parameter.type_name, "Field") {
+                try type_params.insert(allocator, parameter_name, false);
+            }
             let defined = try self.define_scope_param(
                 root,
                 parameter_name,
@@ -2801,9 +2901,7 @@ fn (self: &var Checker) check_generic_instantiation_bound(
     }
     index = 0;
     while runtime_params.at(index) |parameter| {
-        let parameter_type = try self.types.substitute_type_params(allocator,
-            parameter.type_name, substitutions
-        );
+        let parameter_type = try self.instance_type(parameter.type_name, substitutions, values);
         if try self.revalidate_substituted(tree, parameter_type) |problem| {
             type_params.deinit(self.allocator);
             static_values.deinit(self.allocator);
@@ -2826,7 +2924,7 @@ fn (self: &var Checker) check_generic_instantiation_bound(
         index = index + 1;
     }
     let declared_return = facts.return_type;
-    let substituted_return = try self.types.substitute_type_params(allocator, declared_return, substitutions);
+    let substituted_return = try self.instance_type(declared_return, substitutions, values);
     var return_type = empty_type();
     if try self.resolve_instance_type(tree, substituted_return, &var return_type) |problem| {
         type_params.deinit(self.allocator);
