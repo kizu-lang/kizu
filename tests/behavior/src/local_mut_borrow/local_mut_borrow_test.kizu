@@ -1,0 +1,67 @@
+import std::array;
+import std::mem;
+import std::string;
+import std::testing;
+
+struct Inner {
+    x: i64,
+}
+
+struct Outer {
+    inner: Inner,
+    tag: i64,
+}
+
+fn (self: &var Outer) retag() -> void {
+    self.tag = self.tag + 1;
+}
+
+fn nudge(outer: &var Outer) -> void {
+    let inner = &var outer.inner;
+    inner.x = inner.x + 100;
+}
+
+// A `let v = &var x` binding lends x's own storage: a write, a method call
+// or a helper call through v lands in x, not in a copy of it.
+test "a local mut borrow of a struct writes through to it" {
+    var outer = Outer { inner: Inner { x: 1 }, tag: 2 };
+    let lent = &var outer;
+    lent.retag();
+    lent.tag = lent.tag * 10;
+    testing::expect_equal<i64>(30, outer.tag);
+}
+
+test "a local mut borrow of a field writes through to the field" {
+    var outer = Outer { inner: Inner { x: 1 }, tag: 2 };
+    let inner = &var outer.inner;
+    inner.x = 3;
+    nudge(&var outer);
+    testing::expect_equal<i64>(103, outer.inner.x);
+    testing::expect_equal<i64>(2, outer.tag);
+}
+
+test "a local mut borrow of a scalar stores through `.*`" {
+    var count = 1;
+    let counter = &var count;
+    counter.* = counter.* + 5;
+    testing::expect_equal<i64>(6, count);
+}
+
+test "a local mut borrow of an owner grows the owner" {
+    let allocator = mem::page_allocator();
+    var text = string::new(allocator);
+    defer text.deinit(allocator);
+    let writer = &var text;
+    try writer.append_bytes(allocator, "abc");
+    testing::expect_equal<i64>(3, text.len());
+
+    var items = array::new<i64>(allocator);
+    defer items.deinit(allocator);
+    var round = 0;
+    while round < 3 {
+        let list = &var items;
+        try list.append(allocator, round);
+        round = round + 1;
+    }
+    testing::expect_equal<i64>(3, items.len());
+}
