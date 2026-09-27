@@ -137,6 +137,20 @@ fn (self: &var Emitter) llvm_type(module: &ir::Module, typ_name: []u8) -> !ir::N
     if module.unions.contains(typ_name) {
         return self.llvm_union_type_name(typ_name);
     }
+    if try self.buffer_size(typ_name) |size| {
+        let elem = try self.buffer_elem(typ_name) orelse return self.names.intern("ptr");
+        defer elem.deinit(self.allocator);
+        let elem_bytes = elem.as_bytes();
+        let elem_type = try self.llvm_type(module, elem_bytes);
+        var spelled = try string::from_bytes(self.allocator, "[");
+        errdefer spelled.deinit(self.allocator);
+        try fmt::append_i64(self.allocator, &var spelled, size);
+        try spelled.append_bytes(self.allocator, " x ");
+        let elem_text = ir::name_text(&self.names, elem_type);
+        try spelled.append_string(self.allocator, elem_text);
+        try spelled.append_bytes(self.allocator, "]");
+        return self.names.intern_owned(move spelled);
+    }
     return self.names.intern(llvm_primitive_type(typ_name));
 }
 
@@ -158,7 +172,13 @@ fn (self: &var Emitter) llvm_type_of(module: &ir::Module, typ_name: ir::Name) ->
 /// pointer instead of target aggregate lowering, the Go
 /// `usesIndirectStructParamABI`.
 fn uses_indirect_struct_param_abi(module: &ir::Module, typ_name: []u8) -> bool {
-    return module.structs.contains(typ_name);
+    return module.structs.contains(typ_name) or is_buffer_spelling(typ_name);
+}
+
+/// Reports whether a spelling is a fixed-length array `[N]T`.
+fn is_buffer_spelling(typ_name: []u8) -> bool {
+    return mem::len(typ_name) > 1 and typ_name[0] == cast<u8>(91) and
+        typ_name[1] >= cast<u8>(48) and typ_name[1] <= cast<u8>(57);
 }
 
 /// Reports whether a hosted runtime call passes typ behind a pointer, the Go

@@ -32,10 +32,9 @@ func (e *emitter) writeBufferInstr(instr *ir.Instr) error {
 	}
 }
 
-// writeBufferNew zeros one fixed-size stack buffer.
+// writeBufferNew zeros the storage of one fixed-length array.
 func (e *emitter) writeBufferNew(instr *ir.Instr) error {
-	size, elem, ok := e.bufferSize(instr.Result.Type)
-	if !ok || len(instr.Args) != 0 {
+	if _, _, ok := e.bufferSize(instr.Result.Type); !ok || len(instr.Args) != 0 {
 		return fmt.Errorf("wasm error: buffer.new expects `[N]T` result, got %s",
 			instr.Result.Type)
 	}
@@ -43,21 +42,27 @@ func (e *emitter) writeBufferNew(instr *ir.Instr) error {
 	if err != nil {
 		return err
 	}
-	cell, _ := primitiveLayout(elem)
-	e.writeMemoryZero(slot, size*cell.size)
+	layout, err := e.typeLayout(instr.Result.Type)
+	if err != nil {
+		return err
+	}
+	e.writeMemoryZero(slot, layout.size)
 	e.values[instr.Result.Name] = valueInfo{expr: slot}
 	return nil
 }
 
-// writeBufferAsBytes builds a slice descriptor over stack-buffer storage.
+// writeBufferAsBytes builds a slice descriptor over an array's storage.
 func (e *emitter) writeBufferAsBytes(instr *ir.Instr) error {
-	size, elem, ok := e.bufferSize(instr.Args[0].Type)
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("wasm error: buffer.as_bytes expects the storage of `[N]T`")
+	}
+	size, elem, ok := e.bufferSize(derefWasmType(instr.Args[0].Type))
 	if !ok {
-		return fmt.Errorf("wasm error: buffer.as_bytes expects `[N]T`, got %s",
+		return fmt.Errorf("wasm error: buffer.as_bytes expects the storage of `[N]T`, got %s",
 			instr.Args[0].Type)
 	}
-	if len(instr.Args) != 1 || instr.Result.Type != "[]"+elem {
-		return fmt.Errorf("wasm error: buffer.as_bytes expects `[N]T` -> `[]T`")
+	if instr.Result.Type != "[]"+elem {
+		return fmt.Errorf("wasm error: buffer.as_bytes expects `&var [N]T` -> `[]T`")
 	}
 	slot, err := e.resultSlot(instr.Result)
 	if err != nil {

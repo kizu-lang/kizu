@@ -1156,42 +1156,36 @@ fn (self: &var Emitter) write_slice_slice(module: &ir::Module, node: &ir::InstrN
     return null;
 }
 
-/// Allocates a zero-filled fixed-length stack buffer, the Go
-/// `writeBufferNew`. The value registered for the result is the alloca
-/// pointer: a buffer is its storage, and the views buffer.as_bytes hands out
-/// point into it (ADR-0097).
+/// Makes a zero-filled fixed-length array, the Go `writeBufferNew`. The
+/// array is a value like a struct, so the result is the constant itself; a
+/// place that needs its address -- a view, an indexed write -- stores it into
+/// a slot.
 fn (self: &var Emitter) write_buffer_new(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let result_text = ir::name_text(&module.names, node.result.type_name);
     let result_type = result_text.as_bytes();
-    if try self.buffer_size(result_type) |size| {
-        let elem = try self.buffer_elem(result_type) orelse
-            return try self.fail_name1(module, "llvm error: buffer.new expects `[N]T` result, got %s", node.result.type_name);
-        defer elem.deinit(self.allocator);
-        let elem_bytes = elem.as_bytes();
-        let elem_type = llvm_primitive_type(elem_bytes);
-        let elem_name = try self.names.intern(elem_type);
-        let name = try self.local_name(module, node.result.name);
-        try self.line3("  %s = alloca [%d x %s]", Arg::Str(name), Arg::Int(size), Arg::Str(elem_name));
-        try self.line3("  store [%d x %s] zeroinitializer, ptr %s", Arg::Int(size), Arg::Str(elem_name), Arg::Str(name));
-        try self.set_value(module, node.result, name);
+    if try self.buffer_size(result_type) |_| {
+        let constant = try self.names.intern("zeroinitializer");
+        try self.set_value(module, node.result, constant);
         return null;
     }
     return try self.fail_name1(module, "llvm error: buffer.new expects `[N]T` result, got %s", node.result.type_name);
 }
 
-/// Builds the {ptr, len} view of a stack buffer, the Go `writeBufferAsBytes`.
+/// Builds the {ptr, len} view of an array from its storage, the Go
+/// `writeBufferAsBytes`.
 fn (self: &var Emitter) write_buffer_as_bytes(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 or !module.names.starts_with(node.result.type_name, "[]") {
-        return try self.fail0("llvm error: buffer.as_bytes expects `[N]T` -> `[]T`");
+        return try self.fail0("llvm error: buffer.as_bytes expects `&var [N]T` -> `[]T`");
     }
-    let buffer_arg = node.args.get_or_panic(0);
-    let buffer_text = ir::name_text(&module.names, buffer_arg.type_name);
-    let buffer_bytes = buffer_text.as_bytes();
-    if try self.buffer_size(buffer_bytes) |size| {
-        let buffer = try self.operand(module, buffer_arg);
+    let storage_arg = node.args.get_or_panic(0);
+    let storage_text = ir::name_text(&module.names, storage_arg.type_name);
+    let storage_bytes = storage_text.as_bytes();
+    let array_bytes = deref_llvm_type(storage_bytes);
+    if try self.buffer_size(array_bytes) |size| {
+        let storage = try self.operand(module, storage_arg);
         let result_name = try self.local_name(module, node.result.name);
         let base_name = try self.suffixed(result_name, ".base");
-        try self.line2("  %s = insertvalue %%kizu.slice.u8 poison, ptr %s, 0", Arg::Str(base_name), Arg::Str(buffer.operand));
+        try self.line2("  %s = insertvalue %%kizu.slice.u8 poison, ptr %s, 0", Arg::Str(base_name), Arg::Str(storage.operand));
         try self.line3(
             "  %s = insertvalue %%kizu.slice.u8 %s, i64 %d, 1",
             Arg::Str(result_name), Arg::Str(base_name), Arg::Int(size)
@@ -1199,7 +1193,7 @@ fn (self: &var Emitter) write_buffer_as_bytes(module: &ir::Module, node: &ir::In
         try self.set_value(module, node.result, result_name);
         return null;
     }
-    return try self.fail_name1(module, "llvm error: buffer.as_bytes expects `[N]T`, got %s", buffer_arg.type_name);
+    return try self.fail_name1(module, "llvm error: buffer.as_bytes expects the storage of `[N]T`, got %s", storage_arg.type_name);
 }
 
 /// Renders T from a `[N]T` spelling, null for any other spelling.

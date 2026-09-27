@@ -28,7 +28,7 @@ func (e *emitter) planFrame(fn *ir.Function) (*frameLayout, error) {
 			if err := e.planCallCopySlots(frame, instr); err != nil {
 				return nil, err
 			}
-			if (e.isMemoryType(instr.Result.Type) || instr.Op == "buffer.new") &&
+			if e.isMemoryType(instr.Result.Type) &&
 				instr.Op != "phi" && !e.flagResults[instr.Result.Name] &&
 				!e.optionLocals[instr.Result.Name] {
 				layout, err := e.typeLayout(instr.Result.Type)
@@ -56,7 +56,7 @@ func (e *emitter) planFrame(fn *ir.Function) (*frameLayout, error) {
 func (e *emitter) registerFrameValues(fn *ir.Function) error {
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
-			if (e.isMemoryType(instr.Result.Type) || instr.Op == "buffer.new") &&
+			if e.isMemoryType(instr.Result.Type) &&
 				instr.Op != "phi" && !e.flagResults[instr.Result.Name] &&
 				!e.optionLocals[instr.Result.Name] {
 				slot, err := e.resultSlot(instr.Result)
@@ -78,12 +78,8 @@ func (e *emitter) registerFrameValues(fn *ir.Function) error {
 }
 
 // valueSlotLayout returns storage for one wasm value placed in an addressable
-// cell. A stack buffer value is its storage address (ADR-0097), so the cell
-// holds one i32 pointer rather than a second inline byte buffer.
+// cell.
 func (e *emitter) valueSlotLayout(typ string) (wasmLayout, error) {
-	if _, _, ok := e.bufferSize(typ); ok {
-		return wasmLayout{size: 4, align: 4}, nil
-	}
 	return e.typeLayout(typ)
 }
 

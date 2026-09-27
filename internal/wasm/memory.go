@@ -212,12 +212,7 @@ func (e *emitter) loadOp(typ string) (string, error) {
 }
 
 // isAddressValueType reports values represented by one linear-memory address.
-// A stack-buffer value is its storage address even though its storage layout
-// is the full fixed byte count.
 func (e *emitter) isAddressValueType(typ string) bool {
-	if _, _, ok := e.bufferSize(typ); ok {
-		return true
-	}
 	return isReferenceType(typ) || isRawPointerType(typ) ||
 		isFunctionPointerType(typ) || isBoxWasmType(typ)
 }

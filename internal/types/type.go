@@ -276,16 +276,6 @@ func (t *typeTable) isBufferType(value Type) bool {
 	return ok
 }
 
-// containsBufferType reports whether a type contains a stack buffer.
-// A stack buffer is local-only in v1 (ADR-0097): it cannot appear in
-// signatures, fields, payloads, or container elements.
-func (t *typeTable) containsBufferType(value Type) bool {
-	return t.containsTypeNode(value, func(node typ.Type) bool {
-		_, ok := node.(*typ.Buffer)
-		return ok
-	})
-}
-
 // containsBorrowOptional reports whether a type contains `?&T`. A borrow
 // optional is positional-only: it appears as an at/at_mut capture condition
 // and never crosses a user signature.

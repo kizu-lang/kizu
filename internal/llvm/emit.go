@@ -2888,38 +2888,36 @@ func (e *emitter) writeVectorLane(instr *ir.Instr) error {
 	return nil
 }
 
-// writeBufferNew allocates a zero-filled fixed-length stack buffer. The value
-// registered for the result is the alloca pointer: a buffer is its storage,
-// and the views buffer.as_bytes hands out point into it (ADR-0097).
+// writeBufferNew makes a zero-filled fixed-length array. The array is a
+// value like a struct, so the result is the constant itself; a place that
+// needs its address -- a view, an indexed write -- stores it into a slot.
 func (e *emitter) writeBufferNew(instr *ir.Instr) error {
-	size, elem, ok := e.bufferSize(instr.Result.Type)
-	if !ok {
+	if _, _, ok := e.bufferSize(instr.Result.Type); !ok {
 		return fmt.Errorf("llvm error: buffer.new expects `[N]T` result, got %s",
 			instr.Result.Type)
 	}
-	name := localName(instr.Result.Name)
-	elemType := llvmPrimitiveType(elem)
-	fmt.Fprintf(&e.out, "  %s = alloca [%d x %s]\n", name, size, elemType)
-	fmt.Fprintf(&e.out, "  store [%d x %s] zeroinitializer, ptr %s\n", size, elemType, name)
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "zeroinitializer"}
 	return nil
 }
 
-// writeBufferAsBytes builds the {ptr, len} view of a stack buffer.
+// writeBufferAsBytes builds the {ptr, len} view of an array from its storage.
 func (e *emitter) writeBufferAsBytes(instr *ir.Instr) error {
-	size, elem, ok := e.bufferSize(instr.Args[0].Type)
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: buffer.as_bytes expects the storage of `[N]T`")
+	}
+	size, elem, ok := e.bufferSize(derefLLVMType(instr.Args[0].Type))
 	if !ok {
-		return fmt.Errorf("llvm error: buffer.as_bytes expects `[N]T`, got %s",
+		return fmt.Errorf("llvm error: buffer.as_bytes expects the storage of `[N]T`, got %s",
 			instr.Args[0].Type)
 	}
-	if len(instr.Args) != 1 || instr.Result.Type != "[]"+elem {
-		return fmt.Errorf("llvm error: buffer.as_bytes expects `[N]T` -> `[]T`")
+	if instr.Result.Type != "[]"+elem {
+		return fmt.Errorf("llvm error: buffer.as_bytes expects `&var [N]T` -> `[]T`")
 	}
-	buffer := e.value(instr.Args[0])
+	storage := e.value(instr.Args[0])
 	resultName := localName(instr.Result.Name)
 	baseName := resultName + ".base"
 	fmt.Fprintf(&e.out, "  %s = insertvalue %%kizu.slice.u8 poison, ptr %s, 0\n",
-		baseName, buffer.operand)
+		baseName, storage.operand)
 	fmt.Fprintf(&e.out, "  %s = insertvalue %%kizu.slice.u8 %s, i64 %d, 1\n",
 		resultName, baseName, size)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}

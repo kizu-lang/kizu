@@ -44,9 +44,9 @@ fn (self: &Emitter) type_layout(module: &ir::Module, typ_name: []u8) -> !?Layout
 /// Computes a type layout while tracking the named aggregates already on the
 /// recursion path so a by-value cycle is rejected, not looped, the Go
 /// `typeLayoutVisiting`. It only accepts the shapes the #991 value layout
-/// table defines inline; every other type (error unions, raw pointers,
-/// non-i64/u8 integer widths, and unknown type names) reports null so it
-/// fails visibly rather than being silently treated as a pointer.
+/// table defines inline; every other type (error unions, raw pointers, and
+/// unknown type names) reports null so it fails visibly rather than being
+/// silently treated as a pointer.
 fn (self: &Emitter) type_layout_visiting(
     module: &ir::Module,
     typ_name: []u8,
@@ -87,6 +87,12 @@ fn (self: &Emitter) type_layout_visiting(
     if module.structs.at(typ_name) |declared| {
         return self.struct_layout(module, typ_name, declared, seen);
     }
+    // A fixed-length array is its elements side by side, each already padded
+    // to its own alignment.
+    if buffer_parts(typ_name) |parts| {
+        let cell = try self.type_layout_visiting(module, parts.elem, seen) orelse return null;
+        return Layout { size: parts.count * cell.size, align: cell.align };
+    }
     if module.unions.at(typ_name) |declared| {
         let payload = try self.union_payload_storage(module, typ_name, declared, seen) orelse return null;
         return Layout {
@@ -107,7 +113,15 @@ fn primitive_layout(typ_name: []u8) -> ?Layout {
         mem::equal_bytes(typ_name, "u8") {
         return Layout { size: 1, align: 1 };
     }
-    if mem::equal_bytes(typ_name, "i64") or mem::equal_bytes(typ_name, "f64") {
+    if mem::equal_bytes(typ_name, "i16") or mem::equal_bytes(typ_name, "u16") {
+        return Layout { size: 2, align: 2 };
+    }
+    if mem::equal_bytes(typ_name, "i32") or mem::equal_bytes(typ_name, "u32") {
+        return Layout { size: 4, align: 4 };
+    }
+    if mem::equal_bytes(typ_name, "i64") or mem::equal_bytes(typ_name, "u64") or
+        mem::equal_bytes(typ_name, "usize") or mem::equal_bytes(typ_name, "isize") or
+        mem::equal_bytes(typ_name, "f64") {
         return Layout { size: 8, align: 8 };
     }
     if mem::equal_bytes(typ_name, "f32") {
@@ -250,4 +264,28 @@ fn contains_name(seen: &array::Array<string::String>, name: []u8) -> bool {
         }
     }
     return false;
+}
+
+/// The count and element of a fixed-length array spelling `[N]T`.
+struct BufferParts {
+    count: i64,
+    elem: []u8,
+}
+
+/// Splits `[N]T` into N and T, null for any other spelling.
+fn buffer_parts(typ_name: []u8) -> ?BufferParts {
+    let length = mem::len(typ_name);
+    if length < 3 or typ_name[0] != cast<u8>(91) {
+        return null;
+    }
+    var at = 1;
+    var count = 0;
+    while at < length and typ_name[at] >= cast<u8>(48) and typ_name[at] <= cast<u8>(57) {
+        count = count * 10 + cast<i64>(typ_name[at] - cast<u8>(48));
+        at = at + 1;
+    }
+    if at == 1 or at >= length or typ_name[at] != cast<u8>(93) {
+        return null;
+    }
+    return BufferParts { count: count, elem: typ_name[at + 1..length] };
 }

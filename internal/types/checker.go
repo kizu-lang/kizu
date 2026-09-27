@@ -673,10 +673,6 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 			return diag.Locate(errorf("type error: struct field `%s.%s` cannot store type value",
 				decl.Name, field.Name), field.Span)
 		}
-		if c.types.containsBufferType(typ) {
-			return diag.Locate(errorf("type error: struct field `%s.%s` cannot store stack buffer",
-				decl.Name, field.Name), field.Span)
-		}
 		if elem, ok := optionalElem(typ); ok && !c.optionalFieldElemAllowed(elem) {
 			return diag.Locate(errorf(
 				"type error: struct field `%s.%s` cannot store an optional view;"+
@@ -887,11 +883,6 @@ func (c *Checker) newFunctionType(fn ast.FunctionSignature) (*functionType, erro
 	}
 	if compileTimeOnlyType(&c.types, ret) {
 		return nil, errorf("type error: function `%s` cannot return %s", fn.Name, ret)
-	}
-	if c.types.containsBufferType(ret) {
-		return nil, errorf(
-			"type error: function `%s` cannot return a stack buffer; "+
-				"return an owned buffer or write through a view", fn.Name)
 	}
 	if c.types.containsTypeValue(ret) {
 		return nil, errorf("type error: function `%s` cannot return type", fn.Name)
@@ -1231,11 +1222,6 @@ func (c *Checker) checkFunctionParam(
 	}
 	if c.types.containsTypeValue(paramType) {
 		return errorf("type error: parameter `%s` cannot have type", param.Name)
-	}
-	if c.types.containsBufferType(paramType) {
-		return errorf(
-			"type error: stack buffer parameter `%s` is not supported; pass a view (`[]u8` or `&var []u8`)",
-			param.Name)
 	}
 	// A function name and a field token are known only at compile time, so they
 	// belong in the static argument list rather than the runtime parameter list.
@@ -4140,10 +4126,6 @@ func (c *Checker) checkBorrowPrefix(
 	if err != nil {
 		return "", false, err
 	}
-	if c.types.isBufferType(typ) {
-		return "", false, errorf(
-			"type error: cannot borrow a stack buffer; use `as_bytes()` / `as_mut_bytes()`")
-	}
 	if mutable {
 		if err := requireMutableBorrowArg(expr.Right, typ, env); err != nil {
 			return "", false, err
@@ -5057,9 +5039,6 @@ func (c *Checker) rejectArrayStorageType(typ Type, seen map[Type]bool) error {
 	seen[typ] = true
 	if isPointerType(typ) {
 		return errorf("type error: Array element cannot be raw pointer")
-	}
-	if c.types.containsBufferType(typ) {
-		return errorf("type error: Array element cannot be stack buffer")
 	}
 	if base, arg, ok := splitGenericType(string(typ)); ok && base == "option" {
 		argType, err := c.parseType(arg)
@@ -9099,6 +9078,11 @@ func (c *Checker) isPlainDataType(name string, seen map[string]bool) bool {
 	}
 	if c.enums[name] != nil || c.errorSets[name] != nil {
 		return true
+	}
+	// A fixed-length array is its elements laid side by side, so it is plain
+	// data exactly when they are.
+	if elem, ok := c.types.bufferElem(t); ok {
+		return c.isPlainDataType(string(elem), seen)
 	}
 	// An arena handle is an opaque ID; the arena owns the value, so
 	// duplicating the ID creates no cleanup obligation.

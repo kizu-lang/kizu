@@ -80,7 +80,6 @@ union TypeCollectionIssue {
     StructRawPointer(CollectionMemberIssue),
     StructCompileTimeOnly(CollectionMemberTypeIssue),
     StructTypeValue(CollectionMemberIssue),
-    StructBuffer(CollectionMemberIssue),
     StructOptionalView(CollectionMemberIssue),
     ExternStructTypeParams(ast::Text),
     ExternStructUnsafe(ast::Text),
@@ -88,13 +87,11 @@ union TypeCollectionIssue {
     FunctionObligationDoc(ast::Text),
     ReservedFunctionStaticParam(ast::Text),
     FunctionReturnCompileTimeOnly(CollectionNamedTypeIssue),
-    FunctionReturnBuffer(ast::Text),
     FunctionReturnTypeValue(ast::Text),
     FunctionReturnNestedBorrowOptional(ast::Text),
     ParamBorrowOptional(ast::Text),
     ParamVoid(ast::Text),
     ParamTypeValue(ast::Text),
-    ParamBuffer(ast::Text),
     ParamCompileTimeOnly(CollectionNamedTypeIssue),
     ParamBorrowOptionalValue(CollectionNamedTypeIssue),
     FunctionExternAndExport(ast::Text),
@@ -313,9 +310,6 @@ fn (self: &var Checker) kizu_struct_field_issue(
     if self.types.contains_type_value(field_type) {
         return TypeCollectionIssue::StructTypeValue(member);
     }
-    if self.types.contains_buffer_type(field_type) {
-        return TypeCollectionIssue::StructBuffer(member);
-    }
     if try self.types.optional_elem(field_type) |element| {
         if !try self.optional_field_element_allowed(tree, owners, element) {
             return TypeCollectionIssue::StructOptionalView(member);
@@ -406,6 +400,11 @@ fn (self: &var Checker) is_plain_data_type(tree: &ast::Ast, value: Type, seen: &
         self.metadata.error_sets_by_name.contains(name) or
         mem::starts_with(name, "std::arena::Handle<") {
         return true;
+    }
+    // A fixed-length array is its elements laid side by side, so it is plain
+    // data exactly when they are.
+    if try self.types.buffer_elem(value) |element| {
+        return self.is_plain_data_type(tree, element, seen);
     }
     var seen_index = 0;
     while seen.get(seen_index) |active| {
@@ -680,10 +679,6 @@ fn (self: &var Checker) new_declared_function_type_in_scope(tree: &ast::Ast, dec
             name: signature.name, type_name: return_type, span: ast::zero_span()
         };
         let issue = TypeCollectionIssue::FunctionReturnCompileTimeOnly(named);
-        return function_storage_issue(self.allocator, move storage, issue);
-    }
-    if self.types.contains_buffer_type(return_type) {
-        let issue = TypeCollectionIssue::FunctionReturnBuffer(signature.name);
         return function_storage_issue(self.allocator, move storage, issue);
     }
     if self.types.contains_type_value(return_type) {
@@ -998,9 +993,6 @@ fn (self: &var Checker) collect_function_parameter(
     if self.types.contains_type_value(parameter_type) {
         return TypeCollectionIssue::ParamTypeValue(parameter.name);
     }
-    if self.types.contains_buffer_type(parameter_type) {
-        return TypeCollectionIssue::ParamBuffer(parameter.name);
-    }
     if compile_time_only_type(&self.types, parameter_type) {
         let named = CollectionNamedTypeIssue {
             name: parameter.name, type_name: parameter_type, span: ast::zero_span()
@@ -1230,11 +1222,6 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
             try append_collection_member(self.allocator, &var message, tree, member, ".");
             try message.append_bytes(self.allocator, "` cannot store type value");
         },
-        StructBuffer(member) => {
-            try message.append_bytes(self.allocator, "struct field `");
-            try append_collection_member(self.allocator, &var message, tree, member, ".");
-            try message.append_bytes(self.allocator, "` cannot store stack buffer");
-        },
         StructOptionalView(member) => {
             try message.append_bytes(self.allocator, "struct field `");
             try append_collection_member(self.allocator, &var message, tree, member, ".");
@@ -1275,11 +1262,6 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
             try message.append_bytes(self.allocator, " cannot return ");
             try self.append_checker_type(&var message, named.type_name);
         },
-        FunctionReturnBuffer(name) => {
-            try append_function_name(self.allocator, &var message, tree, name);
-            try message.append_bytes(self.allocator, " cannot return a stack buffer; return an owned buffer or ");
-            try message.append_bytes(self.allocator, "write through a view");
-        },
         FunctionReturnTypeValue(name) => {
             try append_function_name(self.allocator, &var message, tree, name);
             try message.append_bytes(self.allocator, " cannot return type");
@@ -1301,11 +1283,6 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
         ParamTypeValue(name) => {
             try append_parameter_name(self.allocator, &var message, tree, name);
             try message.append_bytes(self.allocator, " cannot have type");
-        },
-        ParamBuffer(name) => {
-            try message.append_bytes(self.allocator, "stack buffer parameter `");
-            try append_collection_text(self.allocator, &var message, tree, name);
-            try message.append_bytes(self.allocator, "` is not supported; pass a view (`[]u8` or `&var []u8`)");
         },
         ParamCompileTimeOnly(named) => {
             try self.append_checker_type(&var message, named.type_name);

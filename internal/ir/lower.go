@@ -2800,6 +2800,9 @@ func (l *lowerer) lowerMethodCallExpr(
 	field *ast.FieldExpr,
 	args []ast.Expression,
 ) (Value, error) {
+	if isBufferIRType(l.assignTargetType(field.Receiver)) {
+		return l.lowerBufferMethod(field, args)
+	}
 	receiver, err := l.lowerMethodReceiver(field)
 	if err != nil {
 		return Value{}, err
@@ -2817,9 +2820,6 @@ func (l *lowerer) lowerMethodCallExpr(
 		return Value{}, fmt.Errorf(
 			"ir error: method `%s` takes `&var self`, receiver `%s` has no storage",
 			field.Name, field.Receiver.String())
-	}
-	if isBufferIRType(receiver.Type) {
-		return l.lowerBufferMethod(field.Name, receiver, args)
 	}
 	params, err := l.methodCalleeParams(receiver.Type, field.Name)
 	if err != nil {
@@ -2875,23 +2875,49 @@ func bufferViewIRType(typeName string) string {
 	return "[]" + typeName[strings.IndexByte(typeName, ']')+1:]
 }
 
-// lowerBufferMethod lowers stack buffer view methods (ADR-0097). Both view
-// forms hand back the same {ptr, len} value; mutability is a checker-level
-// permission, not a runtime representation.
-func (l *lowerer) lowerBufferMethod(
-	name string,
-	receiver Value,
-	args []ast.Expression,
-) (Value, error) {
-	switch name {
+// lowerBufferMethod lowers the view methods of a fixed-length array
+// (ADR-0097). A view points into storage, so the receiver is lowered to the
+// array's own place: the slot of a local, a `&var` parameter, or a field
+// projected out of one. A receiver with no place -- a value parameter, a
+// field of a value -- is written to a slot of its own first; the checker
+// lends a read view of it only while nothing writes the value, so the view
+// sees what the value holds. Every view form hands back the same {ptr, len}:
+// mutability is a checker-level permission, not a runtime representation.
+func (l *lowerer) lowerBufferMethod(field *ast.FieldExpr, args []ast.Expression) (Value, error) {
+	switch field.Name {
 	case "as_bytes", "as_mut_bytes", "as_slice", "as_mut_slice":
-		if len(args) != 0 {
-			return Value{}, fmt.Errorf("ir error: buffer `%s` expects 0 args", name)
-		}
-		return l.emit("buffer.as_bytes", bufferViewIRType(receiver.Type), []Value{receiver}, ""), nil
 	default:
-		return Value{}, fmt.Errorf("ir error: unknown buffer method `%s`", name)
+		return Value{}, fmt.Errorf("ir error: unknown buffer method `%s`", field.Name)
 	}
+	if len(args) != 0 {
+		return Value{}, fmt.Errorf("ir error: buffer `%s` expects 0 args", field.Name)
+	}
+	storage, err := l.lowerArrayStorage(field.Receiver)
+	if err != nil {
+		return Value{}, err
+	}
+	view := bufferViewIRType(derefType(storage.Type))
+	return l.emit("buffer.as_bytes", view, []Value{storage}, ""), nil
+}
+
+// lowerArrayStorage lowers an array-valued place to its address: the storage
+// a slot, a `&var` parameter, or a field projection already is, or a fresh
+// slot holding the value when the place has none.
+func (l *lowerer) lowerArrayStorage(expr ast.Expression) (Value, error) {
+	if storage, ok := l.slotPointer(expr); ok {
+		return storage, nil
+	}
+	if storage, ok := l.lowerFieldStorage(expr); ok {
+		return storage, nil
+	}
+	value, err := l.lowerExpr(expr)
+	if err != nil {
+		return Value{}, err
+	}
+	if isReferenceType(value.Type) {
+		return value, nil
+	}
+	return l.emit("local.slot", "&var "+value.Type, []Value{value}, ""), nil
 }
 
 // methodCalleeParams returns the parameters a method call's callee declares

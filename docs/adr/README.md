@@ -93,7 +93,7 @@ ADR には積みません。残す価値が無くなったら消します。番�
 - [ADR-0093: statement match の arm body に `return` を許す](0093-match-arm-return.md)
 - [ADR-0095: `borrows a, b` — 複数 source の保守的統合](0095-multi-source-borrows.md) (節構文は 0098 で置換、意味論は既定として存続)
 - [ADR-0096: 可変性は borrow が運ぶ — `&var []u8` の write-through](0096-mutable-slice-write-through.md)
-- [ADR-0097: stack buffer `[N]u8` — local 限定の固定長 buffer](0097-stack-buffer.md)
+- [ADR-0097: 固定長配列 `[N]T` は inline に並ぶ copy 値にする](0097-stack-buffer.md)
 - [ADR-0098: `borrows` 節を削除し、契約を構造的に導出する](0098-remove-borrows-clause.md)
 - [ADR-0099: fixed_buffer allocator と allocator tie の構造的導出](0099-fixed-buffer-allocator.md)
 - [ADR-0100: struct への view 捕捉と tie の構造的導出](0100-view-capture-structs.md)

@@ -30,11 +30,11 @@ func (e *emitter) typeLayoutVisiting(typ string, seen map[string]bool) (wasmLayo
 	if layout, ok, err := e.taggedTypeLayoutVisiting(typ, seen); ok || err != nil {
 		return layout, err
 	}
-	if _, ok := e.module.Enums[typ]; ok {
+	if e.isTagType(typ) {
 		return wasmLayout{size: 8, align: 8}, nil
 	}
-	if _, ok := e.module.ErrorSets[typ]; ok {
-		return wasmLayout{size: 8, align: 8}, nil
+	if count, elem, ok := e.bufferSize(typ); ok {
+		return e.arrayLayout(count, elem, seen)
 	}
 	if st, ok := e.module.Structs[typ]; ok {
 		if seen[typ] {
@@ -80,14 +80,20 @@ func (e *emitter) typeLayoutVisiting(typ string, seen map[string]bool) (wasmLayo
 	return wasmLayout{}, fmt.Errorf("wasm error: type `%s` has no wasm32 value layout", typ)
 }
 
+// arrayLayout lays out a fixed-length array: its elements side by side,
+// each already padded to its own alignment.
+func (e *emitter) arrayLayout(count int, elem string, seen map[string]bool) (wasmLayout, error) {
+	cell, err := e.typeLayoutVisiting(elem, seen)
+	if err != nil {
+		return wasmLayout{}, err
+	}
+	return wasmLayout{size: count * cell.size, align: cell.align}, nil
+}
+
 // directLayout returns layouts that do not recurse through a declaration.
 func (e *emitter) directLayout(typ string) (wasmLayout, bool) {
 	if layout, ok := primitiveLayout(typ); ok {
 		return layout, true
-	}
-	if size, elem, ok := e.bufferSize(typ); ok {
-		cell, _ := primitiveLayout(elem)
-		return wasmLayout{size: size * cell.size, align: cell.align}, true
 	}
 	if isArrayWasmType(typ) {
 		return wasmLayout{size: arrayHeaderSize, align: 8}, true
@@ -159,6 +165,11 @@ func (e *emitter) isMemoryType(typ string) bool {
 		return true
 	}
 	if _, ok := e.module.Structs[typ]; ok {
+		return true
+	}
+	// A fixed-length array lives in memory like a struct: the value is the
+	// address of its bytes, and a copy copies them.
+	if _, _, ok := e.bufferSize(typ); ok {
 		return true
 	}
 	_, ok := e.module.Unions[typ]

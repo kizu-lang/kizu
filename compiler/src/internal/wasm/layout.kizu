@@ -63,9 +63,18 @@ fn (self: &var Emitter) type_layout_visiting(
     if wasm_primitive_layout(typ) |layout| {
         return WasmLayoutResult::Layout(layout);
     }
+    // A fixed-length array is its elements side by side, each already padded
+    // to its own alignment.
     if try self.buffer_size(typ) |size| {
-        let cell = try self.buffer_cell(typ);
-        return WasmLayoutResult::Layout(WasmLayout { size: size * cell.size, align: cell.align });
+        let elem = try self.buffer_elem(typ) orelse
+            return WasmLayoutResult::Error(try self.fail0("wasm error: `[N]T` has no element"));
+        defer elem.deinit(self.allocator);
+        let elem_bytes = elem.as_bytes();
+        let outcome = try self.type_layout_visiting(module, elem_bytes, seen);
+        match outcome {
+            Error(failed) => return WasmLayoutResult::Error(move failed),
+            Layout(cell) => return WasmLayoutResult::Layout(WasmLayout { size: size * cell.size, align: cell.align }),
+        }
     }
     if is_array_wasm_type(typ) {
         return WasmLayoutResult::Layout(WasmLayout { size: array_header_size(), align: 8 });
@@ -256,6 +265,11 @@ fn (self: &var Emitter) is_memory_type_bytes(module: &ir::Module, bytes: []u8) -
         return true;
     }
     if is_arena_wasm_type(bytes) {
+        return true;
+    }
+    // A fixed-length array lives in memory like a struct: the value is the
+    // address of its bytes, and a copy copies them.
+    if is_buffer_wasm_type(bytes) {
         return true;
     }
     if typ::optional_elem(bytes) |_| {
