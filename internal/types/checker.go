@@ -3639,11 +3639,62 @@ func (c *Checker) checkBuiltinLiteralExpr(
 	if vector, ok := expr.(*ast.VectorLiteralExpr); ok {
 		return c.checkVectorLiteralExpr(vector, env, unsafe)
 	}
-	buffer := expr.(*ast.BufferLiteralExpr)
-	if !typ.IsBufferElem(buffer.Elem) {
-		return "", errorf("type error: buffer element must be a fixed-width number, got %s", buffer.Elem)
+	return c.checkArrayLiteralExpr(expr.(*ast.BufferLiteralExpr), env, unsafe)
+}
+
+// checkArrayLiteralExpr validates a fixed-length array literal. The elements
+// are copy data -- numbers, bool, enums, copy structs and unions, arrays of
+// them -- the only values an array can be made of, so no array holds a view or
+// an owner. `{}` fills with zero, which is a value of numbers and bool only;
+// a list names all N elements, each typed against T the way an argument is
+// against its parameter.
+func (c *Checker) checkArrayLiteralExpr(
+	expr *ast.BufferLiteralExpr,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	array := Type(expr.TypeText())
+	if _, err := c.parseType(string(array)); err != nil {
+		return "", err
 	}
-	return Type(buffer.TypeText()), nil
+	elem := Type(expr.Elem)
+	if !c.isPlainDataType(expr.Elem, nil) {
+		return "", errorAt(expr.Span, "type error: an array holds copy data "+
+			"(numbers, bool, enums, copy structs, arrays of them), got %s", elem)
+	}
+	if expr.Elements == nil {
+		if !c.zeroFillable(elem) {
+			return "", errorAt(expr.Span,
+				"type error: `%s{}` fills with zero, which only numbers and bool have; list the %d elements",
+				array, expr.Size)
+		}
+		return array, nil
+	}
+	if int64(len(expr.Elements)) != expr.Size {
+		return "", errorAt(expr.Span, "type error: `%s` has %d elements, got %d values",
+			array, expr.Size, len(expr.Elements))
+	}
+	for i, element := range expr.Elements {
+		got, err := c.checkContextualExpr(element, elem, env, unsafe)
+		if err != nil {
+			return "", err
+		}
+		if got != elem {
+			return "", errorAt(expressionSpan(element),
+				"type error: element %d of `%s` expects %s, got %s", i, array, elem, got)
+		}
+	}
+	return array, nil
+}
+
+// zeroFillable reports whether zero is a value of elem: a number, bool, or
+// an array of them.
+func (c *Checker) zeroFillable(elem Type) bool {
+	if numericTypes[elem] || elem == typeBool {
+		return true
+	}
+	inner, ok := c.types.bufferElem(elem)
+	return ok && c.zeroFillable(inner)
 }
 
 // checkVectorLiteralExpr validates `f64x2{a, b}`: one expression per lane,

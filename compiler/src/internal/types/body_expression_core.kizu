@@ -1,6 +1,7 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::typ;
+import std::array;
 import std::fmt;
 import std::mem;
 import std::string;
@@ -35,6 +36,10 @@ fn (self: &var Checker) check_expr_form(
     if try ast::copy_vector_literal(self.allocator, tree, expression) |literal| {
         defer literal.deinit(self.allocator);
         return self.check_vector_literal_expr(tree, scope, &literal, out);
+    }
+    if try ast::copy_array_literal(self.allocator, tree, expression) |literal| {
+        defer literal.deinit(self.allocator);
+        return self.check_array_literal_expr(tree, scope, &literal, out);
     }
     match tree.expressions.at(expression.node) {
         Int(_) => return self.check_scalar_expr(tree, expression, out),
@@ -108,22 +113,8 @@ fn (self: &var Checker) check_expr_form(
         StructLiteral(_) => return self.check_struct_literal_expr(tree, scope, expression, out),
         VectorLiteral(_) => return try self.checker_error_at(
             "type error", ast::zero_span(), "vector literal reached the node dispatch"),
-        BufferLiteral(value) => {
-            let retained = tree.texts.at(value.elem.node);
-            let elem = retained.as_bytes();
-            if !typ::is_buffer_elem(elem) {
-                var message = string::new(self.allocator);
-                errdefer message.deinit(self.allocator);
-                try message.append_bytes(self.allocator, "buffer element must be a fixed-width number, got ");
-                try message.append_bytes(self.allocator, elem);
-                return try self.checker_message_at("type error", ast::zero_span(), move message);
-            }
-            let text = try value.type_text(self.allocator, tree);
-            defer text.deinit(self.allocator);
-            let bytes = text.as_bytes();
-            out.* = try self.types.intern(bytes);
-            return null;
-        },
+        BufferLiteral(_) => return try self.checker_error_at(
+            "type error", ast::zero_span(), "array literal reached the node dispatch"),
         Field(value) => {
             let copied = ast::FieldExpr {
                 receiver: value.receiver,
@@ -405,6 +396,101 @@ fn (self: &var Checker) check_vector_operands(
     try self.append_checker_type(&var message, left);
     try message.append_byte(self.allocator, cast<u8>(41));
     return try self.checker_message_at("type error", span, move message);
+}
+
+/// Validates a fixed-length array literal, the Go `checkArrayLiteralExpr`.
+/// The elements are copy data -- numbers, bool, enums, copy structs and
+/// unions, arrays of them -- the only values an array can be made of, so no
+/// array holds a view or an owner. `{}` fills with zero, which is a value of
+/// numbers and bool only; a list names all N elements, each typed against T
+/// the way an argument is against its parameter.
+fn (self: &var Checker) check_array_literal_expr(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    expression: &ast::BufferLiteralExpr,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let text = try expression.type_text(self.allocator, tree);
+    defer text.deinit(self.allocator);
+    let array_bytes = text.as_bytes();
+    var array_type = empty_type();
+    match try self.resolve_type(tree, array_bytes) {
+        Value(value) => {
+            array_type = value;
+        },
+        Issue(issue) => return try self.type_resolution_diagnostic(issue),
+    }
+    let elem = try self.types.buffer_elem(array_type) orelse array_type;
+    var seen = array::new<Type>(self.allocator);
+    defer seen.deinit(self.allocator);
+    if !try self.is_plain_data_type(tree, elem, &var seen) {
+        var message = try string::from_bytes(self.allocator,
+            "an array holds copy data (numbers, bool, enums, copy structs, arrays of them), got ");
+        errdefer message.deinit(self.allocator);
+        try self.append_checker_type(&var message, elem);
+        return try self.checker_message_at("type error", expression.span, move message);
+    }
+    if expression.elements.len() == 0 {
+        if !try self.zero_fillable(elem) {
+            var message = try string::from_bytes(self.allocator, "`");
+            errdefer message.deinit(self.allocator);
+            try self.append_checker_type(&var message, array_type);
+            try message.append_bytes(self.allocator, "{}` fills with zero, which only numbers and bool have; list the ");
+            try fmt::append_i64(self.allocator, &var message, expression.size);
+            try message.append_bytes(self.allocator, " elements");
+            return try self.checker_message_at("type error", expression.span, move message);
+        }
+        out.* = array_type;
+        return null;
+    }
+    if expression.elements.len() != expression.size {
+        var message = try string::from_bytes(self.allocator, "`");
+        errdefer message.deinit(self.allocator);
+        try self.append_checker_type(&var message, array_type);
+        try message.append_bytes(self.allocator, "` has ");
+        try fmt::append_i64(self.allocator, &var message, expression.size);
+        try message.append_bytes(self.allocator, " elements, got ");
+        try fmt::append_i64(self.allocator, &var message, expression.elements.len());
+        try message.append_bytes(self.allocator, " values");
+        return try self.checker_message_at("type error", expression.span, move message);
+    }
+    var index = 0;
+    while expression.elements.get(index) |value| {
+        var got = empty_type();
+        if try self.check_contextual_expr(tree, scope, value, elem, &var got) |problem| {
+            return move problem;
+        }
+        if !same_type(got, elem) {
+            var message = try string::from_bytes(self.allocator, "element ");
+            errdefer message.deinit(self.allocator);
+            try fmt::append_i64(self.allocator, &var message, index);
+            try message.append_bytes(self.allocator, " of `");
+            try self.append_checker_type(&var message, array_type);
+            try message.append_bytes(self.allocator, "` expects ");
+            try self.append_checker_type(&var message, elem);
+            try message.append_bytes(self.allocator, ", got ");
+            try self.append_checker_type(&var message, got);
+            return try self.checker_message_at("type error", expression_span(tree, value), move message);
+        }
+        index = index + 1;
+    }
+    out.* = array_type;
+    return null;
+}
+
+/// Reports whether zero is a value of elem, the Go `zeroFillable`: a number,
+/// bool, or an array of them.
+fn (self: &var Checker) zero_fillable(elem: Type) -> !bool {
+    let text = try self.types.copy_text(self.allocator, elem);
+    defer text.deinit(self.allocator);
+    let bytes = text.as_bytes();
+    if is_numeric_type(bytes) or self.types.is_text(elem, "bool") {
+        return true;
+    }
+    if try self.types.buffer_elem(elem) |inner| {
+        return self.zero_fillable(inner);
+    }
+    return false;
 }
 
 /// Validates `f64x2{a, b}`, the Go `checkVectorLiteralExpr`: one expression

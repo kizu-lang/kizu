@@ -35,18 +35,6 @@ type Name struct {
 // Slice is `[]T`.
 type Slice struct{ Elem Type }
 
-// IsBufferElem reports whether name is a type a stack buffer may hold: a
-// fixed-width number (ADR-0097). A view over one is a contiguous run of
-// equal-sized cells, which is what an index into it assumes.
-func IsBufferElem(name string) bool {
-	switch name {
-	case "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64":
-		return true
-	default:
-		return false
-	}
-}
-
 // VectorOf splits a vector type name into its lane type and lane count:
 // `f64x2` is two f64 lanes. The names are the 128-bit vectors (SPEC §7.3),
 // one register wide on every target the compiler has.

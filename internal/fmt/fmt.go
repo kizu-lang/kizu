@@ -938,17 +938,36 @@ func (b *builder) operatorSpacing(curr token.Token, prev token.Token) bool {
 // operator or `and` takes after it. A type's `[` follows something that is
 // not an operand; an index's `[` follows the operand it indexes.
 func (b *builder) closesTypeBrackets() bool {
-	open := b.prevIndex - 1
-	if b.prev.Type != token.RBracket || open < 0 {
+	if b.prev.Type != token.RBracket {
 		return false
 	}
-	if b.tokens[open].Type == token.Int {
-		open--
+	open := b.openingTypeBracket(b.prevIndex)
+	// A nested array `[3][3]f64` repeats the brackets: the outer `[3]` is
+	// what follows a non-operand.
+	for open > 0 && b.tokens[open-1].Type == token.RBracket {
+		outer := b.openingTypeBracket(open - 1)
+		if outer < 0 {
+			break
+		}
+		open = outer
 	}
-	if open < 0 || b.tokens[open].Type != token.LBracket {
+	if open < 0 {
 		return false
 	}
 	return open == 0 || !endsOperand(b.tokens[open-1])
+}
+
+// openingTypeBracket returns the index of the `[` that the `]` at index
+// closes when the two hold nothing or a length, or -1.
+func (b *builder) openingTypeBracket(index int) int {
+	open := index - 1
+	if open >= 0 && b.tokens[open].Type == token.Int {
+		open--
+	}
+	if open < 0 || b.tokens[open].Type != token.LBracket {
+		return -1
+	}
+	return open
 }
 
 // labelHugsColon reports whether the `:` just written names a loop after

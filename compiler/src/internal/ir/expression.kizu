@@ -73,12 +73,9 @@ fn (self: &var Lowerer) lower_expr(
     if ownership::is_struct_literal_expr(tree, expression) {
         return self.lower_struct_literal_expr(tree, expression, out);
     }
-    if try buffer_literal_type(self.allocator, tree, expression) |type_text| {
-        defer type_text.deinit(self.allocator);
-        let bytes = type_text.as_bytes();
-        let type_name = try self.name(bytes);
-        out.* = try self.emit0(Op::BufferNew, type_name);
-        return null;
+    if try ast::copy_array_literal(self.allocator, tree, expression) |literal| {
+        defer literal.deinit(self.allocator);
+        return self.lower_array_literal(tree, &literal, out);
     }
     if try ast::copy_vector_literal(self.allocator, tree, expression) |literal| {
         defer literal.deinit(self.allocator);
@@ -113,8 +110,54 @@ fn is_null_expr(tree: &ast::Ast, expression: ast::Expression) -> bool {
     }
 }
 
-/// Returns the type spelling of a buffer literal, the Go
-/// `BufferLiteralExpr.TypeText`, or null for another expression.
+/// Lowers an array literal, the Go `lowerArrayLiteral`. `{}` is the zero
+/// value; a list is written element by element into a slot holding the zero
+/// value, and the array is what the slot holds after the last one. Each
+/// element is lowered under the element type, the way an argument is under
+/// its parameter.
+fn (self: &var Lowerer) lower_array_literal(
+    tree: &var ast::Ast,
+    literal: &ast::BufferLiteralExpr,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    let type_text = try literal.type_text(self.allocator, tree);
+    defer type_text.deinit(self.allocator);
+    let type_bytes = type_text.as_bytes();
+    let array_type = try self.name(type_bytes);
+    let zero = try self.emit0(Op::BufferNew, array_type);
+    if literal.elements.len() == 0 {
+        out.* = zero;
+        return null;
+    }
+    let elem_text = tree.texts.at(literal.elem.node);
+    let elem_bytes = elem_text.as_bytes();
+    let elem_type = try self.name(elem_bytes);
+    var values = array::new<Value>(self.allocator);
+    defer values.deinit(self.allocator);
+    var index = 0;
+    while literal.elements.get(index) |element| {
+        index = index + 1;
+        var value = empty_value();
+        if try self.lower_contextual_expr(tree, element, elem_type, &var value) |failed| {
+            return move failed;
+        }
+        try values.append(self.allocator, value);
+    }
+    let slot_type = try self.module.names.prefixed("&var ", array_type);
+    let storage = try self.emit1(Op::LocalSlot, slot_type, zero);
+    let address_type = try self.module.names.prefixed("&var ", elem_type);
+    index = 0;
+    while values.get(index) |value| {
+        let position_text = try self.module.names.intern_i64(index);
+        let position = try self.emit_const(self.common.i64_type, position_text);
+        let element = try self.emit2(Op::BufferAddr, address_type, storage, position);
+        let _ = try self.emit2(Op::RefStore, self.common.void_type, element, value);
+        index = index + 1;
+    }
+    out.* = try self.emit1(Op::RefLoad, array_type, storage);
+    return null;
+}
+
 /// Lowers `f64x2{a, b}` to `vector.new` with one lane value per operand,
 /// each lowered under the lane type the way an argument is under its
 /// parameter, the Go `VectorLiteralExpr` arm of `lowerExpr`.
@@ -145,13 +188,6 @@ fn (self: &var Lowerer) lower_vector_literal_expr(
     }
     out.* = try self.emit_with(Op::VectorNew, empty_name(), type_name, empty_name(), &lanes);
     return null;
-}
-
-fn buffer_literal_type(allocator: Allocator, tree: &ast::Ast, expression: ast::Expression) -> !?string::String {
-    match tree.expressions.at(expression.node) {
-        BufferLiteral(literal) => return try literal.type_text(allocator, tree),
-        _ => return null,
-    }
 }
 
 /// Reads what a borrow or raw pointer points at, the Go `lowerDerefExpr`.

@@ -1275,13 +1275,15 @@ type StructLiteralExpr struct {
 // expressionNode marks StructLiteralExpr as an expression node.
 func (*StructLiteralExpr) expressionNode() {}
 
-// BufferLiteralExpr is `[N]T{}`: a zero-filled fixed-length stack buffer of
-// fixed-width numbers (ADR-0097).
+// BufferLiteralExpr is a fixed-length array literal (ADR-0097): `[N]T{}`
+// fills every element with zero, `[N]T{a, b, ...}` lists all N of them.
 type BufferLiteralExpr struct {
 	Size int64
-	// Elem is the element type's spelling, one of the fixed-width numbers.
+	// Elem is the element type's spelling.
 	Elem string
-	Span Span
+	// Elements are the listed values, in index order; nil for `{}`.
+	Elements []Expression
+	Span     Span
 }
 
 // expressionNode marks BufferLiteralExpr as an expression node.
@@ -1289,7 +1291,11 @@ func (*BufferLiteralExpr) expressionNode() {}
 
 // String returns the literal as written in source.
 func (e *BufferLiteralExpr) String() string {
-	return e.TypeText() + "{}"
+	parts := make([]string, 0, len(e.Elements))
+	for _, element := range e.Elements {
+		parts = append(parts, element.String())
+	}
+	return e.TypeText() + "{" + strings.Join(parts, ", ") + "}"
 }
 
 // TypeText returns the buffer's type spelling.

@@ -19,7 +19,10 @@ struct field・union payload・引数・返り値・container の要素に置け
 - 表現は struct と同じ aggregate(LLVM `[N x T]`、wasm は frame 上の bytes)。
   view(`as_slice` / `as_bytes` など)は配列の storage(slot・field の番地・
   `&var` 引数)を指す。storage の無い値の読む view は、値を slot に写してから取る
-- 生成は `[N]T{}` の zero 埋め。初期化子のない宣言は持たない
+- 要素は copy data(数値・bool・enum・copy aggregate・その入れ子の配列)に広げる。
+  view と owner を要素にしないので、配列は常に copy で、index は等幅の cell を指す
+- 生成は `[N]T{}` の zero 埋め(数値と bool だけ)か、`[N]T{a, b, ...}` で N 個を
+  並べる。初期化子のない宣言は持たない
 - 要素は添字で直接読み書きする(`a[i]`、`s.m[i] = x`)。範囲外は trap、literal の
   添字は compile 時に弾く。書き込みは配列の place への書き込みとして、field の
   書き込みと同じ借用規則に掛ける。view は長さを消して関数へ渡すときに使う
@@ -42,3 +45,5 @@ local 限定にした理由(alloca の pointer を値として回すこと)が�
 | owner を要素にする | index は等幅の cell が前提。cleanup の所在が view に乗る |
 | 要素の読み書きを view 経由に限る | 行列の `m[i][j]` が書けない。view を束縛する行が添字の数だけ増える |
 | `a[lo..hi]` の直接 slicing | view の slicing と同じものの 2 本目の経路になる |
+| enum や struct の配列も `{}` で 0 埋めする | 0 がその型の値とは限らない(enum の tag、struct の不変条件) |
+| 要素数が N に足りない literal の残りを 0 で埋める | 書き忘れが黙って 0 になる |

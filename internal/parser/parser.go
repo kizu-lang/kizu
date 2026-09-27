@@ -1646,9 +1646,9 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 	}
 }
 
-// parseBufferLiteralExpr parses `[N]T{}`, the zero-filled fixed-length stack
-// buffer literal (ADR-0097). Which elements a buffer may hold is the
-// checker's question.
+// parseBufferLiteralExpr parses a fixed-length array literal (ADR-0097):
+// `[N]T{}` or `[N]T{a, b, ...}`. Which elements an array may hold, and how
+// many are listed, are the checker's questions.
 func (p *Parser) parseBufferLiteralExpr() ast.Expression {
 	span := tokenSpan(p.cur)
 	parsed := p.parseTypeName()
@@ -1660,10 +1660,20 @@ func (p *Parser) parseBufferLiteralExpr() ast.Expression {
 		p.errorf("expected buffer literal `[N]T{}`, got type `%s`", typ.Text(parsed))
 		return &ast.IdentExpr{Name: "<error>", Span: span}
 	}
-	if !p.expectPeek(token.LBrace) || !p.expectPeek(token.RBrace) {
+	if !p.expectPeek(token.LBrace) {
 		return &ast.IdentExpr{Name: "<error>", Span: span}
 	}
-	return &ast.BufferLiteralExpr{Size: buffer.Size, Elem: typ.Text(buffer.Elem), Span: span}
+	expr := &ast.BufferLiteralExpr{Size: buffer.Size, Elem: typ.Text(buffer.Elem), Span: span}
+	p.nextToken()
+	for p.cur.Type != token.RBrace && p.cur.Type != token.EOF {
+		expr.Elements = append(expr.Elements, p.parseExpression(lowest))
+		if !p.consumeListDelimiter("array element") {
+			return expr
+		}
+		p.nextToken()
+	}
+	p.expectListClose("array literal")
+	return expr
 }
 
 // parseMarkerExpression parses the keywords that sit in front of an expression

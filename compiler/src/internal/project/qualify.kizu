@@ -1097,6 +1097,7 @@ fn (self: &var Loader) qualify_type_or_control_expr(
             };
         },
         StructLiteral(value) => return self.qualify_struct_literal(tree, file, value),
+        BufferLiteral(value) => return self.qualify_array_literal(tree, file, value),
         Field(value) => return self.qualify_field_value(tree, file, expr, value),
         Index(value) => return self.qualify_index_expr(tree, file, value),
         Deref(value) => return self.qualify_deref_expr(tree, file, value),
@@ -1552,6 +1553,47 @@ fn (self: &var Loader) qualify_deref_expr(
         },
         Failed(failed) => ExpressionResult::Failed(move failed),
     };
+}
+
+/// Rewrites an array literal's element type and the elements it lists, the
+/// Go `qualifyArrayLiteral`.
+fn (self: &var Loader) qualify_array_literal(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    expr: &ast::BufferLiteralExpr
+) -> !ExpressionResult {
+    var node = ast::BufferLiteralExpr {
+        size: expr.size,
+        elem: expr.elem,
+        elements: array::new<ast::Expression>(self.allocator),
+        span: expr.span
+    };
+    errdefer node.deinit(self.allocator);
+    let source = try expr.elements.clone(self.allocator);
+    defer source.deinit(self.allocator);
+    let type_outcome = try self.resolve_text(tree, file, expr.elem);
+    match type_outcome {
+        Name(resolved) => {
+            node.elem = try tree.add_text(move resolved);
+            var index = 0;
+            while source.get(index) |element| {
+                index = index + 1;
+                let outcome = try self.qualify_expr(tree, file, element);
+                match outcome {
+                    Expression(value) => try node.elements.append(self.allocator, value),
+                    Failed(failed) => {
+                        node.deinit(self.allocator);
+                        return ExpressionResult::Failed(move failed);
+                    },
+                }
+            }
+            return ExpressionResult::Expression(try tree.add_expression(ast::ExpressionNode::BufferLiteral(move node)));
+        },
+        Failed(failed) => {
+            node.deinit(self.allocator);
+            return ExpressionResult::Failed(move failed);
+        },
+    }
 }
 
 /// Rewrites struct literal type and field value expressions.

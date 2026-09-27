@@ -1406,9 +1406,24 @@ writable slice place(`&var []T` binding)への indexed assignment
 layout 結合か隠れ call になるため)。
 
 固定長配列は `[N]T` です(ADR-0097)。N 個の T を inline に並べた値で、N は正の
-整数 literal、T は固定幅の数値型(`u8 u16 u32 u64 i8 i16 i32 i64 f32 f64`)です。
-`var buf = [64]u8{};` / `var words = [16]u32{};` が zero 埋めで生成します。
-初期化子のない宣言は持ちません。
+整数 literal です。T は copy data です: 数値型、`bool`、enum、error set、
+`std::arena::Handle<T>`、copy aggregate、それらの `[M]U`(入れ子)。view、
+`Allocator`、raw pointer、owner は要素にできません。
+
+値の作り方は 2 つです。`[N]T{}` は全要素を 0(`false`)で埋め、T が数値型・`bool`・
+その入れ子の配列のときだけ書けます(enum や struct の 0 は値として決まっていない
+ため)。`[N]T{a, b, ...}` は N 個の要素を順に並べ、数が N と違えば compile error
+です。各要素は T を文脈型として検査します(引数が parameter の型に対してそうなる
+のと同じ)。初期化子のない宣言は持ちません。
+
+```kizu
+var buf = [64]u8{};
+let axis = [3]f64{ 1.0, 0.0, 0.0 };
+let cell = [2][2]f64{
+    [2]f64{ 1.0, 0.0 },
+    [2]f64{ 0.0, 1.0 },
+};
+```
 
 `[N]T` は copy 型(§8)で、struct field、union payload、関数 parameter、返り値、
 container の要素に置けます。値として渡すと中身ごと複製されます。大きい配列を
