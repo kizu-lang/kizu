@@ -302,6 +302,47 @@ fn malformed(allocator: Allocator, text: []u8) -> !Outcome {
     return Outcome::Problem(move message);
 }
 
+/// Returns the compile-time names text reads, in the order it reads them, the
+/// Go `Names`. A literal is not a name: a name starts with a letter or `_`.
+pub fn names(allocator: Allocator, text: []u8) -> !array::Array<string::String> {
+    var out = array::new<string::String>(allocator);
+    errdefer out.deinit(allocator);
+    let size = mem::len(text);
+    var index = 0;
+    while index < size {
+        if !is_name_byte(text[index]) {
+            index = index + 1;
+            continue;
+        }
+        let start = index;
+        while index < size and is_name_byte(text[index]) {
+            index = index + 1;
+        }
+        if !is_digit(text[start]) {
+            let name = try string::from_bytes(allocator, text[start..index]);
+            errdefer name.deinit(allocator);
+            try out.append(allocator, move name);
+        }
+    }
+    return move out;
+}
+
+/// Reports whether env binds an integer to every name text reads.
+pub fn binds_all(allocator: Allocator, text: []u8, env: &Env) -> !bool {
+    let read = try names(allocator, text);
+    defer read.deinit(allocator);
+    var index = 0;
+    while read.at(index) |name| {
+        let bytes = name.as_bytes();
+        if env.lookup(bytes) |_| {
+            index = index + 1;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
 fn is_digit(byte: u8) -> bool {
     return byte >= cast<u8>(48) and byte <= cast<u8>(57);
 }

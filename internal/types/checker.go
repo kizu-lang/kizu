@@ -3714,12 +3714,19 @@ func (c *Checker) checkArrayLiteralExpr(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
-	array := Type(expr.TypeText())
-	if _, err := c.parseType(string(array)); err != nil {
+	array, err := c.parseType(expr.TypeText())
+	if err != nil {
 		return "", err
 	}
-	elem := Type(expr.Elem)
-	if !c.isPlainDataType(expr.Elem, nil) {
+	parsed, _ := c.types.lookup(array)
+	buffer, ok := parsed.(*typ.Buffer)
+	if !ok || buffer.Len != "" {
+		// Only a generic's declaration leaves a length waiting, and its
+		// body is checked per instance, where every length is bound.
+		return "", errorAt(expr.Span, "internal error: `%s` has no length here", array)
+	}
+	elem := Type(typ.Text(buffer.Elem))
+	if !c.isPlainDataType(string(elem), nil) {
 		return "", errorAt(expr.Span, "type error: an array holds copy data "+
 			"(numbers, bool, enums, copy structs, arrays of them), got %s", elem)
 	}
@@ -3727,13 +3734,13 @@ func (c *Checker) checkArrayLiteralExpr(
 		if !c.zeroFillable(elem) {
 			return "", errorAt(expr.Span,
 				"type error: `%s{}` fills with zero, which only numbers and bool have; list the %d elements",
-				array, expr.Size)
+				array, buffer.Size)
 		}
 		return array, nil
 	}
-	if int64(len(expr.Elements)) != expr.Size {
+	if int64(len(expr.Elements)) != buffer.Size {
 		return "", errorAt(expr.Span, "type error: `%s` has %d elements, got %d values",
-			array, expr.Size, len(expr.Elements))
+			array, buffer.Size, len(expr.Elements))
 	}
 	for i, element := range expr.Elements {
 		got, err := c.checkContextualExpr(element, elem, env, unsafe)
@@ -6468,7 +6475,10 @@ func (c *Checker) checkGenericUserTypeApply(
 	for idx, param := range fn.sig.TypeParamNames() {
 		subst[param] = typeArgs[idx]
 	}
-	if err := c.checkGenericUserArgs(name, fn, subst, args, env, unsafe); err != nil {
+	if err := c.checkInstanceLengths(fn, subst, bindings.values, span); err != nil {
+		return "", true, err
+	}
+	if err := c.checkGenericUserArgs(name, fn, subst, bindings.values, args, env, unsafe); err != nil {
 		return "", true, err
 	}
 	if err := c.checkGenericInstantiation(fn, subst, bindings); err != nil {
@@ -6477,13 +6487,37 @@ func (c *Checker) checkGenericUserTypeApply(
 	// The result the caller sees is the declaration's type with this call's
 	// arguments bound, forms included: `-> std::meta::field_type<T, f>` is a
 	// concrete type here even though it is not one where it was written.
+	declared := c.types.instanceType(fn.returnType, subst, bindings.values)
 	restore := c.bindMetaFields(bindings.fields)
-	result, err := c.resolveInstanceType(c.types.substituteTypeParams(fn.returnType, subst))
+	result, err := c.resolveInstanceType(declared)
 	restore()
 	if err != nil {
 		return "", true, err
 	}
 	return result, true, nil
+}
+
+// checkInstanceLengths evaluates the array lengths the instance's signature
+// reads from its static values, so a length the call makes 0 or negative is
+// refused at the call that made it.
+func (c *Checker) checkInstanceLengths(
+	fn *functionType,
+	subst map[string]Type,
+	values map[string]comptimeValue,
+	span ast.Span,
+) error {
+	for _, declared := range append([]Type{fn.returnType}, fn.params...) {
+		// Only the declaration writes a length that waits: a type argument
+		// is a type of the caller's, whose lengths are bound.
+		if !typ.HasStaticLengthText(string(declared)) {
+			continue
+		}
+		substituted := c.types.substituteTypeParams(declared, subst)
+		if _, err := c.types.bindLengths(substituted, values); err != nil {
+			return errorAt(span, "type error: %v", err)
+		}
+	}
+	return nil
 }
 
 // checkGenericUserArgs checks a generic call's arguments against the
@@ -6494,17 +6528,21 @@ func (c *Checker) checkGenericUserArgs(
 	name string,
 	fn *functionType,
 	subst map[string]Type,
+	values map[string]comptimeValue,
 	args []ast.Expression,
 	env *scope,
 	unsafe unsafeMark,
 ) error {
-	for _, param := range fn.params {
-		if err := c.revalidateSubstituted(c.types.substituteTypeParams(param, subst)); err != nil {
+	params := make([]Type, len(fn.params))
+	for idx, param := range fn.params {
+		want := c.types.instanceType(param, subst, values)
+		if err := c.revalidateSubstituted(want); err != nil {
 			return err
 		}
+		params[idx] = want
 	}
 	for idx, expr := range args {
-		if err := c.checkGenericUserArg(name, fn, subst, idx, expr, env, unsafe); err != nil {
+		if err := c.checkGenericUserArg(name, fn, params[idx], idx, expr, env, unsafe); err != nil {
 			return err
 		}
 	}
@@ -6804,20 +6842,21 @@ func (c *Checker) checkGenericInstantiation(
 	if err != nil {
 		return err
 	}
+	params := make([]Type, len(fn.sig.Params))
 	for idx, param := range fn.sig.Params {
-		typ := c.types.substituteTypeParams(fn.params[idx], subst)
+		params[idx] = c.types.instanceType(fn.params[idx], subst, bindings.values)
 		defined := defineSignatureParam(
-			&c.types, env, param.Name, typ, param.Borrow, param.MutBorrow)
+			&c.types, env, param.Name, params[idx], param.Borrow, param.MutBorrow)
 		if err := requireScopeDefinition(param.Name, defined); err != nil {
 			return err
 		}
 	}
-	returnType, err := c.resolveInstanceType(c.types.substituteTypeParams(fn.returnType, subst))
+	declared := c.types.instanceType(fn.returnType, subst, bindings.values)
+	returnType, err := c.resolveInstanceType(declared)
 	if err != nil {
 		return err
 	}
-	for idx := range fn.params {
-		paramType := c.types.substituteTypeParams(fn.params[idx], subst)
+	for _, paramType := range params {
 		if err := c.revalidateSubstituted(paramType); err != nil {
 			return err
 		}
@@ -7006,13 +7045,12 @@ func (c *Checker) checkGenericWrapperTypeArgs(name string, args []Type) error {
 func (c *Checker) checkGenericUserArg(
 	name string,
 	fn *functionType,
-	subst map[string]Type,
+	want Type,
 	idx int,
 	arg ast.Expression,
 	env *scope,
 	unsafe unsafeMark,
 ) error {
-	want := c.types.substituteTypeParams(fn.params[idx], subst)
 	checkedArg, err := prepareBorrowArgument(arg, fn.borrowParams[idx], fn.mutBorrowParams[idx], env)
 	if err != nil {
 		return err

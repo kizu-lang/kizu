@@ -1,3 +1,4 @@
+import compiler::internal::staticexpr;
 import std::array;
 import std::map;
 import std::mem;
@@ -58,6 +59,8 @@ test "type parse renders every compiler spelling back" {
     try expect_round_trip(allocator, "[]Point");
     try expect_round_trip(allocator, "[4]u8");
     try expect_round_trip(allocator, "[32]Array<Point>");
+    try expect_round_trip(allocator, "[n]f64");
+    try expect_round_trip(allocator, "[(n * 2)][m]f64");
     try expect_round_trip(allocator, "&i64");
     try expect_round_trip(allocator, "&var i64");
     try expect_round_trip(allocator, "&[]u8");
@@ -357,4 +360,37 @@ test "substitute retains a structural graph without rewriting replacements" {
         "Error!?&var Pair<Pair<U, bool>, Timer, []Pair<U, bool>>",
         bytes
     );
+}
+
+fn expect_bound(allocator: Allocator, env: &staticexpr::Env, text: []u8, want: []u8) -> !void {
+    let bound = try bind_lengths_text(allocator, text, env);
+    defer bound.deinit(allocator);
+    let bytes = bound.as_bytes();
+    testing::expect_equal<[]u8>(want, bytes);
+    return;
+}
+
+test "bind lengths evaluates the lengths the names bind and leaves the others" {
+    let allocator = mem::page_allocator();
+    var env = staticexpr::new_env(allocator);
+    defer env.deinit(allocator);
+    try env.bind(allocator, "n", 4);
+    try expect_bound(allocator, &env, "[n]f64", "[4]f64");
+    try expect_bound(allocator, &env, "&[(n * 2)][(n - 1)]f64", "&[8][3]f64");
+    try expect_bound(allocator, &env, "Array<[n]u8>", "Array<[4]u8>");
+    try expect_bound(allocator, &env, "[m]f64", "[m]f64");
+    try expect_bound(allocator, &env, "fn([n]i64) -> [(n + m)]u8", "fn([4]i64) -> [(n + m)]u8");
+    try expect_bound(allocator, &env, "[3]u8", "[3]u8");
+    if try length_problem(allocator, "[(n - 4)]f64", &env) |problem| {
+        defer problem.deinit(allocator);
+        let bytes = problem.as_bytes();
+        testing::expect_equal<[]u8>("length of `[(n - 4)]f64` is 0; an array holds at least 1 element", bytes);
+    } else {
+        testing::fail("a zero length was accepted");
+    }
+    if try length_problem(allocator, "[(1 / (n - 4))]f64", &env) |problem| {
+        problem.deinit(allocator);
+    } else {
+        testing::fail("a length dividing by zero was accepted");
+    }
 }

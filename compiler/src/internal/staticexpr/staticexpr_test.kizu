@@ -72,3 +72,24 @@ test "static expression env keeps the first binding of a name" {
     try expect_problem(&env, "(flag + 1)");
     try expect_value(&env, "(n * 2)", 8);
 }
+
+test "static expression names skip the literals an expression reads" {
+    let allocator = mem::page_allocator();
+    let names = try names(allocator, "((n1 * 24) + (0 - k2))");
+    defer names.deinit(allocator);
+    testing::expect(names.len() == 2);
+    if names.at(0) |first| {
+        let bytes = first.as_bytes();
+        testing::expect(mem::equal_bytes(bytes, "n1"));
+    }
+    if names.at(1) |second| {
+        let bytes = second.as_bytes();
+        testing::expect(mem::equal_bytes(bytes, "k2"));
+    }
+    var env = new_env(allocator);
+    defer env.deinit(allocator);
+    try env.bind(allocator, "n1", 1);
+    testing::expect(!try binds_all(allocator, "(n1 + k2)", &env));
+    try env.bind(allocator, "k2", 1);
+    testing::expect(try binds_all(allocator, "(n1 + k2)", &env));
+}

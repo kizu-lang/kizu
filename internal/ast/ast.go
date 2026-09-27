@@ -1278,7 +1278,9 @@ func (*StructLiteralExpr) expressionNode() {}
 // BufferLiteralExpr is a fixed-length array literal (ADR-0097): `[N]T{}`
 // fills every element with zero, `[N]T{a, b, ...}` lists all N of them.
 type BufferLiteralExpr struct {
-	Size int64
+	// Len is the length as the type spells it: a number, or a static name
+	// or expression such as `n` or `(n * 2)`, which the checker evaluates.
+	Len string
 	// Elem is the element type's spelling.
 	Elem string
 	// Elements are the listed values, in index order; nil for `{}`.
@@ -1300,7 +1302,7 @@ func (e *BufferLiteralExpr) String() string {
 
 // TypeText returns the buffer's type spelling.
 func (e *BufferLiteralExpr) TypeText() string {
-	return fmt.Sprintf("[%d]%s", e.Size, e.Elem)
+	return "[" + e.Len + "]" + e.Elem
 }
 
 // VectorLiteralExpr is `f64x2{a, b}`: a vector built from one expression

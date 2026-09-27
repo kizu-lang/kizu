@@ -12,6 +12,8 @@ import (
 	"math"
 	"strconv"
 	"strings"
+
+	"github.com/kizu-lang/kizu/internal/staticexpr"
 )
 
 // Type is one parsed type.
@@ -67,9 +69,12 @@ func IsVector(name string) bool {
 	return ok
 }
 
-// Buffer is `[N]T`, a fixed-length stack buffer (ADR-0097).
+// Buffer is `[N]T`, a fixed-length array (ADR-0097). Len holds a length
+// that is a static integer name or expression, such as `n` or `(n * 2)`, until
+// an instance binds it; Size is the length once Len is empty.
 type Buffer struct {
 	Size int64
+	Len  string
 	Elem Type
 }
 
@@ -145,7 +150,15 @@ func (t *Slice) String() string { return "[]" + t.Elem.String() }
 
 // String returns the spelling of a fixed-length buffer type.
 func (t *Buffer) String() string {
-	return "[" + strconv.FormatInt(t.Size, 10) + "]" + t.Elem.String()
+	return "[" + t.LenText() + "]" + t.Elem.String()
+}
+
+// LenText spells the length: the number, or the static expression it waits on.
+func (t *Buffer) LenText() string {
+	if t.Len != "" {
+		return t.Len
+	}
+	return strconv.FormatInt(t.Size, 10)
 }
 
 // String returns the spelling of a borrow type.
@@ -285,7 +298,7 @@ func (t *Slice) equal(other Type) bool {
 // equal reports whether other is a buffer of the same size and element.
 func (t *Buffer) equal(other Type) bool {
 	b, ok := other.(*Buffer)
-	return ok && t.Size == b.Size && Equal(t.Elem, b.Elem)
+	return ok && t.Size == b.Size && t.Len == b.Len && Equal(t.Elem, b.Elem)
 }
 
 // equal reports whether other is the same borrow of the same element.
@@ -350,7 +363,7 @@ func MapNames(t Type, rename func(path []string) ([]string, error)) (Type, error
 		return &Slice{Elem: elem}, err
 	case *Buffer:
 		elem, err := MapNames(node.Elem, rename)
-		return &Buffer{Size: node.Size, Elem: elem}, err
+		return &Buffer{Size: node.Size, Len: node.Len, Elem: elem}, err
 	case *Borrow:
 		elem, err := MapNames(node.Elem, rename)
 		return &Borrow{Elem: elem, Mut: node.Mut}, err
@@ -592,7 +605,7 @@ func Substitute(t Type, subst map[string]Type) Type {
 	case *Slice:
 		return &Slice{Elem: Substitute(node.Elem, subst)}
 	case *Buffer:
-		return &Buffer{Size: node.Size, Elem: Substitute(node.Elem, subst)}
+		return &Buffer{Size: node.Size, Len: node.Len, Elem: Substitute(node.Elem, subst)}
 	case *Borrow:
 		return &Borrow{Elem: Substitute(node.Elem, subst), Mut: node.Mut}
 	case *Optional:
@@ -610,6 +623,182 @@ func Substitute(t Type, subst map[string]Type) Type {
 	default:
 		return t
 	}
+}
+
+// BindLengths evaluates each array length that waits on static names, with
+// value answering the integers bound where the type is used: `[(n * 2)]f64`
+// is `[8]f64` where n is 4. A length naming anything value does not bind stays
+// as written, because that is how a generic's own declaration spells it. A
+// bound length is at least 1, as a written one is.
+func BindLengths(t Type, value func(name string) (int64, bool)) (Type, error) {
+	if !HasStaticLength(t) {
+		return t, nil
+	}
+	switch node := t.(type) {
+	case *Name:
+		if len(node.Args) == 0 {
+			return t, nil
+		}
+		out := &Name{Path: node.Path, Args: make([]Type, 0, len(node.Args))}
+		for _, arg := range node.Args {
+			bound, err := BindLengths(arg, value)
+			if err != nil {
+				return nil, err
+			}
+			out.Args = append(out.Args, bound)
+		}
+		return out, nil
+	case *Buffer:
+		return bindBuffer(node, value)
+	case *Slice:
+		elem, err := BindLengths(node.Elem, value)
+		return &Slice{Elem: elem}, err
+	case *Borrow:
+		elem, err := BindLengths(node.Elem, value)
+		return &Borrow{Elem: elem, Mut: node.Mut}, err
+	case *Optional:
+		elem, err := BindLengths(node.Elem, value)
+		return &Optional{Elem: elem}, err
+	case *Const:
+		elem, err := BindLengths(node.Elem, value)
+		return &Const{Elem: elem}, err
+	case *Func:
+		return bindFunc(node, value)
+	case *ErrorUnion:
+		return bindErrorUnion(node, value)
+	default:
+		return t, nil
+	}
+}
+
+// BindLengthsText is BindLengths for a caller that holds a type as text. A
+// length value makes no array stays as written: the type checker refused the
+// program that wrote it.
+func BindLengthsText(text string, value func(name string) (int64, bool)) string {
+	if !HasStaticLengthText(text) {
+		return text
+	}
+	parsed, err := Parse(text)
+	if err != nil {
+		return text
+	}
+	bound, err := BindLengths(parsed, value)
+	if err != nil {
+		return text
+	}
+	return bound.String()
+}
+
+// HasStaticLengthText reports whether a spelling holds a length that waits on
+// a static name or expression: a `[` that neither closes at once, as `[]T`
+// does, nor opens a number. It answers without parsing, which most spellings
+// never need.
+func HasStaticLengthText(text string) bool {
+	for i := 0; i+1 < len(text); i++ {
+		if text[i] == '[' && text[i+1] != ']' && (text[i+1] < '0' || text[i+1] > '9') {
+			return true
+		}
+	}
+	return false
+}
+
+// HasStaticLength reports whether t holds an array whose length waits on a
+// static name or expression.
+func HasStaticLength(t Type) bool {
+	switch node := t.(type) {
+	case *Name:
+		return anyStaticLength(node.Args)
+	case *Buffer:
+		return node.Len != "" || HasStaticLength(node.Elem)
+	case *Func:
+		return anyStaticLength(node.Params) || HasStaticLength(node.Result)
+	case *ErrorUnion:
+		return HasStaticLength(node.Ok) || (node.Err != nil && HasStaticLength(node.Err))
+	default:
+		if elem := wrappedElem(t); elem != nil {
+			return HasStaticLength(elem)
+		}
+		return false
+	}
+}
+
+// anyStaticLength reports whether any of types holds a waiting length.
+func anyStaticLength(types []Type) bool {
+	for _, t := range types {
+		if HasStaticLength(t) {
+			return true
+		}
+	}
+	return false
+}
+
+// wrappedElem returns what a slice, borrow, optional, or const wraps, or nil.
+func wrappedElem(t Type) Type {
+	switch node := t.(type) {
+	case *Slice:
+		return node.Elem
+	case *Borrow:
+		return node.Elem
+	case *Optional:
+		return node.Elem
+	case *Const:
+		return node.Elem
+	default:
+		return nil
+	}
+}
+
+// bindBuffer evaluates one array's length and binds its element's.
+func bindBuffer(node *Buffer, value func(name string) (int64, bool)) (Type, error) {
+	elem, err := BindLengths(node.Elem, value)
+	if err != nil {
+		return nil, err
+	}
+	out := &Buffer{Size: node.Size, Len: node.Len, Elem: elem}
+	if node.Len == "" {
+		return out, nil
+	}
+	for _, name := range staticexpr.Names(node.Len) {
+		if _, ok := value(name); !ok {
+			return out, nil
+		}
+	}
+	size, err := staticexpr.Eval(node.Len, value)
+	if err != nil {
+		return nil, fmt.Errorf("length of `%s`: %v", node, err)
+	}
+	if size <= 0 {
+		return nil, fmt.Errorf("length of `%s` is %d; an array holds at least 1 element", node, size)
+	}
+	return &Buffer{Size: size, Elem: elem}, nil
+}
+
+// bindFunc binds the lengths in a function pointer's parameters and result.
+func bindFunc(node *Func, value func(name string) (int64, bool)) (Type, error) {
+	out := &Func{Params: make([]Type, 0, len(node.Params)), Unsafe: node.Unsafe, ABI: node.ABI}
+	for _, param := range node.Params {
+		bound, err := BindLengths(param, value)
+		if err != nil {
+			return nil, err
+		}
+		out.Params = append(out.Params, bound)
+	}
+	result, err := BindLengths(node.Result, value)
+	out.Result = result
+	return out, err
+}
+
+// bindErrorUnion binds the lengths on both sides of `E!T`.
+func bindErrorUnion(node *ErrorUnion, value func(name string) (int64, bool)) (Type, error) {
+	ok, err := BindLengths(node.Ok, value)
+	if err != nil {
+		return nil, err
+	}
+	out := &ErrorUnion{Ok: ok}
+	if node.Err != nil {
+		out.Err, err = BindLengths(node.Err, value)
+	}
+	return out, err
 }
 
 // SubstituteText replaces type parameters in a spelling and returns the

@@ -1,4 +1,5 @@
 import compiler::internal::ast;
+import compiler::internal::staticexpr;
 import compiler::internal::typ;
 import std::arena;
 import std::array;
@@ -20,6 +21,9 @@ pub struct Type {
 struct TypeEntry {
     spelling: string::String,
     parsed: typ::Type,
+    // Whether the spelling holds an array length that waits on a static
+    // name, answered once here because every resolution asks.
+    static_length: bool,
 }
 
 /// Owns canonical type spellings and their parsed graphs for one check phase.
@@ -272,7 +276,8 @@ pub fn (self: &var TypeTable) intern(text: []u8) -> !Type {
     errdefer spelling.deinit(self.allocator);
     let handle = try self.entries.add(self.allocator, TypeEntry {
         spelling: move spelling,
-        parsed: parsed
+        parsed: parsed,
+        static_length: typ::has_static_length(text)
     });
     let value = Type { node: handle };
     let retained = self.entries.at(handle);
@@ -332,6 +337,7 @@ fn (self: &var TypeTable) retain_parsed(value: typ::Type) -> !Type {
     let spelling = try typ::render(self.allocator, &self.parsed, value);
     errdefer spelling.deinit(self.allocator);
     let bytes = spelling.as_bytes();
+    let static_length = typ::has_static_length(bytes);
     let known = self.by_spelling.get(bytes);
     if known |retained_type| {
         spelling.deinit(self.allocator);
@@ -339,7 +345,8 @@ fn (self: &var TypeTable) retain_parsed(value: typ::Type) -> !Type {
     }
     let handle = try self.entries.add(self.allocator, TypeEntry {
         spelling: move spelling,
-        parsed: value
+        parsed: value,
+        static_length: static_length
     });
     let retained = self.entries.at(handle);
     let retained_text = retained.spelling.as_bytes();
@@ -529,6 +536,33 @@ pub fn (self: &var TypeTable) substitute_type_params(
         return self.retain_parsed(replaced);
     }
     return declared;
+}
+
+/// Is what binding a type's array lengths gives, the Go `bindLengths`
+/// result: the bound type, or why a length the names bind is no length.
+union BoundLengths {
+    Value(Type),
+    Problem(string::String),
+}
+
+/// Reports whether value spells an array whose length waits on a static name
+/// or expression.
+fn (self: &TypeTable) has_static_length(value: Type) -> bool {
+    let handle = value.node orelse return false;
+    return self.entries.at(handle).static_length;
+}
+
+/// Evaluates the array lengths value reads from the integers env binds.
+fn (self: &var TypeTable) bind_lengths(value: Type, env: &staticexpr::Env) -> !BoundLengths {
+    if !self.has_static_length(value) {
+        return BoundLengths::Value(value);
+    }
+    let parsed = self.lookup(value) orelse return BoundLengths::Value(value);
+    let bound = try typ::bind_lengths(&var self.parsed, parsed, env);
+    match bound {
+        Type(result) => return BoundLengths::Value(try self.retain_parsed(result)),
+        Problem(problem) => return BoundLengths::Problem(move problem),
+    }
 }
 
 /// Renders each parsed static argument into an owned String.

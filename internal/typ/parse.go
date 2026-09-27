@@ -124,20 +124,15 @@ func (p *parser) parseBracketed() (Type, error) {
 	return p.parseBuffer()
 }
 
-// parseBuffer reads a `[N]T` fixed-length buffer spelling.
+// parseBuffer reads a `[N]T` fixed-length buffer spelling. N is a number, a
+// static name, or a static expression in its canonical parenthesized spelling.
 func (p *parser) parseBuffer() (Type, error) {
 	p.pos++
 	start := p.pos
-	for p.pos < len(p.input) && p.input[p.pos] >= '0' && p.input[p.pos] <= '9' {
-		p.pos++
+	if err := p.skipLength(); err != nil {
+		return nil, err
 	}
-	if start == p.pos {
-		return nil, fmt.Errorf("type error: expected buffer size in `%s`", p.input)
-	}
-	size, err := strconv.ParseInt(p.input[start:p.pos], 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("type error: buffer size in `%s`: %v", p.input, err)
-	}
+	length := p.input[start:p.pos]
 	if !p.accept("]") {
 		return nil, fmt.Errorf("type error: expected `]` in `%s`", p.input)
 	}
@@ -145,7 +140,42 @@ func (p *parser) parseBuffer() (Type, error) {
 	if err != nil {
 		return nil, err
 	}
+	if length[0] < '0' || length[0] > '9' {
+		return &Buffer{Len: length, Elem: elem}, nil
+	}
+	size, err := strconv.ParseInt(length, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("type error: buffer size in `%s`: %v", p.input, err)
+	}
 	return &Buffer{Size: size, Elem: elem}, nil
+}
+
+// skipLength moves past a length: a run of name bytes, or a parenthesized
+// expression, whose parentheses balance.
+func (p *parser) skipLength() error {
+	depth := 0
+	start := p.pos
+	for p.pos < len(p.input) {
+		ch := p.input[p.pos]
+		switch {
+		case ch == '(':
+			depth++
+		case ch == ')' && depth > 0:
+			depth--
+		case depth == 0 && !isLengthByte(ch):
+			if start == p.pos {
+				return fmt.Errorf("type error: expected buffer size in `%s`", p.input)
+			}
+			return nil
+		}
+		p.pos++
+	}
+	return fmt.Errorf("type error: expected `]` in `%s`", p.input)
+}
+
+// isLengthByte reports whether ch may appear in a length outside parentheses.
+func isLengthByte(ch byte) bool {
+	return ch == '_' || ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9'
 }
 
 // parseName reads a `::` separated name and the static arguments it applies.

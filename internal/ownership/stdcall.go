@@ -93,7 +93,7 @@ func (c *Checker) stdMethodInfo(base string, receiverType string, name string) *
 	for idx, param := range params {
 		subst[param] = args[idx]
 	}
-	return instantiateFunctionInfo(fn, subst)
+	return instantiateFunctionInfo(fn, subst, nil)
 }
 
 // containerElemType is the type a container hands out by value: the element

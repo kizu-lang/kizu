@@ -9,6 +9,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 	diag "github.com/kizu-lang/kizu/internal/diagnostic"
 	"github.com/kizu-lang/kizu/internal/lexer"
+	"github.com/kizu-lang/kizu/internal/staticexpr"
 	"github.com/kizu-lang/kizu/internal/token"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
@@ -1663,7 +1664,7 @@ func (p *Parser) parseBufferLiteralExpr() ast.Expression {
 	if !p.expectPeek(token.LBrace) {
 		return &ast.IdentExpr{Name: "<error>", Span: span}
 	}
-	expr := &ast.BufferLiteralExpr{Size: buffer.Size, Elem: typ.Text(buffer.Elem), Span: span}
+	expr := &ast.BufferLiteralExpr{Len: buffer.LenText(), Elem: typ.Text(buffer.Elem), Span: span}
 	p.nextToken()
 	for p.cur.Type != token.RBrace && p.cur.Type != token.EOF {
 		expr.Elements = append(expr.Elements, p.parseExpression(lowest))
@@ -1935,7 +1936,8 @@ func (p *Parser) parseBorrowTypeName() typ.Type {
 
 // parseSliceTypeName parses []T and [N]T type spellings.
 func (p *Parser) parseSliceTypeName() typ.Type {
-	if p.peek.Type == token.Int {
+	switch p.peek.Type {
+	case token.Int, token.Ident, token.LParen:
 		return p.parseBufferTypeName()
 	}
 	if !p.expectPeek(token.RBracket) {
@@ -1949,23 +1951,47 @@ func (p *Parser) parseSliceTypeName() typ.Type {
 	return &typ.Slice{Elem: arg}
 }
 
-// parseBufferTypeName parses `[N]T` fixed-length buffer type spellings.
+// parseBufferTypeName parses `[N]T` fixed-length buffer type spellings. N is a
+// positive integer, or a static integer the instance binds: a name, or a
+// parenthesized expression. An expression of literals alone is its value, so
+// `[(2 * 4)]u8` and `[8]u8` are one type.
 func (p *Parser) parseBufferTypeName() typ.Type {
 	p.nextToken()
-	size, err := strconv.ParseInt(p.cur.Literal, 10, 64)
-	if err != nil || size <= 0 {
-		p.errorf("buffer size must be a positive integer, got %s", p.cur.Literal)
+	buffer := &typ.Buffer{}
+	switch p.cur.Type {
+	case token.Ident:
+		buffer.Len = p.cur.Literal
+	case token.LParen:
+		buffer.Len = p.parseStaticExprArg()
+		if size, err := staticexpr.Eval(buffer.Len, noStaticNames); err == nil {
+			buffer.Size, buffer.Len = size, ""
+		}
+	default:
+		size, err := strconv.ParseInt(p.cur.Literal, 10, 64)
+		if err != nil {
+			p.errorf("buffer size must be a positive integer, got %s", p.cur.Literal)
+			return nil
+		}
+		buffer.Size = size
+	}
+	if buffer.Len == "" && buffer.Size <= 0 {
+		p.errorf("buffer size must be a positive integer, got %d", buffer.Size)
 		return nil
 	}
 	if !p.expectPeek(token.RBracket) {
 		return nil
 	}
 	p.nextToken()
-	arg := p.parseTypeArg(false)
-	if arg == nil {
+	buffer.Elem = p.parseTypeArg(false)
+	if buffer.Elem == nil {
 		return nil
 	}
-	return &typ.Buffer{Size: size, Elem: arg}
+	return buffer
+}
+
+// noStaticNames binds no name: an expression it evaluates is literals alone.
+func noStaticNames(string) (int64, bool) {
+	return 0, false
 }
 
 // parseTypeBaseName parses an identifier or namespace-qualified type base.
