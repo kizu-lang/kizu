@@ -97,6 +97,10 @@ type lowerer struct {
 	// is decided per binding, from the value's type, so it is recorded on
 	// the value rather than on the name.
 	placeSlots map[string]bool
+	// lentPlaces names the values a local binds that are a borrowed place's
+	// address rather than a slot of its own: a name bound by
+	// `let v = &var x` is storage the way a `&var` parameter is.
+	lentPlaces map[string]bool
 	// callerStorageParams names the parameters that arrive as the caller's
 	// storage, apart from the locals that were given a slot of their own: a
 	// match through one binds payloads where they lie, a match on a local
@@ -1083,6 +1087,7 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 	l.slots = slots
 	l.indexWritten = indexWrittenLocals(fn)
 	l.placeSlots = map[string]bool{}
+	l.lentPlaces = map[string]bool{}
 	l.callerStorageParams = map[string]bool{}
 	l.nextValue = 0
 	l.nextBlock = 0
@@ -1488,7 +1493,8 @@ func (l *lowerer) lowerAssignTarget(target ast.Expression, value Value) error {
 	case *ast.DerefExpr:
 		// `.*` through a `&var` parameter names the same storage the bare
 		// name does, so both spellings assign through the same rule.
-		if ident, ok := t.Receiver.(*ast.IdentExpr); ok && l.isStorageParam(ident.Name) {
+		if ident, ok := t.Receiver.(*ast.IdentExpr); ok &&
+			(l.isStorageParam(ident.Name) || l.isLentPlace(ident.Name)) {
 			return l.lowerAssignTarget(ident, value)
 		}
 		receiver, err := l.lowerExpr(t.Receiver)
@@ -2245,11 +2251,21 @@ func (l *lowerer) lowerPrefixExpr(expr *ast.PrefixExpr) (Value, error) {
 	return l.emit("unary."+expr.Operator, resultType, []Value{right}, ""), nil
 }
 
-// lowerBorrowExpr preserves the current value-level ABI for checked borrow
-// arguments. `&var p.*` is the one borrow whose storage is already an
-// address: the raw pointer is the `&var T` itself, so writes through the
-// binding reach the pointee rather than a copy of it.
+// lowerBorrowExpr lowers an explicit borrow. A `&var` borrow is the address
+// of the place it lends: a local's or a field's storage, or for `&var p.*`
+// the raw pointer itself. A shared borrow keeps the value-level ABI.
 func (l *lowerer) lowerBorrowExpr(operator string, expr ast.Expression) (Value, error) {
+	if operator == "&var" {
+		// A `&var` borrow of a local or of a field path lends the storage
+		// itself, which the slot analysis gave its root: writes through the
+		// binding land in the borrowed place, not in a copy of its value.
+		if slot, ok := l.slotPointer(expr); ok {
+			return slot, nil
+		}
+		if storage, ok := l.lowerFieldStorage(expr); ok {
+			return storage, nil
+		}
+	}
 	if deref, ok := expr.(*ast.DerefExpr); ok && operator == "&var" {
 		pointer, err := l.lowerExpr(deref.Receiver)
 		if err != nil {

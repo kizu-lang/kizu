@@ -33,6 +33,7 @@ fn (self: &var Lowerer) mutably_borrowed_locals(tree: &var ast::Ast, decl: Facts
     while self.caller_storage_params.pop() |_| {}
     while self.index_written.pop() |_| {}
     while self.place_slots.pop() |_| {}
+    while self.lent_places.pop() |_| {}
     if self.decl_body(decl) |body| {
         if try self.collect_mut_borrows_stmt(tree, body.as_statement()) |failed| {
             return move failed;
@@ -123,6 +124,26 @@ fn (self: &Lowerer) is_index_written(name: Name) -> bool {
         }
     }
     return false;
+}
+
+/// Reports whether value is a borrowed place's address a local binds.
+fn (self: &Lowerer) is_lent_place_value(value: Name) -> bool {
+    var index = 0;
+    while self.lent_places.get(index) |place| {
+        index = index + 1;
+        if same_name(place, value) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Reports whether name is bound to a borrowed place's address (`let v =
+/// &var x`), which `v.*` names the way a `&var` parameter's does, the Go
+/// `isLentPlace`.
+fn (self: &Lowerer) is_lent_place(name: Name) -> bool {
+    let value = self.envs.get(self.env, name) orelse return false;
+    return self.is_lent_place_value(value.name);
 }
 
 /// Reports whether value is a slot bound for an index_written local.
@@ -669,7 +690,7 @@ fn (self: &var Lowerer) mark_if_name(tree: &ast::Ast, expression: ast::Expressio
 /// Binds a declaration, the Go `bindLocal`. A local the function mutably
 /// borrows gets its storage here, once, so every later use of the name means
 /// the same place. A declaration that binds a `&var` borrow is an address
-/// already, and one address is all it needs.
+/// already, and one address is all it needs: it is the local's storage.
 fn (self: &var Lowerer) bind_local(name: Name, value: Value) -> !void {
     if !self.has_slot(name) and self.is_index_written(name) and self.holds_array_place(value.type_name) {
         let place_type = try self.module.names.prefixed("&var ", value.type_name);
@@ -677,7 +698,11 @@ fn (self: &var Lowerer) bind_local(name: Name, value: Value) -> !void {
         try self.place_slots.append(self.allocator, place.name);
         return self.envs.bind(self.allocator, self.env, name, place);
     }
-    if !self.has_slot(name) or self.is_mutable_reference_type(value.type_name) {
+    if self.is_mutable_reference_type(value.type_name) {
+        try self.lent_places.append(self.allocator, value.name);
+        return self.envs.bind(self.allocator, self.env, name, value);
+    }
+    if !self.has_slot(name) {
         return self.envs.bind(self.allocator, self.env, name, value);
     }
     let slot_type = try self.module.names.prefixed("&var ", value.type_name);
@@ -740,12 +765,14 @@ fn (self: &Lowerer) is_storage_param(name: Name) -> bool {
 
 /// Returns the storage behind a name, the Go `slotPointer`, for the places
 /// that need the address rather than the value; null for an expression that
-/// is not a slot-backed name.
+/// is not a slot-backed name. A name bound to a borrowed place's address has
+/// that address as its storage.
 fn (self: &var Lowerer) slot_pointer(tree: &ast::Ast, expression: ast::Expression) -> !?Value {
     let ident = ownership::ident_expr(tree, expression) orelse return null;
     let name = try self.text_name(tree, ident.name);
     let value = self.envs.get(self.env, name) orelse return null;
-    if !self.has_slot(name) and !self.is_place_slot(value.name) {
+    if !self.has_slot(name) and !self.is_place_slot(value.name) and
+        !self.is_lent_place_value(value.name) {
         return null;
     }
     return value;

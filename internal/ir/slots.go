@@ -383,7 +383,12 @@ func (l *lowerer) bindLocal(name string, value Value) {
 		l.env.set(name, slot)
 		return
 	}
-	if !l.slots[name] || isMutableReferenceType(value.Type) {
+	if isMutableReferenceType(value.Type) {
+		l.lentPlaces[value.Name] = true
+		l.env.set(name, value)
+		return
+	}
+	if !l.slots[name] {
 		l.env.set(name, value)
 		return
 	}
@@ -430,15 +435,23 @@ func (l *lowerer) isStorageParam(name string) bool {
 	return false
 }
 
+// isLentPlace reports whether name is bound to a borrowed place's address
+// (`let v = &var x`), which `v.*` names the way a `&var` parameter's does.
+func (l *lowerer) isLentPlace(name string) bool {
+	value, bound := l.env.get(name)
+	return bound && l.lentPlaces[value.Name]
+}
+
 // slotPointer returns the storage behind a name, for the places that need the
-// address rather than the value.
+// address rather than the value. A name bound to a borrowed place's address
+// has that address as its storage.
 func (l *lowerer) slotPointer(expr ast.Expression) (Value, bool) {
 	ident, ok := expr.(*ast.IdentExpr)
 	if !ok {
 		return Value{}, false
 	}
 	value, bound := l.env.get(ident.Name)
-	if !bound || (!l.slots[ident.Name] && !l.placeSlots[value.Name]) {
+	if !bound || (!l.slots[ident.Name] && !l.placeSlots[value.Name] && !l.lentPlaces[value.Name]) {
 		return Value{}, false
 	}
 	return value, true
