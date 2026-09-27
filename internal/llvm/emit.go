@@ -1276,6 +1276,8 @@ func (e *emitter) writeValueInstr(instr *ir.Instr) error {
 		return e.writeBufferNew(instr)
 	case "buffer.as_bytes":
 		return e.writeBufferAsBytes(instr)
+	case "buffer.addr":
+		return e.writeBufferAddr(instr)
 	case "vector.new":
 		return e.writeVectorNew(instr)
 	case "vector.lane":
@@ -2921,6 +2923,24 @@ func (e *emitter) writeBufferAsBytes(instr *ir.Instr) error {
 	fmt.Fprintf(&e.out, "  %s = insertvalue %%kizu.slice.u8 %s, i64 %d, 1\n",
 		resultName, baseName, size)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
+}
+
+// writeBufferAddr projects the address of one element out of an array's
+// storage. The index was bounds-checked when it was lowered.
+func (e *emitter) writeBufferAddr(instr *ir.Instr) error {
+	if len(instr.Args) != 2 {
+		return fmt.Errorf("llvm error: buffer.addr expects the storage of `[N]T` and an index")
+	}
+	array := derefLLVMType(instr.Args[0].Type)
+	if _, elem, ok := e.bufferSize(array); !ok || derefLLVMType(instr.Result.Type) != elem {
+		return fmt.Errorf("llvm error: buffer.addr expects `&var [N]T` -> `&var T`, got %s -> %s",
+			instr.Args[0].Type, instr.Result.Type)
+	}
+	name := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = getelementptr inbounds %s, ptr %s, i64 0, i64 %s\n",
+		name, e.llvmType(array), e.value(instr.Args[0]).operand, e.value(instr.Args[1]).operand)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
 	return nil
 }
 

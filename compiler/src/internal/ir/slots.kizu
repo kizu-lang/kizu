@@ -31,12 +31,117 @@ import std::string;
 fn (self: &var Lowerer) mutably_borrowed_locals(tree: &var ast::Ast, decl: FactsHandle) -> !?diagnostic::Diagnostic {
     while self.slots.pop() |_| {}
     while self.caller_storage_params.pop() |_| {}
+    while self.index_written.pop() |_| {}
+    while self.place_slots.pop() |_| {}
     if self.decl_body(decl) |body| {
         if try self.collect_mut_borrows_stmt(tree, body.as_statement()) |failed| {
             return move failed;
         }
+        try self.collect_index_writes(tree, body.as_statement());
     }
     return null;
+}
+
+/// Records the names element writes start from, the Go
+/// `collectIndexWrites`. The walk only reads names, so a node it does not
+/// know costs a local its slot, never its meaning.
+fn (self: &var Lowerer) collect_index_writes(tree: &var ast::Ast, statement: ast::Statement) -> !void {
+    if ownership::assign_stmt(tree, statement) |assign| {
+        if ownership::index_expr(tree, assign.target) |index| {
+            if !index.slice {
+                var root = assign.target;
+                while ownership::index_expr(tree, root) |inner| {
+                    root = inner.target;
+                }
+                while ownership::field_expr(tree, root) |field| {
+                    if field.namespace {
+                        break;
+                    }
+                    root = field.receiver;
+                }
+                if ownership::ident_expr(tree, root) |ident| {
+                    let name = try self.text_name(tree, ident.name);
+                    if !self.is_index_written(name) {
+                        try self.index_written.append(self.allocator, name);
+                    }
+                }
+            }
+        }
+    }
+    var exprs = array::new<ast::Expression>(self.allocator);
+    defer exprs.deinit(self.allocator);
+    var stmts = array::new<ast::Statement>(self.allocator);
+    defer stmts.deinit(self.allocator);
+    let _ = try statement_children(self.allocator, tree, statement, &var exprs, &var stmts);
+    var index = 0;
+    while exprs.get(index) |expression| {
+        index = index + 1;
+        try self.collect_index_writes_expr(tree, expression);
+    }
+    index = 0;
+    while stmts.get(index) |inner| {
+        index = index + 1;
+        try self.collect_index_writes(tree, inner);
+    }
+    return;
+}
+
+/// Walks an expression for the statements an `if` or `match` in value
+/// position holds, the Go `collectIndexWritesExpr`.
+fn (self: &var Lowerer) collect_index_writes_expr(tree: &var ast::Ast, expression: ast::Expression) -> !void {
+    var exprs = array::new<ast::Expression>(self.allocator);
+    defer exprs.deinit(self.allocator);
+    var stmts = array::new<ast::Statement>(self.allocator);
+    defer stmts.deinit(self.allocator);
+    match tree.expressions.at(expression.node) {
+        If(branch) => try if_children(self.allocator, branch, &var exprs, &var stmts),
+        Match(value) => try match_children(self.allocator, value, &var exprs, &var stmts),
+        _ => {
+            let _ = try expression_children(self.allocator, tree, expression, &var exprs);
+        },
+    }
+    var index = 0;
+    while exprs.get(index) |child| {
+        index = index + 1;
+        try self.collect_index_writes_expr(tree, child);
+    }
+    index = 0;
+    while stmts.get(index) |inner| {
+        index = index + 1;
+        try self.collect_index_writes(tree, inner);
+    }
+    return;
+}
+
+/// Reports whether an element write starts from name.
+fn (self: &Lowerer) is_index_written(name: Name) -> bool {
+    var index = 0;
+    while self.index_written.get(index) |written| {
+        index = index + 1;
+        if same_name(written, name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Reports whether value is a slot bound for an index_written local.
+fn (self: &Lowerer) is_place_slot(value: Name) -> bool {
+    var index = 0;
+    while self.place_slots.get(index) |slot| {
+        index = index + 1;
+        if same_name(slot, value) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Reports whether a value of type_name is written by index in its own
+/// storage, the Go `holdsArrayPlace`: anything but a view, which writes
+/// through to what it views, and a borrow, which already is storage.
+fn (self: &Lowerer) holds_array_place(type_name: Name) -> bool {
+    return !self.module.names.starts_with(type_name, "[]") and !self.is_reference_type(type_name);
 }
 
 /// Reports whether name is a parameter that arrived as the caller's storage,
@@ -559,6 +664,12 @@ fn (self: &var Lowerer) mark_if_name(tree: &ast::Ast, expression: ast::Expressio
 /// borrows gets its storage here, once, so every later use of the name means
 /// the same place.
 fn (self: &var Lowerer) bind_local(name: Name, value: Value) -> !void {
+    if !self.has_slot(name) and self.is_index_written(name) and self.holds_array_place(value.type_name) {
+        let place_type = try self.module.names.prefixed("&var ", value.type_name);
+        let place = try self.emit1(Op::LocalSlot, place_type, value);
+        try self.place_slots.append(self.allocator, place.name);
+        return self.envs.bind(self.allocator, self.env, name, place);
+    }
     if !self.has_slot(name) {
         return self.envs.bind(self.allocator, self.env, name, value);
     }
@@ -573,6 +684,9 @@ fn (self: &var Lowerer) bind_local(name: Name, value: Value) -> !void {
 /// `parts.append(..)` writes through the header it was handed. A capture that
 /// already binds a borrow is an address, and one address is all it needs.
 fn (self: &var Lowerer) bind_capture(name: Name, value: Value) -> !void {
+    if !self.has_slot(name) and self.is_index_written(name) and self.holds_array_place(value.type_name) {
+        return self.bind_local(name, value);
+    }
     if !self.has_slot(name) or self.is_reference_type(value.type_name) {
         return self.envs.bind(self.allocator, self.env, name, value);
     }
@@ -623,10 +737,11 @@ fn (self: &Lowerer) is_storage_param(name: Name) -> bool {
 fn (self: &var Lowerer) slot_pointer(tree: &ast::Ast, expression: ast::Expression) -> !?Value {
     let ident = ownership::ident_expr(tree, expression) orelse return null;
     let name = try self.text_name(tree, ident.name);
-    if !self.has_slot(name) {
+    let value = self.envs.get(self.env, name) orelse return null;
+    if !self.has_slot(name) and !self.is_place_slot(value.name) {
         return null;
     }
-    return self.envs.get(self.env, name);
+    return value;
 }
 
 /// Lowers the receiver of a field write, the Go `lowerReceiverAddress`. A

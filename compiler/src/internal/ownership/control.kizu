@@ -15,6 +15,9 @@ fn (self: &var Checker) check_assign_stmt(
     env: ScopeHandle,
     statement: ast::AssignStmt
 ) -> !?diagnostic::Diagnostic {
+    if try self.is_array_element_write(tree, env, statement.target) {
+        return self.check_array_element_assign(tree, env, statement);
+    }
     if self.direct_assignment_root(tree, env, statement.target) |target| {
         var type_name = empty_name();
         let target_type = self.binding(target).type_name;
@@ -71,6 +74,86 @@ fn (self: &var Checker) check_assign_stmt(
         return null;
     }
     return self.read_expr(tree, env, statement.target, &var ignored);
+}
+
+/// Returns the place a chain of element indexes starts from: `s.m` for
+/// `s.m[i][j]`.
+fn indexed_place(tree: &ast::Ast, expression: ast::Expression) -> ast::Expression {
+    var place = expression;
+    while true {
+        match tree.expressions.at(place.node) {
+            Index(value) => {
+                place = value.target;
+            },
+            _ => return place,
+        }
+    }
+    return place;
+}
+
+/// Reports whether an assignment target is an element of an array held in a
+/// binding or a field path of one, the Go `arrayElementPlace`. The type
+/// checker has already refused every other shape of indexed write but a
+/// view's.
+fn (self: &var Checker) is_array_element_write(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    target: ast::Expression
+) -> !bool {
+    match tree.expressions.at(target.node) {
+        Index(value) => {
+            if value.slice {
+                return false;
+            }
+        },
+        _ => return false,
+    }
+    let place = indexed_place(tree, target);
+    let root = try self.direct_field_root(tree, env, place) orelse return false;
+    var place_type = try self.names.borrowed_value(self.binding(root.root).type_name);
+    if !is_empty(root.path) {
+        place_type = self.field_path_type(place_type, root.path) orelse return false;
+    }
+    return self.names.is_buffer_type(place_type);
+}
+
+/// Checks a write into an element of an array, the Go
+/// `checkArrayElementAssign`. The write lands in the array's storage, so it
+/// waits for every borrow of that place -- a view the array lent is the
+/// usual one -- the way a field write does.
+fn (self: &var Checker) check_array_element_assign(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    statement: ast::AssignStmt
+) -> !?diagnostic::Diagnostic {
+    var ignored = empty_name();
+    if try self.move_expr(tree, env, statement.value, &var ignored) |failed| {
+        return move failed;
+    }
+    var place = statement.target;
+    var more = true;
+    while more {
+        var index: ?ast::Expression = null;
+        var outer: ?ast::Expression = null;
+        match tree.expressions.at(place.node) {
+            Index(value) => {
+                index = value.index;
+                outer = value.target;
+            },
+            _ => {},
+        }
+        if index |present| {
+            if try self.read_expr(tree, env, present, &var ignored) |failed| {
+                return move failed;
+            }
+        }
+        if outer |next| {
+            place = next;
+        } else {
+            more = false;
+        }
+    }
+    return self.check_assignment_borrow_conflict(tree, env, place);
 }
 
 /// Rejects assigning over a live owner field, the Go

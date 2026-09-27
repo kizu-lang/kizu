@@ -20,7 +20,9 @@ struct field・union payload・引数・返り値・container の要素に置け
   view(`as_slice` / `as_bytes` など)は配列の storage(slot・field の番地・
   `&var` 引数)を指す。storage の無い値の読む view は、値を slot に写してから取る
 - 生成は `[N]T{}` の zero 埋め。初期化子のない宣言は持たない
-- 要素は view で読み書きする
+- 要素は添字で直接読み書きする(`a[i]`、`s.m[i] = x`)。範囲外は trap、literal の
+  添字は compile 時に弾く。書き込みは配列の place への書き込みとして、field の
+  書き込みと同じ借用規則に掛ける。view は長さを消して関数へ渡すときに使う
 
 ## なぜこの形か
 
@@ -38,3 +40,5 @@ local 限定にした理由(alloca の pointer を値として回すこと)が�
 | `mem::stack_bytes<64>()` factory | 戻り型が値依存になり型検査の新機構が要る。確保が関数呼びに見える |
 | `[]u8` を `[]u32` に reinterpret する view | byte 順が target 依存になり、同じ source が target ごとに違う bytes を出す |
 | owner を要素にする | index は等幅の cell が前提。cleanup の所在が view に乗る |
+| 要素の読み書きを view 経由に限る | 行列の `m[i][j]` が書けない。view を束縛する行が添字の数だけ増える |
+| `a[lo..hi]` の直接 slicing | view の slicing と同じものの 2 本目の経路になる |

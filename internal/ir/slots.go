@@ -2,6 +2,7 @@ package ir
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/stdprim"
@@ -371,6 +372,12 @@ func markIfName(expr ast.Expression, found map[string]bool) {
 // bindLocal binds a declaration. A local the function mutably borrows gets its
 // storage here, once, so every later use of the name means the same place.
 func (l *lowerer) bindLocal(name string, value Value) {
+	if !l.slots[name] && l.indexWritten[name] && holdsArrayPlace(value.Type) {
+		slot := l.emit("local.slot", "&var "+value.Type, []Value{value}, "")
+		l.placeSlots[slot.Name] = true
+		l.env.set(name, slot)
+		return
+	}
 	if !l.slots[name] {
 		l.env.set(name, value)
 		return
@@ -384,6 +391,10 @@ func (l *lowerer) bindLocal(name string, value Value) {
 // through the header it was handed. A capture that already binds a borrow is
 // an address, and one address is all it needs.
 func (l *lowerer) bindCapture(name string, value Value) {
+	if !l.slots[name] && l.indexWritten[name] && holdsArrayPlace(value.Type) {
+		l.bindLocal(name, value)
+		return
+	}
 	if !l.slots[name] || isReferenceType(value.Type) {
 		l.env.set(name, value)
 		return
@@ -418,11 +429,66 @@ func (l *lowerer) isStorageParam(name string) bool {
 // address rather than the value.
 func (l *lowerer) slotPointer(expr ast.Expression) (Value, bool) {
 	ident, ok := expr.(*ast.IdentExpr)
-	if !ok || !l.slots[ident.Name] {
+	if !ok {
 		return Value{}, false
 	}
 	value, bound := l.env.get(ident.Name)
-	return value, bound
+	if !bound || (!l.slots[ident.Name] && !l.placeSlots[value.Name]) {
+		return Value{}, false
+	}
+	return value, true
+}
+
+// holdsArrayPlace reports whether a value of typ is written by index in its
+// own storage: anything but a view, which writes through to what it views,
+// and a borrow, which already is storage.
+func holdsArrayPlace(typ string) bool {
+	return !strings.HasPrefix(typ, "[]") && !isReferenceType(typ)
+}
+
+// indexWrittenLocals returns the names element writes in fn start from.
+func indexWrittenLocals(fn *ast.FunctionDecl) map[string]bool {
+	found := map[string]bool{}
+	collectIndexWrites(fn.Body, found)
+	return found
+}
+
+// collectIndexWrites walks one statement for element writes. The walk only
+// reads names, so a node it does not know costs a local its slot, never its
+// meaning.
+func collectIndexWrites(stmt ast.Statement, found map[string]bool) {
+	if stmt == nil {
+		return
+	}
+	if assign, ok := stmt.(*ast.AssignStmt); ok {
+		if index, isIndex := assign.Target.(*ast.IndexExpr); isIndex && !index.Slice {
+			markIfName(arrayPlaceRoot(index), found)
+		}
+	}
+	exprs, stmts, _ := statementChildren(stmt)
+	for _, expr := range exprs {
+		collectIndexWritesExpr(expr, found)
+	}
+	for _, inner := range stmts {
+		collectIndexWrites(inner, found)
+	}
+}
+
+// collectIndexWritesExpr walks an expression for the statements an `if` or
+// `match` in value position holds.
+func collectIndexWritesExpr(expr ast.Expression, found map[string]bool) {
+	if expr == nil {
+		return
+	}
+	switch expr.(type) {
+	case *ast.IfStmt, *ast.MatchStmt:
+		collectIndexWrites(expr.(ast.Statement), found)
+		return
+	}
+	children, _ := expressionChildren(expr)
+	for _, child := range children {
+		collectIndexWritesExpr(child, found)
+	}
 }
 
 // lowerReceiverAddress lowers the receiver of a field write. A local with

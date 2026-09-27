@@ -302,13 +302,26 @@ fn (self: &var Checker) read_index_expr(
         out.* = try self.names.intern(lane);
         return null;
     }
+    var ignored = empty_name();
+    // An element of an array is read out of the array, so reading one reads
+    // the array: a live writable view of it refuses the read the same way.
+    let held = try self.names.borrowed_value(target);
+    if self.names.is_buffer_type(held) and !index.slice {
+        if index.index |present| {
+            if try self.read_expr(tree, env, present, &var ignored) |failed| {
+                return move failed;
+            }
+        }
+        out.* = try self.names.buffer_elem(held);
+        return null;
+    }
     if !self.names.is_view_type(target) {
         return try self.error1(
-            tree, ast::zero_span(), "move error: index/slice target expects a view (`[]T`), got %s",
+            tree, ast::zero_span(),
+            "move error: index/slice target expects a view (`[]T`) or an array (`[N]T`), got %s",
             Arg::Str(target)
         );
     }
-    var ignored = empty_name();
     if !index.slice {
         if index.index |present| {
             if try self.read_expr(tree, env, present, &var ignored) |failed| {

@@ -87,6 +87,16 @@ type lowerer struct {
 	// parameters that arrive as such storage. Their entry in env is the
 	// storage, not the value.
 	slots map[string]bool
+	// indexWritten names the locals an element write `x[i] = v` or
+	// `x.f[i] = v` starts from. One that holds an array, or a struct holding
+	// one, is given a slot when it is bound, so the write lands in memory
+	// rather than rebuilding the value; one holding a view writes through
+	// the view and keeps its SSA form.
+	indexWritten map[string]bool
+	// placeSlots names the slots bound for indexWritten locals. The storage
+	// is decided per binding, from the value's type, so it is recorded on
+	// the value rather than on the name.
+	placeSlots map[string]bool
 	// callerStorageParams names the parameters that arrive as the caller's
 	// storage, apart from the locals that were given a slot of their own: a
 	// match through one binds payloads where they lie, a match on a local
@@ -1071,6 +1081,8 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 		return nil, err
 	}
 	l.slots = slots
+	l.indexWritten = indexWrittenLocals(fn)
+	l.placeSlots = map[string]bool{}
 	l.callerStorageParams = map[string]bool{}
 	l.nextValue = 0
 	l.nextBlock = 0
@@ -1091,6 +1103,9 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 		// its own, which is the copy it was handed. One that arrives as an
 		// address already reaches storage, and it is the caller's: wrapping it
 		// again would hand the callee a borrow of a borrow.
+		if l.indexWritten[param.Name] && holdsArrayPlace(signature.Params[index].Type) {
+			l.slots[param.Name] = true
+		}
 		if l.slots[param.Name] && !isReferenceType(signature.Params[index].Type) {
 			valueSlots = append(valueSlots, param.Name)
 		}
@@ -1425,10 +1440,14 @@ func (l *lowerer) assignTargetType(target ast.Expression) string {
 	case *ast.UnsafeExpr:
 		return l.assignTargetType(t.Value)
 	case *ast.IndexExpr:
-		// An element write lands in the view's element type, read from the
-		// view the target names.
-		if view := l.assignTargetType(t.Target); !t.Slice && strings.HasPrefix(view, "[]") {
-			return view[2:]
+		// An element write lands in the element type of the view or the
+		// array the target names.
+		container := l.assignTargetType(t.Target)
+		if !t.Slice && strings.HasPrefix(container, "[]") {
+			return container[2:]
+		}
+		if !t.Slice && isBufferIRType(container) {
+			return container[strings.IndexByte(container, ']')+1:]
 		}
 		return ""
 	default:
@@ -1496,6 +1515,9 @@ func (l *lowerer) lowerAssignTarget(target ast.Expression, value Value) error {
 func (l *lowerer) lowerIndexAssign(target *ast.IndexExpr, value Value) error {
 	if target.Slice {
 		return fmt.Errorf("ir error: unsupported assignment target `%s`", target.String())
+	}
+	if isBufferIRType(l.assignTargetType(target.Target)) {
+		return l.lowerArrayElementAssign(target, value)
 	}
 	slice, err := l.lowerExpr(target.Target)
 	if err != nil {
@@ -3602,9 +3624,26 @@ func (l *lowerer) lowerBuiltinLiteral(expr ast.Expression) (Value, error) {
 // inherits the same check and the same message from one place, and `kizu ir`
 // shows what a program checks before it reads memory.
 func (l *lowerer) lowerIndexExpr(expr *ast.IndexExpr) (Value, error) {
+	if !expr.Slice && isBufferIRType(l.assignTargetType(expr.Target)) {
+		element, err := l.lowerArrayElementAddress(expr)
+		if err != nil {
+			return Value{}, err
+		}
+		return l.emit("ref.load", derefType(element.Type), []Value{element}, ""), nil
+	}
 	target, err := l.lowerExpr(expr.Target)
 	if err != nil {
 		return Value{}, err
+	}
+	if isBufferIRType(target.Type) && !expr.Slice {
+		// An array with no place of its own -- a call's result -- is read
+		// through a slot the value is written into.
+		storage := l.emit("local.slot", "&var "+target.Type, []Value{target}, "")
+		element, err := l.indexArrayStorage(expr, storage)
+		if err != nil {
+			return Value{}, err
+		}
+		return l.emit("ref.load", derefType(element.Type), []Value{element}, ""), nil
 	}
 	if elem, _, ok := typ.VectorOf(target.Type); ok {
 		// The lane is a literal the checker bounded; it travels as the
@@ -3639,6 +3678,115 @@ func (l *lowerer) lowerIndexExpr(expr *ast.IndexExpr) (Value, error) {
 	l.condFail(expr.Span, "binary.>", unsignedStart, unsignedEnd, "range", start, end, length)
 	l.condFail(expr.Span, "binary.>", unsignedEnd, unsignedLength, "range", start, end, length)
 	return l.emit("slice.slice", target.Type, []Value{target, start, end}, ""), nil
+}
+
+// lowerArrayElementAssign stores into one element of an array. An array
+// whose place has storage -- a slot, a `&var` parameter, a field of one --
+// is written where it lies. One held as a value is written into a copy of
+// itself in a slot and the place is then assigned the copy, the way a field
+// write on a value rebuilds the struct.
+func (l *lowerer) lowerArrayElementAssign(target *ast.IndexExpr, value Value) error {
+	base := arrayPlaceRoot(target)
+	if _, stored := l.placeStorage(base); stored {
+		element, err := l.lowerArrayElementAddress(target)
+		if err != nil {
+			return err
+		}
+		l.emit("ref.store", "void", []Value{element, value}, "")
+		return nil
+	}
+	whole, err := l.lowerExpr(base)
+	if err != nil {
+		return err
+	}
+	storage := l.emit("local.slot", "&var "+whole.Type, []Value{whole}, "")
+	element, err := l.arrayElementAddressIn(target, base, storage)
+	if err != nil {
+		return err
+	}
+	l.emit("ref.store", "void", []Value{element, value}, "")
+	updated := l.emit("ref.load", whole.Type, []Value{storage}, "")
+	return l.lowerAssignTarget(base, updated)
+}
+
+// arrayPlaceRoot returns the array place a chain of element indexes starts
+// from: `s.m` for `s.m[i][j]`.
+func arrayPlaceRoot(expr *ast.IndexExpr) ast.Expression {
+	var root ast.Expression = expr
+	for {
+		inner, ok := root.(*ast.IndexExpr)
+		if !ok {
+			return root
+		}
+		root = inner.Target
+	}
+}
+
+// placeStorage returns the storage a place already has: the slot of a
+// local, a `&var` parameter, or a field projected out of one.
+func (l *lowerer) placeStorage(expr ast.Expression) (Value, bool) {
+	if storage, ok := l.slotPointer(expr); ok {
+		return storage, true
+	}
+	return l.lowerFieldStorage(expr)
+}
+
+// arrayElementAddressIn projects the element a chain of indexes names out
+// of storage holding the chain's root.
+func (l *lowerer) arrayElementAddressIn(
+	expr *ast.IndexExpr,
+	root ast.Expression,
+	rootStorage Value,
+) (Value, error) {
+	storage := rootStorage
+	if inner, ok := expr.Target.(*ast.IndexExpr); ok && inner != root {
+		projected, err := l.arrayElementAddressIn(inner, root, rootStorage)
+		if err != nil {
+			return Value{}, err
+		}
+		storage = projected
+	}
+	return l.indexArrayStorage(expr, storage)
+}
+
+// lowerArrayElementAddress lowers `a[i]` on an array to the element's
+// address inside the array's storage, so a read loads it and a write stores
+// through it. Nested elements chain one projection per index: `m[i][j]` is
+// the j-th cell of the i-th row's storage.
+func (l *lowerer) lowerArrayElementAddress(expr *ast.IndexExpr) (Value, error) {
+	var storage Value
+	var err error
+	if inner, ok := expr.Target.(*ast.IndexExpr); ok && isBufferIRType(l.assignTargetType(inner)) {
+		storage, err = l.lowerArrayElementAddress(inner)
+	} else {
+		storage, err = l.lowerArrayStorage(expr.Target)
+	}
+	if err != nil {
+		return Value{}, err
+	}
+	return l.indexArrayStorage(expr, storage)
+}
+
+// indexArrayStorage bounds-checks the index against N and projects the
+// element's address out of an array's storage.
+func (l *lowerer) indexArrayStorage(expr *ast.IndexExpr, storage Value) (Value, error) {
+	index, err := l.lowerExpr(expr.Index)
+	if err != nil {
+		return Value{}, err
+	}
+	array := derefType(storage.Type)
+	parsed, err := l.types.Parse(array)
+	if err != nil {
+		return Value{}, err
+	}
+	buffer, ok := parsed.(*typ.Buffer)
+	if !ok {
+		return Value{}, fmt.Errorf("ir error: `%s` is not an array", array)
+	}
+	length := l.emitConst("i64", fmt.Sprintf("%d", buffer.Size))
+	l.checkIndexInRange(expr.Span, index, length)
+	elem := typ.Text(buffer.Elem)
+	return l.emit("buffer.addr", "&var "+elem, []Value{storage, index}, ""), nil
 }
 
 // checkIndexInRange traps an index that does not name an element. Read

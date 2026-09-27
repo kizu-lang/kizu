@@ -715,6 +715,10 @@ fn (self: &var Checker) check_index_expr(
         let lane = typ::vector_lane_of_kind(target_kind);
         return self.check_vector_lane(tree, expression, target, lane, lanes, out);
     }
+    let held = try self.types.borrowed_value_type(target);
+    if try self.types.buffer_elem(held) |_| {
+        return self.check_array_index(tree, scope, expression, held, out);
+    }
     let elem = try self.types.slice_elem(target) orelse
         return try self.index_target_error(target);
     if !expression.slice {
@@ -738,10 +742,50 @@ fn (self: &var Checker) check_index_expr(
     return null;
 }
 
+/// Types an element of a fixed-length array, the Go `checkArrayIndex`. An
+/// index that is a literal is checked against N here; any other one is
+/// checked where it is read, like a view's. An array has no slicing of its
+/// own: a range is taken through the view.
+fn (self: &var Checker) check_array_index(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    expression: &ast::IndexExpr,
+    array: Type,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if expression.slice {
+        var message = try string::from_bytes(self.allocator, "an array (`");
+        errdefer message.deinit(self.allocator);
+        try self.append_checker_type(&var message, array);
+        try message.append_bytes(self.allocator, "`) is not sliced directly; take a range of its view, `as_slice()`");
+        return try self.checker_message_at("type error", expression.span, move message);
+    }
+    if try self.check_index_bound(tree, scope, "index", expression.index) |problem| {
+        return move problem;
+    }
+    let size = self.types.buffer_size(array) orelse 0;
+    if expression.index |index_expr| {
+        if integer_literal_value(tree, index_expr) |index| {
+            if index < 0 or index >= size {
+                var message = try string::from_bytes(self.allocator, "index ");
+                errdefer message.deinit(self.allocator);
+                try fmt::append_i64(self.allocator, &var message, index);
+                try message.append_bytes(self.allocator, " is outside `");
+                try self.append_checker_type(&var message, array);
+                try message.append_bytes(self.allocator, "`, which has elements 0..");
+                try fmt::append_i64(self.allocator, &var message, size);
+                return try self.checker_message_at("type error", expression.span, move message);
+            }
+        }
+    }
+    out.* = try self.types.buffer_elem(array) orelse array;
+    return null;
+}
+
 fn (self: &Checker) index_target_error(target: Type) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);
-    try message.append_bytes(self.allocator, "index/slice target expects a view (`[]T`), got ");
+    try message.append_bytes(self.allocator, "index/slice target expects a view (`[]T`) or an array (`[N]T`), got ");
     try self.append_checker_type(&var message, target);
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }

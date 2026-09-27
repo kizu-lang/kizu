@@ -1415,7 +1415,14 @@ container の要素に置けます。値として渡すと中身ごと複製さ�
 複製せずに渡すときは `&[N]T` / `&var [N]T` で借ります(§9 の借用規則がそのまま
 掛かります)。
 
-要素は view を通して読み書きします。view の入口は、`[N]u8` では
+要素は添字で読み書きします。`a[i]` は要素の値、`a[i] = x` は `a` が書ける
+place(`var` binding、`&var` で借りた配列、それらの field)のときだけ書けます。
+配列の要素が配列なら `a[i][j]` と重ねます。添字は `i64` で、範囲外は view と同じく
+trap です。添字が整数 literal なら、範囲外は compile error です。書き込みは配列の
+storage に届くので、配列が view を貸している間は書けません(§9)。`a[lo..hi]` の
+直接 slicing は持たず、範囲は view で取ります。
+
+関数境界へ長さを消して渡すときは view を使います。view の入口は、`[N]u8` では
 `buf.as_bytes()` / `buf.as_mut_bytes()`(規則は `String` の同名 method と同じ:
 束縛必須、`as_mut_bytes` は書ける place に限り exclusive)、それ以外の T では
 `words.as_slice()` / `words.as_mut_slice()` で、view の型は `[]T` です。receiver は

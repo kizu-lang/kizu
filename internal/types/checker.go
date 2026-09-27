@@ -2061,10 +2061,22 @@ func (c *Checker) checkAssignableIndex(
 	if expr.Slice {
 		return "", errorf("type error: invalid assignment target `%s`", expr.String())
 	}
+	if array, ok := c.assignableArrayPlace(expr.Target, env, unsafe); ok {
+		return c.checkArrayIndex(expr, array, env, unsafe)
+	}
+	// An array that cannot be written as a whole cannot be written one
+	// element at a time either, and for the same reason.
+	if target, err := c.checkExpr(expr.Target, env, unsafe); err == nil {
+		if _, isArray := c.types.bufferElem(borrowElem(target)); isArray {
+			if _, err := c.checkAssignableTarget(expr.Target, env, unsafe); err != nil {
+				return "", err
+			}
+		}
+	}
 	ident, ok := expr.Target.(*ast.IdentExpr)
 	if !ok {
 		return "", errorf(
-			"type error: indexed assignment target must be a local `&var []T` binding")
+			"type error: indexed assignment target must be a local `&var []T` binding or a writable array")
 	}
 	typ, exists := env.lookup(ident.Name)
 	if !exists {
@@ -2080,6 +2092,40 @@ func (c *Checker) checkAssignableIndex(
 		return "", err
 	}
 	return elem, nil
+}
+
+// assignableArrayPlace reports the array type of a place an element write
+// can land in: a place assignment could write as a whole -- a `var` binding,
+// a `&var` parameter, a field of one -- whose type is `[N]T`, or an element
+// of such an array that is itself an array. An element of a view is not one:
+// the view's element write is the view's own rule.
+func (c *Checker) assignableArrayPlace(
+	expr ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, bool) {
+	var place Type
+	if index, ok := expr.(*ast.IndexExpr); ok {
+		outer, ok := c.assignableArrayPlace(index.Target, env, unsafe)
+		if !ok {
+			return "", false
+		}
+		elem, err := c.checkArrayIndex(index, outer, env, unsafe)
+		if err != nil {
+			return "", false
+		}
+		place = elem
+	} else {
+		written, err := c.checkAssignableTarget(expr, env, unsafe)
+		if err != nil {
+			return "", false
+		}
+		place = borrowElem(written)
+	}
+	if _, ok := c.types.bufferElem(place); !ok {
+		return "", false
+	}
+	return place, true
 }
 
 // checkAssignableIdent validates direct binding assignment. A `&var T`
@@ -3659,9 +3705,13 @@ func (c *Checker) checkIndexExpr(expr *ast.IndexExpr, env *scope, unsafe unsafeM
 	if lane, lanes, ok := typ.VectorOf(string(target)); ok {
 		return checkVectorLane(expr, target, lane, lanes)
 	}
+	if _, ok := c.types.bufferElem(borrowElem(target)); ok {
+		return c.checkArrayIndex(expr, borrowElem(target), env, unsafe)
+	}
 	elem, ok := sliceElem(target)
 	if !ok {
-		return "", errorf("type error: index/slice target expects a view (`[]T`), got %s", target)
+		return "", errorf(
+			"type error: index/slice target expects a view (`[]T`) or an array (`[N]T`), got %s", target)
 	}
 	if !expr.Slice {
 		if err := c.checkIndexBound("index", expr.Index, env, unsafe); err != nil {
@@ -3680,6 +3730,48 @@ func (c *Checker) checkIndexExpr(expr *ast.IndexExpr, env *scope, unsafe unsafeM
 		}
 	}
 	return target, nil
+}
+
+// checkArrayIndex types an element of a fixed-length array. An index that is
+// a literal is checked against N here; any other one is checked where it is
+// read, like a view's. An array has no slicing of its own: a range is taken
+// through the view.
+func (c *Checker) checkArrayIndex(
+	expr *ast.IndexExpr,
+	array Type,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	if expr.Slice {
+		return "", errorAt(expr.Span,
+			"type error: an array (`%s`) is not sliced directly; take a range of its view, `as_slice()`",
+			array)
+	}
+	if err := c.checkIndexBound("index", expr.Index, env, unsafe); err != nil {
+		return "", err
+	}
+	parsed, _ := c.types.lookup(array)
+	buffer := parsed.(*typ.Buffer)
+	if index, ok := literalIndex(expr.Index); ok && (index < 0 || index >= buffer.Size) {
+		return "", errorAt(expr.Span, "type error: index %d is outside `%s`, which has elements 0..%d",
+			index, array, buffer.Size)
+	}
+	return Type(typ.Text(buffer.Elem)), nil
+}
+
+// literalIndex returns the value of an index written as an integer literal,
+// or a negated one.
+func literalIndex(expr ast.Expression) (int64, bool) {
+	if prefix, ok := expr.(*ast.PrefixExpr); ok && prefix.Operator == "-" {
+		value, ok := literalIndex(prefix.Right)
+		return -value, ok
+	}
+	literal, ok := expr.(*ast.IntExpr)
+	if !ok {
+		return 0, false
+	}
+	value, err := strconv.ParseInt(literal.Value, 0, 64)
+	return value, err == nil
 }
 
 // checkIndexBound validates one i64 index or slice bound.

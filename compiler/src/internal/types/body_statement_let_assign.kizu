@@ -762,6 +762,24 @@ fn (self: &var Checker) check_assignable_index(
     if index.slice {
         return try self.invalid_assignment_target_error(tree, expression);
     }
+    var array = empty_type();
+    if try self.assignable_array_place(tree, scope, index.target, &var array) {
+        return self.check_array_index(tree, scope, index, array, out);
+    }
+    // An array that cannot be written as a whole cannot be written one
+    // element at a time either, and for the same reason.
+    var target = empty_type();
+    if try self.check_expr(tree, scope, index.target, &var target) |problem| {
+        problem.deinit(self.allocator);
+    } else {
+        let held = try self.types.borrowed_value_type(target);
+        if try self.types.buffer_elem(held) |_| {
+            var written = empty_type();
+            if try self.check_assignable_target(tree, scope, index.target, &var written) |problem| {
+                return move problem;
+            }
+        }
+    }
     var elem = empty_type();
     match tree.expressions.at(index.target.node) {
         Ident(identifier) => {
@@ -779,7 +797,7 @@ fn (self: &var Checker) check_assignable_index(
         _ => return try self.checker_error_at(
             "type error",
             ast::zero_span(),
-            "indexed assignment target must be a local `&var []T` binding"
+            "indexed assignment target must be a local `&var []T` binding or a writable array"
         ),
     }
     if try self.check_index_bound(tree, scope, "index", index.index) |problem| {
@@ -787,6 +805,54 @@ fn (self: &var Checker) check_assignable_index(
     }
     out.* = elem;
     return null;
+}
+
+/// Reports the array type of a place an element write can land in, the Go
+/// `assignableArrayPlace`: a place assignment could write as a whole -- a
+/// `var` binding, a `&var` parameter, a field of one -- whose type is
+/// `[N]T`, or an element of such an array that is itself an array. An
+/// element of a view is not one: the view's element write is the view's own
+/// rule.
+fn (self: &var Checker) assignable_array_place(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    expression: ast::Expression,
+    out: &var Type
+) -> !bool {
+    var place = empty_type();
+    match tree.expressions.at(expression.node) {
+        Index(value) => {
+            let copied = ast::IndexExpr {
+                target: value.target,
+                index: value.index,
+                start: value.start,
+                end: value.end,
+                slice: value.slice,
+                span: value.span
+            };
+            var outer = empty_type();
+            if !try self.assignable_array_place(tree, scope, copied.target, &var outer) {
+                return false;
+            }
+            if try self.check_array_index(tree, scope, &copied, outer, &var place) |problem| {
+                problem.deinit(self.allocator);
+                return false;
+            }
+        },
+        _ => {
+            var written = empty_type();
+            if try self.check_assignable_target(tree, scope, expression, &var written) |problem| {
+                problem.deinit(self.allocator);
+                return false;
+            }
+            place = try self.types.borrowed_value_type(written);
+        },
+    }
+    if try self.types.buffer_elem(place) |_| {
+        out.* = place;
+        return true;
+    }
+    return false;
 }
 
 fn (self: &Checker) index_assign_error(name: []u8) -> !diagnostic::Diagnostic {

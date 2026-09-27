@@ -64,6 +64,9 @@ fn (self: &var Emitter) write_buffer_instr(
     if node.op == ir::Op::BufferAsBytes {
         return self.write_buffer_as_bytes(module, node);
     }
+    if node.op == ir::Op::BufferAddr {
+        return self.write_buffer_addr(module, node);
+    }
     return try self.fail_op(module, node, "wasm error: unsupported buffer instruction `%s`");
 }
 
@@ -129,5 +132,50 @@ fn (self: &var Emitter) write_buffer_as_bytes(
         Arg::Int(size)
     );
     try self.set_value(module, node.result, slot);
+    return null;
+}
+
+/// Projects the address of one element out of an array's storage, the Go
+/// `writeBufferAddr`. The index was bounds-checked when it was lowered.
+fn (self: &var Emitter) write_buffer_addr(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 {
+        return try self.fail0("wasm error: buffer.addr expects the storage of `[N]T` and an index");
+    }
+    let storage = node.args.get_or_panic(0);
+    let retained = ir::name_text(&module.names, storage.type_name);
+    let spelled = retained.as_bytes();
+    let array = deref_wasm_type(spelled);
+    let elem = try self.buffer_elem(array) orelse
+        return try self.fail0("wasm error: buffer.addr expects `&var [N]T` -> `&var T`");
+    defer elem.deinit(self.allocator);
+    let elem_bytes = elem.as_bytes();
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    let pointed = deref_wasm_type(result_type);
+    if !mem::equal_bytes(pointed, elem_bytes) {
+        return try self.fail0("wasm error: buffer.addr expects `&var [N]T` -> `&var T`");
+    }
+    let outcome = try self.type_layout_bytes(module, elem_bytes);
+    var cell = WasmLayout { size: 0, align: 1 };
+    match outcome {
+        Error(failed) => return move failed,
+        Layout(layout) => {
+            cell = layout;
+        },
+    }
+    let storage_info = try self.value_of(module, storage);
+    let position_info = try self.value_of(module, node.args.get_or_panic(1));
+    let result_name = ir::name_text(&module.names, node.result.name);
+    let result_bytes = result_name.as_bytes();
+    let symbol = try self.symbol_name_of(result_bytes);
+    try self.line4(
+        "            (local.set %s (i32.add %s (i32.mul (i32.wrap_i64 %s) (i32.const %d))))",
+        Arg::Str(symbol), Arg::Str(storage_info.expr), Arg::Str(position_info.expr), Arg::Int(cell.size)
+    );
+    let local = try self.local_expr(result_bytes);
+    try self.set_value(module, node.result, local);
     return null;
 }
