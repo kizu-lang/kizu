@@ -2907,6 +2907,9 @@ func (c *Checker) activateBorrow(target *binding, field string, mutable bool) {
 
 // checkAssignStmt moves the assigned value into an existing binding.
 func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope) error {
+	if handled, err := c.checkArrayElementWrite(stmt, env); handled {
+		return err
+	}
 	if target, ok := directAssignmentRoot(stmt.Target, env); ok {
 		typeName, err := c.moveContextualExpr(stmt.Value, target.typeName, env)
 		if err != nil {
@@ -2952,6 +2955,74 @@ func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope) error {
 		return err
 	}
 	return nil
+}
+
+// checkArrayElementWrite checks stmt when it writes an element of an array,
+// and reports whether it does.
+func (c *Checker) checkArrayElementWrite(stmt *ast.AssignStmt, env *scope) (bool, error) {
+	index, ok := stmt.Target.(*ast.IndexExpr)
+	if !ok || index.Slice {
+		return false, nil
+	}
+	base, indexes, ok := c.arrayElementPlace(index, env)
+	if !ok {
+		return false, nil
+	}
+	return true, c.checkArrayElementAssign(stmt, base, indexes, env)
+}
+
+// arrayElementPlace splits an element write `base[i][j]` into the place that
+// holds the arrays and the indexes that pick the element, when base -- a
+// binding or a field path of one -- is an array. The type checker has already
+// refused every other shape of indexed write but a view's.
+func (c *Checker) arrayElementPlace(
+	index *ast.IndexExpr,
+	env *scope,
+) (ast.Expression, []ast.Expression, bool) {
+	indexes := []ast.Expression{index.Index}
+	var base ast.Expression = index.Target
+	for {
+		inner, ok := base.(*ast.IndexExpr)
+		if !ok {
+			break
+		}
+		indexes = append(indexes, inner.Index)
+		base = inner.Target
+	}
+	root, path, ok := directFieldRoot(base, env)
+	if !ok {
+		return nil, nil, false
+	}
+	placeType := strings.TrimPrefix(strings.TrimPrefix(root.typeName, "&var "), "&")
+	if path != "" {
+		fieldType, known := c.fieldPathType(placeType, path)
+		if !known {
+			return nil, nil, false
+		}
+		placeType = fieldType
+	}
+	return base, indexes, isBufferTypeName(placeType)
+}
+
+// checkArrayElementAssign checks a write into an element of an array. The
+// write lands in the array's storage, so it waits for every borrow of that
+// place -- a view the array lent is the usual one -- the way a field write
+// does.
+func (c *Checker) checkArrayElementAssign(
+	stmt *ast.AssignStmt,
+	base ast.Expression,
+	indexes []ast.Expression,
+	env *scope,
+) error {
+	if _, err := c.moveExpr(stmt.Value, env); err != nil {
+		return err
+	}
+	for _, index := range indexes {
+		if _, err := c.readExpr(index, env); err != nil {
+			return err
+		}
+	}
+	return c.checkAssignmentBorrowConflict(base, env)
 }
 
 // checkOwnerFieldOverwrite rejects assigning over a live owner field. The
@@ -4363,8 +4434,18 @@ func (c *Checker) readIndexExpr(expr *ast.IndexExpr, env *scope) (string, error)
 		// A lane is named by a literal the type checker has already bounded.
 		return elem, nil
 	}
+	// An element of an array is read out of the array, so reading one reads
+	// the array: a live writable view of it refuses the read the same way.
+	array := strings.TrimPrefix(strings.TrimPrefix(target, "&var "), "&")
+	if isBufferTypeName(array) && !expr.Slice {
+		if _, err := c.readExpr(expr.Index, env); err != nil {
+			return "", err
+		}
+		return array[strings.IndexByte(array, ']')+1:], nil
+	}
 	if !isViewTypeName(target) {
-		return "", errorf("move error: index/slice target expects a view (`[]T`), got %s", target)
+		return "", errorf(
+			"move error: index/slice target expects a view (`[]T`) or an array (`[N]T`), got %s", target)
 	}
 	if !expr.Slice {
 		if _, err := c.readExpr(expr.Index, env); err != nil {

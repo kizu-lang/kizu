@@ -1196,6 +1196,40 @@ fn (self: &var Emitter) write_buffer_as_bytes(module: &ir::Module, node: &ir::In
     return try self.fail_name1(module, "llvm error: buffer.as_bytes expects the storage of `[N]T`, got %s", storage_arg.type_name);
 }
 
+/// Projects the address of one element out of an array's storage, the Go
+/// `writeBufferAddr`. The index was bounds-checked when it was lowered.
+fn (self: &var Emitter) write_buffer_addr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 {
+        return try self.fail0("llvm error: buffer.addr expects the storage of `[N]T` and an index");
+    }
+    let storage_arg = node.args.get_or_panic(0);
+    let storage_text = ir::name_text(&module.names, storage_arg.type_name);
+    let storage_bytes = storage_text.as_bytes();
+    let array = deref_llvm_type(storage_bytes);
+    let elem = try self.buffer_elem(array) orelse
+        return try self.fail_name2(module, "llvm error: buffer.addr expects `&var [N]T` -> `&var T`, got %s -> %s",
+        storage_arg.type_name, node.result.type_name);
+    defer elem.deinit(self.allocator);
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_bytes = result_text.as_bytes();
+    let elem_bytes = elem.as_bytes();
+    let pointed = deref_llvm_type(result_bytes);
+    if !mem::equal_bytes(pointed, elem_bytes) {
+        return try self.fail_name2(module, "llvm error: buffer.addr expects `&var [N]T` -> `&var T`, got %s -> %s",
+            storage_arg.type_name, node.result.type_name);
+    }
+    let storage = try self.operand(module, storage_arg);
+    let position = try self.operand(module, node.args.get_or_panic(1));
+    let name = try self.local_name(module, node.result.name);
+    let llvm_array = try self.llvm_type(module, array);
+    try self.line4(
+        "  %s = getelementptr inbounds %s, ptr %s, i64 0, i64 %s",
+        Arg::Str(name), Arg::Str(llvm_array), Arg::Str(storage.operand), Arg::Str(position.operand)
+    );
+    try self.set_value(module, node.result, name);
+    return null;
+}
+
 /// Renders T from a `[N]T` spelling, null for any other spelling.
 fn (self: &var Emitter) buffer_elem(typ_name: []u8) -> !?string::String {
     if mem::len(typ_name) == 0 {

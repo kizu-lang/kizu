@@ -342,6 +342,15 @@ pub struct Lowerer {
     // memory because something writes through a `&var` borrow of them, and
     // the `&var` parameters that arrive as such storage.
     slots: array::Array<Name>,
+    // index_written names the locals an element write `x[i] = v` or
+    // `x.f[i] = v` starts from, the Go `indexWritten`. One that holds an
+    // array, or a struct holding one, is given a slot when it is bound; one
+    // holding a view writes through the view and keeps its SSA form.
+    index_written: array::Array<Name>,
+    // place_slots names the slots bound for index_written locals, the Go
+    // `placeSlots`: the storage is decided per binding, from the value's
+    // type, so it is recorded on the value rather than on the name.
+    place_slots: array::Array<Name>,
     // caller_storage_params names the parameters that arrive as the
     // caller's storage, apart from the locals that were given a slot of
     // their own: a match through one binds payloads where they lie, a match
@@ -524,6 +533,8 @@ pub fn new_lowerer_for_target(
         pending: array::new<GenericInstance>(allocator),
         pending_next: 0,
         slots: array::new<Name>(allocator),
+        index_written: array::new<Name>(allocator),
+        place_slots: array::new<Name>(allocator),
         caller_storage_params: array::new<Name>(allocator),
         generic_decls: map::new<i64, FactsHandle>(allocator),
         struct_decls: map::new<[]u8, ast::Declaration>(allocator),
@@ -1641,6 +1652,9 @@ fn (self: &var Lowerer) lower_function_named(
                 // that arrives as an address already reaches storage, and it
                 // is the caller's: wrapping it again would hand the callee a
                 // borrow of a borrow.
+                if self.is_index_written(facts.name) and self.holds_array_place(param.type_name) {
+                    try self.add_slot(facts.name);
+                }
                 if self.has_slot(facts.name) and !self.is_reference_type(param.type_name) {
                     try value_slots.append(self.allocator, facts.name);
                 }

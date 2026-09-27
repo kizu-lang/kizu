@@ -27,6 +27,8 @@ func (e *emitter) writeBufferInstr(instr *ir.Instr) error {
 		return e.writeBufferNew(instr)
 	case "buffer.as_bytes":
 		return e.writeBufferAsBytes(instr)
+	case "buffer.addr":
+		return e.writeBufferAddr(instr)
 	default:
 		return fmt.Errorf("wasm error: unsupported buffer instruction `%s`", instr.Op)
 	}
@@ -72,5 +74,29 @@ func (e *emitter) writeBufferAsBytes(instr *ir.Instr) error {
 	fmt.Fprintf(&e.out, "            (i32.store %s (i32.const %d))\n",
 		addressAt(slot, 4), size)
 	e.values[instr.Result.Name] = valueInfo{expr: slot}
+	return nil
+}
+
+// writeBufferAddr projects the address of one element out of an array's
+// storage. The index was bounds-checked when it was lowered.
+func (e *emitter) writeBufferAddr(instr *ir.Instr) error {
+	if len(instr.Args) != 2 {
+		return fmt.Errorf("wasm error: buffer.addr expects the storage of `[N]T` and an index")
+	}
+	_, elem, ok := e.bufferSize(derefWasmType(instr.Args[0].Type))
+	if !ok || derefWasmType(instr.Result.Type) != elem {
+		return fmt.Errorf("wasm error: buffer.addr expects `&var [N]T` -> `&var T`, got %s -> %s",
+			instr.Args[0].Type, instr.Result.Type)
+	}
+	cell, err := e.typeLayout(elem)
+	if err != nil {
+		return err
+	}
+	symbol := symbolName(instr.Result.Name)
+	offset := fmt.Sprintf("(i32.mul (i32.wrap_i64 %s) (i32.const %d))",
+		e.value(instr.Args[1]).expr, cell.size)
+	fmt.Fprintf(&e.out, "            (local.set %s (i32.add %s %s))\n",
+		symbol, e.value(instr.Args[0]).expr, offset)
+	e.values[instr.Result.Name] = valueInfo{expr: "(local.get " + symbol + ")"}
 	return nil
 }

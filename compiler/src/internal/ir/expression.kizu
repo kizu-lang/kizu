@@ -845,9 +845,34 @@ fn (self: &var Lowerer) lower_index_expr(
     index: ast::IndexExpr,
     out: &var Value
 ) -> !?diagnostic::Diagnostic {
+    if !index.slice {
+        let container = try self.assign_target_type(tree, index.target);
+        if !is_empty(container) and self.module.names.is_buffer_type(container) {
+            var element = empty_value();
+            if try self.lower_array_element_address(tree, index, &var element) |failed| {
+                return move failed;
+            }
+            let elem = try self.deref_type(element.type_name);
+            out.* = try self.emit1(Op::RefLoad, elem, element);
+            return null;
+        }
+    }
     var target = empty_value();
     if try self.lower_expr(tree, index.target, &var target) |failed| {
         return move failed;
+    }
+    if !index.slice and self.module.names.is_buffer_type(target.type_name) {
+        // An array with no place of its own -- a call's result -- is read
+        // through a slot the value is written into.
+        let slot_type = try self.module.names.prefixed("&var ", target.type_name);
+        let storage = try self.emit1(Op::LocalSlot, slot_type, target);
+        var element = empty_value();
+        if try self.index_array_storage(tree, index, storage, &var element) |failed| {
+            return move failed;
+        }
+        let elem = try self.deref_type(element.type_name);
+        out.* = try self.emit1(Op::RefLoad, elem, element);
+        return null;
     }
     let target_text = name_text(&self.module.names, target.type_name);
     let target_bytes = target_text.as_bytes();
@@ -935,6 +960,137 @@ fn (self: &var Lowerer) cond_fail0(
 /// answers both halves of the question -- which is what an Array element
 /// access has always done, and what lets an index walk cost one branch rather
 /// than two.
+/// Stores into one element of an array, the Go `lowerArrayElementAssign`. An
+/// array whose place has storage -- a slot, a `&var` parameter, a field of
+/// one -- is written where it lies. One held as a value is written into a
+/// copy of itself in a slot and the place is then assigned the copy, the way
+/// a field write on a value rebuilds the struct.
+fn (self: &var Lowerer) lower_array_element_assign(
+    tree: &var ast::Ast,
+    target: ast::Expression,
+    value: Value
+) -> !?diagnostic::Diagnostic {
+    let index = ownership::index_expr(tree, target) orelse
+        return try self.fail0("ir error: array element write expects an index");
+    let base = array_place_root(tree, target);
+    if try self.place_storage(tree, base) |_| {
+        var element = empty_value();
+        if try self.lower_array_element_address(tree, index, &var element) |failed| {
+            return move failed;
+        }
+        let _ = try self.emit2(Op::RefStore, self.common.void_type, element, value);
+        return null;
+    }
+    var whole = empty_value();
+    if try self.lower_expr(tree, base, &var whole) |failed| {
+        return move failed;
+    }
+    let slot_type = try self.module.names.prefixed("&var ", whole.type_name);
+    let storage = try self.emit1(Op::LocalSlot, slot_type, whole);
+    var element = empty_value();
+    if try self.array_element_address_in(tree, target, base, storage, &var element) |failed| {
+        return move failed;
+    }
+    let _ = try self.emit2(Op::RefStore, self.common.void_type, element, value);
+    let updated = try self.emit1(Op::RefLoad, whole.type_name, storage);
+    return self.lower_assign_target(tree, base, updated);
+}
+
+/// Returns the array place a chain of element indexes starts from, the Go
+/// `arrayPlaceRoot`: `s.m` for `s.m[i][j]`.
+fn array_place_root(tree: &ast::Ast, expression: ast::Expression) -> ast::Expression {
+    var root = expression;
+    while ownership::index_expr(tree, root) |index| {
+        root = index.target;
+    }
+    return root;
+}
+
+/// Returns the storage a place already has, the Go `placeStorage`: the slot
+/// of a local, a `&var` parameter, or a field projected out of one.
+fn (self: &var Lowerer) place_storage(tree: &var ast::Ast, expression: ast::Expression) -> !?Value {
+    if try self.slot_pointer(tree, expression) |slot| {
+        return slot;
+    }
+    return self.lower_field_storage(tree, expression);
+}
+
+/// Projects the element a chain of indexes names out of storage holding the
+/// chain's root, the Go `arrayElementAddressIn`.
+fn (self: &var Lowerer) array_element_address_in(
+    tree: &var ast::Ast,
+    expression: ast::Expression,
+    root: ast::Expression,
+    root_storage: Value,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    let index = ownership::index_expr(tree, expression) orelse
+        return try self.fail0("ir error: array element expects an index");
+    var storage = root_storage;
+    if ownership::index_expr(tree, index.target) |_| {
+        if index.target.node != root.node {
+            var projected = empty_value();
+            if try self.array_element_address_in(tree, index.target, root, root_storage, &var projected) |failed| {
+                return move failed;
+            }
+            storage = projected;
+        }
+    }
+    return self.index_array_storage(tree, index, storage, out);
+}
+
+/// Lowers `a[i]` on an array to the element's address inside the array's
+/// storage, the Go `lowerArrayElementAddress`, so a read loads it and a
+/// write stores through it. Nested elements chain one projection per index:
+/// `m[i][j]` is the j-th cell of the i-th row's storage.
+fn (self: &var Lowerer) lower_array_element_address(
+    tree: &var ast::Ast,
+    index: ast::IndexExpr,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var storage = empty_value();
+    var nested = false;
+    if ownership::index_expr(tree, index.target) |inner| {
+        let inner_type = try self.assign_target_type(tree, index.target);
+        if !is_empty(inner_type) and self.module.names.is_buffer_type(inner_type) {
+            nested = true;
+            if try self.lower_array_element_address(tree, inner, &var storage) |failed| {
+                return move failed;
+            }
+        }
+    }
+    if !nested {
+        if try self.lower_array_storage(tree, index.target, &var storage) |failed| {
+            return move failed;
+        }
+    }
+    return self.index_array_storage(tree, index, storage, out);
+}
+
+/// Bounds-checks the index against N and projects the element's address out
+/// of an array's storage, the Go `indexArrayStorage`.
+fn (self: &var Lowerer) index_array_storage(
+    tree: &var ast::Ast,
+    index: ast::IndexExpr,
+    storage: Value,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var position = empty_value();
+    let index_expr = index.index orelse return try self.fail0("ir error: array index is missing");
+    if try self.lower_expr(tree, index_expr, &var position) |failed| {
+        return move failed;
+    }
+    let array = try self.deref_type(storage.type_name);
+    let length_text = try self.module.names.buffer_length_text(array);
+    let length = try self.emit_const(self.common.i64_type, length_text);
+    let bounds = try self.name("bounds");
+    try self.check_index_in_range(index.span, position, length, bounds);
+    let elem = try self.module.names.buffer_elem(array);
+    let address_type = try self.module.names.prefixed("&var ", elem);
+    out.* = try self.emit2(Op::BufferAddr, address_type, storage, position);
+    return null;
+}
+
 fn (self: &var Lowerer) check_index_in_range(
     span: ast::Span,
     index: Value,
