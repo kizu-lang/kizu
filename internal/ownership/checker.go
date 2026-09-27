@@ -4101,6 +4101,10 @@ func (c *Checker) classifyMatchPayload(typeName string) matchPayloadClass {
 	if err != nil {
 		return payloadBorrows
 	}
+	// A fixed-length array of copies is itself a copy, whatever the spelling.
+	if _, isArray := parsed.(*typ.Buffer); isArray && c.isCopyType(typeName) {
+		return payloadCopies
+	}
 	name, ok := parsed.(*typ.Name)
 	if !ok {
 		// []T, &T, ?T, E!T: views and wrappers keep borrow handling.
@@ -9302,6 +9306,11 @@ func (c *Checker) isPlainDataType(typeName string, seen map[string]bool) bool {
 	}
 	if c.enums[typeName] != nil || c.errorSets[typeName] != nil {
 		return true
+	}
+	// A fixed-length array is its elements laid side by side, so it is plain
+	// data exactly when they are.
+	if isBufferTypeName(typeName) {
+		return c.isPlainDataType(typeName[strings.IndexByte(typeName, ']')+1:], seen)
 	}
 	// An arena handle is an opaque ID; the arena owns the value, so
 	// duplicating the ID creates no cleanup obligation.

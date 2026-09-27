@@ -24,8 +24,8 @@ func (e *emitter) typeLayout(typ string) (size int, align int, ok bool) {
 // typeLayoutVisiting computes a type layout while tracking the named aggregates
 // already on the recursion path so a by-value cycle is rejected, not looped. It
 // only accepts the shapes the #991 value layout table defines inline; every
-// other type (error unions, raw pointers, non-i64/u8 integer widths, and
-// unknown type names) reports ok=false so it fails visibly rather than being
+// other type (error unions, raw pointers, and unknown type names) reports
+// ok=false so it fails visibly rather than being
 // silently treated as a pointer.
 func (e *emitter) typeLayoutVisiting(typ string, seen []string) (int, int, bool) {
 	if size, align, ok := primitiveLayout(typ); ok {
@@ -64,6 +64,15 @@ func (e *emitter) typeLayoutVisiting(typ string, seen []string) (int, int, bool)
 	if st, ok := e.module.Structs[typ]; ok {
 		return e.structLayout(typ, st, seen)
 	}
+	// A fixed-length array is its elements side by side, each already padded
+	// to its own alignment.
+	if count, elem, ok := e.bufferSize(typ); ok {
+		elemSize, elemAlign, ok := e.typeLayoutVisiting(elem, seen)
+		if !ok {
+			return 0, 0, false
+		}
+		return int(count) * elemSize, elemAlign, true
+	}
 	if union, ok := e.module.Unions[typ]; ok {
 		payload, _, ok := e.unionPayloadStorage(typ, union, seen)
 		if !ok {
@@ -81,7 +90,11 @@ func primitiveLayout(typ string) (int, int, bool) {
 		return 0, 1, true
 	case "bool", "i8", "u8":
 		return 1, 1, true
-	case "i64", "f64":
+	case "i16", "u16":
+		return 2, 2, true
+	case "i32", "u32":
+		return 4, 4, true
+	case "i64", "u64", "usize", "isize", "f64":
 		return 8, 8, true
 	case "f32":
 		return 4, 4, true

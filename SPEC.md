@@ -1405,19 +1405,24 @@ writable slice place(`&var []T` binding)への indexed assignment
 決定 3: Array は std 定義の struct であり、組み込み indexing は IR の
 layout 結合か隠れ call になるため)。
 
-固定長の stack buffer は `[N]T` です(ADR-0097)。N は正の整数 literal、T は
-固定幅の数値型(`u8 u16 u32 u64 i8 i16 i32 i64 f32 f64`)で、
+固定長配列は `[N]T` です(ADR-0097)。N 個の T を inline に並べた値で、N は正の
+整数 literal、T は固定幅の数値型(`u8 u16 u32 u64 i8 i16 i32 i64 f32 f64`)です。
 `var buf = [64]u8{};` / `var words = [16]u32{};` が zero 埋めで生成します。
-view の入口は、`[N]u8` では `buf.as_bytes()` / `buf.as_mut_bytes()`(規則は
-`String` の同名 method と同じ: 束縛必須、`as_mut_bytes` は mutable binding 限定で
-exclusive)、それ以外の T では `words.as_slice()` / `words.as_mut_slice()` で、
-view の型は `[]T` です。名前が返るものを言うので、`[N]u32` に `as_bytes` は
-なく、`[N]u8` に `as_slice` はありません。`[]u8` と `[]T` の間の reinterpret は
-持ちません: word の bytes がどの順かは source に書きます。
-stack buffer は local 限定です: struct field / union payload / parameter /
-返り値 / container element に置けず、`&` / `&var` で直接 borrow できません。
-関数境界へは view を渡します。buffer への直接 indexing は持ちません(書き込みは
-view 経由の 1 経路)。stack buffer は owner ではなく、`deinit` は不要です。
+初期化子のない宣言は持ちません。
+
+`[N]T` は copy 型(§8)で、struct field、union payload、関数 parameter、返り値、
+container の要素に置けます。値として渡すと中身ごと複製されます。大きい配列を
+複製せずに渡すときは `&[N]T` / `&var [N]T` で借ります(§9 の借用規則がそのまま
+掛かります)。
+
+要素は view を通して読み書きします。view の入口は、`[N]u8` では
+`buf.as_bytes()` / `buf.as_mut_bytes()`(規則は `String` の同名 method と同じ:
+束縛必須、`as_mut_bytes` は書ける place に限り exclusive)、それ以外の T では
+`words.as_slice()` / `words.as_mut_slice()` で、view の型は `[]T` です。receiver は
+binding のほか、そこを root とする field path(`cell.lengths.as_slice()`)も
+書けます。名前が返るものを言うので、`[N]u32` に `as_bytes` はなく、`[N]u8` に
+`as_slice` はありません。`[]u8` と `[]T` の間の reinterpret は持ちません: word の
+bytes がどの順かは source に書きます。`[N]T` は owner ではなく、`deinit` は不要です。
 
 ### 7.2 明示 cast
 
@@ -1517,6 +1522,7 @@ i8 / i16 / i32 / i64 / u8 / u16 / u32 / u64 / usize / isize
 f32 / f64
 enum / error set
 std::arena::Handle<T>
+[N]T(T が copy)
 copy aggregate
 ```
 
@@ -1524,8 +1530,8 @@ copy aggregate
 所有するのは arena です。ID の複製は解放責務を生まないため copy です
 (§10)。
 
-copy aggregate は、scalar・enum・error set・arena handle・copy aggregate
-だけを field / payload に持つ struct / union です(#1597)。copy 判定は型の構造から
+copy aggregate は、scalar・enum・error set・arena handle・copy の `[N]T`・
+copy aggregate だけを field / payload に持つ struct / union です(#1597)。copy 判定は型の構造から
 導出され、注釈はありません。ただし明示 `deinit` を宣言した型は、
 その宣言が cleanup contract なので全 field が copy でも move-only に留まります。
 `[]u8` を transitively 含む struct は copy ではなく view の規則
@@ -3392,8 +3398,7 @@ source であり、戻り値は local binding に束縛します。戻り値の�
 borrow が生きている間は対象 `Box<T>` の move / `take` / `deinit` を禁止します。
 
 **element に置ける型.** `Array<T>` の element には arena、handle、nested
-array、`std::map::Map<K, V>` を置けます。raw pointer と stack buffer は
-置けません。この制限は struct field と union payload の中も再帰的に検査します。
+array、`std::map::Map<K, V>`、`[N]T` を置けます。raw pointer は置けません。この制限は struct field と union payload の中も再帰的に検査します。
 owned collection が provenance または stack lifetime を保持できない型は拒否します。
 
 **`String` は non-copy / move-only** です。

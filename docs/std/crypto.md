@@ -77,9 +77,7 @@ if crypto::equal_constant_time(mine, theirs) {
 `digest_length(hash)` はその digest の長さです。
 
 message は 1 回の呼び出しで全部渡します。少しずつ渡す hasher はありません。
-途中の block を struct に持たせる必要があり、stack buffer は struct field に
-置けないからです(SPEC §7)。組み立て中のものを hash するなら、組み立ててから
-渡します。
+組み立て中のものを hash するなら、組み立ててから渡します。
 
 ## 鍵導出
 

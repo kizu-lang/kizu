@@ -80,13 +80,19 @@ func (e *emitter) llvmType(typ string) string {
 	if _, ok := e.module.Unions[typ]; ok {
 		return llvmUnionTypeName(typ)
 	}
+	if size, elem, ok := e.bufferSize(typ); ok {
+		return fmt.Sprintf("[%d x %s]", size, e.llvmType(elem))
+	}
 	return llvmPrimitiveType(typ)
 }
 
 // usesIndirectStructParamABI reports whether module-local functions pass a
 // value through an explicit pointer instead of target aggregate lowering.
 func (e *emitter) usesIndirectStructParamABI(typ string) bool {
-	_, ok := e.module.Structs[typ]
+	if _, ok := e.module.Structs[typ]; ok {
+		return true
+	}
+	_, _, ok := e.bufferSize(typ)
 	return ok
 }
 

@@ -930,14 +930,14 @@ func TestEmitUnionRejectsRecursivePayload(t *testing.T) {
 	}
 }
 
-// TestEmitUnionRejectsUnsupportedPayloadWidth checks a payload outside the
-// value layout table (a non-i64/u8 integer width) fails visibly rather than
-// being silently lowered.
-func TestEmitUnionRejectsUnsupportedPayloadWidth(t *testing.T) {
+// TestEmitUnionRejectsUnsupportedPayloadShape checks a payload outside the
+// value layout table (a raw pointer) fails visibly rather than being silently
+// lowered.
+func TestEmitUnionRejectsUnsupportedPayloadShape(t *testing.T) {
 	module := &ir.Module{
 		Unions: map[string]ir.Union{
 			"Narrow": {Name: "Narrow", Variants: map[string]ir.UnionVariant{
-				"Value": {Name: "Value", Index: 0, Payload: "i32"},
+				"Value": {Name: "Value", Index: 0, Payload: "ptr<u8>"},
 			}},
 		},
 		Functions: []*ir.Function{{
@@ -951,7 +951,7 @@ func TestEmitUnionRejectsUnsupportedPayloadWidth(t *testing.T) {
 	}
 	_, err := Emit(module)
 	if err == nil {
-		t.Fatal("expected emit to reject an unsupported union payload width")
+		t.Fatal("expected emit to reject an unsupported union payload shape")
 	}
 	if !strings.Contains(err.Error(), "union `Narrow` has an unsupported tagged-union payload shape") {
 		t.Fatalf("got %q", err.Error())

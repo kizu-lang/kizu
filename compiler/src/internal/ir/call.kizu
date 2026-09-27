@@ -1424,6 +1424,10 @@ fn (self: &var Lowerer) lower_method_call_expr(
     args: ast::ExpressionList,
     out: &var Value
 ) -> !?diagnostic::Diagnostic {
+    let receiver_type = try self.assign_target_type(tree, field.receiver);
+    if !is_empty(receiver_type) and self.is_buffer_ir_type(receiver_type) {
+        return self.lower_buffer_method(tree, field, args, out);
+    }
     var receiver = empty_value();
     if try self.lower_method_receiver(tree, field, &var receiver) |failed| {
         return move failed;
@@ -1448,9 +1452,6 @@ fn (self: &var Lowerer) lower_method_call_expr(
             Arg::Str(method),
             Arg::Str(rendered)
         );
-    }
-    if self.is_buffer_ir_type(receiver.type_name) {
-        return self.lower_buffer_method(tree, method, receiver, args, out);
     }
     var params = no_params();
     if try self.method_callee_params(tree, receiver.type_name, method, &var params) |failed| {
@@ -1507,26 +1508,66 @@ fn (self: &var Lowerer) lower_resolved_method(
     );
 }
 
-/// Lowers stack buffer view methods (ADR-0097), the Go `lowerBufferMethod`.
-/// Both view forms hand back the same {ptr, len} value; mutability is a
-/// checker-level permission, not a runtime representation.
+/// Lowers the view methods of a fixed-length array (ADR-0097), the Go
+/// `lowerBufferMethod`. A view points into storage, so the receiver is
+/// lowered to the array's own place: the slot of a local, a `&var`
+/// parameter, or a field projected out of one. A receiver with no place -- a
+/// value parameter, a field of a value -- is written to a slot of its own
+/// first; the checker lends a read view of it only while nothing writes the
+/// value, so the view sees what the value holds. Every view form hands back
+/// the same {ptr, len}: mutability is a checker-level permission, not a
+/// runtime representation.
 fn (self: &var Lowerer) lower_buffer_method(
     tree: &var ast::Ast,
-    name: Name,
-    receiver: Value,
+    field: ast::FieldExpr,
     args: ast::ExpressionList,
     out: &var Value
 ) -> !?diagnostic::Diagnostic {
-    if self.name_is(name, "as_bytes") or self.name_is(name, "as_mut_bytes") or
-        self.name_is(name, "as_slice") or self.name_is(name, "as_mut_slice") {
-        if ownership::arg_count(tree, args) != 0 {
-            return try self.fail1(tree, "ir error: buffer `%s` expects 0 args", Arg::Str(name));
-        }
-        let view = try self.module.names.buffer_view(receiver.type_name);
-        out.* = try self.emit1(Op::BufferAsBytes, view, receiver);
+    let name = try self.text_name(tree, field.name);
+    if !self.name_is(name, "as_bytes") and !self.name_is(name, "as_mut_bytes") and
+        !self.name_is(name, "as_slice") and !self.name_is(name, "as_mut_slice") {
+        return try self.fail1(tree, "ir error: unknown buffer method `%s`", Arg::Str(name));
+    }
+    if ownership::arg_count(tree, args) != 0 {
+        return try self.fail1(tree, "ir error: buffer `%s` expects 0 args", Arg::Str(name));
+    }
+    var storage = empty_value();
+    if try self.lower_array_storage(tree, field.receiver, &var storage) |failed| {
+        return move failed;
+    }
+    let array = try self.deref_type(storage.type_name);
+    let view = try self.module.names.buffer_view(array);
+    out.* = try self.emit1(Op::BufferAsBytes, view, storage);
+    return null;
+}
+
+/// Lowers an array-valued place to its address, the Go `lowerArrayStorage`:
+/// the storage a slot, a `&var` parameter, or a field projection already
+/// is, or a fresh slot holding the value when the place has none.
+fn (self: &var Lowerer) lower_array_storage(
+    tree: &var ast::Ast,
+    expression: ast::Expression,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if try self.slot_pointer(tree, expression) |slot| {
+        out.* = slot;
         return null;
     }
-    return try self.fail1(tree, "ir error: unknown buffer method `%s`", Arg::Str(name));
+    if try self.lower_field_storage(tree, expression) |storage| {
+        out.* = storage;
+        return null;
+    }
+    var value = empty_value();
+    if try self.lower_expr(tree, expression, &var value) |failed| {
+        return move failed;
+    }
+    if self.is_reference_type(value.type_name) {
+        out.* = value;
+        return null;
+    }
+    let slot_type = try self.module.names.prefixed("&var ", value.type_name);
+    out.* = try self.emit1(Op::LocalSlot, slot_type, value);
+    return null;
 }
 
 /// Returns the parameters a method call's callee declares after self, the

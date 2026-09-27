@@ -1,0 +1,75 @@
+import std::array;
+import std::mem;
+
+// A fixed-length array is a value: it sits inline in a struct or a union
+// payload, crosses a call by value, and copies as a whole.
+struct Cell {
+    lengths: [3]f64,
+    counts: [3]i64,
+}
+
+union Shape {
+    Box([3]f64),
+    Point,
+}
+
+fn sum(values: [3]f64) -> f64 {
+    let view = values.as_slice();
+    return view[0] + view[1] + view[2];
+}
+
+fn scaled(scale: f64) -> [3]f64 {
+    var out = [3]f64{};
+    let view = out.as_mut_slice();
+    view[0] = scale;
+    view[1] = scale * 2.0;
+    view[2] = scale * 3.0;
+    return out;
+}
+
+// A borrow lends the array itself: the callee writes where the caller keeps it.
+fn widen(cell: &var Cell) -> void {
+    let view = cell.lengths.as_mut_slice();
+    view[0] = view[0] + 10.0;
+    return;
+}
+
+fn first(values: &[3]f64) -> f64 {
+    let view = values.as_slice();
+    return view[0];
+}
+
+fn main() -> !void {
+    let a = scaled(1.5);
+    var cell = Cell { lengths: a, counts: [3]i64{} };
+    let b = a;
+    print(sum(b));
+    widen(&var cell);
+    print(sum(cell.lengths));
+    print(sum(a));
+    print(first(&cell.lengths));
+    let shape = Shape::Box(cell.lengths);
+    match shape {
+        Box(values) => print(sum(values)),
+        Point => print(0),
+    }
+    let allocator = mem::page_allocator();
+    var rows = array::new<[3]f64>(allocator);
+    defer rows.deinit(allocator);
+    try rows.append(allocator, a);
+    try rows.append(allocator, cell.lengths);
+    if rows.get(1) |row| {
+        print(sum(row));
+    }
+    return;
+}
+
+// run
+// features: stack-buffer
+// output:
+// 9.0
+// 19.0
+// 9.0
+// 11.5
+// 19.0
+// 19.0

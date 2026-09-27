@@ -58,11 +58,6 @@ func TestTypeTableWrappedPredicatesWalkRetainedGraphs(t *testing.T) {
 			match: table.containsCompileTimeOnly,
 		},
 		{
-			name:  "buffer in nested generic",
-			value: "Pair<?T, [4]u8>",
-			match: table.containsBufferType,
-		},
-		{
 			name:  "borrow optional in nested generic",
 			value: "Pair<?&T, bool>",
 			match: table.containsBorrowOptional,

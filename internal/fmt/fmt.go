@@ -962,14 +962,22 @@ func labelReference(t token.Token) bool {
 	return t.Type == token.Break || t.Type == token.Continue
 }
 
-// stackBufferBrace reports whether the `{` about to be written opens a
-// `[N]u8{}` stack buffer, whose brace hugs the type (SPEC §6.x).
+// stackBufferBrace reports whether the `{` about to be written opens an
+// `[N]T{}` array literal, whose brace hugs the type (SPEC §7.1). A return
+// type `-> [N]T` is followed by the function body's brace instead, which
+// keeps its space.
 func (b *builder) stackBufferBrace() bool {
 	i := b.prevIndex
-	return b.prev.Type == token.Ident && i >= 3 &&
-		b.tokens[i-1].Type == token.RBracket &&
-		b.tokens[i-2].Type == token.Int &&
-		b.tokens[i-3].Type == token.LBracket
+	if b.prev.Type != token.Ident {
+		return false
+	}
+	lengths := 0
+	for i >= 3 && b.tokens[i-1].Type == token.RBracket &&
+		b.tokens[i-2].Type == token.Int && b.tokens[i-3].Type == token.LBracket {
+		lengths++
+		i -= 3
+	}
+	return lengths > 0 && (i == 0 || b.tokens[i-1].Type != token.Arrow)
 }
 
 // shiftHalves reports whether prev and curr are the two halves of one shift.
