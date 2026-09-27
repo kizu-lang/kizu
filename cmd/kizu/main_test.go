@@ -1853,6 +1853,43 @@ int main(void) {
 	}
 }
 
+// TestBuildTargetNativeObjectCStructByValueSmoke passes C structs of every
+// shape the host's C calling convention tells apart to C functions and takes
+// them back, and has the C host make the same calls to compare. It runs on the
+// arm64 and x86-64 machines CI has, which is where each convention is proven.
+func TestBuildTargetNativeObjectCStructByValueSmoke(t *testing.T) {
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang is required for native build smoke")
+	}
+	root := t.TempDir()
+	files := map[string]string{}
+	for _, name := range []string{"kizu.toml", "host.c", "src/lib.kizu"} {
+		text, err := os.ReadFile(filepath.Join("testdata", "c_struct_by_value", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[name] = string(text)
+	}
+	writeFileTree(t, root, files)
+	object := filepath.Join(root, "lib.o")
+	build := kizuCommand("build", "--target", "native", "--emit", "obj", "-o", object, root)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("native object build failed: %v\n%s", err, out)
+	}
+	host := filepath.Join(root, "host")
+	link := exec.Command("clang", filepath.Join(root, "host.c"), object, "-o", host)
+	if out, err := link.CombinedOutput(); err != nil {
+		t.Fatalf("host link failed: %v\n%s", err, out)
+	}
+	out, err := exec.Command(host).CombinedOutput()
+	if err != nil {
+		t.Fatalf("host failed: %v\n%s", err, out)
+	}
+	if got := string(out); got != "ok 61023\n" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 // writeFileTree writes each named file under root, making its directories.
 func writeFileTree(t *testing.T, root string, files map[string]string) {
 	t.Helper()

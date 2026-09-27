@@ -456,6 +456,16 @@ func TargetIsArm64(triple string) bool {
 	return strings.Contains(lower, "aarch64") || strings.Contains(lower, "arm64")
 }
 
+// TargetIsX86_64 reports whether a native target triple names a 64-bit x86
+// machine. An omitted triple names the host.
+func TargetIsX86_64(triple string) bool {
+	if triple == "" {
+		return runtime.GOARCH == "amd64"
+	}
+	lower := strings.ToLower(triple)
+	return strings.HasPrefix(lower, "x86_64") || strings.HasPrefix(lower, "amd64")
+}
+
 // clangOptimizationFlags select the native toolchain optimization level.
 // `--opt` is asked for when the binary's own speed is what matters, so it asks
 // for the most the toolchain offers: on the compiler itself -O3 is 1.4% faster

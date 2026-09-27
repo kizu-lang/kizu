@@ -13,26 +13,30 @@ import (
 	typpkg "github.com/kizu-lang/kizu/internal/typ"
 )
 
-// Emit formats a typed SSA IR module as LLVM IR.
+// Emit formats a typed SSA IR module as LLVM IR. Text written for no native
+// target passes a C struct by value the arm64 Linux way.
 func Emit(module *ir.Module) (string, error) {
-	return emit(module, false)
+	return emit(module, false, ArchArm64)
 }
 
 // EmitNative formats a module for the native target, which on Darwin keeps a
-// frame record in every function that calls.
-func EmitNative(module *ir.Module, darwin bool) (string, error) {
-	return emit(module, darwin)
+// frame record in every function that calls, and passes a C struct by value
+// the way arch's C calling convention does.
+func EmitNative(module *ir.Module, darwin bool, arch Arch) (string, error) {
+	return emit(module, darwin, arch)
 }
 
-// emit formats a module, with frame records when frameRecords is set.
-func emit(module *ir.Module, frameRecords bool) (string, error) {
+// emit formats a module for a target: darwin keeps frame records.
+func emit(module *ir.Module, darwin bool, arch Arch) (string, error) {
 	e := &emitter{
 		module:       module,
 		types:        typpkg.NewTable(),
 		strings:      map[string]string{},
 		tables:       map[*ir.Instr]string{},
 		values:       map[string]valueInfo{},
-		frameRecords: frameRecords,
+		frameRecords: darwin,
+		darwin:       darwin,
+		arch:         arch,
 	}
 	if err := e.emit(); err != nil {
 		return "", err
@@ -69,6 +73,10 @@ type emitter struct {
 	entryParamLoads []string
 	wroteParamLoads bool
 	frameRecords    bool
+	// darwin and arch are the native target, which decides how a C struct
+	// travels by value (cabi.go).
+	darwin bool
+	arch   Arch
 	// aggregates names the field types of each optional and error union the
 	// module declares, which is what a phi of one is split along.
 	aggregates map[string][]string
@@ -752,6 +760,13 @@ func (e *emitter) externalCallDecl(name string, instr *ir.Instr) string {
 			strings.Join(params, ", "),
 		)
 	}
+	if instr.ExternABI == "c" {
+		if args := e.cArgs(instr, false); e.usesCStructValues(instr.Result.Type, args) {
+			result, params := e.cCallSignature(instr.Result.Type, args)
+			return fmt.Sprintf("declare %s @%s(%s)",
+				result, llvmFunctionName(name), strings.Join(params, ", "))
+		}
+	}
 	params := make([]string, 0, len(instr.Args))
 	for index, arg := range instr.Args {
 		// A parameter handed the address of a copy is a pointer to C.
@@ -767,6 +782,36 @@ func (e *emitter) externalCallDecl(name string, instr *ir.Instr) string {
 		llvmFunctionName(name),
 		strings.Join(params, ", "),
 	)
+}
+
+// cArgs describes a C call's arguments for the convention's rewriting. With
+// operands set, it also writes the copies borrowed arguments are lent from
+// and spells each operand; without, it only names the parameters.
+func (e *emitter) cArgs(instr *ir.Instr, operands bool) []cArg {
+	args := make([]cArg, 0, len(instr.Args))
+	for index, arg := range instr.Args {
+		declared := index < len(instr.CallParams)
+		if declared && instr.CallParams[index].TakesAddressOf(arg.Type) {
+			described := cArg{typ: "ptr", param: "ptr"}
+			if operands {
+				described.operand = e.copyAddressArg(arg, index)
+			}
+			args = append(args, described)
+			continue
+		}
+		byValue := e.isCStructValue(arg.Type) &&
+			(!declared || instr.CallParams[index].Passing == ir.PassValue)
+		described := cArg{typ: arg.Type, param: e.llvmType(arg.Type), byValue: byValue}
+		if operands {
+			value := e.value(arg)
+			described.operand = value.operand
+			if !byValue {
+				described.operand = described.param + " " + value.operand
+			}
+		}
+		args = append(args, described)
+	}
+	return args
 }
 
 // writeStructTypes writes named LLVM aggregate definitions for declared structs.
@@ -1933,6 +1978,11 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	if !foreignC && e.functionNames[name] {
 		return e.writeInternalCall(name, instr)
 	}
+	if foreignC {
+		if args := e.cArgs(instr, false); e.usesCStructValues(instr.Result.Type, args) {
+			return e.writeCStructResult(name, instr)
+		}
+	}
 	args := make([]string, 0, len(instr.Args))
 	for index, arg := range instr.Args {
 		// A foreign callee carries its declared passing on the call; a
@@ -1957,6 +2007,19 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = %s\n", resultName, call)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
+}
+
+// writeCStructResult writes a C call that passes or returns a struct by value
+// and binds its result.
+func (e *emitter) writeCStructResult(name string, instr *ir.Instr) error {
+	result, err := e.writeCStructCall(llvmFunctionName(name), instr.Result.Type, e.cArgs(instr, true))
+	if err != nil {
+		return err
+	}
+	if instr.Result.Type != "void" {
+		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: result}
+	}
 	return nil
 }
 

@@ -52,7 +52,7 @@ Kizu の通常 `struct` は C layout を約束しない。C と共有する layo
 | `@repr("c")` attribute | attribute は link 情報のためのもの。layout は型の宣言そのもので、`extern "c" fn` が ABI を語で名乗るのと揃える |
 | `extern struct`(ABI 名なし) | `extern "c" fn` が ABI を書くのに struct だけ省くと、別 ABI を足したとき綴りが割れる |
 | 通常 struct を暗黙に C layout にする | Kizu の layout を C との約束で縛る。境界は書いて見えるべき |
-| struct の値渡し | register への載せ方が platform ごとに違う。pointer なら同じ意味で、必要な例も無い |
+| struct の値渡し | register への載せ方が platform ごとに違う。pointer なら同じ意味で、必要な例も無い(ADR-0153 で値渡しを採用) |
 | field を `pub` 必須にする | C が名前を決めているので書いても情報が無い。書けなくして綴りを 1 つにする |
 
 ## Runtime symbols

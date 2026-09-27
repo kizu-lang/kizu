@@ -37,7 +37,7 @@ func linkModule(module *ir.Module, path string) (string, error) {
 		return "", err
 	}
 	ir.KeepTargetReachableFunctions(module, "c", "main")
-	llvmIR, err := llvm.EmitNative(module, host == stdtarget.NativeDarwin)
+	llvmIR, err := llvm.EmitNative(module, host == stdtarget.NativeDarwin, nativeArch(""))
 	if err != nil {
 		return "", err
 	}
@@ -357,6 +357,19 @@ func wasmExportABI(target wasm.Target) string {
 	return ""
 }
 
+// nativeArch is the machine a native triple names, the host when it is
+// omitted.
+func nativeArch(triple string) llvm.Arch {
+	switch {
+	case native.TargetIsArm64(triple):
+		return llvm.ArchArm64
+	case native.TargetIsX86_64(triple):
+		return llvm.ArchX86_64
+	default:
+		return llvm.ArchOther
+	}
+}
+
 // emitNativeFile lowers and links a source file into a native executable.
 func emitNativeFile(args []string) error {
 	options, err := parseNativeBuildArgs(args)
@@ -377,7 +390,8 @@ func emitNativeFile(args []string) error {
 	if err := keepNativeRoots(module, options.Emit); err != nil {
 		return err
 	}
-	llvmIR, err := llvm.EmitNative(module, target == stdtarget.NativeDarwin)
+	llvmIR, err := llvm.EmitNative(module, target == stdtarget.NativeDarwin,
+		nativeArch(options.Triple))
 	if err != nil {
 		return err
 	}
