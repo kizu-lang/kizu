@@ -932,13 +932,12 @@ func validateHostFunctionSignature(
 }
 
 // validateCHostFunctionTypes limits a C function's boundary to what C can
-// name: integers, floats, bool, raw pointers, and an extern struct lent as
-// `&S` / `&var S`, which C receives as a pointer to the struct. A view, an
-// owner, a Kizu struct, or an error union has no C representation; passing
-// one hands C the address of something it cannot read, and taking one back
-// hands Kizu a value C never built. An extern struct by value is refused
-// too: how C passes a struct in registers is per platform, and a pointer
-// says the same thing everywhere.
+// name: integers, floats, bool, raw pointers, and an extern struct, by value
+// or lent as `&S` / `&var S`, which C receives as a pointer to the struct. A
+// view, an owner, a Kizu struct, or an error union has no C representation;
+// passing one hands C the address of something it cannot read, and taking one
+// back hands Kizu a value C never built. How a struct by value travels is the
+// target's C calling convention, which the backend follows (llvm/cabi.go).
 func validateCHostFunctionTypes(
 	fn ast.FunctionSignature,
 	params []Type,
@@ -960,20 +959,14 @@ func validateCHostFunctionTypes(
 				"C function `%s` parameter %d is a borrow (`%s`), which C cannot receive",
 				fn.Name, index+1, spelled))
 		}
-		if cHostScalar(param) {
+		if cHostScalar(param) || isExternStruct(param) {
 			continue
-		}
-		if isExternStruct(param) {
-			return cHostTypeError(fn.Span, fmt.Sprintf(
-				"C function `%s` parameter %d takes extern struct `%s` by value; "+
-					"lend it as `&%s` or `&var %s`",
-				fn.Name, index+1, spelled, spelled, spelled))
 		}
 		return cHostTypeError(fn.Span, fmt.Sprintf(
 			"C function `%s` parameter %d has type `%s`, which C cannot receive",
 			fn.Name, index+1, spelled))
 	}
-	if ret != typeVoid && !cHostScalar(ret) {
+	if ret != typeVoid && !cHostScalar(ret) && !isExternStruct(ret) {
 		return cHostTypeError(fn.Span, fmt.Sprintf(
 			"C function `%s` returns `%s`, which C cannot produce", fn.Name, ret))
 	}
@@ -1041,7 +1034,7 @@ func cExportTypeError(span ast.Span, message string) error {
 func cHostTypeError(span ast.Span, message string) error {
 	return diag.FromText(diag.SeverityError, span, "type error: "+message).
 		WithNote("a C function passes only what C can name: an integer, a float, `bool`," +
-			" `ptr<T>`, `ptr<const T>`, a nullable pointer, or an extern struct as `&S` / `&var S`").
+			" `ptr<T>`, `ptr<const T>`, a nullable pointer, or an extern struct").
 		WithHelp("spell the value as C sees it: `ptr<const u8>` with a `usize` length" +
 			" for bytes, `ptr<T>` for a value C reads or writes in place")
 }
@@ -1069,6 +1062,20 @@ func cFunctionPointer(value Type) bool {
 		return false
 	}
 	return cFunctionPointerSignature(node) == ""
+}
+
+// cPointerRefusal returns the first type a C function's pointer type passes
+// that a C function pointer cannot, or "" when it can carry them all. A call by
+// name passes a struct by value, or lends one, through the convention the
+// backend follows for that function; a call through a pointer passes only
+// scalars.
+func cPointerRefusal(value Type) Type {
+	parsed, err := typ.Parse(string(value))
+	node, ok := parsed.(*typ.Func)
+	if err != nil || !ok || node.ABI != "c" {
+		return ""
+	}
+	return cFunctionPointerSignature(node)
 }
 
 // cFunctionPointerSignature returns the first type an `extern "c" fn(...)`
@@ -4205,6 +4212,11 @@ func (c *Checker) checkIdentExpr(expr *ast.IdentExpr, env *scope) (Type, error) 
 	// There is nothing else to build one from: Kizu has no closures, so the
 	// name is checked here rather than through a conversion form.
 	if value, ok := c.functionPointerValue(expr.Name); ok {
+		if refused := cPointerRefusal(value); refused != "" {
+			return "", errorAt(expr.Span,
+				"type error: C function `%s` passes `%s`, which a C function pointer "+
+					"cannot carry; call it by name", expr.Name, refused)
+		}
 		return value, nil
 	}
 	return "", errorAt(expr.Span, "type error: undefined variable `%s`", expr.Name)
