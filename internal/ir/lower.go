@@ -2245,8 +2245,21 @@ func (l *lowerer) lowerPrefixExpr(expr *ast.PrefixExpr) (Value, error) {
 	return l.emit("unary."+expr.Operator, resultType, []Value{right}, ""), nil
 }
 
-// lowerBorrowExpr preserves the current value-level ABI for checked borrow arguments.
-func (l *lowerer) lowerBorrowExpr(_ string, expr ast.Expression) (Value, error) {
+// lowerBorrowExpr preserves the current value-level ABI for checked borrow
+// arguments. `&var p.*` is the one borrow whose storage is already an
+// address: the raw pointer is the `&var T` itself, so writes through the
+// binding reach the pointee rather than a copy of it.
+func (l *lowerer) lowerBorrowExpr(operator string, expr ast.Expression) (Value, error) {
+	if deref, ok := expr.(*ast.DerefExpr); ok && operator == "&var" {
+		pointer, err := l.lowerExpr(deref.Receiver)
+		if err != nil {
+			return Value{}, err
+		}
+		if elem, ok := rawPointerElem(pointer.Type); ok {
+			borrowed := "&var " + elem
+			return l.emit("cast", borrowed, []Value{pointer}, borrowed), nil
+		}
+	}
 	return l.lowerExpr(expr)
 }
 

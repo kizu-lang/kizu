@@ -145,3 +145,4 @@ ADR には積みません。残す価値が無くなったら消します。番�
 - [ADR-0149: SIMD は固定名の 128-bit vector 型で明示する](0149-explicit-simd-vector-types.md)
 - [ADR-0150: native target は OS を darwin / linux の 1 語で名乗る](0150-native-target-names-its-os.md)
 - [ADR-0151: C の callback は呼び出し規約を型で名乗る](0151-a-c-callback-names-its-calling-convention.md)
+- [ADR-0152: raw pointer の指す値は local borrow として借りる](0152-a-raw-pointer-lends-its-pointee.md)

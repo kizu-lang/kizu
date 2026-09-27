@@ -2336,8 +2336,16 @@ C 側に表現が無いので拒否します。byte 列は `ptr<const u8>` と `
   tag になる
 * `p.field` のような raw pointer field access は禁止
 * `ptr_read(p)` は `ptr<T>` / `ptr<const T>` から `T` を読む
-* `ptr_write(p, value)` は `ptr<T>` に `T` を書く
+* `ptr_write(p, value)` は `ptr<T>` に `T` を書く。owner は `ptr_write(p, move value)` と
+  `move` で渡し、pointee が持ち主になる(call の owner 引数と同じ規則)
 * `ptr_write` は `ptr<const T>` と nullable pointer には使えない
+* `let v = &var p.*;` は `ptr<T>` の指す `T` を `&var T` として、`let v = &p.*;` は
+  `ptr<T>` / `ptr<const T>` の指す `T` を `&T` として束縛する(ADR-0152)。`unsafe` は
+  `p.*` と同じ `ptr_deref` で、`let` の初期化子にだけ書ける。raw view と同じく
+  どの binding も借りていない local borrow で、返せず、field にも入らず、最後の
+  使用で終わる。call の引数には束縛してから渡す。値がそこに初期化済みであり、
+  borrow の間ほかの経路(C からの callback を含む)が触らず、動きも解放もされない
+  ことは `unsafe` が引き受ける
 * `ptr_of(v)` は view `[]T` の先頭要素の address を `ptr<const T>` として返す
 * `mut_ptr_of(v)` は `&var []T` として持つ binding(indexed assignment が書ける
   view と同じもの、ADR-0096)の先頭要素の address を `ptr<T>` として返す
@@ -2380,7 +2388,7 @@ fn update(node: ptr<Node>) -> void {
 | --- | --- |
 | `ptr_read` | `ptr_read(p)` |
 | `ptr_write` | `ptr_write(p, value)` |
-| `ptr_deref` | `p.*` / `p.* = value` / `p.*.field` |
+| `ptr_deref` | `p.*` / `p.* = value` / `p.*.field` / `let v = &var p.*` |
 | `ptr_cast` | raw pointer 間、および raw pointer と C 関数 pointer の間の `cast<...>(value)` |
 | `ptr_int_cast` | `ptr_from_int<ptr<...>>(value)` / `int_from_ptr<usize>(value)` |
 | `ptr_offset` | `ptr_offset(p, count)` |

@@ -1,0 +1,76 @@
+// A value a C host keeps behind an opaque pointer lives in raw memory.
+// `ptr_write(p, move value)` hands an owner to that memory, and
+// `let v = unsafe &var p.*;` borrows it back for as long as the binding is
+// used: calls, field writes and methods reach the pointee itself, with no
+// copy to read out and write back. The borrow is local, so it cannot be
+// returned or stored; that the pointee is there and nothing else touches it
+// meanwhile is what the `unsafe` marker answers for.
+import std::mem;
+import std::string;
+
+extern "c" fn malloc(size: usize) -> ?ptr<u8>
+extern "c" fn free(p: ptr<u8>) -> void
+struct Log {
+    lines: string::String,
+    count: i64,
+}
+
+fn (self: &var Log) add(allocator: Allocator, line: []u8) -> !void {
+    try self.lines.append_bytes(allocator, line);
+    try self.lines.append_byte(allocator, cast<u8>(59));
+    self.count = self.count + 1;
+    return;
+}
+
+fn record(log: &var Log, allocator: Allocator) -> !void {
+    try log.add(allocator, "open");
+    try log.add(allocator, "write");
+    return;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    // SAFETY: malloc returns storage for one Log or null.
+    let storage = unsafe malloc(64) orelse return;
+    // SAFETY: storage is fresh and large enough for one Log.
+    let handle = unsafe cast<ptr<Log>>(storage);
+    let log = Log { lines: string::new(allocator), count: 0 };
+    // SAFETY: handle is fresh storage for one Log; the log now lives there.
+    unsafe ptr_write(handle, move log);
+
+    // SAFETY: handle holds the Log written above, and nothing else touches it.
+    let live = unsafe &var handle.*;
+    try record(live, allocator);
+    try live.add(allocator, "close");
+    live.count = live.count * 10;
+
+    // SAFETY: as above; the mutable borrow ended at its last use.
+    let seen = unsafe &handle.*;
+    print(seen.count);
+    print(seen.lines.len());
+
+    // SAFETY: handle holds the Log, which is read out once to release it.
+    let owned = unsafe ptr_read(handle);
+    owned.lines.deinit(allocator);
+    // SAFETY: storage came from malloc and nothing reads it after this.
+    unsafe free(storage);
+    return;
+}
+
+// run
+// features: raw-pointer unsafe borrow extern-c
+// output:
+// 30
+// 17
+
+// check
+// load:
+// extern "c" fn malloc(size: usize) -> ?ptr<u8>
+// extern "c" fn free(p: ptr<u8>) -> void
+// struct Log { lines: std::string::String, count: i64 }
+// fn (self: &var Log) Log.add(allocator: Allocator, line: []u8) -> !void { try self.lines.append_bytes(allocator, line); try self.lines.append_byte(allocator, cast<u8>(59)); self.count = (self.count + 1); return; }
+// fn record(log: &var Log, allocator: Allocator) -> !void { try log.add(allocator, "open"); try log.add(allocator, "write"); return; }
+// fn main() -> !void { let allocator = std::mem::page_allocator(); let storage = (unsafe malloc(64) orelse return); let handle = unsafe cast<ptr<Log>>(storage); let log = Log { lines: std::string::new(allocator), count: 0 }; unsafe ptr_write(handle, move log); let live = unsafe (&varhandle.*); try record(live, allocator); try live.add(allocator, "close"); live.count = (live.count * 10); let seen = unsafe (&handle.*); print(seen.count); print(seen.lines.len()); let owned = unsafe ptr_read(handle); owned.lines.deinit(allocator); unsafe free(storage); return; }
+// fn (self: Log) Log.deinit(allocator: Allocator) -> void { self.lines.deinit(allocator); return; }
+// check:
+// ok

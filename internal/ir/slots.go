@@ -373,7 +373,9 @@ func markIfName(expr ast.Expression, found map[string]bool) {
 }
 
 // bindLocal binds a declaration. A local the function mutably borrows gets its
-// storage here, once, so every later use of the name means the same place.
+// storage here, once, so every later use of the name means the same place. A
+// declaration that binds a `&var` borrow is an address already, and one
+// address is all it needs.
 func (l *lowerer) bindLocal(name string, value Value) {
 	if !l.slots[name] && l.indexWritten[name] && holdsArrayPlace(value.Type) {
 		slot := l.emit("local.slot", "&var "+value.Type, []Value{value}, "")
@@ -381,7 +383,7 @@ func (l *lowerer) bindLocal(name string, value Value) {
 		l.env.set(name, slot)
 		return
 	}
-	if !l.slots[name] {
+	if !l.slots[name] || isMutableReferenceType(value.Type) {
 		l.env.set(name, value)
 		return
 	}

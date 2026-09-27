@@ -1,0 +1,309 @@
+// A value a C host keeps behind an opaque pointer lives in raw memory.
+// `ptr_write(p, move value)` hands an owner to that memory, and
+// `let v = unsafe &var p.*;` borrows it back for as long as the binding is
+// used: calls, field writes and methods reach the pointee itself, with no
+// copy to read out and write back. The borrow is local, so it cannot be
+// returned or stored; that the pointee is there and nothing else touches it
+// meanwhile is what the `unsafe` marker answers for.
+import std::mem;
+import std::string;
+
+extern "c" fn malloc(size: usize) -> ?ptr<u8>
+extern "c" fn free(p: ptr<u8>) -> void
+struct Log {
+    lines: string::String,
+    count: i64,
+}
+
+fn (self: &var Log) add(allocator: Allocator, line: []u8) -> !void {
+    try self.lines.append_bytes(allocator, line);
+    try self.lines.append_byte(allocator, cast<u8>(59));
+    self.count = self.count + 1;
+    return;
+}
+
+fn record(log: &var Log, allocator: Allocator) -> !void {
+    try log.add(allocator, "open");
+    try log.add(allocator, "write");
+    return;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    // SAFETY: malloc returns storage for one Log or null.
+    let storage = unsafe malloc(64) orelse return;
+    // SAFETY: storage is fresh and large enough for one Log.
+    let handle = unsafe cast<ptr<Log>>(storage);
+    let log = Log { lines: string::new(allocator), count: 0 };
+    // SAFETY: handle is fresh storage for one Log; the log now lives there.
+    unsafe ptr_write(handle, move log);
+
+    // SAFETY: handle holds the Log written above, and nothing else touches it.
+    let live = unsafe &var handle.*;
+    try record(live, allocator);
+    try live.add(allocator, "close");
+    live.count = live.count * 10;
+
+    // SAFETY: as above; the mutable borrow ended at its last use.
+    let seen = unsafe &handle.*;
+    print(seen.count);
+    print(seen.lines.len());
+
+    // SAFETY: handle holds the Log, which is read out once to release it.
+    let owned = unsafe ptr_read(handle);
+    owned.lines.deinit(allocator);
+    // SAFETY: storage came from malloc and nothing reads it after this.
+    unsafe free(storage);
+    return;
+}
+
+// run
+// features: raw-pointer unsafe borrow extern-c
+// output:
+// 30
+// 17
+
+// ir
+// lower:
+// fn Log.add(%self: &var Log, %allocator: Allocator, %line: []u8) -> !void {
+// entry:
+//   %1: &var std::string::String = field.addr.lines %self: &var Log
+//   %2: std::mem::Error!void = call.std::string::String.append_bytes %1: &var std::string::String, %allocator: Allocator, %line: []u8
+//   error.try %2: std::mem::Error!void
+//   %4: &var std::string::String = field.addr.lines %self: &var Log
+//   %5: i64 = const 59
+//   %6: u8 = cast %5: i64, u8
+//   %7: std::mem::Error!void = call.std::string::String.append_byte %4: &var std::string::String, %allocator: Allocator, %6: u8
+//   error.try %7: std::mem::Error!void
+//   %9: i64 = field.ref.count %self: &var Log
+//   %10: i64 = const 1
+//   %11: i64 = binary.+ %9: i64, %10: i64
+//   field.ref.set.count %self: &var Log, %11: i64
+//   %13: !void = error.ok
+//   return %13: !void
+// }
+// fn record(%log: &var Log, %allocator: Allocator) -> !void {
+// entry:
+//   %1: []u8 = const "open"
+//   %2: !void = call.Log.add %log: &var Log, %allocator: Allocator, %1: []u8
+//   error.try %2: !void
+//   %4: []u8 = const "write"
+//   %5: !void = call.Log.add %log: &var Log, %allocator: Allocator, %4: []u8
+//   error.try %5: !void
+//   %7: !void = error.ok
+//   return %7: !void
+// }
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: usize = const 64
+//   %3: ?ptr<u8> = extern "c" call.malloc %2: usize
+//   %4: bool = ptr.has %3: ?ptr<u8>
+//   branch %4: bool, guard.some.1, guard.exit.2
+// guard.some.1:
+//   %6: ptr<u8> = ptr.value %3: ?ptr<u8>
+//   %7: ptr<Log> = cast %6: ptr<u8>, ptr<Log>
+//   %8: std::string::String = call.std::string::new %1: Allocator
+//   %9: i64 = const 0
+//   %10: Log = struct.new {lines: %8: std::string::String, count: %9: i64}
+//   ref.store %7: ptr<Log>, %10: Log
+//   %12: &var Log = cast %7: ptr<Log>, &var Log
+//   %13: !void = call.record %12: &var Log, %1: Allocator
+//   error.try %13: !void
+//   %15: []u8 = const "close"
+//   %16: !void = call.Log.add %12: &var Log, %1: Allocator, %15: []u8
+//   error.try %16: !void
+//   %18: i64 = field.ref.count %12: &var Log
+//   %19: i64 = const 10
+//   %20: i64 = binary.* %18: i64, %19: i64
+//   field.ref.set.count %12: &var Log, %20: i64
+//   %22: Log = ref.load %7: ptr<Log>
+//   %23: i64 = field.count %22: Log
+//   call.std::fmt::print.i64 %23: i64
+//   %25: std::string::String = field.lines %22: Log
+//   %26: i64 = call.std::string::String.len %25: std::string::String
+//   call.std::fmt::print.i64 %26: i64
+//   %28: Log = ref.load %7: ptr<Log>
+//   %29: std::string::String = field.lines %28: Log
+//   call.std::string::String.deinit %29: std::string::String, %1: Allocator
+//   extern "c" call.free %6: ptr<u8>
+//   %32: !void = error.ok
+//   return %32: !void
+// guard.exit.2:
+//   %5: !void = error.ok
+//   return %5: !void
+// }
+// fn Log.deinit(%self: Log, %allocator: Allocator) -> void {
+// entry:
+//   %1: std::string::String = field.lines %self: Log
+//   call.std::string::String.deinit %1: std::string::String, %allocator: Allocator
+//   return void: void
+// }
+// opt:
+// fn Log.add(%self: &var Log, %allocator: Allocator, %line: []u8) -> !void {
+// entry:
+//   %1: &var std::string::String = field.addr.lines %self: &var Log
+//   %in1.1: &var std::array::Array<u8> = field.addr.bytes %1: &var std::string::String
+//   %in1.in1.1: std::mem::Error!void = array.append_bytes %in1.1: &var std::array::Array<u8>, %allocator: Allocator, %line: []u8
+//   error.try %in1.in1.1: std::mem::Error!void
+//   %4: &var std::string::String = field.addr.lines %self: &var Log
+//   %5: i64 = const 59
+//   %6: u8 = cast %5: i64, u8
+//   %in2.1: &var std::array::Array<u8> = field.addr.bytes %4: &var std::string::String
+//   %in2.in1.1: std::mem::Error!void = array.append %in2.1: &var std::array::Array<u8>, %allocator: Allocator, %6: u8
+//   error.try %in2.in1.1: std::mem::Error!void
+//   %9: i64 = field.ref.count %self: &var Log
+//   %10: i64 = const 1
+//   %11: i64 = binary.+ %9: i64, %10: i64
+//   field.ref.set.count %self: &var Log, %11: i64
+//   %13: !void = error.ok
+//   return %13: !void
+// }
+// fn record(%log: &var Log, %allocator: Allocator) -> !void {
+// entry:
+//   %1: []u8 = const "open"
+//   %2: !void = call.Log.add %log: &var Log, %allocator: Allocator, %1: []u8
+//   error.try %2: !void
+//   %4: []u8 = const "write"
+//   %5: !void = call.Log.add %log: &var Log, %allocator: Allocator, %4: []u8
+//   return %5: !void
+// }
+// fn main() -> !void {
+// entry:
+//   %in1.1: Allocator = call.std::internal::builtin::mem_page_allocator
+//   %2: usize = const 64
+//   %3: ?ptr<u8> = extern "c" call.malloc %2: usize
+//   %4: bool = ptr.has %3: ?ptr<u8>
+//   branch %4: bool, guard.some.1, guard.exit.2
+// guard.some.1:
+//   %6: ptr<u8> = ptr.value %3: ?ptr<u8>
+//   %7: ptr<Log> = cast %6: ptr<u8>, ptr<Log>
+//   %in2.1: std::array::Array<u8> = array.new %in1.1: Allocator
+//   %in2.2: std::string::String = struct.new {bytes: %in2.1: std::array::Array<u8>}
+//   %9: i64 = const 0
+//   %10: Log = struct.new {lines: %in2.2: std::string::String, count: %9: i64}
+//   ref.store %7: ptr<Log>, %10: Log
+//   %12: &var Log = cast %7: ptr<Log>, &var Log
+//   %13: !void = call.record %12: &var Log, %in1.1: Allocator
+//   error.try %13: !void
+//   %15: []u8 = const "close"
+//   %16: !void = call.Log.add %12: &var Log, %in1.1: Allocator, %15: []u8
+//   error.try %16: !void
+//   %18: i64 = field.ref.count %12: &var Log
+//   %19: i64 = const 10
+//   %20: i64 = binary.* %18: i64, %19: i64
+//   field.ref.set.count %12: &var Log, %20: i64
+//   %22: Log = ref.load %7: ptr<Log>
+//   %23: i64 = field.count %22: Log
+//   %in3.1: i64 = cast %23: i64, i64
+//   call.std::fmt::write_i64 %in3.1: i64
+//   %25: std::string::String = field.lines %22: Log
+//   %26: i64 = call.std::string::String.len %25: std::string::String
+//   %in4.1: i64 = cast %26: i64, i64
+//   call.std::fmt::write_i64 %in4.1: i64
+//   %28: Log = ref.load %7: ptr<Log>
+//   %29: std::string::String = field.lines %28: Log
+//   %in5.1: std::array::Array<u8> = field.bytes %29: std::string::String
+//   %in5.in1.1: &var std::array::Array<u8> = local.slot %in5.1: std::array::Array<u8>
+//   %in5.in1.2: std::array::Array<u8> = ref.load %in5.in1.1: &var std::array::Array<u8>
+//   array.deinit %in5.in1.2: std::array::Array<u8>, %in1.1: Allocator
+//   extern "c" call.free %6: ptr<u8>
+//   %32: !void = error.ok
+//   return %32: !void
+// guard.exit.2:
+//   %5: !void = error.ok
+//   return %5: !void
+// }
+// fn Log.deinit(%self: Log, %allocator: Allocator) -> void {
+// entry:
+//   %1: std::string::String = field.lines %self: Log
+//   %in1.1: std::array::Array<u8> = field.bytes %1: std::string::String
+//   %in1.in1.1: &var std::array::Array<u8> = local.slot %in1.1: std::array::Array<u8>
+//   %in1.in1.2: std::array::Array<u8> = ref.load %in1.in1.1: &var std::array::Array<u8>
+//   array.deinit %in1.in1.2: std::array::Array<u8>, %allocator: Allocator
+//   return void: void
+// }
+// opt wasm:
+// fn Log.add(%self: &var Log, %allocator: Allocator, %line: []u8) -> !void {
+// entry:
+//   %1: &var std::string::String = field.addr.lines %self: &var Log
+//   %in1.1: &var std::array::Array<u8> = field.addr.bytes %1: &var std::string::String
+//   %in1.in1.1: std::mem::Error!void = array.append_bytes %in1.1: &var std::array::Array<u8>, %allocator: Allocator, %line: []u8
+//   error.try %in1.in1.1: std::mem::Error!void
+//   %4: &var std::string::String = field.addr.lines %self: &var Log
+//   %5: i64 = const 59
+//   %6: u8 = cast %5: i64, u8
+//   %in2.1: &var std::array::Array<u8> = field.addr.bytes %4: &var std::string::String
+//   %in2.in1.1: std::mem::Error!void = array.append %in2.1: &var std::array::Array<u8>, %allocator: Allocator, %6: u8
+//   error.try %in2.in1.1: std::mem::Error!void
+//   %9: i64 = field.ref.count %self: &var Log
+//   %10: i64 = const 1
+//   %11: i64 = binary.+ %9: i64, %10: i64
+//   field.ref.set.count %self: &var Log, %11: i64
+//   %13: !void = error.ok
+//   return %13: !void
+// }
+// fn record(%log: &var Log, %allocator: Allocator) -> !void {
+// entry:
+//   %1: []u8 = const "open"
+//   %2: !void = call.Log.add %log: &var Log, %allocator: Allocator, %1: []u8
+//   error.try %2: !void
+//   %4: []u8 = const "write"
+//   %5: !void = call.Log.add %log: &var Log, %allocator: Allocator, %4: []u8
+//   return %5: !void
+// }
+// fn main() -> !void {
+// entry:
+//   %in1.1: Allocator = call.std::internal::builtin::mem_page_allocator
+//   %2: usize = const 64
+//   %3: ?ptr<u8> = extern "c" call.malloc %2: usize
+//   %4: bool = ptr.has %3: ?ptr<u8>
+//   branch %4: bool, guard.some.1, guard.exit.2
+// guard.some.1:
+//   %6: ptr<u8> = ptr.value %3: ?ptr<u8>
+//   %7: ptr<Log> = cast %6: ptr<u8>, ptr<Log>
+//   %in2.1: std::array::Array<u8> = array.new %in1.1: Allocator
+//   %in2.2: std::string::String = struct.new {bytes: %in2.1: std::array::Array<u8>}
+//   %9: i64 = const 0
+//   %10: Log = struct.new {lines: %in2.2: std::string::String, count: %9: i64}
+//   ref.store %7: ptr<Log>, %10: Log
+//   %12: &var Log = cast %7: ptr<Log>, &var Log
+//   %13: !void = call.record %12: &var Log, %in1.1: Allocator
+//   error.try %13: !void
+//   %15: []u8 = const "close"
+//   %16: !void = call.Log.add %12: &var Log, %in1.1: Allocator, %15: []u8
+//   error.try %16: !void
+//   %18: i64 = field.ref.count %12: &var Log
+//   %19: i64 = const 10
+//   %20: i64 = binary.* %18: i64, %19: i64
+//   field.ref.set.count %12: &var Log, %20: i64
+//   %22: Log = ref.load %7: ptr<Log>
+//   %23: i64 = field.count %22: Log
+//   %in3.1: i64 = cast %23: i64, i64
+//   call.std::fmt::write_i64 %in3.1: i64
+//   %25: std::string::String = field.lines %22: Log
+//   %26: i64 = call.std::string::String.len %25: std::string::String
+//   %in4.1: i64 = cast %26: i64, i64
+//   call.std::fmt::write_i64 %in4.1: i64
+//   %28: Log = ref.load %7: ptr<Log>
+//   %29: std::string::String = field.lines %28: Log
+//   %in5.1: std::array::Array<u8> = field.bytes %29: std::string::String
+//   %in5.in1.1: &var std::array::Array<u8> = local.slot %in5.1: std::array::Array<u8>
+//   %in5.in1.2: std::array::Array<u8> = ref.load %in5.in1.1: &var std::array::Array<u8>
+//   array.deinit %in5.in1.2: std::array::Array<u8>, %in1.1: Allocator
+//   extern "c" call.free %6: ptr<u8>
+//   %32: !void = error.ok
+//   return %32: !void
+// guard.exit.2:
+//   %5: !void = error.ok
+//   return %5: !void
+// }
+// fn Log.deinit(%self: Log, %allocator: Allocator) -> void {
+// entry:
+//   %1: std::string::String = field.lines %self: Log
+//   %in1.1: std::array::Array<u8> = field.bytes %1: std::string::String
+//   %in1.in1.1: &var std::array::Array<u8> = local.slot %in1.1: std::array::Array<u8>
+//   %in1.in1.2: std::array::Array<u8> = ref.load %in1.in1.1: &var std::array::Array<u8>
+//   array.deinit %in1.in1.2: std::array::Array<u8>, %allocator: Allocator
+//   return void: void
+// }
