@@ -3604,7 +3604,7 @@ func (l *lowerer) lowerEnumTagExpr(expr *ast.FieldExpr) (Value, bool) {
 func (l *lowerer) lowerBuiltinLiteral(expr ast.Expression) (Value, error) {
 	vector, ok := expr.(*ast.VectorLiteralExpr)
 	if !ok {
-		return l.emit("buffer.new", expr.(*ast.BufferLiteralExpr).TypeText(), nil, ""), nil
+		return l.lowerArrayLiteral(expr.(*ast.BufferLiteralExpr))
 	}
 	elem, _, _ := typ.VectorOf(vector.TypeName)
 	lanes := make([]Value, 0, len(vector.Lanes))
@@ -3616,6 +3616,32 @@ func (l *lowerer) lowerBuiltinLiteral(expr ast.Expression) (Value, error) {
 		lanes = append(lanes, value)
 	}
 	return l.emit("vector.new", vector.TypeName, lanes, ""), nil
+}
+
+// lowerArrayLiteral lowers an array literal. `{}` is the zero value; a list
+// is written element by element into a slot holding the zero value, and the
+// array is what the slot holds after the last one. Each element is lowered
+// under the element type, the way an argument is under its parameter.
+func (l *lowerer) lowerArrayLiteral(expr *ast.BufferLiteralExpr) (Value, error) {
+	zero := l.emit("buffer.new", expr.TypeText(), nil, "")
+	if expr.Elements == nil {
+		return zero, nil
+	}
+	values := make([]Value, 0, len(expr.Elements))
+	for _, element := range expr.Elements {
+		value, err := l.lowerContextualExpr(element, expr.Elem)
+		if err != nil {
+			return Value{}, err
+		}
+		values = append(values, value)
+	}
+	storage := l.emit("local.slot", "&var "+zero.Type, []Value{zero}, "")
+	for index, value := range values {
+		position := l.emitConst("i64", fmt.Sprintf("%d", index))
+		element := l.emit("buffer.addr", "&var "+expr.Elem, []Value{storage, position}, "")
+		l.emit("ref.store", "void", []Value{element, value}, "")
+	}
+	return l.emit("ref.load", zero.Type, []Value{storage}, ""), nil
 }
 
 // lowerIndexExpr lowers checked byte-slice indexing and slicing.

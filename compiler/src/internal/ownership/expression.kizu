@@ -72,6 +72,10 @@ fn (self: &var Checker) read_expr_form(
         defer literal.deinit(self.allocator);
         return self.read_vector_literal(tree, env, &literal, out);
     }
+    if try ast::copy_array_literal(self.allocator, tree, expression) |literal| {
+        defer literal.deinit(self.allocator);
+        return self.read_array_literal(tree, env, &literal, out);
+    }
     match tree.expressions.at(expression.node) {
         Int(_) => {
             out.* = self.common.i64_name;
@@ -97,11 +101,8 @@ fn (self: &var Checker) read_expr_form(
             out.* = self.common.null_name;
             return null;
         },
-        BufferLiteral(value) => {
-            let text = try value.type_text(self.allocator, tree);
-            out.* = try self.names.intern_owned(move text);
-            return null;
-        },
+        BufferLiteral(_) => return try self.error0(
+            ast::zero_span(), "move error: array literal reached the node dispatch"),
         VectorLiteral(_) => return try self.error0(
             ast::zero_span(), "move error: vector literal reached the node dispatch"),
         Comptime(value) => return self.read_comptime_only(tree, value.expr, out),
@@ -263,6 +264,27 @@ fn (self: &var Checker) read_catch_guard_expr(
 
 /// Reads checked byte indexing and slicing without moving bytes, the Go
 /// `readIndexExpr`.
+/// Reads the elements an array literal lists, the Go `readArrayLiteral`;
+/// they are copy data, so reading them leaves nothing behind to move.
+fn (self: &var Checker) read_array_literal(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    literal: &ast::BufferLiteralExpr,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    var ignored = empty_name();
+    var index = 0;
+    while literal.elements.get(index) |element| {
+        index = index + 1;
+        if try self.read_expr(tree, env, element, &var ignored) |failed| {
+            return move failed;
+        }
+    }
+    let text = try literal.type_text(self.allocator, tree);
+    out.* = try self.names.intern_owned(move text);
+    return null;
+}
+
 /// Reads the lanes of `f64x2{a, b}`, the `VectorLiteralExpr` arm of the Go
 /// `readExpr`; the value is the vector type itself.
 fn (self: &var Checker) read_vector_literal(

@@ -4271,7 +4271,7 @@ func (c *Checker) readExprForm(expr ast.Expression, env *scope) (string, error) 
 	case *ast.IntExpr, *ast.FloatExpr, *ast.StringExpr, *ast.BoolExpr, *ast.TypeExpr, *ast.NullExpr:
 		return c.readScalarExpr(e)
 	case *ast.BufferLiteralExpr:
-		return e.TypeText(), nil
+		return c.readArrayLiteral(e, env)
 	case *ast.VectorLiteralExpr:
 		return c.readVectorLiteral(e, env)
 	case *ast.ComptimeExpr:
@@ -4411,6 +4411,17 @@ func (c *Checker) readCatchGuardExpr(expr *ast.CatchGuardExpr, env *scope) (stri
 		return condType, nil
 	}
 	return elem, nil
+}
+
+// readArrayLiteral reads the elements an array literal lists; they are copy
+// data, so reading them leaves nothing behind to move.
+func (c *Checker) readArrayLiteral(expr *ast.BufferLiteralExpr, env *scope) (string, error) {
+	for _, element := range expr.Elements {
+		if _, err := c.readExpr(element, env); err != nil {
+			return "", err
+		}
+	}
+	return expr.TypeText(), nil
 }
 
 // readVectorLiteral reads the lanes of `f64x2{a, b}`; the value is the
@@ -9889,8 +9900,8 @@ func exprIdentUses(expr ast.Expression) []string {
 		return exprIdentUses(e.Receiver)
 	case *ast.DerefExpr:
 		return exprIdentUses(e.Receiver)
-	case *ast.VectorLiteralExpr:
-		return vectorLaneIdentUses(e)
+	case *ast.VectorLiteralExpr, *ast.BufferLiteralExpr:
+		return valuesIdentUses(listedValues(e))
 	case *ast.IndexExpr:
 		uses := exprIdentUses(e.Target)
 		uses = append(uses, exprIdentUses(e.Index)...)
@@ -9903,12 +9914,20 @@ func exprIdentUses(expr ast.Expression) []string {
 	}
 }
 
-// vectorLaneIdentUses collects the identifier reads of every lane of a
-// vector literal.
-func vectorLaneIdentUses(expr *ast.VectorLiteralExpr) []string {
+// listedValues returns the values a vector or array literal lists.
+func listedValues(expr ast.Expression) []ast.Expression {
+	if vector, ok := expr.(*ast.VectorLiteralExpr); ok {
+		return vector.Lanes
+	}
+	return expr.(*ast.BufferLiteralExpr).Elements
+}
+
+// valuesIdentUses collects the identifier reads of the values a vector or
+// array literal lists.
+func valuesIdentUses(values []ast.Expression) []string {
 	uses := []string{}
-	for _, lane := range expr.Lanes {
-		uses = append(uses, exprIdentUses(lane)...)
+	for _, value := range values {
+		uses = append(uses, exprIdentUses(value)...)
 	}
 	return uses
 }

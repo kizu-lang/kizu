@@ -199,11 +199,14 @@ func (l *lowerer) collectMutBorrowsExpr(expr ast.Expression, found map[string]bo
 	return nil
 }
 
-// literalValues returns the expressions a struct or vector literal is built
-// from: the field values, or the lanes.
+// literalValues returns the expressions a struct, vector, or array literal is
+// built from: the field values, the lanes, or the elements.
 func literalValues(expr ast.Expression) []ast.Expression {
-	if vector, ok := expr.(*ast.VectorLiteralExpr); ok {
-		return vector.Lanes
+	switch literal := expr.(type) {
+	case *ast.VectorLiteralExpr:
+		return literal.Lanes
+	case *ast.BufferLiteralExpr:
+		return literal.Elements
 	}
 	return structLiteralValues(expr.(*ast.StructLiteralExpr))
 }
@@ -213,7 +216,7 @@ func literalValues(expr ast.Expression) []ast.Expression {
 func expressionChildren(expr ast.Expression) ([]ast.Expression, bool) {
 	switch e := expr.(type) {
 	case *ast.IdentExpr, *ast.IntExpr, *ast.FloatExpr, *ast.StringExpr, *ast.BoolExpr, *ast.TypeExpr,
-		*ast.BufferLiteralExpr, *ast.NullExpr:
+		*ast.NullExpr:
 		return nil, true
 	case *ast.PrefixExpr:
 		return []ast.Expression{e.Right}, true
@@ -237,7 +240,7 @@ func expressionChildren(expr ast.Expression) ([]ast.Expression, bool) {
 		return []ast.Expression{e.Receiver}, true
 	case *ast.IndexExpr:
 		return []ast.Expression{e.Target, e.Index, e.Start, e.End}, true
-	case *ast.StructLiteralExpr, *ast.VectorLiteralExpr:
+	case *ast.StructLiteralExpr, *ast.VectorLiteralExpr, *ast.BufferLiteralExpr:
 		return literalValues(e), true
 	case *ast.CallExpr:
 		return append([]ast.Expression{e.Callee}, e.Args...), true

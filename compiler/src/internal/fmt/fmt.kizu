@@ -1385,17 +1385,36 @@ fn (self: &Builder) operator_spacing(
 /// after it, the Go `closesTypeBrackets`. A type's `[` follows something
 /// that is not an operand; an index's `[` follows the operand it indexes.
 fn (self: &Builder) closes_type_brackets(tokens: &array::Array<token::Token>) -> bool {
-    var open = self.prev_index - 1;
-    if self.prev_kind != token::Kind::RBracket or open < 0 {
+    if self.prev_kind != token::Kind::RBracket {
         return false;
     }
-    if kind_at(tokens, open) == token::Kind::Int {
-        open = open - 1;
+    var open = opening_type_bracket(tokens, self.prev_index);
+    // A nested array `[3][3]f64` repeats the brackets: the outer `[3]` is
+    // what follows a non-operand.
+    while open > 0 and kind_at(tokens, open - 1) == token::Kind::RBracket {
+        let outer = opening_type_bracket(tokens, open - 1);
+        if outer < 0 {
+            break;
+        }
+        open = outer;
     }
-    if open < 0 or kind_at(tokens, open) != token::Kind::LBracket {
+    if open < 0 {
         return false;
     }
     return open == 0 or !ends_operand(kind_at(tokens, open - 1));
+}
+
+/// Returns the index of the `[` that the `]` at index closes when the two
+/// hold nothing or a length, or -1, the Go `openingTypeBracket`.
+fn opening_type_bracket(tokens: &array::Array<token::Token>, index: i64) -> i64 {
+    var open = index - 1;
+    if open >= 0 and kind_at(tokens, open) == token::Kind::Int {
+        open = open - 1;
+    }
+    if open < 0 or kind_at(tokens, open) != token::Kind::LBracket {
+        return -1;
+    }
+    return open;
 }
 
 /// Reports whether the `:` just written names a loop after `break` or

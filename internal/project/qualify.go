@@ -594,6 +594,8 @@ func (c *graphChecker) qualifyTypeOrControlExpr(
 		return &cp, nil
 	case *ast.StructLiteralExpr:
 		return c.qualifyStructLiteral(module, e)
+	case *ast.BufferLiteralExpr:
+		return c.qualifyArrayLiteral(module, e)
 	case *ast.FieldExpr:
 		return c.qualifyFieldValue(module, e)
 	case *ast.IndexExpr:
@@ -906,6 +908,31 @@ func (c *graphChecker) qualifyStructLiteral(
 			return nil, err
 		}
 		cp.Fields[idx].Value = value
+	}
+	return &cp, nil
+}
+
+// qualifyArrayLiteral rewrites an array literal's element type and the
+// elements it lists.
+func (c *graphChecker) qualifyArrayLiteral(
+	module *moduleFile,
+	expr *ast.BufferLiteralExpr,
+) (*ast.BufferLiteralExpr, error) {
+	cp := *expr
+	elem, err := c.resolveType(module, expr.Elem)
+	if err != nil {
+		return nil, err
+	}
+	cp.Elem = elem
+	if expr.Elements != nil {
+		cp.Elements = make([]ast.Expression, len(expr.Elements))
+		for idx, element := range expr.Elements {
+			value, err := c.qualifyExpr(module, element)
+			if err != nil {
+				return nil, err
+			}
+			cp.Elements[idx] = value
+		}
 	}
 	return &cp, nil
 }
