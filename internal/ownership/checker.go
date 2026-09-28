@@ -7536,6 +7536,7 @@ func (c *Checker) readTryExpr(expr *ast.TryExpr, env *scope) (string, error) {
 func (c *Checker) checkPointerBuiltin(expr *ast.CallExpr, env *scope) (string, error) {
 	name, _ := expr.Callee.(*ast.IdentExpr)
 	writes := name != nil && (name.Name == "ptr_write" || name.Name == "volatile_write")
+	pointer := ""
 	for index, arg := range expr.Args {
 		// The value a write stores is handed to the pointee: an owner leaves
 		// its binding with `move`, as it would into a call, so nothing is left
@@ -7546,11 +7547,20 @@ func (c *Checker) checkPointerBuiltin(expr *ast.CallExpr, env *scope) (string, e
 			}
 			continue
 		}
-		if _, err := c.readExpr(arg, env); err != nil {
+		read, err := c.readExpr(arg, env)
+		if err != nil {
 			return "", err
 		}
+		if index == 0 {
+			pointer = read
+		}
 	}
-	if name, ok := expr.Callee.(*ast.IdentExpr); ok && name.Name == "ptr_read" {
+	if name != nil && (name.Name == "ptr_read" || name.Name == "volatile_read") {
+		// A read gives the pointee, so what is done with it -- a method it is
+		// the receiver of, a result that method returns -- is typed as it.
+		if elem, ok := rawPointerElement(pointer); ok {
+			return strings.TrimPrefix(elem, "const "), nil
+		}
 		return "i64", nil
 	}
 	return "void", nil

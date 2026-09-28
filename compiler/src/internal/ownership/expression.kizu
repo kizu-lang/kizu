@@ -1533,6 +1533,7 @@ fn (self: &var Checker) check_pointer_builtin(
         writes = text_equals(tree, name, "ptr_write") or text_equals(tree, name, "volatile_write");
     }
     var ignored = empty_name();
+    var pointer = empty_name();
     var index = 0;
     while arg_at(tree, call.args, index) |arg| {
         // The value a write stores is handed to the pointee: an owner leaves
@@ -1546,13 +1547,22 @@ fn (self: &var Checker) check_pointer_builtin(
             if try self.read_expr(tree, env, arg, &var ignored) |failed| {
                 return move failed;
             }
+            if index == 0 {
+                pointer = ignored;
+            }
         }
         index = index + 1;
     }
     out.* = self.common.void_name;
     if ident_text(tree, call.callee) |name| {
-        if text_equals(tree, name, "ptr_read") {
+        if text_equals(tree, name, "ptr_read") or text_equals(tree, name, "volatile_read") {
+            // A read gives the pointee, so what is done with it -- a method it
+            // is the receiver of, a result that method returns -- is typed as
+            // it.
             out.* = self.common.i64_name;
+            if try self.names.raw_pointer_element(pointer) |elem| {
+                out.* = try self.names.trim_prefix(elem, "const ");
+            }
         }
     }
     return null;
