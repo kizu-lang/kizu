@@ -76,6 +76,22 @@ fn (self: &var Checker) check_assign_stmt(
     return self.read_expr(tree, env, statement.target, &var ignored);
 }
 
+/// Returns the element an assignment writes into, the Go `elementWriteIndex`:
+/// the target of `a[i] = x`, or the indexed receiver of `a[i].f = x`, whose
+/// field is stored by writing the element.
+fn element_write_target(tree: &ast::Ast, target: ast::Expression) -> ast::Expression {
+    var element = target;
+    while true {
+        match tree.expressions.at(element.node) {
+            Field(value) => {
+                element = value.receiver;
+            },
+            _ => return element,
+        }
+    }
+    return element;
+}
+
 /// Returns the place a chain of element indexes starts from: `s.m` for
 /// `s.m[i][j]`.
 fn indexed_place(tree: &ast::Ast, expression: ast::Expression) -> ast::Expression {
@@ -98,8 +114,9 @@ fn indexed_place(tree: &ast::Ast, expression: ast::Expression) -> ast::Expressio
 fn (self: &var Checker) is_array_element_write(
     tree: &ast::Ast,
     env: ScopeHandle,
-    target: ast::Expression
+    written: ast::Expression
 ) -> !bool {
+    let target = element_write_target(tree, written);
     match tree.expressions.at(target.node) {
         Index(value) => {
             if value.slice {
@@ -130,7 +147,7 @@ fn (self: &var Checker) check_array_element_assign(
     if try self.move_expr(tree, env, statement.value, &var ignored) |failed| {
         return move failed;
     }
-    var place = statement.target;
+    var place = element_write_target(tree, statement.target);
     var more = true;
     while more {
         var index: ?ast::Expression = null;
