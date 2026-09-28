@@ -1798,6 +1798,12 @@ func (l *lowerer) lowerTypeApplyCall(
 		return l.lowerPtrIntCast(typeApply.TypeArg, args)
 	case "std::internal::builtin::mem_allocator_from":
 		return l.lowerAllocatorFrom(l.resolveType(typeApply.TypeArg), args)
+	case "std::internal::builtin::mem_size_of":
+		// The size is the target's, which only a backend knows: the call
+		// names the type, and each backend writes the constant its layout
+		// gives.
+		return l.emit("call.std::internal::builtin::mem_size_of", "usize", nil,
+			l.resolveType(typeApply.TypeArg)), nil
 	case "std::internal::builtin::task_new":
 		return l.lowerTaskNew(l.resolveType(typeApply.TypeArg), args)
 	case "std::internal::builtin::task_set_spawn":

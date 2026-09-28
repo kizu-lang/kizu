@@ -23,6 +23,9 @@ fn (self: &var Emitter) write_call(module: &ir::Module, node: &ir::InstrNode) ->
             return self.write_thread_pool_round(module, node, data_index);
         }
     }
+    if !foreign_c and module.names.is(node.operand, "std::internal::builtin::mem_size_of") {
+        return self.write_size_of(module, node);
+    }
     if !foreign_c and try self.uses_hosted_runtime_abi(module, node.operand, node) {
         return self.write_hosted_runtime_call(module, node.operand, node);
     }
@@ -56,6 +59,20 @@ fn (self: &var Emitter) write_call(module: &ir::Module, node: &ir::InstrNode) ->
     let joined = try string::join(self.allocator, &args, ", ");
     let call = try self.text3("call %s @%s(%s)", Arg::Str(result_type), Arg::Str(symbol), Arg::Owned(move joined));
     return self.write_call_line(module, node, call);
+}
+
+/// Writes the size of the type the call names as the target lays it out, the
+/// Go `writeSizeOf`: the address one T past null, which LLVM folds to a
+/// constant from the data layout clang gives the module.
+fn (self: &var Emitter) write_size_of(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let end_name = try self.next_synthetic_value("size.end");
+    let end = try self.percent(end_name);
+    let measured = try self.llvm_type_of(module, node.immediate);
+    try self.line2("  %s = getelementptr %s, ptr null, i64 1", Arg::Str(end), Arg::Str(measured));
+    let result = try self.local_name(module, node.result.name);
+    try self.line2("  %s = ptrtoint ptr %s to i64", Arg::Str(result), Arg::Str(end));
+    try self.set_value(module, node.result, result);
+    return null;
 }
 
 /// Writes the address of a declared function. A function symbol is already a

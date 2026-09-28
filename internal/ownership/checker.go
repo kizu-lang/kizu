@@ -6413,6 +6413,8 @@ func (c *Checker) checkRuntimeTypeApply(
 	env *scope,
 ) (string, error) {
 	switch name {
+	case "std::internal::builtin::mem_size_of":
+		return "usize", nil
 	case "std::internal::builtin::mem_allocator_from":
 		return c.checkAllocatorFrom(args, env)
 	case "std::internal::builtin::task_new":

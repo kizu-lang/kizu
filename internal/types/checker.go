@@ -5454,6 +5454,15 @@ func (c *Checker) checkBuiltinTypeApply(
 		typ, err := c.checkAllocatorFrom(typeArg, args, env, unsafe)
 		return typ, true, err
 	}
+	if name == "std::internal::builtin::mem_size_of" {
+		if len(args) != 0 {
+			return "", true, errorf("type error: `std::mem::size_of` takes no arguments")
+		}
+		if Type(typeArg) == typeVoid {
+			return "", true, errorf("type error: `std::mem::size_of` needs a type with a size, got void")
+		}
+		return "usize", true, nil
+	}
 	if name == "std::internal::builtin::task_new" {
 		typ, err := c.checkTaskNew(typeArg, args, env, unsafe)
 		return typ, true, err

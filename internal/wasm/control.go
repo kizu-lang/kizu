@@ -546,6 +546,9 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 		)
 	}
 	name := strings.TrimPrefix(instr.Op, "call.")
+	if name == "std::internal::builtin::mem_size_of" {
+		return e.writeSizeOf(instr)
+	}
 	if handled, err := e.writeAllocatorBuiltinCall(name, instr); handled {
 		return err
 	}
@@ -586,6 +589,19 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	e.values[instr.Result.Name] = valueInfo{
 		expr: "(local.get " + symbolName(instr.Result.Name) + ")",
 	}
+	return nil
+}
+
+// writeSizeOf writes the size of the type the call names as wasm32 lays it
+// out, a constant the frontend could not know.
+func (e *emitter) writeSizeOf(instr *ir.Instr) error {
+	layout, err := e.typeLayout(instr.Immediate)
+	if err != nil {
+		return err
+	}
+	symbol := symbolName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "            (local.set %s (i64.const %d))\n", symbol, layout.size)
+	e.values[instr.Result.Name] = valueInfo{expr: "(local.get " + symbol + ")"}
 	return nil
 }
 

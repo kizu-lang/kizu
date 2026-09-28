@@ -683,6 +683,9 @@ fn (self: &var Emitter) write_call(
         let expr = try self.names.intern_owned(move call);
         return self.write_scalar_result(module, node.result, expr);
     }
+    if module.names.is(node.operand, "std::internal::builtin::mem_size_of") {
+        return self.write_size_of(module, node);
+    }
     if module.names.is(node.operand, "std::internal::builtin::mem_allocator_from") {
         return self.write_allocator_from_call(module, node);
     }
@@ -1659,4 +1662,22 @@ fn (self: &var Emitter) write_float_bits(
     try expression.append_byte(self.allocator, cast<u8>(41));
     let expr = try self.names.intern_owned(move expression);
     return self.write_scalar_result(module, node.result, expr);
+}
+
+/// Writes the size of the type the call names as wasm32 lays it out, a
+/// constant the frontend could not know, the Go `writeSizeOf`.
+fn (self: &var Emitter) write_size_of(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let outcome = try self.type_layout(module, node.immediate);
+    match outcome {
+        Error(failed) => return move failed,
+        Layout(layout) => {
+            let retained = ir::name_text(&module.names, node.result.name);
+            let bytes = retained.as_bytes();
+            let symbol = try self.symbol_name_of(bytes);
+            try self.line2("            (local.set %s (i64.const %d))", Arg::Str(symbol), Arg::Int(layout.size));
+            let local = try self.local_expr(bytes);
+            try self.set_value(module, node.result, local);
+            return null;
+        },
+    }
 }

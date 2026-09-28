@@ -2368,6 +2368,10 @@ C 側に表現が無いので拒否します。byte 列は `ptr<const u8>` と `
 * `ptr_write(p, value)` は `ptr<T>` に `T` を書く。owner は `ptr_write(p, move value)` と
   `move` で渡し、pointee が持ち主になる(call の owner 引数と同じ規則)
 * `ptr_write` は `ptr<const T>` と nullable pointer には使えない
+* `std::mem::size_of<T>()` は build する target で `T` が memory に占める byte 数を
+  `usize` で返す。`ptr_write` が書く大きさで、C に確保させる領域の大きさに使う。
+  値は backend が target の layout から決める(native と wasm32 で pointer の
+  大きさが違う)。読むだけなので `unsafe` は要らない
 * `let v = &var p.*;` は `ptr<T>` の指す `T` を `&var T` として、`let v = &p.*;` は
   `ptr<T>` / `ptr<const T>` の指す `T` を `&T` として束縛する(ADR-0152)。`unsafe` は
   `p.*` と同じ `ptr_deref` で、`let` の初期化子にだけ書ける。raw view と同じく
