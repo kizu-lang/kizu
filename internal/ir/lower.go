@@ -2028,6 +2028,11 @@ func (l *lowerer) lowerContextualExpr(expr ast.Expression, want string) (Value, 
 		if err != nil {
 			return Value{}, err
 		}
+		// A `ptr<T>` fills a `?ptr<T>`: the same address, now spelled as one
+		// that may be null.
+		if strings.HasPrefix(want, "?ptr<") && value.Type == want[1:] {
+			return l.emit("cast", want, []Value{value}, want), nil
+		}
 		return l.readBorrowForContext(value, want), nil
 	}
 	if value, ok, err := l.lowerContextualLiteral(expr, want); ok || err != nil {

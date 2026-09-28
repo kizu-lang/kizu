@@ -1,0 +1,43 @@
+import std::testing;
+
+extern "c" fn malloc(size: usize) -> ?ptr<u8>
+extern "c" fn free(address: ?ptr<u8>) -> void
+extern "c" struct Slot {
+    address: ?ptr<u8>,
+}
+
+fn is_live(address: ?ptr<u8>) -> bool {
+    if address |_live| {
+        return true;
+    }
+    return false;
+}
+
+fn (self: &Slot) holds(address: ?ptr<u8>) -> bool {
+    if self.address |held| {
+        if address |given| {
+            // SAFETY: the addresses are only compared.
+            return unsafe int_from_ptr<usize>(held) == unsafe int_from_ptr<usize>(given);
+        }
+    }
+    return false;
+}
+
+test "a pointer fills a nullable pointer wherever one is written" {
+    // SAFETY: malloc returns storage or null; the test does not run out.
+    let storage = unsafe malloc(8) orelse return;
+    testing::expect(is_live(storage));
+    let lifted: ?ptr<u8> = storage;
+    testing::expect(is_live(lifted));
+    // SAFETY: address zero is only compared, never read.
+    let zero = unsafe ptr_from_int<ptr<u8>>(0);
+    var later: ?ptr<u8> = zero;
+    testing::expect(!is_live(later));
+    later = storage;
+    testing::expect(is_live(later));
+    let slot = Slot { address: storage };
+    testing::expect(slot.holds(storage));
+    let release: extern "c" fn(?ptr<u8>) -> void = free;
+    // SAFETY: storage came from malloc and nothing reads it after this.
+    unsafe release(storage);
+}

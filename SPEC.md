@@ -2348,6 +2348,9 @@ C 側に表現が無いので拒否します。byte 列は `ptr<const u8>` と `
 * `ptr<T>` は non-null mutable raw pointer
 * `ptr<const T>` は non-null const raw pointer
 * `?ptr<T>` / `?ptr<const T>` は nullable raw pointer
+* `ptr<T>` は `?ptr<T>` を受け取る位置(引数、戻り値、`let` / `var` の型注釈、
+  代入、struct field)にそのまま書ける。同じ address で、null になりうる側に
+  広げるだけなので `unsafe` は要らない。逆向きは `if p |q|` などで開く
 * safe borrow と raw pointer は別物として扱う
 * `p.*` は `ptr<T>` / `ptr<const T>` から `T` を読む
 * `p.* = value` は `ptr<T>` に `T` を書く
