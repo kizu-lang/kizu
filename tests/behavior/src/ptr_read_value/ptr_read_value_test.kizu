@@ -1,0 +1,55 @@
+import std::mem;
+import std::string;
+import std::testing;
+
+extern "c" fn malloc(size: usize) -> ?ptr<u8>
+extern "c" fn free(address: ?ptr<u8>) -> void
+struct Counter {
+    count: i64,
+}
+
+fn (self: &var Counter) bump() -> bool {
+    self.count = self.count + 1;
+    return self.count > 1;
+}
+
+fn step(p: ptr<Counter>) -> bool {
+    // SAFETY: p points at a live Counter.
+    var value = unsafe ptr_read(p);
+    let again = value.bump();
+    // SAFETY: p points at a live Counter.
+    unsafe ptr_write(p, value);
+    return again;
+}
+
+fn grow(p: ptr<string::String>) -> i64 {
+    // SAFETY: p points at a live String.
+    var text = unsafe ptr_read(p);
+    if text.append_byte(mem::page_allocator(), cast<u8>(65)) {} else |_| {}
+    let length = text.len();
+    // SAFETY: p points at a live String, which takes text back.
+    unsafe ptr_write(p, move text);
+    return length;
+}
+
+test "a value read through a pointer is typed as the pointee" {
+    // SAFETY: malloc returns storage or null; the test does not run out.
+    let storage = unsafe malloc(64) orelse return;
+    // SAFETY: storage holds 64 bytes, room for one Counter.
+    let counter = unsafe cast<ptr<Counter>>(storage);
+    // SAFETY: counter is fresh storage for one Counter.
+    unsafe ptr_write(counter, Counter { count: 0 });
+    testing::expect(!step(counter));
+    testing::expect(step(counter));
+    // SAFETY: storage holds 64 bytes, room for one String.
+    let text = unsafe cast<ptr<string::String>>(storage);
+    // SAFETY: text is storage for one String; the Counter needs no cleanup.
+    unsafe ptr_write(text, string::new(mem::page_allocator()));
+    testing::expect_equal<i64>(1, grow(text));
+    testing::expect_equal<i64>(2, grow(text));
+    // SAFETY: text holds the String written above, read out once to free it.
+    let owned = unsafe ptr_read(text);
+    owned.deinit(mem::page_allocator());
+    // SAFETY: storage came from malloc and nothing reads it after this.
+    unsafe free(storage);
+}
