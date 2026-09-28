@@ -2318,7 +2318,7 @@ func (c *Checker) checkErrorUnionReturn(
 			return ok, err
 		}
 	}
-	if c.types.absorbsErrorUnion(want, got) {
+	if c.errorUnionFits(want, got) {
 		return true, nil
 	}
 	if errorType, success, ok := c.types.errorUnionParts(want); ok {
@@ -4683,6 +4683,23 @@ func (c *Checker) checkTryExpr(expr *ast.TryExpr, env *scope, unsafe unsafeMark)
 		return "", tryPropagateError(expr, sourceError, source, c.currentReturn)
 	}
 	return success, nil
+}
+
+// errorUnionFits reports whether a returned error union is the function's own
+// result: `!T` absorbs any set, and a declared `E!T` takes an `E1!T` whose
+// members are a subset of E's, which is what lets `try` propagate the same
+// failure (ADR-0127).
+func (c *Checker) errorUnionFits(want Type, got Type) bool {
+	if c.types.absorbsErrorUnion(want, got) {
+		return true
+	}
+	wantError, wantSuccess, ok := c.types.errorUnionParts(want)
+	if !ok || wantError == "" {
+		return false
+	}
+	gotError, gotSuccess, ok := c.types.errorUnionParts(got)
+	return ok && gotError != "" && sameType(gotSuccess, wantSuccess) &&
+		c.errorSetFits(gotError, wantError)
 }
 
 // tryPropagateError names both ends of a `try` that cannot hand its failure

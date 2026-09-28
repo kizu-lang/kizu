@@ -554,6 +554,11 @@ fn (self: &var Lowerer) lower_return_stmt(
     if try self.lower_contextual_expr(tree, returned_value, want, &var value) |failed| {
         return move failed;
     }
+    if try self.propagate_returned_failure(statement, value) |succeeded| {
+        try self.emit_normal_cleanups();
+        self.terminate(return_terminator(succeeded));
+        return null;
+    }
     var error_return = self.produces_error_value(value);
     let current_return = self.module.function_return(self.current);
     if try self.error_union_parts(current_return) |parts| {
@@ -579,6 +584,62 @@ fn (self: &var Lowerer) lower_return_stmt(
     }
     self.terminate(return_terminator(value));
     return null;
+}
+
+/// Lowers `return f()` where f's error union fails through this function's
+/// the way `try f()` would, the Go `propagateReturnedFailure`: a failure
+/// leaves through the error path, running the errdefer cleanups the ownership
+/// checker kept for this return, and a success is wrapped as this function's
+/// own. It is how a narrower set returns into the one the function declares
+/// (ADR-0127), and how an errdefer runs when the value handed back is a
+/// failure. A union returned as the function's own type with no errdefer to
+/// run passes through unchanged, and null says so.
+fn (self: &var Lowerer) propagate_returned_failure(statement: ast::Statement, value: Value) -> !?Value {
+    let current_return = self.module.function_return(self.current);
+    let returns = try self.error_union_parts(current_return) orelse return null;
+    // A value of the success type is a success even when that type is itself
+    // an error union (`E!!T`).
+    if same_name(value.type_name, returns.success) {
+        return null;
+    }
+    let given = try self.error_union_parts(value.type_name) orelse return null;
+    var cleanups = array::new<Cleanup>(self.allocator);
+    defer cleanups.deinit(self.allocator);
+    try self.error_cleanups(&var cleanups);
+    try self.retire_cleanups(CleanupExit::Return(statement), &var cleanups);
+    var runs_errdefer = false;
+    var index = 0;
+    while cleanups.get(index) |cleanup| {
+        index = index + 1;
+        runs_errdefer = runs_errdefer or cleanup.on_error;
+    }
+    if same_name(value.type_name, current_return) and !runs_errdefer {
+        return null;
+    }
+    // A `!T` return absorbs any union where it is returned (the backends
+    // rebuild it), so it only goes through here to run an errdefer.
+    if is_empty(returns.err) and !runs_errdefer {
+        return null;
+    }
+    index = 0;
+    while index < cleanups.len() {
+        if cleanups.get(index) |cleanup| {
+            try cleanups.set(index, try self.loaded_cleanup(cleanup));
+        }
+        index = index + 1;
+    }
+    let unwrapped = try self.emit1(Op::ErrorTry, given.success, value);
+    if self.last_instr() |instr| {
+        index = 0;
+        while cleanups.get(index) |cleanup| {
+            index = index + 1;
+            try self.module.add_cleanup(self.allocator, instr, cleanup);
+        }
+    }
+    if self.name_is(given.success, "void") {
+        return try self.emit0(Op::ErrorOk, current_return);
+    }
+    return try self.emit1(Op::ErrorOk, current_return, unwrapped);
 }
 
 /// Lowers `return;`, the no-value arm of `lowerReturnStmt`.
