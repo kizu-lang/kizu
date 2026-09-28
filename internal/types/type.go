@@ -344,6 +344,43 @@ func (t *typeTable) substituteTypeParams(declared Type, subst map[string]Type) T
 	return t.remember(typ.Substitute(parsed, t.parsedSubst(subst)))
 }
 
+// instanceType is a signature type as one instance sees it: the type
+// arguments substituted, and each array length that reads a static value
+// evaluated against the values the instance was given.
+func (t *typeTable) instanceType(
+	declared Type,
+	subst map[string]Type,
+	values map[string]comptimeValue,
+) Type {
+	substituted := t.substituteTypeParams(declared, subst)
+	bound, err := t.bindLengths(substituted, values)
+	if err != nil {
+		// checkInstanceLengths refused the call that made this length.
+		return substituted
+	}
+	return bound
+}
+
+// bindLengths evaluates the array lengths value reads from the integers in
+// values.
+func (t *typeTable) bindLengths(value Type, values map[string]comptimeValue) (Type, error) {
+	if len(values) == 0 {
+		return value, nil
+	}
+	parsed, ok := t.lookup(value)
+	if !ok {
+		return value, nil
+	}
+	bound, err := typ.BindLengths(parsed, func(name string) (int64, bool) {
+		value, ok := values[name]
+		return value.i, ok && value.typ == typeI64
+	})
+	if err != nil {
+		return "", err
+	}
+	return t.remember(bound), nil
+}
+
 // parsedSubst parses the replacement types once per substitution.
 func (t *typeTable) parsedSubst(subst map[string]Type) map[string]typ.Type {
 	out := make(map[string]typ.Type, len(subst))

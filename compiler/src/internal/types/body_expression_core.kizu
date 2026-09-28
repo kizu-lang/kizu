@@ -420,6 +420,16 @@ fn (self: &var Checker) check_array_literal_expr(
         },
         Issue(issue) => return try self.type_resolution_diagnostic(issue),
     }
+    if self.types.has_static_length(array_type) {
+        // Only a generic's declaration leaves a length waiting, and its body
+        // is checked per instance, where every length is bound.
+        var message = try string::from_bytes(self.allocator, "`");
+        errdefer message.deinit(self.allocator);
+        try self.append_checker_type(&var message, array_type);
+        try message.append_bytes(self.allocator, "` has no length here");
+        return try self.checker_message_at("internal error", expression.span, move message);
+    }
+    let size = self.types.buffer_size(array_type) orelse 0;
     let elem = try self.types.buffer_elem(array_type) orelse array_type;
     var seen = array::new<Type>(self.allocator);
     defer seen.deinit(self.allocator);
@@ -436,19 +446,19 @@ fn (self: &var Checker) check_array_literal_expr(
             errdefer message.deinit(self.allocator);
             try self.append_checker_type(&var message, array_type);
             try message.append_bytes(self.allocator, "{}` fills with zero, which only numbers and bool have; list the ");
-            try fmt::append_i64(self.allocator, &var message, expression.size);
+            try fmt::append_i64(self.allocator, &var message, size);
             try message.append_bytes(self.allocator, " elements");
             return try self.checker_message_at("type error", expression.span, move message);
         }
         out.* = array_type;
         return null;
     }
-    if expression.elements.len() != expression.size {
+    if expression.elements.len() != size {
         var message = try string::from_bytes(self.allocator, "`");
         errdefer message.deinit(self.allocator);
         try self.append_checker_type(&var message, array_type);
         try message.append_bytes(self.allocator, "` has ");
-        try fmt::append_i64(self.allocator, &var message, expression.size);
+        try fmt::append_i64(self.allocator, &var message, size);
         try message.append_bytes(self.allocator, " elements, got ");
         try fmt::append_i64(self.allocator, &var message, expression.elements.len());
         try message.append_bytes(self.allocator, " values");

@@ -12,7 +12,7 @@ import (
 func TestTypeParamStoreRestoresReplacedScopes(t *testing.T) {
 	var store typeParamStore
 	outer := store.enter([]string{"T"})
-	if outer != nil || !store.contains("T") {
+	if outer.types != nil || !store.contains("T") {
 		t.Fatal("outer type parameter was not selected")
 	}
 	previous := store.enter([]string{"U"})
@@ -39,5 +39,8 @@ func TestTypeParamStoreSelectsOnlySignatureTypes(t *testing.T) {
 	}})
 	if !store.contains("T") || store.contains("count") {
 		t.Fatal("signature static values were treated as type parameters")
+	}
+	if !store.containsLength("count") || store.containsLength("T") {
+		t.Fatal("an integer static value was not selected as a length")
 	}
 }

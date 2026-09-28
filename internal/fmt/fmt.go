@@ -958,16 +958,40 @@ func (b *builder) closesTypeBrackets() bool {
 }
 
 // openingTypeBracket returns the index of the `[` that the `]` at index
-// closes when the two hold nothing or a length, or -1.
+// closes when the two hold nothing or a length -- a number, a static name, or
+// a parenthesized static expression -- or -1.
 func (b *builder) openingTypeBracket(index int) int {
 	open := index - 1
-	if open >= 0 && b.tokens[open].Type == token.Int {
-		open--
+	if open >= 0 {
+		switch b.tokens[open].Type {
+		case token.Int, token.Ident:
+			open--
+		case token.RParen:
+			open = b.openingParen(open) - 1
+		}
 	}
 	if open < 0 || b.tokens[open].Type != token.LBracket {
 		return -1
 	}
 	return open
+}
+
+// openingParen returns the index of the `(` that the `)` at index closes, or
+// -1.
+func (b *builder) openingParen(index int) int {
+	depth := 0
+	for i := index; i >= 0; i-- {
+		switch b.tokens[i].Type {
+		case token.RParen:
+			depth++
+		case token.LParen:
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // labelHugsColon reports whether the `:` just written names a loop after
@@ -991,10 +1015,13 @@ func (b *builder) stackBufferBrace() bool {
 		return false
 	}
 	lengths := 0
-	for i >= 3 && b.tokens[i-1].Type == token.RBracket &&
-		b.tokens[i-2].Type == token.Int && b.tokens[i-3].Type == token.LBracket {
+	for i >= 1 && b.tokens[i-1].Type == token.RBracket {
+		open := b.openingTypeBracket(i - 1)
+		if open < 0 || b.tokens[open+1].Type == token.RBracket {
+			break
+		}
 		lengths++
-		i -= 3
+		i = open
 	}
 	return lengths > 0 && (i == 0 || b.tokens[i-1].Type != token.Arrow)
 }

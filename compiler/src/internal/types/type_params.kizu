@@ -1,10 +1,14 @@
 import compiler::internal::ast;
+import compiler::internal::typ;
 import std::arena;
 import std::array;
 import std::map;
+import std::mem;
 
 // Owns every type-parameter frame made during a checker phase. The current
 // frame is a copy handle so entering a generic never moves an owner field.
+// A frame maps a type parameter to true, and an integer value parameter --
+// a name an array length may use, as in `[n]f64` -- to false.
 struct TypeParamStore {
     allocator: Allocator,
     frames: arena::Arena<map::Map<[]u8, bool>>,
@@ -42,7 +46,8 @@ fn (self: &var TypeParamStore) enter_ast(
     return try self.install_frame(move names, previous);
 }
 
-// Selects only type-valued entries from one parser-owned signature.
+// Selects the static parameters of one parser-owned signature: the type
+// parameters, and the integer value parameters an array length may name.
 fn (self: &var TypeParamStore) enter_ast_signature(allocator: Allocator, tree: &ast::Ast, signature: &ast::FunctionSignature) -> !?arena::Handle<map::Map<[]u8, bool>> {
     let previous = self.current;
     if signature.static_params.len() == 0 {
@@ -53,14 +58,28 @@ fn (self: &var TypeParamStore) enter_ast_signature(allocator: Allocator, tree: &
     errdefer names.deinit(self.allocator);
     var index = 0;
     while signature.static_params.at(index) |parameter| {
-        if parameter.type_name |_| {} else {
-            let retained = tree.texts.at(parameter.name.node);
-            let name = retained.as_bytes();
+        let retained = tree.texts.at(parameter.name.node);
+        let name = retained.as_bytes();
+        if parameter.type_name |value_type| {
+            if try is_length_param_type(allocator, &tree.types, value_type) {
+                try names.insert(allocator, name, false);
+            }
+        } else {
             try names.insert(allocator, name, true);
         }
         index = index + 1;
     }
     return try self.install_frame(move names, previous);
+}
+
+// is_length_param_type reports whether a value parameter of this type holds
+// an integer: anything but bool, Function, and Field.
+fn is_length_param_type(allocator: Allocator, table: &typ::Table, value: typ::Type) -> !bool {
+    let spelling = try typ::render(allocator, table, value);
+    defer spelling.deinit(allocator);
+    let bytes = spelling.as_bytes();
+    return !mem::equal_bytes(bytes, "bool") and !mem::equal_bytes(bytes, "Function") and
+        !mem::equal_bytes(bytes, "Field");
 }
 
 // Selects only type-valued static parameters from a cached signature.
@@ -110,8 +129,16 @@ fn (self: &var TypeParamStore) restore(previous: ?arena::Handle<map::Map<[]u8, b
     self.current = previous;
 }
 
-// Reports whether name belongs to the selected frame.
+// Reports whether name is a type parameter in the selected frame.
 fn (self: &TypeParamStore) contains(name: []u8) -> bool {
     let handle = self.current orelse return false;
-    return self.frames.at(handle).contains(name);
+    let is_type = self.frames.at(handle).get(name) orelse return false;
+    return is_type;
+}
+
+// Reports whether name is an integer static parameter in the selected frame.
+fn (self: &TypeParamStore) contains_length(name: []u8) -> bool {
+    let handle = self.current orelse return false;
+    let is_type = self.frames.at(handle).get(name) orelse return false;
+    return !is_type;
 }

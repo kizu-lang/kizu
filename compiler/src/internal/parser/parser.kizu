@@ -2,6 +2,7 @@ import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::lexer;
 import compiler::internal::source;
+import compiler::internal::staticexpr;
 import compiler::internal::token;
 import compiler::internal::typ;
 import std::arena;
@@ -2983,7 +2984,15 @@ fn (self: &var Parser) parse_buffer_literal_expr(
                 return try tree.add_recovered_expression(span);
             }
             let elem_text = try tree.add_text(move elem);
-            let size = buffer.size;
+            var written = string::new(self.allocator);
+            errdefer written.deinit(self.allocator);
+            if buffer.len.len() > 0 {
+                let bytes = buffer.len.as_bytes();
+                try written.append_bytes(self.allocator, bytes);
+            } else {
+                try fmt::append_i64(self.allocator, &var written, buffer.size);
+            }
+            let len = try tree.add_text(move written);
             var elements = array::new<ast::Expression>(self.allocator);
             errdefer elements.deinit(self.allocator);
             try self.next_token();
@@ -2999,7 +3008,9 @@ fn (self: &var Parser) parse_buffer_literal_expr(
             }
             try self.expect_list_close("array literal", "");
             return try tree.add_expression(ast::ExpressionNode::BufferLiteral(
-                ast::BufferLiteralExpr { size: size, elem: elem_text, elements: move elements, span: span }
+                ast::BufferLiteralExpr {
+                len: len, elem: elem_text, elements: move elements, span: span
+            }
             ));
         },
         _ => {},
@@ -3644,7 +3655,8 @@ fn (self: &var Parser) parse_type_argument(
 fn (self: &var Parser) parse_bracket_type(
     builder: &var typ::Builder
 ) -> !?arena::Handle<typ::Node> {
-    if self.peek_kind() == token::Kind::Int {
+    let next = self.peek_kind();
+    if next == token::Kind::Int or next == token::Kind::Ident or next == token::Kind::LParen {
         return self.parse_buffer_type(builder);
     }
     if !try self.expect_peek(token::Kind::RBracket) {
@@ -3658,19 +3670,42 @@ fn (self: &var Parser) parse_bracket_type(
     return null;
 }
 
+// parse_buffer_type parses `[N]T`. N is a positive integer, or a static
+// integer the instance binds: a name, or a parenthesized expression. An
+// expression of literals alone is its value, so `[(2 * 4)]u8` and `[8]u8` are
+// one type.
 fn (self: &var Parser) parse_buffer_type(
     builder: &var typ::Builder
 ) -> !?arena::Handle<typ::Node> {
     try self.next_token();
-    let current = self.current_token();
+    var len = string::new(self.allocator);
+    errdefer len.deinit(self.allocator);
     var size = 0;
-    if positive_decimal(current) |parsed| {
-        size = parsed;
+    let kind = self.current_kind();
+    if kind == token::Kind::Ident {
+        try append_token_literal(self.allocator, &var len, self.current_token());
+    } else if kind == token::Kind::LParen {
+        size = try self.parse_length_expr(&var len);
     } else {
-        try self.error_literal("buffer size must be a positive integer, got ", current);
+        let current = self.current_token();
+        if positive_decimal(current) |parsed| {
+            size = parsed;
+        } else {
+            len.deinit(self.allocator);
+            try self.error_literal("buffer size must be a positive integer, got ", current);
+            return null;
+        }
+    }
+    if len.len() == 0 and size <= 0 {
+        len.deinit(self.allocator);
+        var number = string::new(self.allocator);
+        defer number.deinit(self.allocator);
+        try fmt::append_i64(self.allocator, &var number, size);
+        try self.error_value("buffer size must be a positive integer, got ", &number, "");
         return null;
     }
     if !try self.expect_peek(token::Kind::RBracket) {
+        len.deinit(self.allocator);
         return null;
     }
     try self.next_token();
@@ -3678,10 +3713,32 @@ fn (self: &var Parser) parse_buffer_type(
     if parsed |elem| {
         return try builder.add(typ::Node::Buffer(typ::Buffer {
             size: size,
+            len: move len,
             elem: elem
         }));
     }
+    len.deinit(self.allocator);
     return null;
+}
+
+// parse_length_expr reads a parenthesized length into len, or answers its
+// value when it reads literals alone. The expression is parsed into a scratch
+// tree: a type holds only its canonical text.
+fn (self: &var Parser) parse_length_expr(len: &var string::String) -> !i64 {
+    var scratch = ast::new(self.allocator);
+    defer scratch.deinit(self.allocator);
+    let text = try self.parse_static_expr_arg(&var scratch) orelse return 0;
+    defer text.deinit(self.allocator);
+    var env = staticexpr::new_env(self.allocator);
+    defer env.deinit(self.allocator);
+    let bytes = text.as_bytes();
+    let outcome = try staticexpr::eval(self.allocator, bytes, &env);
+    match outcome {
+        Value(value) => return value,
+        Problem(problem) => problem.deinit(self.allocator),
+    }
+    try len.append_bytes(self.allocator, bytes);
+    return 0;
 }
 
 fn owned_token_literal(

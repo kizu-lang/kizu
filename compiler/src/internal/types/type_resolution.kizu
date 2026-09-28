@@ -1,4 +1,5 @@
 import compiler::internal::ast;
+import compiler::internal::staticexpr;
 import compiler::internal::stdmeta;
 import compiler::internal::stdtarget;
 import compiler::internal::typ;
@@ -21,6 +22,13 @@ struct TypeArityIssue {
 struct CFunctionIssue {
     pub subject: Type,
     pub refused: Type,
+}
+
+// LengthUnboundIssue is an array whose length reads a name that is no static
+// integer where the type is written.
+struct LengthUnboundIssue {
+    pub subject: Type,
+    pub name: Type,
 }
 
 struct MetaArityIssue {
@@ -74,6 +82,10 @@ union TypeResolutionIssue {
     MetaElementArity,
     MetaElementUnsupported(Type),
     CFunction(CFunctionIssue),
+    LengthUnbound(LengthUnboundIssue),
+    // Length is a type with a length the names bind to no length; the
+    // diagnostic evaluates it again to say why.
+    Length(Type),
 }
 
 union TypeResolution {
@@ -305,7 +317,16 @@ fn (self: &var Checker) resolve_type_node(allocator: Allocator, tree: &ast::Ast,
     return self.resolve_type_value(tree, value);
 }
 
-fn (self: &var Checker) resolve_type_value(tree: &ast::Ast, value: Type) -> !TypeResolution {
+fn (self: &var Checker) resolve_type_value(tree: &ast::Ast, written: Type) -> !TypeResolution {
+    var value = written;
+    if self.types.has_static_length(written) {
+        match try self.bind_lengths(written) {
+            Value(bound) => {
+                value = bound;
+            },
+            Issue(issue) => return TypeResolution::Issue(issue),
+        }
+    }
     let parsed = self.types.lookup(value) orelse return TypeResolution::Issue(
         TypeResolutionIssue::Unknown(value)
     );
@@ -322,6 +343,9 @@ fn (self: &var Checker) resolve_type_value(tree: &ast::Ast, value: Type) -> !Typ
             return self.resolve_wrapping_type(tree, value, elem);
         },
         Buffer(node) => {
+            if try self.unbound_length(value, &node.len) |issue| {
+                return TypeResolution::Issue(issue);
+            }
             let child = typ::child_type(parsed, node.elem);
             let elem = try self.types.retain_parsed(child);
             return self.resolve_wrapping_type(tree, value, elem);
@@ -335,6 +359,43 @@ fn (self: &var Checker) resolve_type_value(tree: &ast::Ast, value: Type) -> !Typ
         Func(node) => return self.resolve_func_type(tree, value, parsed, node),
         _ => return TypeResolution::Issue(TypeResolutionIssue::Unknown(value)),
     }
+}
+
+// bind_lengths evaluates the array lengths a type reads from static integers
+// bound here: an instance's static values and `comptime for` captures.
+fn (self: &var Checker) bind_lengths(value: Type) -> !TypeResolution {
+    let env = try self.comptime_env();
+    defer env.deinit(self.allocator);
+    let bound = try self.types.bind_lengths(value, &env);
+    match bound {
+        Value(result) => return TypeResolution::Value(result),
+        Problem(problem) => {
+            problem.deinit(self.allocator);
+            return TypeResolution::Issue(TypeResolutionIssue::Length(value));
+        },
+    }
+}
+
+// unbound_length finds a name an array's length reads that is no integer
+// static parameter of the signature being declared, which each instance binds.
+fn (self: &var Checker) unbound_length(value: Type, len: &string::String) -> !?TypeResolutionIssue {
+    let bytes = len.as_bytes();
+    if mem::len(bytes) == 0 {
+        return null;
+    }
+    let names = try staticexpr::names(self.allocator, bytes);
+    defer names.deinit(self.allocator);
+    var index = 0;
+    while names.at(index) |name| {
+        let name_bytes = name.as_bytes();
+        if !self.type_params.contains_length(name_bytes) {
+            return TypeResolutionIssue::LengthUnbound(LengthUnboundIssue {
+                subject: value, name: try self.types.intern(name_bytes)
+            });
+        }
+        index = index + 1;
+    }
+    return null;
 }
 
 // resolve_func_type validates the parameter and result types a function

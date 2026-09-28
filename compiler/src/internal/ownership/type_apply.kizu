@@ -1,6 +1,7 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::staticexpr;
+import compiler::internal::typ;
 import std::arena;
 import std::array;
 import std::fmt;
@@ -1162,13 +1163,13 @@ fn (self: &var Checker) check_generic_user_type_apply(
     // The call site sees the instantiated signature and nothing else: with
     // `T` spelled out, an owner argument moves, a view lends or is refused,
     // and two borrows of one value collide, exactly as for a direct call.
-    let instantiated = try self.instantiate_function_info(function, &subst);
+    let values = try self.generic_call_values(function, type_arg);
+    defer values.deinit(self.allocator);
+    let instantiated = try self.instantiate_function_info(function, &subst, &values);
     if try self.check_callable_call(tree, env, name, instantiated, args, sanctioned, out) |failed| {
         subst.deinit(self.allocator);
         return move failed;
     }
-    let values = try self.generic_call_values(function, type_arg);
-    defer values.deinit(self.allocator);
     let restore = try self.bind_generic_call_fields(tree, function, type_arg);
     let restore_functions = try self.bind_generic_call_functions(function, type_arg);
     if try self.check_generic_instantiation(tree, function, move subst, &values) |failed| {
@@ -1183,10 +1184,15 @@ fn (self: &var Checker) check_generic_user_type_apply(
 
 /// Is the signature one generic call sees, the Go `instantiateFunctionInfo`:
 /// the declaration's, with every type parameter replaced by the static
-/// argument the call spelled. Only the ownership-facing parts are
+/// argument the call spelled, and every array length read from a static value
+/// bound to the value the call gave. Only the ownership-facing parts are
 /// substituted; the body and static parameter list stay the declaration's.
 /// The copy joins the function arena, which releases it with the checker.
-fn (self: &var Checker) instantiate_function_info(function: FunctionHandle, subst: &Subst) -> !FunctionHandle {
+fn (self: &var Checker) instantiate_function_info(
+    function: FunctionHandle,
+    subst: &Subst,
+    values: &array::Array<Name>
+) -> !FunctionHandle {
     var static_params = array::new<StaticParamInfo>(self.allocator);
     errdefer static_params.deinit(self.allocator);
     var index = 0;
@@ -1199,7 +1205,8 @@ fn (self: &var Checker) instantiate_function_info(function: FunctionHandle, subs
     index = 0;
     while self.param_at(function, index) |param| {
         index = index + 1;
-        let type_name = try self.substitute_with(param.type_name, subst);
+        let substituted = try self.substitute_with(param.type_name, subst);
+        let type_name = try self.bind_value_lengths(substituted, function, values);
         try params.append(self.allocator, ParamInfo {
             name: param.name,
             type_name: type_name,
@@ -1207,7 +1214,8 @@ fn (self: &var Checker) instantiate_function_info(function: FunctionHandle, subs
             mut_borrow: param.mut_borrow
         });
     }
-    let return_type = try self.substitute_with(self.return_type_name(function), subst);
+    let substituted_return = try self.substitute_with(self.return_type_name(function), subst);
+    let return_type = try self.bind_value_lengths(substituted_return, function, values);
     let declared = self.functions.at(function.index);
     let info = FunctionInfo {
         name: declared.name,
@@ -1279,6 +1287,15 @@ fn (self: &var Checker) generic_call_values(
     return move values;
 }
 
+/// Is generic_call_values for a declaration that takes a compile-time value,
+/// and no values for one that takes only types, which has none to read.
+fn (self: &var Checker) instance_values(function: FunctionHandle, type_arg: Name) -> !array::Array<Name> {
+    if !self.has_value_static_param(function) {
+        return array::new<Name>(self.allocator);
+    }
+    return self.generic_call_values(function, type_arg);
+}
+
 /// Replaces a parenthesized static expression with the decimal text of its
 /// value, the Go `staticexpr.Eval(arg, c.comptimeInt)`. The type checker has
 /// already refused an expression that does not evaluate, so a failure here
@@ -1289,23 +1306,8 @@ fn (self: &var Checker) evaluate_static_expr(arg: Name) -> !Name {
     if !staticexpr::is(arg_bytes) {
         return arg;
     }
-    // The innermost binding of a name is the one in force, so the walk from
-    // the current binding outward binds it first.
-    var env = staticexpr::new_env(self.allocator);
+    let env = try self.comptime_env();
     defer env.deinit(self.allocator);
-    var current = self.comptime_values.current;
-    while current |handle| {
-        let binding = self.comptime_values.bindings.at(handle);
-        let value_text = name_text(&self.names, binding.value);
-        let value_bytes = value_text.as_bytes();
-        let name = binding.name.as_bytes();
-        if staticexpr::parse_i64(value_bytes) |value| {
-            try env.bind(self.allocator, name, value);
-        } else {
-            try env.hide(self.allocator, name);
-        }
-        current = binding.parent;
-    }
     let outcome = try staticexpr::eval(self.allocator, arg_bytes, &env);
     match outcome {
         Value(value) => {
@@ -1319,6 +1321,93 @@ fn (self: &var Checker) evaluate_static_expr(arg: Name) -> !Name {
             return arg;
         },
     }
+}
+
+/// Binds the integers the comptime-readable names stand for, the Go
+/// `c.comptimeInt`. The innermost binding of a name is the one in force, so
+/// the walk from the current binding outward binds it first.
+fn (self: &Checker) comptime_env() -> !staticexpr::Env {
+    var env = staticexpr::new_env(self.allocator);
+    errdefer env.deinit(self.allocator);
+    var current = self.comptime_values.current;
+    while current |handle| {
+        let binding = self.comptime_values.bindings.at(handle);
+        let value_text = name_text(&self.names, binding.value);
+        let value_bytes = value_text.as_bytes();
+        let name = binding.name.as_bytes();
+        if staticexpr::parse_i64(value_bytes) |value| {
+            try env.bind(self.allocator, name, value);
+        } else {
+            try env.hide(self.allocator, name);
+        }
+        current = binding.parent;
+    }
+    return move env;
+}
+
+/// Binds the integers one call gives the static value parameters of function;
+/// values runs parallel to the static parameters, as generic_call_values
+/// answers it.
+fn (self: &Checker) values_env(function: FunctionHandle, values: &array::Array<Name>) -> !staticexpr::Env {
+    var env = staticexpr::new_env(self.allocator);
+    errdefer env.deinit(self.allocator);
+    var index = 0;
+    while self.static_param_at(function, index) |param| {
+        let value = values.get(index) orelse empty_name();
+        index = index + 1;
+        let value_text = name_text(&self.names, value);
+        let value_bytes = value_text.as_bytes();
+        if staticexpr::parse_i64(value_bytes) |integer| {
+            let retained = name_text(&self.names, param.name);
+            let name = retained.as_bytes();
+            try env.bind(self.allocator, name, integer);
+        }
+    }
+    return move env;
+}
+
+/// Evaluates the array lengths a type reads from the comptime-readable
+/// integers, the Go `bindOwnershipLengths(name, c.comptimeValues)`.
+fn (self: &var Checker) bind_comptime_lengths(type_name: Name) -> !Name {
+    if self.comptime_values.current |_| {} else {
+        return type_name;
+    }
+    if !self.has_static_length(type_name) {
+        return type_name;
+    }
+    let env = try self.comptime_env();
+    defer env.deinit(self.allocator);
+    return self.bind_ownership_lengths(type_name, &env);
+}
+
+/// Evaluates the array lengths a type reads from the integers one call gives
+/// the static value parameters of function.
+fn (self: &var Checker) bind_value_lengths(
+    type_name: Name,
+    function: FunctionHandle,
+    values: &array::Array<Name>
+) -> !Name {
+    if values.len() == 0 or !self.has_static_length(type_name) {
+        return type_name;
+    }
+    let env = try self.values_env(function, values);
+    defer env.deinit(self.allocator);
+    return self.bind_ownership_lengths(type_name, &env);
+}
+
+fn (self: &Checker) has_static_length(type_name: Name) -> bool {
+    let retained = name_text(&self.names, type_name);
+    let bytes = retained.as_bytes();
+    return typ::has_static_length(bytes);
+}
+
+/// Evaluates the array lengths a type reads from the integers env binds, the
+/// Go `bindOwnershipLengths`.
+fn (self: &var Checker) bind_ownership_lengths(type_name: Name, env: &staticexpr::Env) -> !Name {
+    let retained = name_text(&self.names, type_name);
+    let bytes = retained.as_bytes();
+    let bound = try typ::bind_lengths_text(self.allocator, bytes, env);
+    return self.names.intern_owned(move bound);
 }
 
 /// Replaces the comptime-readable names with the values an instance binds and

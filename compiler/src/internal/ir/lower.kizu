@@ -1822,19 +1822,37 @@ fn (self: &var Lowerer) resolve_bound_type(name: Name) -> !Name {
     // A `std::meta` form written where a type goes resolves first: it names
     // a type through the capture in force rather than being one (ADR-0113).
     let resolved = try self.resolve_meta_type_deep(name);
-    let args = self.current_args orelse return resolved;
+    let args = self.current_args orelse return self.bind_static_lengths(resolved);
     if self.bound_type(args, resolved) |bound| {
         return bound;
     }
     if self.binding_count(args) == 0 or is_empty(resolved) {
-        return resolved;
+        return self.bind_static_lengths(resolved);
     }
     let node = self.generic_args.at(args.node);
     let retained = name_text(&self.module.names, resolved);
     let bytes = retained.as_bytes();
     let substituted = try typ::substitute_owned_text(self.allocator, bytes, &node.binding_names, &node.binding_types
     );
-    return self.module.names.intern_owned(move substituted);
+    let interned = try self.module.names.intern_owned(move substituted);
+    return self.bind_static_lengths(interned);
+}
+
+// bind_static_lengths evaluates the array lengths a type reads from the
+// static integers in force: an instance's values and `comptime for` captures.
+fn (self: &var Lowerer) bind_static_lengths(name: Name) -> !Name {
+    if !self.has_static_ints() {
+        return name;
+    }
+    let retained = name_text(&self.module.names, name);
+    let bytes = retained.as_bytes();
+    if !typ::has_static_length(bytes) {
+        return name;
+    }
+    let env = try self.static_int_env();
+    defer env.deinit(self.allocator);
+    let bound = try typ::bind_lengths_text(self.allocator, bytes, &env);
+    return self.module.names.intern_owned(move bound);
 }
 
 /// Binds the type parameters in force across a static argument list, the Go
@@ -1949,6 +1967,17 @@ fn (self: &Lowerer) static_int_env() -> !staticexpr::Env {
         try self.add_static_int(&var env, value);
     }
     return move env;
+}
+
+// has_static_ints reports whether any static value is in force: a capture, or
+// a value of the instance being lowered.
+fn (self: &Lowerer) has_static_ints() -> bool {
+    if self.static_current |_| {
+        return true;
+    }
+    let args = self.current_args orelse return false;
+    let node = self.generic_args.at(args.node);
+    return node.values.len() > 0;
 }
 
 fn (self: &Lowerer) add_static_int(env: &var staticexpr::Env, value: StaticValue) -> !void {
