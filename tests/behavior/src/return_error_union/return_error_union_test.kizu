@@ -1,0 +1,84 @@
+import std::mem;
+import std::testing;
+
+error ParseError {
+    Invalid,
+}
+
+error Failure = ParseError or mem::Error;
+
+struct Log {
+    cleaned: i64,
+}
+
+fn (self: &var Log) clean() -> void {
+    self.cleaned = self.cleaned + 1;
+}
+
+fn parse(n: i64) -> ParseError!i64 {
+    if n == 0 {
+        return ParseError::Invalid;
+    }
+    return n;
+}
+
+fn check(n: i64) -> ParseError!void {
+    if n == 0 {
+        return ParseError::Invalid;
+    }
+    return;
+}
+
+fn widened(n: i64) -> Failure!i64 {
+    return parse(n);
+}
+
+fn widened_void(n: i64) -> Failure!void {
+    return check(n);
+}
+
+fn cleaned(log: &var Log, n: i64) -> ParseError!i64 {
+    errdefer log.clean();
+    return parse(n);
+}
+
+fn widened_cleaned(log: &var Log, n: i64) -> Failure!i64 {
+    errdefer log.clean();
+    return parse(n);
+}
+
+fn failure_code(result: Failure!i64) -> i64 {
+    if result |value| {
+        return value;
+    } else |failure| {
+        return match failure {
+            ParseError::Invalid => -1,
+            OutOfMemory => -2,
+        };
+    }
+}
+
+test "a narrower error union returns into the declared set" {
+    testing::expect_equal<i64>(5, failure_code(widened(5)));
+    testing::expect_equal<i64>(-1, failure_code(widened(0)));
+    if widened_void(1) {} else |_| {
+        testing::expect(false);
+    }
+    if widened_void(0) {
+        testing::expect(false);
+    } else |_| {}
+}
+
+test "returning a failure runs the errdefer cleanups" {
+    var log = Log { cleaned: 0 };
+    if cleaned(&var log, 4) |value| {
+        testing::expect_equal<i64>(4, value);
+    } else |_| {}
+    testing::expect_equal<i64>(0, log.cleaned);
+    if cleaned(&var log, 0) |_| {} else |_| {}
+    testing::expect_equal<i64>(1, log.cleaned);
+    testing::expect_equal<i64>(-1, failure_code(widened_cleaned(&var log, 0)));
+    testing::expect_equal<i64>(2, log.cleaned);
+    testing::expect_equal<i64>(3, failure_code(widened_cleaned(&var log, 3)));
+    testing::expect_equal<i64>(2, log.cleaned);
+}

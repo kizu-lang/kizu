@@ -1553,6 +1553,11 @@ func (l *lowerer) lowerReturnStmt(stmt *ast.ReturnStmt) error {
 	if err != nil {
 		return err
 	}
+	if succeeded, ok := l.propagateReturnedFailure(stmt, value); ok {
+		l.emitNormalCleanups()
+		l.block.Terminator = Terminator{Op: "return", Value: succeeded}
+		return nil
+	}
 	errorReturn := l.producesErrorValue(value)
 	if _, success, ok := errorUnionParts(l.types, l.current.Return); ok {
 		if value.Type == success {
@@ -1577,6 +1582,50 @@ func (l *lowerer) lowerReturnStmt(stmt *ast.ReturnStmt) error {
 	}
 	l.block.Terminator = Terminator{Op: "return", Value: value}
 	return nil
+}
+
+// propagateReturnedFailure lowers `return f()` where f's error union fails
+// through this function's the way `try f()` would: a failure leaves through the
+// error path, running the errdefer cleanups the ownership checker kept for this
+// return, and a success is wrapped as this function's own. It is how a narrower
+// set returns into the one the function declares (ADR-0127), and how an
+// errdefer runs when the value handed back is a failure. A union returned as
+// the function's own type with no errdefer to run passes through unchanged.
+func (l *lowerer) propagateReturnedFailure(stmt *ast.ReturnStmt, value Value) (Value, bool) {
+	_, returnSuccess, ok := errorUnionParts(l.types, l.current.Return)
+	// A value of the success type is a success even when that type is itself
+	// an error union (`E!!T`).
+	if !ok || value.Type == returnSuccess {
+		return Value{}, false
+	}
+	_, success, isUnion := errorUnionParts(l.types, value.Type)
+	if !isUnion {
+		return Value{}, false
+	}
+	cleanups := retireCleanups(l.errorCleanups(), l.ownership.RetiredErrDefersForReturn(stmt))
+	runsErrDefer := false
+	for _, cleanup := range cleanups {
+		runsErrDefer = runsErrDefer || cleanup.OnError
+	}
+	if value.Type == l.current.Return && !runsErrDefer {
+		return Value{}, false
+	}
+	// A `!T` return absorbs any union where it is returned (the backends
+	// rebuild it), so it only goes through here to run an errdefer.
+	returnError, _, _ := errorUnionParts(l.types, l.current.Return)
+	if returnError == "" && !runsErrDefer {
+		return Value{}, false
+	}
+	for index := range cleanups {
+		cleanups[index].Args = l.loadCleanupArgs(cleanups[index].Args, cleanups[index].Loads)
+	}
+	unwrapped := l.emit("error.try", success, []Value{value}, "")
+	l.block.Instrs[len(l.block.Instrs)-1].Cleanups = cleanups
+	args := []Value{unwrapped}
+	if success == "void" {
+		args = nil
+	}
+	return l.emit("error.ok", l.current.Return, args, ""), true
 }
 
 // producesErrorValue reports whether v was defined by an error.error
