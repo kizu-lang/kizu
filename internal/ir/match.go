@@ -288,7 +288,11 @@ func (l *lowerer) storageFieldType(expr ast.Expression) string {
 	var base string
 	if ident, isIdent := field.Receiver.(*ast.IdentExpr); isIdent {
 		value, bound := l.env.get(ident.Name)
-		if !bound || !l.slots[ident.Name] {
+		// A root bound to a `&T` is read through, never written, so a match
+		// on a field of it reads the value rather than binding payloads by
+		// reference into storage it may not write.
+		shared := isReferenceType(value.Type) && !isMutableReferenceType(value.Type)
+		if !bound || !l.slots[ident.Name] || shared {
 			return ""
 		}
 		base = derefType(value.Type)

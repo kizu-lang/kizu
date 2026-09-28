@@ -1,0 +1,59 @@
+import std::array;
+import std::mem;
+import std::testing;
+
+// A match on a union field reached through a `&T` reads the value: the
+// borrow is read through, never written, so payloads are not bound by
+// reference into its storage.
+
+struct Table {
+    rows: array::Array<i64>,
+}
+
+fn (self: &Table) count() -> i64 {
+    return self.rows.len();
+}
+
+union Source {
+    Fixed(Table),
+    Grown(Table),
+}
+
+struct Reader {
+    base: i64,
+    source: Source,
+}
+
+fn (self: &Reader) size() -> i64 {
+    match self.source {
+        Fixed(_table) => {
+            return self.base;
+        },
+        Grown(table) => {
+            return self.base + table.count();
+        },
+    }
+}
+
+fn reader_size(reader: &Reader) -> i64 {
+    match reader.source {
+        Fixed(_table) => {
+            return 0;
+        },
+        Grown(table) => {
+            return table.count();
+        },
+    }
+}
+
+test "a match on a union field reads through a shared borrow" {
+    let allocator = mem::page_allocator();
+    var rows = array::new<i64>(allocator);
+    errdefer rows.deinit(allocator);
+    try rows.append(allocator, 3);
+    try rows.append(allocator, 4);
+    let reader = Reader { base: 10, source: Source::Grown(Table { rows: move rows }) };
+    defer reader.deinit(allocator);
+    testing::expect_equal<i64>(12, reader.size());
+    testing::expect_equal<i64>(2, reader_size(&reader));
+}
