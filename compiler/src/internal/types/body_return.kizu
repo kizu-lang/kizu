@@ -107,7 +107,7 @@ fn (self: &var Checker) check_error_union_return(
             return null;
         }
     }
-    if try self.types.absorbs_error_union(want, got) {
+    if try self.types.absorbs_error_union(want, got) or try self.error_union_fits(want, got) {
         out.* = true;
         return null;
     }
@@ -139,6 +139,19 @@ fn (self: &var Checker) check_error_union_return(
     }
     out.* = false;
     return null;
+}
+
+/// Reports whether a returned `E1!T` is a declared `E!T`'s own result, the Go
+/// `errorUnionFits`: the success types match and E1's members are a subset of
+/// E's, which is what lets `try` propagate the same failure (ADR-0127).
+fn (self: &var Checker) error_union_fits(want: Type, got: Type) -> !bool {
+    let wanted = try self.types.error_union_parts(want) orelse return false;
+    if same_type(wanted.err, empty_type()) {
+        return false;
+    }
+    let given = try self.types.error_union_parts(got) orelse return false;
+    return !same_type(given.err, empty_type()) and same_type(given.success, wanted.success) and
+        self.error_set_fits(given.err, wanted.err);
 }
 
 fn (self: &Checker) is_declared_error_set(value: Type) -> bool {

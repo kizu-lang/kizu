@@ -2223,6 +2223,9 @@ member でもあるので、`CacheError!T` の関数は `FsError!T` の呼び出
 * `!T` は set を宣言しないので、body はどの set の member でも伝播・返却できる
 * `E!T` と宣言した場合、`try` で伝播できるのは member 集合が `E` の部分集合で
   ある set(`E` 自身と、その合成元)だけ
+* `return f()` で `E1!T` をそのまま返せるのも同じ条件(`E1` の member 集合が `E` の
+  部分集合)のときだけ。`try f()` と同じく、失敗は error return path で出るので
+  `errdefer`(§6.3.1)が実行される
 * `!T` 関数では `T` を返すと成功値、error set の member を返すと失敗値として扱う
 * error 値は大域一意な整数 1 個に lower される。set をまたぐ変換は存在しない
 * `==` / `!=` は、片方の member 集合がもう片方に含まれる set 同士(set と、
