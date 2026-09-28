@@ -2158,8 +2158,8 @@ func (c *Checker) checkAssignableIndex(
 // assignableArrayPlace reports the array type of a place an element write
 // can land in: a place assignment could write as a whole -- a `var` binding,
 // a `&var` parameter, a field of one -- whose type is `[N]T`, or an element
-// of such an array that is itself an array. An element of a view is not one:
-// the view's element write is the view's own rule.
+// of such an array or of a writable view (`rows[k]` of a `&var [][2]f64`)
+// that is itself an array.
 func (c *Checker) assignableArrayPlace(
 	expr ast.Expression,
 	env *scope,
@@ -2167,11 +2167,7 @@ func (c *Checker) assignableArrayPlace(
 ) (Type, bool) {
 	var place Type
 	if index, ok := expr.(*ast.IndexExpr); ok {
-		outer, ok := c.assignableArrayPlace(index.Target, env, unsafe)
-		if !ok {
-			return "", false
-		}
-		elem, err := c.checkArrayIndex(index, outer, env, unsafe)
+		elem, err := c.checkAssignableIndex(index, env, unsafe)
 		if err != nil {
 			return "", false
 		}
@@ -7527,9 +7523,10 @@ func (c *Checker) checkDerefExpr(expr *ast.DerefExpr, env *scope, unsafe unsafeM
 
 // checkAssignableField validates mutation of a field on a mutable value.
 // The receiver must itself be an assignable place — a mutable binding, a
-// mutable borrow dereference, or a field chain that bottoms out in one.
-// Anything else (a call result, an index) is refused here so the accept set
-// matches what assignment lowering can store into.
+// mutable borrow dereference, a field chain that bottoms out in one, or an
+// element an indexed assignment could write (`cells[i].x`). Anything else (a
+// call result) is refused here so the accept set matches what assignment
+// lowering can store into.
 func (c *Checker) checkAssignableField(
 	expr *ast.FieldExpr,
 	env *scope,
@@ -7556,6 +7553,10 @@ func (c *Checker) checkAssignableField(
 		}
 	case *ast.FieldExpr:
 		if _, err := c.checkAssignableField(receiver, env, unsafe); err != nil {
+			return "", err
+		}
+	case *ast.IndexExpr:
+		if _, err := c.checkAssignableIndex(receiver, env, unsafe); err != nil {
 			return "", err
 		}
 	default:

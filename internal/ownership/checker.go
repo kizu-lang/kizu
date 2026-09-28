@@ -2960,7 +2960,7 @@ func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope) error {
 // checkArrayElementWrite checks stmt when it writes an element of an array,
 // and reports whether it does.
 func (c *Checker) checkArrayElementWrite(stmt *ast.AssignStmt, env *scope) (bool, error) {
-	index, ok := stmt.Target.(*ast.IndexExpr)
+	index, ok := elementWriteIndex(stmt.Target)
 	if !ok || index.Slice {
 		return false, nil
 	}
@@ -2969,6 +2969,22 @@ func (c *Checker) checkArrayElementWrite(stmt *ast.AssignStmt, env *scope) (bool
 		return false, nil
 	}
 	return true, c.checkArrayElementAssign(stmt, base, indexes, env)
+}
+
+// elementWriteIndex returns the element an assignment writes into: the
+// target of `a[i] = x`, or the indexed receiver of `a[i].f = x`, whose field
+// is stored by writing the element.
+func elementWriteIndex(target ast.Expression) (*ast.IndexExpr, bool) {
+	for {
+		switch t := target.(type) {
+		case *ast.IndexExpr:
+			return t, true
+		case *ast.FieldExpr:
+			target = t.Receiver
+		default:
+			return nil, false
+		}
+	}
 }
 
 // arrayElementPlace splits an element write `base[i][j]` into the place that

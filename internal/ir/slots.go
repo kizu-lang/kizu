@@ -479,8 +479,8 @@ func collectIndexWrites(stmt ast.Statement, found map[string]bool) {
 		return
 	}
 	if assign, ok := stmt.(*ast.AssignStmt); ok {
-		if index, isIndex := assign.Target.(*ast.IndexExpr); isIndex && !index.Slice {
-			markIfName(arrayPlaceRoot(index), found)
+		if index, isIndex := elementWriteTarget(assign.Target); isIndex && !index.Slice {
+			markIfName(indexChainRoot(index), found)
 		}
 	}
 	exprs, stmts, _ := statementChildren(stmt)
@@ -489,6 +489,35 @@ func collectIndexWrites(stmt ast.Statement, found map[string]bool) {
 	}
 	for _, inner := range stmts {
 		collectIndexWrites(inner, found)
+	}
+}
+
+// elementWriteTarget returns the element an assignment writes into: the
+// target itself for `a[i] = x`, the indexed receiver for `a[i].f = x`.
+func elementWriteTarget(target ast.Expression) (*ast.IndexExpr, bool) {
+	for {
+		switch t := target.(type) {
+		case *ast.IndexExpr:
+			return t, true
+		case *ast.FieldExpr:
+			target = t.Receiver
+		default:
+			return nil, false
+		}
+	}
+}
+
+// indexChainRoot returns the expression a chain of indexes starts from, by
+// syntax alone: `s.m` for `s.m[i][j]`. A view at the root gets no slot, so
+// reading past a view's element here costs nothing.
+func indexChainRoot(expr *ast.IndexExpr) ast.Expression {
+	var root ast.Expression = expr
+	for {
+		inner, ok := root.(*ast.IndexExpr)
+		if !ok {
+			return root
+		}
+		root = inner.Target
 	}
 }
 

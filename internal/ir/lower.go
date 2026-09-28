@@ -3750,7 +3750,7 @@ func (l *lowerer) lowerIndexExpr(expr *ast.IndexExpr) (Value, error) {
 // itself in a slot and the place is then assigned the copy, the way a field
 // write on a value rebuilds the struct.
 func (l *lowerer) lowerArrayElementAssign(target *ast.IndexExpr, value Value) error {
-	base := arrayPlaceRoot(target)
+	base := l.arrayPlaceRoot(target)
 	if _, stored := l.placeStorage(base); stored {
 		element, err := l.lowerArrayElementAddress(target)
 		if err != nil {
@@ -3774,12 +3774,14 @@ func (l *lowerer) lowerArrayElementAssign(target *ast.IndexExpr, value Value) er
 }
 
 // arrayPlaceRoot returns the array place a chain of element indexes starts
-// from: `s.m` for `s.m[i][j]`.
-func arrayPlaceRoot(expr *ast.IndexExpr) ast.Expression {
+// from: `s.m` for `s.m[i][j]`. The chain stops where an index reads a view:
+// `rows[k]` of a `[][2]f64` is an element value, not array storage, so
+// `rows[k][j]` starts from it.
+func (l *lowerer) arrayPlaceRoot(expr *ast.IndexExpr) ast.Expression {
 	var root ast.Expression = expr
 	for {
 		inner, ok := root.(*ast.IndexExpr)
-		if !ok {
+		if !ok || !isBufferIRType(l.assignTargetType(inner.Target)) {
 			return root
 		}
 		root = inner.Target
@@ -3820,7 +3822,8 @@ func (l *lowerer) arrayElementAddressIn(
 func (l *lowerer) lowerArrayElementAddress(expr *ast.IndexExpr) (Value, error) {
 	var storage Value
 	var err error
-	if inner, ok := expr.Target.(*ast.IndexExpr); ok && isBufferIRType(l.assignTargetType(inner)) {
+	inner, nested := expr.Target.(*ast.IndexExpr)
+	if nested && isBufferIRType(l.assignTargetType(inner.Target)) {
 		storage, err = l.lowerArrayElementAddress(inner)
 	} else {
 		storage, err = l.lowerArrayStorage(expr.Target)
