@@ -690,7 +690,7 @@ func (e *emitter) externalCallDecls() []string {
 					continue
 				}
 				name := strings.TrimPrefix(instr.Op, "call.")
-				if defined[name] {
+				if defined[name] || name == memSizeOf {
 					continue
 				}
 				seen[name] = e.externalCallDecl(name, instr)
@@ -1969,8 +1969,10 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	if foreignC {
 		name = instr.ExternName
 	}
-	if !foreignC && isThreadPoolRound(name) {
-		return e.writeThreadPoolRound(name, instr)
+	if !foreignC {
+		if handled, err := e.writeCompilerBuiltin(name, instr); handled {
+			return err
+		}
 	}
 	if !foreignC && e.usesHostedRuntimeABI(name, instr) {
 		return e.writeHostedRuntimeCall(name, instr)
@@ -2007,6 +2009,33 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = %s\n", resultName, call)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
+}
+
+// writeCompilerBuiltin writes a builtin the emitter spells itself rather than
+// calling into the runtime, and reports whether name was one.
+func (e *emitter) writeCompilerBuiltin(name string, instr *ir.Instr) (bool, error) {
+	switch {
+	case isThreadPoolRound(name):
+		return true, e.writeThreadPoolRound(name, instr)
+	case name == memSizeOf:
+		return true, e.writeSizeOf(instr)
+	}
+	return false, nil
+}
+
+// memSizeOf is the builtin behind `std::mem::size_of<T>()`.
+const memSizeOf = "std::internal::builtin::mem_size_of"
+
+// writeSizeOf writes the size of the type the call names as the target lays
+// it out: the address one T past null, which LLVM folds to a constant from the
+// data layout clang gives the module.
+func (e *emitter) writeSizeOf(instr *ir.Instr) error {
+	end := "%" + e.nextSyntheticValue("size.end")
+	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr null, i64 1\n", end, e.llvmType(instr.Immediate))
+	result := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = ptrtoint ptr %s to i64\n", result, end)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: result}
 	return nil
 }
 
