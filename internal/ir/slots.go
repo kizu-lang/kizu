@@ -422,6 +422,15 @@ func borrowTargetExpr(expr ast.Expression) ast.Expression {
 	return expr
 }
 
+// sharedBorrowTarget unwraps explicit `&x` call-site syntax to the place a
+// `&T` parameter that travels as an address is handed.
+func sharedBorrowTarget(expr ast.Expression) ast.Expression {
+	if prefix, ok := expr.(*ast.PrefixExpr); ok && prefix.Operator == "&" {
+		return prefix.Right
+	}
+	return expr
+}
+
 // isStorageParam reports whether name is a parameter whose storage is the
 // borrow the source names. For such a name `n.*` dereferences the slot itself;
 // a lent local's slot holds the binding's value instead, which `.*` first
@@ -551,14 +560,18 @@ func (l *lowerer) lowerReceiverAddress(expr ast.Expression) (Value, error) {
 // lowerFieldStorage lowers `base.field` to the field's own storage: a
 // `field.addr` projection out of the base's storage. A nested path chains one
 // projection per hop. ok is false when the path is not rooted in a storage
-// name -- a slot-backed local or a `&var` parameter -- which is the shape the
-// checker admits for every `&var` position.
+// name -- a slot-backed local, a `&var` parameter, or a name bound to a
+// shared borrow's address. The projection keeps the root's mutability: a
+// field of a `&T` is read through, never written.
 func (l *lowerer) lowerFieldStorage(expr ast.Expression) (Value, bool) {
 	field, isField := expr.(*ast.FieldExpr)
 	if !isField || field.Namespace {
 		return Value{}, false
 	}
 	storage, ok := l.slotPointer(field.Receiver)
+	if !ok {
+		storage, ok = l.sharedBorrowAddress(field.Receiver)
+	}
 	if !ok {
 		storage, ok = l.lowerFieldStorage(field.Receiver)
 	}
@@ -569,7 +582,27 @@ func (l *lowerer) lowerFieldStorage(expr ast.Expression) (Value, bool) {
 	if fieldType == "unknown" {
 		return Value{}, false
 	}
-	return l.emit("field.addr."+field.Name, "&var "+fieldType, []Value{storage}, ""), true
+	borrow := "&var "
+	if !isMutableReferenceType(storage.Type) {
+		borrow = "&"
+	}
+	return l.emit("field.addr."+field.Name, borrow+fieldType, []Value{storage}, ""), true
+}
+
+// sharedBorrowAddress returns the address a name bound to a `&T` holds: a
+// parameter the call handed a copy's or the caller's address, or a capture of
+// a shared borrow. A view taken from its fields has to point there, into the
+// storage the borrow names, rather than into a copy the callee loads out.
+func (l *lowerer) sharedBorrowAddress(expr ast.Expression) (Value, bool) {
+	ident, ok := expr.(*ast.IdentExpr)
+	if !ok {
+		return Value{}, false
+	}
+	value, bound := l.env.get(ident.Name)
+	if !bound || !isReferenceType(value.Type) || isMutableReferenceType(value.Type) {
+		return Value{}, false
+	}
+	return value, true
 }
 
 // lowerCallArgs lowers the arguments of a call to name.

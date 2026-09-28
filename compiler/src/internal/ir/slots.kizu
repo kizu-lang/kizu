@@ -747,6 +747,17 @@ fn borrow_target_expr(tree: &ast::Ast, expression: ast::Expression) -> ast::Expr
     return expression;
 }
 
+/// Unwraps explicit `&x` call-site syntax to the place a `&T` parameter that
+/// travels as an address is handed, the Go `sharedBorrowTarget`.
+fn shared_borrow_target(tree: &ast::Ast, expression: ast::Expression) -> ast::Expression {
+    if ownership::prefix_expr(tree, expression) |prefix| {
+        if text_is(tree, prefix.operator, "&") {
+            return prefix.right;
+        }
+    }
+    return expression;
+}
+
 /// Reports whether name is a parameter whose storage is the borrow the
 /// source names, the Go `isStorageParam`. For such a name `n.*` dereferences
 /// the slot itself; a lent local's slot holds the binding's value instead,
@@ -800,8 +811,9 @@ fn (self: &var Lowerer) lower_receiver_address(tree: &var ast::Ast, expression: 
 /// Lowers `base.field` to the field's own storage, the Go
 /// `lowerFieldStorage`: a `field.addr` projection out of the base's storage.
 /// A nested path chains one projection per hop. null when the path is not
-/// rooted in a storage name -- a slot-backed local or a `&var` parameter --
-/// which is the shape the checker admits for every `&var` position.
+/// rooted in a storage name -- a slot-backed local, a `&var` parameter, or a
+/// name bound to a shared borrow's address. The projection keeps the root's
+/// mutability: a field of a `&T` is read through, never written.
 fn (self: &var Lowerer) lower_field_storage(tree: &var ast::Ast, expression: ast::Expression) -> !?Value {
     let field = ownership::field_expr(tree, expression) orelse return null;
     if field.namespace {
@@ -810,6 +822,8 @@ fn (self: &var Lowerer) lower_field_storage(tree: &var ast::Ast, expression: ast
     var storage: ?Value = null;
     if try self.slot_pointer(tree, field.receiver) |slot| {
         storage = slot;
+    } else if try self.shared_borrow_address(tree, field.receiver) |address| {
+        storage = address;
     } else {
         storage = try self.lower_field_storage(tree, field.receiver);
     }
@@ -820,8 +834,26 @@ fn (self: &var Lowerer) lower_field_storage(tree: &var ast::Ast, expression: ast
     if self.name_is(field_type, "unknown") {
         return null;
     }
-    let addr_type = try self.module.names.prefixed("&var ", field_type);
+    var addr_type = try self.module.names.prefixed("&var ", field_type);
+    if !self.is_mutable_reference_type(found.type_name) {
+        addr_type = try self.module.names.prefixed("&", field_type);
+    }
     return try self.emit_op1(Op::FieldAddr, field_name, addr_type, found);
+}
+
+/// Returns the address a name bound to a `&T` holds, the Go
+/// `sharedBorrowAddress`: a parameter the call handed a copy's or the
+/// caller's address, or a capture of a shared borrow. A view taken from its
+/// fields has to point there, into the storage the borrow names, rather than
+/// into a copy the callee loads out.
+fn (self: &var Lowerer) shared_borrow_address(tree: &ast::Ast, expression: ast::Expression) -> !?Value {
+    let ident = ownership::ident_expr(tree, expression) orelse return null;
+    let name = try self.text_name(tree, ident.name);
+    let value = self.envs.get(self.env, name) orelse return null;
+    if !self.is_reference_type(value.type_name) or self.is_mutable_reference_type(value.type_name) {
+        return null;
+    }
+    return value;
 }
 
 /// Lowers the arguments of a call to name, the Go `lowerCallArgs`.

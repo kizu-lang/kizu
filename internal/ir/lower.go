@@ -1181,12 +1181,39 @@ func (l *lowerer) borrowIRType(elem string, mutable bool) (string, Passing) {
 	// storage it describes (ADR-0131): a copy of one stops seeing what the
 	// original goes on to own, so the two answer differently the moment
 	// anything writes through the original -- `b.show(b.put(v))` would show
-	// the value from before the put. Copy data has no such interior, so a
-	// borrow of it travels flat.
+	// the value from before the put.
 	if ast.OwnerType(l.deinitOwners, elem) {
 		return "&" + elem, PassCopyAddress
 	}
+	// A fixed array lends views into its own bytes, and a view the callee
+	// derives from a borrow may be returned to the caller. A copy made for
+	// the call would leave that view pointing into the callee's frame, so
+	// copy data that holds a fixed array travels as an address too. Other
+	// copy data has no interior a view can reach, so a borrow of it travels
+	// flat.
+	if l.holdsFixedArray(elem) {
+		return "&" + elem, PassCopyAddress
+	}
 	return elem, PassValue
+}
+
+// holdsFixedArray reports whether a value of typeName keeps a fixed array in
+// its own bytes: it is one, or a struct field is. A struct cannot hold itself
+// by value, so the walk ends.
+func (l *lowerer) holdsFixedArray(typeName string) bool {
+	if isBufferIRType(typeName) {
+		return true
+	}
+	st, ok := l.module.Structs[typeName]
+	if !ok {
+		return false
+	}
+	for _, field := range st.Fields {
+		if l.holdsFixedArray(field.Type) {
+			return true
+		}
+	}
+	return false
 }
 
 // lowerReturnType gives a function's result the type it travels as, so a
@@ -2008,26 +2035,8 @@ func (l *lowerer) lowerContextualExpr(expr ast.Expression, want string) (Value, 
 	if elem, ok := optionalElemType(want); ok {
 		return l.lowerOptionalContextExpr(expr, want, elem)
 	}
-	// A `&var` context wants the storage itself, not the value read out of it:
-	// a `&var` argument and a returned `&var self` both hand over the same
-	// pointer the caller lent. This is the one place that decides it; a
-	// mutable reference type and PassCallerStorage are the same fact
-	// (borrowIRType), which TestLowerParamAgreesWithItself pins.
-	if isMutableReferenceType(want) {
-		target := borrowTargetExpr(expr)
-		if slot, ok := l.slotPointer(target); ok {
-			// A slot that holds a `&var T` borrow hands over the borrow it
-			// holds, not its own address: the callee wants the storage the
-			// borrow already names, and a slot of `&var T` would be `&var
-			// &var T`.
-			if slot.Type == "&var "+want {
-				return l.lowerExpr(expr)
-			}
-			return slot, nil
-		}
-		if storage, ok := l.lowerFieldStorage(target); ok {
-			return storage, nil
-		}
+	if storage, ok := l.lendStorage(expr, want); ok {
+		return storage, nil
 	}
 	if !narrowsIntegerLiteral(want) && !narrowsFloatLiteral(want) {
 		value, err := l.lowerExpr(expr)
@@ -2045,6 +2054,41 @@ func (l *lowerer) lowerContextualExpr(expr ast.Expression, want string) (Value, 
 		return value, err
 	}
 	return l.lowerExpr(expr)
+}
+
+// lendStorage returns the storage a borrow context is handed, when the
+// expression names a place that has some.
+//
+// A `&var` context wants the storage itself, not the value read out of it:
+// a `&var` argument and a returned `&var self` both hand over the same
+// pointer the caller lent. This is the one place that decides it; a
+// mutable reference type and PassCallerStorage are the same fact
+// (borrowIRType), which TestLowerParamAgreesWithItself pins.
+//
+// A `&T` that travels as an address is handed the place's own storage the
+// way a method receiver is: a view the callee derives from it then points
+// into that place, not into a copy made in a frame that may return before
+// the view is read.
+func (l *lowerer) lendStorage(expr ast.Expression, want string) (Value, bool) {
+	if !isMutableReferenceType(want) {
+		if !isReferenceType(want) {
+			return Value{}, false
+		}
+		storage, ok := l.placeStorage(sharedBorrowTarget(expr))
+		return storage, ok && derefType(storage.Type) == derefType(want)
+	}
+	target := borrowTargetExpr(expr)
+	if slot, ok := l.slotPointer(target); ok {
+		// A slot that holds a `&var T` borrow hands over the borrow it
+		// holds, not its own address: the callee wants the storage the
+		// borrow already names, and a slot of `&var T` would be `&var
+		// &var T`.
+		if slot.Type == "&var "+want {
+			return Value{}, false
+		}
+		return slot, true
+	}
+	return l.lowerFieldStorage(target)
 }
 
 // lowerContextualLiteral lowers a literal, possibly negated, as the narrower

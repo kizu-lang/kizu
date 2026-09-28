@@ -1,0 +1,93 @@
+import std::testing;
+
+// A view taken through a `&T` of copy data that holds a fixed array points
+// into the caller's storage, so it outlives the call that made it. The
+// helper below reuses the stack a returned view would point into if the
+// borrow had been a copy in the callee's frame.
+
+struct Point {
+    x: f64,
+    y: f64,
+}
+
+struct Path {
+    points: [4]Point,
+}
+
+struct Shape {
+    path: Path,
+    id: i64,
+}
+
+fn (self: &Path) window(start: i64, end: i64) -> []Point {
+    let all = self.points.as_slice();
+    return all[start..end];
+}
+
+fn first_point(path: &Path) -> []Point {
+    let all = path.points.as_slice();
+    return all[0..1];
+}
+
+fn all_points(points: &[4]Point) -> []Point {
+    let all = points.as_slice();
+    return all;
+}
+
+fn (self: &Shape) outline() -> []Point {
+    return self.path.window(1, 3);
+}
+
+fn shape_start(shape: &Shape) -> []Point {
+    return first_point(shape.path);
+}
+
+fn scribble(seed: f64) -> f64 {
+    var scratch = [64]f64{};
+    for 0..64 |i| {
+        scratch[i] = seed + cast<f64>(i);
+    }
+    return scratch[63];
+}
+
+fn sample_path() -> Path {
+    let origin = Point { x: 0.0, y: 0.0 };
+    return Path { points: [4]Point{ origin, origin, origin, origin } };
+}
+
+test "a receiver view reaches the caller's array" {
+    var path = sample_path();
+    path.points[1] = Point { x: 1.0, y: 2.0 };
+    path.points[2] = Point { x: 3.0, y: 4.0 };
+    let view = path.window(1, 3);
+    testing::expect_equal<f64>(72.0, scribble(9.0));
+    testing::expect_equal<f64>(1.0, view[0].x);
+    testing::expect_equal<f64>(4.0, view[1].y);
+}
+
+test "a parameter view reaches the caller's array" {
+    let path = Path {
+        points: [4]Point{
+            Point { x: 5.0, y: 6.0 },
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 0.0, y: 0.0 },
+        }
+    };
+    let view = first_point(path);
+    let points = all_points(path.points);
+    testing::expect_equal<f64>(72.0, scribble(9.0));
+    testing::expect_equal<f64>(5.0, view[0].x);
+    testing::expect_equal<f64>(6.0, points[0].y);
+}
+
+test "a view through a borrowed field reaches the caller's array" {
+    var shape = Shape { path: sample_path(), id: 7 };
+    shape.path.points[0] = Point { x: 8.0, y: 0.0 };
+    shape.path.points[2] = Point { x: 9.0, y: 0.0 };
+    let outline = shape.outline();
+    let start = shape_start(shape);
+    testing::expect_equal<f64>(72.0, scribble(9.0));
+    testing::expect_equal<f64>(9.0, outline[1].x);
+    testing::expect_equal<f64>(8.0, start[0].x);
+}
