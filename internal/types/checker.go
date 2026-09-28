@@ -2655,7 +2655,7 @@ func (c *Checker) structLiteralFieldMatches(
 	want Type,
 	got Type,
 ) (bool, error) {
-	if sameType(got, want) {
+	if sameType(got, want) || fillsNullablePointer(want, got) {
 		return true, nil
 	}
 	if _, isOptional := optionalElem(want); isOptional {
@@ -4067,6 +4067,10 @@ func (c *Checker) checkContextualExpr(
 	got, err := c.checkExpr(expr, env, unsafe)
 	if err != nil {
 		return "", err
+	}
+	// A `ptr<T>` fills a `?ptr<T>` wherever it is written, as a return does.
+	if fillsNullablePointer(want, got) {
+		return want, nil
 	}
 	if _, ok := optionalElem(want); ok {
 		// A plain value in an optional context wraps implicitly, the same way a
