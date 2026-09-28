@@ -271,6 +271,34 @@ fn (self: &Checker) checker_numeric_type(value: Type) -> bool {
     return false;
 }
 
+/// Reports whether expression is written `&x` or `&var x`, the Go
+/// `isBorrowPrefix`.
+fn is_borrow_prefix(tree: &ast::Ast, expression: ast::Expression) -> bool {
+    match tree.expressions.at(expression.node) {
+        Prefix(value) => {
+            let retained = tree.texts.at(value.operator.node);
+            let operator = retained.as_bytes();
+            return mem::equal_bytes(operator, "&") or mem::equal_bytes(operator, "&var");
+        },
+        _ => return false,
+    }
+}
+
+/// Rejects a borrow as the right operand of `&`, the Go
+/// `borrowOperandOfBitAnd`. A borrow is never a bit-and operand, and refusing
+/// it is what keeps `a && b`, which reads as `a & &b`, from quietly meaning a
+/// bit and of two integers when a logical and was meant.
+fn (self: &var Checker) borrow_operand_of_bit_and(span: ast::Span) -> !?diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit(self.allocator);
+    try message.append_bytes(self.allocator,
+        "type error: `&&` is not an operator; logical and is written `and`");
+    try message.append_byte(self.allocator, cast<u8>(10));
+    try message.append_bytes(self.allocator,
+        "note: `a && b` reads as `a & &b`, and a borrow is not an operand of `&`");
+    return try self.checker_text_diagnostic_at(span, move message);
+}
+
 // Validates arithmetic, logical, equality, and comparison operators.
 fn (self: &var Checker) check_binary_expr(
     tree: &var ast::Ast,
@@ -310,6 +338,9 @@ fn (self: &var Checker) check_binary_expr(
     if mem::equal_bytes(operator, "==") or
         mem::equal_bytes(operator, "!=") {
         return self.check_equality(operator, left, right, expression.operator_span, out);
+    }
+    if mem::equal_bytes(operator, "&") and is_borrow_prefix(tree, expression.right) {
+        return self.borrow_operand_of_bit_and(expression.operator_span);
     }
     if !same_type(left, right) {
         return try self.operator_type_mismatch(operator, left, right, expression.operator_span);

@@ -4392,11 +4392,30 @@ func (c *Checker) checkBinaryExpr(
 	return left, nil
 }
 
+// isBorrowPrefix reports whether expr is written `&x` or `&var x`.
+func isBorrowPrefix(expr ast.Expression) bool {
+	prefix, ok := expr.(*ast.PrefixExpr)
+	return ok && (prefix.Operator == "&" || prefix.Operator == "&var")
+}
+
+// borrowOperandOfBitAnd rejects a borrow as the right operand of `&`. A
+// borrow is never a bit-and operand, and refusing it is what keeps `a && b`,
+// which reads as `a & &b`, from quietly meaning a bit and of two integers
+// when a logical and was meant.
+func borrowOperandOfBitAnd(span ast.Span) error {
+	return errorAt(span,
+		"type error: `&&` is not an operator; logical and is written `and`\n"+
+			"note: `a && b` reads as `a & &b`, and a borrow is not an operand of `&`")
+}
+
 // checkArithmeticOperands validates the operands of a comparison, an
 // arithmetic operator, or a bit operator: the same numeric type on both
 // sides, an integer one where the operator works on bits, and a shift
 // amount that is not a negative literal.
 func checkArithmeticOperands(expr *ast.BinaryExpr, left Type, right Type) error {
+	if expr.Operator == "&" && isBorrowPrefix(expr.Right) {
+		return borrowOperandOfBitAnd(expr.OperatorSpan)
+	}
 	if left != right {
 		return operatorTypeMismatch(expr.Operator, left, right, expr.OperatorSpan)
 	}
