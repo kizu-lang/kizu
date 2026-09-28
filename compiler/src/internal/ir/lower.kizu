@@ -1749,9 +1749,17 @@ fn (self: &var Lowerer) borrow_ir_type(elem: Name, mutable: bool) -> !Name {
     // storage it describes (ADR-0131): a copy of one stops seeing what the
     // original goes on to own, so the two answer differently the moment
     // anything writes through the original -- `b.show(b.put(v))` would show
-    // the value from before the put. Copy data has no such interior, so a
-    // borrow of it travels flat.
+    // the value from before the put.
     if self.is_owner_type(elem) {
+        return self.module.names.prefixed("&", elem);
+    }
+    // A fixed array lends views into its own bytes, and a view the callee
+    // derives from a borrow may be returned to the caller. A copy made for
+    // the call would leave that view pointing into the callee's frame, so
+    // copy data that holds a fixed array travels as an address too. Other
+    // copy data has no interior a view can reach, so a borrow of it travels
+    // flat.
+    if self.module.holds_fixed_array(elem) {
         return self.module.names.prefixed("&", elem);
     }
     return elem;
@@ -1770,6 +1778,9 @@ fn (self: &Lowerer) borrow_passing(elem: Name, mutable: bool) -> Passing {
         return Passing::CopyAddress;
     }
     if self.is_owner_type(elem) {
+        return Passing::CopyAddress;
+    }
+    if self.module.holds_fixed_array(elem) {
         return Passing::CopyAddress;
     }
     return Passing::Value;

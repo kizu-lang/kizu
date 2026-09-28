@@ -215,6 +215,52 @@ fn (self: &var Lowerer) lower_deref_expr(
     return null;
 }
 
+/// Returns the storage a borrow context is handed, the Go `lendStorage`,
+/// when the expression names a place that has some.
+///
+/// A `&var` context wants the storage itself, not the value read out of it:
+/// a `&var` argument and a returned `&var self` both hand over the same
+/// pointer the caller lent. This is the one place that decides it.
+///
+/// A `&T` that travels as an address is handed the place's own storage the
+/// way a method receiver is: a view the callee derives from it then points
+/// into that place, not into a copy made in a frame that may return before
+/// the view is read.
+fn (self: &var Lowerer) lend_storage(
+    tree: &var ast::Ast,
+    expression: ast::Expression,
+    want: Name
+) -> !?Value {
+    if !self.is_mutable_reference_type(want) {
+        if !self.is_reference_type(want) {
+            return null;
+        }
+        let shared = shared_borrow_target(tree, expression);
+        let storage = try self.place_storage(tree, shared) orelse return null;
+        let held = try self.deref_type(storage.type_name);
+        let wanted = try self.deref_type(want);
+        if !same_name(held, wanted) {
+            return null;
+        }
+        return storage;
+    }
+    let target = borrow_target_expr(tree, expression);
+    if try self.slot_pointer(tree, target) |slot| {
+        // A slot that holds a `&var T` borrow hands over the borrow it
+        // holds, not its own address: the callee wants the storage the
+        // borrow already names, and a slot of `&var T` would be
+        // `&var &var T`.
+        if self.is_mutable_reference_type(slot.type_name) {
+            let held = try self.deref_type(slot.type_name);
+            if same_name(held, want) {
+                return null;
+            }
+        }
+        return slot;
+    }
+    return self.lower_field_storage(tree, target);
+}
+
 /// Lowers an expression whose type the position it appears in already
 /// fixes, the Go `lowerContextualExpr`: a function return, a struct field, a
 /// union payload, a parameter. An integer literal takes that type there, the
@@ -230,29 +276,9 @@ fn (self: &var Lowerer) lower_contextual_expr(
     if try self.optional_elem_type(want) |elem| {
         return self.lower_optional_context_expr(tree, expression, want, elem, out);
     }
-    // A `&var` context wants the storage itself, not the value read out of
-    // it: a `&var` argument and a returned `&var self` both hand over the
-    // same pointer the caller lent. This is the one place that decides it.
-    if self.is_mutable_reference_type(want) {
-        let target = borrow_target_expr(tree, expression);
-        if try self.slot_pointer(tree, target) |slot| {
-            // A slot that holds a `&var T` borrow hands over the borrow it
-            // holds, not its own address: the callee wants the storage the
-            // borrow already names, and a slot of `&var T` would be
-            // `&var &var T`.
-            if self.is_mutable_reference_type(slot.type_name) {
-                let held = try self.deref_type(slot.type_name);
-                if same_name(held, want) {
-                    return self.lower_expr(tree, expression, out);
-                }
-            }
-            out.* = slot;
-            return null;
-        }
-        if try self.lower_field_storage(tree, target) |storage| {
-            out.* = storage;
-            return null;
-        }
+    if try self.lend_storage(tree, expression, want) |storage| {
+        out.* = storage;
+        return null;
     }
     if !self.narrows_integer_literal(want) and !self.narrows_float_literal(want) {
         var value = empty_value();
