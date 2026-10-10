@@ -1,0 +1,88 @@
+import std::mem;
+import std::testing;
+
+extern "c" struct Visit {
+    count: i32,
+    total: i64,
+}
+
+extern "c" struct Timespec {
+    seconds: i64,
+    nanoseconds: i64,
+}
+
+/// The functions a host hands over, as C lays the table out.
+extern "c" struct Hooks {
+    copy: extern "c" fn(&var Visit, &Visit, usize) -> ptr<u8>,
+    pause: ?extern "c" fn(&Timespec, &var Timespec) -> i32,
+}
+
+struct Page {
+    label: i64,
+    visit: Visit,
+}
+
+extern "c" fn memmove(into: &var Visit, from: &Visit, size: usize) -> ptr<u8>
+extern "c" fn nanosleep(request: &Timespec, remaining: &var Timespec) -> i32
+extern "c" fn clock_gettime(clock: i32, out: &var Timespec) -> i32
+fn copy_through(
+    copy: extern "c" fn(&var Visit, &Visit, usize) -> ptr<u8>,
+    into: &var Visit,
+    from: &Visit
+) -> void {
+    // SAFETY: both borrows are one Visit, which is the size C copies.
+    let _ = unsafe copy(into, from, mem::size_of<Visit>());
+}
+
+fn pause_through(pause: ?extern "c" fn(&Timespec, &var Timespec) -> i32, nanoseconds: i64) -> i32 {
+    let call = pause orelse return 1;
+    let request = Timespec { seconds: 0, nanoseconds: nanoseconds };
+    var remaining = Timespec { seconds: 0, nanoseconds: 0 };
+    // SAFETY: both structs outlive the call; C reads the first and may write the second.
+    return unsafe call(&request, &var remaining);
+}
+
+test "a C function pointer writes the struct it is lent as `&var`" {
+    let copy = memmove;
+    let from = Visit { count: 3, total: 40 };
+    var into = Visit { count: 0, total: 0 };
+    // SAFETY: both borrows are one Visit, which is the size C copies.
+    let _ = unsafe copy(&var into, &from, mem::size_of<Visit>());
+    testing::expect_equal<i32>(3, into.count);
+    testing::expect_equal<i64>(40, into.total);
+    testing::expect_equal<i32>(3, from.count);
+}
+
+test "a lent struct reaches C through a parameter, a field, and a field path" {
+    let hooks = Hooks { copy: memmove, pause: nanosleep };
+    let from = Visit { count: 5, total: 60 };
+    var into = Visit { count: 0, total: 0 };
+    copy_through(hooks.copy, &var into, &from);
+    testing::expect_equal<i64>(60, into.total);
+    var page = Page { label: 7, visit: Visit { count: 0, total: 0 } };
+    let copy = hooks.copy;
+    // SAFETY: both borrows are one Visit, which is the size C copies.
+    let _ = unsafe copy(&var page.visit, &into, mem::size_of<Visit>());
+    testing::expect_equal<i32>(5, page.visit.count);
+    testing::expect_equal<i64>(7, page.label);
+}
+
+test "C reads the struct it is lent as `&`" {
+    let hooks = Hooks { copy: memmove, pause: nanosleep };
+    testing::expect_equal<i32>(0, pause_through(hooks.pause, 1));
+    // A nanosecond count of a full second is out of range, which C can only
+    // tell by reading the struct.
+    testing::expect_equal<i32>(-1, pause_through(hooks.pause, 1000000000));
+    testing::expect_equal<i32>(1, pause_through(null, 1));
+}
+
+test "a C function pointer that lends a struct goes through `void *` and back" {
+    // SAFETY: the address goes back to the type it came from.
+    let erased = unsafe cast<ptr<const u8>>(clock_gettime);
+    // SAFETY: erased is clock_gettime, which takes a clock and a timespec to fill.
+    let clock = unsafe cast<extern "c" fn(i32, &var Timespec) -> i32>(erased);
+    var now = Timespec { seconds: 0, nanoseconds: 0 };
+    // SAFETY: clock 0 is CLOCK_REALTIME on every host, and `now` outlives the call.
+    testing::expect_equal<i32>(0, unsafe clock(0, &var now));
+    testing::expect(now.seconds > 1600000000);
+}
