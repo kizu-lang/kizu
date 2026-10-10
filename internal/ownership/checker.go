@@ -4284,7 +4284,8 @@ func (c *Checker) readExprForm(expr ast.Expression, env *scope) (string, error) 
 		return c.readExpr(inner, env)
 	}
 	switch e := expr.(type) {
-	case *ast.IntExpr, *ast.FloatExpr, *ast.StringExpr, *ast.BoolExpr, *ast.TypeExpr, *ast.NullExpr:
+	case *ast.IntExpr, *ast.FloatExpr, *ast.StringExpr, *ast.CStringExpr, *ast.BoolExpr,
+		*ast.TypeExpr, *ast.NullExpr:
 		return c.readScalarExpr(e)
 	case *ast.BufferLiteralExpr:
 		return c.readArrayLiteral(e, env)
@@ -4502,6 +4503,8 @@ func readLiteralType(expr ast.Expression) (string, error) {
 		return "f64", nil
 	case *ast.StringExpr:
 		return "[]u8", nil
+	case *ast.CStringExpr:
+		return "ptr<const u8>", nil
 	case *ast.BoolExpr:
 		return "bool", nil
 	case *ast.NullExpr:

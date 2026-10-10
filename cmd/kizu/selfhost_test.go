@@ -713,11 +713,31 @@ func wasmRepresentativeFixtures() []wasmFixture {
 	return append(wasmEmitFixtures(), wasmRejectionFixtures()...)
 }
 
+// wasmCStringSource walks to the NUL of a C string literal. The NUL is a byte
+// of the literal's data segment, the one byte value a string literal cannot
+// carry.
+const wasmCStringSource = `fn length(text: ptr<const u8>) -> i64 {
+    var count = 0;
+    // SAFETY: text is NUL-terminated, and the walk stops at the NUL.
+    while unsafe ptr_read(unsafe ptr_offset(text, count)) != 0 {
+        count = count + 1;
+    }
+    return count;
+}
+
+fn main() {
+    print(length(c"hello"));
+    print(length(c""));
+    print("next");
+}
+`
+
 // wasmEmitFixtures is one program per emitted shape: calls with i64 parameters
 // and a return, the phi copies and dispatch arms of a loop with a bool print,
-// what the optimizer folds away, the bytes a data segment escapes, a tagged
-// field, and branch-local returns. The plain data segment and string print are
-// the hello file the command table already crosses.
+// what the optimizer folds away, the bytes a data segment escapes, the NUL of
+// a C string literal, a tagged field, and branch-local returns. The plain data
+// segment and string print are the hello file the command table already
+// crosses.
 func wasmEmitFixtures() []wasmFixture {
 	return []wasmFixture{
 		{name: "functions", source: `fn add(a: i64, b: i64) -> i64 {
@@ -763,6 +783,7 @@ fn main() {
 			"        \\\\second line\n" +
 			"    );\n" +
 			"}\n"},
+		{name: "c_string_literal", source: wasmCStringSource},
 		{name: "tagged_field", source: `struct Holder {
     value: ?i64,
 }

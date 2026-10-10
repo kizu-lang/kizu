@@ -1,0 +1,87 @@
+import std::testing;
+
+extern "c" fn strlen(text: ptr<const u8>) -> usize
+extern "c" fn strcmp(left: ptr<const u8>, right: ptr<const u8>) -> i32
+extern "c" struct Entry {
+    name: ptr<const u8>,
+    hint: ?ptr<const u8>,
+}
+
+fn byte_at(text: ptr<const u8>, index: i64) -> i64 {
+    // SAFETY: every caller stays at or before the literal's NUL.
+    return cast<i64>(unsafe ptr_read(unsafe ptr_offset(text, index)));
+}
+
+fn length(text: ptr<const u8>) -> i64 {
+    var count = 0;
+    while byte_at(text, count) != 0 {
+        count = count + 1;
+    }
+    return count;
+}
+
+fn default_name() -> ptr<const u8> {
+    return c"default";
+}
+
+fn pick(named: bool) -> ?ptr<const u8> {
+    if named {
+        return c"picked";
+    }
+    return null;
+}
+
+test "a C string literal is its bytes and then one NUL" {
+    let text = c"kizu";
+    testing::expect_equal<i64>(107, byte_at(text, 0));
+    testing::expect_equal<i64>(117, byte_at(text, 3));
+    testing::expect_equal<i64>(0, byte_at(text, 4));
+    testing::expect_equal<i64>(4, length(text));
+    testing::expect_equal<i64>(0, length(c""));
+}
+
+test "a C string literal keeps its bytes as written" {
+    // No escape is read: the backslash and the `n` are two bytes.
+    let text = c"a\n";
+    testing::expect_equal<i64>(3, length(text));
+    testing::expect_equal<i64>(92, byte_at(text, 1));
+    // Bytes outside ASCII are stored as the source has them.
+    testing::expect_equal<i64>(3, length(c"あ"));
+}
+
+test "a C string literal is read by C" {
+    // SAFETY: the literal is NUL-terminated.
+    testing::expect_equal<i64>(5, cast<i64>(unsafe strlen(c"hello")));
+    // SAFETY: both literals are NUL-terminated.
+    testing::expect(unsafe strcmp(c"same", c"same") == 0);
+    // SAFETY: both literals are NUL-terminated.
+    testing::expect(unsafe strcmp(c"same", c"other") != 0);
+}
+
+test "a C string literal fills pointer positions" {
+    testing::expect_equal<i64>(7, length(default_name()));
+    let entry = Entry { name: c"entry", hint: c"hint" };
+    testing::expect_equal<i64>(5, length(entry.name));
+    if entry.hint |hint| {
+        testing::expect_equal<i64>(4, length(hint));
+    } else {
+        testing::expect(false);
+    }
+    if pick(true) |picked| {
+        testing::expect_equal<i64>(6, length(picked));
+    } else {
+        testing::expect(false);
+    }
+    var later: ptr<const u8> = c"first";
+    later = c"second one";
+    testing::expect_equal<i64>(10, length(later));
+    let compare: extern "c" fn(ptr<const u8>, ptr<const u8>) -> i32 = strcmp;
+    // SAFETY: both literals are NUL-terminated.
+    testing::expect(unsafe compare(c"through", c"through") == 0);
+}
+
+test "a name c beside a string literal is still a name" {
+    let c = 3;
+    testing::expect_equal<i64>(3, c);
+    testing::expect_equal<i64>(1, length(c"c"));
+}

@@ -301,6 +301,32 @@ func TestLoopIsIdentifier(t *testing.T) {
 	}
 }
 
+// TestCStringLiteral checks that `c` directly before a quote opens a C string
+// literal, and that a `c` anywhere else is a name or part of one.
+func TestCStringLiteral(t *testing.T) {
+	tests := []struct {
+		typ token.Type
+		lit string
+	}{
+		{token.CString, "HOME"},
+		{token.CString, ""},
+		{token.Ident, "c"},
+		{token.String, "spaced"},
+		{token.Ident, "abc"},
+		{token.String, "suffix"},
+		{token.Ident, "cc"},
+		{token.EOF, ""},
+	}
+	l := New(`c"HOME" c"" c "spaced" abc"suffix" cc`)
+	for i, tt := range tests {
+		tok := l.NextToken()
+		if tok.Type != tt.typ || tok.Literal != tt.lit {
+			t.Fatalf("token %d: got (%q, %q), want (%q, %q)",
+				i, tok.Type, tok.Literal, tt.typ, tt.lit)
+		}
+	}
+}
+
 // TestMultilineString verifies `\\`-prefixed multi-line string literals.
 func TestMultilineString(t *testing.T) {
 	input := "let help =\n" +
