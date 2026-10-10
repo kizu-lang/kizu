@@ -422,6 +422,15 @@ func openableElem(t Type) (Type, bool) {
 	return Type(elem), ok
 }
 
+// takesNull reports whether `null` can be written where t is expected: an
+// optional's absence, or a nullable raw pointer's null address. These are the
+// types a capture or `orelse` opens, so whatever can be tested for null can be
+// written as null.
+func takesNull(t Type) bool {
+	_, ok := openableElem(t)
+	return ok
+}
+
 // fillsNullablePointer reports whether a `ptr<T>` fills a `?ptr<T>` slot. The
 // two spell the same machine value and the non-null one is a subset of the
 // nullable one, so widening is always sound. `?ptr<T>` is a raw-pointer

@@ -3,16 +3,28 @@
 // and `orelse` do that the way they open an optional: the capture is the
 // same address as a `ptr<T>`. Testing for null needs no `unsafe`; using the
 // pointer does.
+//
+// Null itself is written `null` wherever a `?ptr<T>` is expected -- an
+// argument, a field, a return -- the way it is for an optional. Writing it
+// reads and writes nothing, so it needs no `unsafe` either.
 extern "c" fn malloc(size: usize) -> ?ptr<u8>
-extern "c" fn free(p: ptr<u8>) -> void
+extern "c" fn free(p: ?ptr<u8>) -> void
 error Error {
     OutOfMemory,
 }
 
-// Address zero is the null pointer, as `?ptr<u8>` spells it.
-fn none() -> ?ptr<u8> {
-    // SAFETY: address zero is null, which nothing dereferences.
-    return unsafe ptr_from_int<ptr<u8>>(0);
+// What a C API takes as "each of these may be left unset".
+extern "c" struct Options {
+    scratch: ?ptr<u8>,
+    name: ?ptr<const u8>,
+}
+
+// The block when it is wanted, and null when it is not.
+fn pick(wanted: bool, block: ptr<u8>) -> ?ptr<u8> {
+    if wanted {
+        return block;
+    }
+    return null;
 }
 
 fn first_byte(block: ?ptr<u8>) -> Error!u8 {
@@ -30,17 +42,26 @@ fn main() -> void {
         // SAFETY: cell is the block malloc returned, live until free.
         let value = first_byte(block) catch 0;
         print(value);
+        if pick(false, cell) |_picked| {
+            print("picked");
+        } else {
+            print("nothing picked");
+        }
         // SAFETY: cell came from malloc and nothing uses it after.
         unsafe free(cell);
     } else {
         print("out of memory");
     }
     // A null pointer opens to nothing.
-    if none() |_cell| {
+    let options = Options { scratch: null, name: null };
+    if options.scratch |_cell| {
         print("null opened");
     } else {
         print("null stays closed");
     }
+    print(first_byte(null) catch 0);
+    // SAFETY: free does nothing with a null pointer.
+    unsafe free(null);
     return;
 }
 
@@ -48,4 +69,6 @@ fn main() -> void {
 // features: extern-c raw-pointer nullable-pointer
 // output:
 // 42
+// nothing picked
 // null stays closed
+// 0

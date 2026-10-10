@@ -2084,6 +2084,11 @@ func (l *lowerer) lowerContextualExpr(expr ast.Expression, want string) (Value, 
 	if elem, ok := optionalElemType(want); ok {
 		return l.lowerOptionalContextExpr(expr, want, elem)
 	}
+	if _, isNull := expr.(*ast.NullExpr); isNull {
+		if elem, ok := typ.NullablePointerElem(want); ok {
+			return l.lowerNullPointer(want, elem), nil
+		}
+	}
 	if storage, ok := l.lendStorage(expr, want); ok {
 		return storage, nil
 	}
@@ -2211,6 +2216,16 @@ func (l *lowerer) lowerOptionalContextExpr(
 		return value, nil
 	}
 	return l.emit("opt.some", want, []Value{value}, ""), nil
+}
+
+// lowerNullPointer lowers `null` written where a nullable raw pointer is
+// expected: address zero as the non-null spelling, widened to the nullable
+// one. That is what `ptr_from_int<ptr<T>>(0)` handed to a `?ptr<T>` lowers to,
+// so a backend sees nothing it did not already read.
+func (l *lowerer) lowerNullPointer(want string, elem string) Value {
+	zero := l.emitConst("i64", "0")
+	address := l.emit("cast", elem, []Value{zero}, elem)
+	return l.emit("cast", want, []Value{address}, want)
 }
 
 // optionalElemType returns T for an optional value type `?T`.

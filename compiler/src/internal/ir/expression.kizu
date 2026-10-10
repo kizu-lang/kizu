@@ -276,6 +276,12 @@ fn (self: &var Lowerer) lower_contextual_expr(
     if try self.optional_elem_type(want) |elem| {
         return self.lower_optional_context_expr(tree, expression, want, elem, out);
     }
+    if is_null_expr(tree, expression) {
+        if try self.module.names.nullable_pointer_elem(want) |elem| {
+            out.* = try self.lower_null_pointer(want, elem);
+            return null;
+        }
+    }
     if try self.lend_storage(tree, expression, want) |storage| {
         out.* = storage;
         return null;
@@ -351,6 +357,16 @@ fn (self: &var Lowerer) read_borrow_for_context(value: Value, want: Name) -> !Va
         return value;
     }
     return self.emit1(Op::RefLoad, want_deref, value);
+}
+
+/// Lowers `null` written where a nullable raw pointer is expected, the Go
+/// `lowerNullPointer`: address zero as the non-null spelling, widened to the
+/// nullable one. That is what `ptr_from_int<ptr<T>>(0)` handed to a `?ptr<T>`
+/// lowers to, so a backend sees nothing it did not already read.
+fn (self: &var Lowerer) lower_null_pointer(want: Name, elem: Name) -> !Value {
+    let zero = try self.emit_const_text(self.common.i64_type, "0");
+    let address = try self.emit_imm1(Op::Cast, elem, elem, zero);
+    return try self.emit_imm1(Op::Cast, want, want, address);
 }
 
 /// Lowers an expression written where a `?T` is expected, the Go

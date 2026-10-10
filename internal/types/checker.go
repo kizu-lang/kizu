@@ -2220,7 +2220,7 @@ func (c *Checker) checkReturnStmt(
 		if elem, isUnion := c.types.errorUnionElement(success); isUnion {
 			success = elem
 		}
-		if _, isOptional := optionalElem(success); isOptional {
+		if takesNull(success) {
 			return true, nil
 		}
 		return false, errorf("type error: return expects %s, got null", want)
@@ -2685,7 +2685,7 @@ func (c *Checker) structLiteralFieldValue(
 	if err != nil {
 		return "", err
 	}
-	if _, isOptional := optionalElem(want); !isOptional {
+	if !takesNull(want) {
 		return "", errorf("type error: field `%s.%s` expects %s, got null",
 			typeName, field.Name, want)
 	}
@@ -4062,7 +4062,7 @@ func (c *Checker) checkContextualExpr(
 	unsafe unsafeMark,
 ) (Type, error) {
 	if _, ok := expr.(*ast.NullExpr); ok {
-		if _, isOptional := optionalElem(want); isOptional {
+		if takesNull(want) {
 			return want, nil
 		}
 		return "", errorf("type error: `null` needs an optional context, expected %s", want)

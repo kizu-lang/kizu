@@ -1,0 +1,64 @@
+import std::testing;
+
+extern "c" fn malloc(size: usize) -> ?ptr<u8>
+extern "c" fn free(address: ?ptr<u8>) -> void
+extern "c" struct Slot {
+    address: ?ptr<u8>,
+    name: ?ptr<const u8>,
+}
+
+error Missing {
+    Absent,
+}
+
+fn is_live(address: ?ptr<u8>) -> bool {
+    if address |_live| {
+        return true;
+    }
+    return false;
+}
+
+fn nothing() -> ?ptr<u8> {
+    return null;
+}
+
+fn nothing_unless(fail: bool) -> Missing!?ptr<u8> {
+    if fail {
+        return Missing::Absent;
+    }
+    return null;
+}
+
+fn pass_through(address: ?ptr<u8>) -> ?ptr<u8> {
+    let live = address orelse return null;
+    return live;
+}
+
+test "null is written wherever a nullable pointer is expected" {
+    testing::expect(!is_live(null));
+    testing::expect(!is_live(nothing()));
+    testing::expect(!is_live(pass_through(null)));
+    let annotated: ?ptr<u8> = null;
+    testing::expect(!is_live(annotated));
+    let slot = Slot { address: null, name: null };
+    testing::expect(!is_live(slot.address));
+    if slot.name |_text| {
+        testing::expect(false);
+    }
+    let fallible = nothing_unless(false) catch return;
+    testing::expect(!is_live(fallible));
+    // SAFETY: malloc returns storage or null; the test does not run out.
+    let storage = unsafe malloc(8) orelse return;
+    testing::expect(is_live(pass_through(storage)));
+    var later: ?ptr<u8> = storage;
+    testing::expect(is_live(later));
+    later = null;
+    if later |_live| {
+        testing::expect(false);
+    }
+    let release: extern "c" fn(?ptr<u8>) -> void = free;
+    // SAFETY: free does nothing with a null pointer.
+    unsafe release(null);
+    // SAFETY: storage came from malloc and nothing reads it after this.
+    unsafe release(storage);
+}
