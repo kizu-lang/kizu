@@ -18,10 +18,14 @@ fn (self: &var Checker) check_assign_stmt(
     if try self.is_array_element_write(tree, env, statement.target) {
         return self.check_array_element_assign(tree, env, statement);
     }
+    var ignored = empty_name();
     if self.direct_assignment_root(tree, env, statement.target) |target| {
-        var type_name = empty_name();
+        // The binding keeps the type it was declared with. What is assigned
+        // fits that type without always being spelled as it -- `null`, the
+        // payload a `?T` wraps, a value written through a `&var` -- so its
+        // type says nothing about whether the binding copies.
         let target_type = self.binding(target).type_name;
-        if try self.move_contextual_expr(tree, env, statement.value, target_type, &var type_name) |failed| {
+        if try self.move_contextual_expr(tree, env, statement.value, target_type, &var ignored) |failed| {
             return move failed;
         }
         if self.store.has_any_borrow(target) {
@@ -46,7 +50,6 @@ fn (self: &var Checker) check_assign_stmt(
             return move failed;
         }
         if self.store.binding_mut(target) |record| {
-            record.type_name = type_name;
             record.moved = false;
             record.deinitialized = false;
             record.arena_id = 0;
@@ -55,7 +58,6 @@ fn (self: &var Checker) check_assign_stmt(
         try self.set_arena_provenance(tree, env, target, statement.value);
         return null;
     }
-    var ignored = empty_name();
     if try self.move_expr(tree, env, statement.value, &var ignored) |failed| {
         return move failed;
     }
