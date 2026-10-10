@@ -2590,6 +2590,12 @@ func (l *lowerer) lowerFuncPointerSignature(node *typ.Func) ([]Param, string, er
 		if borrow, ok := declared.(*typ.Borrow); ok {
 			elem := l.resolveType(typ.Text(borrow.Elem))
 			param.Type, param.Passing = l.borrowIRType(elem, borrow.Mut)
+			if node.ABI != "" && !borrow.Mut {
+				// The pointee may be C, which reads a lent struct through
+				// a pointer, as a declared foreign function does
+				// (lowerSignature).
+				param.Type, param.Passing = "&"+elem, PassCopyAddress
+			}
 		} else {
 			param.Type = l.resolveType(typ.Text(declared))
 		}

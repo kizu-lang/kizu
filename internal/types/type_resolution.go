@@ -257,7 +257,7 @@ func (c *Checker) resolveFuncType(
 		return "", issue
 	}
 	if node.ABI == "c" {
-		if refused := cFunctionPointerSignature(node); refused != "" {
+		if refused := cFunctionPointerSignature(node, c.isExternStruct); refused != "" {
 			return "", typeResolutionIssue{
 				kind: typeResolutionCFunction, subject: name, related: refused,
 			}

@@ -15,6 +15,10 @@ C の呼び出し規約を持つ関数の address は `extern "c" fn(...) -> T` 
 
 * 引数と結果は C が名指しできる型だけ。型自身も C が名指しできる型に加わるので、
   `extern "c" fn` の引数・結果と `extern "c" struct` の field に置ける。
+* 引数は宣言した `extern "c" fn` と同じく `extern "c" struct` の `&S` / `&var S` も
+  取る。名前で呼ぶ C 関数と pointer 経由で呼ぶ C 関数は同じ規約で同じ address を
+  受け取るので、片方だけ貸せない理由が無い。貸せないと、関数表を渡してくる host を
+  呼ぶたびに struct を heap に確保することになる。
 * 呼び出しは直接の extern 呼び出しと同じく `unsafe`(`extern_call`)が要る。
   指す先が C かもしれない。
 * `void *` で受け渡す API のために、raw pointer との間は `cast` で行き来する

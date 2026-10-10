@@ -1048,7 +1048,8 @@ func cHostScalar(value Type) bool {
 }
 
 // cFunctionPointer reports whether value spells `extern "c" fn(...)`, or the
-// nullable `?extern "c" fn(...)`, over types C can name.
+// nullable `?extern "c" fn(...)`, over types C can name. A struct it lends is
+// taken to be one C lays out, which is what resolving the type checked.
 func cFunctionPointer(value Type) bool {
 	parsed, err := typ.Parse(string(value))
 	if err != nil {
@@ -1061,28 +1062,38 @@ func cFunctionPointer(value Type) bool {
 	if !ok || node.ABI != "c" {
 		return false
 	}
-	return cFunctionPointerSignature(node) == ""
+	return cFunctionPointerSignature(node, resolvedLayout) == ""
 }
 
 // cPointerRefusal returns the first type a C function's pointer type passes
 // that a C function pointer cannot, or "" when it can carry them all. A call by
-// name passes a struct by value, or lends one, through the convention the
-// backend follows for that function; a call through a pointer passes only
-// scalars.
+// name passes a struct by value through the convention the backend follows for
+// that function; a call through a pointer passes scalars and lends structs,
+// which reach C as an address either way.
 func cPointerRefusal(value Type) Type {
 	parsed, err := typ.Parse(string(value))
 	node, ok := parsed.(*typ.Func)
 	if err != nil || !ok || node.ABI != "c" {
 		return ""
 	}
-	return cFunctionPointerSignature(node)
+	return cFunctionPointerSignature(node, resolvedLayout)
 }
 
 // cFunctionPointerSignature returns the first type an `extern "c" fn(...)`
-// passes that C cannot name, or "" when C can name them all.
-func cFunctionPointerSignature(node *typ.Func) Type {
+// passes that C cannot name, or "" when C can name them all. A parameter
+// spelled `&S` / `&var S` lends a struct the way a declared C function's does:
+// C receives its address, so S has to be a struct C lays out, which is what
+// cLayout answers.
+func cFunctionPointerSignature(node *typ.Func, cLayout func(Type) bool) Type {
 	for _, param := range node.Params {
-		if spelled := Type(param.String()); !cHostScalar(spelled) {
+		spelled := Type(param.String())
+		if lent, lends := cLentStruct(param); lends {
+			if !cLayout(lent) {
+				return spelled
+			}
+			continue
+		}
+		if !cHostScalar(spelled) {
 			return spelled
 		}
 	}
@@ -1090,6 +1101,29 @@ func cFunctionPointerSignature(node *typ.Func) Type {
 		return result
 	}
 	return ""
+}
+
+// cLentStruct returns the type a C function pointer's parameter borrows, and
+// reports whether the parameter is a borrow of a plain name, which is the only
+// spelling a struct with a C layout has.
+func cLentStruct(param typ.Type) (Type, bool) {
+	borrow, ok := param.(*typ.Borrow)
+	if !ok {
+		return "", false
+	}
+	named, ok := borrow.Elem.(*typ.Name)
+	if !ok || len(named.Args) > 0 {
+		return "", false
+	}
+	return Type(named.String()), true
+}
+
+// resolvedLayout answers cFunctionPointerSignature for a type that resolved.
+// Which struct a C function pointer lends is settled where the type is spelled
+// (resolveFuncType) or where the function it names is declared
+// (validateCHostFunctionTypes), so a later reading asks only about the shape.
+func resolvedLayout(Type) bool {
+	return true
 }
 
 // validateHostFunctionABI accepts only the host boundaries the compiler and

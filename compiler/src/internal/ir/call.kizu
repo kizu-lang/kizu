@@ -668,9 +668,11 @@ fn (self: &var Lowerer) lower_function_pointer_signature(pointer: Name) -> !Sign
     defer declared.deinit(self.allocator);
     var result = parsed;
     var unsafe_call = false;
+    var c_abi = false;
     match typ::root_node(&self.types, parsed) {
         Func(node) => {
             unsafe_call = node.unsafe_call;
+            c_abi = node.c_abi;
             var index = 0;
             while node.params.get(index) |param| {
                 index = index + 1;
@@ -695,6 +697,13 @@ fn (self: &var Lowerer) lower_function_pointer_signature(pointer: Name) -> !Sign
                 let resolved = try self.resolve_bound_type(named);
                 type_name = try self.borrow_ir_type(resolved, borrow.mutable);
                 passing = self.borrow_passing(resolved, borrow.mutable);
+                if c_abi and !borrow.mutable {
+                    // The pointee may be C, which reads a lent struct through
+                    // a pointer, as a declared foreign function does
+                    // (lower_signature).
+                    type_name = try self.module.names.prefixed("&", resolved);
+                    passing = Passing::CopyAddress;
+                }
             },
             _ => {
                 let rendered = try typ::render(self.allocator, &self.types, part);

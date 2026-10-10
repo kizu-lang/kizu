@@ -1,0 +1,103 @@
+// A C function pointer lends an `extern "c" struct` the way a declared C
+// function does. Its type spells the parameter `&S` or `&var S`, and C
+// receives a pointer to the struct: for `&var S` the caller's own storage, so
+// what the callee wrote is there when the call returns.
+//
+// This is the shape of a host that hands over a table of functions. Each call
+// passes a local struct through one of the pointers, and nothing is allocated
+// to do it. The two exports stand in for the host's functions and reach the
+// table as `void *`, the way a host hands them over. A declared C function
+// that borrows a struct is a value of the same kind of type by its name.
+/// How often one page was visited, as C lays it out.
+extern "c" struct Visit {
+    count: i32,
+    total: i64,
+}
+
+/// The functions a host hands over.
+extern "c" struct Hooks {
+    record: extern "c" fn(&var Visit) -> void,
+    weigh: ?extern "c" fn(&Visit, i64) -> i64,
+}
+
+/// Wall-clock time as C's `struct timespec`.
+extern "c" struct Timespec {
+    seconds: i64,
+    nanoseconds: i64,
+}
+
+extern "c" fn clock_gettime(clock: i32, out: &var Timespec) -> i32
+export "c" fn record_visit(visit: ptr<Visit>) -> void {
+    // SAFETY: the caller lends one Visit for the call.
+    let count = unsafe visit.*.count;
+    // SAFETY: as above.
+    unsafe visit.*.count = count + 1;
+    // SAFETY: as above.
+    let total = unsafe visit.*.total;
+    // SAFETY: as above.
+    unsafe visit.*.total = total + 10;
+}
+
+export "c" fn weigh_visit(visit: ptr<const Visit>, scale: i64) -> i64 {
+    // SAFETY: the caller lends one Visit for the call.
+    let count = unsafe visit.*.count;
+    // SAFETY: as above.
+    let total = unsafe visit.*.total;
+    return (cast<i64>(count) + total) * scale;
+}
+
+fn hooks() -> Hooks {
+    // SAFETY: the address leaves as `void *`, which is how a host passes it.
+    let record = unsafe cast<ptr<const u8>>(record_visit);
+    // SAFETY: as above.
+    let weigh = unsafe cast<ptr<const u8>>(weigh_visit);
+    // SAFETY: record_visit takes a pointer to a Visit, what C gets for `&var Visit`.
+    let record_hook = unsafe cast<extern "c" fn(&var Visit) -> void>(record);
+    // SAFETY: weigh_visit takes a pointer to a Visit and an i64.
+    let weigh_hook = unsafe cast<extern "c" fn(&Visit, i64) -> i64>(weigh);
+    return Hooks { record: record_hook, weigh: weigh_hook };
+}
+
+fn record_twice(record: extern "c" fn(&var Visit) -> void, visit: &var Visit) -> void {
+    // SAFETY: record writes the one Visit it is lent and keeps no address.
+    unsafe record(visit);
+    // SAFETY: as above.
+    unsafe record(visit);
+}
+
+fn main() -> void {
+    let table = hooks();
+    var visit = Visit { count: 0, total: 0 };
+    let record = table.record;
+    // SAFETY: record writes the one Visit it is lent and keeps no address.
+    unsafe record(&var visit);
+    print(visit.count);
+    print(visit.total);
+    record_twice(record, &var visit);
+    print(visit.count);
+    if table.weigh |weigh| {
+        // SAFETY: weigh reads the one Visit it is lent and keeps no address.
+        print(unsafe weigh(&visit, 2));
+        let other = Visit { count: 1, total: 2 };
+        // SAFETY: as above.
+        print(unsafe weigh(&other, 1));
+    }
+    let clock = clock_gettime;
+    var now = Timespec { seconds: 0, nanoseconds: 0 };
+    // SAFETY: clock 0 is CLOCK_REALTIME on every host, and `now` outlives the call.
+    let status = unsafe clock(0, &var now);
+    print(status == 0);
+    print(now.seconds > 1600000000);
+    return;
+}
+
+// run
+// features: extern-c extern-struct function-pointer raw-pointer unsafe
+// output:
+// 1
+// 10
+// 3
+// 66
+// 3
+// true
+// true

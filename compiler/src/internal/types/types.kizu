@@ -866,7 +866,8 @@ pub fn (self: &TypeTable) is_pointer_type(value: Type) -> bool {
 }
 
 /// Reports whether value spells `extern "c" fn(...)`, or the nullable
-/// `?extern "c" fn(...)`, over types C can name.
+/// `?extern "c" fn(...)`, over types C can name. A struct it lends is taken
+/// to be one C lays out, which is what resolving the type checked.
 pub fn (self: &TypeTable) is_c_function_pointer(value: Type) -> bool {
     if self.lookup(value) |parsed| {
         return parsed_c_function_pointer(&self.parsed, parsed);
@@ -918,12 +919,31 @@ fn parsed_c_function_pointer(table: &typ::Table, value: typ::Type) -> bool {
             var index = 0;
             while node.params.get(index) |param| {
                 index = index + 1;
-                if !parsed_c_scalar(table, typ::child_type(candidate, param)) {
+                let passed = typ::child_type(candidate, param);
+                if !parsed_lends_struct(table, passed) and !parsed_c_scalar(table, passed) {
                     return false;
                 }
             }
             let result = typ::child_type(candidate, node.result);
             return parsed_name_is(table, result, "void") or parsed_c_scalar(table, result);
+        },
+        _ => return false,
+    }
+}
+
+// parsed_lends_struct reports whether value is `&S` / `&var S` over a plain
+// name, the only spelling a struct with a C layout has. A C function pointer
+// lends one the way a declared C function does. Whether S has a C layout is a
+// question for the declarations: `resolve_func_type` asks it of every such
+// type a program spells, and a declared C function's own check asks it of the
+// type its name has as a value.
+fn parsed_lends_struct(table: &typ::Table, value: typ::Type) -> bool {
+    match typ::root_node(table, value) {
+        Borrow(node) => {
+            match typ::root_node(table, typ::child_type(value, node.elem)) {
+                Name(name) => return name.args.len() == 0,
+                _ => return false,
+            }
         },
         _ => return false,
     }
