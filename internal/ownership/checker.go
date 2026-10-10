@@ -2911,8 +2911,11 @@ func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope) error {
 		return err
 	}
 	if target, ok := directAssignmentRoot(stmt.Target, env); ok {
-		typeName, err := c.moveContextualExpr(stmt.Value, target.typeName, env)
-		if err != nil {
+		// The binding keeps the type it was declared with. What is assigned
+		// fits that type without always being spelled as it -- `null`, the
+		// payload a `?T` wraps, a value written through a `&var` -- so its
+		// type says nothing about whether the binding copies.
+		if _, err := c.moveContextualExpr(stmt.Value, target.typeName, env); err != nil {
 			return err
 		}
 		if target.hasAnyBorrow() {
@@ -2930,7 +2933,6 @@ func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope) error {
 		if err := c.checkCleanupReceiverOverwrite(target, stmt); err != nil {
 			return err
 		}
-		target.typeName = typeName
 		target.moved = false
 		target.deinitialized = false
 		target.arenaID = 0
