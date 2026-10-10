@@ -3,16 +3,28 @@
 // and `orelse` do that the way they open an optional: the capture is the
 // same address as a `ptr<T>`. Testing for null needs no `unsafe`; using the
 // pointer does.
+//
+// Null itself is written `null` wherever a `?ptr<T>` is expected -- an
+// argument, a field, a return -- the way it is for an optional. Writing it
+// reads and writes nothing, so it needs no `unsafe` either.
 extern "c" fn malloc(size: usize) -> ?ptr<u8>
-extern "c" fn free(p: ptr<u8>) -> void
+extern "c" fn free(p: ?ptr<u8>) -> void
 error Error {
     OutOfMemory,
 }
 
-// Address zero is the null pointer, as `?ptr<u8>` spells it.
-fn none() -> ?ptr<u8> {
-    // SAFETY: address zero is null, which nothing dereferences.
-    return unsafe ptr_from_int<ptr<u8>>(0);
+// What a C API takes as "each of these may be left unset".
+extern "c" struct Options {
+    scratch: ?ptr<u8>,
+    name: ?ptr<const u8>,
+}
+
+// The block when it is wanted, and null when it is not.
+fn pick(wanted: bool, block: ptr<u8>) -> ?ptr<u8> {
+    if wanted {
+        return block;
+    }
+    return null;
 }
 
 fn first_byte(block: ?ptr<u8>) -> Error!u8 {
@@ -30,17 +42,26 @@ fn main() -> void {
         // SAFETY: cell is the block malloc returned, live until free.
         let value = first_byte(block) catch 0;
         print(value);
+        if pick(false, cell) |_picked| {
+            print("picked");
+        } else {
+            print("nothing picked");
+        }
         // SAFETY: cell came from malloc and nothing uses it after.
         unsafe free(cell);
     } else {
         print("out of memory");
     }
     // A null pointer opens to nothing.
-    if none() |_cell| {
+    let options = Options { scratch: null, name: null };
+    if options.scratch |_cell| {
         print("null opened");
     } else {
         print("null stays closed");
     }
+    print(first_byte(null) catch 0);
+    // SAFETY: free does nothing with a null pointer.
+    unsafe free(null);
     return;
 }
 
@@ -48,16 +69,25 @@ fn main() -> void {
 // features: extern-c raw-pointer nullable-pointer
 // output:
 // 42
+// nothing picked
 // null stays closed
+// 0
 
 // ir
 // lower:
-// fn none() -> ?ptr<u8> {
+// fn pick(%wanted: bool, %block: ptr<u8>) -> ?ptr<u8> {
 // entry:
-//   %1: i64 = const 0
-//   %2: ptr<u8> = cast %1: i64, ptr<u8>
-//   %3: ?ptr<u8> = cast %2: ptr<u8>, ?ptr<u8>
-//   return %3: ?ptr<u8>
+//   branch %wanted: bool, if.then.1, if.else.2
+// if.then.1:
+//   %1: ?ptr<u8> = cast %block: ptr<u8>, ?ptr<u8>
+//   return %1: ?ptr<u8>
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %2: i64 = const 0
+//   %3: ptr<u8> = cast %2: i64, ptr<u8>
+//   %4: ?ptr<u8> = cast %3: ptr<u8>, ?ptr<u8>
+//   return %4: ?ptr<u8>
 // }
 // fn first_byte(%block: ?ptr<u8>) -> Error!u8 {
 // entry:
@@ -87,14 +117,21 @@ fn main() -> void {
 //   %6: bool = error.has %5: Error!u8
 //   branch %6: bool, catch.ok.4, catch.else.5
 // if.else.2:
-//   %12: []u8 = const "out of memory"
-//   call.std::fmt::print._5b_5du8 %12: []u8
+//   %21: []u8 = const "out of memory"
+//   call.std::fmt::print._5b_5du8 %21: []u8
 //   jump if.end.3
 // if.end.3:
-//   %14: ?ptr<u8> = call.none
-//   %15: ptr<u8> = ptr.value %14: ?ptr<u8>
-//   %16: bool = ptr.has %14: ?ptr<u8>
-//   branch %16: bool, if.then.7, if.else.8
+//   %23: i64 = const 0
+//   %24: ptr<u8> = cast %23: i64, ptr<u8>
+//   %25: ?ptr<u8> = cast %24: ptr<u8>, ?ptr<u8>
+//   %26: i64 = const 0
+//   %27: ptr<const u8> = cast %26: i64, ptr<const u8>
+//   %28: ?ptr<const u8> = cast %27: ptr<const u8>, ?ptr<const u8>
+//   %29: Options = struct.new {scratch: %25: ?ptr<u8>, name: %28: ?ptr<const u8>}
+//   %30: ?ptr<u8> = field.scratch %29: Options
+//   %31: ptr<u8> = ptr.value %30: ?ptr<u8>
+//   %32: bool = ptr.has %30: ?ptr<u8>
+//   branch %32: bool, if.then.10, if.else.11
 // catch.ok.4:
 //   %7: u8 = error.value %5: Error!u8
 //   jump catch.end.6
@@ -104,26 +141,67 @@ fn main() -> void {
 // catch.end.6:
 //   %9: u8 = phi [catch.ok.4, %7: u8], [catch.else.5, %8: u8]
 //   call.std::fmt::print.u8 %9: u8
-//   extern "c" call.free %3: ptr<u8>
-//   jump if.end.3
+//   %11: bool = const false
+//   %12: ?ptr<u8> = call.pick %11: bool, %3: ptr<u8>
+//   %13: ptr<u8> = ptr.value %12: ?ptr<u8>
+//   %14: bool = ptr.has %12: ?ptr<u8>
+//   branch %14: bool, if.then.7, if.else.8
 // if.then.7:
-//   %17: []u8 = const "null opened"
-//   call.std::fmt::print._5b_5du8 %17: []u8
+//   %15: []u8 = const "picked"
+//   call.std::fmt::print._5b_5du8 %15: []u8
 //   jump if.end.9
 // if.else.8:
-//   %19: []u8 = const "null stays closed"
-//   call.std::fmt::print._5b_5du8 %19: []u8
+//   %17: []u8 = const "nothing picked"
+//   call.std::fmt::print._5b_5du8 %17: []u8
 //   jump if.end.9
 // if.end.9:
+//   %19: ?ptr<u8> = cast %3: ptr<u8>, ?ptr<u8>
+//   extern "c" call.free %19: ?ptr<u8>
+//   jump if.end.3
+// if.then.10:
+//   %33: []u8 = const "null opened"
+//   call.std::fmt::print._5b_5du8 %33: []u8
+//   jump if.end.12
+// if.else.11:
+//   %35: []u8 = const "null stays closed"
+//   call.std::fmt::print._5b_5du8 %35: []u8
+//   jump if.end.12
+// if.end.12:
+//   %37: i64 = const 0
+//   %38: ptr<u8> = cast %37: i64, ptr<u8>
+//   %39: ?ptr<u8> = cast %38: ptr<u8>, ?ptr<u8>
+//   %40: Error!u8 = call.first_byte %39: ?ptr<u8>
+//   %41: bool = error.has %40: Error!u8
+//   branch %41: bool, catch.ok.13, catch.else.14
+// catch.ok.13:
+//   %42: u8 = error.value %40: Error!u8
+//   jump catch.end.15
+// catch.else.14:
+//   %43: u8 = const 0
+//   jump catch.end.15
+// catch.end.15:
+//   %44: u8 = phi [catch.ok.13, %42: u8], [catch.else.14, %43: u8]
+//   call.std::fmt::print.u8 %44: u8
+//   %46: i64 = const 0
+//   %47: ptr<u8> = cast %46: i64, ptr<u8>
+//   %48: ?ptr<u8> = cast %47: ptr<u8>, ?ptr<u8>
+//   extern "c" call.free %48: ?ptr<u8>
 //   return void: void
 // }
 // opt:
-// fn none() -> ?ptr<u8> {
+// fn pick(%wanted: bool, %block: ptr<u8>) -> ?ptr<u8> {
 // entry:
-//   %1: i64 = const 0
-//   %2: ptr<u8> = cast %1: i64, ptr<u8>
-//   %3: ?ptr<u8> = cast %2: ptr<u8>, ?ptr<u8>
-//   return %3: ?ptr<u8>
+//   branch %wanted: bool, if.then.1, if.else.2
+// if.then.1:
+//   %1: ?ptr<u8> = cast %block: ptr<u8>, ?ptr<u8>
+//   return %1: ?ptr<u8>
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %2: i64 = const 0
+//   %3: ptr<u8> = cast %2: i64, ptr<u8>
+//   %4: ?ptr<u8> = cast %3: ptr<u8>, ?ptr<u8>
+//   return %4: ?ptr<u8>
 // }
 // fn first_byte(%block: ?ptr<u8>) -> Error!u8 {
 // entry:
@@ -169,15 +247,20 @@ fn main() -> void {
 //   %6: bool = error.has %5: Error!u8
 //   branch %6: bool, catch.ok.4, catch.else.5
 // if.else.2:
-//   %12: []u8 = const "out of memory"
-//   print.line %12: []u8
+//   %21: []u8 = const "out of memory"
+//   print.line %21: []u8
 //   jump if.end.3
 // if.end.3:
-//   %in3.1: i64 = const 0
-//   %in3.2: ptr<u8> = cast %in3.1: i64, ptr<u8>
-//   %in3.3: ?ptr<u8> = cast %in3.2: ptr<u8>, ?ptr<u8>
-//   %16: bool = ptr.has %in3.3: ?ptr<u8>
-//   branch %16: bool, if.then.7, if.else.8
+//   %23: i64 = const 0
+//   %24: ptr<u8> = cast %23: i64, ptr<u8>
+//   %25: ?ptr<u8> = cast %24: ptr<u8>, ?ptr<u8>
+//   %26: i64 = const 0
+//   %27: ptr<const u8> = cast %26: i64, ptr<const u8>
+//   %28: ?ptr<const u8> = cast %27: ptr<const u8>, ?ptr<const u8>
+//   %29: Options = struct.new {scratch: %25: ?ptr<u8>, name: %28: ?ptr<const u8>}
+//   %30: ?ptr<u8> = field.scratch %29: Options
+//   %32: bool = ptr.has %30: ?ptr<u8>
+//   branch %32: bool, if.then.10, if.else.11
 // catch.ok.4:
 //   %7: u8 = error.value %5: Error!u8
 //   jump catch.end.6
@@ -186,28 +269,94 @@ fn main() -> void {
 //   jump catch.end.6
 // catch.end.6:
 //   %9: u8 = phi [catch.ok.4, %7: u8], [catch.else.5, %8: u8]
-//   %in4.1: u64 = cast %9: u8, u64
-//   call.std::fmt::write_u64 %in4.1: u64
-//   extern "c" call.free %3: ptr<u8>
-//   jump if.end.3
+//   %in3.1: u64 = cast %9: u8, u64
+//   call.std::fmt::write_u64 %in3.1: u64
+//   jump in4.entry
+// in4.entry:
+//   jump in4.if.else.2
+// in4.if.else.2:
+//   jump in4.if.end.3
+// in4.if.end.3:
+//   %in4.2: i64 = const 0
+//   %in4.3: ptr<u8> = cast %in4.2: i64, ptr<u8>
+//   %in4.4: ?ptr<u8> = cast %in4.3: ptr<u8>, ?ptr<u8>
+//   jump in4.cont
+// in4.cont:
+//   %14: bool = ptr.has %in4.4: ?ptr<u8>
+//   branch %14: bool, if.then.7, if.else.8
 // if.then.7:
-//   %17: []u8 = const "null opened"
-//   print.line %17: []u8
+//   %15: []u8 = const "picked"
+//   print.line %15: []u8
 //   jump if.end.9
 // if.else.8:
-//   %19: []u8 = const "null stays closed"
-//   print.line %19: []u8
+//   %17: []u8 = const "nothing picked"
+//   print.line %17: []u8
 //   jump if.end.9
 // if.end.9:
+//   %19: ?ptr<u8> = cast %3: ptr<u8>, ?ptr<u8>
+//   extern "c" call.free %19: ?ptr<u8>
+//   jump if.end.3
+// if.then.10:
+//   %33: []u8 = const "null opened"
+//   print.line %33: []u8
+//   jump if.end.12
+// if.else.11:
+//   %35: []u8 = const "null stays closed"
+//   print.line %35: []u8
+//   jump if.end.12
+// if.end.12:
+//   %37: i64 = const 0
+//   %38: ptr<u8> = cast %37: i64, ptr<u8>
+//   %39: ?ptr<u8> = cast %38: ptr<u8>, ?ptr<u8>
+//   jump in9.entry
+// in9.entry:
+//   %in9.1: bool = ptr.has %39: ?ptr<u8>
+//   branch %in9.1: bool, in9.guard.some.1, in9.guard.exit.2
+// in9.guard.some.1:
+//   %in9.4: ptr<u8> = ptr.value %39: ?ptr<u8>
+//   %in9.5: u8 = const 42
+//   ref.store %in9.4: ptr<u8>, %in9.5: u8
+//   %in9.7: u8 = ref.load %in9.4: ptr<u8>
+//   %in9.8: Error!u8 = error.ok %in9.7: u8
+//   jump in9.cont
+// in9.guard.exit.2:
+//   %in9.2: Error = const 107
+//   %in9.3: Error!u8 = error.error %in9.2: Error
+//   jump in9.cont
+// in9.cont:
+//   %40: Error!u8 = phi [in9.guard.some.1, %in9.8: Error!u8], [in9.guard.exit.2, %in9.3: Error!u8]
+//   %41: bool = error.has %40: Error!u8
+//   branch %41: bool, catch.ok.13, catch.else.14
+// catch.ok.13:
+//   %42: u8 = error.value %40: Error!u8
+//   jump catch.end.15
+// catch.else.14:
+//   %43: u8 = const 0
+//   jump catch.end.15
+// catch.end.15:
+//   %44: u8 = phi [catch.ok.13, %42: u8], [catch.else.14, %43: u8]
+//   %in10.1: u64 = cast %44: u8, u64
+//   call.std::fmt::write_u64 %in10.1: u64
+//   %46: i64 = const 0
+//   %47: ptr<u8> = cast %46: i64, ptr<u8>
+//   %48: ?ptr<u8> = cast %47: ptr<u8>, ?ptr<u8>
+//   extern "c" call.free %48: ?ptr<u8>
 //   return void: void
 // }
 // opt wasm:
-// fn none() -> ?ptr<u8> {
+// fn pick(%wanted: bool, %block: ptr<u8>) -> ?ptr<u8> {
 // entry:
-//   %1: i64 = const 0
-//   %2: ptr<u8> = cast %1: i64, ptr<u8>
-//   %3: ?ptr<u8> = cast %2: ptr<u8>, ?ptr<u8>
-//   return %3: ?ptr<u8>
+//   branch %wanted: bool, if.then.1, if.else.2
+// if.then.1:
+//   %1: ?ptr<u8> = cast %block: ptr<u8>, ?ptr<u8>
+//   return %1: ?ptr<u8>
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %2: i64 = const 0
+//   %3: ptr<u8> = cast %2: i64, ptr<u8>
+//   %4: ?ptr<u8> = cast %3: ptr<u8>, ?ptr<u8>
+//   return %4: ?ptr<u8>
 // }
 // fn first_byte(%block: ?ptr<u8>) -> Error!u8 {
 // entry:
@@ -253,15 +402,19 @@ fn main() -> void {
 //   %6: bool = error.has %5: Error!u8
 //   branch %6: bool, catch.ok.4, catch.else.5
 // if.else.2:
-//   %12: []u8 = const "out of memory"
-//   print.line %12: []u8
+//   %21: []u8 = const "out of memory"
+//   print.line %21: []u8
 //   jump if.end.3
 // if.end.3:
-//   %in3.1: i64 = const 0
-//   %in3.2: ptr<u8> = cast %in3.1: i64, ptr<u8>
-//   %in3.3: ?ptr<u8> = cast %in3.2: ptr<u8>, ?ptr<u8>
-//   %16: bool = ptr.has %in3.3: ?ptr<u8>
-//   branch %16: bool, if.then.7, if.else.8
+//   %23: i64 = const 0
+//   %24: ptr<u8> = cast %23: i64, ptr<u8>
+//   %25: ?ptr<u8> = cast %24: ptr<u8>, ?ptr<u8>
+//   %27: ptr<const u8> = cast %23: i64, ptr<const u8>
+//   %28: ?ptr<const u8> = cast %27: ptr<const u8>, ?ptr<const u8>
+//   %29: Options = struct.new {scratch: %25: ?ptr<u8>, name: %28: ?ptr<const u8>}
+//   %30: ?ptr<u8> = field.scratch %29: Options
+//   %32: bool = ptr.has %30: ?ptr<u8>
+//   branch %32: bool, if.then.10, if.else.11
 // catch.ok.4:
 //   %7: u8 = error.value %5: Error!u8
 //   jump catch.end.6
@@ -270,18 +423,71 @@ fn main() -> void {
 //   jump catch.end.6
 // catch.end.6:
 //   %9: u8 = phi [catch.ok.4, %7: u8], [catch.else.5, %8: u8]
-//   %in4.1: u64 = cast %9: u8, u64
-//   call.std::fmt::write_u64 %in4.1: u64
-//   extern "c" call.free %3: ptr<u8>
-//   jump if.end.3
+//   %in3.1: u64 = cast %9: u8, u64
+//   call.std::fmt::write_u64 %in3.1: u64
+//   jump in4.entry
+// in4.entry:
+//   jump in4.if.else.2
+// in4.if.else.2:
+//   jump in4.if.end.3
+// in4.if.end.3:
+//   %in4.2: i64 = const 0
+//   %in4.3: ptr<u8> = cast %in4.2: i64, ptr<u8>
+//   %in4.4: ?ptr<u8> = cast %in4.3: ptr<u8>, ?ptr<u8>
+//   jump in4.cont
+// in4.cont:
+//   %14: bool = ptr.has %in4.4: ?ptr<u8>
+//   branch %14: bool, if.then.7, if.else.8
 // if.then.7:
-//   %17: []u8 = const "null opened"
-//   print.line %17: []u8
+//   %15: []u8 = const "picked"
+//   print.line %15: []u8
 //   jump if.end.9
 // if.else.8:
-//   %19: []u8 = const "null stays closed"
-//   print.line %19: []u8
+//   %17: []u8 = const "nothing picked"
+//   print.line %17: []u8
 //   jump if.end.9
 // if.end.9:
+//   %19: ?ptr<u8> = cast %3: ptr<u8>, ?ptr<u8>
+//   extern "c" call.free %19: ?ptr<u8>
+//   jump if.end.3
+// if.then.10:
+//   %33: []u8 = const "null opened"
+//   print.line %33: []u8
+//   jump if.end.12
+// if.else.11:
+//   %35: []u8 = const "null stays closed"
+//   print.line %35: []u8
+//   jump if.end.12
+// if.end.12:
+//   jump in9.entry
+// in9.entry:
+//   %in9.1: bool = ptr.has %25: ?ptr<u8>
+//   branch %in9.1: bool, in9.guard.some.1, in9.guard.exit.2
+// in9.guard.some.1:
+//   %in9.4: ptr<u8> = ptr.value %25: ?ptr<u8>
+//   %in9.5: u8 = const 42
+//   ref.store %in9.4: ptr<u8>, %in9.5: u8
+//   %in9.7: u8 = ref.load %in9.4: ptr<u8>
+//   %in9.8: Error!u8 = error.ok %in9.7: u8
+//   jump in9.cont
+// in9.guard.exit.2:
+//   %in9.2: Error = const 107
+//   %in9.3: Error!u8 = error.error %in9.2: Error
+//   jump in9.cont
+// in9.cont:
+//   %40: Error!u8 = phi [in9.guard.some.1, %in9.8: Error!u8], [in9.guard.exit.2, %in9.3: Error!u8]
+//   %41: bool = error.has %40: Error!u8
+//   branch %41: bool, catch.ok.13, catch.else.14
+// catch.ok.13:
+//   %42: u8 = error.value %40: Error!u8
+//   jump catch.end.15
+// catch.else.14:
+//   %43: u8 = const 0
+//   jump catch.end.15
+// catch.end.15:
+//   %44: u8 = phi [catch.ok.13, %42: u8], [catch.else.14, %43: u8]
+//   %in10.1: u64 = cast %44: u8, u64
+//   call.std::fmt::write_u64 %in10.1: u64
+//   extern "c" call.free %25: ?ptr<u8>
 //   return void: void
 // }

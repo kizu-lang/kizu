@@ -1330,10 +1330,9 @@ if registry.user(id) |u| { u.visits = u.visits + 1; }
 * `?Owner` field の cleanup 契約は §14.4 にある。`deinit` の中で optional を開いて
   中身を解放する。宣言しなければ、それを行う body が導出される
 * `?ptr<T>` は raw pointer の nullable 綴りのままで、この optional
-  semantics の対象外(unsafe 世界の C ABI 用)。開く形だけは同じで、
-  `if p |q|` / `while p |q|` / `p orelse ...` が `ptr<T>` を束縛する(§12)。
-  `null` literal は書けず、null は `ptr_from_int<ptr<T>>(0)` を `?ptr<T>` に
-  渡した値
+  semantics の対象外(unsafe 世界の C ABI 用)。開く形と不在の綴りだけは同じで、
+  `if p |q|` / `while p |q|` / `p orelse ...` が `ptr<T>` を束縛し、`null` は
+  null pointer を表す(§12)
 
 collection は primitive ではなく、標準ライブラリ型として扱います。
 実装済みの collection / ownership 型:
@@ -2356,6 +2355,9 @@ C 側に表現が無いので拒否します。byte 列は `ptr<const u8>` と `
 * `ptr<T>` は `?ptr<T>` を受け取る位置(引数、戻り値、`let` / `var` の型注釈、
   代入、struct field)にそのまま書ける。同じ address で、null になりうる側に
   広げるだけなので `unsafe` は要らない。逆向きは `if p |q|` などで開く
+* `null` は `?ptr<T>` / `?ptr<const T>` を受け取る同じ位置に書ける。address 0 の
+  pointer で、何も読み書きしないので `unsafe` は要らない。`ptr<T>` /
+  `ptr<const T>` を受け取る位置には書けない
 * safe borrow と raw pointer は別物として扱う
 * `p.*` は `ptr<T>` / `ptr<const T>` から `T` を読む
 * `p.* = value` は `ptr<T>` に `T` を書く

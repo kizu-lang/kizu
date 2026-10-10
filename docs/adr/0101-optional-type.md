@@ -27,6 +27,11 @@ union を宣言することになり、原理 10(定型の量産)に反する。
    struct field、union payload、static argument、borrow 対象は閉じた
    まま(optional を包めるのは error union だけ)。
 2. **`null` literal**。文脈が `?T` の位置(return / 引数)でだけ書ける。
+   `?ptr<T>` の位置でも同じ綴りで null pointer を書ける。開く形
+   (`if p |q|` / `orelse`)が optional と同じなのに不在の綴りだけ
+   `unsafe ptr_from_int<ptr<T>>(0)` に分かれていると、何も読み書きしない
+   箇所に `unsafe` が立ち、`?extern "c" fn` には `null` が書けて
+   `?ptr<T>` には書けない差が残る(原理 3・7)。
 3. **暗黙 wrap**。`?T` 文脈の `T` は暗黙に wrap する。`!T` の成功 wrap
    と同じ既存規則の適用。
 4. **消費は 3 形だけ**: `if opt |v| {} else {}`、`while opt |v| {}`、
