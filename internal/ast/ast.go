@@ -994,6 +994,20 @@ func (e *StringExpr) String() string {
 	return quote.Bytes(e.Value)
 }
 
+// CStringExpr represents a C string literal `c"..."`. Value is the bytes
+// between the quotes; the NUL that ends them in storage is not part of it.
+type CStringExpr struct {
+	Value string
+}
+
+// expressionNode marks CStringExpr as an expression node.
+func (*CStringExpr) expressionNode() {}
+
+// String returns the quoted literal spelling.
+func (e *CStringExpr) String() string {
+	return "c" + quote.Bytes(e.Value)
+}
+
 // NullExpr is the `null` literal of an optional type.
 type NullExpr struct {
 	Span Span

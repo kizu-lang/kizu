@@ -2294,6 +2294,7 @@ fn (self: &var Parser) parse_prefix_expression(
         Int => try self.parse_int_literal_expression(tree),
         Float => try self.parse_float_literal_expression(tree),
         String => try self.retain_literal_expression(tree, true),
+        CString => try self.parse_c_string_literal_expression(tree),
         If => {
             let value = try self.parse_if_stmt(tree) orelse
                 return try tree.add_recovered_expression(token_span_at(self));
@@ -2332,6 +2333,37 @@ fn (self: &Parser) retain_literal_expression(
     return try tree.add_expression(ast::ExpressionNode::Int(
         ast::IntExpr { value: value }
     ));
+}
+
+// Reads a C string literal. It has no multi-line form, so a line break
+// between the quotes is an error instead of a byte of the value: a quote left
+// open then stops at the end of its line.
+fn (self: &var Parser) parse_c_string_literal_expression(
+    tree: &var ast::Ast
+) -> !ast::Expression {
+    if token_literal_has_line_break(self.current_token()) {
+        try self.error_text("a C string literal ends on the line it starts on");
+        let empty = try tree.add_empty_text();
+        return try tree.add_expression(ast::ExpressionNode::CString(
+            ast::CStringExpr { value: empty }
+        ));
+    }
+    let value = try self.retain_current_literal(tree);
+    return try tree.add_expression(ast::ExpressionNode::CString(
+        ast::CStringExpr { value: value }
+    ));
+}
+
+fn token_literal_has_line_break(current: &token::Token) -> bool {
+    let bytes = current.literal.as_bytes();
+    var index = 0;
+    while index < mem::len(bytes) {
+        if bytes[index] == cast<u8>(10) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
 }
 
 // Turns the spelling of an integer literal into its decimal value, so that
@@ -3969,6 +4001,7 @@ fn token_class_description(kind: token::Kind) -> []u8 {
         Ident => "identifier",
         Int => "integer",
         String => "string",
+        CString => "C string",
         _ => "",
     };
 }

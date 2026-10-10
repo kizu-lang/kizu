@@ -52,6 +52,9 @@ const (
 	typeByteString Type = "[]u8"
 	typeType       Type = "type"
 	typeVoid       Type = "void"
+	// typeCString is what a C string literal `c"..."` is: the address of
+	// constant bytes that a NUL ends.
+	typeCString Type = "ptr<const u8>"
 )
 
 var knownTypes = map[Type]bool{

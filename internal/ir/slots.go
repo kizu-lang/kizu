@@ -215,8 +215,8 @@ func literalValues(expr ast.Expression) []ast.Expression {
 // whether the node is one this walk knows.
 func expressionChildren(expr ast.Expression) ([]ast.Expression, bool) {
 	switch e := expr.(type) {
-	case *ast.IdentExpr, *ast.IntExpr, *ast.FloatExpr, *ast.StringExpr, *ast.BoolExpr, *ast.TypeExpr,
-		*ast.NullExpr:
+	case *ast.IdentExpr, *ast.IntExpr, *ast.FloatExpr, *ast.StringExpr, *ast.CStringExpr,
+		*ast.BoolExpr, *ast.TypeExpr, *ast.NullExpr:
 		return nil, true
 	case *ast.PrefixExpr:
 		return []ast.Expression{e.Right}, true

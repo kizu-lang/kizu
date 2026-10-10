@@ -398,6 +398,10 @@ func escapeString(value string) string {
 			out.WriteString("\\22")
 		case '\n':
 			out.WriteString("\\0A")
+		case 0:
+			// The NUL a C string literal ends with. Written raw it would
+			// put a NUL byte in the text handed to clang.
+			out.WriteString("\\00")
 		default:
 			out.WriteByte(ch)
 		}

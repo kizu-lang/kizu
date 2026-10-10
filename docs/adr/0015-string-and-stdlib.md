@@ -43,6 +43,17 @@ std::set::Set<T>      hash set, later
 `std::string::String` と C ABI の間に暗黙変換は置かない。
 C へ渡す場合は、将来 `std::string::as_c_string` のような明示 API を使う。
 
+固定の名前を C へ渡す綴りは C string literal `c"..."`(`ptr<const u8>`、SPEC §7)に
+する。NUL 終端の約束が綴りと型に現れ、型は増えない。却下した案:
+
+- 文字列 literal の NUL 終端を仕様で保証する。約束が型に現れず、literal から
+  切り出した view や実行時に組み立てた `[]u8` では成り立たないので、誤用を
+  型検査で止められない(原理 1・5)
+- allocator を受け取って NUL 終端のコピーを返す std の関数だけで済ませる。
+  固定の名前のために呼び出しごとの確保とコピーが要る。実行時の文字列には
+  この形が要るので、必要になった時点で足す
+- C 文字列を表す新しい型。`ptr<const u8>` で表せる(原理 6)
+
 stdlib module naming は lowercase namespace names にし、namespace separator は
 ADR-0038 に従って `::` を使う。
 

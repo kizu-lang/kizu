@@ -3303,7 +3303,8 @@ func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe unsafeMark) 
 // checkExprForm checks one expression by its form.
 func (c *Checker) checkExprForm(expr ast.Expression, env *scope, unsafe unsafeMark) (Type, error) {
 	switch e := expr.(type) {
-	case *ast.IntExpr, *ast.FloatExpr, *ast.StringExpr, *ast.BoolExpr, *ast.TypeExpr, *ast.NullExpr:
+	case *ast.IntExpr, *ast.FloatExpr, *ast.StringExpr, *ast.CStringExpr, *ast.BoolExpr,
+		*ast.TypeExpr, *ast.NullExpr:
 		return c.checkScalarExpr(e)
 	case *ast.ComptimeExpr:
 		return c.checkComptimeExpr(e, env, unsafe)
@@ -3918,6 +3919,8 @@ func literalType(expr ast.Expression) (Type, error) {
 		return typeF64, nil
 	case *ast.StringExpr:
 		return typeByteString, nil
+	case *ast.CStringExpr:
+		return typeCString, nil
 	case *ast.BoolExpr:
 		return typeBool, nil
 	case *ast.NullExpr:

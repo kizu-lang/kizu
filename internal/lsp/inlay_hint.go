@@ -74,6 +74,8 @@ func inferInlayPrimaryType(
 		return "i64", start
 	case token.String:
 		return "[]u8", start
+	case token.CString:
+		return "ptr<const u8>", start
 	case token.True, token.False:
 		return "bool", start
 	case token.Ident:
