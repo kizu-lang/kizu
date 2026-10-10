@@ -1,0 +1,362 @@
+// `c"..."` is a C string literal: the address of the bytes between the quotes
+// with one NUL after them, typed `ptr<const u8>`. A C function that takes a
+// name reads up to that NUL, so a fixed name reaches it without a copy. A
+// string literal `"..."` is a `[]u8` view and promises no NUL.
+extern "c" fn strlen(text: ptr<const u8>) -> usize
+extern "c" fn atoi(text: ptr<const u8>) -> i32
+extern "c" fn strchr(text: ptr<const u8>, byte: i32) -> ?ptr<const u8>
+// Counts the bytes before the NUL, the way C reads the literal.
+fn length(text: ptr<const u8>) -> i64 {
+    var count = 0;
+    // SAFETY: text is NUL-terminated, and the walk stops at the NUL.
+    while unsafe ptr_read(unsafe ptr_offset(text, count)) != 0 {
+        count = count + 1;
+    }
+    return count;
+}
+
+fn main() -> void {
+    // Writing the literal reads nothing; the call that reads it is the
+    // unsafe step.
+    // SAFETY: the literal is NUL-terminated.
+    print(unsafe strlen(c"hello"));
+    // SAFETY: the literal is NUL-terminated.
+    print(unsafe atoi(c"42"));
+    // The NUL is there for Kizu code too, and `c""` is the address of one NUL.
+    print(length(c"hello, kizu"));
+    print(length(c""));
+    // A `?ptr<const u8>` position takes the literal the way it takes any
+    // `ptr<const u8>`.
+    let entry: ?ptr<const u8> = c"name=kizu";
+    if entry |text| {
+        // SAFETY: text is NUL-terminated, and 61 is `=`.
+        if unsafe strchr(text, 61) |rest| {
+            print(length(rest));
+        }
+    }
+    return;
+}
+
+// run
+// features: extern-c raw-pointer string-literal
+// output:
+// 5
+// 42
+// 11
+// 0
+// 5
+
+// ir
+// lower:
+// fn length(%text: ptr<const u8>) -> i64 {
+// entry:
+//   %1: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %2: i64 = phi [entry, %1: i64], [while.body.2, %8: i64]
+//   %3: ptr<const u8> = ptr.offset %text: ptr<const u8>, %2: i64
+//   %4: u8 = ref.load %3: ptr<const u8>
+//   %5: u8 = const 0
+//   %6: bool = binary.!= %4: u8, %5: u8
+//   branch %6: bool, while.body.2, while.end.3
+// while.body.2:
+//   %7: i64 = const 1
+//   %8: i64 = binary.+ %2: i64, %7: i64
+//   jump while.header.1
+// while.end.3:
+//   return %2: i64
+// }
+// fn main() -> void {
+// entry:
+//   %1: []u8 = const "hello\x00"
+//   %2: ptr<const u8> = slice.ptr %1: []u8
+//   %3: usize = extern "c" call.strlen %2: ptr<const u8>
+//   call.std::fmt::print.usize %3: usize
+//   %5: []u8 = const "42\x00"
+//   %6: ptr<const u8> = slice.ptr %5: []u8
+//   %7: i32 = extern "c" call.atoi %6: ptr<const u8>
+//   call.std::fmt::print.i32 %7: i32
+//   %9: []u8 = const "hello, kizu\x00"
+//   %10: ptr<const u8> = slice.ptr %9: []u8
+//   %11: i64 = call.length %10: ptr<const u8>
+//   call.std::fmt::print.i64 %11: i64
+//   %13: []u8 = const "\x00"
+//   %14: ptr<const u8> = slice.ptr %13: []u8
+//   %15: i64 = call.length %14: ptr<const u8>
+//   call.std::fmt::print.i64 %15: i64
+//   %17: []u8 = const "name=kizu\x00"
+//   %18: ptr<const u8> = slice.ptr %17: []u8
+//   %19: ?ptr<const u8> = cast %18: ptr<const u8>, ?ptr<const u8>
+//   %20: ptr<const u8> = ptr.value %19: ?ptr<const u8>
+//   %21: bool = ptr.has %19: ?ptr<const u8>
+//   branch %21: bool, if.then.1, if.else.2
+// if.then.1:
+//   %22: i32 = const 61
+//   %23: ?ptr<const u8> = extern "c" call.strchr %20: ptr<const u8>, %22: i32
+//   %24: ptr<const u8> = ptr.value %23: ?ptr<const u8>
+//   %25: bool = ptr.has %23: ?ptr<const u8>
+//   branch %25: bool, if.then.4, if.else.5
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return void: void
+// if.then.4:
+//   %26: i64 = call.length %24: ptr<const u8>
+//   call.std::fmt::print.i64 %26: i64
+//   jump if.end.6
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   jump if.end.3
+// }
+// opt:
+// fn length(%text: ptr<const u8>) -> i64 {
+// entry:
+//   %1: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %2: i64 = phi [entry, %1: i64], [while.body.2, %8: i64]
+//   %3: ptr<const u8> = ptr.offset %text: ptr<const u8>, %2: i64
+//   %4: u8 = ref.load %3: ptr<const u8>
+//   %5: u8 = const 0
+//   %6: bool = binary.!= %4: u8, %5: u8
+//   branch %6: bool, while.body.2, while.end.3
+// while.body.2:
+//   %7: i64 = const 1
+//   %8: i64 = binary.+ %2: i64, %7: i64
+//   jump while.header.1
+// while.end.3:
+//   return %2: i64
+// }
+// fn main() -> void {
+// entry:
+//   %1: []u8 = const "hello\x00"
+//   %2: ptr<const u8> = slice.ptr %1: []u8
+//   %3: usize = extern "c" call.strlen %2: ptr<const u8>
+//   %in1.1: u64 = cast %3: usize, u64
+//   call.std::fmt::write_u64 %in1.1: u64
+//   %5: []u8 = const "42\x00"
+//   %6: ptr<const u8> = slice.ptr %5: []u8
+//   %7: i32 = extern "c" call.atoi %6: ptr<const u8>
+//   %in2.1: i64 = cast %7: i32, i64
+//   call.std::fmt::write_i64 %in2.1: i64
+//   %9: []u8 = const "hello, kizu\x00"
+//   %10: ptr<const u8> = slice.ptr %9: []u8
+//   jump in3.entry
+// in3.entry:
+//   %in3.1: i64 = const 0
+//   jump in3.while.header.1
+// in3.while.header.1:
+//   %in3.2: i64 = phi [in3.entry, %in3.1: i64], [in3.while.body.2, %in3.8: i64]
+//   %in3.3: ptr<const u8> = ptr.offset %10: ptr<const u8>, %in3.2: i64
+//   %in3.4: u8 = ref.load %in3.3: ptr<const u8>
+//   %in3.5: u8 = const 0
+//   %in3.6: bool = binary.!= %in3.4: u8, %in3.5: u8
+//   branch %in3.6: bool, in3.while.body.2, in3.while.end.3
+// in3.while.body.2:
+//   %in3.7: i64 = const 1
+//   %in3.8: i64 = binary.+ %in3.2: i64, %in3.7: i64
+//   jump in3.while.header.1
+// in3.while.end.3:
+//   jump in3.cont
+// in3.cont:
+//   %in4.1: i64 = cast %in3.2: i64, i64
+//   call.std::fmt::write_i64 %in4.1: i64
+//   %13: []u8 = const "\x00"
+//   %14: ptr<const u8> = slice.ptr %13: []u8
+//   jump in5.entry
+// in5.entry:
+//   %in5.1: i64 = const 0
+//   jump in5.while.header.1
+// in5.while.header.1:
+//   %in5.2: i64 = phi [in5.entry, %in5.1: i64], [in5.while.body.2, %in5.8: i64]
+//   %in5.3: ptr<const u8> = ptr.offset %14: ptr<const u8>, %in5.2: i64
+//   %in5.4: u8 = ref.load %in5.3: ptr<const u8>
+//   %in5.5: u8 = const 0
+//   %in5.6: bool = binary.!= %in5.4: u8, %in5.5: u8
+//   branch %in5.6: bool, in5.while.body.2, in5.while.end.3
+// in5.while.body.2:
+//   %in5.7: i64 = const 1
+//   %in5.8: i64 = binary.+ %in5.2: i64, %in5.7: i64
+//   jump in5.while.header.1
+// in5.while.end.3:
+//   jump in5.cont
+// in5.cont:
+//   %in6.1: i64 = cast %in5.2: i64, i64
+//   call.std::fmt::write_i64 %in6.1: i64
+//   %17: []u8 = const "name=kizu\x00"
+//   %18: ptr<const u8> = slice.ptr %17: []u8
+//   %19: ?ptr<const u8> = cast %18: ptr<const u8>, ?ptr<const u8>
+//   %20: ptr<const u8> = ptr.value %19: ?ptr<const u8>
+//   %21: bool = ptr.has %19: ?ptr<const u8>
+//   branch %21: bool, if.then.1, if.else.2
+// if.then.1:
+//   %22: i32 = const 61
+//   %23: ?ptr<const u8> = extern "c" call.strchr %20: ptr<const u8>, %22: i32
+//   %24: ptr<const u8> = ptr.value %23: ?ptr<const u8>
+//   %25: bool = ptr.has %23: ?ptr<const u8>
+//   branch %25: bool, if.then.4, if.else.5
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return void: void
+// if.then.4:
+//   jump in7.entry
+// in7.entry:
+//   %in7.1: i64 = const 0
+//   jump in7.while.header.1
+// in7.while.header.1:
+//   %in7.2: i64 = phi [in7.entry, %in7.1: i64], [in7.while.body.2, %in7.8: i64]
+//   %in7.3: ptr<const u8> = ptr.offset %24: ptr<const u8>, %in7.2: i64
+//   %in7.4: u8 = ref.load %in7.3: ptr<const u8>
+//   %in7.5: u8 = const 0
+//   %in7.6: bool = binary.!= %in7.4: u8, %in7.5: u8
+//   branch %in7.6: bool, in7.while.body.2, in7.while.end.3
+// in7.while.body.2:
+//   %in7.7: i64 = const 1
+//   %in7.8: i64 = binary.+ %in7.2: i64, %in7.7: i64
+//   jump in7.while.header.1
+// in7.while.end.3:
+//   jump in7.cont
+// in7.cont:
+//   %in8.1: i64 = cast %in7.2: i64, i64
+//   call.std::fmt::write_i64 %in8.1: i64
+//   jump if.end.6
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   jump if.end.3
+// }
+// opt wasm:
+// fn length(%text: ptr<const u8>) -> i64 {
+// entry:
+//   %1: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %3: ptr<const u8> = ptr.offset %text: ptr<const u8>, %1: i64
+//   %4: u8 = ref.load %3: ptr<const u8>
+//   %5: u8 = const 0
+//   %6: bool = binary.!= %4: u8, %5: u8
+//   branch %6: bool, while.body.2, while.end.3
+// while.body.2:
+//   %rot1.b.2: i64 = phi [while.header.1, %1: i64], [while.body.2, %8: i64]
+//   %7: i64 = const 1
+//   %8: i64 = binary.+ %rot1.b.2: i64, %7: i64
+//   %rot1.l0.3: ptr<const u8> = ptr.offset %text: ptr<const u8>, %8: i64
+//   %rot1.l0.4: u8 = ref.load %rot1.l0.3: ptr<const u8>
+//   %rot1.l0.5: u8 = const 0
+//   %rot1.l0.6: bool = binary.!= %rot1.l0.4: u8, %rot1.l0.5: u8
+//   branch %rot1.l0.6: bool, while.body.2, while.end.3
+// while.end.3:
+//   %rot1.x.2: i64 = phi [while.header.1, %1: i64], [while.body.2, %8: i64]
+//   return %rot1.x.2: i64
+// }
+// fn main() -> void {
+// entry:
+//   %1: []u8 = const "hello\x00"
+//   %2: ptr<const u8> = slice.ptr %1: []u8
+//   %3: usize = extern "c" call.strlen %2: ptr<const u8>
+//   %in1.1: u64 = cast %3: usize, u64
+//   call.std::fmt::write_u64 %in1.1: u64
+//   %5: []u8 = const "42\x00"
+//   %6: ptr<const u8> = slice.ptr %5: []u8
+//   %7: i32 = extern "c" call.atoi %6: ptr<const u8>
+//   %in2.1: i64 = cast %7: i32, i64
+//   call.std::fmt::write_i64 %in2.1: i64
+//   %9: []u8 = const "hello, kizu\x00"
+//   %10: ptr<const u8> = slice.ptr %9: []u8
+//   jump in3.entry
+// in3.entry:
+//   %in3.1: i64 = const 0
+//   jump in3.while.header.1
+// in3.while.header.1:
+//   %in3.3: ptr<const u8> = ptr.offset %10: ptr<const u8>, %in3.1: i64
+//   %in3.4: u8 = ref.load %in3.3: ptr<const u8>
+//   %in3.5: u8 = const 0
+//   %in3.6: bool = binary.!= %in3.4: u8, %in3.5: u8
+//   branch %in3.6: bool, in3.while.body.2, in3.while.end.3
+// in3.while.body.2:
+//   %rot1.b.in3.2: i64 = phi [in3.while.header.1, %in3.1: i64], [in3.while.body.2, %in3.8: i64]
+//   %in3.7: i64 = const 1
+//   %in3.8: i64 = binary.+ %rot1.b.in3.2: i64, %in3.7: i64
+//   %rot1.l0.in3.3: ptr<const u8> = ptr.offset %10: ptr<const u8>, %in3.8: i64
+//   %rot1.l0.in3.4: u8 = ref.load %rot1.l0.in3.3: ptr<const u8>
+//   %rot1.l0.in3.5: u8 = const 0
+//   %rot1.l0.in3.6: bool = binary.!= %rot1.l0.in3.4: u8, %rot1.l0.in3.5: u8
+//   branch %rot1.l0.in3.6: bool, in3.while.body.2, in3.while.end.3
+// in3.while.end.3:
+//   %rot1.x.in3.2: i64 = phi [in3.while.header.1, %in3.1: i64], [in3.while.body.2, %in3.8: i64]
+//   %rot1.x.in3.5: u8 = phi [in3.while.header.1, %in3.5: u8], [in3.while.body.2, %rot1.l0.in3.5: u8]
+//   jump in3.cont
+// in3.cont:
+//   %in4.1: i64 = cast %rot1.x.in3.2: i64, i64
+//   call.std::fmt::write_i64 %in4.1: i64
+//   %13: []u8 = const "\x00"
+//   %14: ptr<const u8> = slice.ptr %13: []u8
+//   jump in5.entry
+// in5.entry:
+//   jump in5.while.header.1
+// in5.while.header.1:
+//   %in5.3: ptr<const u8> = ptr.offset %14: ptr<const u8>, %in3.1: i64
+//   %in5.4: u8 = ref.load %in5.3: ptr<const u8>
+//   %in5.6: bool = binary.!= %in5.4: u8, %rot1.x.in3.5: u8
+//   branch %in5.6: bool, in5.while.body.2, in5.while.end.3
+// in5.while.body.2:
+//   %rot2.b.in5.2: i64 = phi [in5.while.header.1, %in3.1: i64], [in5.while.body.2, %in5.8: i64]
+//   %in5.7: i64 = const 1
+//   %in5.8: i64 = binary.+ %rot2.b.in5.2: i64, %in5.7: i64
+//   %rot2.l0.in5.3: ptr<const u8> = ptr.offset %14: ptr<const u8>, %in5.8: i64
+//   %rot2.l0.in5.4: u8 = ref.load %rot2.l0.in5.3: ptr<const u8>
+//   %rot2.l0.in5.6: bool = binary.!= %rot2.l0.in5.4: u8, %rot1.x.in3.5: u8
+//   branch %rot2.l0.in5.6: bool, in5.while.body.2, in5.while.end.3
+// in5.while.end.3:
+//   %rot2.x.in5.2: i64 = phi [in5.while.header.1, %in3.1: i64], [in5.while.body.2, %in5.8: i64]
+//   jump in5.cont
+// in5.cont:
+//   %in6.1: i64 = cast %rot2.x.in5.2: i64, i64
+//   call.std::fmt::write_i64 %in6.1: i64
+//   %17: []u8 = const "name=kizu\x00"
+//   %18: ptr<const u8> = slice.ptr %17: []u8
+//   %19: ?ptr<const u8> = cast %18: ptr<const u8>, ?ptr<const u8>
+//   %20: ptr<const u8> = ptr.value %19: ?ptr<const u8>
+//   %21: bool = ptr.has %19: ?ptr<const u8>
+//   branch %21: bool, if.then.1, if.else.2
+// if.then.1:
+//   %22: i32 = const 61
+//   %23: ?ptr<const u8> = extern "c" call.strchr %20: ptr<const u8>, %22: i32
+//   %24: ptr<const u8> = ptr.value %23: ?ptr<const u8>
+//   %25: bool = ptr.has %23: ?ptr<const u8>
+//   branch %25: bool, if.then.4, if.else.5
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return void: void
+// if.then.4:
+//   jump in7.entry
+// in7.entry:
+//   jump in7.while.header.1
+// in7.while.header.1:
+//   %in7.3: ptr<const u8> = ptr.offset %24: ptr<const u8>, %in3.1: i64
+//   %in7.4: u8 = ref.load %in7.3: ptr<const u8>
+//   %in7.6: bool = binary.!= %in7.4: u8, %rot1.x.in3.5: u8
+//   branch %in7.6: bool, in7.while.body.2, in7.while.end.3
+// in7.while.body.2:
+//   %rot3.b.in7.2: i64 = phi [in7.while.header.1, %in3.1: i64], [in7.while.body.2, %in7.8: i64]
+//   %in7.7: i64 = const 1
+//   %in7.8: i64 = binary.+ %rot3.b.in7.2: i64, %in7.7: i64
+//   %rot3.l0.in7.3: ptr<const u8> = ptr.offset %24: ptr<const u8>, %in7.8: i64
+//   %rot3.l0.in7.4: u8 = ref.load %rot3.l0.in7.3: ptr<const u8>
+//   %rot3.l0.in7.6: bool = binary.!= %rot3.l0.in7.4: u8, %rot1.x.in3.5: u8
+//   branch %rot3.l0.in7.6: bool, in7.while.body.2, in7.while.end.3
+// in7.while.end.3:
+//   %rot3.x.in7.2: i64 = phi [in7.while.header.1, %in3.1: i64], [in7.while.body.2, %in7.8: i64]
+//   jump in7.cont
+// in7.cont:
+//   %in8.1: i64 = cast %rot3.x.in7.2: i64, i64
+//   call.std::fmt::write_i64 %in8.1: i64
+//   jump if.end.6
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   jump if.end.3
+// }

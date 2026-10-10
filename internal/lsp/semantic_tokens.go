@@ -88,7 +88,7 @@ func semanticTokenType(
 	switch tok.Type {
 	case token.Int, token.Float:
 		return semanticNumber, true
-	case token.String:
+	case token.String, token.CString:
 		return semanticString, true
 	}
 	if isOperatorToken(tok.Type) {

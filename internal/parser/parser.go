@@ -1614,6 +1614,8 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 		return p.parseFloatLiteral()
 	case token.String:
 		return &ast.StringExpr{Value: p.cur.Literal}
+	case token.CString:
+		return p.parseCStringLiteral()
 	case token.True, token.False, token.Null:
 		return p.parseKeywordLiteralExpression()
 	case token.If:
@@ -2267,6 +2269,17 @@ func (p *Parser) parseIntLiteral() ast.Expression {
 	return &ast.IntExpr{Value: strconv.FormatInt(value, 10)}
 }
 
+// parseCStringLiteral reads a C string literal. It has no multi-line form, so
+// a line break between the quotes is an error instead of a byte of the value:
+// a quote left open then stops at the end of its line.
+func (p *Parser) parseCStringLiteral() ast.Expression {
+	if strings.Contains(p.cur.Literal, "\n") {
+		p.errorf("a C string literal ends on the line it starts on")
+		return &ast.CStringExpr{}
+	}
+	return &ast.CStringExpr{Value: p.cur.Literal}
+}
+
 // parseFloatLiteral keeps the spelling of a floating-point literal without
 // its separators, as `1.5e3`. The value it names is the nearest f64; a
 // magnitude no f64 holds is a parse error rather than an infinity.
@@ -2622,6 +2635,8 @@ func tokenDescription(tok token.Token) string {
 		return "integer " + diag.QuoteBytes(tok.Literal)
 	case token.String:
 		return "string " + diag.QuoteBytes(tok.Literal)
+	case token.CString:
+		return "C string " + diag.QuoteBytes(tok.Literal)
 	case token.Illegal:
 		if tok.Literal != "" {
 			return "illegal token " + diag.QuoteBytes(tok.Literal)
@@ -2643,6 +2658,8 @@ func tokenTypeDescription(typ token.Type) string {
 		return "integer"
 	case token.String:
 		return "string"
+	case token.CString:
+		return "C string"
 	case token.EOF:
 		return "end of file"
 	default:

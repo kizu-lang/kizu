@@ -13,6 +13,9 @@ const (
 	Int    Type = "INT"
 	Float  Type = "FLOAT"
 	String Type = "STRING"
+	// CString is a C string literal `c"..."`: the bytes between the quotes
+	// with one NUL after them, which is what a C function reads a name as.
+	CString Type = "CSTRING"
 
 	Assign   Type = "="
 	Plus     Type = "+"

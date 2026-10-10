@@ -1690,7 +1690,8 @@ func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 		return l.lowerMarkedExpr(expr, inner)
 	}
 	switch e := expr.(type) {
-	case *ast.IntExpr, *ast.FloatExpr, *ast.StringExpr, *ast.BoolExpr, *ast.NullExpr:
+	case *ast.IntExpr, *ast.FloatExpr, *ast.StringExpr, *ast.CStringExpr, *ast.BoolExpr,
+		*ast.NullExpr:
 		return l.lowerLiteralExpr(e)
 	case *ast.TypeExpr:
 		return l.emitConst("type", e.TypeName), nil
@@ -2261,6 +2262,11 @@ func (l *lowerer) lowerLiteralExpr(expr ast.Expression) (Value, error) {
 		return l.emitConst("f64", e.Value), nil
 	case *ast.StringExpr:
 		return l.emitConst("[]u8", quote.Bytes(e.Value)), nil
+	case *ast.CStringExpr:
+		// The NUL is a byte of the constant, so every backend stores it, and
+		// the address is the one `ptr_of` takes of a view. No op is added.
+		bytes := l.emitConst("[]u8", quote.Bytes(e.Value+"\x00"))
+		return l.emit("slice.ptr", "ptr<const u8>", []Value{bytes}, ""), nil
 	case *ast.BoolExpr:
 		return l.emitConst("bool", e.String()), nil
 	case *ast.NullExpr:

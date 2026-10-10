@@ -135,6 +135,15 @@ func (l *Lexer) scanToken() token.Token {
 			tok = l.oneCharToken(tokType)
 			break
 		}
+		// `c` directly before a quote opens a C string literal. No name can
+		// sit against a string, so the spelling takes nothing a program
+		// could have written before.
+		if l.ch == 'c' && l.peekChar() == '"' {
+			l.readChar()
+			tok.Type = token.CString
+			tok.Literal = l.readString()
+			return tok
+		}
 		if isLetter(l.ch) {
 			tok.Literal = l.readIdentifier()
 			tok.Type = token.LookupIdent(tok.Literal)

@@ -1,0 +1,128 @@
+import std::testing;
+
+extern "c" fn malloc(size: usize) -> ?ptr<u8>
+extern "c" fn free(address: ?ptr<u8>) -> void
+extern "c" fn abs(value: i32) -> i32
+struct Point {
+    pub x: i64,
+    pub y: i64,
+}
+
+struct Visit {
+    pub page: ?i64,
+    pub count: i64,
+}
+
+fn or_minus_one(value: ?i64) -> i64 {
+    return value orelse -1;
+}
+
+fn sum(point: ?Point) -> i64 {
+    if point |held| {
+        return held.x + held.y;
+    }
+    return -1;
+}
+
+fn is_live(address: ?ptr<u8>) -> bool {
+    if address |_live| {
+        return true;
+    }
+    return false;
+}
+
+fn apply(callback: ?extern "c" fn(i32) -> i32, value: i32) -> i32 {
+    if callback |call| {
+        // SAFETY: abs reads only its argument.
+        return unsafe call(value);
+    }
+    return value;
+}
+
+fn clear(slot: &var ?i64) -> i64 {
+    slot.* = null;
+    let first = or_minus_one(slot.*);
+    return first + or_minus_one(slot.*);
+}
+
+fn refill(slot: &var ?i64, value: i64) -> i64 {
+    slot.* = value;
+    let first = or_minus_one(slot.*);
+    return first + or_minus_one(slot.*);
+}
+
+fn pages(visit: Visit) -> i64 {
+    return (visit.page orelse 0) + visit.count;
+}
+
+// An assignment stores a value in a binding; it does not change what the
+// binding is. A `?i64` is copy data before `null` is assigned to it and after,
+// so it is passed twice without a `move`.
+test "an optional of copy data still copies after null is assigned" {
+    var slot: ?i64 = 1;
+    testing::expect_equal<i64>(1, or_minus_one(slot));
+    slot = null;
+    testing::expect_equal<i64>(-1, or_minus_one(slot));
+    testing::expect_equal<i64>(-1, or_minus_one(slot));
+    slot = 5;
+    testing::expect_equal<i64>(5, or_minus_one(slot));
+    testing::expect_equal<i64>(5, or_minus_one(slot));
+    slot = null;
+    let kept = slot;
+    testing::expect_equal<i64>(-1, or_minus_one(kept));
+    testing::expect_equal<i64>(-1, or_minus_one(slot));
+}
+
+test "an optional of a copy struct still copies after null is assigned" {
+    var point: ?Point = Point { x: 1, y: 2 };
+    testing::expect_equal<i64>(3, sum(point));
+    point = null;
+    testing::expect_equal<i64>(-1, sum(point));
+    testing::expect_equal<i64>(-1, sum(point));
+    point = Point { x: 3, y: 4 };
+    testing::expect_equal<i64>(7, sum(point));
+    testing::expect_equal<i64>(7, sum(point));
+}
+
+// A nullable raw pointer and a nullable C function pointer take `null` the
+// same way and are addresses either way.
+test "a nullable pointer still copies after null is assigned" {
+    // SAFETY: malloc returns storage or null; the test does not run out.
+    let storage = unsafe malloc(8) orelse return;
+    var address: ?ptr<u8> = storage;
+    testing::expect(is_live(address));
+    address = null;
+    testing::expect(!is_live(address));
+    testing::expect(!is_live(address));
+    address = storage;
+    testing::expect(is_live(address));
+    testing::expect(is_live(address));
+    // SAFETY: storage came from malloc and nothing reads it after this.
+    unsafe free(storage);
+
+    var callback: ?extern "c" fn(i32) -> i32 = abs;
+    testing::expect_equal<i32>(3, apply(callback, -3));
+    callback = null;
+    testing::expect_equal<i32>(-3, apply(callback, -3));
+    testing::expect_equal<i32>(-3, apply(callback, -3));
+}
+
+// The same assignment through a `&var` leaves the parameter the borrow it is.
+test "an optional behind a mutable borrow still copies after null is assigned" {
+    var slot: ?i64 = 1;
+    testing::expect_equal<i64>(-2, clear(&var slot));
+    testing::expect_equal<i64>(-1, or_minus_one(slot));
+    testing::expect_equal<i64>(14, refill(&var slot, 7));
+    testing::expect_equal<i64>(7, or_minus_one(slot));
+    testing::expect_equal<i64>(7, or_minus_one(slot));
+}
+
+test "an optional field still copies after null is assigned" {
+    var visit = Visit { page: 4, count: 2 };
+    testing::expect_equal<i64>(6, pages(visit));
+    visit.page = null;
+    testing::expect_equal<i64>(-1, or_minus_one(visit.page));
+    testing::expect_equal<i64>(-1, or_minus_one(visit.page));
+    testing::expect_equal<i64>(2, pages(visit));
+    testing::expect_equal<i64>(2, pages(visit));
+}

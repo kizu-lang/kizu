@@ -35,6 +35,9 @@ fn (self: &var Lowerer) lower_expr(
     if is_string_expr(tree, expression) or is_null_expr(tree, expression) {
         return self.lower_literal_expr(tree, expression, out);
     }
+    if c_string_literal_text(tree, expression) |_| {
+        return self.lower_literal_expr(tree, expression, out);
+    }
     if ownership::type_expr(tree, expression) |typed| {
         let immediate = try self.text_name(tree, typed.type_name);
         out.* = try self.emit_const(self.common.type_type, immediate);
@@ -455,6 +458,22 @@ fn (self: &var Lowerer) lower_literal_expr(
         out.* = try self.emit_const(self.common.bytes_type, quoted);
         return null;
     }
+    if c_string_literal_text(tree, expression) |text| {
+        // The NUL is a byte of the constant, so every backend stores it, and
+        // the address is the one `ptr_of` takes of a view. No op is added.
+        var ended = string::new(self.allocator);
+        defer ended.deinit(self.allocator);
+        let retained = tree.texts.at(text.node);
+        let written = retained.as_bytes();
+        try ended.append_bytes(self.allocator, written);
+        try ended.append_byte(self.allocator, cast<u8>(0));
+        let stored = ended.as_bytes();
+        let quoted = try self.quoted_bytes(stored);
+        let bytes = try self.emit_const(self.common.bytes_type, quoted);
+        let pointer = try self.module.names.intern("ptr<const u8>");
+        out.* = try self.emit1(Op::SlicePtr, pointer, bytes);
+        return null;
+    }
     if ownership::bool_expr(tree, expression) |literal| {
         if literal.value {
             out.* = try self.emit_const_text(self.common.bool_type, "true");
@@ -476,6 +495,14 @@ fn (self: &var Lowerer) lower_literal_expr(
 fn string_literal_text(tree: &ast::Ast, expression: ast::Expression) -> ?ast::Text {
     match tree.expressions.at(expression.node) {
         String(literal) => return literal.value,
+        _ => return null,
+    }
+}
+
+/// Returns the text of a C string literal, or null for another expression.
+fn c_string_literal_text(tree: &ast::Ast, expression: ast::Expression) -> ?ast::Text {
+    match tree.expressions.at(expression.node) {
+        CString(literal) => return literal.value,
         _ => return null,
     }
 }
@@ -504,6 +531,7 @@ fn expression_go_type(tree: &ast::Ast, expression: ast::Expression) -> []u8 {
         Int(_) => return "*ast.IntExpr",
         Float(_) => return "*ast.FloatExpr",
         String(_) => return "*ast.StringExpr",
+        CString(_) => return "*ast.CStringExpr",
         Null(_) => return "*ast.NullExpr",
         OrelseGuard(_) => return "*ast.OrelseGuardExpr",
         CatchGuard(_) => return "*ast.CatchGuardExpr",

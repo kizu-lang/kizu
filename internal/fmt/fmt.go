@@ -834,6 +834,9 @@ func (b *builder) writeToken(t token.Token) {
 	switch t.Type {
 	case token.String:
 		b.writeStringLiteral(t.Literal)
+	case token.CString:
+		b.out.WriteByte('c')
+		b.writeStringLiteral(t.Literal)
 	default:
 		b.out.WriteString(tokenSpelling(t))
 	}
@@ -1089,7 +1092,7 @@ func (b *builder) attachedTokenHugsLeft(curr token.Token, prev token.Token) bool
 // value. A generic `>` qualifies; a comparison `>` does not.
 func (b *builder) attachedLeftOperand(prev token.Token) bool {
 	switch prev.Type {
-	case token.Ident, token.String, token.RParen, token.RBracket, token.RBrace:
+	case token.Ident, token.String, token.CString, token.RParen, token.RBracket, token.RBrace:
 		return true
 	case token.GT:
 		return b.prevIndex < len(b.generic) && b.generic[b.prevIndex]
@@ -1148,8 +1151,8 @@ func (b *builder) signMinus() bool {
 // `-` a subtraction rather than a sign.
 func endsOperand(t token.Token) bool {
 	switch t.Type {
-	case token.Ident, token.Int, token.Float, token.String, token.True, token.False,
-		token.Null, token.RParen, token.RBracket:
+	case token.Ident, token.Int, token.Float, token.String, token.CString, token.True,
+		token.False, token.Null, token.RParen, token.RBracket:
 		return true
 	}
 	return false

@@ -1163,6 +1163,25 @@ let help =
 
 multi-line literal の値は連結後のバイト列 (`Usage: kizu <command>\n\nCommands:\n build Build the project`) で、`[]u8` 型として `"..."` と相互に交換可能です。
 
+文字列 literal は NUL で終わることを約束しません。C の関数が NUL まで読む名前には
+**C string literal** `c"..."` を書きます。型は `ptr<const u8>` で、指す先は引用符の
+間のバイト列に NUL を 1 つ続けた、書き換えられない static な領域です。
+
+```kizu
+extern "c" fn getenv(name: ptr<const u8>) -> ?ptr<const u8>
+
+// SAFETY: the literal is NUL-terminated.
+let home = unsafe getenv(c"HOME");
+```
+
+* バイト列の規則は single-line literal と同じで、escape 解釈は行わない。literal が
+  NUL を含むことはないので、最初の NUL が終端になる
+* `c` の直後に `"` が続く綴りだけが C string literal。間に空白があれば、名前 `c` と
+  文字列 literal である
+* 1 行に収める。multi-line の形は無く、引用符の間の改行は compile error
+* `c""` は NUL 1 つを指す
+* comptime の値にも static argument にもならない
+
 `void` は値を返さない関数の戻り値です。
 Kizu は `Unit` という別名を導入しません。
 
@@ -2334,7 +2353,7 @@ extern "c" fn puts(s: ptr<const u8>) -> i32
 引数はこれに加えて `extern "c" struct`(§12.2)の borrow `&S` / `&var S` を
 取れます。`[]u8`、それ以外の borrow、owner、通常の struct、error union は
 C 側に表現が無いので拒否します。byte 列は `ptr<const u8>` と `usize` の長さで
-渡します。
+渡します。C が NUL まで読む固定の名前は `c"..."`(§7)で書きます。
 
 ルール:
 
@@ -2358,6 +2377,9 @@ C 側に表現が無いので拒否します。byte 列は `ptr<const u8>` と `
 * `null` は `?ptr<T>` / `?ptr<const T>` を受け取る同じ位置に書ける。address 0 の
   pointer で、何も読み書きしないので `unsafe` は要らない。`ptr<T>` /
   `ptr<const T>` を受け取る位置には書けない
+* `c"..."` は NUL で終わる static な byte 列を指す `ptr<const u8>`(§7)。書くこと
+  自体は何も読み書きしないので `unsafe` は要らない。`?ptr<const u8>` を受け取る
+  位置にも同じ規則で書け、`ptr<u8>` を受け取る位置には書けない
 * safe borrow と raw pointer は別物として扱う
 * `p.*` は `ptr<T>` / `ptr<const T>` から `T` を読む
 * `p.* = value` は `ptr<T>` に `T` を書く

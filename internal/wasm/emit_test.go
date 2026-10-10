@@ -168,6 +168,48 @@ func TestBinaryRunsHello(t *testing.T) {
 	}
 }
 
+// TestBinaryKeepsCStringNUL runs a walk to the NUL of a C string literal. Data
+// segments sit end to end, so a literal stored without its NUL would send the
+// walk on into the literal after it.
+func TestBinaryKeepsCStringNUL(t *testing.T) {
+	wasmtime, err := exec.LookPath("wasmtime")
+	if err != nil {
+		t.Skip("wasmtime is required for binary execution")
+	}
+	module, err := Lower(lowerSource(t, `fn length(text: ptr<const u8>) -> i64 {
+    var count = 0;
+    // SAFETY: text is NUL-terminated, and the walk stops at the NUL.
+    while unsafe ptr_read(unsafe ptr_offset(text, count)) != 0 {
+        count = count + 1;
+    }
+    return count;
+}
+
+fn main() {
+    print(length(c"hello"));
+    print(length(c""));
+    print("next");
+}`))
+	if err != nil {
+		t.Fatalf("lower wasm failed: %v", err)
+	}
+	binary, err := module.Binary()
+	if err != nil {
+		t.Fatalf("encode binary failed: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "c_string.wasm")
+	if err := os.WriteFile(path, binary, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output, err := exec.Command(wasmtime, "run", path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("wasmtime failed: %v\n%s", err, output)
+	}
+	if got, want := string(output), "5\n0\nnext\n"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // lowerSource loads, checks, and lowers a source snippet. The loader brings
 // std::fmt with it, as every real path does (SPEC §14.1), and the module is
 // pruned to what a build keeps.
