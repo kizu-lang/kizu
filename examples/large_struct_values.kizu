@@ -1,0 +1,209 @@
+import std::array;
+import std::mem;
+
+// A struct or a fixed array of many numbers is still a value. A copy of one
+// is a snapshot: whatever is written afterwards to the place it was read
+// from, or to the place it was copied to, does not reach the other. That
+// holds for a `let`, an assignment, a by-value receiver or argument, an
+// array element, a field that is itself large, and a value a loop carries.
+
+struct Grid {
+    cells: [48]f64,
+    marks: [48]i64,
+}
+
+struct Desk {
+    near: Grid,
+    far: Grid,
+    count: i64,
+}
+
+fn fresh(seed: i64) -> Grid {
+    var grid = Grid { cells: [48]f64{}, marks: [48]i64{} };
+    for 0..48 |i| {
+        grid.marks[i] = seed + i;
+        grid.cells[i] = cast<f64>(seed * i) + 0.5;
+    }
+    return grid;
+}
+
+fn (self: Grid) sum() -> i64 {
+    var total = 0;
+    for 0..48 |i| {
+        total = total + self.marks[i];
+    }
+    return total;
+}
+
+fn (self: Grid) cell(i: i64) -> f64 {
+    return self.cells[i];
+}
+
+fn (self: Desk) weight() -> i64 {
+    return self.near.sum() + self.far.sum() + self.count;
+}
+
+// The argument is the desk as it was at the call. The borrow reaches the
+// same local, and a write through it does not change the argument.
+fn count_before(seen: Desk, live: &var Desk) -> i64 {
+    live.count = live.count + 100;
+    live.near.marks[0] = 7000;
+    return seen.count + seen.near.marks[0];
+}
+
+// Both arguments meet in one value that either branch may have chosen.
+fn pick(first: Grid, second: Grid, take_second: bool) -> Grid {
+    var chosen = first;
+    if take_second {
+        chosen = second;
+    }
+    return chosen;
+}
+
+fn first_mark(rows: []Grid, at: i64) -> i64 {
+    let row = rows[at];
+    return row.marks[0];
+}
+
+fn main() -> !void {
+    var desk = Desk { near: fresh(1), far: fresh(100), count: 5 };
+
+    // A `let` keeps what it read.
+    let before = desk;
+    desk.count = 6;
+    desk.near.marks[0] = -40;
+    print(before.count);
+    print(before.near.marks[0]);
+    print(desk.count);
+    print(desk.near.marks[0]);
+
+    // An assignment copies; the two then change apart.
+    var other = desk;
+    other.count = 60;
+    other.far.marks[47] = 1;
+    desk.far.marks[47] = 2;
+    print(desk.count);
+    print(other.count);
+    print(desk.far.marks[47]);
+    print(other.far.marks[47]);
+
+    // A by-value receiver and argument read the value of the call.
+    let weighed = desk.weight();
+    desk.count = 7;
+    print(weighed);
+    print(desk.weight());
+    print(count_before(desk, &var desk));
+    print(desk.count);
+    print(desk.near.marks[0]);
+
+    // A field that is itself large is copied out and back in.
+    var lifted = desk.near;
+    lifted.marks[1] = 500;
+    print(desk.near.marks[1]);
+    desk.far = lifted;
+    lifted.marks[1] = 600;
+    print(desk.far.marks[1]);
+    print(before.far.marks[1]);
+    let nested = before.far;
+    desk.far.marks[2] = 900;
+    print(nested.sum());
+    print(nested.cell(3));
+
+    // An element of a fixed array is copied out, over another, and in.
+    var shelf = [3]Grid{ fresh(1), fresh(2), fresh(3) };
+    let taken = shelf[1];
+    shelf[1] = shelf[2];
+    shelf[2].marks[0] = 999;
+    shelf[0] = taken;
+    print(taken.marks[0]);
+    print(shelf[0].marks[0]);
+    print(shelf[1].marks[0]);
+    print(shelf[2].marks[0]);
+
+    // An element of a growable array is the same.
+    let allocator = mem::page_allocator();
+    var stack = array::new<Grid>(allocator);
+    defer stack.deinit(allocator);
+    try stack.append(allocator, taken);
+    try stack.append(allocator, desk.far);
+    try stack.append(allocator, pick(shelf[0], shelf[2], true));
+    desk.far.marks[0] = 31;
+    try stack.swap(0, 2);
+    try stack.set(1, shelf[0]);
+    shelf[0].marks[0] = 12;
+    let top = stack.get_or_panic(0);
+    print(top.marks[0]);
+    if stack.get(1) |middle| {
+        print(middle.marks[0]);
+    }
+    let last = stack.pop_or_panic();
+    print(last.marks[0]);
+    print(stack.len());
+
+    // A value read before a loop is not what the loop writes.
+    let frozen = desk;
+    var held = desk.near;
+    for 0..3 |round| {
+        if round == 1 {
+            held = desk.far;
+        }
+        desk.far.marks[0] = desk.far.marks[0] + 1000;
+        desk.count = desk.count + 1;
+    }
+    print(frozen.count);
+    print(frozen.far.marks[0]);
+    print(desk.count);
+    print(desk.far.marks[0]);
+    print(held.marks[0]);
+    print(pick(frozen.near, held, false).marks[0]);
+
+    // A view of an array reads and writes its elements the same way.
+    var pair = [2]Grid{ fresh(40), fresh(50) };
+    let rows = pair.as_mut_slice();
+    let kept = rows[0];
+    rows[0] = rows[1];
+    rows[1] = taken;
+    print(kept.marks[0]);
+    print(first_mark(rows, 0));
+    print(first_mark(rows, 1));
+    return;
+}
+
+// run
+// features: struct stack-buffer std-array copy mutable-borrow
+// output:
+// 5
+// 1
+// 6
+// -40
+// 6
+// 60
+// 2
+// 1
+// 6924
+// 6925
+// -33
+// 107
+// 7000
+// 2
+// 500
+// 101
+// 5928
+// 300.5
+// 2
+// 2
+// 3
+// 999
+// 999
+// 2
+// 2
+// 2
+// 107
+// 31
+// 110
+// 3031
+// 1031
+// 7000
+// 40
+// 50
+// 2

@@ -212,6 +212,9 @@ func (e *emitter) writeArenaPopOrPanic(instr *ir.Instr) error {
 		return err
 	}
 	e.writeNullFailure(instr, ptrName, "arena.pop.panic", "arena_empty")
+	if e.copiedIntoMemory(instr.Result, ptrName) {
+		return nil
+	}
 	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n",
 		resultName, e.llvmType(instr.Result.Type), ptrName)
@@ -233,6 +236,9 @@ func (e *emitter) writeArenaAt(instr *ir.Instr) error {
 	e.writeNullFailure(instr, ptrName, "arena.at", "arena_handle")
 	if strings.HasPrefix(instr.Result.Type, "&") {
 		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: ptrName}
+		return nil
+	}
+	if e.copiedIntoMemory(instr.Result, ptrName) {
 		return nil
 	}
 	resultName := localName(instr.Result.Name)

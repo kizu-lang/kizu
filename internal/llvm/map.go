@@ -127,7 +127,12 @@ func (e *emitter) writeMapInsert(instr *ir.Instr) error {
 	if err != nil {
 		return err
 	}
-	valueSlot := e.writeStackValue(localName(instr.Result.Name)+".value", instr.Args[3])
+	// The runtime copies the value out of the pointer it is handed, so one
+	// kept in memory is handed as the slot it lives in.
+	valueSlot, ok := e.addressArg(instr, 3)
+	if !ok {
+		valueSlot = e.writeStackValue(localName(instr.Result.Name)+".value", instr.Args[3])
+	}
 	okName := localName(instr.Result.Name) + ".ok"
 	fmt.Fprintf(&e.out,
 		"  %s = call i1 @kizu_map_insert(ptr %s, ptr %s, ptr %s, i64 %s, ptr %s, i64 %s)\n",
@@ -227,6 +232,9 @@ func (e *emitter) writeMapTakeValueAt(instr *ir.Instr) error {
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_map_value_at(ptr %s, i64 %s, i64 %s)\n",
 		ptrName, mapValue.operand, index.operand, e.elementSizeOperand(instr.Result.Type))
 	e.writeNullFailure(instr, ptrName, "map.take.panic", "bounds", index.operand, lenName)
+	if e.copiedIntoMemory(instr.Result, ptrName) {
+		return nil
+	}
 	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n",
 		resultName, e.llvmType(instr.Result.Type), ptrName)

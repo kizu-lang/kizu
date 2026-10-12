@@ -11,32 +11,59 @@ import std::string;
 // symbols, plus the declaration an external call gets in the header. Go's `functionParams[name]` is read here through the
 // function handle `function_named` hands back.
 
+/// Is which of its ways write_call hands a callee its arguments, the Go
+/// `callKind`: as the values they are, spelled by the emitter itself, to a
+/// std runtime entry with the out-pointer ABI, to a function of this module
+/// with the pointer ABI, or to a declared C function.
+enum CallKind {
+    Plain,
+    Builtin,
+    Hosted,
+    Internal,
+    Foreign,
+}
+
+/// Says how the callee of a call by name is called, the Go `callTarget`. It
+/// is asked where the call is written and where its arguments are sorted
+/// (call_reads_address), so the two cannot answer differently.
+fn (self: &var Emitter) call_kind(module: &ir::Module, node: &ir::InstrNode) -> !CallKind {
+    if module.names.is(node.extern_abi, "c") {
+        return CallKind::Foreign;
+    }
+    if thread_round_data(&module.names, node.operand) |_| {
+        return CallKind::Builtin;
+    }
+    if module.names.is(node.operand, "std::internal::builtin::mem_size_of") {
+        return CallKind::Builtin;
+    }
+    if try self.uses_hosted_runtime_abi(module, node.operand, node) {
+        return CallKind::Hosted;
+    }
+    if self.function_named(module, node.operand) |_| {
+        return CallKind::Internal;
+    }
+    return CallKind::Plain;
+}
+
 /// Writes user function calls, the Go `writeCall`.
 fn (self: &var Emitter) write_call(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     var callee_name = node.operand;
-    let foreign_c = module.names.is(node.extern_abi, "c");
-    if foreign_c {
-        callee_name = node.extern_name;
-    }
-    if !foreign_c {
-        if thread_round_data(&module.names, node.operand) |data_index| {
-            return self.write_thread_pool_round(module, node, data_index);
-        }
-    }
-    if !foreign_c and module.names.is(node.operand, "std::internal::builtin::mem_size_of") {
-        return self.write_size_of(module, node);
-    }
-    if !foreign_c and try self.uses_hosted_runtime_abi(module, node.operand, node) {
-        return self.write_hosted_runtime_call(module, node.operand, node);
-    }
-    if !foreign_c {
-        if self.function_named(module, node.operand) |callee| {
-            return self.write_internal_call(module, callee, node);
-        }
-    }
-    if foreign_c and try self.c_call_uses_struct_values(module, node) {
-        let symbol = try self.callee_symbol(module, callee_name);
-        return self.write_c_struct_call(module, symbol, node);
+    match try self.call_kind(module, node) {
+        Builtin => return self.write_compiler_builtin(module, node),
+        Hosted => return self.write_hosted_runtime_call(module, node.operand, node),
+        Internal => {
+            if self.function_named(module, node.operand) |callee| {
+                return self.write_internal_call(module, callee, node);
+            }
+        },
+        Foreign => {
+            callee_name = node.extern_name;
+            if try self.c_call_uses_struct_values(module, node) {
+                let symbol = try self.callee_symbol(module, callee_name);
+                return self.write_c_struct_call(module, symbol, node);
+            }
+        },
+        Plain => {},
     }
     var args = array::new<string::String>(self.allocator);
     defer args.deinit(self.allocator);
@@ -45,7 +72,7 @@ fn (self: &var Emitter) write_call(module: &ir::Module, node: &ir::InstrNode) ->
         // A foreign callee carries its declared passing on the call; a
         // parameter handed the address of a copy gets that copy made here.
         if call_param_takes_address_of(module, node, index, arg.type_name) {
-            try args.append(self.allocator, try self.copy_address_arg(module, arg, index));
+            try args.append(self.allocator, try self.copy_address_arg(module, node, index, index));
             index = index + 1;
             continue;
         }
@@ -59,6 +86,16 @@ fn (self: &var Emitter) write_call(module: &ir::Module, node: &ir::InstrNode) ->
     let joined = try string::join(self.allocator, &args, ", ");
     let call = try self.text3("call %s @%s(%s)", Arg::Str(result_type), Arg::Str(symbol), Arg::Owned(move joined));
     return self.write_call_line(module, node, call);
+}
+
+/// Writes a builtin the emitter spells itself rather than calling into the
+/// runtime, the Go `writeCompilerBuiltin`: a pool round, or the size of a
+/// type.
+fn (self: &var Emitter) write_compiler_builtin(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if thread_round_data(&module.names, node.operand) |data_index| {
+        return self.write_thread_pool_round(module, node, data_index);
+    }
+    return self.write_size_of(module, node);
 }
 
 /// Writes the size of the type the call names as the target lays it out, the
@@ -103,9 +140,8 @@ fn (self: &var Emitter) write_indirect_call(module: &ir::Module, node: &ir::Inst
     var args = array::new<string::String>(self.allocator);
     defer args.deinit(self.allocator);
     var index = 1;
-    while node.args.get(index) |arg| {
+    while index < node.args.len() {
         let param_index = index - 1;
-        index = index + 1;
         var passing = ir::Passing::Value;
         var param_type = ir::empty_name();
         if node.call_params.get(param_index) |param| {
@@ -114,8 +150,9 @@ fn (self: &var Emitter) write_indirect_call(module: &ir::Module, node: &ir::Inst
         }
         try args.append(
             self.allocator,
-            try self.internal_call_arg(module, arg, passing, param_type, param_index)
+            try self.internal_call_arg(module, node, index, passing, param_type, param_index)
         );
+        index = index + 1;
     }
     let result_type = try self.llvm_type_of(module, node.result.type_name);
     let joined = try string::join(self.allocator, &args, ", ");
@@ -157,7 +194,7 @@ fn (self: &var Emitter) write_internal_call(
     defer args.deinit(self.allocator);
     let param_count = module.function_param_count(callee);
     var index = 0;
-    while node.args.get(index) |arg| {
+    while index < node.args.len() {
         // A callee this module does not declare takes its arguments by value,
         // which is what the zero Param says.
         var passing = ir::Passing::Value;
@@ -168,7 +205,7 @@ fn (self: &var Emitter) write_internal_call(
                 param_type = param.type_name;
             }
         }
-        try args.append(self.allocator, try self.internal_call_arg(module, arg, passing, param_type, index));
+        try args.append(self.allocator, try self.internal_call_arg(module, node, index, passing, param_type, index));
         index = index + 1;
     }
     let result_type = try self.llvm_type_of(module, node.result.type_name);
@@ -178,45 +215,64 @@ fn (self: &var Emitter) write_internal_call(
     return self.write_call_line(module, node, call);
 }
 
-/// Returns one module-local call argument in function_param_abi form, the
-/// Go `internalCallArg`. A parameter handed the value its address is taken
-/// of gets that address made here, which is the one thing the callee's
-/// declared Passing decides.
+/// Returns the argument of an instruction at arg_index, the index-th the
+/// callee takes, in function_param_abi form, the Go `internalCallArg`. A
+/// parameter handed the value its address is taken of gets that address made
+/// here, which is the one thing the callee's declared Passing decides.
+///
+/// A value kept in memory is passed as the slot it already lives in: the
+/// callee only reads through the address, and nothing writes the slot while
+/// the call runs.
 fn (self: &var Emitter) internal_call_arg(
     module: &ir::Module,
-    arg: ir::Value,
+    node: &ir::InstrNode,
+    arg_index: i64,
     passing: ir::Passing,
     param_type: ir::Name,
     index: i64
 ) -> !string::String {
-    let value = try self.operand(module, arg);
+    let arg = node.args.get_or_panic(arg_index);
     let arg_type = try self.llvm_type_of(module, arg.type_name);
     if takes_address_of(module, passing, param_type, arg.type_name) {
-        return self.copy_address_arg(module, arg, index);
+        return self.copy_address_arg(module, node, arg_index, index);
     }
     let type_text = ir::name_text(&module.names, arg.type_name);
     let type_bytes = type_text.as_bytes();
     if !uses_indirect_struct_param_abi(module, type_bytes) {
+        let value = try self.operand(module, arg);
         return self.sprint2("%s %s", Arg::Str(arg_type), Arg::Str(value.operand));
+    }
+    if try self.address_arg(module, node, arg_index) |addr| {
+        return self.sprint2("ptr %s", Arg::Str(addr), Arg::None);
     }
     let slot_name = try self.next_arg_slot(index);
     try self.line2("  %s = alloca %s", Arg::Str(slot_name), Arg::Str(arg_type));
+    let value = try self.operand(module, arg);
     try self.line3("  store %s %s, ptr %s", Arg::Str(arg_type), Arg::Str(value.operand), Arg::Str(slot_name));
     return self.sprint2("ptr %s", Arg::Str(slot_name), Arg::None);
 }
 
-/// Stores a copy of arg in a slot of its own and returns that slot as the
-/// pointer argument a CopyAddress parameter reads through, the Go
+/// Stores a copy of the argument of an instruction at arg_index, the
+/// index-th the callee takes, in a slot of its own and returns that slot as
+/// the pointer argument a CopyAddress parameter reads through, the Go
 /// `copyAddressArg`.
-fn (self: &var Emitter) copy_address_arg(module: &ir::Module, arg: ir::Value, index: i64) -> !string::String {
-    let value = try self.operand(module, arg);
+fn (self: &var Emitter) copy_address_arg(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    arg_index: i64,
+    index: i64
+) -> !string::String {
+    let arg = node.args.get_or_panic(arg_index);
     let arg_type = try self.llvm_type_of(module, arg.type_name);
     let slot_name = try self.next_arg_slot(index);
     try self.line3("  %s = alloca %s, align %d", Arg::Str(slot_name), Arg::Str(arg_type), Arg::Int(max_inline_payload_align()));
-    try self.line4(
-        "  store %s %s, ptr %s, align %d",
-        Arg::Str(arg_type), Arg::Str(value.operand), Arg::Str(slot_name), Arg::Int(max_inline_payload_align())
-    );
+    if !try self.copied_from_memory(module, node, arg_index, slot_name) {
+        let value = try self.operand(module, arg);
+        try self.line4(
+            "  store %s %s, ptr %s, align %d",
+            Arg::Str(arg_type), Arg::Str(value.operand), Arg::Str(slot_name), Arg::Int(max_inline_payload_align())
+        );
+    }
     return self.sprint2("ptr %s", Arg::Str(slot_name), Arg::None);
 }
 
@@ -332,14 +388,16 @@ fn (self: &var Emitter) write_hosted_runtime_call(
     try args.append(self.allocator, try self.sprint2("ptr %s", Arg::Str(result_slot), Arg::None));
     var index = 0;
     while node.args.get(index) |arg| {
-        let value = try self.operand(module, arg);
         let type_text = ir::name_text(&module.names, arg.type_name);
         let type_bytes = type_text.as_bytes();
         let arg_type = try self.llvm_type_of(module, arg.type_name);
         if hosted_runtime_indirect_abi(module, type_bytes) {
             let arg_slot = try self.text2("%s.arg.%d", Arg::Str(result_name), Arg::Int(index));
             try self.line2("  %s = alloca %s", Arg::Str(arg_slot), Arg::Str(arg_type));
-            try self.line3("  store %s %s, ptr %s", Arg::Str(arg_type), Arg::Str(value.operand), Arg::Str(arg_slot));
+            if !try self.copied_from_memory(module, node, index, arg_slot) {
+                let value = try self.operand(module, arg);
+                try self.line3("  store %s %s, ptr %s", Arg::Str(arg_type), Arg::Str(value.operand), Arg::Str(arg_slot));
+            }
             try args.append(self.allocator, try self.sprint2("ptr %s", Arg::Str(arg_slot), Arg::None));
             if module.names.is(name, "std::internal::builtin::task_set_spawn") and index == 3 {
                 let state = node.args.get_or_panic(4);
@@ -353,6 +411,7 @@ fn (self: &var Emitter) write_hosted_runtime_call(
             index = index + 1;
             continue;
         }
+        let value = try self.operand(module, arg);
         try args.append(self.allocator, try self.sprint2("%s %s", Arg::Str(arg_type), Arg::Str(value.operand)));
         if module.names.is(name, "std::internal::builtin::task_set_spawn") and index == 3 {
             let state = node.args.get_or_panic(4);

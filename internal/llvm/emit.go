@@ -34,6 +34,7 @@ func emit(module *ir.Module, darwin bool, arch Arch) (string, error) {
 		strings:      map[string]string{},
 		tables:       map[*ir.Instr]string{},
 		values:       map[string]valueInfo{},
+		memoryTypes:  map[string]bool{},
 		frameRecords: darwin,
 		darwin:       darwin,
 		arch:         arch,
@@ -82,11 +83,26 @@ type emitter struct {
 	aggregates map[string][]string
 	// references counts the places that name each function (phi.go).
 	references map[string]int
+	// memoryTypes keeps each type's answer to isMemoryValueType, wholeValues
+	// names the values of the function being written that something reads
+	// whole and wholeStorage the addresses one of them is loaded from, misread
+	// is the first value kept in memory that was asked for whole all the same,
+	// and memoryCopyUsed records that a value was copied, so the module
+	// declares llvm.memcpy (memory.go).
+	memoryTypes    map[string]bool
+	wholeValues    map[string]bool
+	wholeStorage   map[string]bool
+	misread        string
+	memoryCopyUsed bool
 }
 
+// valueInfo is how one SSA value is written: the LLVM operand that stands for
+// it, or for a value kept in memory the address it lives at (memory.go), which
+// has no operand.
 type valueInfo struct {
 	typ     string
 	operand string
+	addr    string
 }
 
 // emit writes declarations and function definitions.
@@ -109,6 +125,7 @@ func (e *emitter) emit() error {
 			return err
 		}
 	}
+	e.writeMemoryCopyDecl()
 	e.writeTBAATable()
 	return nil
 }
@@ -195,8 +212,12 @@ func (e *emitter) writeTaskInvokeThunks() {
 		)
 		e.out.WriteString("entry:\n")
 		fmt.Fprintf(&e.out, "  %%kizu.state.copy = alloca %s\n", llvmType)
-		fmt.Fprintf(&e.out, "  %%kizu.state.value = load %s, ptr %%kizu.state\n", llvmType)
-		fmt.Fprintf(&e.out, "  store %s %%kizu.state.value, ptr %%kizu.state.copy\n", llvmType)
+		if e.isMemoryValueType(typeName) {
+			e.writeMemoryCopy("%kizu.state.copy", "%kizu.state", typeName)
+		} else {
+			fmt.Fprintf(&e.out, "  %%kizu.state.value = load %s, ptr %%kizu.state\n", llvmType)
+			fmt.Fprintf(&e.out, "  store %s %%kizu.state.value, ptr %%kizu.state.copy\n", llvmType)
+		}
 		e.out.WriteString("  call void %kizu.entry(" +
 			"ptr %kizu.io, ptr %kizu.allocator, ptr %kizu.state.copy)\n")
 		e.out.WriteString("  ret void\n}\n\n")
@@ -791,10 +812,10 @@ func (e *emitter) cArgs(instr *ir.Instr, operands bool) []cArg {
 	args := make([]cArg, 0, len(instr.Args))
 	for index, arg := range instr.Args {
 		declared := index < len(instr.CallParams)
-		if declared && instr.CallParams[index].TakesAddressOf(arg.Type) {
+		if callParamTakesAddressOf(instr, index) {
 			described := cArg{typ: "ptr", param: "ptr"}
 			if operands {
-				described.operand = e.copyAddressArg(arg, index)
+				described.operand = e.copyAddressArg(instr, index, index)
 			}
 			args = append(args, described)
 			continue
@@ -1076,6 +1097,7 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 	e.blockExitLabel = map[string]string{}
 	e.entryParamLoads = nil
 	e.precomputeNicheAliases(fn)
+	e.collectWholeValues(fn)
 	e.wroteParamLoads = false
 	returnType := e.llvmType(fn.Return)
 	_, returnsErrorUnion := e.errorUnionSuccessType(fn.Return)
@@ -1111,6 +1133,10 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 	// the module written so far, so taking one function body that way costs
 	// the module size once per function.
 	body := dropUnreachableTails(e.resolvePhiPredecessors(string(e.out.Bytes()[bodyStart:])))
+	if e.misread != "" {
+		return fmt.Errorf("llvm error: emitter bug: function `%s` reads `%s` whole, "+
+			"which is kept in memory", fn.Name, e.misread)
+	}
 	body = e.splitAggregatePhis(e.unifyAggregateReturns(body, fn.Name, returnType))
 	hoisted, err := hoistAllocasToEntry(body)
 	if err != nil {
@@ -1137,13 +1163,13 @@ func (e *emitter) definitionParams(fn *ir.Function) []string {
 	}
 	params := make([]string, 0, len(fn.Params))
 	for _, param := range fn.Params {
-		spelled := e.functionParamABI(param)
-		if fn.ExportABI == "c" {
-			spelled = e.llvmType(param.Type) + cIntegerExtension(param.Type) + " " +
-				localName(param.Name)
-		}
-		params = append(params, spelled)
 		e.values[param.Name] = valueInfo{typ: param.Type, operand: localName(param.Name)}
+		if fn.ExportABI == "c" {
+			params = append(params, e.llvmType(param.Type)+cIntegerExtension(param.Type)+" "+
+				localName(param.Name))
+			continue
+		}
+		params = append(params, e.functionParamABI(param))
 	}
 	return params
 }
@@ -1156,6 +1182,9 @@ func (e *emitter) definitionParams(fn *ir.Function) []string {
 // `byval` said the same thing to the code generator only: the copy it asks for
 // is made below the optimizer, at every call, so a struct handed down a
 // recursion was copied once per call even when no one ever read it.
+//
+// A value kept in memory (memory.go) is that slot, read through its address,
+// and is not loaded at all.
 func (e *emitter) functionParamABI(param ir.Param) string {
 	paramType := e.llvmType(param.Type)
 	paramName := localName(param.Name)
@@ -1163,6 +1192,10 @@ func (e *emitter) functionParamABI(param ir.Param) string {
 		return paramType + " " + paramName
 	}
 	addrName := paramName + ".addr"
+	if e.keptInMemory(param.Value()) {
+		e.setMemoryValue(param.Value(), addrName)
+		return "ptr noalias nocapture readonly " + addrName
+	}
 	e.entryParamLoads = append(
 		e.entryParamLoads,
 		fmt.Sprintf("  %s = load %s, ptr %s\n", paramName, paramType, addrName),
@@ -1573,17 +1606,31 @@ func (e *emitter) writeOptValue(instr *ir.Instr) error {
 // prefix is checked before the borrowed-read one because it extends it.
 func (e *emitter) writeFieldInstr(instr *ir.Instr) error {
 	switch {
+	case isFieldRead(instr.Op):
+		return e.writeField(instr)
 	case strings.HasPrefix(instr.Op, "field.ref.set."):
 		return e.writeFieldRefSet(instr)
 	case strings.HasPrefix(instr.Op, "field.ref."):
 		return e.writeFieldRef(instr)
 	case strings.HasPrefix(instr.Op, "field.addr."):
 		return e.writeFieldAddr(instr)
-	case strings.HasPrefix(instr.Op, "field.set."):
-		return e.writeFieldSet(instr)
 	default:
-		return e.writeField(instr)
+		return e.writeFieldSet(instr)
 	}
+}
+
+// isFieldRead reports whether op reads a field out of a struct value, the one
+// field instruction that names no borrow and writes nothing.
+func isFieldRead(op string) bool {
+	if !strings.HasPrefix(op, "field.") {
+		return false
+	}
+	for _, other := range []string{"field.ref.", "field.addr.", "field.set."} {
+		if strings.HasPrefix(op, other) {
+			return false
+		}
+	}
+	return true
 }
 
 // writeErrorInstr dispatches recoverable-result operations.
@@ -1704,7 +1751,6 @@ func (e *emitter) writeSliceStore(instr *ir.Instr) error {
 	}
 	slice := e.value(instr.Args[0])
 	index := e.value(instr.Args[1])
-	value := e.value(instr.Args[2])
 	base := "%" + e.nextSyntheticValue("slice.store")
 	ptrName := base + ".ptr"
 	elemPtrName := base + ".elem.ptr"
@@ -1712,7 +1758,10 @@ func (e *emitter) writeSliceStore(instr *ir.Instr) error {
 	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 0\n", ptrName, slice.operand)
 	fmt.Fprintf(&e.out, "  %s = getelementptr inbounds %s, ptr %s, i64 %s\n",
 		elemPtrName, elemType, ptrName, index.operand)
-	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n", elemType, value.operand, elemPtrName)
+	if !e.copiedFromMemory(instr, 2, elemPtrName) {
+		fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n",
+			elemType, e.value(instr.Args[2]).operand, elemPtrName)
+	}
 	return nil
 }
 
@@ -1935,12 +1984,12 @@ func (e *emitter) writeIndirectCall(instr *ir.Instr) error {
 	}
 	callee := e.value(instr.Args[0])
 	args := make([]string, 0, len(instr.Args)-1)
-	for index, arg := range instr.Args[1:] {
+	for index := range instr.Args[1:] {
 		param := ir.Param{}
 		if index < len(instr.CallParams) {
 			param = instr.CallParams[index]
 		}
-		callArg, err := e.internalCallArg(arg, param, index)
+		callArg, err := e.internalCallArg(instr, index+1, param, index)
 		if err != nil {
 			return err
 		}
@@ -1962,25 +2011,59 @@ func (e *emitter) writeIndirectCall(instr *ir.Instr) error {
 	return nil
 }
 
+// callKind is which of its ways writeCall hands a callee its arguments.
+type callKind int
+
+const (
+	// callPlain passes every argument as the value it is.
+	callPlain callKind = iota
+	// callBuiltin is spelled by the emitter itself (writeCompilerBuiltin).
+	callBuiltin
+	// callHosted is a std runtime entry with the out-pointer ABI.
+	callHosted
+	// callInternal is a function of this module, with the pointer ABI.
+	callInternal
+	// callForeign is a declared C function.
+	callForeign
+)
+
+// callTarget names the callee of a call by name and how it is called. It is
+// asked where the call is written and where its arguments are sorted
+// (callReadsAddress), so the two cannot answer differently.
+func (e *emitter) callTarget(instr *ir.Instr) (string, callKind) {
+	name := strings.TrimPrefix(instr.Op, "call.")
+	switch {
+	case instr.ExternABI == "c":
+		return instr.ExternName, callForeign
+	case isThreadPoolRound(name), name == memSizeOf:
+		return name, callBuiltin
+	case e.usesHostedRuntimeABI(name, instr):
+		return name, callHosted
+	case e.functionNames[name]:
+		return name, callInternal
+	}
+	return name, callPlain
+}
+
+// callParamTakesAddressOf reports whether the call's index-th declared
+// parameter, when the call carries one, is handed the address of a copy of
+// its argument.
+func callParamTakesAddressOf(instr *ir.Instr, index int) bool {
+	return index < len(instr.CallParams) &&
+		instr.CallParams[index].TakesAddressOf(instr.Args[index].Type)
+}
+
 // writeCall writes runtime print and user function calls.
 func (e *emitter) writeCall(instr *ir.Instr) error {
-	name := strings.TrimPrefix(instr.Op, "call.")
-	foreignC := instr.ExternABI == "c"
-	if foreignC {
-		name = instr.ExternName
-	}
-	if !foreignC {
-		if handled, err := e.writeCompilerBuiltin(name, instr); handled {
-			return err
-		}
-	}
-	if !foreignC && e.usesHostedRuntimeABI(name, instr) {
+	name, kind := e.callTarget(instr)
+	switch kind {
+	case callBuiltin:
+		return e.writeCompilerBuiltin(name, instr)
+	case callHosted:
 		return e.writeHostedRuntimeCall(name, instr)
-	}
-	if !foreignC && e.functionNames[name] {
+	case callInternal:
 		return e.writeInternalCall(name, instr)
-	}
-	if foreignC {
+	case callForeign:
 		if args := e.cArgs(instr, false); e.usesCStructValues(instr.Result.Type, args) {
 			return e.writeCStructResult(name, instr)
 		}
@@ -1989,8 +2072,8 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	for index, arg := range instr.Args {
 		// A foreign callee carries its declared passing on the call; a
 		// parameter handed the address of a copy gets that copy made here.
-		if index < len(instr.CallParams) && instr.CallParams[index].TakesAddressOf(arg.Type) {
-			args = append(args, e.copyAddressArg(arg, index))
+		if callParamTakesAddressOf(instr, index) {
+			args = append(args, e.copyAddressArg(instr, index, index))
 			continue
 		}
 		value := e.value(arg)
@@ -2013,15 +2096,12 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 }
 
 // writeCompilerBuiltin writes a builtin the emitter spells itself rather than
-// calling into the runtime, and reports whether name was one.
-func (e *emitter) writeCompilerBuiltin(name string, instr *ir.Instr) (bool, error) {
-	switch {
-	case isThreadPoolRound(name):
-		return true, e.writeThreadPoolRound(name, instr)
-	case name == memSizeOf:
-		return true, e.writeSizeOf(instr)
+// calling into the runtime: a pool round, or the size of a type.
+func (e *emitter) writeCompilerBuiltin(name string, instr *ir.Instr) error {
+	if isThreadPoolRound(name) {
+		return e.writeThreadPoolRound(name, instr)
 	}
-	return false, nil
+	return e.writeSizeOf(instr)
 }
 
 // memSizeOf is the builtin behind `std::mem::size_of<T>()`.
@@ -2130,14 +2210,14 @@ func cIntegerExtension(value string) string {
 func (e *emitter) writeInternalCall(name string, instr *ir.Instr) error {
 	args := make([]string, 0, len(instr.Args))
 	params := e.functionParams[name]
-	for index, arg := range instr.Args {
+	for index := range instr.Args {
 		// A callee this module does not declare takes its arguments by value,
 		// which is what the zero Param says.
 		param := ir.Param{}
 		if index < len(params) {
 			param = params[index]
 		}
-		callArg, err := e.internalCallArg(arg, param, index)
+		callArg, err := e.internalCallArg(instr, index, param, index)
 		if err != nil {
 			return err
 		}
@@ -2159,34 +2239,50 @@ func (e *emitter) writeInternalCall(name string, instr *ir.Instr) error {
 	return nil
 }
 
-// internalCallArg returns one module-local call argument in functionParamABI form.
-// A parameter handed the value its address is taken of gets that address made
-// here, which is the one thing the callee's declared Passing decides.
-func (e *emitter) internalCallArg(arg ir.Value, param ir.Param, index int) (string, error) {
-	value := e.value(arg)
+// internalCallArg returns the argument of instr at argIndex, the index-th the
+// callee takes, in functionParamABI form. A parameter handed the value its
+// address is taken of gets that address made here, which is the one thing the
+// callee's declared Passing decides.
+//
+// A value kept in memory is passed as the slot it already lives in: the
+// callee only reads through the address, and nothing writes the slot while
+// the call runs.
+func (e *emitter) internalCallArg(
+	instr *ir.Instr,
+	argIndex int,
+	param ir.Param,
+	index int,
+) (string, error) {
+	arg := instr.Args[argIndex]
 	argType := e.llvmType(arg.Type)
 	if param.TakesAddressOf(arg.Type) {
-		return e.copyAddressArg(arg, index), nil
+		return e.copyAddressArg(instr, argIndex, index), nil
 	}
 	if !e.usesIndirectStructParamABI(arg.Type) {
-		return argType + " " + value.operand, nil
+		return argType + " " + e.value(arg).operand, nil
+	}
+	if addr, ok := e.addressArg(instr, argIndex); ok {
+		return "ptr " + addr, nil
 	}
 	slotName := "%" + e.nextSyntheticValue(fmt.Sprintf("arg.%d", index))
 	fmt.Fprintf(&e.out, "  %s = alloca %s\n", slotName, argType)
-	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n", argType, value.operand, slotName)
+	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n", argType, e.value(arg).operand, slotName)
 	return "ptr " + slotName, nil
 }
 
-// copyAddressArg stores a copy of arg in a slot of its own and returns that
-// slot as the pointer argument a PassCopyAddress parameter reads through.
-func (e *emitter) copyAddressArg(arg ir.Value, index int) string {
-	value := e.value(arg)
+// copyAddressArg stores a copy of the argument of instr at argIndex, the
+// index-th the callee takes, in a slot of its own and returns that slot as the
+// pointer argument a PassCopyAddress parameter reads through.
+func (e *emitter) copyAddressArg(instr *ir.Instr, argIndex int, index int) string {
+	arg := instr.Args[argIndex]
 	argType := e.llvmType(arg.Type)
 	slotName := "%" + e.nextSyntheticValue(fmt.Sprintf("arg.%d", index))
 	fmt.Fprintf(&e.out, "  %s = alloca %s, align %d\n",
 		slotName, argType, maxInlinePayloadAlign)
-	fmt.Fprintf(&e.out, "  store %s %s, ptr %s, align %d\n",
-		argType, value.operand, slotName, maxInlinePayloadAlign)
+	if !e.copiedFromMemory(instr, argIndex, slotName) {
+		fmt.Fprintf(&e.out, "  store %s %s, ptr %s, align %d\n",
+			argType, e.value(arg).operand, slotName, maxInlinePayloadAlign)
+	}
 	return "ptr " + slotName
 }
 
@@ -2234,15 +2330,16 @@ func (e *emitter) writeHostedRuntimeCall(name string, instr *ir.Instr) error {
 	fmt.Fprintf(&e.out, "  %s = alloca %s\n", resultSlot, resultType)
 	args := []string{"ptr " + resultSlot}
 	for index, arg := range instr.Args {
-		value := e.value(arg)
 		if e.hostedRuntimeIndirectABI(arg.Type) {
 			argType := e.llvmType(arg.Type)
 			argSlot := fmt.Sprintf("%s.arg.%d", resultName, index)
 			fmt.Fprintf(&e.out, "  %s = alloca %s\n", argSlot, argType)
-			fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n", argType, value.operand, argSlot)
+			if !e.copiedFromMemory(instr, index, argSlot) {
+				fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n", argType, e.value(arg).operand, argSlot)
+			}
 			args = append(args, "ptr "+argSlot)
 		} else {
-			args = append(args, e.llvmType(arg.Type)+" "+value.operand)
+			args = append(args, e.llvmType(arg.Type)+" "+e.value(arg).operand)
 		}
 		if name == "std::internal::builtin::task_set_spawn" && index == 3 {
 			args = append(args, "ptr @"+taskInvokeThunkName(instr.Args[4].Type))
@@ -2530,6 +2627,10 @@ func (e *emitter) writeField(instr *ir.Instr) error {
 			instr.Result.Type,
 		)
 	}
+	if addr, ok := e.addressArg(instr, 0); ok {
+		e.writeMemoryField(instr, addr, index)
+		return nil
+	}
 	value := e.value(receiver)
 	name := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, %d\n",
@@ -2569,6 +2670,9 @@ func (e *emitter) writeFieldRef(instr *ir.Instr) error {
 	resultType := e.llvmType(instr.Result.Type)
 	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i32 0, i32 %d\n",
 		ptrName, e.llvmType(structType), value.operand, index)
+	if e.copiedIntoMemory(instr.Result, ptrName) {
+		return nil
+	}
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s%s\n",
 		name, resultType, ptrName, e.valueTag(resultType))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
@@ -2692,8 +2796,10 @@ func (e *emitter) writeFieldRefSet(instr *ir.Instr) error {
 	fieldType := e.llvmType(instr.Args[1].Type)
 	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i32 0, i32 %d\n",
 		ptrName, e.llvmType(structType), e.value(receiver).operand, index)
-	fmt.Fprintf(&e.out, "  store %s %s, ptr %s%s\n",
-		fieldType, e.value(instr.Args[1]).operand, ptrName, e.valueTag(fieldType))
+	if !e.copiedFromMemory(instr, 1, ptrName) {
+		fmt.Fprintf(&e.out, "  store %s %s, ptr %s%s\n",
+			fieldType, e.value(instr.Args[1]).operand, ptrName, e.valueTag(fieldType))
+	}
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "void"}
 	return nil
 }
@@ -2711,6 +2817,10 @@ func (e *emitter) writeRefStore(instr *ir.Instr) error {
 	if instr.Result.Type != "void" {
 		return fmt.Errorf("llvm error: dereference write returns void, got %s",
 			instr.Result.Type)
+	}
+	if e.copiedFromMemory(instr, 1, e.value(receiver).operand) {
+		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "void"}
+		return nil
 	}
 	valueType := e.llvmType(instr.Args[1].Type)
 	fmt.Fprintf(&e.out, "  store %s%s %s, ptr %s%s\n",
@@ -2749,8 +2859,10 @@ func (e *emitter) writeLocalSlot(instr *ir.Instr) error {
 	slotName := localName(instr.Result.Name)
 	valueType := e.llvmType(initial.Type)
 	fmt.Fprintf(&e.out, "  %s = alloca %s\n", slotName, valueType)
-	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n",
-		valueType, e.value(initial).operand, slotName)
+	if !e.copiedFromMemory(instr, 0, slotName) {
+		fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n",
+			valueType, e.value(initial).operand, slotName)
+	}
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: slotName}
 	return nil
 }
@@ -2764,6 +2876,12 @@ func (e *emitter) writeRefLoad(instr *ir.Instr) error {
 	if want := derefLLVMType(receiver.Type); want != instr.Result.Type {
 		return fmt.Errorf("llvm error: borrow read of `%s` gives %s, got %s",
 			receiver.Type, want, instr.Result.Type)
+	}
+	// A volatile read names a device register, which is read whole whatever
+	// its uses allow.
+	if volatileKeyword(instr.Op) == "" &&
+		e.copiedIntoMemory(instr.Result, e.value(receiver).operand) {
+		return nil
 	}
 	resultName := localName(instr.Result.Name)
 	resultType := e.llvmType(instr.Result.Type)
@@ -2902,6 +3020,9 @@ func (e *emitter) writeSliceIndex(instr *ir.Instr) error {
 	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 0\n", ptrName, slice.operand)
 	fmt.Fprintf(&e.out, "  %s = getelementptr inbounds %s, ptr %s, i64 %s\n",
 		elemPtrName, elemType, ptrName, index.operand)
+	if e.copiedIntoMemory(instr.Result, elemPtrName) {
+		return nil
+	}
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", resultName, elemType, elemPtrName)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
@@ -3712,8 +3833,15 @@ func (e *emitter) nextSyntheticValue(prefix string) string {
 }
 
 // value resolves an SSA value to a LLVM operand.
+//
+// A value kept in memory has no operand: every use of it reads it through
+// addressArg (memory.go). One that is asked for here was sorted wrongly, and
+// the function is refused rather than written with a load nothing counted on.
 func (e *emitter) value(value ir.Value) valueInfo {
 	if found, ok := e.values[value.Name]; ok {
+		if found.operand == "" && found.addr != "" && e.misread == "" {
+			e.misread = value.Name
+		}
 		return found
 	}
 	if source, ok := e.nicheAliasSource(value.Name); ok {
