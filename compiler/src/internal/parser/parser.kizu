@@ -417,19 +417,37 @@ fn (self: &var Parser) parse_extern_decl_with_doc(
     }
     let abi = try self.retain_current_literal(tree);
     if self.peek_kind() == token::Kind::Struct {
+        try self.require_abi_name("parse error: extern struct needs an ABI name: `c`");
         try self.next_token();
         return self.parse_extern_struct_decl(tree, move docs, public, abi);
     }
+    try self.require_abi_name("parse error: extern fn needs an ABI name: `c` or `browser`");
     var function = try self.function_stub(tree, public, move docs);
     errdefer function.deinit(self.allocator);
     function.signature.extern_abi = abi;
-    self.take_link_attributes(&var function.signature);
+    // A declaration without an ABI name leaves the link attributes pending,
+    // the way the Go `parseAttributedDecl` refuses a function with no ABI.
+    if !token_literal_is(self.current_token(), "") {
+        self.take_link_attributes(&var function.signature);
+    }
     if !try self.expect_peek(token::Kind::Function) {
         function.deinit(self.allocator);
         return try tree.add_recovered_declaration(token_span_at(self));
     }
     let _ = try self.parse_function_signature_after_fn(tree, &var function.signature);
     return add_function_decl(self.allocator, tree, move function);
+}
+
+/// Reports `message` when the ABI string under the cursor is empty, the Go
+/// `requireABIName`. The tree spells "not extern" and "not export" as the
+/// empty ABI, so an empty literal would turn the declaration into an ordinary
+/// one without a word. The declaration is parsed all the same, so the tokens
+/// after the string are not reported a second time as stray ones.
+fn (self: &var Parser) require_abi_name(message: []u8) -> !void {
+    if token_literal_is(self.current_token(), "") {
+        try self.error_text(message);
+    }
+    return;
 }
 
 /// Parses the struct after `extern "abi"`, the Go `parseExternStructDecl`.
@@ -636,6 +654,7 @@ fn (self: &var Parser) parse_export_decl_with_doc(
         function.deinit(self.allocator);
         return try tree.add_recovered_declaration(token_span_at(self));
     }
+    try self.require_abi_name("parse error: export fn needs an ABI name: `c` or `browser`");
     function.signature.export_abi = try self.retain_current_literal(tree);
     if !try self.expect_peek(token::Kind::Function) {
         function.deinit(self.allocator);
