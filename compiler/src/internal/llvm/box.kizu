@@ -104,8 +104,13 @@ fn (self: &var Emitter) write_box_new(module: &ir::Module, node: &ir::InstrNode)
             try self.line1("%s:", Arg::Str(store_label));
             let payload = node.args.get_or_panic(1);
             let payload_type = try self.llvm_type_of(module, payload.type_name);
-            let payload_value = try self.operand(module, payload);
-            try self.line3("  store %s %s, ptr %s", Arg::Str(payload_type), Arg::Str(payload_value.operand), Arg::Str(raw_name));
+            if !try self.copied_from_memory(module, node, 1, raw_name) {
+                let payload_value = try self.operand(module, payload);
+                try self.line3(
+                    "  store %s %s, ptr %s",
+                    Arg::Str(payload_type), Arg::Str(payload_value.operand), Arg::Str(raw_name)
+                );
+            }
             try self.line1("  br label %%%s", Arg::Str(join_label));
             try self.line1("%s:", Arg::Str(join_label));
             let code_name = try self.suffixed(result_name, ".code");
@@ -146,6 +151,9 @@ fn (self: &var Emitter) write_box_borrow(module: &ir::Module, node: &ir::InstrNo
     let box = try self.operand(module, node.args.get_or_panic(0));
     if module.names.starts_with(node.result.type_name, "&") {
         try self.set_value(module, node.result, box.operand);
+        return null;
+    }
+    if try self.copied_into_memory(module, node.result, box.operand) {
         return null;
     }
     let result_name = try self.local_name(module, node.result.name);
@@ -195,12 +203,14 @@ fn (self: &var Emitter) write_box_take(module: &ir::Module, node: &ir::InstrNode
     let box = try self.operand(module, node.args.get_or_panic(0));
     let allocator = try self.operand(module, node.args.get_or_panic(1));
     let result_name = try self.local_name(module, node.result.name);
-    let result_type = try self.llvm_type_of(module, node.result.type_name);
-    try self.line3("  %s = load %s, ptr %s", Arg::Str(result_name), Arg::Str(result_type), Arg::Str(box.operand));
+    if !try self.copied_into_memory(module, node.result, box.operand) {
+        let result_type = try self.llvm_type_of(module, node.result.type_name);
+        try self.line3("  %s = load %s, ptr %s", Arg::Str(result_name), Arg::Str(result_type), Arg::Str(box.operand));
+        try self.set_value(module, node.result, result_name);
+    }
     try self.line3(
         "  call void @kizu_box_deinit(ptr %s, ptr %s, i64 %s)",
         Arg::Str(allocator.operand), Arg::Str(box.operand), Arg::Str(size)
     );
-    try self.set_value(module, node.result, result_name);
     return null;
 }

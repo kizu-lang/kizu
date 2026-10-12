@@ -76,8 +76,10 @@ func (e *emitter) writeBoxNew(instr *ir.Instr) error {
 	e.markCurrentBlockExit(joinLabel)
 	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", okName, storeLabel, joinLabel)
 	fmt.Fprintf(&e.out, "%s:\n", storeLabel)
-	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n",
-		e.llvmType(instr.Args[1].Type), e.value(instr.Args[1]).operand, rawName)
+	if !e.copiedFromMemory(instr, 1, rawName) {
+		fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n",
+			e.llvmType(instr.Args[1].Type), e.value(instr.Args[1]).operand, rawName)
+	}
 	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
 	fmt.Fprintf(&e.out, "%s:\n", joinLabel)
 	codeName := resultName + ".code"
@@ -102,6 +104,9 @@ func (e *emitter) writeBoxBorrow(instr *ir.Instr) error {
 	box := e.value(instr.Args[0])
 	if strings.HasPrefix(instr.Result.Type, "&") {
 		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: box.operand}
+		return nil
+	}
+	if e.copiedIntoMemory(instr.Result, box.operand) {
 		return nil
 	}
 	resultName := localName(instr.Result.Name)
@@ -141,11 +146,13 @@ func (e *emitter) writeBoxTake(instr *ir.Instr) error {
 	box := e.value(instr.Args[0])
 	allocator := e.value(instr.Args[1])
 	resultName := localName(instr.Result.Name)
-	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n",
-		resultName, e.llvmType(instr.Result.Type), box.operand)
+	if !e.copiedIntoMemory(instr.Result, box.operand) {
+		fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n",
+			resultName, e.llvmType(instr.Result.Type), box.operand)
+		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	}
 	fmt.Fprintf(&e.out, "  call void @kizu_box_deinit(ptr %s, ptr %s, i64 %s)\n",
 		allocator.operand, box.operand, e.elementSizeOperand(elem))
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
 

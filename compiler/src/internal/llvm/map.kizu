@@ -190,8 +190,15 @@ fn (self: &var Emitter) write_map_insert(module: &ir::Module, node: &ir::InstrNo
     if try self.write_map_key_parts(module, key_base, node.args.get_or_panic(2), &var key_parts) |failed| {
         return move failed;
     }
-    let value_base = try self.suffixed(result_name, ".value");
-    let value_slot = try self.write_stack_value(module, value_base, node.args.get_or_panic(3));
+    // The runtime copies the value out of the pointer it is handed, so one
+    // kept in memory is handed as the slot it lives in.
+    var value_slot = ir::empty_name();
+    if try self.address_arg(module, node, 3) |addr| {
+        value_slot = addr;
+    } else {
+        let value_base = try self.suffixed(result_name, ".value");
+        value_slot = try self.write_stack_value(module, value_base, node.args.get_or_panic(3));
+    }
     let ok_name = try self.suffixed(result_name, ".ok");
     let size = try self.element_size_operand_bytes(module, value_bytes);
     try self.line7(
@@ -329,6 +336,9 @@ fn (self: &var Emitter) write_map_take_value_at(module: &ir::Module, node: &ir::
     try args.append(self.allocator, index.operand);
     try args.append(self.allocator, len_name);
     try self.write_null_failure(module, node, ptr_name, "map.take.panic", PanicKey::Bounds, &args);
+    if try self.copied_into_memory(module, node.result, ptr_name) {
+        return null;
+    }
     let result_type = try self.llvm_type_of(module, node.result.type_name);
     try self.line3("  %s = load %s, ptr %s", Arg::Str(result_name), Arg::Str(result_type), Arg::Str(ptr_name));
     try self.set_value(module, node.result, result_name);

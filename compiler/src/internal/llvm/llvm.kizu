@@ -84,6 +84,11 @@ fn emit_for_native_target(
         darwin: darwin,
         arch: arch,
         tbaa_used: false,
+        memory_types: array::new<i64>(allocator),
+        whole_values: array::new<i64>(allocator),
+        whole_storage: array::new<i64>(allocator),
+        misread: ir::empty_name(),
+        memory_copy_used: false,
         wrote_phi_value_mark: false,
         aggregates: map::new<[]u8, ir::Name>(allocator),
         references: map::new<[]u8, i64>(allocator),
@@ -170,6 +175,18 @@ struct Emitter {
     // Records that a load or store named a type-based alias tag, so the
     // module ends with the tag table (tbaa.kizu), the Go `tbaaUsed`.
     tbaa_used: bool,
+    // Each type's answer to is_memory_value_type_of by its module name id,
+    // the values of the function being written that something reads whole
+    // and the addresses one of them is loaded from, each stamped with its
+    // generation, the first value kept in memory that was asked for whole all
+    // the same, and whether a value was copied, so the module declares
+    // llvm.memcpy (memory.kizu): the Go `memoryTypes`, `wholeValues`,
+    // `wholeStorage`, `misread` and `memoryCopyUsed`.
+    memory_types: array::Array<i64>,
+    whole_values: array::Array<i64>,
+    whole_storage: array::Array<i64>,
+    misread: ir::Name,
+    memory_copy_used: bool,
     // Records that the function being written named a phi value by its mark,
     // so only a body that holds one is walked for it; Go searches the body.
     wrote_phi_value_mark: bool,
@@ -190,13 +207,16 @@ struct Emitter {
 }
 
 /// Is what the emitter knows about one SSA value, the Go `valueInfo`: its
-/// type and the LLVM operand that stands for it, both emitter names. Go
+/// type and the LLVM operand that stands for it, both emitter names, or for
+/// a value kept in memory the address it lives at (memory.kizu), which has
+/// no operand. Go
 /// gives every function a fresh values map; a Map cannot be emptied, so an
 /// entry carries the generation (the function count) it was written in and
 /// one from an earlier function is not found.
 struct ValueInfo {
     typ: ir::Name,
     operand: ir::Name,
+    addr: ir::Name,
     generation: i64,
 }
 
@@ -727,6 +747,7 @@ fn (self: &var Emitter) emit_module(module: &ir::Module) -> !?diagnostic::Diagno
             return move failed;
         }
     }
+    try self.write_memory_copy_decl(module);
     try self.write_tbaa_table();
     return null;
 }
@@ -1131,6 +1152,7 @@ fn (self: &var Emitter) write_function(module: &ir::Module, function: ir::Functi
     self.wrote_aggregate_phi = false;
     self.wrote_open_trap = false;
     try self.precompute_niche_aliases(module, node);
+    try self.collect_whole_values(module, node);
     var return_type = try self.llvm_type_of(module, node.return_type);
     let return_text = ir::name_text(&module.names, node.return_type);
     let return_bytes = return_text.as_bytes();
@@ -1152,13 +1174,13 @@ fn (self: &var Emitter) write_function(module: &ir::Module, function: ir::Functi
         var index = 0;
         while node.params.get(index) |param| {
             index = index + 1;
+            let operand = try self.local_name(module, param.name);
+            try self.set_value(module, param.value(), operand);
             if exports_c {
                 try params.append(self.allocator, try self.c_export_param_abi(module, param));
             } else {
                 try params.append(self.allocator, try self.function_param_abi(module, param));
             }
-            let operand = try self.local_name(module, param.name);
-            try self.set_value(module, param.value(), operand);
         }
     }
     var return_attrs = "";
@@ -1196,6 +1218,14 @@ fn (self: &var Emitter) write_function(module: &ir::Module, function: ir::Functi
     var resolved = string::new(self.allocator);
     defer resolved.deinit(self.allocator);
     try self.resolve_phi_predecessors(module, body_start, &var resolved);
+    if !ir::is_empty(self.misread) {
+        let fn_name = try self.own(module, node.name);
+        let value_name = try self.own(module, self.misread);
+        return try self.fail2(
+            "llvm error: emitter bug: function `%s` reads `%s` whole, which is kept in memory",
+            Arg::Str(fn_name), Arg::Str(value_name)
+        );
+    }
     var reachable = string::new(self.allocator);
     defer reachable.deinit(self.allocator);
     let resolved_text = resolved.as_bytes();
@@ -1247,6 +1277,9 @@ fn (self: &var Emitter) write_function(module: &ir::Module, function: ir::Functi
 /// say. `byval` said the same thing to the code generator only: the copy it
 /// asks for is made below the optimizer, at every call, so a struct handed
 /// down a recursion was copied once per call even when no one ever read it.
+///
+/// A value kept in memory (memory.kizu) is that slot, read through its
+/// address, and is not loaded at all.
 fn (self: &var Emitter) function_param_abi(module: &ir::Module, param: ir::Param) -> !string::String {
     let param_type = try self.llvm_type_of(module, param.type_name);
     let param_name = try self.local_name(module, param.name);
@@ -1256,6 +1289,10 @@ fn (self: &var Emitter) function_param_abi(module: &ir::Module, param: ir::Param
         return self.sprint2("%s %s", Arg::Str(param_type), Arg::Str(param_name));
     }
     let addr_name = try self.suffixed(param_name, ".addr");
+    if try self.kept_in_memory(module, param.value()) {
+        try self.set_memory_value(module, param.value(), addr_name);
+        return self.sprint2("ptr noalias nocapture readonly %s", Arg::Str(addr_name), Arg::None);
+    }
     let allocator = self.allocator;
     let names = &self.names;
     try format_args3(
@@ -1880,11 +1917,19 @@ fn (self: &var Emitter) op_name(module: &ir::Module, node: &ir::InstrNode) -> !i
 /// unnamed, typed `void` the way Go types it.
 fn (self: &var Emitter) write_cleanup(module: &ir::Module, cleanup: ir::Cleanup) -> !?diagnostic::Diagnostic {
     let _ = try self.next_synthetic_value("cleanup");
+    var instr = try self.cleanup_instr(module, cleanup);
+    defer instr.deinit(self.allocator);
+    return self.write_instr(module, &instr);
+}
+
+/// Presents an attached cleanup through the same typed call view used by
+/// call emission, the Go `cleanupInstruction`.
+fn (self: &Emitter) cleanup_instr(module: &ir::Module, cleanup: ir::Cleanup) -> !ir::InstrNode {
     var instr = module.blank_instr(
         ir::Value { name: ir::empty_name(), type_name: self.void_name },
         cleanup.op, cleanup.operand, ir::empty_name()
     );
-    defer instr.deinit(self.allocator);
+    errdefer instr.deinit(self.allocator);
     instr.extern_abi = cleanup.extern_abi;
     instr.extern_name = cleanup.extern_name;
     var arg_index = 0;
@@ -1897,7 +1942,7 @@ fn (self: &var Emitter) write_cleanup(module: &ir::Module, cleanup: ir::Cleanup)
         param_index = param_index + 1;
         try instr.call_params.append(self.allocator, param);
     }
-    return self.write_instr(module, &instr);
+    return move instr;
 }
 
 /// Returns what a phi names an incoming block by until the function's body
@@ -2177,9 +2222,17 @@ fn (self: &var Emitter) percent(name: ir::Name) -> !ir::Name {
 }
 
 /// Resolves an SSA value to a LLVM operand, the Go `value`.
+///
+/// A value kept in memory has no operand: every use of it reads it through
+/// address_arg (memory.kizu). One that is asked for here was sorted wrongly,
+/// and the function is refused rather than written with a load nothing
+/// counted on.
 fn (self: &var Emitter) operand(module: &ir::Module, value: ir::Value) -> !ValueInfo {
     if self.values.get(ir::name_id(value.name)) |found| {
         if found.generation == self.generation {
+            if ir::is_empty(found.operand) and !ir::is_empty(found.addr) and ir::is_empty(self.misread) {
+                self.misread = value.name;
+            }
             return found;
         }
     }
@@ -2187,11 +2240,13 @@ fn (self: &var Emitter) operand(module: &ir::Module, value: ir::Value) -> !Value
     if self.niche_alias_source(value.name) |source| {
         let carried = try self.operand(module, source);
         return ValueInfo {
-            typ: typ_name, operand: carried.operand, generation: self.generation
+            typ: typ_name, operand: carried.operand, addr: ir::empty_name(), generation: self.generation
         };
     }
     let local = try self.local_name(module, value.name);
-    return ValueInfo { typ: typ_name, operand: local, generation: self.generation };
+    return ValueInfo {
+        typ: typ_name, operand: local, addr: ir::empty_name(), generation: self.generation
+    };
 }
 
 /// Reports whether the value a name stands for was written in this function,
@@ -2209,6 +2264,9 @@ fn (self: &Emitter) value_written(name: ir::Name) -> bool {
 fn (self: &var Emitter) name_operand(module: &ir::Module, name: ir::Name) -> !ir::Name {
     if self.values.get(ir::name_id(name)) |found| {
         if found.generation == self.generation {
+            if ir::is_empty(found.operand) and !ir::is_empty(found.addr) and ir::is_empty(self.misread) {
+                self.misread = name;
+            }
             return found.operand;
         }
     }
@@ -2310,15 +2368,28 @@ fn (self: &var Emitter) precompute_niche_aliases(
 /// Records the operand that stands for a result, the Go
 /// `e.values[instr.Result.Name] = valueInfo{...}`.
 fn (self: &var Emitter) set_value(module: &ir::Module, result: ir::Value, operand: ir::Name) -> !void {
+    return self.set_value_info(module, result, operand, ir::empty_name());
+}
+
+/// Records the operand and the address that stand for a result, the Go
+/// `valueInfo{typ: ..., operand: ..., addr: ...}`; either may be empty.
+fn (self: &var Emitter) set_value_info(
+    module: &ir::Module,
+    result: ir::Value,
+    operand: ir::Name,
+    addr: ir::Name
+) -> !void {
     let typ_name = try self.own(module, result.type_name);
     let id = ir::name_id(result.name);
     let stale = ValueInfo {
-        typ: ir::empty_name(), operand: ir::empty_name(), generation: -1
+        typ: ir::empty_name(), operand: ir::empty_name(), addr: ir::empty_name(), generation: -1
     };
     while self.values.len() <= id {
         try self.values.append(self.allocator, stale);
     }
-    return self.values.set(id, ValueInfo { typ: typ_name, operand: operand, generation: self.generation });
+    return self.values.set(
+        id, ValueInfo { typ: typ_name, operand: operand, addr: addr, generation: self.generation }
+    );
 }
 
 /// Records that a result is the `void` operand, the Go

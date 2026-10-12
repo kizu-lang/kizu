@@ -419,10 +419,19 @@ fn (self: &var Emitter) write_array_swap(module: &ir::Module, node: &ir::InstrNo
     let left_value = try self.percent(left_value_synthetic);
     let right_value_synthetic = try self.next_synthetic_value("array.swap.right");
     let right_value = try self.percent(right_value_synthetic);
-    try self.line4("  %s = load %s, ptr %s%s", Arg::Str(left_value), Arg::Str(elem_type), Arg::Str(left_addr), Arg::Lit(tag));
-    try self.line4("  %s = load %s, ptr %s%s", Arg::Str(right_value), Arg::Str(elem_type), Arg::Str(right_addr), Arg::Lit(tag));
-    try self.line4("  store %s %s, ptr %s%s", Arg::Str(elem_type), Arg::Str(right_value), Arg::Str(left_addr), Arg::Lit(tag));
-    try self.line4("  store %s %s, ptr %s%s", Arg::Str(elem_type), Arg::Str(left_value), Arg::Str(right_addr), Arg::Lit(tag));
+    if try self.is_memory_value_type(module, elem_bytes) {
+        // An element kept in memory moves through a slot rather than a
+        // register; swapping a slot with itself copies it in place.
+        try self.line2("  %s = alloca %s", Arg::Str(left_value), Arg::Str(elem_type));
+        try self.write_memory_copy(left_value, left_addr, elem_type);
+        try self.write_memory_copy(left_addr, right_addr, elem_type);
+        try self.write_memory_copy(right_addr, left_value, elem_type);
+    } else {
+        try self.line4("  %s = load %s, ptr %s%s", Arg::Str(left_value), Arg::Str(elem_type), Arg::Str(left_addr), Arg::Lit(tag));
+        try self.line4("  %s = load %s, ptr %s%s", Arg::Str(right_value), Arg::Str(elem_type), Arg::Str(right_addr), Arg::Lit(tag));
+        try self.line4("  store %s %s, ptr %s%s", Arg::Str(elem_type), Arg::Str(right_value), Arg::Str(left_addr), Arg::Lit(tag));
+        try self.line4("  store %s %s, ptr %s%s", Arg::Str(elem_type), Arg::Str(left_value), Arg::Str(right_addr), Arg::Lit(tag));
+    }
     try self.line1("  br label %%%s", Arg::Str(join_label));
     try self.line1("%s:", Arg::Str(skip_label));
     try self.line1("  br label %%%s", Arg::Str(join_label));
@@ -551,12 +560,14 @@ fn (self: &var Emitter) write_array_append_paths(
     let value = node.args.get_or_panic(2);
     let elem_addr = try self.array_element_addr_bytes(module, handle, elem_bytes, length);
     let value_type = try self.llvm_type_of(module, value.type_name);
-    let value_operand = try self.operand(module, value);
-    let stored_tag = self.value_tag(value_type);
-    try self.line4(
-        "  store %s %s, ptr %s%s",
-        Arg::Str(value_type), Arg::Str(value_operand.operand), Arg::Str(elem_addr), Arg::Lit(stored_tag)
-    );
+    if !try self.copied_from_memory(module, node, 2, elem_addr) {
+        let value_operand = try self.operand(module, value);
+        let stored_tag = self.value_tag(value_type);
+        try self.line4(
+            "  store %s %s, ptr %s%s",
+            Arg::Str(value_type), Arg::Str(value_operand.operand), Arg::Str(elem_addr), Arg::Lit(stored_tag)
+        );
+    }
     try self.line3("  store i64 %s, ptr %s%s", Arg::Str(grown), Arg::Str(length_addr), Arg::Lit(length_tag));
     try self.line1("  br label %%%s", Arg::Str(join_label));
     try self.line1("%s:", Arg::Str(join_label));
@@ -772,6 +783,9 @@ fn (self: &var Emitter) write_array_pop_or_panic(module: &ir::Module, node: &ir:
     let none = self.no_names();
     defer none.deinit(self.allocator);
     try self.write_null_failure(module, node, ptr_name, "array.pop.panic", PanicKey::ArrayEmpty, &none);
+    if try self.copied_into_memory(module, node.result, ptr_name) {
+        return null;
+    }
     let result_type = try self.llvm_type_of(module, node.result.type_name);
     let tag = self.value_tag(result_type);
     try self.line4("  %s = load %s, ptr %s%s", Arg::Str(result_name), Arg::Str(result_type), Arg::Str(ptr_name), Arg::Lit(tag));
@@ -823,6 +837,9 @@ fn (self: &var Emitter) write_array_get_or_panic(module: &ir::Module, node: &ir:
     try self.write_bounds_failure(module, node, index.operand, len_name);
     let elem_type = try self.llvm_type(module, elem_bytes);
     let elem_addr = try self.array_element_at(data, elem_type, index.operand);
+    if try self.copied_into_memory(module, node.result, elem_addr) {
+        return null;
+    }
     let result_name = try self.local_name(module, node.result.name);
     let result_type = try self.llvm_type_of(module, node.result.type_name);
     let tag = self.value_tag(result_type);
@@ -902,11 +919,14 @@ fn (self: &var Emitter) write_array_checked_store(
     let elem_type = try self.llvm_type(module, elem_bytes);
     let elem_addr = try self.array_element_at(data, elem_type, index);
     let value_type = try self.llvm_type_of(module, value.type_name);
-    let value_operand = try self.operand(module, value);
-    let tag = self.value_tag(value_type);
-    try self.line4(
-        "  store %s %s, ptr %s%s", Arg::Str(value_type), Arg::Str(value_operand.operand), Arg::Str(elem_addr), Arg::Lit(tag)
-    );
+    if !try self.copied_from_memory(module, node, 2, elem_addr) {
+        let value_operand = try self.operand(module, value);
+        let tag = self.value_tag(value_type);
+        try self.line4(
+            "  store %s %s, ptr %s%s",
+            Arg::Str(value_type), Arg::Str(value_operand.operand), Arg::Str(elem_addr), Arg::Lit(tag)
+        );
+    }
     try self.line1("  br label %%%s", Arg::Str(join_label));
     try self.line1("%s:", Arg::Str(skip_label));
     try self.line1("  br label %%%s", Arg::Str(join_label));

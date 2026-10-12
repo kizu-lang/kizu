@@ -236,10 +236,19 @@ func (e *emitter) writeArraySwap(instr *ir.Instr) error {
 	rightAddr := e.arrayElementAt(data, elem, right)
 	leftValue := "%" + e.nextSyntheticValue("array.swap.left")
 	rightValue := "%" + e.nextSyntheticValue("array.swap.right")
-	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s%s\n", leftValue, elemType, leftAddr, tag)
-	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s%s\n", rightValue, elemType, rightAddr, tag)
-	fmt.Fprintf(&e.out, "  store %s %s, ptr %s%s\n", elemType, rightValue, leftAddr, tag)
-	fmt.Fprintf(&e.out, "  store %s %s, ptr %s%s\n", elemType, leftValue, rightAddr, tag)
+	if e.isMemoryValueType(elem) {
+		// An element kept in memory moves through a slot rather than a
+		// register; swapping a slot with itself copies it in place.
+		fmt.Fprintf(&e.out, "  %s = alloca %s\n", leftValue, elemType)
+		e.writeMemoryCopy(leftValue, leftAddr, elem)
+		e.writeMemoryCopy(leftAddr, rightAddr, elem)
+		e.writeMemoryCopy(rightAddr, leftValue, elem)
+	} else {
+		fmt.Fprintf(&e.out, "  %s = load %s, ptr %s%s\n", leftValue, elemType, leftAddr, tag)
+		fmt.Fprintf(&e.out, "  %s = load %s, ptr %s%s\n", rightValue, elemType, rightAddr, tag)
+		fmt.Fprintf(&e.out, "  store %s %s, ptr %s%s\n", elemType, rightValue, leftAddr, tag)
+		fmt.Fprintf(&e.out, "  store %s %s, ptr %s%s\n", elemType, leftValue, rightAddr, tag)
+	}
 	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
 	fmt.Fprintf(&e.out, "%s:\n", skipLabel)
 	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
@@ -324,8 +333,10 @@ func (e *emitter) writeArrayAppendPaths(
 	fmt.Fprintf(&e.out, "%s:\n", fastLabel)
 	elemAddr := e.arrayElementAddr(handle, elem, length)
 	valueType := e.llvmType(instr.Args[2].Type)
-	fmt.Fprintf(&e.out, "  store %s %s, ptr %s%s\n",
-		valueType, e.value(instr.Args[2]).operand, elemAddr, e.valueTag(valueType))
+	if !e.copiedFromMemory(instr, 2, elemAddr) {
+		fmt.Fprintf(&e.out, "  store %s %s, ptr %s%s\n",
+			valueType, e.value(instr.Args[2]).operand, elemAddr, e.valueTag(valueType))
+	}
 	fmt.Fprintf(&e.out, "  store i64 %s, ptr %s%s\n", grown, lengthAddr, e.tbaaTag(tbaaCount))
 	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
 	fmt.Fprintf(&e.out, "%s:\n", joinLabel)
@@ -548,6 +559,9 @@ func (e *emitter) writeArrayPopOrPanic(instr *ir.Instr) error {
 		return err
 	}
 	e.writeNullFailure(instr, ptrName, "array.pop.panic", "array_empty")
+	if e.copiedIntoMemory(instr.Result, ptrName) {
+		return nil
+	}
 	resultName := localName(instr.Result.Name)
 	resultType := e.llvmType(instr.Result.Type)
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s%s\n",
@@ -589,6 +603,9 @@ func (e *emitter) writeArrayGetOrPanic(instr *ir.Instr) error {
 	data := e.arrayData(handle)
 	e.writeBoundsFailure(instr, index.operand, lenName)
 	elemAddr := e.arrayElementAt(data, elem, index.operand)
+	if e.copiedIntoMemory(instr.Result, elemAddr) {
+		return nil
+	}
 	resultName := localName(instr.Result.Name)
 	resultType := e.llvmType(instr.Result.Type)
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s%s\n",
@@ -626,19 +643,20 @@ func (e *emitter) writeArraySet(instr *ir.Instr) error {
 	handle := e.value(instr.Args[0]).operand
 	index := e.value(instr.Args[1])
 	okName := localName(instr.Result.Name) + ".ok"
-	e.writeArrayCheckedStore(handle, elem, index.operand, instr.Args[2], okName)
+	e.writeArrayCheckedStore(instr, handle, elem, index.operand, okName)
 	return e.writeArrayBoolResult(instr.Result, okName, "array_bounds")
 }
 
-// writeArrayCheckedStore writes value at index when index is inside the array,
-// and leaves okName saying whether it did.
+// writeArrayCheckedStore writes the value instr sets at index when index is
+// inside the array, and leaves okName saying whether it did.
 func (e *emitter) writeArrayCheckedStore(
+	instr *ir.Instr,
 	handle string,
 	elem string,
 	index string,
-	value ir.Value,
 	okName string,
 ) {
+	value := instr.Args[2]
 	length := "%" + e.nextSyntheticValue("array.set.len")
 	e.arrayLoadField(handle, arrayFieldLen, "array.set.len", length)
 	data := e.arrayData(handle)
@@ -652,8 +670,10 @@ func (e *emitter) writeArrayCheckedStore(
 	fmt.Fprintf(&e.out, "%s:\n", storeLabel)
 	elemAddr := e.arrayElementAt(data, elem, index)
 	valueType := e.llvmType(value.Type)
-	fmt.Fprintf(&e.out, "  store %s %s, ptr %s%s\n",
-		valueType, e.value(value).operand, elemAddr, e.valueTag(valueType))
+	if !e.copiedFromMemory(instr, 2, elemAddr) {
+		fmt.Fprintf(&e.out, "  store %s %s, ptr %s%s\n",
+			valueType, e.value(value).operand, elemAddr, e.valueTag(valueType))
+	}
 	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
 	fmt.Fprintf(&e.out, "%s:\n", skipLabel)
 	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
