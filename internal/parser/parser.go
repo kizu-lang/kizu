@@ -235,15 +235,28 @@ func (p *Parser) parseExternDeclWithDoc(docs string) ast.Decl {
 	}
 	abi := p.cur.Literal
 	if p.peek.Type == token.Struct {
+		p.requireABIName("parse error: extern struct needs an ABI name: `c`")
 		p.nextToken()
 		return p.parseExternStructDecl(docs, abi)
 	}
+	p.requireABIName("parse error: extern fn needs an ABI name: `c` or `browser`")
 	fn.ExternABI = abi
 	if !p.expectPeek(token.Function) {
 		return fn
 	}
 	p.parseFunctionSignatureAfterFn(fn)
 	return fn
+}
+
+// requireABIName reports message when the ABI string under the cursor is
+// empty. The tree spells "not extern" and "not export" as the empty ABI, so an
+// empty literal would turn the declaration into an ordinary one without a
+// word. The declaration is parsed all the same, so the tokens after the
+// string are not reported a second time as stray ones.
+func (p *Parser) requireABIName(message string) {
+	if p.cur.Literal == "" {
+		p.errorf("%s", message)
+	}
 }
 
 // parseExternStructDecl parses the struct after `extern "abi"`. Its fields
@@ -345,6 +358,7 @@ func (p *Parser) parseExportDeclWithDoc(docs string) ast.Decl {
 	if !p.expectPeek(token.String) {
 		return fn
 	}
+	p.requireABIName("parse error: export fn needs an ABI name: `c` or `browser`")
 	fn.ExportABI = p.cur.Literal
 	if !p.expectPeek(token.Function) {
 		return fn

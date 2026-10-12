@@ -4,6 +4,12 @@
 引数で選びます(`array::new<T>` と同じ綴り)。それ以外の型は body で type error に
 なります。
 
+`abs` / `min` / `max` / `clamp` の 4 つは整数型(`i8` / `i16` / `i32` / `i64` /
+`u8` / `u16` / `u32` / `u64` / `isize` / `usize`)も取ります。大きい方、小さい方、
+範囲に収めた値、大きさは、整数でも float でも同じ意味だからです。この 4 つは
+数値でない型を呼び出しの位置で compile error にします(`math::max<bool>(a, b)` は
+`` `std::math::max` does not support type `bool` ``)。
+
 ```text
 std::math::sqrt<T>(value: T) -> T
 std::math::floor<T>(value: T) -> T
@@ -76,6 +82,11 @@ trusted primitive です。backend はそれぞれを 1 命令(LLVM intrinsic、
   扱います。C の `fmin` / `fmax` と同じで、Go の `math.Min` とは NaN の扱いが
   違います。
 - `clamp` は NaN をそのまま返します。
+- 整数の `min` / `max` / `clamp` はその型の比較そのもので、符号なしは符号なしの
+  大小で比べます(`max<u8>(200, 100)` は `200`)。
+- 整数の `abs` は負の値を単項 `-` で反転します。単項 `-` は型の bit 幅で wrap する
+  (SPEC §6.9.2)ので、符号付きの最小値は自分自身のままです(`abs<i8>(-128)` は
+  `-128`)。符号なしの `abs` は引数をそのまま返します。
 - `hypot` は大きい方の絶対値で括り出してから平方根を取るので、`3e200` と
   `4e200` の二乗が溢れても `5e200` に近い値を返します。無限大が 1 つでもあれば、
   もう片方が NaN でも無限大です。
