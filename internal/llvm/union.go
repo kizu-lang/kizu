@@ -36,28 +36,21 @@ func (e *emitter) writeUnionNew(instr *ir.Instr) error {
 	if len(instr.Args) > 1 {
 		return fmt.Errorf("llvm error: union.new expects at most one payload")
 	}
+	return e.writeInlineUnion(instr, variant)
+}
+
+// writeInlineUnion materializes the `tag + inline payload storage` union value
+// a union.new makes. It writes the active tag and, when present, stores only
+// the active variant's payload into the inline storage, leaving the inactive
+// bytes uninitialized per the #991 ABI. A union kept in memory (memory.go) is
+// the slot it is built in, and any other is loaded out of it.
+func (e *emitter) writeInlineUnion(instr *ir.Instr, variant ir.UnionVariant) error {
 	var payload *ir.Value
 	if len(instr.Args) == 1 {
 		payload = &instr.Args[0]
 	}
 	resultName := localName(instr.Result.Name)
-	if err := e.writeInlineUnion(resultName, instr.Result.Type, variant, payload); err != nil {
-		return err
-	}
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
-	return nil
-}
-
-// writeInlineUnion materializes a `tag + inline payload storage` union value
-// named resultName. It writes the active tag and, when present, stores only the
-// active variant's payload into the inline storage, leaving the inactive bytes
-// uninitialized per the #991 ABI.
-func (e *emitter) writeInlineUnion(
-	resultName string,
-	unionIRType string,
-	variant ir.UnionVariant,
-	payload *ir.Value,
-) error {
+	unionIRType := instr.Result.Type
 	if variant.Payload == "" && payload != nil {
 		return fmt.Errorf("llvm error: union variant `%s::%s` stores no payload, got `%s`",
 			unionIRType, variant.Name, payload.Type)
@@ -87,14 +80,20 @@ func (e *emitter) writeInlineUnion(
 			)
 		}
 		payloadPtr := resultName + ".payload.ptr"
-		value := e.value(*payload)
 		fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i32 0, i32 1\n",
 			payloadPtr, unionType, slotName)
-		fmt.Fprintf(&e.out, "  store %s %s, ptr %s, align %d\n",
-			e.llvmType(payload.Type), value.operand, payloadPtr, payloadAlign)
+		if !e.copiedFromMemory(instr, 0, payloadPtr) {
+			fmt.Fprintf(&e.out, "  store %s %s, ptr %s, align %d\n",
+				e.llvmType(payload.Type), e.value(*payload).operand, payloadPtr, payloadAlign)
+		}
+	}
+	if e.keptInMemory(instr.Result) {
+		e.setMemoryValue(instr.Result, slotName)
+		return nil
 	}
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s, align %d\n",
 		resultName, unionType, slotName, maxInlinePayloadAlign)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
 
@@ -111,6 +110,9 @@ func (e *emitter) writeUnionLoad(instr *ir.Instr) error {
 		return fmt.Errorf("llvm error: union.load expects borrowed union, got `%s`", instr.Args[0].Type)
 	}
 	value := e.value(instr.Args[0])
+	if e.copiedIntoMemory(instr.Result, value.operand) {
+		return nil
+	}
 	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s, align %d\n",
 		resultName, e.llvmType(unionName), value.operand, maxInlinePayloadAlign)
@@ -123,10 +125,13 @@ func (e *emitter) writeUnionTag(instr *ir.Instr) error {
 	if len(instr.Args) != 1 || instr.Result.Type != "i64" {
 		return fmt.Errorf("llvm error: union.tag expects union -> i64")
 	}
-	value := e.value(instr.Args[0])
 	resultName := localName(instr.Result.Name)
-	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 0\n",
-		resultName, e.llvmType(instr.Args[0].Type), value.operand)
+	if addr, ok := e.addressArg(instr, 0); ok {
+		e.writeMemoryTag(resultName, "i64", addr)
+	} else {
+		fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 0\n",
+			resultName, e.llvmType(instr.Args[0].Type), e.value(instr.Args[0]).operand)
+	}
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
@@ -154,6 +159,10 @@ func (e *emitter) writeUnionPayload(instr *ir.Instr) error {
 				"inline payload size/alignment must be compile-time known per the #991 ABI (#495)",
 			unionType.Name, variant.Name, instr.Result.Type)
 	}
+	if addr, ok := e.addressArg(instr, 0); ok {
+		e.writeMemoryField(instr, addr, 1)
+		return nil
+	}
 	value := e.value(instr.Args[0])
 	llvmUnion := e.llvmType(instr.Args[0].Type)
 	resultName := localName(instr.Result.Name)
@@ -164,6 +173,12 @@ func (e *emitter) writeUnionPayload(instr *ir.Instr) error {
 		llvmUnion, value.operand, slotName, maxInlinePayloadAlign)
 	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i32 0, i32 1\n",
 		payloadPtr, llvmUnion, slotName)
+	// The slot is this instruction's own, so a payload kept in memory is
+	// where it already lies.
+	if e.keptInMemory(instr.Result) {
+		e.setMemoryValue(instr.Result, payloadPtr)
+		return nil
+	}
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s, align %d\n",
 		resultName, e.llvmType(instr.Result.Type), payloadPtr, payloadAlign)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}

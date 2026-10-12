@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/kizu-lang/kizu/internal/ir"
 	typpkg "github.com/kizu-lang/kizu/internal/typ"
 )
 
@@ -111,21 +112,40 @@ func isAddressType(typ string) bool {
 // writeNichePresence tests whether a niche optional holds a value by reading
 // the word its niche sits in and comparing it against the zero only an absent
 // value writes. The read is one extractvalue however deep the word is, so a
-// niche a struct inherited costs what a bare pointer's costs.
-func (e *emitter) writeNichePresence(elem string, operand string, into string) error {
+// niche a struct inherited costs what a bare pointer's costs. An optional
+// kept in memory (memory.go) is read at addr, where the word is one load.
+func (e *emitter) writeNichePresence(
+	elem string,
+	source ir.Value,
+	addr string,
+	into string,
+) error {
 	path, fieldType, ok := e.nichePath(elem)
 	if !ok {
 		return fmt.Errorf("llvm error: `%s` has no niche", elem)
 	}
-	field := operand
-	if len(path) > 0 {
+	var field string
+	switch {
+	case addr != "":
+		field = "%" + e.nextSyntheticValue("opt.niche")
+		indices := make([]string, 0, len(path)+1)
+		indices = append(indices, "i32 0")
+		for _, index := range path {
+			indices = append(indices, "i32 "+strconv.Itoa(index))
+		}
+		fmt.Fprintf(&e.out, "  %s.addr = getelementptr %s, ptr %s, %s\n",
+			field, e.llvmType(elem), addr, strings.Join(indices, ", "))
+		fmt.Fprintf(&e.out, "  %s = load %s, ptr %s.addr\n", field, fieldType, field)
+	case len(path) > 0:
 		indices := make([]string, 0, len(path))
 		for _, index := range path {
 			indices = append(indices, strconv.Itoa(index))
 		}
 		field = "%" + e.nextSyntheticValue("opt.niche")
 		fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, %s\n",
-			field, e.llvmType(elem), operand, strings.Join(indices, ", "))
+			field, e.llvmType(elem), e.value(source).operand, strings.Join(indices, ", "))
+	default:
+		field = e.value(source).operand
 	}
 	zero := "0"
 	if fieldType == "ptr" {

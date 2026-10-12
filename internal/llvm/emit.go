@@ -85,13 +85,17 @@ type emitter struct {
 	references map[string]int
 	// memoryTypes keeps each type's answer to isMemoryValueType, wholeValues
 	// names the values of the function being written that something reads
-	// whole and wholeStorage the addresses one of them is loaded from, misread
-	// is the first value kept in memory that was asked for whole all the same,
-	// and memoryCopyUsed records that a value was copied, so the module
-	// declares llvm.memcpy (memory.go).
+	// whole and wholeStorage the storage one of them is loaded from, partOf
+	// names for the address of a part the address it was taken from, lent
+	// names the values that lie in storage the caller filled, misread is the
+	// first value kept in memory that was asked for whole all the same, and
+	// memoryCopyUsed records that a value was copied, so the module declares
+	// llvm.memcpy (memory.go).
 	memoryTypes    map[string]bool
 	wholeValues    map[string]bool
 	wholeStorage   map[string]bool
+	partOf         map[string]string
+	lent           map[string]bool
 	misread        string
 	memoryCopyUsed bool
 }
@@ -1516,11 +1520,20 @@ func (e *emitter) writeOptSome(instr *ir.Instr) error {
 	if !ok || len(instr.Args) != 1 {
 		return fmt.Errorf("llvm error: opt.some expects one payload and a `?T` result")
 	}
+	addr, kept := e.addressArg(instr, 0)
 	if _, ok := e.nicheOptionalElem(instr.Result.Type); ok {
 		// The payload is the whole value: a live element never writes the
 		// zero its niche reserves.
+		if kept {
+			e.writeMemoryAlias(instr.Result, addr)
+			return nil
+		}
 		e.values[instr.Result.Name] = valueInfo{
 			typ: instr.Result.Type, operand: e.value(instr.Args[0]).operand}
+		return nil
+	}
+	if kept {
+		e.writeMemoryWrapper(instr, "i8 1", addr)
 		return nil
 	}
 	resultName := localName(instr.Result.Name)
@@ -1561,17 +1574,21 @@ func (e *emitter) writeOptHas(instr *ir.Instr) error {
 		return fmt.Errorf("llvm error: opt.has expects `?T`, got %s", source.Type)
 	}
 	resultName := localName(instr.Result.Name)
+	addr, kept := e.addressArg(instr, 0)
 	if elem, ok := e.nicheOptionalElem(source.Type); ok {
-		if err := e.writeNichePresence(
-			elem, e.value(source).operand, resultName); err != nil {
+		if err := e.writeNichePresence(elem, source, addr, resultName); err != nil {
 			return err
 		}
 		e.values[instr.Result.Name] = valueInfo{typ: "bool", operand: resultName}
 		return nil
 	}
 	tagName := resultName + ".tag"
-	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 0\n",
-		tagName, e.llvmType(source.Type), e.value(source).operand)
+	if kept {
+		e.writeMemoryTag(tagName, "i8", addr)
+	} else {
+		fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 0\n",
+			tagName, e.llvmType(source.Type), e.value(source).operand)
+	}
 	fmt.Fprintf(&e.out, "  %s = icmp ne i8 %s, 0\n", resultName, tagName)
 	e.values[instr.Result.Name] = valueInfo{typ: "bool", operand: resultName}
 	return nil
@@ -1591,8 +1608,17 @@ func (e *emitter) writeOptValue(instr *ir.Instr) error {
 	if instr.Result.Type != elem {
 		return fmt.Errorf("llvm error: opt.value returns %s, got %s", elem, instr.Result.Type)
 	}
+	addr, kept := e.addressArg(instr, 0)
 	if _, ok := e.nicheOptionalElem(source.Type); ok {
+		if kept {
+			e.writeMemoryAlias(instr.Result, addr)
+			return nil
+		}
 		e.values[instr.Result.Name] = valueInfo{typ: elem, operand: e.value(source).operand}
+		return nil
+	}
+	if kept {
+		e.writeMemoryField(instr, addr, 1)
 		return nil
 	}
 	resultName := localName(instr.Result.Name)
@@ -1664,7 +1690,8 @@ func (e *emitter) writeErrorHas(instr *ir.Instr) error {
 		return fmt.Errorf("llvm error: error.has expects !T, got %s", source.Type)
 	}
 	resultName := localName(instr.Result.Name)
-	e.writeErrorSucceeded(resultName, e.llvmType(source.Type), e.value(source).operand)
+	addr, _ := e.addressArg(instr, 0)
+	e.writeErrorSucceeded(resultName, source, addr)
 	e.values[instr.Result.Name] = valueInfo{typ: "bool", operand: resultName}
 	return nil
 }
@@ -1685,6 +1712,10 @@ func (e *emitter) writeErrorValue(instr *ir.Instr) error {
 	if instr.Result.Type != success {
 		return fmt.Errorf("llvm error: error.value returns %s, got %s",
 			success, instr.Result.Type)
+	}
+	if addr, ok := e.addressArg(instr, 0); ok {
+		e.writeMemoryField(instr, addr, errorPayloadField)
+		return nil
 	}
 	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 1\n",
@@ -1709,10 +1740,8 @@ func (e *emitter) writeErrorCode(instr *ir.Instr) error {
 		return fmt.Errorf("llvm error: error.code returns %s, got %s",
 			errorName, instr.Result.Type)
 	}
-	resultName := localName(instr.Result.Name)
-	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, %d\n",
-		resultName, e.llvmType(source.Type), e.value(source).operand,
-		errorCodeField)
+	addr, _ := e.addressArg(instr, 0)
+	resultName := e.failureCode(localName(instr.Result.Name), source, addr)
 	e.values[instr.Result.Name] = valueInfo{typ: errorName, operand: resultName}
 	return nil
 }
@@ -2543,8 +2572,14 @@ func (e *emitter) writeIntegerCast(instr *ir.Instr) error {
 }
 
 // failureCode extracts an error-union failure. A failure is one global code,
-// so it reads the same i64 out of every union and needs no conversion.
-func (e *emitter) failureCode(resultName string, source ir.Value) string {
+// so it reads the same i64 out of every union and needs no conversion. A
+// union kept in memory (memory.go) is read at addr, and any other is the
+// operand it is, with no addr.
+func (e *emitter) failureCode(resultName string, source ir.Value, addr string) string {
+	if addr != "" {
+		e.writeMemoryTag(resultName, "i64", addr)
+		return resultName
+	}
 	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, %d\n",
 		resultName,
 		e.llvmType(source.Type),
@@ -3242,6 +3277,10 @@ func (e *emitter) writeErrorOK(instr *ir.Instr) error {
 	if value.Type != success {
 		return fmt.Errorf("llvm error: error.ok expects %s, got %s", success, value.Type)
 	}
+	if addr, ok := e.addressArg(instr, 0); ok {
+		e.writeMemoryWrapper(instr, "i64 0", addr)
+		return nil
+	}
 	argInfo := e.value(value)
 	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, %s %s, %d\n",
 		resultName, unionType, e.llvmType(success), argInfo.operand, errorPayloadField)
@@ -3317,12 +3356,11 @@ func (e *emitter) writeErrorTry(instr *ir.Instr) error {
 			e.currentReturn,
 		)
 	}
-	sourceValue := e.value(source)
-	sourceType := e.llvmType(source.Type)
+	addr, kept := e.addressArg(instr, 0)
 	okBool := localName(instr.Result.Name) + ".ok"
 	okLabel := helperLabel(instr.Result.Name, "try.ok")
 	errLabel := helperLabel(instr.Result.Name, "try.err")
-	e.writeErrorSucceeded(okBool, sourceType, sourceValue.operand)
+	e.writeErrorSucceeded(okBool, source, addr)
 	// A `try` passes a failure on rather than handling it, so the failure is
 	// the rare edge. Said outright because the optimizer's own guess reads
 	// `code == 0` as the unlikely side -- most values it meets are not zero --
@@ -3336,7 +3374,7 @@ func (e *emitter) writeErrorTry(instr *ir.Instr) error {
 			return err
 		}
 	}
-	if err := e.writeErrorFailureReturn(source); err != nil {
+	if err := e.writeErrorFailureReturn(source, addr); err != nil {
 		return err
 	}
 	// Marked after the cleanups: one that opens blocks of its own marks
@@ -3346,9 +3384,13 @@ func (e *emitter) writeErrorTry(instr *ir.Instr) error {
 	if success == "void" {
 		return nil
 	}
+	if kept {
+		e.writeMemoryField(instr, addr, errorPayloadField)
+		return nil
+	}
 	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, %d\n",
-		resultName, sourceType, sourceValue.operand, errorPayloadField)
+		resultName, e.llvmType(source.Type), e.value(source).operand, errorPayloadField)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
@@ -3581,10 +3623,10 @@ func (e *emitter) writeAbsorbedErrorUnionReturn(value ir.Value) error {
 	okBool := "%" + e.nextSyntheticValue("absorb.ok")
 	okLabel := e.nextSyntheticValue("absorb.ok.block")
 	errLabel := e.nextSyntheticValue("absorb.err.block")
-	e.writeErrorSucceeded(okBool, sourceType, source.operand)
+	e.writeErrorSucceeded(okBool, value, "")
 	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", okBool, okLabel, errLabel)
 	fmt.Fprintf(&e.out, "%s:\n", errLabel)
-	if err := e.writeErrorFailureReturn(value); err != nil {
+	if err := e.writeErrorFailureReturn(value, ""); err != nil {
 		return err
 	}
 	fmt.Fprintf(&e.out, "%s:\n", okLabel)
@@ -3625,12 +3667,12 @@ func (e *emitter) writeMainErrorUnionReturn(value ir.Value) error {
 	okBoolName := "%" + e.nextSyntheticValue("main.ok")
 	codeName := "%" + e.nextSyntheticValue("main.code")
 	_, success, _ := e.errorUnionParts(value.Type)
-	e.writeErrorSucceeded(okBoolName, unionType, valueInfo.operand)
+	e.writeErrorSucceeded(okBoolName, value, "")
 	okLabel := e.nextSyntheticValue("main.exit.ok")
 	failLabel := e.nextSyntheticValue("main.exit.fail")
 	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", okBoolName, okLabel, failLabel)
 	fmt.Fprintf(&e.out, "%s:\n", failLabel)
-	if err := e.writeMainErrorMessage(value); err != nil {
+	if err := e.writeMainErrorMessage(value, ""); err != nil {
 		return err
 	}
 	e.out.WriteString("  ret i32 1\n")
@@ -3711,11 +3753,11 @@ func (e *emitter) writeMainExitStatusReturn(value ir.Value) error {
 // writeMainErrorMessage names the failure a `main -> !T` process exits with,
 // so it reports why it exits 1 instead of failing silently. The failure is one
 // global code, and the spelling comes from the module's table of error names.
-func (e *emitter) writeMainErrorMessage(source ir.Value) error {
+func (e *emitter) writeMainErrorMessage(source ir.Value, addr string) error {
 	if _, _, ok := e.errorUnionParts(source.Type); !ok {
 		return nil
 	}
-	e.writeMainErrorName(e.failureCode("%"+e.nextSyntheticValue("main.err.code"), source))
+	e.writeMainErrorName(e.failureCode("%"+e.nextSyntheticValue("main.err.code"), source, addr))
 	return nil
 }
 
@@ -3739,21 +3781,23 @@ func (e *emitter) writeMainErrorName(codeOperand string) {
 }
 
 // writeErrorFailureReturn propagates a failed try from the current function.
-func (e *emitter) writeErrorFailureReturn(source ir.Value) error {
+// The failed union is the operand it is, or is kept in memory at addr; one
+// that is the function's own is returned as it is, and is never kept
+// (readsAddress).
+func (e *emitter) writeErrorFailureReturn(source ir.Value, addr string) error {
 	if e.mainReturnsInt {
-		if err := e.writeMainErrorMessage(source); err != nil {
+		if err := e.writeMainErrorMessage(source, addr); err != nil {
 			return err
 		}
 		e.out.WriteString("  ret i32 1\n")
 		return nil
 	}
-	sourceInfo := e.value(source)
 	if source.Type == e.currentReturn {
-		fmt.Fprintf(&e.out, "  ret %s %s\n", e.llvmType(source.Type), sourceInfo.operand)
+		fmt.Fprintf(&e.out, "  ret %s %s\n", e.llvmType(source.Type), e.value(source).operand)
 		return nil
 	}
 	name := "%" + e.nextSyntheticValue("try.err")
-	code := e.failureCode(name+".code", source)
+	code := e.failureCode(name+".code", source, addr)
 	e.writeErrorFailureCode(name, e.currentReturn, code)
 	fmt.Fprintf(&e.out, "  ret %s %s\n", e.llvmType(e.currentReturn), name)
 	return nil
@@ -3819,11 +3863,11 @@ func (e *emitter) writeTryDecls() {
 	}
 }
 
-// writeErrorSucceeded names whether an error union holds a success.
-func (e *emitter) writeErrorSucceeded(name string, unionType string, operand string) {
-	fmt.Fprintf(&e.out, "  %s.code = extractvalue %s %s, %d\n",
-		name, unionType, operand, errorCodeField)
-	fmt.Fprintf(&e.out, "  %s = icmp eq i64 %s.code, 0\n", name, name)
+// writeErrorSucceeded names whether an error union holds a success: the
+// operand it is, or the one kept in memory at addr.
+func (e *emitter) writeErrorSucceeded(name string, source ir.Value, addr string) {
+	code := e.failureCode(name+".code", source, addr)
+	fmt.Fprintf(&e.out, "  %s = icmp eq i64 %s, 0\n", name, code)
 }
 
 // nextSyntheticValue returns a unique helper value name without a leading percent.
