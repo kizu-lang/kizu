@@ -1,0 +1,116 @@
+import std::float;
+import std::math;
+import std::testing;
+
+// ordered checks min, max and clamp on one pair with low < high, in both
+// argument orders, so each integer type is asked the same questions.
+fn ordered<T>(low: T, high: T) -> bool {
+    return math::min<T>(low, high) == low and math::min<T>(high, low) == low
+        and math::max<T>(low, high) == high and math::max<T>(high, low) == high
+        and math::min<T>(low, low) == low and math::max<T>(high, high) == high
+        and math::clamp<T>(low, low, high) == low and math::clamp<T>(high, low, high) == high
+        and math::clamp<T>(low, high, high) == high and math::clamp<T>(high, low, low) == low;
+}
+
+test "min and max return the smaller and the larger integer" {
+    testing::expect_equal<i64>(7, math::max<i64>(3, 7));
+    testing::expect_equal<i64>(3, math::min<i64>(3, 7));
+    testing::expect_equal<i64>(5, math::max<i64>(5, 5));
+    testing::expect_equal<i64>(5, math::min<i64>(5, 5));
+    let below: i32 = -4;
+    let above: i32 = 4;
+    testing::expect(math::max<i32>(below, above) == 4);
+    testing::expect(math::min<i32>(below, above) == -4);
+}
+
+test "min and max order a negative integer below a positive one" {
+    testing::expect_equal<i64>(4, math::max<i64>(-9, 4));
+    testing::expect_equal<i64>(-9, math::min<i64>(-9, 4));
+    testing::expect_equal<i64>(-1, math::max<i64>(-9, -1));
+    testing::expect_equal<i64>(0, math::max<i64>(-9, 0));
+}
+
+// 200 and 100 as a u8 are in that order; read as an i8 the first would be -56.
+test "min and max compare an unsigned integer as unsigned" {
+    let large: u8 = 200;
+    let small: u8 = 100;
+    testing::expect(math::max<u8>(large, small) == 200);
+    testing::expect(math::min<u8>(large, small) == 100);
+    let top = cast<u64>(1) << 63;
+    testing::expect(math::max<u64>(top, 1) == top);
+    testing::expect(math::min<u64>(top, 1) == 1);
+}
+
+test "clamp holds an integer within its bounds" {
+    testing::expect_equal<i64>(5, math::clamp<i64>(12, -5, 5));
+    testing::expect_equal<i64>(-5, math::clamp<i64>(-12, -5, 5));
+    testing::expect_equal<i64>(0, math::clamp<i64>(0, -5, 5));
+    testing::expect_equal<i64>(5, math::clamp<i64>(5, -5, 5));
+    let wide: i32 = 1000;
+    testing::expect(math::clamp<i32>(wide, -128, 127) == 127);
+    let level: u8 = 200;
+    testing::expect(math::clamp<u8>(level, 10, 150) == 150);
+    testing::expect(math::clamp<u8>(level, 10, 250) == 200);
+}
+
+test "abs negates a negative integer" {
+    testing::expect_equal<i64>(9, math::abs<i64>(-9));
+    testing::expect_equal<i64>(9, math::abs<i64>(9));
+    testing::expect_equal<i64>(0, math::abs<i64>(0));
+    let below: i32 = -4;
+    testing::expect(math::abs<i32>(below) == 4);
+    testing::expect(math::abs<i16>(-32767) == 32767);
+    testing::expect(math::abs<isize>(-3) == 3);
+}
+
+test "abs of an unsigned integer is the integer" {
+    let level: u8 = 200;
+    testing::expect(math::abs<u8>(level) == 200);
+    testing::expect(math::abs<u16>(65535) == 65535);
+    testing::expect(math::abs<u32>(0) == 0);
+    let top = cast<u64>(1) << 63;
+    testing::expect(math::abs<u64>(top) == top);
+    testing::expect(math::abs<usize>(7) == 7);
+}
+
+// The lowest value of a signed type has no positive counterpart in the type.
+// Negation wraps at the type's width (SPEC §6.9.2), so it comes back as it is.
+test "abs of the lowest signed integer wraps to itself" {
+    let lowest: i8 = -128;
+    testing::expect(math::abs<i8>(lowest) == lowest);
+    testing::expect(math::abs<i8>(lowest + 1) == 127);
+    testing::expect(math::abs<i16>(-32768) == -32768);
+    testing::expect(math::abs<i32>(-2147483648) == -2147483648);
+    let lowest_i64 = -9223372036854775807 - 1;
+    testing::expect_equal<i64>(lowest_i64, math::abs<i64>(lowest_i64));
+    testing::expect_equal<i64>(9223372036854775807, math::abs<i64>(lowest_i64 + 1));
+}
+
+test "every integer type takes min, max and clamp" {
+    testing::expect(ordered<i8>(-128, 127));
+    testing::expect(ordered<i16>(-32768, 32767));
+    testing::expect(ordered<i32>(-2147483648, 2147483647));
+    testing::expect(ordered<i64>(-9223372036854775807 - 1, 9223372036854775807));
+    testing::expect(ordered<isize>(-3, 3));
+    testing::expect(ordered<u8>(0, 255));
+    testing::expect(ordered<u16>(0, 65535));
+    testing::expect(ordered<u32>(0, 4294967295));
+    testing::expect(ordered<u64>(0, cast<u64>(1) << 63));
+    testing::expect(ordered<usize>(0, 9));
+}
+
+test "floats keep their own min, max, clamp and abs" {
+    testing::expect(math::min<f64>(math::nan<f64>(), 1.5) == 1.5);
+    testing::expect(math::max<f64>(1.5, math::nan<f64>()) == 1.5);
+    testing::expect(math::is_negative<f64>(math::min<f64>(0.0, -0.0)));
+    testing::expect(!math::is_negative<f64>(math::max<f64>(-0.0, 0.0)));
+    testing::expect(math::clamp<f64>(7.0, -1.0, 1.0) == 1.0);
+    testing::expect(float::is_nan(math::clamp<f64>(math::nan<f64>(), -1.0, 1.0)));
+    testing::expect(math::abs<f64>(-3.25) == 3.25);
+    testing::expect(!math::is_negative<f64>(math::abs<f64>(-0.0)));
+    let single: f32 = -2.5;
+    testing::expect(math::abs<f32>(single) == 2.5);
+    testing::expect(math::max<f32>(single, 1.5) == 1.5);
+    testing::expect(math::min<f32>(single, 1.5) == -2.5);
+    testing::expect(math::clamp<f32>(single, -1.0, 1.0) == -1.0);
+}
