@@ -144,8 +144,12 @@ type FunctionSignature struct {
 	// StaticParams is the `<...>` list. An entry with no declared type is a
 	// type parameter; one with a type is a compile-time value. Both are
 	// compile-time, which is why they live here and not in Params.
-	StaticParams   []StaticParam
-	Params         []Param
+	StaticParams []StaticParam
+	Params       []Param
+	// Variadic reports a parameter list that ends in `...`: a C variadic
+	// function, which takes further arguments after Params. Only an
+	// `extern "c" fn` declaration can say so.
+	Variadic       bool
 	ReturnType     typ.Type
 	RequiresUnsafe bool
 	ExternABI      string
@@ -238,9 +242,12 @@ func (d *FunctionDecl) String() string {
 		receiver = "(" + rest[0].String() + ") "
 		rest = rest[1:]
 	}
-	params := make([]string, 0, len(rest))
+	params := make([]string, 0, len(rest)+1)
 	for _, p := range rest {
 		params = append(params, p.String())
+	}
+	if d.Variadic {
+		params = append(params, "...")
 	}
 	ret := ""
 	if d.ReturnType != nil {

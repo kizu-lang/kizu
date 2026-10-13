@@ -970,6 +970,36 @@ func validateCHostFunctionTypes(
 		return cHostTypeError(fn.Span, fmt.Sprintf(
 			"C function `%s` returns `%s`, which C cannot produce", fn.Name, ret))
 	}
+	return validateCVariadicFunction(fn, params, ret, isExternStruct)
+}
+
+// validateCVariadicFunction refuses a C variadic declaration that passes or
+// returns a struct by value. The backend rewrites such a struct into the
+// registers or the memory the target's convention gives it (llvm/cabi.go),
+// so the declared parameters are no longer one LLVM parameter each, and a
+// variadic call has to say exactly where they end. A struct lent as `&S` is
+// one pointer and stays allowed.
+func validateCVariadicFunction(
+	fn ast.FunctionSignature,
+	params []Type,
+	ret Type,
+	isExternStruct func(Type) bool,
+) error {
+	if !fn.Variadic {
+		return nil
+	}
+	for index, param := range params {
+		if fn.Params[index].Borrow || fn.Params[index].MutBorrow || !isExternStruct(param) {
+			continue
+		}
+		return errorAt(fn.Span,
+			"type error: C variadic function `%s` parameter %d passes `%s` by value;"+
+				" lend it as `&%s`", fn.Name, index+1, param, param)
+	}
+	if isExternStruct(ret) {
+		return errorAt(fn.Span,
+			"type error: C variadic function `%s` cannot return `%s` by value", fn.Name, ret)
+	}
 	return nil
 }
 
@@ -4255,6 +4285,14 @@ func (c *Checker) checkIdentExpr(expr *ast.IdentExpr, env *scope) (Type, error) 
 	// A top-level function name is the one value a function pointer takes.
 	// There is nothing else to build one from: Kizu has no closures, so the
 	// name is checked here rather than through a conversion form.
+	if fn, ok := c.lookupFunctionByValueName(expr.Name); ok && fn.sig.Variadic {
+		return "", errorAt(
+			expr.Span,
+			"type error: C variadic function `%s` cannot be used as a function pointer;"+
+				" call it by name",
+			expr.Name,
+		)
+	}
 	if value, ok := c.functionPointerValue(expr.Name); ok {
 		if refused := cPointerRefusal(value); refused != "" {
 			return "", errorAt(expr.Span,
@@ -7221,15 +7259,83 @@ func (c *Checker) checkUserCall(
 	if len(fn.sig.TypeParamNames()) > 0 {
 		return "", errorf("type error: `%s` requires explicit static arguments", name)
 	}
-	if len(args) != len(fn.params) {
+	if fn.sig.Variadic {
+		if len(args) < len(fn.params) {
+			return "", errorf("type error: `%s` expects at least %d args, got %d",
+				name, len(fn.params), len(args))
+		}
+	} else if len(args) != len(fn.params) {
 		return "", userCallArityError(name, fn, len(args))
 	}
 	for idx, arg := range args {
+		if idx >= len(fn.params) {
+			if err := c.checkCVariadicArg(name, idx, arg, env, unsafe); err != nil {
+				return "", err
+			}
+			continue
+		}
 		if err := c.checkUserCallArg(name, fn, idx, arg, env, unsafe); err != nil {
 			return "", err
 		}
 	}
 	return fn.returnType, nil
+}
+
+// checkCVariadicArg validates one argument after the declared parameters of a
+// C variadic call. No parameter gives it a type, so it is the type the
+// expression has by itself, and it has to be one C reads back unchanged: C
+// widens a narrower integer, a `bool` and a `float` on the way in (the default
+// argument promotions), and Kizu converts nothing the source does not spell.
+func (c *Checker) checkCVariadicArg(
+	name string,
+	idx int,
+	arg ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) error {
+	got, err := c.checkExpr(arg, env, unsafe)
+	if err != nil {
+		return err
+	}
+	if cVariadicArgType(got) {
+		return nil
+	}
+	if fix := cVariadicPromotionFix(got); fix != "" {
+		return errorf("type error: arg %d of `%s` has type %s, which C promotes in a"+
+			" variadic call and Kizu does not; %s", idx+1, name, got, fix)
+	}
+	return errorf("type error: arg %d of `%s` has type %s, which a C variadic argument"+
+		" cannot carry; it takes `i32`, `u32`, `i64`, `u64`, `isize`, `usize`, `f64`,"+
+		" or a raw pointer", idx+1, name, got)
+}
+
+// cVariadicArgType reports the types a C variadic argument can have: the ones
+// the default argument promotions leave as they are.
+func cVariadicArgType(value Type) bool {
+	if isPointerType(value) {
+		return true
+	}
+	switch value {
+	case "i32", "u32", "i64", "u64", "isize", "usize", typeF64:
+		return true
+	default:
+		return false
+	}
+}
+
+// cVariadicPromotionFix says what to write for a type C would have promoted,
+// or "" when value is not one of those.
+func cVariadicPromotionFix(value Type) string {
+	switch value {
+	case "i8", "i16", typeU8, "u16":
+		return "write `cast<i32>(...)`"
+	case typeF32:
+		return "write `cast<f64>(...)`"
+	case typeBool:
+		return "pass an `i32`"
+	default:
+		return ""
+	}
 }
 
 // checkUserCallArg validates one declared function argument.

@@ -158,6 +158,12 @@ type Instr struct {
 	// declaration at the use site, so lowering records the same Param facts
 	// beside the call once rather than asking each backend to infer them.
 	CallParams []Param
+	// VariadicFixed is how many of Args a C variadic callee declares as
+	// parameters; the arguments after them are its variadic ones. It is zero
+	// for every other call, which a variadic declaration cannot be mistaken
+	// for: it names at least one parameter. A backend needs the split
+	// because C passes a variadic argument differently from a declared one.
+	VariadicFixed int
 	// Immediate is what the instruction carries that no value of its own
 	// spells: the text of a literal, the variant a union instruction selects,
 	// and the kind a cond_fail reports. A type argument is not among them --
@@ -195,7 +201,10 @@ type Cleanup struct {
 	// CallParams carries the declared passing of a foreign callee, which
 	// has no body here to read it from (Instr.CallParams).
 	CallParams []Param
-	OnError    bool
+	// VariadicFixed is the declared parameter count of a C variadic callee
+	// (Instr.VariadicFixed).
+	VariadicFixed int
+	OnError       bool
 	// Receiver is the receiver expression the cleanup statement was written
 	// with, which is how the ownership checker names a retired errdefer: one
 	// node per registration, so two registrations on one name stay apart.
@@ -247,6 +256,9 @@ type Signature struct {
 	// Unsafe carries the obligation the declaration named, so the type its
 	// name has as a value spells `unsafe fn(...)` the way the checker did.
 	Unsafe bool
+	// Variadic marks a C variadic function: a call passes further arguments
+	// after Params.
+	Variadic bool
 }
 
 // Param is one parameter of a callable: its SSA name, the type the callee sees,

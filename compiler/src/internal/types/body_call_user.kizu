@@ -8,6 +8,7 @@ struct CallableFacts {
     extern_call: bool,
     requires_unsafe: bool,
     has_type_params: bool,
+    variadic: bool,
     parameter_count: i64,
     return_type: Type,
 }
@@ -62,8 +63,13 @@ fn (self: &var Checker) check_user_call(
         try message.append_bytes(self.allocator, "` requires explicit static arguments");
         return try self.checker_message_at("type error", ast::zero_span(), move message);
     }
-    if args.len(tree) != facts.parameter_count {
-        return try self.user_call_arity_error(function_handle, name, args.len(tree));
+    let arg_count = args.len(tree);
+    if facts.variadic {
+        if arg_count < facts.parameter_count {
+            return try self.variadic_arity_error(name, facts.parameter_count, arg_count);
+        }
+    } else if arg_count != facts.parameter_count {
+        return try self.user_call_arity_error(function_handle, name, arg_count);
     }
     var index = 0;
     while index < facts.parameter_count {
@@ -80,7 +86,102 @@ fn (self: &var Checker) check_user_call(
         }
         index = index + 1;
     }
+    while index < arg_count {
+        let argument = args.get_or_panic(tree, index);
+        if try self.check_c_variadic_arg(tree, scope, name, index, argument) |problem| {
+            return move problem;
+        }
+        index = index + 1;
+    }
     out.* = facts.return_type;
+    return null;
+}
+
+// Reports a C variadic call that passes fewer arguments than the callee
+// declares parameters.
+fn (self: &Checker) variadic_arity_error(
+    name: []u8,
+    expected: i64,
+    got: i64
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit(self.allocator);
+    try message.append_byte(self.allocator, cast<u8>(96));
+    try message.append_bytes(self.allocator, name);
+    try message.append_bytes(self.allocator, "` expects at least ");
+    try fmt::append_i64(self.allocator, &var message, expected);
+    try message.append_bytes(self.allocator, " args, got ");
+    try fmt::append_i64(self.allocator, &var message, got);
+    return self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+// Validates one argument after the declared parameters of a C variadic call,
+// the Go `checkCVariadicArg`. No parameter gives it a type, so it is the type
+// the expression has by itself, and it has to be one C reads back unchanged:
+// C widens a narrower integer, a `bool` and a `float` on the way in (the
+// default argument promotions), and Kizu converts nothing the source does not
+// spell.
+fn (self: &var Checker) check_c_variadic_arg(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    name: []u8,
+    index: i64,
+    argument: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    var got = empty_type();
+    if try self.check_expr(tree, scope, argument, &var got) |problem| {
+        return move problem;
+    }
+    if c_variadic_arg_type(&self.types, got) {
+        return null;
+    }
+    var message = string::new(self.allocator);
+    errdefer message.deinit(self.allocator);
+    try message.append_bytes(self.allocator, "arg ");
+    try fmt::append_i64(self.allocator, &var message, index + 1);
+    try message.append_bytes(self.allocator, " of `");
+    try message.append_bytes(self.allocator, name);
+    try message.append_bytes(self.allocator, "` has type ");
+    try self.append_checker_type(&var message, got);
+    if c_variadic_promotion_fix(&self.types, got) |fix| {
+        try message.append_bytes(self.allocator,
+            ", which C promotes in a variadic call and Kizu does not; "
+        );
+        try message.append_bytes(self.allocator, fix);
+    } else {
+        try message.append_bytes(self.allocator,
+            ", which a C variadic argument cannot carry; it takes `i32`, `u32`, `i64`, `u64`, `isize`, `usize`, `f64`, or a raw pointer"
+        );
+    }
+    return try self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+// Reports the types a C variadic argument can have, the Go
+// `cVariadicArgType`: the ones the default argument promotions leave as they
+// are.
+fn c_variadic_arg_type(types: &TypeTable, value: Type) -> bool {
+    if types.is_pointer_type(value) {
+        return true;
+    }
+    return types.is_text(value, "i32") or types.is_text(value, "u32") or
+        types.is_text(value, "i64") or types.is_text(value, "u64") or
+        types.is_text(value, "isize") or types.is_text(value, "usize") or
+        types.is_text(value, "f64");
+}
+
+// Says what to write for a type C would have promoted, the Go
+// `cVariadicPromotionFix`, or null when value is not one of those.
+fn c_variadic_promotion_fix(types: &TypeTable, value: Type) -> ?[]u8 {
+    if types.is_text(value, "i8") or types.is_text(value, "i16") or
+        types.is_text(value, "u8") or types.is_text(value, "u16") {
+        return "write `cast<i32>(...)`";
+    }
+    if types.is_text(value, "f32") {
+        return "write `cast<f64>(...)`";
+    }
+    if types.is_text(value, "bool") {
+        return "pass an `i32`";
+    }
     return null;
 }
 
@@ -91,6 +192,7 @@ fn (self: &Checker) callable_facts(handle: FunctionHandle) -> ?CallableFacts {
             extern_call: mem::len(abi) > 0,
             requires_unsafe: function.signature.requires_unsafe,
             has_type_params: function_has_type_params(function),
+            variadic: function.signature.variadic,
             parameter_count: function.params.len(),
             return_type: function.return_type
         };

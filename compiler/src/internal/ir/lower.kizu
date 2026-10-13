@@ -51,6 +51,7 @@ pub struct FunctionFacts {
     pub link_library: Name,
     pub link_framework: Name,
     pub requires_unsafe: bool,
+    pub variadic: bool,
     pub body: ?ast::Block,
 }
 
@@ -480,6 +481,7 @@ pub fn new_lowerer_for_target(
             link_library: empty_name(),
             link_framework: empty_name(),
             requires_unsafe: false,
+            variadic: false,
             body: null
         })
     };
@@ -493,7 +495,8 @@ pub fn new_lowerer_for_target(
             params: array::new<Param>(allocator),
             return_type: empty_name(),
             pointer_type: empty_name(),
-            requires_unsafe: false
+            requires_unsafe: false,
+            variadic: false
         })
     };
     var storage_self_params = array::new<Param>(allocator);
@@ -506,7 +509,8 @@ pub fn new_lowerer_for_target(
             params: move storage_self_params,
             return_type: empty_name(),
             pointer_type: empty_name(),
-            requires_unsafe: false
+            requires_unsafe: false,
+            variadic: false
         })
     };
     var lowerer = Lowerer {
@@ -682,6 +686,7 @@ fn (self: &var Lowerer) function_facts(tree: &ast::Ast, function: &ast::Function
         link_library: try self.module.names.intern_text(tree, function.signature.link_library),
         link_framework: try self.module.names.intern_text(tree, function.signature.link_framework),
         requires_unsafe: function.signature.requires_unsafe,
+        variadic: function.signature.variadic,
         body: function.body
     };
     return FactsHandle { node: try self.decl_facts.add(self.allocator, move facts) };
@@ -874,6 +879,7 @@ fn (self: &var Lowerer) lower_tests(
             link_library: empty_name(),
             link_framework: empty_name(),
             requires_unsafe: false,
+            variadic: false,
             body: test.body
         };
         self.current_test_module = test.module;
@@ -1384,7 +1390,8 @@ fn (self: &var Lowerer) lower_signature(decl: FactsHandle) -> !SignatureHandle {
         params: move params,
         return_type: returned,
         pointer_type: pointer,
-        requires_unsafe: requires_unsafe
+        requires_unsafe: requires_unsafe,
+        variadic: self.decl_facts.at(decl.node).variadic
     });
     return SignatureHandle { node: handle };
 }
@@ -1471,6 +1478,17 @@ fn (self: &Lowerer) decl_body(decl: FactsHandle) -> ?ast::Block {
 /// Returns the return type of a signature.
 fn (self: &Lowerer) signature_return(signature: SignatureHandle) -> Name {
     return self.signature_nodes.at(signature.node).return_type;
+}
+
+/// Returns what a call to a signature records as its variadic_fixed, the Go
+/// `variadicFixed`: the declared parameter count of a C variadic function,
+/// zero for any other.
+fn (self: &Lowerer) signature_variadic_fixed(signature: SignatureHandle) -> i64 {
+    let node = self.signature_nodes.at(signature.node);
+    if !node.variadic {
+        return 0;
+    }
+    return node.params.len();
 }
 
 /// Returns one parameter of a signature, or null past the last.

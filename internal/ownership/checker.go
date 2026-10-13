@@ -5471,6 +5471,13 @@ func (c *Checker) checkCallableCall(
 	env *scope,
 	sanctioned bool,
 ) (string, error) {
+	// The arguments after a C variadic function's declared parameters are
+	// scalars and raw pointers, the only things the type checker lets through:
+	// they are read, and nothing about them moves or borrows.
+	var variadic []ast.Expression
+	if fn.sig.Variadic && len(args) > len(fn.params) {
+		args, variadic = args[:len(fn.params)], args[len(fn.params):]
+	}
 	if len(args) != len(fn.params) {
 		return "", errorf("move error: `%s` expects %d args, got %d",
 			name, len(fn.params), len(args))
@@ -5491,6 +5498,11 @@ func (c *Checker) checkCallableCall(
 	defer releaseTemporaryBorrows(borrowed)
 	for idx, arg := range args {
 		if err := c.checkUserCallArg(fn, idx, arg, env, sanctioned); err != nil {
+			return "", err
+		}
+	}
+	for _, arg := range variadic {
+		if _, err := c.readExpr(arg, env); err != nil {
 			return "", err
 		}
 	}

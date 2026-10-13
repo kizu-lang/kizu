@@ -1035,8 +1035,9 @@ func (l *lowerer) lowerSignature(sig ast.FunctionSignature) Signature {
 	returned := l.lowerReturnType(declaredReturn)
 	return Signature{
 		Params: params, Return: returned,
-		Pointer: l.declaredFunctionPointerType(sig, declaredReturn),
-		Unsafe:  sig.RequiresUnsafe,
+		Pointer:  l.declaredFunctionPointerType(sig, declaredReturn),
+		Unsafe:   sig.RequiresUnsafe,
+		Variadic: sig.Variadic,
 	}
 }
 
@@ -2700,9 +2701,20 @@ func (l *lowerer) lowerNamedCallExpr(name string, rawArgs []ast.Expression) (Val
 		instr.ExternName = external.name
 		// A foreign callee has no body in the module, so the call carries
 		// the passing its declaration decided, the way an indirect call does.
-		instr.CallParams = l.signatures[calleeName].Params
+		sig := l.signatures[calleeName]
+		instr.CallParams = sig.Params
+		instr.VariadicFixed = variadicFixed(sig)
 	}
 	return result, nil
+}
+
+// variadicFixed is what a call to sig records as its VariadicFixed: the
+// declared parameter count of a C variadic function, zero for any other.
+func variadicFixed(sig Signature) int {
+	if !sig.Variadic {
+		return 0
+	}
+	return len(sig.Params)
 }
 
 // lowerTypedNamedCallExpr lowers the small typed-call subset with backend support.

@@ -237,6 +237,7 @@ fn (self: &var Checker) function_pointer_handle(pointer: Name) -> !?FunctionHand
         receiver: false,
         has_extern_abi: false,
         c_abi: false,
+        variadic: false,
         requires_unsafe: unsafe_call,
         std: false,
         static_params: array::new<StaticParamInfo>(self.allocator),
@@ -290,7 +291,11 @@ fn (self: &var Checker) check_callable_call(
     let info = self.functions.at(function.index);
     let param_count = info.params.len();
     let count = arg_count(tree, args);
-    if count != param_count {
+    // The arguments after a C variadic function's declared parameters are
+    // scalars and raw pointers, the only things the type checker lets
+    // through: they are read, and nothing about them moves or borrows.
+    let variadic_tail = info.variadic and count > param_count;
+    if count != param_count and !variadic_tail {
         return try self.error3(
             tree, ast::zero_span(), "move error: `%s` expects %d args, got %d",
             Arg::Str(name), Arg::Int(param_count), Arg::Int(count)
@@ -317,8 +322,18 @@ fn (self: &var Checker) check_callable_call(
         return move failed;
     }
     var index = 0;
-    while arg_at(tree, args, index) |arg| {
+    while index < param_count {
+        let arg = arg_at(tree, args, index) orelse break;
         if try self.check_user_call_arg(tree, env, function, index, arg, sanctioned) |failed| {
+            errdefer failed.deinit(self.allocator);
+            try self.release_temporary_borrows(&borrowed);
+            return move failed;
+        }
+        index = index + 1;
+    }
+    while arg_at(tree, args, index) |arg| {
+        var ignored = empty_name();
+        if try self.read_expr(tree, env, arg, &var ignored) |failed| {
             errdefer failed.deinit(self.allocator);
             try self.release_temporary_borrows(&borrowed);
             return move failed;

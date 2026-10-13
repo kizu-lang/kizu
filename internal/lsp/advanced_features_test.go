@@ -37,6 +37,35 @@ func TestSignatureHelpReturnsFunctionAndMethodParameters(t *testing.T) {
 	requireSignature(t, methodHelp, "fn rename", "name: []u8", 0)
 }
 
+// TestVariadicDeclarationIsReadByEditorFeatures checks a C variadic
+// declaration and a call that passes arguments after its named parameters
+// are read by the features that walk a signature.
+func TestVariadicDeclarationIsReadByEditorFeatures(t *testing.T) {
+	source := `extern "c" fn printf(format: ptr<const u8>, ...) -> i32
+fn main() -> void {
+    let count: i32 = 3;
+    // SAFETY: the format reads two ints.
+    unsafe printf(c"%d %d", count, count);
+    return;
+}
+`
+	uri := "file:///main.kizu"
+	server := NewServer(nil, nil)
+	server.documents[uri] = source
+
+	// An argument past the named parameters has no parameter of its own, so
+	// the last named one stays active.
+	help := server.signatureHelp(uri, positionIn(source, "count, count)", "count"))
+	requireSignature(t, help, "fn printf", "format: ptr<const u8>", 0)
+	tokens := server.semanticTokens(uri)
+	if len(tokens.Data) == 0 || len(tokens.Data)%5 != 0 {
+		t.Fatalf("semantic tokens = %#v, want encoded 5-tuples", tokens.Data)
+	}
+	if diagnostics := server.checkedDocument(uri).Diagnostics; len(diagnostics) != 0 {
+		t.Fatalf("diagnostics = %#v, want none", diagnostics)
+	}
+}
+
 // TestSemanticTokensReturnClassifiedData checks semantic token encoding exists.
 func TestSemanticTokensReturnClassifiedData(t *testing.T) {
 	source := navigationFixture()

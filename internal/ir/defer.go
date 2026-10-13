@@ -170,6 +170,7 @@ func (l *lowerer) cleanupFromFunction(name string, args []Value) (Cleanup, error
 	cleanup := Cleanup{Op: "call." + name, Args: args, Loads: ownerLoads(args, sig.Params)}
 	if _, foreign := l.externDecls[name]; foreign {
 		cleanup.CallParams = sig.Params
+		cleanup.VariadicFixed = variadicFixed(sig)
 	}
 	if external, ok := l.externDecls[name]; ok {
 		cleanup.Op = "call." + external.name
@@ -348,6 +349,7 @@ func (l *lowerer) emitCleanups(cleanups []Cleanup) {
 			instr := l.block.Instrs[len(l.block.Instrs)-1]
 			instr.ExternABI = cleanup.ExternABI
 			instr.ExternName = cleanup.ExternName
+			instr.VariadicFixed = cleanup.VariadicFixed
 		}
 	}
 }

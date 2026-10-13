@@ -332,6 +332,12 @@ pub struct InstrNode {
     // this from the function it names; an indirect call has no declaration
     // at the use site, so lowering retains the Param facts beside it.
     pub call_params: array::Array<Param>,
+    // How many of args a C variadic callee declares as parameters; the
+    // arguments after them are its variadic ones. It is zero for every other
+    // call, which a variadic declaration cannot be mistaken for: it names at
+    // least one parameter. A backend needs the split because C passes a
+    // variadic argument differently from a declared one.
+    pub variadic_fixed: i64,
     // What the instruction carries that no value of its own spells: the text
     // of a literal, the variant a union instruction selects, and the kind a
     // cond_fail reports. A type argument is not among them -- a container
@@ -373,6 +379,9 @@ pub struct Cleanup {
     // `Cleanup.CallParams`, InstrNode.call_params).
     pub params_start: i64,
     pub params_len: i64,
+    // The declared parameter count of a C variadic callee
+    // (InstrNode.variadic_fixed).
+    pub variadic_fixed: i64,
     pub on_error: bool,
     // The receiver expression the cleanup statement was written with, which
     // is how the ownership checker names a retired errdefer: one node per
@@ -769,6 +778,9 @@ pub struct Signature {
     /// Carries the obligation the declaration named, so the type its name has
     /// as a value spells `unsafe fn(...)` the way the checker did.
     pub requires_unsafe: bool,
+    /// Marks a C variadic function: a call passes further arguments after
+    /// params.
+    pub variadic: bool,
 }
 
 /// Reports whether a parameter reading through an address is being handed
@@ -1070,6 +1082,7 @@ pub fn (self: &Module) blank_instr(result: Value, op: Op, operand: Name, immedia
         extern_abi: empty_name(),
         extern_name: empty_name(),
         call_params: array::new<Param>(allocator),
+        variadic_fixed: 0,
         immediate: immediate,
         fields: array::new<FieldArg>(allocator),
         incoming: array::new<Incoming>(allocator),
@@ -1140,6 +1153,14 @@ pub fn (self: &var Module) set_extern_call(instr: Instr, abi: Name, name: Name) 
     if self.instrs.at_mut(instr.node) |node| {
         node.extern_abi = abi;
         node.extern_name = name;
+    }
+    return;
+}
+
+/// Marks one foreign call as a C variadic one that declares fixed parameters.
+pub fn (self: &var Module) set_variadic_fixed(instr: Instr, fixed: i64) -> void {
+    if self.instrs.at_mut(instr.node) |node| {
+        node.variadic_fixed = fixed;
     }
     return;
 }

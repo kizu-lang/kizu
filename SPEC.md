@@ -2361,6 +2361,36 @@ extern "c" fn puts(s: ptr<const u8>) -> i32
 C 側に表現が無いので拒否します。byte 列は `ptr<const u8>` と `usize` の長さで
 渡します。C が NUL まで読む固定の名前は `c"..."`(§7)で書きます。
 
+C の可変長引数関数は、宣言の引数列の最後に `...` を書きます。
+
+```kizu
+extern "c" fn snprintf(buffer: ptr<u8>, size: usize, format: ptr<const u8>, ...) -> i32
+```
+
+* `...` は `extern "c" fn` 宣言の引数列の最後にだけ書け、前に名前付き引数が 1 つ以上
+  要ります。`...` の後ろに `,` は書けません。通常の関数、method、`export "c" fn`、
+  `extern "browser" fn`、関数 pointer 型(`fn(...)` / `extern "c" fn(...)`)には
+  書けません。
+* 呼び出しは名前付き引数を宣言どおりに渡し、その後ろに 0 個以上の引数を続けます。
+  `unsafe` が要るのは他の `extern "c" fn` と同じで、続けた引数の個数と型が callee の
+  読み方に合うこともその `unsafe` が引き受けます。
+* 続ける引数の型は `i32` / `u32` / `i64` / `u64` / `isize` / `usize` / `f64` と
+  raw pointer(`ptr<T>` / `ptr<const T>` / nullable raw pointer、`c"..."` を含む)
+  だけです。
+* C の default argument promotion はしません。`i8` / `i16` / `u8` / `u16` は
+  `cast<i32>(x)`、`f32` は `cast<f64>(x)` と書かなければ compile error です。`bool` も
+  渡せません。
+* 続ける引数の位置は期待型を与えません。整数 literal は `i64`、float literal は
+  `f64` です(§7)。C の `int` として読まれる引数は `cast<i32>(1)` か `i32` の
+  binding で渡します。
+* 可変長引数関数は `extern "c" struct` を値で受け取れず、値で返せません。`&S` /
+  `&var S` は取れます。
+* 可変長引数関数の名前は関数 pointer の値になりません。名前でだけ呼べます。
+* native target だけが呼べます。wasm32-wasi と wasm32-browser は `extern "c" fn` の
+  呼び出しを build error にします。
+* header import(`kizu import-c-header`)は可変長引数の prototype を変換しません。
+  宣言は手で書きます。
+
 ルール:
 
 * 未証明操作は `unsafe` マーカーに覆われていなければ compile error

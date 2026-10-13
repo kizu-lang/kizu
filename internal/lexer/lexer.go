@@ -112,6 +112,8 @@ func (l *Lexer) scanToken() token.Token {
 			break
 		}
 		tok = l.readCompoundToken(compoundTokens[l.ch])
+	case '.':
+		tok = l.readDotToken()
 	case '"':
 		tok.Type = token.String
 		tok.Literal = l.readString()
@@ -188,6 +190,26 @@ func (l *Lexer) twoCharToken(t token.Type) token.Token {
 	return token.Token{
 		Type:    t,
 		Literal: string([]rune{ch, l.ch}),
+		Source:  l.source,
+		Line:    line,
+		Column:  column,
+	}
+}
+
+// readDotToken reads the token a `.` starts: `...`, `..`, or the dot itself.
+// Three dots are one token, so a variadic marker is never a range with a
+// stray dot after it.
+func (l *Lexer) readDotToken() token.Token {
+	if l.peekChar() != '.' || l.peekRune(2) != '.' {
+		return l.readCompoundToken(compoundTokens[l.ch])
+	}
+	line := l.line
+	column := l.column
+	l.readChar()
+	l.readChar()
+	return token.Token{
+		Type:    token.Ellipsis,
+		Literal: string(token.Ellipsis),
 		Source:  l.source,
 		Line:    line,
 		Column:  column,

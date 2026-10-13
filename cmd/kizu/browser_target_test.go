@@ -248,6 +248,7 @@ fn main() -> !void {
 		{"coroutine", "../../examples/coro_suspend.kizu", "std::coro"},
 		{"socket", "../../examples/net_round_trip.kizu", "std::net"},
 		{"extern-c", "../../examples/user_allocator.kizu", "extern C"},
+		{"extern-c-variadic", "../../examples/c_variadic.kizu", "extern C"},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
