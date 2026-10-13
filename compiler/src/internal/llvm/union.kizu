@@ -32,30 +32,27 @@ fn (self: &var Emitter) write_union_new(module: &ir::Module, node: &ir::InstrNod
         if node.args.len() > 1 {
             return try self.fail0("llvm error: union.new expects at most one payload");
         }
-        let payload = node.args.get(0);
-        let result_name = try self.local_name(module, node.result.name);
-        if try self.write_inline_union(module, result_name, node.result.type_name, variant, payload) |failed| {
-            return move failed;
-        }
-        try self.set_value(module, node.result, result_name);
-        return null;
+        return self.write_inline_union(module, node, variant);
     }
     let union_shown = try self.own(module, node.result.type_name);
     let variant_shown = try self.own(module, node.immediate);
     return try self.fail2("llvm error: unknown union variant `%s::%s`", Arg::Str(union_shown), Arg::Str(variant_shown));
 }
 
-/// Materializes a `tag + inline payload storage` union value named
-/// result_name, the Go `writeInlineUnion`. It writes the active tag and, when
+/// Materializes the `tag + inline payload storage` union value a union.new
+/// makes, the Go `writeInlineUnion`. It writes the active tag and, when
 /// present, stores only the active variant's payload into the inline
-/// storage, leaving the inactive bytes uninitialized per the #991 ABI.
+/// storage, leaving the inactive bytes uninitialized per the #991 ABI. A
+/// union kept in memory (memory.kizu) is the slot it is built in, and any
+/// other is loaded out of it.
 fn (self: &var Emitter) write_inline_union(
     module: &ir::Module,
-    result_name: ir::Name,
-    union_ir_type: ir::Name,
-    variant: ir::UnionVariant,
-    payload: ?ir::Value
+    node: &ir::InstrNode,
+    variant: ir::UnionVariant
 ) -> !?diagnostic::Diagnostic {
+    let payload = node.args.get(0);
+    let result_name = try self.local_name(module, node.result.name);
+    let union_ir_type = node.result.type_name;
     if payload |value| {
         if ir::is_empty(variant.payload) {
             let union_shown = try self.own(module, union_ir_type);
@@ -98,13 +95,15 @@ fn (self: &var Emitter) write_inline_union(
         let payload_bytes = payload_text.as_bytes();
         if try self.type_layout(module, payload_bytes) |layout| {
             let payload_ptr = try self.suffixed(result_name, ".payload.ptr");
-            let info = try self.operand(module, value);
             try self.line3("  %s = getelementptr %s, ptr %s, i32 0, i32 1", Arg::Str(payload_ptr), Arg::Str(union_type), Arg::Str(slot_name));
-            let payload_type = try self.llvm_type(module, payload_bytes);
-            try self.line4(
-                "  store %s %s, ptr %s, align %d",
-                Arg::Str(payload_type), Arg::Str(info.operand), Arg::Str(payload_ptr), Arg::Int(layout.align)
-            );
+            if !try self.copied_from_memory(module, node, 0, payload_ptr) {
+                let info = try self.operand(module, value);
+                let payload_type = try self.llvm_type(module, payload_bytes);
+                try self.line4(
+                    "  store %s %s, ptr %s, align %d",
+                    Arg::Str(payload_type), Arg::Str(info.operand), Arg::Str(payload_ptr), Arg::Int(layout.align)
+                );
+            }
         } else {
             let variant_shown = try self.own(module, variant.name);
             let got = try self.own(module, value.type_name);
@@ -114,10 +113,15 @@ fn (self: &var Emitter) write_inline_union(
             );
         }
     }
+    if try self.kept_in_memory(module, node.result) {
+        try self.set_memory_value(module, node.result, slot_name);
+        return null;
+    }
     try self.line4(
         "  %s = load %s, ptr %s, align %d",
         Arg::Str(result_name), Arg::Str(union_type), Arg::Str(slot_name), Arg::Int(max_inline_payload_align())
     );
+    try self.set_value(module, node.result, result_name);
     return null;
 }
 
@@ -141,6 +145,9 @@ fn (self: &var Emitter) write_union_load(module: &ir::Module, node: &ir::InstrNo
         return try self.fail1("llvm error: union.load expects borrowed union, got `%s`", Arg::Str(shown));
     }
     let info = try self.operand(module, arg);
+    if try self.copied_into_memory(module, node.result, info.operand) {
+        return null;
+    }
     let result_name = try self.local_name(module, node.result.name);
     let union_type = try self.llvm_type(module, union_name);
     try self.line4(
@@ -158,10 +165,14 @@ fn (self: &var Emitter) write_union_tag(module: &ir::Module, node: &ir::InstrNod
         return try self.fail0("llvm error: union.tag expects union -> i64");
     }
     let arg = node.args.get_or_panic(0);
-    let info = try self.operand(module, arg);
     let result_name = try self.local_name(module, node.result.name);
-    let union_type = try self.llvm_type_of(module, arg.type_name);
-    try self.line3("  %s = extractvalue %s %s, 0", Arg::Str(result_name), Arg::Str(union_type), Arg::Str(info.operand));
+    if try self.address_arg(module, node, 0) |addr| {
+        try self.write_memory_tag(result_name, "i64", addr);
+    } else {
+        let info = try self.operand(module, arg);
+        let union_type = try self.llvm_type_of(module, arg.type_name);
+        try self.line3("  %s = extractvalue %s %s, 0", Arg::Str(result_name), Arg::Str(union_type), Arg::Str(info.operand));
+    }
     try self.set_value(module, node.result, result_name);
     return null;
 }
@@ -230,6 +241,10 @@ fn (self: &var Emitter) write_union_payload(module: &ir::Module, node: &ir::Inst
             let result_text = ir::name_text(&module.names, node.result.type_name);
             let result_type = result_text.as_bytes();
             if try self.type_layout(module, result_type) |layout| {
+                if try self.address_arg(module, node, 0) |addr| {
+                    try self.write_memory_field(module, node, addr, 1);
+                    return null;
+                }
                 let info = try self.operand(module, arg);
                 let llvm_union = try self.llvm_type_of(module, arg.type_name);
                 let result_name = try self.local_name(module, node.result.name);
@@ -241,6 +256,12 @@ fn (self: &var Emitter) write_union_payload(module: &ir::Module, node: &ir::Inst
                     Arg::Str(llvm_union), Arg::Str(info.operand), Arg::Str(slot_name), Arg::Int(max_inline_payload_align())
                 );
                 try self.line3("  %s = getelementptr %s, ptr %s, i32 0, i32 1", Arg::Str(payload_ptr), Arg::Str(llvm_union), Arg::Str(slot_name));
+                // The slot is this instruction's own, so a payload kept in
+                // memory is where it already lies.
+                if try self.kept_in_memory(module, node.result) {
+                    try self.set_memory_value(module, node.result, payload_ptr);
+                    return null;
+                }
                 let payload_type = try self.llvm_type(module, result_type);
                 try self.line4(
                     "  %s = load %s, ptr %s, align %d",

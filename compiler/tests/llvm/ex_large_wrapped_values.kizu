@@ -1,0 +1,3557 @@
+import std::array;
+import std::mem;
+
+// An optional, an error union or a tagged union around a large value is
+// still a value. Opening one yields the payload it held at that moment:
+// whatever is written afterwards to the place the wrapper was read from does
+// not reach the payload, and a wrapper copied out of a place keeps what that
+// place held. That holds for a field, a local, a by-value receiver or
+// argument, an array element, and a value a loop reads again.
+
+struct Grid {
+    cells: [24]f64,
+    marks: [24]i64,
+}
+
+struct Holder {
+    slot: ?Grid,
+    spare: ?Grid,
+    count: i64,
+}
+
+// An optional of a struct that holds a function is the struct itself, with
+// an absent function standing for the absent value.
+struct Tool {
+    apply: fn(i64) -> i64,
+    table: [24]i64,
+}
+
+struct Chest {
+    tool: ?Tool,
+    uses: i64,
+}
+
+error Fault {
+    Empty,
+    Odd,
+}
+
+union Shape {
+    Dot,
+    Line(i64),
+    Sheet(Grid),
+}
+
+fn fresh(seed: i64) -> Grid {
+    var grid = Grid { cells: [24]f64{}, marks: [24]i64{} };
+    for 0..24 |i| {
+        grid.marks[i] = seed + i;
+        grid.cells[i] = cast<f64>(seed * i) + 0.5;
+    }
+    return grid;
+}
+
+fn maybe(seed: i64) -> ?Grid {
+    if seed < 0 {
+        return null;
+    }
+    return fresh(seed);
+}
+
+fn checked(seed: i64) -> Fault!Grid {
+    if seed == 0 {
+        return Fault::Empty;
+    }
+    if seed % 2 == 1 {
+        return Fault::Odd;
+    }
+    return fresh(seed);
+}
+
+fn double(value: i64) -> i64 {
+    return value * 2;
+}
+
+fn triple(value: i64) -> i64 {
+    return value * 3;
+}
+
+fn tool(apply: fn(i64) -> i64, seed: i64) -> Tool {
+    var made = Tool { apply: apply, table: [24]i64{} };
+    for 0..24 |i| {
+        made.table[i] = seed + i;
+    }
+    return made;
+}
+
+// A by-value receiver opens the optional it was called with.
+fn (self: Holder) first() -> i64 {
+    if self.slot |grid| {
+        return grid.marks[0] + self.count;
+    }
+    return -1;
+}
+
+fn (self: Holder) either(i: i64) -> i64 {
+    let spare = self.spare orelse return -2;
+    let grid = self.slot orelse spare;
+    return grid.marks[i];
+}
+
+fn (self: &Holder) borrowed() -> i64 {
+    if self.spare |grid| {
+        return grid.marks[1];
+    }
+    return -3;
+}
+
+// The argument is the holder as it was at the call. The borrow reaches the
+// same local, and emptying it does not empty the argument.
+fn count_before(seen: Holder, live: &var Holder) -> i64 {
+    live.slot = null;
+    live.count = live.count + 100;
+    if seen.slot |grid| {
+        return grid.marks[2] + seen.count;
+    }
+    return -4;
+}
+
+fn (self: Chest) run(i: i64) -> i64 {
+    if self.tool |held| {
+        let apply = held.apply;
+        return apply(held.table[i]) + self.uses;
+    }
+    return -5;
+}
+
+// A tool read whole out of the chest the call was made with is that tool.
+fn (self: Chest) tool_or(other: Tool) -> Tool {
+    return self.tool orelse other;
+}
+
+fn weigh(shape: &Shape) -> i64 {
+    match shape {
+        Dot => return 0,
+        Line(length) => return length,
+        Sheet(grid) => return grid.marks[2] + grid.marks[3],
+    }
+}
+
+fn weigh_value(shape: Shape) -> i64 {
+    match shape {
+        Dot => return 1,
+        Line(length) => return length + 1,
+        Sheet(grid) => return grid.marks[4],
+    }
+}
+
+// The union is copied out of the borrow, and replacing what it was copied
+// from afterwards leaves the payload the copy holds.
+fn replace_then_read(shape: &var Shape, next: Shape) -> i64 {
+    let seen = shape.*;
+    shape.* = next;
+    match seen {
+        Sheet(grid) => return grid.marks[5],
+        Line(length) => return length,
+        Dot => return -6,
+    }
+}
+
+fn code(failure: Fault) -> i64 {
+    return match failure {
+        Empty => -10,
+        Odd => -11,
+    };
+}
+
+fn forward(seed: i64) -> Fault!i64 {
+    let grid = try checked(seed);
+    return grid.marks[5];
+}
+
+// A failure passes through unchanged, payload and all.
+fn again(seed: i64) -> Fault!Grid {
+    let grid = try checked(seed);
+    return grid;
+}
+
+fn main() -> !void {
+    var holder = Holder { slot: maybe(10), spare: maybe(-1), count: 3 };
+    print(holder.first());
+    print(holder.either(2));
+    print(holder.borrowed());
+
+    // The payload is what the optional held when it was opened.
+    if holder.slot |grid| {
+        holder.slot = null;
+        holder.count = 9;
+        print(grid.marks[0]);
+    }
+    print(holder.first());
+
+    // An optional copied out of a field keeps what the field held.
+    holder.spare = fresh(40);
+    let kept = holder.spare;
+    holder.spare = maybe(70);
+    if kept |grid| {
+        print(grid.marks[1]);
+    }
+    print(holder.borrowed());
+    print(holder.either(3));
+
+    // Wrapping a value copies it; the two then change apart.
+    var loose = fresh(200);
+    holder.slot = loose;
+    loose.marks[0] = -1;
+    print(holder.first());
+    print(loose.marks[0]);
+    print(count_before(holder, &var holder));
+    print(holder.first());
+    print(holder.count);
+
+    // An optional that needs no tag behaves the same way.
+    var chest = Chest { tool: tool(double, 5), uses: 1 };
+    print(chest.run(2));
+    let lent = chest.tool;
+    chest.tool = tool(triple, 9);
+    chest.uses = 2;
+    if lent |held| {
+        let apply = held.apply;
+        print(apply(held.table[3]));
+    }
+    print(chest.run(0));
+    print(chest.tool_or(tool(double, 30)).table[4]);
+    chest.tool = null;
+    print(chest.run(0));
+    print(chest.tool_or(tool(double, 30)).table[4]);
+
+    // A local error union, opened three ways.
+    var result = checked(4);
+    if result |grid| {
+        result = checked(1);
+        print(grid.marks[0]);
+    } else |failure| {
+        print(code(failure));
+    }
+    if result |grid| {
+        print(grid.marks[0]);
+    } else |failure| {
+        print(code(failure));
+    }
+    let fallback = checked(0) catch fresh(500);
+    print(fallback.marks[1]);
+    print(forward(6) catch -1);
+    print(forward(3) catch -1);
+    let passed = again(8) catch fresh(0);
+    print(passed.marks[2]);
+    if again(0) |grid| {
+        print(grid.marks[0]);
+    } else |failure| {
+        print(code(failure));
+    }
+
+    // A union's payload is read out of the union as it was matched.
+    var shape = Shape::Sheet(fresh(20));
+    print(weigh(shape));
+    print(weigh_value(shape));
+    match shape {
+        Sheet(grid) => {
+            shape = Shape::Line(77);
+            print(grid.marks[0]);
+        },
+        _ => print(-1),
+    }
+    print(weigh(shape));
+    shape = Shape::Sheet(loose);
+    loose.marks[5] = -2;
+    print(replace_then_read(&var shape, Shape::Line(8)));
+    print(replace_then_read(&var shape, Shape::Dot));
+    print(weigh_value(shape));
+
+    // The same through the elements of a fixed array and a loop.
+    var row = [3]Holder{
+        Holder { slot: maybe(1), spare: maybe(-1), count: 0 },
+        Holder { slot: maybe(-1), spare: maybe(2), count: 1 },
+        Holder { slot: maybe(3), spare: maybe(4), count: 2 },
+    };
+    var total = 0;
+    for 0..3 |i| {
+        if row[i].slot |grid| {
+            row[i].slot = null;
+            total = total + grid.marks[i];
+        } else {
+            row[i].slot = fresh(100 + i);
+        }
+    }
+    print(total);
+    for 0..3 |i| {
+        if row[i].slot |grid| {
+            total = total + grid.marks[0];
+        }
+        let each = row[i];
+        row[i].spare = null;
+        total = total + each.first() + each.either(i);
+    }
+    print(total);
+
+    // And through the elements of a growable array.
+    let allocator = mem::page_allocator();
+    var shapes = array::new<Shape>(allocator);
+    defer shapes.deinit(allocator);
+    try shapes.append(allocator, Shape::Sheet(fresh(7)));
+    try shapes.append(allocator, Shape::Line(5));
+    try shapes.append(allocator, shape);
+    var sum = 0;
+    for 0..shapes.len() |i| {
+        let each = shapes.get_or_panic(i);
+        try shapes.set(i, Shape::Line(i));
+        sum = sum + weigh_value(each) + weigh(each);
+    }
+    print(sum);
+    for 0..shapes.len() |i| {
+        sum = sum + weigh_value(shapes.get_or_panic(i));
+    }
+    print(sum);
+    return;
+}
+
+// run
+// features: optional error-union union match struct stack-buffer std-array copy mutable-borrow
+// output:
+// 13
+// -2
+// -3
+// 10
+// -1
+// 41
+// 71
+// 73
+// 209
+// -1
+// 211
+// -1
+// 109
+// 15
+// 16
+// 29
+// 13
+// -5
+// 34
+// 4
+// -11
+// 501
+// 11
+// -1
+// 10
+// -10
+// 45
+// 24
+// 20
+// 77
+// 205
+// 8
+// 1
+// 6
+// 313
+// 42
+// 48
+
+// llvm
+// emit:
+// ; Kizu LLVM IR
+// %kizu.slice.u8 = type { ptr, i64 }
+// %kizu.opt.Grid = type { i8, %kizu.struct.Grid }
+// 
+// %kizu.error.void = type { i64 }
+// %kizu.error.Fault.Grid = type { i64, %kizu.struct.Grid }
+// %kizu.error.Fault.i64 = type { i64, i64 }
+// %kizu.error.std__array__Error.void = type { i64 }
+// %kizu.error.std__mem__Error.void = type { i64 }
+// 
+// %kizu.union.Shape = type { i64, [48 x i64] }
+// %kizu.union.std__mem__Limit = type { i64, [1 x i64] }
+// 
+// %kizu.struct.Chest = type { %kizu.struct.Tool, i64 }
+// %kizu.struct.Grid = type { [24 x double], [24 x i64] }
+// %kizu.struct.Holder = type { %kizu.opt.Grid, %kizu.opt.Grid, i64 }
+// %kizu.struct.Tool = type { ptr, [24 x i64] }
+// %kizu.struct.std__float__Big = type { %kizu.array }
+// %kizu.struct.std__float__Decimal = type { %kizu.array, i64 }
+// %kizu.struct.std__float__Scan = type { %kizu.slice.u8, i64 }
+// %kizu.struct.std__mem__AllocatorHeader = type { i64, i64, i64, i64 }
+// %kizu.struct.std__mem__BytesIter = type { %kizu.slice.u8, i64 }
+// %kizu.struct.std__string__Scalar = type { i64, i64 }
+// %kizu.struct.std__string__String = type { %kizu.array }
+// %kizu.struct.std__string__TrimBounds = type { i64, i64 }
+// 
+// @.kizu.error.name.1 = private unnamed_addr constant [31 x i8] c"std::array::Error::OutOfBounds\00"
+// @.kizu.error.name.73 = private unnamed_addr constant [29 x i8] c"std::mem::Error::OutOfMemory\00"
+// @.kizu.error.name.96 = private unnamed_addr constant [34 x i8] c"std::string::Error::InvalidLength\00"
+// @.kizu.error.name.107 = private unnamed_addr constant [13 x i8] c"Fault::Empty\00"
+// @.kizu.error.name.108 = private unnamed_addr constant [11 x i8] c"Fault::Odd\00"
+// @.kizu.error.names = private unnamed_addr constant [109 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr @.kizu.error.name.1, i64 30 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr @.kizu.error.name.73, i64 28 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr @.kizu.error.name.96, i64 33 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr @.kizu.error.name.107, i64 12 }, { ptr, i64 } { ptr @.kizu.error.name.108, i64 10 }]
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// %kizu.array = type { ptr, i64, i64 }
+// declare { ptr, i64 } @kizu_array_grow(ptr, ptr, i64, i64, i64)
+// declare i1 @kizu_array_append_bytes(ptr, ptr, ptr, i64)
+// declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)
+// declare i1 @kizu_array_reserve(ptr, ptr, i64, i64)
+// declare void @kizu_array_deinit(ptr, ptr, i64)
+// 
+// declare %kizu.error.std__mem__Error.void @std__array__Array.append.Shape(ptr, ptr, %kizu.union.Shape)
+// declare %kizu.union.Shape @std__array__Array.get_or_panic.Shape(ptr, i64)
+// declare i64 @std__array__Array.len.Shape(ptr)
+// declare %kizu.error.std__array__Error.void @std__array__Array.set.Shape(ptr, i64, %kizu.union.Shape)
+// declare void @std__fmt__print.i64(i64)
+// declare ptr @std__mem__page_allocator()
+// 
+// declare void @kizu_panic_bounds(i64, i64, i64, i64)
+// 
+// declare i1 @llvm.expect.i1(i1, i1)
+// 
+// attributes #0 = { "probe-stack"="inline-asm" "stack-probe-size"="4096" }
+// 
+// define internal %kizu.struct.Grid @fresh(i64 %kizu.seed) #0 {
+// entry:
+//   %kizu.4 = alloca %kizu.struct.Grid
+//   %kizu.3.field0 = insertvalue %kizu.struct.Grid zeroinitializer, [24 x double] zeroinitializer, 0
+//   %kizu.3 = insertvalue %kizu.struct.Grid %kizu.3.field0, [24 x i64] zeroinitializer, 1
+//   store %kizu.struct.Grid %kizu.3, ptr %kizu.4
+//   br label %for.header.1
+// for.header.1:
+//   %kizu.7 = phi i64 [ 0, %entry ], [ %kizu.31, %for.step.3 ]
+//   %kizu.8 = icmp slt i64 %kizu.7, 24
+//   br i1 %kizu.8, label %for.body.2, label %for.end.4
+// for.body.2:
+//   %kizu.9 = add i64 %kizu.seed, %kizu.7
+//   %kizu.10 = getelementptr %kizu.struct.Grid, ptr %kizu.4, i32 0, i32 1
+//   %kizu.11 = getelementptr %kizu.struct.Grid, ptr %kizu.4, i32 0, i32 1
+//   %kizu.15 = icmp uge i64 %kizu.7, 24
+//   br i1 %kizu.15, label %kizu.check.1.fail, label %kizu.check.1.pass
+// kizu.check.1.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.7, i64 24, i64 48, i64 19)
+//   unreachable
+// kizu.check.1.pass:
+//   %kizu.16 = getelementptr inbounds [24 x i64], ptr %kizu.11, i64 0, i64 %kizu.7
+//   store i64 %kizu.9, ptr %kizu.16, !tbaa !6
+//   %kizu.18 = mul i64 %kizu.seed, %kizu.7
+//   %kizu.19 = sitofp i64 %kizu.18 to double
+//   %kizu.21 = fadd double %kizu.19, 0x3FE0000000000000
+//   %kizu.22 = getelementptr %kizu.struct.Grid, ptr %kizu.4, i32 0, i32 0
+//   %kizu.23 = getelementptr %kizu.struct.Grid, ptr %kizu.4, i32 0, i32 0
+//   %kizu.27 = icmp uge i64 %kizu.7, 24
+//   br i1 %kizu.27, label %kizu.check.2.fail, label %kizu.check.2.pass
+// kizu.check.2.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.7, i64 24, i64 49, i64 19)
+//   unreachable
+// kizu.check.2.pass:
+//   %kizu.28 = getelementptr inbounds [24 x double], ptr %kizu.23, i64 0, i64 %kizu.7
+//   store double %kizu.21, ptr %kizu.28, !tbaa !6
+//   br label %for.step.3
+// for.step.3:
+//   %kizu.31 = add i64 %kizu.7, 1
+//   br label %for.header.1
+// for.end.4:
+//   %kizu.32 = load %kizu.struct.Grid, ptr %kizu.4
+//   ret %kizu.struct.Grid %kizu.32
+// }
+// 
+// define internal %kizu.opt.Grid @maybe(i64 %kizu.seed) #0 {
+// entry:
+//   %kizu.2 = icmp slt i64 %kizu.seed, 0
+//   br i1 %kizu.2, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.3 = insertvalue %kizu.opt.Grid zeroinitializer, i8 0, 0
+//   %kizu.return.join.arm0.f0 = extractvalue %kizu.opt.Grid %kizu.3, 0
+//   %kizu.return.join.arm0.f1 = extractvalue %kizu.opt.Grid %kizu.3, 1
+//   br label %kizu.return.join
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.4 = call %kizu.struct.Grid @fresh(i64 %kizu.seed)
+//   %kizu.5.some = insertvalue %kizu.opt.Grid zeroinitializer, i8 1, 0
+//   %kizu.5 = insertvalue %kizu.opt.Grid %kizu.5.some, %kizu.struct.Grid %kizu.4, 1
+//   %kizu.return.join.arm1.f0 = extractvalue %kizu.opt.Grid %kizu.5, 0
+//   %kizu.return.join.arm1.f1 = extractvalue %kizu.opt.Grid %kizu.5, 1
+//   br label %kizu.return.join
+// kizu.return.join:
+//   %kizu.return.join.f0 = phi i8 [ %kizu.return.join.arm0.f0, %if.then.1 ], [ %kizu.return.join.arm1.f0, %if.end.3 ]
+//   %kizu.return.join.f1 = phi %kizu.struct.Grid [ %kizu.return.join.arm0.f1, %if.then.1 ], [ %kizu.return.join.arm1.f1, %if.end.3 ]
+//   %kizu.return.join.built0 = insertvalue %kizu.opt.Grid zeroinitializer, i8 %kizu.return.join.f0, 0
+//   %kizu.return.join.built1 = insertvalue %kizu.opt.Grid %kizu.return.join.built0, %kizu.struct.Grid %kizu.return.join.f1, 1
+//   ret %kizu.opt.Grid %kizu.return.join.built1
+// }
+// 
+// define internal %kizu.error.Fault.Grid @checked(i64 %kizu.seed) #0 {
+// entry:
+//   %kizu.2 = icmp eq i64 %kizu.seed, 0
+//   br i1 %kizu.2, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.4 = insertvalue %kizu.error.Fault.Grid zeroinitializer, i64 107, 0
+//   %kizu.return.join.arm0.f0 = extractvalue %kizu.error.Fault.Grid %kizu.4, 0
+//   %kizu.return.join.arm0.f1 = extractvalue %kizu.error.Fault.Grid %kizu.4, 1
+//   br label %kizu.return.join
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.6 = srem i64 %kizu.seed, 2
+//   %kizu.8 = icmp eq i64 %kizu.6, 1
+//   br i1 %kizu.8, label %if.then.4, label %if.else.5
+// if.then.4:
+//   %kizu.10 = insertvalue %kizu.error.Fault.Grid zeroinitializer, i64 108, 0
+//   %kizu.return.join.arm1.f0 = extractvalue %kizu.error.Fault.Grid %kizu.10, 0
+//   %kizu.return.join.arm1.f1 = extractvalue %kizu.error.Fault.Grid %kizu.10, 1
+//   br label %kizu.return.join
+// if.else.5:
+//   br label %if.end.6
+// if.end.6:
+//   %kizu.11 = call %kizu.struct.Grid @fresh(i64 %kizu.seed)
+//   %kizu.12 = insertvalue %kizu.error.Fault.Grid zeroinitializer, %kizu.struct.Grid %kizu.11, 1
+//   %kizu.return.join.arm2.f0 = extractvalue %kizu.error.Fault.Grid %kizu.12, 0
+//   %kizu.return.join.arm2.f1 = extractvalue %kizu.error.Fault.Grid %kizu.12, 1
+//   br label %kizu.return.join
+// kizu.return.join:
+//   %kizu.return.join.f0 = phi i64 [ %kizu.return.join.arm0.f0, %if.then.1 ], [ %kizu.return.join.arm1.f0, %if.then.4 ], [ %kizu.return.join.arm2.f0, %if.end.6 ]
+//   %kizu.return.join.f1 = phi %kizu.struct.Grid [ %kizu.return.join.arm0.f1, %if.then.1 ], [ %kizu.return.join.arm1.f1, %if.then.4 ], [ %kizu.return.join.arm2.f1, %if.end.6 ]
+//   %kizu.return.join.built0 = insertvalue %kizu.error.Fault.Grid zeroinitializer, i64 %kizu.return.join.f0, 0
+//   %kizu.return.join.built1 = insertvalue %kizu.error.Fault.Grid %kizu.return.join.built0, %kizu.struct.Grid %kizu.return.join.f1, 1
+//   ret %kizu.error.Fault.Grid %kizu.return.join.built1
+// }
+// 
+// define internal i64 @double(i64 %kizu.value) #0 {
+// entry:
+//   %kizu.2 = mul i64 %kizu.value, 2
+//   ret i64 %kizu.2
+// }
+// 
+// define internal i64 @triple(i64 %kizu.value) #0 {
+// entry:
+//   %kizu.2 = mul i64 %kizu.value, 3
+//   ret i64 %kizu.2
+// }
+// 
+// define internal %kizu.struct.Tool @tool(ptr %kizu.apply, i64 %kizu.seed) #0 {
+// entry:
+//   %kizu.3 = alloca %kizu.struct.Tool
+//   %kizu.2.field0 = insertvalue %kizu.struct.Tool zeroinitializer, ptr %kizu.apply, 0
+//   %kizu.2 = insertvalue %kizu.struct.Tool %kizu.2.field0, [24 x i64] zeroinitializer, 1
+//   store %kizu.struct.Tool %kizu.2, ptr %kizu.3
+//   br label %for.header.1
+// for.header.1:
+//   %kizu.6 = phi i64 [ 0, %entry ], [ %kizu.18, %for.step.3 ]
+//   %kizu.7 = icmp slt i64 %kizu.6, 24
+//   br i1 %kizu.7, label %for.body.2, label %for.end.4
+// for.body.2:
+//   %kizu.8 = add i64 %kizu.seed, %kizu.6
+//   %kizu.9 = getelementptr %kizu.struct.Tool, ptr %kizu.3, i32 0, i32 1
+//   %kizu.10 = getelementptr %kizu.struct.Tool, ptr %kizu.3, i32 0, i32 1
+//   %kizu.14 = icmp uge i64 %kizu.6, 24
+//   br i1 %kizu.14, label %kizu.check.1.fail, label %kizu.check.1.pass
+// kizu.check.1.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.6, i64 24, i64 82, i64 19)
+//   unreachable
+// kizu.check.1.pass:
+//   %kizu.15 = getelementptr inbounds [24 x i64], ptr %kizu.10, i64 0, i64 %kizu.6
+//   store i64 %kizu.8, ptr %kizu.15, !tbaa !6
+//   br label %for.step.3
+// for.step.3:
+//   %kizu.18 = add i64 %kizu.6, 1
+//   br label %for.header.1
+// for.end.4:
+//   %kizu.19 = load %kizu.struct.Tool, ptr %kizu.3
+//   ret %kizu.struct.Tool %kizu.19
+// }
+// 
+// define internal i64 @Holder.first(ptr noalias nocapture readonly %kizu.self.addr) #0 {
+// entry:
+//   %kizu.5 = alloca [24 x i64]
+//   %kizu.1.addr = getelementptr %kizu.struct.Holder, ptr %kizu.self.addr, i32 0, i32 0
+//   %kizu.2.addr = getelementptr %kizu.opt.Grid, ptr %kizu.1.addr, i32 0, i32 1
+//   %kizu.3.tag = load i8, ptr %kizu.1.addr
+//   %kizu.3 = icmp ne i8 %kizu.3.tag, 0
+//   br i1 %kizu.3, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.4.addr = getelementptr %kizu.struct.Grid, ptr %kizu.2.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.5, ptr %kizu.4.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.10 = icmp uge i64 0, 24
+//   br i1 %kizu.10, label %kizu.check.1.fail, label %kizu.check.1.pass
+// kizu.check.1.fail:
+//   call void @kizu_panic_bounds(i64 0, i64 24, i64 90, i64 26)
+//   unreachable
+// kizu.check.1.pass:
+//   %kizu.11 = getelementptr inbounds [24 x i64], ptr %kizu.5, i64 0, i64 0
+//   %kizu.12 = load i64, ptr %kizu.11, !tbaa !6
+//   %kizu.13.addr = getelementptr %kizu.struct.Holder, ptr %kizu.self.addr, i32 0, i32 2
+//   %kizu.13 = load i64, ptr %kizu.13.addr, !tbaa !6
+//   %kizu.14 = add i64 %kizu.12, %kizu.13
+//   ret i64 %kizu.14
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.16 = sub i64 0, 1
+//   ret i64 %kizu.16
+// }
+// 
+// define internal i64 @Holder.either(ptr noalias nocapture readonly %kizu.self.addr, i64 %kizu.i) #0 {
+// entry:
+//   %kizu.11 = alloca [24 x i64]
+//   %kizu.1.addr = getelementptr %kizu.struct.Holder, ptr %kizu.self.addr, i32 0, i32 1
+//   %kizu.2.tag = load i8, ptr %kizu.1.addr
+//   %kizu.2 = icmp ne i8 %kizu.2.tag, 0
+//   br i1 %kizu.2, label %guard.some.1, label %guard.exit.2
+// guard.some.1:
+//   %kizu.5.addr = getelementptr %kizu.opt.Grid, ptr %kizu.1.addr, i32 0, i32 1
+//   %kizu.5 = load %kizu.struct.Grid, ptr %kizu.5.addr
+//   %kizu.6.addr = getelementptr %kizu.struct.Holder, ptr %kizu.self.addr, i32 0, i32 0
+//   %kizu.7.tag = load i8, ptr %kizu.6.addr
+//   %kizu.7 = icmp ne i8 %kizu.7.tag, 0
+//   br i1 %kizu.7, label %orelse.some.3, label %orelse.else.4
+// guard.exit.2:
+//   %kizu.4 = sub i64 0, 2
+//   ret i64 %kizu.4
+// orelse.some.3:
+//   %kizu.8.addr = getelementptr %kizu.opt.Grid, ptr %kizu.6.addr, i32 0, i32 1
+//   %kizu.8 = load %kizu.struct.Grid, ptr %kizu.8.addr
+//   br label %orelse.end.5
+// orelse.else.4:
+//   br label %orelse.end.5
+// orelse.end.5:
+//   %kizu.9 = phi %kizu.struct.Grid [ %kizu.8, %orelse.some.3 ], [ %kizu.5, %orelse.else.4 ]
+//   %kizu.10 = extractvalue %kizu.struct.Grid %kizu.9, 1
+//   store [24 x i64] %kizu.10, ptr %kizu.11
+//   %kizu.15 = icmp uge i64 %kizu.i, 24
+//   br i1 %kizu.15, label %kizu.check.1.fail, label %kizu.check.1.pass
+// kizu.check.1.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.i, i64 24, i64 98, i64 22)
+//   unreachable
+// kizu.check.1.pass:
+//   %kizu.16 = getelementptr inbounds [24 x i64], ptr %kizu.11, i64 0, i64 %kizu.i
+//   %kizu.17 = load i64, ptr %kizu.16, !tbaa !6
+//   ret i64 %kizu.17
+// }
+// 
+// define internal i64 @Holder.borrowed(ptr noalias nocapture readonly %kizu.self.addr) #0 {
+// entry:
+//   %kizu.5 = alloca [24 x i64]
+//   %kizu.1.addr = getelementptr %kizu.struct.Holder, ptr %kizu.self.addr, i32 0, i32 1
+//   %kizu.2.addr = getelementptr %kizu.opt.Grid, ptr %kizu.1.addr, i32 0, i32 1
+//   %kizu.3.tag = load i8, ptr %kizu.1.addr
+//   %kizu.3 = icmp ne i8 %kizu.3.tag, 0
+//   br i1 %kizu.3, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.4.addr = getelementptr %kizu.struct.Grid, ptr %kizu.2.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.5, ptr %kizu.4.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.10 = icmp uge i64 1, 24
+//   br i1 %kizu.10, label %kizu.check.1.fail, label %kizu.check.1.pass
+// kizu.check.1.fail:
+//   call void @kizu_panic_bounds(i64 1, i64 24, i64 103, i64 26)
+//   unreachable
+// kizu.check.1.pass:
+//   %kizu.11 = getelementptr inbounds [24 x i64], ptr %kizu.5, i64 0, i64 1
+//   %kizu.12 = load i64, ptr %kizu.11, !tbaa !6
+//   ret i64 %kizu.12
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.14 = sub i64 0, 3
+//   ret i64 %kizu.14
+// }
+// 
+// define internal i64 @count_before(ptr noalias nocapture readonly %kizu.seen.addr, ptr %kizu.live) #0 {
+// entry:
+//   %kizu.11 = alloca [24 x i64]
+//   %kizu.1 = insertvalue %kizu.opt.Grid zeroinitializer, i8 0, 0
+//   %kizu.2.ptr = getelementptr %kizu.struct.Holder, ptr %kizu.live, i32 0, i32 0
+//   store %kizu.opt.Grid %kizu.1, ptr %kizu.2.ptr
+//   %kizu.3.ptr = getelementptr %kizu.struct.Holder, ptr %kizu.live, i32 0, i32 2
+//   %kizu.3 = load i64, ptr %kizu.3.ptr, !tbaa !6
+//   %kizu.5 = add i64 %kizu.3, 100
+//   %kizu.6.ptr = getelementptr %kizu.struct.Holder, ptr %kizu.live, i32 0, i32 2
+//   store i64 %kizu.5, ptr %kizu.6.ptr, !tbaa !6
+//   %kizu.7.addr = getelementptr %kizu.struct.Holder, ptr %kizu.seen.addr, i32 0, i32 0
+//   %kizu.8.addr = getelementptr %kizu.opt.Grid, ptr %kizu.7.addr, i32 0, i32 1
+//   %kizu.9.tag = load i8, ptr %kizu.7.addr
+//   %kizu.9 = icmp ne i8 %kizu.9.tag, 0
+//   br i1 %kizu.9, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.10.addr = getelementptr %kizu.struct.Grid, ptr %kizu.8.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.11, ptr %kizu.10.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.16 = icmp uge i64 2, 24
+//   br i1 %kizu.16, label %kizu.check.1.fail, label %kizu.check.1.pass
+// kizu.check.1.fail:
+//   call void @kizu_panic_bounds(i64 2, i64 24, i64 114, i64 26)
+//   unreachable
+// kizu.check.1.pass:
+//   %kizu.17 = getelementptr inbounds [24 x i64], ptr %kizu.11, i64 0, i64 2
+//   %kizu.18 = load i64, ptr %kizu.17, !tbaa !6
+//   %kizu.19.addr = getelementptr %kizu.struct.Holder, ptr %kizu.seen.addr, i32 0, i32 2
+//   %kizu.19 = load i64, ptr %kizu.19.addr, !tbaa !6
+//   %kizu.20 = add i64 %kizu.18, %kizu.19
+//   ret i64 %kizu.20
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.22 = sub i64 0, 4
+//   ret i64 %kizu.22
+// }
+// 
+// define internal i64 @Chest.run(ptr noalias nocapture readonly %kizu.self.addr, i64 %kizu.i) #0 {
+// entry:
+//   %kizu.6 = alloca [24 x i64]
+//   %kizu.1.addr = getelementptr %kizu.struct.Chest, ptr %kizu.self.addr, i32 0, i32 0
+//   %kizu.opt.niche.1.addr = getelementptr %kizu.struct.Tool, ptr %kizu.1.addr, i32 0, i32 0
+//   %kizu.opt.niche.1 = load ptr, ptr %kizu.opt.niche.1.addr
+//   %kizu.3 = icmp ne ptr %kizu.opt.niche.1, null
+//   br i1 %kizu.3, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.4.addr = getelementptr %kizu.struct.Tool, ptr %kizu.1.addr, i32 0, i32 0
+//   %kizu.4 = load ptr, ptr %kizu.4.addr, !tbaa !6
+//   %kizu.5.addr = getelementptr %kizu.struct.Tool, ptr %kizu.1.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.6, ptr %kizu.5.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.10 = icmp uge i64 %kizu.i, 24
+//   br i1 %kizu.10, label %kizu.check.2.fail, label %kizu.check.2.pass
+// kizu.check.2.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.i, i64 24, i64 122, i64 32)
+//   unreachable
+// kizu.check.2.pass:
+//   %kizu.11 = getelementptr inbounds [24 x i64], ptr %kizu.6, i64 0, i64 %kizu.i
+//   %kizu.12 = load i64, ptr %kizu.11, !tbaa !6
+//   %kizu.13 = call i64 %kizu.4(i64 %kizu.12)
+//   %kizu.14.addr = getelementptr %kizu.struct.Chest, ptr %kizu.self.addr, i32 0, i32 1
+//   %kizu.14 = load i64, ptr %kizu.14.addr, !tbaa !6
+//   %kizu.15 = add i64 %kizu.13, %kizu.14
+//   ret i64 %kizu.15
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.17 = sub i64 0, 5
+//   ret i64 %kizu.17
+// }
+// 
+// define internal %kizu.struct.Tool @Chest.tool_or(ptr noalias nocapture readonly %kizu.self.addr, ptr noalias nocapture readonly %kizu.other.addr) #0 {
+// entry:
+//   %kizu.other = load %kizu.struct.Tool, ptr %kizu.other.addr
+//   %kizu.1.addr = getelementptr %kizu.struct.Chest, ptr %kizu.self.addr, i32 0, i32 0
+//   %kizu.opt.niche.1.addr = getelementptr %kizu.struct.Tool, ptr %kizu.1.addr, i32 0, i32 0
+//   %kizu.opt.niche.1 = load ptr, ptr %kizu.opt.niche.1.addr
+//   %kizu.2 = icmp ne ptr %kizu.opt.niche.1, null
+//   br i1 %kizu.2, label %orelse.some.1, label %orelse.else.2
+// orelse.some.1:
+//   %kizu.3 = load %kizu.struct.Tool, ptr %kizu.1.addr
+//   br label %orelse.end.3
+// orelse.else.2:
+//   br label %orelse.end.3
+// orelse.end.3:
+//   %kizu.4 = phi %kizu.struct.Tool [ %kizu.3, %orelse.some.1 ], [ %kizu.other, %orelse.else.2 ]
+//   ret %kizu.struct.Tool %kizu.4
+// }
+// 
+// define internal i64 @weigh(ptr %kizu.shape) #0 {
+// entry:
+//   %kizu.1.addr = alloca %kizu.union.Shape
+//   %kizu.10 = alloca [24 x i64]
+//   %kizu.19 = alloca [24 x i64]
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.1.addr, ptr %kizu.shape, i64 ptrtoint (ptr getelementptr (%kizu.union.Shape, ptr null, i64 1) to i64), i1 false)
+//   %kizu.2 = load i64, ptr %kizu.1.addr
+//   br label %match.check.2
+// match.end.1:
+//   unreachable
+// match.check.2:
+//   %kizu.3 = icmp eq i64 %kizu.2, 0
+//   br i1 %kizu.3, label %match.arm.3, label %match.check.4
+// match.arm.3:
+//   ret i64 0
+// match.check.4:
+//   %kizu.5 = icmp eq i64 %kizu.2, 1
+//   br i1 %kizu.5, label %match.arm.5, label %match.check.6
+// match.arm.5:
+//   %kizu.6.addr = getelementptr %kizu.union.Shape, ptr %kizu.1.addr, i32 0, i32 1
+//   %kizu.6 = load i64, ptr %kizu.6.addr, !tbaa !6
+//   ret i64 %kizu.6
+// match.check.6:
+//   %kizu.7 = icmp eq i64 %kizu.2, 2
+//   br i1 %kizu.7, label %match.arm.7, label %match.unreachable.8
+// match.arm.7:
+//   %kizu.8.addr = getelementptr %kizu.union.Shape, ptr %kizu.1.addr, i32 0, i32 1
+//   %kizu.9.addr = getelementptr %kizu.struct.Grid, ptr %kizu.8.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.10, ptr %kizu.9.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.15 = icmp uge i64 2, 24
+//   br i1 %kizu.15, label %kizu.check.1.fail, label %kizu.check.1.pass
+// kizu.check.1.fail:
+//   call void @kizu_panic_bounds(i64 2, i64 24, i64 136, i64 41)
+//   unreachable
+// kizu.check.1.pass:
+//   %kizu.16 = getelementptr inbounds [24 x i64], ptr %kizu.10, i64 0, i64 2
+//   %kizu.17 = load i64, ptr %kizu.16, !tbaa !6
+//   %kizu.18.addr = getelementptr %kizu.struct.Grid, ptr %kizu.8.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.19, ptr %kizu.18.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.24 = icmp uge i64 3, 24
+//   br i1 %kizu.24, label %kizu.check.2.fail, label %kizu.check.2.pass
+// kizu.check.2.fail:
+//   call void @kizu_panic_bounds(i64 3, i64 24, i64 136, i64 57)
+//   unreachable
+// kizu.check.2.pass:
+//   %kizu.25 = getelementptr inbounds [24 x i64], ptr %kizu.19, i64 0, i64 3
+//   %kizu.26 = load i64, ptr %kizu.25, !tbaa !6
+//   %kizu.27 = add i64 %kizu.17, %kizu.26
+//   ret i64 %kizu.27
+// match.unreachable.8:
+//   unreachable
+// }
+// 
+// define internal i64 @weigh_value(%kizu.union.Shape %kizu.shape) #0 {
+// entry:
+//   %kizu.5.slot = alloca %kizu.union.Shape, align 8
+//   %kizu.9.slot = alloca %kizu.union.Shape, align 8
+//   %kizu.11 = alloca [24 x i64]
+//   %kizu.1 = extractvalue %kizu.union.Shape %kizu.shape, 0
+//   br label %match.check.2
+// match.end.1:
+//   unreachable
+// match.check.2:
+//   %kizu.2 = icmp eq i64 %kizu.1, 0
+//   br i1 %kizu.2, label %match.arm.3, label %match.check.4
+// match.arm.3:
+//   ret i64 1
+// match.check.4:
+//   %kizu.4 = icmp eq i64 %kizu.1, 1
+//   br i1 %kizu.4, label %match.arm.5, label %match.check.6
+// match.arm.5:
+//   store %kizu.union.Shape %kizu.shape, ptr %kizu.5.slot, align 8
+//   %kizu.5.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.5.slot, i32 0, i32 1
+//   %kizu.5 = load i64, ptr %kizu.5.payload.ptr, align 8
+//   %kizu.7 = add i64 %kizu.5, 1
+//   ret i64 %kizu.7
+// match.check.6:
+//   %kizu.8 = icmp eq i64 %kizu.1, 2
+//   br i1 %kizu.8, label %match.arm.7, label %match.unreachable.8
+// match.arm.7:
+//   store %kizu.union.Shape %kizu.shape, ptr %kizu.9.slot, align 8
+//   %kizu.9.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.9.slot, i32 0, i32 1
+//   %kizu.10.addr = getelementptr %kizu.struct.Grid, ptr %kizu.9.payload.ptr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.11, ptr %kizu.10.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.16 = icmp uge i64 4, 24
+//   br i1 %kizu.16, label %kizu.check.1.fail, label %kizu.check.1.pass
+// kizu.check.1.fail:
+//   call void @kizu_panic_bounds(i64 4, i64 24, i64 144, i64 41)
+//   unreachable
+// kizu.check.1.pass:
+//   %kizu.17 = getelementptr inbounds [24 x i64], ptr %kizu.11, i64 0, i64 4
+//   %kizu.18 = load i64, ptr %kizu.17, !tbaa !6
+//   ret i64 %kizu.18
+// match.unreachable.8:
+//   unreachable
+// }
+// 
+// define internal i64 @replace_then_read(ptr %kizu.shape, %kizu.union.Shape %kizu.next) #0 {
+// entry:
+//   %kizu.1.addr = alloca %kizu.union.Shape
+//   %kizu.7 = alloca [24 x i64]
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.1.addr, ptr %kizu.shape, i64 ptrtoint (ptr getelementptr (%kizu.union.Shape, ptr null, i64 1) to i64), i1 false)
+//   store %kizu.union.Shape %kizu.next, ptr %kizu.shape
+//   %kizu.3 = load i64, ptr %kizu.1.addr
+//   br label %match.check.2
+// match.end.1:
+//   unreachable
+// match.check.2:
+//   %kizu.4 = icmp eq i64 %kizu.3, 2
+//   br i1 %kizu.4, label %match.arm.3, label %match.check.4
+// match.arm.3:
+//   %kizu.5.addr = getelementptr %kizu.union.Shape, ptr %kizu.1.addr, i32 0, i32 1
+//   %kizu.6.addr = getelementptr %kizu.struct.Grid, ptr %kizu.5.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.7, ptr %kizu.6.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.12 = icmp uge i64 5, 24
+//   br i1 %kizu.12, label %kizu.check.1.fail, label %kizu.check.1.pass
+// kizu.check.1.fail:
+//   call void @kizu_panic_bounds(i64 5, i64 24, i64 154, i64 41)
+//   unreachable
+// kizu.check.1.pass:
+//   %kizu.13 = getelementptr inbounds [24 x i64], ptr %kizu.7, i64 0, i64 5
+//   %kizu.14 = load i64, ptr %kizu.13, !tbaa !6
+//   ret i64 %kizu.14
+// match.check.4:
+//   %kizu.15 = icmp eq i64 %kizu.3, 1
+//   br i1 %kizu.15, label %match.arm.5, label %match.check.6
+// match.arm.5:
+//   %kizu.16.addr = getelementptr %kizu.union.Shape, ptr %kizu.1.addr, i32 0, i32 1
+//   %kizu.16 = load i64, ptr %kizu.16.addr, !tbaa !6
+//   ret i64 %kizu.16
+// match.check.6:
+//   %kizu.17 = icmp eq i64 %kizu.3, 0
+//   br i1 %kizu.17, label %match.arm.7, label %match.unreachable.8
+// match.arm.7:
+//   %kizu.19 = sub i64 0, 6
+//   ret i64 %kizu.19
+// match.unreachable.8:
+//   unreachable
+// }
+// 
+// define internal i64 @code(i64 %kizu.failure) #0 {
+// entry:
+//   br label %match.check.2
+// match.end.1:
+//   %kizu.7 = phi i64 [ %kizu.3, %match.arm.3 ], [ %kizu.6, %match.arm.5 ]
+//   ret i64 %kizu.7
+// match.check.2:
+//   %kizu.1 = icmp eq i64 %kizu.failure, 107
+//   br i1 %kizu.1, label %match.arm.3, label %match.check.4
+// match.arm.3:
+//   %kizu.3 = sub i64 0, 10
+//   br label %match.end.1
+// match.check.4:
+//   %kizu.4 = icmp eq i64 %kizu.failure, 108
+//   br i1 %kizu.4, label %match.arm.5, label %match.unreachable.6
+// match.arm.5:
+//   %kizu.6 = sub i64 0, 11
+//   br label %match.end.1
+// match.unreachable.6:
+//   unreachable
+// }
+// 
+// define internal %kizu.error.Fault.i64 @forward(i64 %kizu.seed) #0 {
+// entry:
+//   %kizu.4 = alloca [24 x i64]
+//   %kizu.1 = call %kizu.error.Fault.Grid @checked(i64 %kizu.seed)
+//   %kizu.2.ok.code = extractvalue %kizu.error.Fault.Grid %kizu.1, 0
+//   %kizu.2.ok = icmp eq i64 %kizu.2.ok.code, 0
+//   %kizu.2.ok.expected = call i1 @llvm.expect.i1(i1 %kizu.2.ok, i1 true)
+//   br i1 %kizu.2.ok.expected, label %kizu.2.try.ok, label %kizu.2.try.err
+// kizu.2.try.err:
+//   %kizu.try.err.1.code = extractvalue %kizu.error.Fault.Grid %kizu.1, 0
+//   %kizu.try.err.1 = insertvalue %kizu.error.Fault.i64 zeroinitializer, i64 %kizu.try.err.1.code, 0
+//   %kizu.return.join.arm0.f0 = extractvalue %kizu.error.Fault.i64 %kizu.try.err.1, 0
+//   %kizu.return.join.arm0.f1 = extractvalue %kizu.error.Fault.i64 %kizu.try.err.1, 1
+//   br label %kizu.return.join
+// kizu.2.try.ok:
+//   %kizu.2 = extractvalue %kizu.error.Fault.Grid %kizu.1, 1
+//   %kizu.3 = extractvalue %kizu.struct.Grid %kizu.2, 1
+//   store [24 x i64] %kizu.3, ptr %kizu.4
+//   %kizu.9 = icmp uge i64 5, 24
+//   br i1 %kizu.9, label %kizu.check.2.fail, label %kizu.check.2.pass
+// kizu.check.2.fail:
+//   call void @kizu_panic_bounds(i64 5, i64 24, i64 169, i64 22)
+//   unreachable
+// kizu.check.2.pass:
+//   %kizu.10 = getelementptr inbounds [24 x i64], ptr %kizu.4, i64 0, i64 5
+//   %kizu.11 = load i64, ptr %kizu.10, !tbaa !6
+//   %kizu.12 = insertvalue %kizu.error.Fault.i64 zeroinitializer, i64 %kizu.11, 1
+//   %kizu.return.join.arm1.f0 = extractvalue %kizu.error.Fault.i64 %kizu.12, 0
+//   %kizu.return.join.arm1.f1 = extractvalue %kizu.error.Fault.i64 %kizu.12, 1
+//   br label %kizu.return.join
+// kizu.return.join:
+//   %kizu.return.join.f0 = phi i64 [ %kizu.return.join.arm0.f0, %kizu.2.try.err ], [ %kizu.return.join.arm1.f0, %kizu.check.2.pass ]
+//   %kizu.return.join.f1 = phi i64 [ %kizu.return.join.arm0.f1, %kizu.2.try.err ], [ %kizu.return.join.arm1.f1, %kizu.check.2.pass ]
+//   %kizu.return.join.built0 = insertvalue %kizu.error.Fault.i64 zeroinitializer, i64 %kizu.return.join.f0, 0
+//   %kizu.return.join.built1 = insertvalue %kizu.error.Fault.i64 %kizu.return.join.built0, i64 %kizu.return.join.f1, 1
+//   ret %kizu.error.Fault.i64 %kizu.return.join.built1
+// }
+// 
+// define internal %kizu.error.Fault.Grid @again(i64 %kizu.seed) #0 {
+// entry:
+//   %kizu.1 = call %kizu.error.Fault.Grid @checked(i64 %kizu.seed)
+//   %kizu.2.ok.code = extractvalue %kizu.error.Fault.Grid %kizu.1, 0
+//   %kizu.2.ok = icmp eq i64 %kizu.2.ok.code, 0
+//   %kizu.2.ok.expected = call i1 @llvm.expect.i1(i1 %kizu.2.ok, i1 true)
+//   br i1 %kizu.2.ok.expected, label %kizu.2.try.ok, label %kizu.2.try.err
+// kizu.2.try.err:
+//   %kizu.return.join.arm0.f0 = extractvalue %kizu.error.Fault.Grid %kizu.1, 0
+//   %kizu.return.join.arm0.f1 = extractvalue %kizu.error.Fault.Grid %kizu.1, 1
+//   br label %kizu.return.join
+// kizu.2.try.ok:
+//   %kizu.2 = extractvalue %kizu.error.Fault.Grid %kizu.1, 1
+//   %kizu.3 = insertvalue %kizu.error.Fault.Grid zeroinitializer, %kizu.struct.Grid %kizu.2, 1
+//   %kizu.return.join.arm1.f0 = extractvalue %kizu.error.Fault.Grid %kizu.3, 0
+//   %kizu.return.join.arm1.f1 = extractvalue %kizu.error.Fault.Grid %kizu.3, 1
+//   br label %kizu.return.join
+// kizu.return.join:
+//   %kizu.return.join.f0 = phi i64 [ %kizu.return.join.arm0.f0, %kizu.2.try.err ], [ %kizu.return.join.arm1.f0, %kizu.2.try.ok ]
+//   %kizu.return.join.f1 = phi %kizu.struct.Grid [ %kizu.return.join.arm0.f1, %kizu.2.try.err ], [ %kizu.return.join.arm1.f1, %kizu.2.try.ok ]
+//   %kizu.return.join.built0 = insertvalue %kizu.error.Fault.Grid zeroinitializer, i64 %kizu.return.join.f0, 0
+//   %kizu.return.join.built1 = insertvalue %kizu.error.Fault.Grid %kizu.return.join.built0, %kizu.struct.Grid %kizu.return.join.f1, 1
+//   ret %kizu.error.Fault.Grid %kizu.return.join.built1
+// }
+// 
+// define i32 @main(i32 %kizu.argc, ptr %kizu.argv) #0 {
+// entry:
+//   %kizu.8 = alloca %kizu.struct.Holder
+//   %kizu.9.addr = alloca %kizu.struct.Holder
+//   %kizu.12.addr = alloca %kizu.struct.Holder
+//   %kizu.16.addr = alloca %kizu.struct.Holder
+//   %kizu.19.addr = alloca %kizu.opt.Grid
+//   %kizu.27 = alloca [24 x i64]
+//   %kizu.36.addr = alloca %kizu.struct.Holder
+//   %kizu.43.addr = alloca %kizu.opt.Grid
+//   %kizu.50 = alloca [24 x i64]
+//   %kizu.59.addr = alloca %kizu.struct.Holder
+//   %kizu.62.addr = alloca %kizu.struct.Holder
+//   %kizu.68 = alloca %kizu.struct.Grid
+//   %kizu.69.addr = alloca %kizu.struct.Grid
+//   %kizu.70.addr = alloca %kizu.opt.Grid
+//   %kizu.83.addr = alloca %kizu.struct.Holder
+//   %kizu.95.addr = alloca %kizu.struct.Holder
+//   %kizu.98.addr = alloca %kizu.struct.Holder
+//   %kizu.arg.0.5 = alloca %kizu.struct.Chest
+//   %kizu.124 = alloca [24 x i64]
+//   %kizu.arg.0.8 = alloca %kizu.struct.Chest
+//   %kizu.arg.0.9 = alloca %kizu.struct.Chest
+//   %kizu.arg.1.10 = alloca %kizu.struct.Tool
+//   %kizu.142 = alloca [24 x i64]
+//   %kizu.arg.0.12 = alloca %kizu.struct.Chest
+//   %kizu.arg.0.13 = alloca %kizu.struct.Chest
+//   %kizu.arg.1.14 = alloca %kizu.struct.Tool
+//   %kizu.161 = alloca [24 x i64]
+//   %kizu.178 = alloca [24 x i64]
+//   %kizu.194 = alloca [24 x i64]
+//   %kizu.213 = alloca [24 x i64]
+//   %kizu.246 = alloca [24 x i64]
+//   %kizu.261 = alloca [24 x i64]
+//   %kizu.274.slot = alloca %kizu.union.Shape, align 8
+//   %kizu.275 = alloca %kizu.union.Shape
+//   %kizu.281.addr = alloca %kizu.union.Shape
+//   %kizu.304.slot = alloca %kizu.union.Shape, align 8
+//   %kizu.318.slot = alloca %kizu.union.Shape, align 8
+//   %kizu.321.slot = alloca %kizu.union.Shape, align 8
+//   %kizu.348 = alloca [3 x %kizu.struct.Holder]
+//   %kizu.359 = alloca [3 x %kizu.struct.Holder]
+//   %kizu.286.slot = alloca %kizu.union.Shape, align 8
+//   %kizu.289 = alloca [24 x i64]
+//   %kizu.371.addr = alloca %kizu.struct.Holder
+//   %kizu.390 = alloca [24 x i64]
+//   %kizu.429.addr = alloca %kizu.struct.Holder
+//   %kizu.473 = alloca %kizu.array
+//   %kizu.476.slot = alloca %kizu.union.Shape, align 8
+//   %kizu.481.slot = alloca %kizu.union.Shape, align 8
+//   %kizu.434 = alloca [24 x i64]
+//   %kizu.449.addr = alloca %kizu.struct.Holder
+//   %kizu.496.slot = alloca %kizu.union.Shape, align 8
+//   %kizu.arg.0.62 = alloca %kizu.union.Shape, align 8
+//   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
+//   %kizu.2 = call %kizu.opt.Grid @maybe(i64 10)
+//   %kizu.4 = sub i64 0, 1
+//   %kizu.5 = call %kizu.opt.Grid @maybe(i64 %kizu.4)
+//   %kizu.7.field0 = insertvalue %kizu.struct.Holder zeroinitializer, %kizu.opt.Grid %kizu.2, 0
+//   %kizu.7.field1 = insertvalue %kizu.struct.Holder %kizu.7.field0, %kizu.opt.Grid %kizu.5, 1
+//   %kizu.7 = insertvalue %kizu.struct.Holder %kizu.7.field1, i64 3, 2
+//   store %kizu.struct.Holder %kizu.7, ptr %kizu.8
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.9.addr, ptr %kizu.8, i64 ptrtoint (ptr getelementptr (%kizu.struct.Holder, ptr null, i64 1) to i64), i1 false)
+//   %kizu.10 = call i64 @Holder.first(ptr %kizu.9.addr)
+//   call void @std__fmt__print.i64(i64 %kizu.10)
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.12.addr, ptr %kizu.8, i64 ptrtoint (ptr getelementptr (%kizu.struct.Holder, ptr null, i64 1) to i64), i1 false)
+//   %kizu.14 = call i64 @Holder.either(ptr %kizu.12.addr, i64 2)
+//   call void @std__fmt__print.i64(i64 %kizu.14)
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.16.addr, ptr %kizu.8, i64 ptrtoint (ptr getelementptr (%kizu.struct.Holder, ptr null, i64 1) to i64), i1 false)
+//   %kizu.17 = call i64 @Holder.borrowed(ptr %kizu.16.addr)
+//   call void @std__fmt__print.i64(i64 %kizu.17)
+//   %kizu.19.ptr = getelementptr %kizu.struct.Holder, ptr %kizu.8, i32 0, i32 0
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.19.addr, ptr %kizu.19.ptr, i64 ptrtoint (ptr getelementptr (%kizu.opt.Grid, ptr null, i64 1) to i64), i1 false)
+//   %kizu.20.addr = getelementptr %kizu.opt.Grid, ptr %kizu.19.addr, i32 0, i32 1
+//   %kizu.21.tag = load i8, ptr %kizu.19.addr
+//   %kizu.21 = icmp ne i8 %kizu.21.tag, 0
+//   br i1 %kizu.21, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.22 = insertvalue %kizu.opt.Grid zeroinitializer, i8 0, 0
+//   %kizu.23.ptr = getelementptr %kizu.struct.Holder, ptr %kizu.8, i32 0, i32 0
+//   store %kizu.opt.Grid %kizu.22, ptr %kizu.23.ptr
+//   %kizu.25.ptr = getelementptr %kizu.struct.Holder, ptr %kizu.8, i32 0, i32 2
+//   store i64 9, ptr %kizu.25.ptr, !tbaa !6
+//   %kizu.26.addr = getelementptr %kizu.struct.Grid, ptr %kizu.20.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.27, ptr %kizu.26.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.32 = icmp uge i64 0, 24
+//   br i1 %kizu.32, label %kizu.check.1.fail, label %kizu.check.1.pass
+// kizu.check.1.fail:
+//   call void @kizu_panic_bounds(i64 0, i64 24, i64 188, i64 25)
+//   unreachable
+// kizu.check.1.pass:
+//   %kizu.33 = getelementptr inbounds [24 x i64], ptr %kizu.27, i64 0, i64 0
+//   %kizu.34 = load i64, ptr %kizu.33, !tbaa !6
+//   call void @std__fmt__print.i64(i64 %kizu.34)
+//   br label %if.end.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.36.addr, ptr %kizu.8, i64 ptrtoint (ptr getelementptr (%kizu.struct.Holder, ptr null, i64 1) to i64), i1 false)
+//   %kizu.37 = call i64 @Holder.first(ptr %kizu.36.addr)
+//   call void @std__fmt__print.i64(i64 %kizu.37)
+//   %kizu.40 = call %kizu.struct.Grid @fresh(i64 40)
+//   %kizu.41.some = insertvalue %kizu.opt.Grid zeroinitializer, i8 1, 0
+//   %kizu.41 = insertvalue %kizu.opt.Grid %kizu.41.some, %kizu.struct.Grid %kizu.40, 1
+//   %kizu.42.ptr = getelementptr %kizu.struct.Holder, ptr %kizu.8, i32 0, i32 1
+//   store %kizu.opt.Grid %kizu.41, ptr %kizu.42.ptr
+//   %kizu.43.ptr = getelementptr %kizu.struct.Holder, ptr %kizu.8, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.43.addr, ptr %kizu.43.ptr, i64 ptrtoint (ptr getelementptr (%kizu.opt.Grid, ptr null, i64 1) to i64), i1 false)
+//   %kizu.45 = call %kizu.opt.Grid @maybe(i64 70)
+//   %kizu.46.ptr = getelementptr %kizu.struct.Holder, ptr %kizu.8, i32 0, i32 1
+//   store %kizu.opt.Grid %kizu.45, ptr %kizu.46.ptr
+//   %kizu.47.addr = getelementptr %kizu.opt.Grid, ptr %kizu.43.addr, i32 0, i32 1
+//   %kizu.48.tag = load i8, ptr %kizu.43.addr
+//   %kizu.48 = icmp ne i8 %kizu.48.tag, 0
+//   br i1 %kizu.48, label %if.then.4, label %if.else.5
+// if.then.4:
+//   %kizu.49.addr = getelementptr %kizu.struct.Grid, ptr %kizu.47.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.50, ptr %kizu.49.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.55 = icmp uge i64 1, 24
+//   br i1 %kizu.55, label %kizu.check.2.fail, label %kizu.check.2.pass
+// kizu.check.2.fail:
+//   call void @kizu_panic_bounds(i64 1, i64 24, i64 197, i64 25)
+//   unreachable
+// kizu.check.2.pass:
+//   %kizu.56 = getelementptr inbounds [24 x i64], ptr %kizu.50, i64 0, i64 1
+//   %kizu.57 = load i64, ptr %kizu.56, !tbaa !6
+//   call void @std__fmt__print.i64(i64 %kizu.57)
+//   br label %if.end.6
+// if.else.5:
+//   br label %if.end.6
+// if.end.6:
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.59.addr, ptr %kizu.8, i64 ptrtoint (ptr getelementptr (%kizu.struct.Holder, ptr null, i64 1) to i64), i1 false)
+//   %kizu.60 = call i64 @Holder.borrowed(ptr %kizu.59.addr)
+//   call void @std__fmt__print.i64(i64 %kizu.60)
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.62.addr, ptr %kizu.8, i64 ptrtoint (ptr getelementptr (%kizu.struct.Holder, ptr null, i64 1) to i64), i1 false)
+//   %kizu.64 = call i64 @Holder.either(ptr %kizu.62.addr, i64 3)
+//   call void @std__fmt__print.i64(i64 %kizu.64)
+//   %kizu.67 = call %kizu.struct.Grid @fresh(i64 200)
+//   store %kizu.struct.Grid %kizu.67, ptr %kizu.68
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.69.addr, ptr %kizu.68, i64 ptrtoint (ptr getelementptr (%kizu.struct.Grid, ptr null, i64 1) to i64), i1 false)
+//   store i8 1, ptr %kizu.70.addr
+//   %kizu.70.payload.addr = getelementptr %kizu.opt.Grid, ptr %kizu.70.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.70.payload.addr, ptr %kizu.69.addr, i64 ptrtoint (ptr getelementptr (%kizu.struct.Grid, ptr null, i64 1) to i64), i1 false)
+//   %kizu.71.ptr = getelementptr %kizu.struct.Holder, ptr %kizu.8, i32 0, i32 0
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.71.ptr, ptr %kizu.70.addr, i64 ptrtoint (ptr getelementptr (%kizu.opt.Grid, ptr null, i64 1) to i64), i1 false)
+//   %kizu.73 = sub i64 0, 1
+//   %kizu.74 = getelementptr %kizu.struct.Grid, ptr %kizu.68, i32 0, i32 1
+//   %kizu.75 = getelementptr %kizu.struct.Grid, ptr %kizu.68, i32 0, i32 1
+//   %kizu.80 = icmp uge i64 0, 24
+//   br i1 %kizu.80, label %kizu.check.3.fail, label %kizu.check.3.pass
+// kizu.check.3.fail:
+//   call void @kizu_panic_bounds(i64 0, i64 24, i64 205, i64 16)
+//   unreachable
+// kizu.check.3.pass:
+//   %kizu.81 = getelementptr inbounds [24 x i64], ptr %kizu.75, i64 0, i64 0
+//   store i64 %kizu.73, ptr %kizu.81, !tbaa !6
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.83.addr, ptr %kizu.8, i64 ptrtoint (ptr getelementptr (%kizu.struct.Holder, ptr null, i64 1) to i64), i1 false)
+//   %kizu.84 = call i64 @Holder.first(ptr %kizu.83.addr)
+//   call void @std__fmt__print.i64(i64 %kizu.84)
+//   %kizu.86 = getelementptr %kizu.struct.Grid, ptr %kizu.68, i32 0, i32 1
+//   %kizu.91 = icmp uge i64 0, 24
+//   br i1 %kizu.91, label %kizu.check.4.fail, label %kizu.check.4.pass
+// kizu.check.4.fail:
+//   call void @kizu_panic_bounds(i64 0, i64 24, i64 207, i64 22)
+//   unreachable
+// kizu.check.4.pass:
+//   %kizu.92 = getelementptr inbounds [24 x i64], ptr %kizu.86, i64 0, i64 0
+//   %kizu.93 = load i64, ptr %kizu.92, !tbaa !6
+//   call void @std__fmt__print.i64(i64 %kizu.93)
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.95.addr, ptr %kizu.8, i64 ptrtoint (ptr getelementptr (%kizu.struct.Holder, ptr null, i64 1) to i64), i1 false)
+//   %kizu.96 = call i64 @count_before(ptr %kizu.95.addr, ptr %kizu.8)
+//   call void @std__fmt__print.i64(i64 %kizu.96)
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.98.addr, ptr %kizu.8, i64 ptrtoint (ptr getelementptr (%kizu.struct.Holder, ptr null, i64 1) to i64), i1 false)
+//   %kizu.99 = call i64 @Holder.first(ptr %kizu.98.addr)
+//   call void @std__fmt__print.i64(i64 %kizu.99)
+//   %kizu.101.ptr = getelementptr %kizu.struct.Holder, ptr %kizu.8, i32 0, i32 2
+//   %kizu.101 = load i64, ptr %kizu.101.ptr, !tbaa !6
+//   call void @std__fmt__print.i64(i64 %kizu.101)
+//   %kizu.105 = call %kizu.struct.Tool @tool(ptr @double, i64 5)
+//   %kizu.108.field0 = insertvalue %kizu.struct.Chest zeroinitializer, %kizu.struct.Tool %kizu.105, 0
+//   %kizu.108 = insertvalue %kizu.struct.Chest %kizu.108.field0, i64 1, 1
+//   store %kizu.struct.Chest %kizu.108, ptr %kizu.arg.0.5
+//   %kizu.110 = call i64 @Chest.run(ptr %kizu.arg.0.5, i64 2)
+//   call void @std__fmt__print.i64(i64 %kizu.110)
+//   %kizu.112 = extractvalue %kizu.struct.Chest %kizu.108, 0
+//   %kizu.115 = call %kizu.struct.Tool @tool(ptr @triple, i64 9)
+//   %kizu.117 = insertvalue %kizu.struct.Chest %kizu.108, %kizu.struct.Tool %kizu.115, 0
+//   %kizu.119 = insertvalue %kizu.struct.Chest %kizu.117, i64 2, 1
+//   %kizu.opt.niche.6 = extractvalue %kizu.struct.Tool %kizu.112, 0
+//   %kizu.121 = icmp ne ptr %kizu.opt.niche.6, null
+//   br i1 %kizu.121, label %if.then.7, label %if.else.8
+// if.then.7:
+//   %kizu.122 = extractvalue %kizu.struct.Tool %kizu.112, 0
+//   %kizu.123 = extractvalue %kizu.struct.Tool %kizu.112, 1
+//   store [24 x i64] %kizu.123, ptr %kizu.124
+//   %kizu.129 = icmp uge i64 3, 24
+//   br i1 %kizu.129, label %kizu.check.7.fail, label %kizu.check.7.pass
+// kizu.check.7.fail:
+//   call void @kizu_panic_bounds(i64 3, i64 24, i64 220, i64 31)
+//   unreachable
+// kizu.check.7.pass:
+//   %kizu.130 = getelementptr inbounds [24 x i64], ptr %kizu.124, i64 0, i64 3
+//   %kizu.131 = load i64, ptr %kizu.130, !tbaa !6
+//   %kizu.132 = call i64 %kizu.122(i64 %kizu.131)
+//   call void @std__fmt__print.i64(i64 %kizu.132)
+//   br label %if.end.9
+// if.else.8:
+//   br label %if.end.9
+// if.end.9:
+//   store %kizu.struct.Chest %kizu.119, ptr %kizu.arg.0.8
+//   %kizu.135 = call i64 @Chest.run(ptr %kizu.arg.0.8, i64 0)
+//   call void @std__fmt__print.i64(i64 %kizu.135)
+//   %kizu.139 = call %kizu.struct.Tool @tool(ptr @double, i64 30)
+//   store %kizu.struct.Chest %kizu.119, ptr %kizu.arg.0.9
+//   store %kizu.struct.Tool %kizu.139, ptr %kizu.arg.1.10
+//   %kizu.140 = call %kizu.struct.Tool @Chest.tool_or(ptr %kizu.arg.0.9, ptr %kizu.arg.1.10)
+//   %kizu.141 = extractvalue %kizu.struct.Tool %kizu.140, 1
+//   store [24 x i64] %kizu.141, ptr %kizu.142
+//   %kizu.147 = icmp uge i64 4, 24
+//   br i1 %kizu.147, label %kizu.check.11.fail, label %kizu.check.11.pass
+// kizu.check.11.fail:
+//   call void @kizu_panic_bounds(i64 4, i64 24, i64 223, i64 48)
+//   unreachable
+// kizu.check.11.pass:
+//   %kizu.148 = getelementptr inbounds [24 x i64], ptr %kizu.142, i64 0, i64 4
+//   %kizu.149 = load i64, ptr %kizu.148, !tbaa !6
+//   call void @std__fmt__print.i64(i64 %kizu.149)
+//   %kizu.152 = insertvalue %kizu.struct.Chest %kizu.119, %kizu.struct.Tool zeroinitializer, 0
+//   store %kizu.struct.Chest %kizu.152, ptr %kizu.arg.0.12
+//   %kizu.154 = call i64 @Chest.run(ptr %kizu.arg.0.12, i64 0)
+//   call void @std__fmt__print.i64(i64 %kizu.154)
+//   %kizu.158 = call %kizu.struct.Tool @tool(ptr @double, i64 30)
+//   store %kizu.struct.Chest %kizu.152, ptr %kizu.arg.0.13
+//   store %kizu.struct.Tool %kizu.158, ptr %kizu.arg.1.14
+//   %kizu.159 = call %kizu.struct.Tool @Chest.tool_or(ptr %kizu.arg.0.13, ptr %kizu.arg.1.14)
+//   %kizu.160 = extractvalue %kizu.struct.Tool %kizu.159, 1
+//   store [24 x i64] %kizu.160, ptr %kizu.161
+//   %kizu.166 = icmp uge i64 4, 24
+//   br i1 %kizu.166, label %kizu.check.15.fail, label %kizu.check.15.pass
+// kizu.check.15.fail:
+//   call void @kizu_panic_bounds(i64 4, i64 24, i64 226, i64 48)
+//   unreachable
+// kizu.check.15.pass:
+//   %kizu.167 = getelementptr inbounds [24 x i64], ptr %kizu.161, i64 0, i64 4
+//   %kizu.168 = load i64, ptr %kizu.167, !tbaa !6
+//   call void @std__fmt__print.i64(i64 %kizu.168)
+//   %kizu.171 = call %kizu.error.Fault.Grid @checked(i64 4)
+//   %kizu.172 = extractvalue %kizu.error.Fault.Grid %kizu.171, 1
+//   %kizu.173 = extractvalue %kizu.error.Fault.Grid %kizu.171, 0
+//   %kizu.174.code = extractvalue %kizu.error.Fault.Grid %kizu.171, 0
+//   %kizu.174 = icmp eq i64 %kizu.174.code, 0
+//   br i1 %kizu.174, label %if.then.10, label %if.else.11
+// if.then.10:
+//   %kizu.176 = call %kizu.error.Fault.Grid @checked(i64 1)
+//   %kizu.177 = extractvalue %kizu.struct.Grid %kizu.172, 1
+//   store [24 x i64] %kizu.177, ptr %kizu.178
+//   %kizu.183 = icmp uge i64 0, 24
+//   br i1 %kizu.183, label %kizu.check.16.fail, label %kizu.check.16.pass
+// kizu.check.16.fail:
+//   call void @kizu_panic_bounds(i64 0, i64 24, i64 232, i64 25)
+//   unreachable
+// kizu.check.16.pass:
+//   %kizu.184 = getelementptr inbounds [24 x i64], ptr %kizu.178, i64 0, i64 0
+//   %kizu.185 = load i64, ptr %kizu.184, !tbaa !6
+//   call void @std__fmt__print.i64(i64 %kizu.185)
+//   %kizu.189.split0.arm0.f0 = extractvalue %kizu.error.Fault.Grid %kizu.176, 0
+//   %kizu.189.split0.arm0.f1 = extractvalue %kizu.error.Fault.Grid %kizu.176, 1
+//   br label %if.end.12
+// if.else.11:
+//   %kizu.187 = call i64 @code(i64 %kizu.173)
+//   call void @std__fmt__print.i64(i64 %kizu.187)
+//   %kizu.189.split0.arm1.f0 = extractvalue %kizu.error.Fault.Grid %kizu.171, 0
+//   %kizu.189.split0.arm1.f1 = extractvalue %kizu.error.Fault.Grid %kizu.171, 1
+//   br label %if.end.12
+// if.end.12:
+//   %kizu.189.split0.f0 = phi i64 [ %kizu.189.split0.arm0.f0, %kizu.check.16.pass ], [ %kizu.189.split0.arm1.f0, %if.else.11 ]
+//   %kizu.189.split0.f1 = phi %kizu.struct.Grid [ %kizu.189.split0.arm0.f1, %kizu.check.16.pass ], [ %kizu.189.split0.arm1.f1, %if.else.11 ]
+//   %kizu.189.split0.built0 = insertvalue %kizu.error.Fault.Grid zeroinitializer, i64 %kizu.189.split0.f0, 0
+//   %kizu.189 = insertvalue %kizu.error.Fault.Grid %kizu.189.split0.built0, %kizu.struct.Grid %kizu.189.split0.f1, 1
+//   %kizu.190 = extractvalue %kizu.error.Fault.Grid %kizu.189, 1
+//   %kizu.191 = extractvalue %kizu.error.Fault.Grid %kizu.189, 0
+//   %kizu.192.code = extractvalue %kizu.error.Fault.Grid %kizu.189, 0
+//   %kizu.192 = icmp eq i64 %kizu.192.code, 0
+//   br i1 %kizu.192, label %if.then.13, label %if.else.14
+// if.then.13:
+//   %kizu.193 = extractvalue %kizu.struct.Grid %kizu.190, 1
+//   store [24 x i64] %kizu.193, ptr %kizu.194
+//   %kizu.199 = icmp uge i64 0, 24
+//   br i1 %kizu.199, label %kizu.check.17.fail, label %kizu.check.17.pass
+// kizu.check.17.fail:
+//   call void @kizu_panic_bounds(i64 0, i64 24, i64 237, i64 25)
+//   unreachable
+// kizu.check.17.pass:
+//   %kizu.200 = getelementptr inbounds [24 x i64], ptr %kizu.194, i64 0, i64 0
+//   %kizu.201 = load i64, ptr %kizu.200, !tbaa !6
+//   call void @std__fmt__print.i64(i64 %kizu.201)
+//   br label %if.end.15
+// if.else.14:
+//   %kizu.203 = call i64 @code(i64 %kizu.191)
+//   call void @std__fmt__print.i64(i64 %kizu.203)
+//   br label %if.end.15
+// if.end.15:
+//   %kizu.206 = call %kizu.error.Fault.Grid @checked(i64 0)
+//   %kizu.207.code = extractvalue %kizu.error.Fault.Grid %kizu.206, 0
+//   %kizu.207 = icmp eq i64 %kizu.207.code, 0
+//   br i1 %kizu.207, label %catch.ok.16, label %catch.else.17
+// catch.ok.16:
+//   %kizu.208 = extractvalue %kizu.error.Fault.Grid %kizu.206, 1
+//   br label %catch.end.18
+// catch.else.17:
+//   %kizu.210 = call %kizu.struct.Grid @fresh(i64 500)
+//   br label %catch.end.18
+// catch.end.18:
+//   %kizu.211 = phi %kizu.struct.Grid [ %kizu.208, %catch.ok.16 ], [ %kizu.210, %catch.else.17 ]
+//   %kizu.212 = extractvalue %kizu.struct.Grid %kizu.211, 1
+//   store [24 x i64] %kizu.212, ptr %kizu.213
+//   %kizu.218 = icmp uge i64 1, 24
+//   br i1 %kizu.218, label %kizu.check.18.fail, label %kizu.check.18.pass
+// kizu.check.18.fail:
+//   call void @kizu_panic_bounds(i64 1, i64 24, i64 242, i64 25)
+//   unreachable
+// kizu.check.18.pass:
+//   %kizu.219 = getelementptr inbounds [24 x i64], ptr %kizu.213, i64 0, i64 1
+//   %kizu.220 = load i64, ptr %kizu.219, !tbaa !6
+//   call void @std__fmt__print.i64(i64 %kizu.220)
+//   %kizu.223 = call %kizu.error.Fault.i64 @forward(i64 6)
+//   %kizu.224.code = extractvalue %kizu.error.Fault.i64 %kizu.223, 0
+//   %kizu.224 = icmp eq i64 %kizu.224.code, 0
+//   br i1 %kizu.224, label %catch.ok.19, label %catch.else.20
+// catch.ok.19:
+//   %kizu.225 = extractvalue %kizu.error.Fault.i64 %kizu.223, 1
+//   br label %catch.end.21
+// catch.else.20:
+//   %kizu.227 = sub i64 0, 1
+//   br label %catch.end.21
+// catch.end.21:
+//   %kizu.228 = phi i64 [ %kizu.225, %catch.ok.19 ], [ %kizu.227, %catch.else.20 ]
+//   call void @std__fmt__print.i64(i64 %kizu.228)
+//   %kizu.231 = call %kizu.error.Fault.i64 @forward(i64 3)
+//   %kizu.232.code = extractvalue %kizu.error.Fault.i64 %kizu.231, 0
+//   %kizu.232 = icmp eq i64 %kizu.232.code, 0
+//   br i1 %kizu.232, label %catch.ok.22, label %catch.else.23
+// catch.ok.22:
+//   %kizu.233 = extractvalue %kizu.error.Fault.i64 %kizu.231, 1
+//   br label %catch.end.24
+// catch.else.23:
+//   %kizu.235 = sub i64 0, 1
+//   br label %catch.end.24
+// catch.end.24:
+//   %kizu.236 = phi i64 [ %kizu.233, %catch.ok.22 ], [ %kizu.235, %catch.else.23 ]
+//   call void @std__fmt__print.i64(i64 %kizu.236)
+//   %kizu.239 = call %kizu.error.Fault.Grid @again(i64 8)
+//   %kizu.240.code = extractvalue %kizu.error.Fault.Grid %kizu.239, 0
+//   %kizu.240 = icmp eq i64 %kizu.240.code, 0
+//   br i1 %kizu.240, label %catch.ok.25, label %catch.else.26
+// catch.ok.25:
+//   %kizu.241 = extractvalue %kizu.error.Fault.Grid %kizu.239, 1
+//   br label %catch.end.27
+// catch.else.26:
+//   %kizu.243 = call %kizu.struct.Grid @fresh(i64 0)
+//   br label %catch.end.27
+// catch.end.27:
+//   %kizu.244 = phi %kizu.struct.Grid [ %kizu.241, %catch.ok.25 ], [ %kizu.243, %catch.else.26 ]
+//   %kizu.245 = extractvalue %kizu.struct.Grid %kizu.244, 1
+//   store [24 x i64] %kizu.245, ptr %kizu.246
+//   %kizu.251 = icmp uge i64 2, 24
+//   br i1 %kizu.251, label %kizu.check.19.fail, label %kizu.check.19.pass
+// kizu.check.19.fail:
+//   call void @kizu_panic_bounds(i64 2, i64 24, i64 246, i64 23)
+//   unreachable
+// kizu.check.19.pass:
+//   %kizu.252 = getelementptr inbounds [24 x i64], ptr %kizu.246, i64 0, i64 2
+//   %kizu.253 = load i64, ptr %kizu.252, !tbaa !6
+//   call void @std__fmt__print.i64(i64 %kizu.253)
+//   %kizu.256 = call %kizu.error.Fault.Grid @again(i64 0)
+//   %kizu.257 = extractvalue %kizu.error.Fault.Grid %kizu.256, 1
+//   %kizu.258 = extractvalue %kizu.error.Fault.Grid %kizu.256, 0
+//   %kizu.259.code = extractvalue %kizu.error.Fault.Grid %kizu.256, 0
+//   %kizu.259 = icmp eq i64 %kizu.259.code, 0
+//   br i1 %kizu.259, label %if.then.28, label %if.else.29
+// if.then.28:
+//   %kizu.260 = extractvalue %kizu.struct.Grid %kizu.257, 1
+//   store [24 x i64] %kizu.260, ptr %kizu.261
+//   %kizu.266 = icmp uge i64 0, 24
+//   br i1 %kizu.266, label %kizu.check.20.fail, label %kizu.check.20.pass
+// kizu.check.20.fail:
+//   call void @kizu_panic_bounds(i64 0, i64 24, i64 248, i64 25)
+//   unreachable
+// kizu.check.20.pass:
+//   %kizu.267 = getelementptr inbounds [24 x i64], ptr %kizu.261, i64 0, i64 0
+//   %kizu.268 = load i64, ptr %kizu.267, !tbaa !6
+//   call void @std__fmt__print.i64(i64 %kizu.268)
+//   br label %if.end.30
+// if.else.29:
+//   %kizu.270 = call i64 @code(i64 %kizu.258)
+//   call void @std__fmt__print.i64(i64 %kizu.270)
+//   br label %if.end.30
+// if.end.30:
+//   %kizu.273 = call %kizu.struct.Grid @fresh(i64 20)
+//   %kizu.274.tag.ptr = getelementptr %kizu.union.Shape, ptr %kizu.274.slot, i32 0, i32 0
+//   store i64 2, ptr %kizu.274.tag.ptr, align 8
+//   %kizu.274.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.274.slot, i32 0, i32 1
+//   store %kizu.struct.Grid %kizu.273, ptr %kizu.274.payload.ptr, align 8
+//   %kizu.274 = load %kizu.union.Shape, ptr %kizu.274.slot, align 8
+//   store %kizu.union.Shape %kizu.274, ptr %kizu.275
+//   %kizu.276 = call i64 @weigh(ptr %kizu.275)
+//   call void @std__fmt__print.i64(i64 %kizu.276)
+//   %kizu.278 = load %kizu.union.Shape, ptr %kizu.275
+//   %kizu.279 = call i64 @weigh_value(%kizu.union.Shape %kizu.278)
+//   call void @std__fmt__print.i64(i64 %kizu.279)
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.281.addr, ptr %kizu.275, i64 ptrtoint (ptr getelementptr (%kizu.union.Shape, ptr null, i64 1) to i64), i1 false)
+//   %kizu.282 = load i64, ptr %kizu.281.addr
+//   br label %match.check.32
+// match.end.31:
+//   %kizu.301 = call i64 @weigh(ptr %kizu.275)
+//   call void @std__fmt__print.i64(i64 %kizu.301)
+//   %kizu.303 = load %kizu.struct.Grid, ptr %kizu.68
+//   %kizu.304.tag.ptr = getelementptr %kizu.union.Shape, ptr %kizu.304.slot, i32 0, i32 0
+//   store i64 2, ptr %kizu.304.tag.ptr, align 8
+//   %kizu.304.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.304.slot, i32 0, i32 1
+//   store %kizu.struct.Grid %kizu.303, ptr %kizu.304.payload.ptr, align 8
+//   %kizu.304 = load %kizu.union.Shape, ptr %kizu.304.slot, align 8
+//   store %kizu.union.Shape %kizu.304, ptr %kizu.275
+//   %kizu.307 = sub i64 0, 2
+//   %kizu.308 = getelementptr %kizu.struct.Grid, ptr %kizu.68, i32 0, i32 1
+//   %kizu.309 = getelementptr %kizu.struct.Grid, ptr %kizu.68, i32 0, i32 1
+//   %kizu.314 = icmp uge i64 5, 24
+//   br i1 %kizu.314, label %kizu.check.21.fail, label %kizu.check.21.pass
+// kizu.check.21.fail:
+//   call void @kizu_panic_bounds(i64 5, i64 24, i64 266, i64 16)
+//   unreachable
+// kizu.check.21.pass:
+//   %kizu.315 = getelementptr inbounds [24 x i64], ptr %kizu.309, i64 0, i64 5
+//   store i64 %kizu.307, ptr %kizu.315, !tbaa !6
+//   %kizu.318.tag.ptr = getelementptr %kizu.union.Shape, ptr %kizu.318.slot, i32 0, i32 0
+//   store i64 1, ptr %kizu.318.tag.ptr, align 8
+//   %kizu.318.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.318.slot, i32 0, i32 1
+//   store i64 8, ptr %kizu.318.payload.ptr, align 8
+//   %kizu.318 = load %kizu.union.Shape, ptr %kizu.318.slot, align 8
+//   %kizu.319 = call i64 @replace_then_read(ptr %kizu.275, %kizu.union.Shape %kizu.318)
+//   call void @std__fmt__print.i64(i64 %kizu.319)
+//   %kizu.321.tag.ptr = getelementptr %kizu.union.Shape, ptr %kizu.321.slot, i32 0, i32 0
+//   store i64 0, ptr %kizu.321.tag.ptr, align 8
+//   %kizu.321 = load %kizu.union.Shape, ptr %kizu.321.slot, align 8
+//   %kizu.322 = call i64 @replace_then_read(ptr %kizu.275, %kizu.union.Shape %kizu.321)
+//   call void @std__fmt__print.i64(i64 %kizu.322)
+//   %kizu.324 = load %kizu.union.Shape, ptr %kizu.275
+//   %kizu.325 = call i64 @weigh_value(%kizu.union.Shape %kizu.324)
+//   call void @std__fmt__print.i64(i64 %kizu.325)
+//   %kizu.329 = call %kizu.opt.Grid @maybe(i64 1)
+//   %kizu.331 = sub i64 0, 1
+//   %kizu.332 = call %kizu.opt.Grid @maybe(i64 %kizu.331)
+//   %kizu.334.field0 = insertvalue %kizu.struct.Holder zeroinitializer, %kizu.opt.Grid %kizu.329, 0
+//   %kizu.334.field1 = insertvalue %kizu.struct.Holder %kizu.334.field0, %kizu.opt.Grid %kizu.332, 1
+//   %kizu.334 = insertvalue %kizu.struct.Holder %kizu.334.field1, i64 0, 2
+//   %kizu.336 = sub i64 0, 1
+//   %kizu.337 = call %kizu.opt.Grid @maybe(i64 %kizu.336)
+//   %kizu.339 = call %kizu.opt.Grid @maybe(i64 2)
+//   %kizu.341.field0 = insertvalue %kizu.struct.Holder zeroinitializer, %kizu.opt.Grid %kizu.337, 0
+//   %kizu.341.field1 = insertvalue %kizu.struct.Holder %kizu.341.field0, %kizu.opt.Grid %kizu.339, 1
+//   %kizu.341 = insertvalue %kizu.struct.Holder %kizu.341.field1, i64 1, 2
+//   %kizu.343 = call %kizu.opt.Grid @maybe(i64 3)
+//   %kizu.345 = call %kizu.opt.Grid @maybe(i64 4)
+//   %kizu.347.field0 = insertvalue %kizu.struct.Holder zeroinitializer, %kizu.opt.Grid %kizu.343, 0
+//   %kizu.347.field1 = insertvalue %kizu.struct.Holder %kizu.347.field0, %kizu.opt.Grid %kizu.345, 1
+//   %kizu.347 = insertvalue %kizu.struct.Holder %kizu.347.field1, i64 2, 2
+//   store [3 x %kizu.struct.Holder] zeroinitializer, ptr %kizu.348
+//   %kizu.350 = getelementptr inbounds [3 x %kizu.struct.Holder], ptr %kizu.348, i64 0, i64 0
+//   store %kizu.struct.Holder %kizu.334, ptr %kizu.350
+//   %kizu.353 = getelementptr inbounds [3 x %kizu.struct.Holder], ptr %kizu.348, i64 0, i64 1
+//   store %kizu.struct.Holder %kizu.341, ptr %kizu.353
+//   %kizu.356 = getelementptr inbounds [3 x %kizu.struct.Holder], ptr %kizu.348, i64 0, i64 2
+//   store %kizu.struct.Holder %kizu.347, ptr %kizu.356
+//   %kizu.358 = load [3 x %kizu.struct.Holder], ptr %kizu.348
+//   store [3 x %kizu.struct.Holder] %kizu.358, ptr %kizu.359
+//   br label %for.header.36
+// match.check.32:
+//   %kizu.283 = icmp eq i64 %kizu.282, 2
+//   br i1 %kizu.283, label %match.arm.33, label %match.check.34
+// match.arm.33:
+//   %kizu.284.addr = getelementptr %kizu.union.Shape, ptr %kizu.281.addr, i32 0, i32 1
+//   %kizu.286.tag.ptr = getelementptr %kizu.union.Shape, ptr %kizu.286.slot, i32 0, i32 0
+//   store i64 1, ptr %kizu.286.tag.ptr, align 8
+//   %kizu.286.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.286.slot, i32 0, i32 1
+//   store i64 77, ptr %kizu.286.payload.ptr, align 8
+//   %kizu.286 = load %kizu.union.Shape, ptr %kizu.286.slot, align 8
+//   store %kizu.union.Shape %kizu.286, ptr %kizu.275
+//   %kizu.288.addr = getelementptr %kizu.struct.Grid, ptr %kizu.284.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.289, ptr %kizu.288.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.294 = icmp uge i64 0, 24
+//   br i1 %kizu.294, label %kizu.check.22.fail, label %kizu.check.22.pass
+// kizu.check.22.fail:
+//   call void @kizu_panic_bounds(i64 0, i64 24, i64 260, i64 29)
+//   unreachable
+// kizu.check.22.pass:
+//   %kizu.295 = getelementptr inbounds [24 x i64], ptr %kizu.289, i64 0, i64 0
+//   %kizu.296 = load i64, ptr %kizu.295, !tbaa !6
+//   call void @std__fmt__print.i64(i64 %kizu.296)
+//   br label %match.end.31
+// match.check.34:
+//   br label %match.arm.35
+// match.arm.35:
+//   %kizu.299 = sub i64 0, 1
+//   call void @std__fmt__print.i64(i64 %kizu.299)
+//   br label %match.end.31
+// for.header.36:
+//   %kizu.363 = phi i64 [ 0, %kizu.check.21.pass ], [ %kizu.415, %for.step.38 ]
+//   %kizu.364 = phi i64 [ 0, %kizu.check.21.pass ], [ %kizu.417, %for.step.38 ]
+//   %kizu.365 = icmp slt i64 %kizu.364, 3
+//   br i1 %kizu.365, label %for.body.37, label %for.end.39
+// for.body.37:
+//   %kizu.369 = icmp uge i64 %kizu.364, 3
+//   br i1 %kizu.369, label %kizu.check.23.fail, label %kizu.check.23.pass
+// kizu.check.23.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.364, i64 3, i64 279, i64 15)
+//   unreachable
+// kizu.check.23.pass:
+//   %kizu.370 = getelementptr inbounds [3 x %kizu.struct.Holder], ptr %kizu.359, i64 0, i64 %kizu.364
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.371.addr, ptr %kizu.370, i64 ptrtoint (ptr getelementptr (%kizu.struct.Holder, ptr null, i64 1) to i64), i1 false)
+//   %kizu.372.addr = getelementptr %kizu.struct.Holder, ptr %kizu.371.addr, i32 0, i32 0
+//   %kizu.373.addr = getelementptr %kizu.opt.Grid, ptr %kizu.372.addr, i32 0, i32 1
+//   %kizu.374.tag = load i8, ptr %kizu.372.addr
+//   %kizu.374 = icmp ne i8 %kizu.374.tag, 0
+//   br i1 %kizu.374, label %if.then.40, label %if.else.41
+// for.step.38:
+//   %kizu.417 = add i64 %kizu.364, 1
+//   br label %for.header.36
+// for.end.39:
+//   call void @std__fmt__print.i64(i64 %kizu.363)
+//   br label %for.header.43
+// if.then.40:
+//   %kizu.375 = insertvalue %kizu.opt.Grid zeroinitializer, i8 0, 0
+//   %kizu.379 = icmp uge i64 %kizu.364, 3
+//   br i1 %kizu.379, label %kizu.check.24.fail, label %kizu.check.24.pass
+// kizu.check.24.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.364, i64 3, i64 280, i64 16)
+//   unreachable
+// kizu.check.24.pass:
+//   %kizu.380 = getelementptr inbounds [3 x %kizu.struct.Holder], ptr %kizu.359, i64 0, i64 %kizu.364
+//   %kizu.381 = load %kizu.struct.Holder, ptr %kizu.380
+//   %kizu.382 = insertvalue %kizu.struct.Holder %kizu.381, %kizu.opt.Grid %kizu.375, 0
+//   %kizu.386 = icmp uge i64 %kizu.364, 3
+//   br i1 %kizu.386, label %kizu.check.25.fail, label %kizu.check.25.pass
+// kizu.check.25.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.364, i64 3, i64 280, i64 16)
+//   unreachable
+// kizu.check.25.pass:
+//   %kizu.387 = getelementptr inbounds [3 x %kizu.struct.Holder], ptr %kizu.359, i64 0, i64 %kizu.364
+//   store %kizu.struct.Holder %kizu.382, ptr %kizu.387
+//   %kizu.389.addr = getelementptr %kizu.struct.Grid, ptr %kizu.373.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.390, ptr %kizu.389.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.394 = icmp uge i64 %kizu.364, 24
+//   br i1 %kizu.394, label %kizu.check.26.fail, label %kizu.check.26.pass
+// kizu.check.26.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.364, i64 24, i64 281, i64 39)
+//   unreachable
+// kizu.check.26.pass:
+//   %kizu.395 = getelementptr inbounds [24 x i64], ptr %kizu.390, i64 0, i64 %kizu.364
+//   %kizu.396 = load i64, ptr %kizu.395, !tbaa !6
+//   %kizu.397 = add i64 %kizu.363, %kizu.396
+//   br label %if.end.42
+// if.else.41:
+//   %kizu.399 = add i64 100, %kizu.364
+//   %kizu.400 = call %kizu.struct.Grid @fresh(i64 %kizu.399)
+//   %kizu.401.some = insertvalue %kizu.opt.Grid zeroinitializer, i8 1, 0
+//   %kizu.401 = insertvalue %kizu.opt.Grid %kizu.401.some, %kizu.struct.Grid %kizu.400, 1
+//   %kizu.405 = icmp uge i64 %kizu.364, 3
+//   br i1 %kizu.405, label %kizu.check.27.fail, label %kizu.check.27.pass
+// kizu.check.27.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.364, i64 3, i64 283, i64 16)
+//   unreachable
+// kizu.check.27.pass:
+//   %kizu.406 = getelementptr inbounds [3 x %kizu.struct.Holder], ptr %kizu.359, i64 0, i64 %kizu.364
+//   %kizu.407 = load %kizu.struct.Holder, ptr %kizu.406
+//   %kizu.408 = insertvalue %kizu.struct.Holder %kizu.407, %kizu.opt.Grid %kizu.401, 0
+//   %kizu.412 = icmp uge i64 %kizu.364, 3
+//   br i1 %kizu.412, label %kizu.check.28.fail, label %kizu.check.28.pass
+// kizu.check.28.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.364, i64 3, i64 283, i64 16)
+//   unreachable
+// kizu.check.28.pass:
+//   %kizu.413 = getelementptr inbounds [3 x %kizu.struct.Holder], ptr %kizu.359, i64 0, i64 %kizu.364
+//   store %kizu.struct.Holder %kizu.408, ptr %kizu.413
+//   br label %if.end.42
+// if.end.42:
+//   %kizu.415 = phi i64 [ %kizu.397, %kizu.check.26.pass ], [ %kizu.363, %kizu.check.28.pass ]
+//   br label %for.step.38
+// for.header.43:
+//   %kizu.421 = phi i64 [ %kizu.363, %for.end.39 ], [ %kizu.467, %for.step.45 ]
+//   %kizu.422 = phi i64 [ 0, %for.end.39 ], [ %kizu.469, %for.step.45 ]
+//   %kizu.423 = icmp slt i64 %kizu.422, 3
+//   br i1 %kizu.423, label %for.body.44, label %for.end.46
+// for.body.44:
+//   %kizu.427 = icmp uge i64 %kizu.422, 3
+//   br i1 %kizu.427, label %kizu.check.29.fail, label %kizu.check.29.pass
+// kizu.check.29.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.422, i64 3, i64 288, i64 15)
+//   unreachable
+// kizu.check.29.pass:
+//   %kizu.428 = getelementptr inbounds [3 x %kizu.struct.Holder], ptr %kizu.359, i64 0, i64 %kizu.422
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.429.addr, ptr %kizu.428, i64 ptrtoint (ptr getelementptr (%kizu.struct.Holder, ptr null, i64 1) to i64), i1 false)
+//   %kizu.430.addr = getelementptr %kizu.struct.Holder, ptr %kizu.429.addr, i32 0, i32 0
+//   %kizu.431.addr = getelementptr %kizu.opt.Grid, ptr %kizu.430.addr, i32 0, i32 1
+//   %kizu.432.tag = load i8, ptr %kizu.430.addr
+//   %kizu.432 = icmp ne i8 %kizu.432.tag, 0
+//   br i1 %kizu.432, label %if.then.47, label %if.else.48
+// for.step.45:
+//   %kizu.469 = add i64 %kizu.422, 1
+//   br label %for.header.43
+// for.end.46:
+//   call void @std__fmt__print.i64(i64 %kizu.421)
+//   %kizu.471 = call ptr @std__mem__page_allocator()
+//   store %kizu.array zeroinitializer, ptr %kizu.473
+//   %kizu.475 = call %kizu.struct.Grid @fresh(i64 7)
+//   %kizu.476.tag.ptr = getelementptr %kizu.union.Shape, ptr %kizu.476.slot, i32 0, i32 0
+//   store i64 2, ptr %kizu.476.tag.ptr, align 8
+//   %kizu.476.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.476.slot, i32 0, i32 1
+//   store %kizu.struct.Grid %kizu.475, ptr %kizu.476.payload.ptr, align 8
+//   %kizu.476 = load %kizu.union.Shape, ptr %kizu.476.slot, align 8
+//   %kizu.477 = call %kizu.error.std__mem__Error.void @std__array__Array.append.Shape(ptr %kizu.473, ptr %kizu.471, %kizu.union.Shape %kizu.476)
+//   %kizu.478 = load %kizu.array, ptr %kizu.473
+//   %kizu.479.ok.code = extractvalue %kizu.error.std__mem__Error.void %kizu.477, 0
+//   %kizu.479.ok = icmp eq i64 %kizu.479.ok.code, 0
+//   %kizu.479.ok.expected = call i1 @llvm.expect.i1(i1 %kizu.479.ok, i1 true)
+//   br i1 %kizu.479.ok.expected, label %kizu.479.try.ok, label %kizu.479.try.err
+// kizu.479.try.err:
+//   %kizu.array.deinit.data.31 = extractvalue %kizu.array %kizu.478, 0
+//   %kizu.array.deinit.cap.32 = extractvalue %kizu.array %kizu.478, 2
+//   %kizu.array.deinit.bytes.33 = mul i64 %kizu.array.deinit.cap.32, ptrtoint (ptr getelementptr (%kizu.union.Shape, ptr null, i64 1) to i64)
+//   %kizu.array.deinit.owns.34 = icmp ne i64 %kizu.array.deinit.bytes.33, 0
+//   br i1 %kizu.array.deinit.owns.34, label %kizu.array.deinit.owns.34.release, label %kizu.array.deinit.owns.34.done
+// kizu.array.deinit.owns.34.release:
+//   call void @kizu_array_deinit(ptr %kizu.471, ptr %kizu.array.deinit.data.31, i64 %kizu.array.deinit.bytes.33)
+//   br label %kizu.array.deinit.owns.34.done
+// kizu.array.deinit.owns.34.done:
+//   %kizu.main.err.code.35 = extractvalue %kizu.error.std__mem__Error.void %kizu.477, 0
+//   %kizu.main.err.name.36.row = getelementptr [109 x { ptr, i64 }], ptr @.kizu.error.names, i64 0, i64 %kizu.main.err.code.35
+//   %kizu.main.err.name.36.ptr = load ptr, ptr %kizu.main.err.name.36.row
+//   %kizu.main.err.name.36.len.addr = getelementptr { ptr, i64 }, ptr %kizu.main.err.name.36.row, i64 0, i32 1
+//   %kizu.main.err.name.36.len = load i64, ptr %kizu.main.err.name.36.len.addr
+//   call void @kizu_main_error_message(ptr %kizu.main.err.name.36.ptr, i64 %kizu.main.err.name.36.len)
+//   ret i32 1
+// kizu.479.try.ok:
+//   %kizu.481.tag.ptr = getelementptr %kizu.union.Shape, ptr %kizu.481.slot, i32 0, i32 0
+//   store i64 1, ptr %kizu.481.tag.ptr, align 8
+//   %kizu.481.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.481.slot, i32 0, i32 1
+//   store i64 5, ptr %kizu.481.payload.ptr, align 8
+//   %kizu.481 = load %kizu.union.Shape, ptr %kizu.481.slot, align 8
+//   %kizu.482 = call %kizu.error.std__mem__Error.void @std__array__Array.append.Shape(ptr %kizu.473, ptr %kizu.471, %kizu.union.Shape %kizu.481)
+//   %kizu.483 = load %kizu.array, ptr %kizu.473
+//   %kizu.484.ok.code = extractvalue %kizu.error.std__mem__Error.void %kizu.482, 0
+//   %kizu.484.ok = icmp eq i64 %kizu.484.ok.code, 0
+//   %kizu.484.ok.expected = call i1 @llvm.expect.i1(i1 %kizu.484.ok, i1 true)
+//   br i1 %kizu.484.ok.expected, label %kizu.484.try.ok, label %kizu.484.try.err
+// kizu.484.try.err:
+//   %kizu.array.deinit.data.38 = extractvalue %kizu.array %kizu.483, 0
+//   %kizu.array.deinit.cap.39 = extractvalue %kizu.array %kizu.483, 2
+//   %kizu.array.deinit.bytes.40 = mul i64 %kizu.array.deinit.cap.39, ptrtoint (ptr getelementptr (%kizu.union.Shape, ptr null, i64 1) to i64)
+//   %kizu.array.deinit.owns.41 = icmp ne i64 %kizu.array.deinit.bytes.40, 0
+//   br i1 %kizu.array.deinit.owns.41, label %kizu.array.deinit.owns.41.release, label %kizu.array.deinit.owns.41.done
+// kizu.array.deinit.owns.41.release:
+//   call void @kizu_array_deinit(ptr %kizu.471, ptr %kizu.array.deinit.data.38, i64 %kizu.array.deinit.bytes.40)
+//   br label %kizu.array.deinit.owns.41.done
+// kizu.array.deinit.owns.41.done:
+//   %kizu.main.err.code.42 = extractvalue %kizu.error.std__mem__Error.void %kizu.482, 0
+//   %kizu.main.err.name.43.row = getelementptr [109 x { ptr, i64 }], ptr @.kizu.error.names, i64 0, i64 %kizu.main.err.code.42
+//   %kizu.main.err.name.43.ptr = load ptr, ptr %kizu.main.err.name.43.row
+//   %kizu.main.err.name.43.len.addr = getelementptr { ptr, i64 }, ptr %kizu.main.err.name.43.row, i64 0, i32 1
+//   %kizu.main.err.name.43.len = load i64, ptr %kizu.main.err.name.43.len.addr
+//   call void @kizu_main_error_message(ptr %kizu.main.err.name.43.ptr, i64 %kizu.main.err.name.43.len)
+//   ret i32 1
+// kizu.484.try.ok:
+//   %kizu.485 = load %kizu.union.Shape, ptr %kizu.275
+//   %kizu.486 = call %kizu.error.std__mem__Error.void @std__array__Array.append.Shape(ptr %kizu.473, ptr %kizu.471, %kizu.union.Shape %kizu.485)
+//   %kizu.487 = load %kizu.array, ptr %kizu.473
+//   %kizu.488.ok.code = extractvalue %kizu.error.std__mem__Error.void %kizu.486, 0
+//   %kizu.488.ok = icmp eq i64 %kizu.488.ok.code, 0
+//   %kizu.488.ok.expected = call i1 @llvm.expect.i1(i1 %kizu.488.ok, i1 true)
+//   br i1 %kizu.488.ok.expected, label %kizu.488.try.ok, label %kizu.488.try.err
+// kizu.488.try.err:
+//   %kizu.array.deinit.data.45 = extractvalue %kizu.array %kizu.487, 0
+//   %kizu.array.deinit.cap.46 = extractvalue %kizu.array %kizu.487, 2
+//   %kizu.array.deinit.bytes.47 = mul i64 %kizu.array.deinit.cap.46, ptrtoint (ptr getelementptr (%kizu.union.Shape, ptr null, i64 1) to i64)
+//   %kizu.array.deinit.owns.48 = icmp ne i64 %kizu.array.deinit.bytes.47, 0
+//   br i1 %kizu.array.deinit.owns.48, label %kizu.array.deinit.owns.48.release, label %kizu.array.deinit.owns.48.done
+// kizu.array.deinit.owns.48.release:
+//   call void @kizu_array_deinit(ptr %kizu.471, ptr %kizu.array.deinit.data.45, i64 %kizu.array.deinit.bytes.47)
+//   br label %kizu.array.deinit.owns.48.done
+// kizu.array.deinit.owns.48.done:
+//   %kizu.main.err.code.49 = extractvalue %kizu.error.std__mem__Error.void %kizu.486, 0
+//   %kizu.main.err.name.50.row = getelementptr [109 x { ptr, i64 }], ptr @.kizu.error.names, i64 0, i64 %kizu.main.err.code.49
+//   %kizu.main.err.name.50.ptr = load ptr, ptr %kizu.main.err.name.50.row
+//   %kizu.main.err.name.50.len.addr = getelementptr { ptr, i64 }, ptr %kizu.main.err.name.50.row, i64 0, i32 1
+//   %kizu.main.err.name.50.len = load i64, ptr %kizu.main.err.name.50.len.addr
+//   call void @kizu_main_error_message(ptr %kizu.main.err.name.50.ptr, i64 %kizu.main.err.name.50.len)
+//   ret i32 1
+// kizu.488.try.ok:
+//   %kizu.491 = call i64 @std__array__Array.len.Shape(ptr %kizu.473)
+//   br label %for.header.50
+// if.then.47:
+//   %kizu.433.addr = getelementptr %kizu.struct.Grid, ptr %kizu.431.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.434, ptr %kizu.433.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.439 = icmp uge i64 0, 24
+//   br i1 %kizu.439, label %kizu.check.51.fail, label %kizu.check.51.pass
+// kizu.check.51.fail:
+//   call void @kizu_panic_bounds(i64 0, i64 24, i64 289, i64 39)
+//   unreachable
+// kizu.check.51.pass:
+//   %kizu.440 = getelementptr inbounds [24 x i64], ptr %kizu.434, i64 0, i64 0
+//   %kizu.441 = load i64, ptr %kizu.440, !tbaa !6
+//   %kizu.442 = add i64 %kizu.421, %kizu.441
+//   br label %if.end.49
+// if.else.48:
+//   br label %if.end.49
+// if.end.49:
+//   %kizu.443 = phi i64 [ %kizu.442, %kizu.check.51.pass ], [ %kizu.421, %if.else.48 ]
+//   %kizu.447 = icmp uge i64 %kizu.422, 3
+//   br i1 %kizu.447, label %kizu.check.52.fail, label %kizu.check.52.pass
+// kizu.check.52.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.422, i64 3, i64 291, i64 23)
+//   unreachable
+// kizu.check.52.pass:
+//   %kizu.448 = getelementptr inbounds [3 x %kizu.struct.Holder], ptr %kizu.359, i64 0, i64 %kizu.422
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.449.addr, ptr %kizu.448, i64 ptrtoint (ptr getelementptr (%kizu.struct.Holder, ptr null, i64 1) to i64), i1 false)
+//   %kizu.450 = insertvalue %kizu.opt.Grid zeroinitializer, i8 0, 0
+//   %kizu.454 = icmp uge i64 %kizu.422, 3
+//   br i1 %kizu.454, label %kizu.check.53.fail, label %kizu.check.53.pass
+// kizu.check.53.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.422, i64 3, i64 292, i64 12)
+//   unreachable
+// kizu.check.53.pass:
+//   %kizu.455 = getelementptr inbounds [3 x %kizu.struct.Holder], ptr %kizu.359, i64 0, i64 %kizu.422
+//   %kizu.456 = load %kizu.struct.Holder, ptr %kizu.455
+//   %kizu.457 = insertvalue %kizu.struct.Holder %kizu.456, %kizu.opt.Grid %kizu.450, 1
+//   %kizu.461 = icmp uge i64 %kizu.422, 3
+//   br i1 %kizu.461, label %kizu.check.54.fail, label %kizu.check.54.pass
+// kizu.check.54.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.422, i64 3, i64 292, i64 12)
+//   unreachable
+// kizu.check.54.pass:
+//   %kizu.462 = getelementptr inbounds [3 x %kizu.struct.Holder], ptr %kizu.359, i64 0, i64 %kizu.422
+//   store %kizu.struct.Holder %kizu.457, ptr %kizu.462
+//   %kizu.464 = call i64 @Holder.first(ptr %kizu.449.addr)
+//   %kizu.465 = add i64 %kizu.443, %kizu.464
+//   %kizu.466 = call i64 @Holder.either(ptr %kizu.449.addr, i64 %kizu.422)
+//   %kizu.467 = add i64 %kizu.465, %kizu.466
+//   br label %for.step.45
+// for.header.50:
+//   %kizu.492 = phi i64 [ 0, %kizu.488.try.ok ], [ %kizu.503, %for.step.52 ]
+//   %kizu.493 = phi i64 [ 0, %kizu.488.try.ok ], [ %kizu.505, %for.step.52 ]
+//   %kizu.494 = icmp slt i64 %kizu.493, %kizu.491
+//   br i1 %kizu.494, label %for.body.51, label %for.end.53
+// for.body.51:
+//   %kizu.495 = call %kizu.union.Shape @std__array__Array.get_or_panic.Shape(ptr %kizu.473, i64 %kizu.493)
+//   %kizu.496.tag.ptr = getelementptr %kizu.union.Shape, ptr %kizu.496.slot, i32 0, i32 0
+//   store i64 1, ptr %kizu.496.tag.ptr, align 8
+//   %kizu.496.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.496.slot, i32 0, i32 1
+//   store i64 %kizu.493, ptr %kizu.496.payload.ptr, align 8
+//   %kizu.496 = load %kizu.union.Shape, ptr %kizu.496.slot, align 8
+//   %kizu.497 = call %kizu.error.std__array__Error.void @std__array__Array.set.Shape(ptr %kizu.473, i64 %kizu.493, %kizu.union.Shape %kizu.496)
+//   %kizu.498 = load %kizu.array, ptr %kizu.473
+//   %kizu.499.ok.code = extractvalue %kizu.error.std__array__Error.void %kizu.497, 0
+//   %kizu.499.ok = icmp eq i64 %kizu.499.ok.code, 0
+//   %kizu.499.ok.expected = call i1 @llvm.expect.i1(i1 %kizu.499.ok, i1 true)
+//   br i1 %kizu.499.ok.expected, label %kizu.499.try.ok, label %kizu.499.try.err
+// kizu.499.try.err:
+//   %kizu.array.deinit.data.56 = extractvalue %kizu.array %kizu.498, 0
+//   %kizu.array.deinit.cap.57 = extractvalue %kizu.array %kizu.498, 2
+//   %kizu.array.deinit.bytes.58 = mul i64 %kizu.array.deinit.cap.57, ptrtoint (ptr getelementptr (%kizu.union.Shape, ptr null, i64 1) to i64)
+//   %kizu.array.deinit.owns.59 = icmp ne i64 %kizu.array.deinit.bytes.58, 0
+//   br i1 %kizu.array.deinit.owns.59, label %kizu.array.deinit.owns.59.release, label %kizu.array.deinit.owns.59.done
+// kizu.array.deinit.owns.59.release:
+//   call void @kizu_array_deinit(ptr %kizu.471, ptr %kizu.array.deinit.data.56, i64 %kizu.array.deinit.bytes.58)
+//   br label %kizu.array.deinit.owns.59.done
+// kizu.array.deinit.owns.59.done:
+//   %kizu.main.err.code.60 = extractvalue %kizu.error.std__array__Error.void %kizu.497, 0
+//   %kizu.main.err.name.61.row = getelementptr [109 x { ptr, i64 }], ptr @.kizu.error.names, i64 0, i64 %kizu.main.err.code.60
+//   %kizu.main.err.name.61.ptr = load ptr, ptr %kizu.main.err.name.61.row
+//   %kizu.main.err.name.61.len.addr = getelementptr { ptr, i64 }, ptr %kizu.main.err.name.61.row, i64 0, i32 1
+//   %kizu.main.err.name.61.len = load i64, ptr %kizu.main.err.name.61.len.addr
+//   call void @kizu_main_error_message(ptr %kizu.main.err.name.61.ptr, i64 %kizu.main.err.name.61.len)
+//   ret i32 1
+// kizu.499.try.ok:
+//   %kizu.500 = call i64 @weigh_value(%kizu.union.Shape %kizu.495)
+//   %kizu.501 = add i64 %kizu.492, %kizu.500
+//   store %kizu.union.Shape %kizu.495, ptr %kizu.arg.0.62, align 8
+//   %kizu.502 = call i64 @weigh(ptr %kizu.arg.0.62)
+//   %kizu.503 = add i64 %kizu.501, %kizu.502
+//   br label %for.step.52
+// for.step.52:
+//   %kizu.505 = add i64 %kizu.493, 1
+//   br label %for.header.50
+// for.end.53:
+//   call void @std__fmt__print.i64(i64 %kizu.492)
+//   %kizu.508 = call i64 @std__array__Array.len.Shape(ptr %kizu.473)
+//   br label %for.header.54
+// for.header.54:
+//   %kizu.509 = phi i64 [ %kizu.492, %for.end.53 ], [ %kizu.514, %for.step.56 ]
+//   %kizu.510 = phi i64 [ 0, %for.end.53 ], [ %kizu.516, %for.step.56 ]
+//   %kizu.511 = icmp slt i64 %kizu.510, %kizu.508
+//   br i1 %kizu.511, label %for.body.55, label %for.end.57
+// for.body.55:
+//   %kizu.512 = call %kizu.union.Shape @std__array__Array.get_or_panic.Shape(ptr %kizu.473, i64 %kizu.510)
+//   %kizu.513 = call i64 @weigh_value(%kizu.union.Shape %kizu.512)
+//   %kizu.514 = add i64 %kizu.509, %kizu.513
+//   br label %for.step.56
+// for.step.56:
+//   %kizu.516 = add i64 %kizu.510, 1
+//   br label %for.header.54
+// for.end.57:
+//   call void @std__fmt__print.i64(i64 %kizu.509)
+//   %kizu.518 = load %kizu.array, ptr %kizu.473
+//   %kizu.array.deinit.data.63 = extractvalue %kizu.array %kizu.518, 0
+//   %kizu.array.deinit.cap.64 = extractvalue %kizu.array %kizu.518, 2
+//   %kizu.array.deinit.bytes.65 = mul i64 %kizu.array.deinit.cap.64, ptrtoint (ptr getelementptr (%kizu.union.Shape, ptr null, i64 1) to i64)
+//   %kizu.array.deinit.owns.66 = icmp ne i64 %kizu.array.deinit.bytes.65, 0
+//   br i1 %kizu.array.deinit.owns.66, label %kizu.array.deinit.owns.66.release, label %kizu.array.deinit.owns.66.done
+// kizu.array.deinit.owns.66.release:
+//   call void @kizu_array_deinit(ptr %kizu.471, ptr %kizu.array.deinit.data.63, i64 %kizu.array.deinit.bytes.65)
+//   br label %kizu.array.deinit.owns.66.done
+// kizu.array.deinit.owns.66.done:
+//   %kizu.520 = insertvalue %kizu.error.void zeroinitializer, i64 0, 0
+//   %kizu.main.ok.67.code = extractvalue %kizu.error.void %kizu.520, 0
+//   %kizu.main.ok.67 = icmp eq i64 %kizu.main.ok.67.code, 0
+//   br i1 %kizu.main.ok.67, label %kizu.main.exit.ok.69, label %kizu.main.exit.fail.70
+// kizu.main.exit.fail.70:
+//   %kizu.main.err.code.71 = extractvalue %kizu.error.void %kizu.520, 0
+//   %kizu.main.err.name.72.row = getelementptr [109 x { ptr, i64 }], ptr @.kizu.error.names, i64 0, i64 %kizu.main.err.code.71
+//   %kizu.main.err.name.72.ptr = load ptr, ptr %kizu.main.err.name.72.row
+//   %kizu.main.err.name.72.len.addr = getelementptr { ptr, i64 }, ptr %kizu.main.err.name.72.row, i64 0, i32 1
+//   %kizu.main.err.name.72.len = load i64, ptr %kizu.main.err.name.72.len.addr
+//   call void @kizu_main_error_message(ptr %kizu.main.err.name.72.ptr, i64 %kizu.main.err.name.72.len)
+//   ret i32 1
+// kizu.main.exit.ok.69:
+//   ret i32 0
+// }
+// 
+// !0 = !{!"kizu tbaa"}
+// !1 = !{!"kizu array count", !0, i64 0}
+// !2 = !{!"kizu array data", !0, i64 0}
+// !3 = !{!"kizu value", !0, i64 0}
+// !4 = !{!1, !1, i64 0}
+// !5 = !{!2, !2, i64 0}
+// !6 = !{!3, !3, i64 0}
+// opt:
+// ; Kizu LLVM IR
+// %kizu.slice.u8 = type { ptr, i64 }
+// %kizu.opt.Grid = type { i8, %kizu.struct.Grid }
+// 
+// %kizu.error.void = type { i64 }
+// %kizu.error.Fault.Grid = type { i64, %kizu.struct.Grid }
+// %kizu.error.Fault.i64 = type { i64, i64 }
+// %kizu.error.std__mem__Error.void = type { i64 }
+// 
+// %kizu.union.Shape = type { i64, [48 x i64] }
+// %kizu.union.std__mem__Limit = type { i64, [1 x i64] }
+// 
+// %kizu.struct.Chest = type { %kizu.struct.Tool, i64 }
+// %kizu.struct.Grid = type { [24 x double], [24 x i64] }
+// %kizu.struct.Holder = type { %kizu.opt.Grid, %kizu.opt.Grid, i64 }
+// %kizu.struct.Tool = type { ptr, [24 x i64] }
+// %kizu.struct.std__float__Big = type { %kizu.array }
+// %kizu.struct.std__float__Decimal = type { %kizu.array, i64 }
+// %kizu.struct.std__float__Scan = type { %kizu.slice.u8, i64 }
+// %kizu.struct.std__mem__AllocatorHeader = type { i64, i64, i64, i64 }
+// %kizu.struct.std__mem__BytesIter = type { %kizu.slice.u8, i64 }
+// %kizu.struct.std__string__Scalar = type { i64, i64 }
+// %kizu.struct.std__string__String = type { %kizu.array }
+// %kizu.struct.std__string__TrimBounds = type { i64, i64 }
+// 
+// @.kizu.error.name.1 = private unnamed_addr constant [31 x i8] c"std::array::Error::OutOfBounds\00"
+// @.kizu.error.name.73 = private unnamed_addr constant [29 x i8] c"std::mem::Error::OutOfMemory\00"
+// @.kizu.error.name.96 = private unnamed_addr constant [34 x i8] c"std::string::Error::InvalidLength\00"
+// @.kizu.error.name.107 = private unnamed_addr constant [13 x i8] c"Fault::Empty\00"
+// @.kizu.error.name.108 = private unnamed_addr constant [11 x i8] c"Fault::Odd\00"
+// @.kizu.error.names = private unnamed_addr constant [109 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr @.kizu.error.name.1, i64 30 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr @.kizu.error.name.73, i64 28 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr @.kizu.error.name.96, i64 33 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr @.kizu.error.name.107, i64 12 }, { ptr, i64 } { ptr @.kizu.error.name.108, i64 10 }]
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// %kizu.array = type { ptr, i64, i64 }
+// declare { ptr, i64 } @kizu_array_grow(ptr, ptr, i64, i64, i64)
+// declare i1 @kizu_array_append_bytes(ptr, ptr, ptr, i64)
+// declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)
+// declare i1 @kizu_array_reserve(ptr, ptr, i64, i64)
+// declare void @kizu_array_deinit(ptr, ptr, i64)
+// 
+// declare void @std__fmt__write_i64(i64)
+// declare ptr @std__internal__builtin__mem_page_allocator()
+// 
+// declare void @kizu_panic_bounds(i64, i64, i64, i64)
+// 
+// declare i1 @llvm.expect.i1(i1, i1)
+// 
+// attributes #0 = { "probe-stack"="inline-asm" "stack-probe-size"="4096" }
+// 
+// define internal %kizu.struct.Grid @fresh(i64 %kizu.seed) #0 {
+// entry:
+//   %kizu.4 = alloca %kizu.struct.Grid
+//   %kizu.3.field0 = insertvalue %kizu.struct.Grid zeroinitializer, [24 x double] zeroinitializer, 0
+//   %kizu.3 = insertvalue %kizu.struct.Grid %kizu.3.field0, [24 x i64] zeroinitializer, 1
+//   store %kizu.struct.Grid %kizu.3, ptr %kizu.4
+//   br label %for.header.1
+// for.header.1:
+//   %kizu.7 = phi i64 [ 0, %entry ], [ %kizu.31, %for.step.3 ]
+//   %kizu.8 = icmp slt i64 %kizu.7, 24
+//   br i1 %kizu.8, label %for.body.2, label %for.end.4
+// for.body.2:
+//   %kizu.9 = add i64 %kizu.seed, %kizu.7
+//   %kizu.11 = getelementptr %kizu.struct.Grid, ptr %kizu.4, i32 0, i32 1
+//   %kizu.15 = icmp uge i64 %kizu.7, 24
+//   br i1 %kizu.15, label %kizu.check.1.fail, label %kizu.check.1.pass
+// kizu.check.1.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.7, i64 24, i64 48, i64 19)
+//   unreachable
+// kizu.check.1.pass:
+//   %kizu.16 = getelementptr inbounds [24 x i64], ptr %kizu.11, i64 0, i64 %kizu.7
+//   store i64 %kizu.9, ptr %kizu.16, !tbaa !6
+//   %kizu.18 = mul i64 %kizu.seed, %kizu.7
+//   %kizu.19 = sitofp i64 %kizu.18 to double
+//   %kizu.21 = fadd double %kizu.19, 0x3FE0000000000000
+//   %kizu.23 = getelementptr %kizu.struct.Grid, ptr %kizu.4, i32 0, i32 0
+//   %kizu.27 = icmp uge i64 %kizu.7, 24
+//   br i1 %kizu.27, label %kizu.check.2.fail, label %kizu.check.2.pass
+// kizu.check.2.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.7, i64 24, i64 49, i64 19)
+//   unreachable
+// kizu.check.2.pass:
+//   %kizu.28 = getelementptr inbounds [24 x double], ptr %kizu.23, i64 0, i64 %kizu.7
+//   store double %kizu.21, ptr %kizu.28, !tbaa !6
+//   br label %for.step.3
+// for.step.3:
+//   %kizu.31 = add i64 %kizu.7, 1
+//   br label %for.header.1
+// for.end.4:
+//   %kizu.32 = load %kizu.struct.Grid, ptr %kizu.4
+//   ret %kizu.struct.Grid %kizu.32
+// }
+// 
+// define internal %kizu.opt.Grid @maybe(i64 %kizu.seed) #0 {
+// entry:
+//   %kizu.2 = icmp slt i64 %kizu.seed, 0
+//   br i1 %kizu.2, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.3 = insertvalue %kizu.opt.Grid zeroinitializer, i8 0, 0
+//   %kizu.return.join.arm0.f0 = extractvalue %kizu.opt.Grid %kizu.3, 0
+//   %kizu.return.join.arm0.f1 = extractvalue %kizu.opt.Grid %kizu.3, 1
+//   br label %kizu.return.join
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.4 = call %kizu.struct.Grid @fresh(i64 %kizu.seed)
+//   %kizu.5.some = insertvalue %kizu.opt.Grid zeroinitializer, i8 1, 0
+//   %kizu.5 = insertvalue %kizu.opt.Grid %kizu.5.some, %kizu.struct.Grid %kizu.4, 1
+//   %kizu.return.join.arm1.f0 = extractvalue %kizu.opt.Grid %kizu.5, 0
+//   %kizu.return.join.arm1.f1 = extractvalue %kizu.opt.Grid %kizu.5, 1
+//   br label %kizu.return.join
+// kizu.return.join:
+//   %kizu.return.join.f0 = phi i8 [ %kizu.return.join.arm0.f0, %if.then.1 ], [ %kizu.return.join.arm1.f0, %if.end.3 ]
+//   %kizu.return.join.f1 = phi %kizu.struct.Grid [ %kizu.return.join.arm0.f1, %if.then.1 ], [ %kizu.return.join.arm1.f1, %if.end.3 ]
+//   %kizu.return.join.built0 = insertvalue %kizu.opt.Grid zeroinitializer, i8 %kizu.return.join.f0, 0
+//   %kizu.return.join.built1 = insertvalue %kizu.opt.Grid %kizu.return.join.built0, %kizu.struct.Grid %kizu.return.join.f1, 1
+//   ret %kizu.opt.Grid %kizu.return.join.built1
+// }
+// 
+// define internal %kizu.error.Fault.Grid @checked(i64 %kizu.seed) #0 {
+// entry:
+//   %kizu.2 = icmp eq i64 %kizu.seed, 0
+//   br i1 %kizu.2, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.4 = insertvalue %kizu.error.Fault.Grid zeroinitializer, i64 107, 0
+//   %kizu.return.join.arm0.f0 = extractvalue %kizu.error.Fault.Grid %kizu.4, 0
+//   %kizu.return.join.arm0.f1 = extractvalue %kizu.error.Fault.Grid %kizu.4, 1
+//   br label %kizu.return.join
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.6 = srem i64 %kizu.seed, 2
+//   %kizu.8 = icmp eq i64 %kizu.6, 1
+//   br i1 %kizu.8, label %if.then.4, label %if.else.5
+// if.then.4:
+//   %kizu.10 = insertvalue %kizu.error.Fault.Grid zeroinitializer, i64 108, 0
+//   %kizu.return.join.arm1.f0 = extractvalue %kizu.error.Fault.Grid %kizu.10, 0
+//   %kizu.return.join.arm1.f1 = extractvalue %kizu.error.Fault.Grid %kizu.10, 1
+//   br label %kizu.return.join
+// if.else.5:
+//   br label %if.end.6
+// if.end.6:
+//   %kizu.11 = call %kizu.struct.Grid @fresh(i64 %kizu.seed)
+//   %kizu.12 = insertvalue %kizu.error.Fault.Grid zeroinitializer, %kizu.struct.Grid %kizu.11, 1
+//   %kizu.return.join.arm2.f0 = extractvalue %kizu.error.Fault.Grid %kizu.12, 0
+//   %kizu.return.join.arm2.f1 = extractvalue %kizu.error.Fault.Grid %kizu.12, 1
+//   br label %kizu.return.join
+// kizu.return.join:
+//   %kizu.return.join.f0 = phi i64 [ %kizu.return.join.arm0.f0, %if.then.1 ], [ %kizu.return.join.arm1.f0, %if.then.4 ], [ %kizu.return.join.arm2.f0, %if.end.6 ]
+//   %kizu.return.join.f1 = phi %kizu.struct.Grid [ %kizu.return.join.arm0.f1, %if.then.1 ], [ %kizu.return.join.arm1.f1, %if.then.4 ], [ %kizu.return.join.arm2.f1, %if.end.6 ]
+//   %kizu.return.join.built0 = insertvalue %kizu.error.Fault.Grid zeroinitializer, i64 %kizu.return.join.f0, 0
+//   %kizu.return.join.built1 = insertvalue %kizu.error.Fault.Grid %kizu.return.join.built0, %kizu.struct.Grid %kizu.return.join.f1, 1
+//   ret %kizu.error.Fault.Grid %kizu.return.join.built1
+// }
+// 
+// define internal i64 @double(i64 %kizu.value) #0 {
+// entry:
+//   %kizu.2 = mul i64 %kizu.value, 2
+//   ret i64 %kizu.2
+// }
+// 
+// define internal i64 @triple(i64 %kizu.value) #0 {
+// entry:
+//   %kizu.2 = mul i64 %kizu.value, 3
+//   ret i64 %kizu.2
+// }
+// 
+// define internal %kizu.struct.Tool @tool(ptr %kizu.apply, i64 %kizu.seed) #0 {
+// entry:
+//   %kizu.3 = alloca %kizu.struct.Tool
+//   %kizu.2.field0 = insertvalue %kizu.struct.Tool zeroinitializer, ptr %kizu.apply, 0
+//   %kizu.2 = insertvalue %kizu.struct.Tool %kizu.2.field0, [24 x i64] zeroinitializer, 1
+//   store %kizu.struct.Tool %kizu.2, ptr %kizu.3
+//   br label %for.header.1
+// for.header.1:
+//   %kizu.6 = phi i64 [ 0, %entry ], [ %kizu.18, %for.step.3 ]
+//   %kizu.7 = icmp slt i64 %kizu.6, 24
+//   br i1 %kizu.7, label %for.body.2, label %for.end.4
+// for.body.2:
+//   %kizu.8 = add i64 %kizu.seed, %kizu.6
+//   %kizu.10 = getelementptr %kizu.struct.Tool, ptr %kizu.3, i32 0, i32 1
+//   %kizu.14 = icmp uge i64 %kizu.6, 24
+//   br i1 %kizu.14, label %kizu.check.1.fail, label %kizu.check.1.pass
+// kizu.check.1.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.6, i64 24, i64 82, i64 19)
+//   unreachable
+// kizu.check.1.pass:
+//   %kizu.15 = getelementptr inbounds [24 x i64], ptr %kizu.10, i64 0, i64 %kizu.6
+//   store i64 %kizu.8, ptr %kizu.15, !tbaa !6
+//   br label %for.step.3
+// for.step.3:
+//   %kizu.18 = add i64 %kizu.6, 1
+//   br label %for.header.1
+// for.end.4:
+//   %kizu.19 = load %kizu.struct.Tool, ptr %kizu.3
+//   ret %kizu.struct.Tool %kizu.19
+// }
+// 
+// define internal i64 @Holder.first(ptr noalias nocapture readonly %kizu.self.addr) #0 {
+// entry:
+//   %kizu.5 = alloca [24 x i64]
+//   %kizu.1.addr = getelementptr %kizu.struct.Holder, ptr %kizu.self.addr, i32 0, i32 0
+//   %kizu.2.addr = getelementptr %kizu.opt.Grid, ptr %kizu.1.addr, i32 0, i32 1
+//   %kizu.3.tag = load i8, ptr %kizu.1.addr
+//   %kizu.3 = icmp ne i8 %kizu.3.tag, 0
+//   br i1 %kizu.3, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.4.addr = getelementptr %kizu.struct.Grid, ptr %kizu.2.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.5, ptr %kizu.4.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.10 = icmp uge i64 0, 24
+//   br i1 %kizu.10, label %kizu.check.1.fail, label %kizu.check.1.pass
+// kizu.check.1.fail:
+//   call void @kizu_panic_bounds(i64 0, i64 24, i64 90, i64 26)
+//   unreachable
+// kizu.check.1.pass:
+//   %kizu.11 = getelementptr inbounds [24 x i64], ptr %kizu.5, i64 0, i64 0
+//   %kizu.12 = load i64, ptr %kizu.11, !tbaa !6
+//   %kizu.13.addr = getelementptr %kizu.struct.Holder, ptr %kizu.self.addr, i32 0, i32 2
+//   %kizu.13 = load i64, ptr %kizu.13.addr, !tbaa !6
+//   %kizu.14 = add i64 %kizu.12, %kizu.13
+//   ret i64 %kizu.14
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.16 = sub i64 0, 1
+//   ret i64 %kizu.16
+// }
+// 
+// define internal i64 @Holder.either(ptr noalias nocapture readonly %kizu.self.addr, i64 %kizu.i) #0 {
+// entry:
+//   %kizu.11 = alloca [24 x i64]
+//   %kizu.1.addr = getelementptr %kizu.struct.Holder, ptr %kizu.self.addr, i32 0, i32 1
+//   %kizu.2.tag = load i8, ptr %kizu.1.addr
+//   %kizu.2 = icmp ne i8 %kizu.2.tag, 0
+//   br i1 %kizu.2, label %guard.some.1, label %guard.exit.2
+// guard.some.1:
+//   %kizu.5.addr = getelementptr %kizu.opt.Grid, ptr %kizu.1.addr, i32 0, i32 1
+//   %kizu.5 = load %kizu.struct.Grid, ptr %kizu.5.addr
+//   %kizu.6.addr = getelementptr %kizu.struct.Holder, ptr %kizu.self.addr, i32 0, i32 0
+//   %kizu.7.tag = load i8, ptr %kizu.6.addr
+//   %kizu.7 = icmp ne i8 %kizu.7.tag, 0
+//   br i1 %kizu.7, label %orelse.some.3, label %orelse.else.4
+// guard.exit.2:
+//   %kizu.4 = sub i64 0, 2
+//   ret i64 %kizu.4
+// orelse.some.3:
+//   %kizu.8.addr = getelementptr %kizu.opt.Grid, ptr %kizu.6.addr, i32 0, i32 1
+//   %kizu.8 = load %kizu.struct.Grid, ptr %kizu.8.addr
+//   br label %orelse.end.5
+// orelse.else.4:
+//   br label %orelse.end.5
+// orelse.end.5:
+//   %kizu.9 = phi %kizu.struct.Grid [ %kizu.8, %orelse.some.3 ], [ %kizu.5, %orelse.else.4 ]
+//   %kizu.10 = extractvalue %kizu.struct.Grid %kizu.9, 1
+//   store [24 x i64] %kizu.10, ptr %kizu.11
+//   %kizu.15 = icmp uge i64 %kizu.i, 24
+//   br i1 %kizu.15, label %kizu.check.1.fail, label %kizu.check.1.pass
+// kizu.check.1.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.i, i64 24, i64 98, i64 22)
+//   unreachable
+// kizu.check.1.pass:
+//   %kizu.16 = getelementptr inbounds [24 x i64], ptr %kizu.11, i64 0, i64 %kizu.i
+//   %kizu.17 = load i64, ptr %kizu.16, !tbaa !6
+//   ret i64 %kizu.17
+// }
+// 
+// define internal i64 @Holder.borrowed(ptr noalias nocapture readonly %kizu.self.addr) #0 {
+// entry:
+//   %kizu.5 = alloca [24 x i64]
+//   %kizu.1.addr = getelementptr %kizu.struct.Holder, ptr %kizu.self.addr, i32 0, i32 1
+//   %kizu.2.addr = getelementptr %kizu.opt.Grid, ptr %kizu.1.addr, i32 0, i32 1
+//   %kizu.3.tag = load i8, ptr %kizu.1.addr
+//   %kizu.3 = icmp ne i8 %kizu.3.tag, 0
+//   br i1 %kizu.3, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.4.addr = getelementptr %kizu.struct.Grid, ptr %kizu.2.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.5, ptr %kizu.4.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.10 = icmp uge i64 1, 24
+//   br i1 %kizu.10, label %kizu.check.1.fail, label %kizu.check.1.pass
+// kizu.check.1.fail:
+//   call void @kizu_panic_bounds(i64 1, i64 24, i64 103, i64 26)
+//   unreachable
+// kizu.check.1.pass:
+//   %kizu.11 = getelementptr inbounds [24 x i64], ptr %kizu.5, i64 0, i64 1
+//   %kizu.12 = load i64, ptr %kizu.11, !tbaa !6
+//   ret i64 %kizu.12
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.14 = sub i64 0, 3
+//   ret i64 %kizu.14
+// }
+// 
+// define internal i64 @count_before(ptr noalias nocapture readonly %kizu.seen.addr, ptr %kizu.live) #0 {
+// entry:
+//   %kizu.11 = alloca [24 x i64]
+//   %kizu.1 = insertvalue %kizu.opt.Grid zeroinitializer, i8 0, 0
+//   %kizu.2.ptr = getelementptr %kizu.struct.Holder, ptr %kizu.live, i32 0, i32 0
+//   store %kizu.opt.Grid %kizu.1, ptr %kizu.2.ptr
+//   %kizu.3.ptr = getelementptr %kizu.struct.Holder, ptr %kizu.live, i32 0, i32 2
+//   %kizu.3 = load i64, ptr %kizu.3.ptr, !tbaa !6
+//   %kizu.5 = add i64 %kizu.3, 100
+//   %kizu.6.ptr = getelementptr %kizu.struct.Holder, ptr %kizu.live, i32 0, i32 2
+//   store i64 %kizu.5, ptr %kizu.6.ptr, !tbaa !6
+//   %kizu.7.addr = getelementptr %kizu.struct.Holder, ptr %kizu.seen.addr, i32 0, i32 0
+//   %kizu.8.addr = getelementptr %kizu.opt.Grid, ptr %kizu.7.addr, i32 0, i32 1
+//   %kizu.9.tag = load i8, ptr %kizu.7.addr
+//   %kizu.9 = icmp ne i8 %kizu.9.tag, 0
+//   br i1 %kizu.9, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.10.addr = getelementptr %kizu.struct.Grid, ptr %kizu.8.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.11, ptr %kizu.10.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.16 = icmp uge i64 2, 24
+//   br i1 %kizu.16, label %kizu.check.1.fail, label %kizu.check.1.pass
+// kizu.check.1.fail:
+//   call void @kizu_panic_bounds(i64 2, i64 24, i64 114, i64 26)
+//   unreachable
+// kizu.check.1.pass:
+//   %kizu.17 = getelementptr inbounds [24 x i64], ptr %kizu.11, i64 0, i64 2
+//   %kizu.18 = load i64, ptr %kizu.17, !tbaa !6
+//   %kizu.19.addr = getelementptr %kizu.struct.Holder, ptr %kizu.seen.addr, i32 0, i32 2
+//   %kizu.19 = load i64, ptr %kizu.19.addr, !tbaa !6
+//   %kizu.20 = add i64 %kizu.18, %kizu.19
+//   ret i64 %kizu.20
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.22 = sub i64 0, 4
+//   ret i64 %kizu.22
+// }
+// 
+// define internal i64 @Chest.run(ptr noalias nocapture readonly %kizu.self.addr, i64 %kizu.i) #0 {
+// entry:
+//   %kizu.6 = alloca [24 x i64]
+//   %kizu.1.addr = getelementptr %kizu.struct.Chest, ptr %kizu.self.addr, i32 0, i32 0
+//   %kizu.opt.niche.1.addr = getelementptr %kizu.struct.Tool, ptr %kizu.1.addr, i32 0, i32 0
+//   %kizu.opt.niche.1 = load ptr, ptr %kizu.opt.niche.1.addr
+//   %kizu.3 = icmp ne ptr %kizu.opt.niche.1, null
+//   br i1 %kizu.3, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.4.addr = getelementptr %kizu.struct.Tool, ptr %kizu.1.addr, i32 0, i32 0
+//   %kizu.4 = load ptr, ptr %kizu.4.addr, !tbaa !6
+//   %kizu.5.addr = getelementptr %kizu.struct.Tool, ptr %kizu.1.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.6, ptr %kizu.5.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.10 = icmp uge i64 %kizu.i, 24
+//   br i1 %kizu.10, label %kizu.check.2.fail, label %kizu.check.2.pass
+// kizu.check.2.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.i, i64 24, i64 122, i64 32)
+//   unreachable
+// kizu.check.2.pass:
+//   %kizu.11 = getelementptr inbounds [24 x i64], ptr %kizu.6, i64 0, i64 %kizu.i
+//   %kizu.12 = load i64, ptr %kizu.11, !tbaa !6
+//   %kizu.13 = call i64 %kizu.4(i64 %kizu.12)
+//   %kizu.14.addr = getelementptr %kizu.struct.Chest, ptr %kizu.self.addr, i32 0, i32 1
+//   %kizu.14 = load i64, ptr %kizu.14.addr, !tbaa !6
+//   %kizu.15 = add i64 %kizu.13, %kizu.14
+//   ret i64 %kizu.15
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.17 = sub i64 0, 5
+//   ret i64 %kizu.17
+// }
+// 
+// define internal %kizu.struct.Tool @Chest.tool_or(ptr noalias nocapture readonly %kizu.self.addr, ptr noalias nocapture readonly %kizu.other.addr) #0 {
+// entry:
+//   %kizu.other = load %kizu.struct.Tool, ptr %kizu.other.addr
+//   %kizu.1.addr = getelementptr %kizu.struct.Chest, ptr %kizu.self.addr, i32 0, i32 0
+//   %kizu.opt.niche.1.addr = getelementptr %kizu.struct.Tool, ptr %kizu.1.addr, i32 0, i32 0
+//   %kizu.opt.niche.1 = load ptr, ptr %kizu.opt.niche.1.addr
+//   %kizu.2 = icmp ne ptr %kizu.opt.niche.1, null
+//   br i1 %kizu.2, label %orelse.some.1, label %orelse.else.2
+// orelse.some.1:
+//   %kizu.3 = load %kizu.struct.Tool, ptr %kizu.1.addr
+//   br label %orelse.end.3
+// orelse.else.2:
+//   br label %orelse.end.3
+// orelse.end.3:
+//   %kizu.4 = phi %kizu.struct.Tool [ %kizu.3, %orelse.some.1 ], [ %kizu.other, %orelse.else.2 ]
+//   ret %kizu.struct.Tool %kizu.4
+// }
+// 
+// define internal i64 @weigh(ptr %kizu.shape) #0 {
+// entry:
+//   %kizu.1.addr = alloca %kizu.union.Shape
+//   %kizu.10 = alloca [24 x i64]
+//   %kizu.19 = alloca [24 x i64]
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.1.addr, ptr %kizu.shape, i64 ptrtoint (ptr getelementptr (%kizu.union.Shape, ptr null, i64 1) to i64), i1 false)
+//   %kizu.2 = load i64, ptr %kizu.1.addr
+//   br label %match.check.2
+// match.check.2:
+//   %kizu.3 = icmp eq i64 %kizu.2, 0
+//   br i1 %kizu.3, label %match.arm.3, label %match.check.4
+// match.arm.3:
+//   ret i64 0
+// match.check.4:
+//   %kizu.5 = icmp eq i64 %kizu.2, 1
+//   br i1 %kizu.5, label %match.arm.5, label %match.check.6
+// match.arm.5:
+//   %kizu.6.addr = getelementptr %kizu.union.Shape, ptr %kizu.1.addr, i32 0, i32 1
+//   %kizu.6 = load i64, ptr %kizu.6.addr, !tbaa !6
+//   ret i64 %kizu.6
+// match.check.6:
+//   br label %match.arm.7
+// match.arm.7:
+//   %kizu.8.addr = getelementptr %kizu.union.Shape, ptr %kizu.1.addr, i32 0, i32 1
+//   %kizu.9.addr = getelementptr %kizu.struct.Grid, ptr %kizu.8.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.10, ptr %kizu.9.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.15 = icmp uge i64 2, 24
+//   br i1 %kizu.15, label %kizu.check.1.fail, label %kizu.check.1.pass
+// kizu.check.1.fail:
+//   call void @kizu_panic_bounds(i64 2, i64 24, i64 136, i64 41)
+//   unreachable
+// kizu.check.1.pass:
+//   %kizu.16 = getelementptr inbounds [24 x i64], ptr %kizu.10, i64 0, i64 2
+//   %kizu.17 = load i64, ptr %kizu.16, !tbaa !6
+//   %kizu.18.addr = getelementptr %kizu.struct.Grid, ptr %kizu.8.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.19, ptr %kizu.18.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.24 = icmp uge i64 3, 24
+//   br i1 %kizu.24, label %kizu.check.2.fail, label %kizu.check.2.pass
+// kizu.check.2.fail:
+//   call void @kizu_panic_bounds(i64 3, i64 24, i64 136, i64 57)
+//   unreachable
+// kizu.check.2.pass:
+//   %kizu.25 = getelementptr inbounds [24 x i64], ptr %kizu.19, i64 0, i64 3
+//   %kizu.26 = load i64, ptr %kizu.25, !tbaa !6
+//   %kizu.27 = add i64 %kizu.17, %kizu.26
+//   ret i64 %kizu.27
+// }
+// 
+// define internal i64 @weigh_value(%kizu.union.Shape %kizu.shape) #0 {
+// entry:
+//   %kizu.5.slot = alloca %kizu.union.Shape, align 8
+//   %kizu.9.slot = alloca %kizu.union.Shape, align 8
+//   %kizu.11 = alloca [24 x i64]
+//   %kizu.1 = extractvalue %kizu.union.Shape %kizu.shape, 0
+//   br label %match.check.2
+// match.check.2:
+//   %kizu.2 = icmp eq i64 %kizu.1, 0
+//   br i1 %kizu.2, label %match.arm.3, label %match.check.4
+// match.arm.3:
+//   ret i64 1
+// match.check.4:
+//   %kizu.4 = icmp eq i64 %kizu.1, 1
+//   br i1 %kizu.4, label %match.arm.5, label %match.check.6
+// match.arm.5:
+//   store %kizu.union.Shape %kizu.shape, ptr %kizu.5.slot, align 8
+//   %kizu.5.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.5.slot, i32 0, i32 1
+//   %kizu.5 = load i64, ptr %kizu.5.payload.ptr, align 8
+//   %kizu.7 = add i64 %kizu.5, 1
+//   ret i64 %kizu.7
+// match.check.6:
+//   br label %match.arm.7
+// match.arm.7:
+//   store %kizu.union.Shape %kizu.shape, ptr %kizu.9.slot, align 8
+//   %kizu.9.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.9.slot, i32 0, i32 1
+//   %kizu.10.addr = getelementptr %kizu.struct.Grid, ptr %kizu.9.payload.ptr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.11, ptr %kizu.10.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.16 = icmp uge i64 4, 24
+//   br i1 %kizu.16, label %kizu.check.1.fail, label %kizu.check.1.pass
+// kizu.check.1.fail:
+//   call void @kizu_panic_bounds(i64 4, i64 24, i64 144, i64 41)
+//   unreachable
+// kizu.check.1.pass:
+//   %kizu.17 = getelementptr inbounds [24 x i64], ptr %kizu.11, i64 0, i64 4
+//   %kizu.18 = load i64, ptr %kizu.17, !tbaa !6
+//   ret i64 %kizu.18
+// }
+// 
+// define internal i64 @replace_then_read(ptr %kizu.shape, %kizu.union.Shape %kizu.next) #0 {
+// entry:
+//   %kizu.1.addr = alloca %kizu.union.Shape
+//   %kizu.7 = alloca [24 x i64]
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.1.addr, ptr %kizu.shape, i64 ptrtoint (ptr getelementptr (%kizu.union.Shape, ptr null, i64 1) to i64), i1 false)
+//   store %kizu.union.Shape %kizu.next, ptr %kizu.shape
+//   %kizu.3 = load i64, ptr %kizu.1.addr
+//   br label %match.check.2
+// match.check.2:
+//   %kizu.4 = icmp eq i64 %kizu.3, 2
+//   br i1 %kizu.4, label %match.arm.3, label %match.check.4
+// match.arm.3:
+//   %kizu.5.addr = getelementptr %kizu.union.Shape, ptr %kizu.1.addr, i32 0, i32 1
+//   %kizu.6.addr = getelementptr %kizu.struct.Grid, ptr %kizu.5.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.7, ptr %kizu.6.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.12 = icmp uge i64 5, 24
+//   br i1 %kizu.12, label %kizu.check.1.fail, label %kizu.check.1.pass
+// kizu.check.1.fail:
+//   call void @kizu_panic_bounds(i64 5, i64 24, i64 154, i64 41)
+//   unreachable
+// kizu.check.1.pass:
+//   %kizu.13 = getelementptr inbounds [24 x i64], ptr %kizu.7, i64 0, i64 5
+//   %kizu.14 = load i64, ptr %kizu.13, !tbaa !6
+//   ret i64 %kizu.14
+// match.check.4:
+//   %kizu.15 = icmp eq i64 %kizu.3, 1
+//   br i1 %kizu.15, label %match.arm.5, label %match.check.6
+// match.arm.5:
+//   %kizu.16.addr = getelementptr %kizu.union.Shape, ptr %kizu.1.addr, i32 0, i32 1
+//   %kizu.16 = load i64, ptr %kizu.16.addr, !tbaa !6
+//   ret i64 %kizu.16
+// match.check.6:
+//   br label %match.arm.7
+// match.arm.7:
+//   %kizu.19 = sub i64 0, 6
+//   ret i64 %kizu.19
+// }
+// 
+// define internal i64 @code(i64 %kizu.failure) #0 {
+// entry:
+//   br label %match.check.2
+// match.end.1:
+//   %kizu.7 = phi i64 [ %kizu.3, %match.arm.3 ], [ %kizu.6, %match.arm.5 ]
+//   ret i64 %kizu.7
+// match.check.2:
+//   %kizu.1 = icmp eq i64 %kizu.failure, 107
+//   br i1 %kizu.1, label %match.arm.3, label %match.check.4
+// match.arm.3:
+//   %kizu.3 = sub i64 0, 10
+//   br label %match.end.1
+// match.check.4:
+//   br label %match.arm.5
+// match.arm.5:
+//   %kizu.6 = sub i64 0, 11
+//   br label %match.end.1
+// }
+// 
+// define internal %kizu.error.Fault.i64 @forward(i64 %kizu.seed) #0 {
+// entry:
+//   %kizu.4 = alloca [24 x i64]
+//   %kizu.1 = call %kizu.error.Fault.Grid @checked(i64 %kizu.seed)
+//   %kizu.2.ok.code = extractvalue %kizu.error.Fault.Grid %kizu.1, 0
+//   %kizu.2.ok = icmp eq i64 %kizu.2.ok.code, 0
+//   %kizu.2.ok.expected = call i1 @llvm.expect.i1(i1 %kizu.2.ok, i1 true)
+//   br i1 %kizu.2.ok.expected, label %kizu.2.try.ok, label %kizu.2.try.err
+// kizu.2.try.err:
+//   %kizu.try.err.1.code = extractvalue %kizu.error.Fault.Grid %kizu.1, 0
+//   %kizu.try.err.1 = insertvalue %kizu.error.Fault.i64 zeroinitializer, i64 %kizu.try.err.1.code, 0
+//   %kizu.return.join.arm0.f0 = extractvalue %kizu.error.Fault.i64 %kizu.try.err.1, 0
+//   %kizu.return.join.arm0.f1 = extractvalue %kizu.error.Fault.i64 %kizu.try.err.1, 1
+//   br label %kizu.return.join
+// kizu.2.try.ok:
+//   %kizu.2 = extractvalue %kizu.error.Fault.Grid %kizu.1, 1
+//   %kizu.3 = extractvalue %kizu.struct.Grid %kizu.2, 1
+//   store [24 x i64] %kizu.3, ptr %kizu.4
+//   %kizu.9 = icmp uge i64 5, 24
+//   br i1 %kizu.9, label %kizu.check.2.fail, label %kizu.check.2.pass
+// kizu.check.2.fail:
+//   call void @kizu_panic_bounds(i64 5, i64 24, i64 169, i64 22)
+//   unreachable
+// kizu.check.2.pass:
+//   %kizu.10 = getelementptr inbounds [24 x i64], ptr %kizu.4, i64 0, i64 5
+//   %kizu.11 = load i64, ptr %kizu.10, !tbaa !6
+//   %kizu.12 = insertvalue %kizu.error.Fault.i64 zeroinitializer, i64 %kizu.11, 1
+//   %kizu.return.join.arm1.f0 = extractvalue %kizu.error.Fault.i64 %kizu.12, 0
+//   %kizu.return.join.arm1.f1 = extractvalue %kizu.error.Fault.i64 %kizu.12, 1
+//   br label %kizu.return.join
+// kizu.return.join:
+//   %kizu.return.join.f0 = phi i64 [ %kizu.return.join.arm0.f0, %kizu.2.try.err ], [ %kizu.return.join.arm1.f0, %kizu.check.2.pass ]
+//   %kizu.return.join.f1 = phi i64 [ %kizu.return.join.arm0.f1, %kizu.2.try.err ], [ %kizu.return.join.arm1.f1, %kizu.check.2.pass ]
+//   %kizu.return.join.built0 = insertvalue %kizu.error.Fault.i64 zeroinitializer, i64 %kizu.return.join.f0, 0
+//   %kizu.return.join.built1 = insertvalue %kizu.error.Fault.i64 %kizu.return.join.built0, i64 %kizu.return.join.f1, 1
+//   ret %kizu.error.Fault.i64 %kizu.return.join.built1
+// }
+// 
+// define internal %kizu.error.Fault.Grid @again(i64 %kizu.seed) #0 {
+// entry:
+//   %kizu.1 = call %kizu.error.Fault.Grid @checked(i64 %kizu.seed)
+//   %kizu.2.ok.code = extractvalue %kizu.error.Fault.Grid %kizu.1, 0
+//   %kizu.2.ok = icmp eq i64 %kizu.2.ok.code, 0
+//   %kizu.2.ok.expected = call i1 @llvm.expect.i1(i1 %kizu.2.ok, i1 true)
+//   br i1 %kizu.2.ok.expected, label %kizu.2.try.ok, label %kizu.2.try.err
+// kizu.2.try.err:
+//   %kizu.return.join.arm0.f0 = extractvalue %kizu.error.Fault.Grid %kizu.1, 0
+//   %kizu.return.join.arm0.f1 = extractvalue %kizu.error.Fault.Grid %kizu.1, 1
+//   br label %kizu.return.join
+// kizu.2.try.ok:
+//   %kizu.2 = extractvalue %kizu.error.Fault.Grid %kizu.1, 1
+//   %kizu.3 = insertvalue %kizu.error.Fault.Grid zeroinitializer, %kizu.struct.Grid %kizu.2, 1
+//   %kizu.return.join.arm1.f0 = extractvalue %kizu.error.Fault.Grid %kizu.3, 0
+//   %kizu.return.join.arm1.f1 = extractvalue %kizu.error.Fault.Grid %kizu.3, 1
+//   br label %kizu.return.join
+// kizu.return.join:
+//   %kizu.return.join.f0 = phi i64 [ %kizu.return.join.arm0.f0, %kizu.2.try.err ], [ %kizu.return.join.arm1.f0, %kizu.2.try.ok ]
+//   %kizu.return.join.f1 = phi %kizu.struct.Grid [ %kizu.return.join.arm0.f1, %kizu.2.try.err ], [ %kizu.return.join.arm1.f1, %kizu.2.try.ok ]
+//   %kizu.return.join.built0 = insertvalue %kizu.error.Fault.Grid zeroinitializer, i64 %kizu.return.join.f0, 0
+//   %kizu.return.join.built1 = insertvalue %kizu.error.Fault.Grid %kizu.return.join.built0, %kizu.struct.Grid %kizu.return.join.f1, 1
+//   ret %kizu.error.Fault.Grid %kizu.return.join.built1
+// }
+// 
+// define i32 @main(i32 %kizu.argc, ptr %kizu.argv) #0 {
+// entry:
+//   %kizu.8 = alloca %kizu.struct.Holder
+//   %kizu.9.addr = alloca %kizu.struct.Holder
+//   %kizu.12.addr = alloca %kizu.struct.Holder
+//   %kizu.16.addr = alloca %kizu.struct.Holder
+//   %kizu.19.addr = alloca %kizu.opt.Grid
+//   %kizu.27 = alloca [24 x i64]
+//   %kizu.36.addr = alloca %kizu.struct.Holder
+//   %kizu.43.addr = alloca %kizu.opt.Grid
+//   %kizu.50 = alloca [24 x i64]
+//   %kizu.59.addr = alloca %kizu.struct.Holder
+//   %kizu.62.addr = alloca %kizu.struct.Holder
+//   %kizu.68 = alloca %kizu.struct.Grid
+//   %kizu.69.addr = alloca %kizu.struct.Grid
+//   %kizu.70.addr = alloca %kizu.opt.Grid
+//   %kizu.83.addr = alloca %kizu.struct.Holder
+//   %kizu.95.addr = alloca %kizu.struct.Holder
+//   %kizu.98.addr = alloca %kizu.struct.Holder
+//   %kizu.arg.0.5 = alloca %kizu.struct.Chest
+//   %kizu.124 = alloca [24 x i64]
+//   %kizu.arg.0.8 = alloca %kizu.struct.Chest
+//   %kizu.142 = alloca [24 x i64]
+//   %kizu.arg.0.11 = alloca %kizu.struct.Chest
+//   %kizu.161 = alloca [24 x i64]
+//   %kizu.178 = alloca [24 x i64]
+//   %kizu.194 = alloca [24 x i64]
+//   %kizu.213 = alloca [24 x i64]
+//   %kizu.246 = alloca [24 x i64]
+//   %kizu.261 = alloca [24 x i64]
+//   %kizu.274.slot = alloca %kizu.union.Shape, align 8
+//   %kizu.275 = alloca %kizu.union.Shape
+//   %kizu.281.addr = alloca %kizu.union.Shape
+//   %kizu.304.slot = alloca %kizu.union.Shape, align 8
+//   %kizu.318.slot = alloca %kizu.union.Shape, align 8
+//   %kizu.321.slot = alloca %kizu.union.Shape, align 8
+//   %kizu.348 = alloca [3 x %kizu.struct.Holder]
+//   %kizu.359 = alloca [3 x %kizu.struct.Holder]
+//   %kizu.286.slot = alloca %kizu.union.Shape, align 8
+//   %kizu.289 = alloca [24 x i64]
+//   %kizu.371.addr = alloca %kizu.struct.Holder
+//   %kizu.390 = alloca [24 x i64]
+//   %kizu.429.addr = alloca %kizu.struct.Holder
+//   %kizu.473 = alloca %kizu.array
+//   %kizu.476.slot = alloca %kizu.union.Shape, align 8
+//   %kizu.481.slot = alloca %kizu.union.Shape, align 8
+//   %kizu.485.addr = alloca %kizu.union.Shape
+//   %kizu.434 = alloca [24 x i64]
+//   %kizu.449.addr = alloca %kizu.struct.Holder
+//   %kizu.496.slot = alloca %kizu.union.Shape, align 8
+//   %kizu.arg.0.118 = alloca %kizu.union.Shape, align 8
+//   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
+//   br label %in1.entry
+// in1.entry:
+//   br label %in1.if.else.2
+// in1.if.else.2:
+//   br label %in1.if.end.3
+// in1.if.end.3:
+//   %kizu.in1.4 = call %kizu.struct.Grid @fresh(i64 10)
+//   %kizu.in1.5.some = insertvalue %kizu.opt.Grid zeroinitializer, i8 1, 0
+//   %kizu.in1.5 = insertvalue %kizu.opt.Grid %kizu.in1.5.some, %kizu.struct.Grid %kizu.in1.4, 1
+//   br label %in1.cont
+// in1.cont:
+//   %kizu.4 = sub i64 0, 1
+//   br label %in2.entry
+// in2.entry:
+//   %kizu.in2.2 = icmp slt i64 %kizu.4, 0
+//   br i1 %kizu.in2.2, label %in2.if.then.1, label %in2.if.else.2
+// in2.if.then.1:
+//   %kizu.in2.3 = insertvalue %kizu.opt.Grid zeroinitializer, i8 0, 0
+//   %kizu.5.split0.arm0.f0 = extractvalue %kizu.opt.Grid %kizu.in2.3, 0
+//   %kizu.5.split0.arm0.f1 = extractvalue %kizu.opt.Grid %kizu.in2.3, 1
+//   br label %in2.cont
+// in2.if.else.2:
+//   br label %in2.if.end.3
+// in2.if.end.3:
+//   %kizu.in2.4 = call %kizu.struct.Grid @fresh(i64 %kizu.4)
+//   %kizu.in2.5.some = insertvalue %kizu.opt.Grid zeroinitializer, i8 1, 0
+//   %kizu.in2.5 = insertvalue %kizu.opt.Grid %kizu.in2.5.some, %kizu.struct.Grid %kizu.in2.4, 1
+//   %kizu.5.split0.arm1.f0 = extractvalue %kizu.opt.Grid %kizu.in2.5, 0
+//   %kizu.5.split0.arm1.f1 = extractvalue %kizu.opt.Grid %kizu.in2.5, 1
+//   br label %in2.cont
+// in2.cont:
+//   %kizu.5.split0.f0 = phi i8 [ %kizu.5.split0.arm0.f0, %in2.if.then.1 ], [ %kizu.5.split0.arm1.f0, %in2.if.end.3 ]
+//   %kizu.5.split0.f1 = phi %kizu.struct.Grid [ %kizu.5.split0.arm0.f1, %in2.if.then.1 ], [ %kizu.5.split0.arm1.f1, %in2.if.end.3 ]
+//   %kizu.5.split0.built0 = insertvalue %kizu.opt.Grid zeroinitializer, i8 %kizu.5.split0.f0, 0
+//   %kizu.5 = insertvalue %kizu.opt.Grid %kizu.5.split0.built0, %kizu.struct.Grid %kizu.5.split0.f1, 1
+//   %kizu.7.field0 = insertvalue %kizu.struct.Holder zeroinitializer, %kizu.opt.Grid %kizu.in1.5, 0
+//   %kizu.7.field1 = insertvalue %kizu.struct.Holder %kizu.7.field0, %kizu.opt.Grid %kizu.5, 1
+//   %kizu.7 = insertvalue %kizu.struct.Holder %kizu.7.field1, i64 3, 2
+//   store %kizu.struct.Holder %kizu.7, ptr %kizu.8
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.9.addr, ptr %kizu.8, i64 ptrtoint (ptr getelementptr (%kizu.struct.Holder, ptr null, i64 1) to i64), i1 false)
+//   %kizu.10 = call i64 @Holder.first(ptr %kizu.9.addr)
+//   call void @std__fmt__write_i64(i64 %kizu.10)
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.12.addr, ptr %kizu.8, i64 ptrtoint (ptr getelementptr (%kizu.struct.Holder, ptr null, i64 1) to i64), i1 false)
+//   %kizu.14 = call i64 @Holder.either(ptr %kizu.12.addr, i64 2)
+//   call void @std__fmt__write_i64(i64 %kizu.14)
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.16.addr, ptr %kizu.8, i64 ptrtoint (ptr getelementptr (%kizu.struct.Holder, ptr null, i64 1) to i64), i1 false)
+//   %kizu.17 = call i64 @Holder.borrowed(ptr %kizu.16.addr)
+//   call void @std__fmt__write_i64(i64 %kizu.17)
+//   %kizu.19.ptr = getelementptr %kizu.struct.Holder, ptr %kizu.8, i32 0, i32 0
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.19.addr, ptr %kizu.19.ptr, i64 ptrtoint (ptr getelementptr (%kizu.opt.Grid, ptr null, i64 1) to i64), i1 false)
+//   %kizu.20.addr = getelementptr %kizu.opt.Grid, ptr %kizu.19.addr, i32 0, i32 1
+//   %kizu.21.tag = load i8, ptr %kizu.19.addr
+//   %kizu.21 = icmp ne i8 %kizu.21.tag, 0
+//   br i1 %kizu.21, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.22 = insertvalue %kizu.opt.Grid zeroinitializer, i8 0, 0
+//   %kizu.23.ptr = getelementptr %kizu.struct.Holder, ptr %kizu.8, i32 0, i32 0
+//   store %kizu.opt.Grid %kizu.22, ptr %kizu.23.ptr
+//   %kizu.25.ptr = getelementptr %kizu.struct.Holder, ptr %kizu.8, i32 0, i32 2
+//   store i64 9, ptr %kizu.25.ptr, !tbaa !6
+//   %kizu.26.addr = getelementptr %kizu.struct.Grid, ptr %kizu.20.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.27, ptr %kizu.26.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.32 = icmp uge i64 0, 24
+//   br i1 %kizu.32, label %kizu.check.1.fail, label %kizu.check.1.pass
+// kizu.check.1.fail:
+//   call void @kizu_panic_bounds(i64 0, i64 24, i64 188, i64 25)
+//   unreachable
+// kizu.check.1.pass:
+//   %kizu.33 = getelementptr inbounds [24 x i64], ptr %kizu.27, i64 0, i64 0
+//   %kizu.34 = load i64, ptr %kizu.33, !tbaa !6
+//   call void @std__fmt__write_i64(i64 %kizu.34)
+//   br label %if.end.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.36.addr, ptr %kizu.8, i64 ptrtoint (ptr getelementptr (%kizu.struct.Holder, ptr null, i64 1) to i64), i1 false)
+//   %kizu.37 = call i64 @Holder.first(ptr %kizu.36.addr)
+//   call void @std__fmt__write_i64(i64 %kizu.37)
+//   %kizu.40 = call %kizu.struct.Grid @fresh(i64 40)
+//   %kizu.41.some = insertvalue %kizu.opt.Grid zeroinitializer, i8 1, 0
+//   %kizu.41 = insertvalue %kizu.opt.Grid %kizu.41.some, %kizu.struct.Grid %kizu.40, 1
+//   %kizu.42.ptr = getelementptr %kizu.struct.Holder, ptr %kizu.8, i32 0, i32 1
+//   store %kizu.opt.Grid %kizu.41, ptr %kizu.42.ptr
+//   %kizu.43.ptr = getelementptr %kizu.struct.Holder, ptr %kizu.8, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.43.addr, ptr %kizu.43.ptr, i64 ptrtoint (ptr getelementptr (%kizu.opt.Grid, ptr null, i64 1) to i64), i1 false)
+//   br label %in8.entry
+// in8.entry:
+//   br label %in8.if.else.2
+// in8.if.else.2:
+//   br label %in8.if.end.3
+// in8.if.end.3:
+//   %kizu.in8.4 = call %kizu.struct.Grid @fresh(i64 70)
+//   %kizu.in8.5.some = insertvalue %kizu.opt.Grid zeroinitializer, i8 1, 0
+//   %kizu.in8.5 = insertvalue %kizu.opt.Grid %kizu.in8.5.some, %kizu.struct.Grid %kizu.in8.4, 1
+//   br label %in8.cont
+// in8.cont:
+//   %kizu.46.ptr = getelementptr %kizu.struct.Holder, ptr %kizu.8, i32 0, i32 1
+//   store %kizu.opt.Grid %kizu.in8.5, ptr %kizu.46.ptr
+//   %kizu.47.addr = getelementptr %kizu.opt.Grid, ptr %kizu.43.addr, i32 0, i32 1
+//   %kizu.48.tag = load i8, ptr %kizu.43.addr
+//   %kizu.48 = icmp ne i8 %kizu.48.tag, 0
+//   br i1 %kizu.48, label %if.then.4, label %if.else.5
+// if.then.4:
+//   %kizu.49.addr = getelementptr %kizu.struct.Grid, ptr %kizu.47.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.50, ptr %kizu.49.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.55 = icmp uge i64 1, 24
+//   br i1 %kizu.55, label %kizu.check.2.fail, label %kizu.check.2.pass
+// kizu.check.2.fail:
+//   call void @kizu_panic_bounds(i64 1, i64 24, i64 197, i64 25)
+//   unreachable
+// kizu.check.2.pass:
+//   %kizu.56 = getelementptr inbounds [24 x i64], ptr %kizu.50, i64 0, i64 1
+//   %kizu.57 = load i64, ptr %kizu.56, !tbaa !6
+//   call void @std__fmt__write_i64(i64 %kizu.57)
+//   br label %if.end.6
+// if.else.5:
+//   br label %if.end.6
+// if.end.6:
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.59.addr, ptr %kizu.8, i64 ptrtoint (ptr getelementptr (%kizu.struct.Holder, ptr null, i64 1) to i64), i1 false)
+//   %kizu.60 = call i64 @Holder.borrowed(ptr %kizu.59.addr)
+//   call void @std__fmt__write_i64(i64 %kizu.60)
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.62.addr, ptr %kizu.8, i64 ptrtoint (ptr getelementptr (%kizu.struct.Holder, ptr null, i64 1) to i64), i1 false)
+//   %kizu.64 = call i64 @Holder.either(ptr %kizu.62.addr, i64 3)
+//   call void @std__fmt__write_i64(i64 %kizu.64)
+//   %kizu.67 = call %kizu.struct.Grid @fresh(i64 200)
+//   store %kizu.struct.Grid %kizu.67, ptr %kizu.68
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.69.addr, ptr %kizu.68, i64 ptrtoint (ptr getelementptr (%kizu.struct.Grid, ptr null, i64 1) to i64), i1 false)
+//   store i8 1, ptr %kizu.70.addr
+//   %kizu.70.payload.addr = getelementptr %kizu.opt.Grid, ptr %kizu.70.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.70.payload.addr, ptr %kizu.69.addr, i64 ptrtoint (ptr getelementptr (%kizu.struct.Grid, ptr null, i64 1) to i64), i1 false)
+//   %kizu.71.ptr = getelementptr %kizu.struct.Holder, ptr %kizu.8, i32 0, i32 0
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.71.ptr, ptr %kizu.70.addr, i64 ptrtoint (ptr getelementptr (%kizu.opt.Grid, ptr null, i64 1) to i64), i1 false)
+//   %kizu.73 = sub i64 0, 1
+//   %kizu.75 = getelementptr %kizu.struct.Grid, ptr %kizu.68, i32 0, i32 1
+//   %kizu.80 = icmp uge i64 0, 24
+//   br i1 %kizu.80, label %kizu.check.3.fail, label %kizu.check.3.pass
+// kizu.check.3.fail:
+//   call void @kizu_panic_bounds(i64 0, i64 24, i64 205, i64 16)
+//   unreachable
+// kizu.check.3.pass:
+//   %kizu.81 = getelementptr inbounds [24 x i64], ptr %kizu.75, i64 0, i64 0
+//   store i64 %kizu.73, ptr %kizu.81, !tbaa !6
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.83.addr, ptr %kizu.8, i64 ptrtoint (ptr getelementptr (%kizu.struct.Holder, ptr null, i64 1) to i64), i1 false)
+//   %kizu.84 = call i64 @Holder.first(ptr %kizu.83.addr)
+//   call void @std__fmt__write_i64(i64 %kizu.84)
+//   %kizu.86 = getelementptr %kizu.struct.Grid, ptr %kizu.68, i32 0, i32 1
+//   %kizu.91 = icmp uge i64 0, 24
+//   br i1 %kizu.91, label %kizu.check.4.fail, label %kizu.check.4.pass
+// kizu.check.4.fail:
+//   call void @kizu_panic_bounds(i64 0, i64 24, i64 207, i64 22)
+//   unreachable
+// kizu.check.4.pass:
+//   %kizu.92 = getelementptr inbounds [24 x i64], ptr %kizu.86, i64 0, i64 0
+//   %kizu.93 = load i64, ptr %kizu.92, !tbaa !6
+//   call void @std__fmt__write_i64(i64 %kizu.93)
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.95.addr, ptr %kizu.8, i64 ptrtoint (ptr getelementptr (%kizu.struct.Holder, ptr null, i64 1) to i64), i1 false)
+//   %kizu.96 = call i64 @count_before(ptr %kizu.95.addr, ptr %kizu.8)
+//   call void @std__fmt__write_i64(i64 %kizu.96)
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.98.addr, ptr %kizu.8, i64 ptrtoint (ptr getelementptr (%kizu.struct.Holder, ptr null, i64 1) to i64), i1 false)
+//   %kizu.99 = call i64 @Holder.first(ptr %kizu.98.addr)
+//   call void @std__fmt__write_i64(i64 %kizu.99)
+//   %kizu.101.ptr = getelementptr %kizu.struct.Holder, ptr %kizu.8, i32 0, i32 2
+//   %kizu.101 = load i64, ptr %kizu.101.ptr, !tbaa !6
+//   call void @std__fmt__write_i64(i64 %kizu.101)
+//   %kizu.105 = call %kizu.struct.Tool @tool(ptr @double, i64 5)
+//   %kizu.108.field0 = insertvalue %kizu.struct.Chest zeroinitializer, %kizu.struct.Tool %kizu.105, 0
+//   %kizu.108 = insertvalue %kizu.struct.Chest %kizu.108.field0, i64 1, 1
+//   store %kizu.struct.Chest %kizu.108, ptr %kizu.arg.0.5
+//   %kizu.110 = call i64 @Chest.run(ptr %kizu.arg.0.5, i64 2)
+//   call void @std__fmt__write_i64(i64 %kizu.110)
+//   %kizu.112 = extractvalue %kizu.struct.Chest %kizu.108, 0
+//   %kizu.115 = call %kizu.struct.Tool @tool(ptr @triple, i64 9)
+//   %kizu.117 = insertvalue %kizu.struct.Chest %kizu.108, %kizu.struct.Tool %kizu.115, 0
+//   %kizu.119 = insertvalue %kizu.struct.Chest %kizu.117, i64 2, 1
+//   %kizu.opt.niche.6 = extractvalue %kizu.struct.Tool %kizu.112, 0
+//   %kizu.121 = icmp ne ptr %kizu.opt.niche.6, null
+//   br i1 %kizu.121, label %if.then.7, label %if.else.8
+// if.then.7:
+//   %kizu.122 = extractvalue %kizu.struct.Tool %kizu.112, 0
+//   %kizu.123 = extractvalue %kizu.struct.Tool %kizu.112, 1
+//   store [24 x i64] %kizu.123, ptr %kizu.124
+//   %kizu.129 = icmp uge i64 3, 24
+//   br i1 %kizu.129, label %kizu.check.7.fail, label %kizu.check.7.pass
+// kizu.check.7.fail:
+//   call void @kizu_panic_bounds(i64 3, i64 24, i64 220, i64 31)
+//   unreachable
+// kizu.check.7.pass:
+//   %kizu.130 = getelementptr inbounds [24 x i64], ptr %kizu.124, i64 0, i64 3
+//   %kizu.131 = load i64, ptr %kizu.130, !tbaa !6
+//   %kizu.132 = call i64 %kizu.122(i64 %kizu.131)
+//   call void @std__fmt__write_i64(i64 %kizu.132)
+//   br label %if.end.9
+// if.else.8:
+//   br label %if.end.9
+// if.end.9:
+//   store %kizu.struct.Chest %kizu.119, ptr %kizu.arg.0.8
+//   %kizu.135 = call i64 @Chest.run(ptr %kizu.arg.0.8, i64 0)
+//   call void @std__fmt__write_i64(i64 %kizu.135)
+//   %kizu.139 = call %kizu.struct.Tool @tool(ptr @double, i64 30)
+//   br label %in20.entry
+// in20.entry:
+//   %kizu.in20.1 = extractvalue %kizu.struct.Chest %kizu.119, 0
+//   %kizu.opt.niche.9 = extractvalue %kizu.struct.Tool %kizu.in20.1, 0
+//   %kizu.in20.2 = icmp ne ptr %kizu.opt.niche.9, null
+//   br i1 %kizu.in20.2, label %in20.orelse.some.1, label %in20.orelse.else.2
+// in20.orelse.some.1:
+//   br label %in20.orelse.end.3
+// in20.orelse.else.2:
+//   br label %in20.orelse.end.3
+// in20.orelse.end.3:
+//   %kizu.in20.4 = phi %kizu.struct.Tool [ %kizu.in20.1, %in20.orelse.some.1 ], [ %kizu.139, %in20.orelse.else.2 ]
+//   br label %in20.cont
+// in20.cont:
+//   %kizu.141 = extractvalue %kizu.struct.Tool %kizu.in20.4, 1
+//   store [24 x i64] %kizu.141, ptr %kizu.142
+//   %kizu.147 = icmp uge i64 4, 24
+//   br i1 %kizu.147, label %kizu.check.10.fail, label %kizu.check.10.pass
+// kizu.check.10.fail:
+//   call void @kizu_panic_bounds(i64 4, i64 24, i64 223, i64 48)
+//   unreachable
+// kizu.check.10.pass:
+//   %kizu.148 = getelementptr inbounds [24 x i64], ptr %kizu.142, i64 0, i64 4
+//   %kizu.149 = load i64, ptr %kizu.148, !tbaa !6
+//   call void @std__fmt__write_i64(i64 %kizu.149)
+//   %kizu.152 = insertvalue %kizu.struct.Chest %kizu.119, %kizu.struct.Tool zeroinitializer, 0
+//   store %kizu.struct.Chest %kizu.152, ptr %kizu.arg.0.11
+//   %kizu.154 = call i64 @Chest.run(ptr %kizu.arg.0.11, i64 0)
+//   call void @std__fmt__write_i64(i64 %kizu.154)
+//   %kizu.158 = call %kizu.struct.Tool @tool(ptr @double, i64 30)
+//   br label %in23.entry
+// in23.entry:
+//   %kizu.in23.1 = extractvalue %kizu.struct.Chest %kizu.152, 0
+//   %kizu.opt.niche.12 = extractvalue %kizu.struct.Tool %kizu.in23.1, 0
+//   %kizu.in23.2 = icmp ne ptr %kizu.opt.niche.12, null
+//   br i1 %kizu.in23.2, label %in23.orelse.some.1, label %in23.orelse.else.2
+// in23.orelse.some.1:
+//   br label %in23.orelse.end.3
+// in23.orelse.else.2:
+//   br label %in23.orelse.end.3
+// in23.orelse.end.3:
+//   %kizu.in23.4 = phi %kizu.struct.Tool [ %kizu.in23.1, %in23.orelse.some.1 ], [ %kizu.158, %in23.orelse.else.2 ]
+//   br label %in23.cont
+// in23.cont:
+//   %kizu.160 = extractvalue %kizu.struct.Tool %kizu.in23.4, 1
+//   store [24 x i64] %kizu.160, ptr %kizu.161
+//   %kizu.166 = icmp uge i64 4, 24
+//   br i1 %kizu.166, label %kizu.check.13.fail, label %kizu.check.13.pass
+// kizu.check.13.fail:
+//   call void @kizu_panic_bounds(i64 4, i64 24, i64 226, i64 48)
+//   unreachable
+// kizu.check.13.pass:
+//   %kizu.167 = getelementptr inbounds [24 x i64], ptr %kizu.161, i64 0, i64 4
+//   %kizu.168 = load i64, ptr %kizu.167, !tbaa !6
+//   call void @std__fmt__write_i64(i64 %kizu.168)
+//   %kizu.171 = call %kizu.error.Fault.Grid @checked(i64 4)
+//   %kizu.172 = extractvalue %kizu.error.Fault.Grid %kizu.171, 1
+//   %kizu.173 = extractvalue %kizu.error.Fault.Grid %kizu.171, 0
+//   %kizu.174.code = extractvalue %kizu.error.Fault.Grid %kizu.171, 0
+//   %kizu.174 = icmp eq i64 %kizu.174.code, 0
+//   br i1 %kizu.174, label %if.then.10, label %if.else.11
+// if.then.10:
+//   %kizu.176 = call %kizu.error.Fault.Grid @checked(i64 1)
+//   %kizu.177 = extractvalue %kizu.struct.Grid %kizu.172, 1
+//   store [24 x i64] %kizu.177, ptr %kizu.178
+//   %kizu.183 = icmp uge i64 0, 24
+//   br i1 %kizu.183, label %kizu.check.14.fail, label %kizu.check.14.pass
+// kizu.check.14.fail:
+//   call void @kizu_panic_bounds(i64 0, i64 24, i64 232, i64 25)
+//   unreachable
+// kizu.check.14.pass:
+//   %kizu.184 = getelementptr inbounds [24 x i64], ptr %kizu.178, i64 0, i64 0
+//   %kizu.185 = load i64, ptr %kizu.184, !tbaa !6
+//   call void @std__fmt__write_i64(i64 %kizu.185)
+//   %kizu.189.split1.arm0.f0 = extractvalue %kizu.error.Fault.Grid %kizu.176, 0
+//   %kizu.189.split1.arm0.f1 = extractvalue %kizu.error.Fault.Grid %kizu.176, 1
+//   br label %if.end.12
+// if.else.11:
+//   br label %in26.entry
+// in26.entry:
+//   br label %in26.match.check.2
+// in26.match.end.1:
+//   %kizu.in26.7 = phi i64 [ %kizu.in26.3, %in26.match.arm.3 ], [ %kizu.in26.6, %in26.match.arm.5 ]
+//   br label %in26.cont
+// in26.match.check.2:
+//   %kizu.in26.1 = icmp eq i64 %kizu.173, 107
+//   br i1 %kizu.in26.1, label %in26.match.arm.3, label %in26.match.check.4
+// in26.match.arm.3:
+//   %kizu.in26.3 = sub i64 0, 10
+//   br label %in26.match.end.1
+// in26.match.check.4:
+//   br label %in26.match.arm.5
+// in26.match.arm.5:
+//   %kizu.in26.6 = sub i64 0, 11
+//   br label %in26.match.end.1
+// in26.cont:
+//   call void @std__fmt__write_i64(i64 %kizu.in26.7)
+//   %kizu.189.split1.arm1.f0 = extractvalue %kizu.error.Fault.Grid %kizu.171, 0
+//   %kizu.189.split1.arm1.f1 = extractvalue %kizu.error.Fault.Grid %kizu.171, 1
+//   br label %if.end.12
+// if.end.12:
+//   %kizu.189.split1.f0 = phi i64 [ %kizu.189.split1.arm0.f0, %kizu.check.14.pass ], [ %kizu.189.split1.arm1.f0, %in26.cont ]
+//   %kizu.189.split1.f1 = phi %kizu.struct.Grid [ %kizu.189.split1.arm0.f1, %kizu.check.14.pass ], [ %kizu.189.split1.arm1.f1, %in26.cont ]
+//   %kizu.189.split1.built0 = insertvalue %kizu.error.Fault.Grid zeroinitializer, i64 %kizu.189.split1.f0, 0
+//   %kizu.189 = insertvalue %kizu.error.Fault.Grid %kizu.189.split1.built0, %kizu.struct.Grid %kizu.189.split1.f1, 1
+//   %kizu.190 = extractvalue %kizu.error.Fault.Grid %kizu.189, 1
+//   %kizu.191 = extractvalue %kizu.error.Fault.Grid %kizu.189, 0
+//   %kizu.192.code = extractvalue %kizu.error.Fault.Grid %kizu.189, 0
+//   %kizu.192 = icmp eq i64 %kizu.192.code, 0
+//   br i1 %kizu.192, label %if.then.13, label %if.else.14
+// if.then.13:
+//   %kizu.193 = extractvalue %kizu.struct.Grid %kizu.190, 1
+//   store [24 x i64] %kizu.193, ptr %kizu.194
+//   %kizu.199 = icmp uge i64 0, 24
+//   br i1 %kizu.199, label %kizu.check.15.fail, label %kizu.check.15.pass
+// kizu.check.15.fail:
+//   call void @kizu_panic_bounds(i64 0, i64 24, i64 237, i64 25)
+//   unreachable
+// kizu.check.15.pass:
+//   %kizu.200 = getelementptr inbounds [24 x i64], ptr %kizu.194, i64 0, i64 0
+//   %kizu.201 = load i64, ptr %kizu.200, !tbaa !6
+//   call void @std__fmt__write_i64(i64 %kizu.201)
+//   br label %if.end.15
+// if.else.14:
+//   br label %in29.entry
+// in29.entry:
+//   br label %in29.match.check.2
+// in29.match.end.1:
+//   %kizu.in29.7 = phi i64 [ %kizu.in29.3, %in29.match.arm.3 ], [ %kizu.in29.6, %in29.match.arm.5 ]
+//   br label %in29.cont
+// in29.match.check.2:
+//   %kizu.in29.1 = icmp eq i64 %kizu.191, 107
+//   br i1 %kizu.in29.1, label %in29.match.arm.3, label %in29.match.check.4
+// in29.match.arm.3:
+//   %kizu.in29.3 = sub i64 0, 10
+//   br label %in29.match.end.1
+// in29.match.check.4:
+//   br label %in29.match.arm.5
+// in29.match.arm.5:
+//   %kizu.in29.6 = sub i64 0, 11
+//   br label %in29.match.end.1
+// in29.cont:
+//   call void @std__fmt__write_i64(i64 %kizu.in29.7)
+//   br label %if.end.15
+// if.end.15:
+//   %kizu.206 = call %kizu.error.Fault.Grid @checked(i64 0)
+//   %kizu.207.code = extractvalue %kizu.error.Fault.Grid %kizu.206, 0
+//   %kizu.207 = icmp eq i64 %kizu.207.code, 0
+//   br i1 %kizu.207, label %catch.ok.16, label %catch.else.17
+// catch.ok.16:
+//   %kizu.208 = extractvalue %kizu.error.Fault.Grid %kizu.206, 1
+//   br label %catch.end.18
+// catch.else.17:
+//   %kizu.210 = call %kizu.struct.Grid @fresh(i64 500)
+//   br label %catch.end.18
+// catch.end.18:
+//   %kizu.211 = phi %kizu.struct.Grid [ %kizu.208, %catch.ok.16 ], [ %kizu.210, %catch.else.17 ]
+//   %kizu.212 = extractvalue %kizu.struct.Grid %kizu.211, 1
+//   store [24 x i64] %kizu.212, ptr %kizu.213
+//   %kizu.218 = icmp uge i64 1, 24
+//   br i1 %kizu.218, label %kizu.check.16.fail, label %kizu.check.16.pass
+// kizu.check.16.fail:
+//   call void @kizu_panic_bounds(i64 1, i64 24, i64 242, i64 25)
+//   unreachable
+// kizu.check.16.pass:
+//   %kizu.219 = getelementptr inbounds [24 x i64], ptr %kizu.213, i64 0, i64 1
+//   %kizu.220 = load i64, ptr %kizu.219, !tbaa !6
+//   call void @std__fmt__write_i64(i64 %kizu.220)
+//   %kizu.223 = call %kizu.error.Fault.i64 @forward(i64 6)
+//   %kizu.224.code = extractvalue %kizu.error.Fault.i64 %kizu.223, 0
+//   %kizu.224 = icmp eq i64 %kizu.224.code, 0
+//   br i1 %kizu.224, label %catch.ok.19, label %catch.else.20
+// catch.ok.19:
+//   %kizu.225 = extractvalue %kizu.error.Fault.i64 %kizu.223, 1
+//   br label %catch.end.21
+// catch.else.20:
+//   %kizu.227 = sub i64 0, 1
+//   br label %catch.end.21
+// catch.end.21:
+//   %kizu.228 = phi i64 [ %kizu.225, %catch.ok.19 ], [ %kizu.227, %catch.else.20 ]
+//   call void @std__fmt__write_i64(i64 %kizu.228)
+//   %kizu.231 = call %kizu.error.Fault.i64 @forward(i64 3)
+//   %kizu.232.code = extractvalue %kizu.error.Fault.i64 %kizu.231, 0
+//   %kizu.232 = icmp eq i64 %kizu.232.code, 0
+//   br i1 %kizu.232, label %catch.ok.22, label %catch.else.23
+// catch.ok.22:
+//   %kizu.233 = extractvalue %kizu.error.Fault.i64 %kizu.231, 1
+//   br label %catch.end.24
+// catch.else.23:
+//   %kizu.235 = sub i64 0, 1
+//   br label %catch.end.24
+// catch.end.24:
+//   %kizu.236 = phi i64 [ %kizu.233, %catch.ok.22 ], [ %kizu.235, %catch.else.23 ]
+//   call void @std__fmt__write_i64(i64 %kizu.236)
+//   %kizu.239 = call %kizu.error.Fault.Grid @again(i64 8)
+//   %kizu.240.code = extractvalue %kizu.error.Fault.Grid %kizu.239, 0
+//   %kizu.240 = icmp eq i64 %kizu.240.code, 0
+//   br i1 %kizu.240, label %catch.ok.25, label %catch.else.26
+// catch.ok.25:
+//   %kizu.241 = extractvalue %kizu.error.Fault.Grid %kizu.239, 1
+//   br label %catch.end.27
+// catch.else.26:
+//   %kizu.243 = call %kizu.struct.Grid @fresh(i64 0)
+//   br label %catch.end.27
+// catch.end.27:
+//   %kizu.244 = phi %kizu.struct.Grid [ %kizu.241, %catch.ok.25 ], [ %kizu.243, %catch.else.26 ]
+//   %kizu.245 = extractvalue %kizu.struct.Grid %kizu.244, 1
+//   store [24 x i64] %kizu.245, ptr %kizu.246
+//   %kizu.251 = icmp uge i64 2, 24
+//   br i1 %kizu.251, label %kizu.check.17.fail, label %kizu.check.17.pass
+// kizu.check.17.fail:
+//   call void @kizu_panic_bounds(i64 2, i64 24, i64 246, i64 23)
+//   unreachable
+// kizu.check.17.pass:
+//   %kizu.252 = getelementptr inbounds [24 x i64], ptr %kizu.246, i64 0, i64 2
+//   %kizu.253 = load i64, ptr %kizu.252, !tbaa !6
+//   call void @std__fmt__write_i64(i64 %kizu.253)
+//   %kizu.256 = call %kizu.error.Fault.Grid @again(i64 0)
+//   %kizu.257 = extractvalue %kizu.error.Fault.Grid %kizu.256, 1
+//   %kizu.258 = extractvalue %kizu.error.Fault.Grid %kizu.256, 0
+//   %kizu.259.code = extractvalue %kizu.error.Fault.Grid %kizu.256, 0
+//   %kizu.259 = icmp eq i64 %kizu.259.code, 0
+//   br i1 %kizu.259, label %if.then.28, label %if.else.29
+// if.then.28:
+//   %kizu.260 = extractvalue %kizu.struct.Grid %kizu.257, 1
+//   store [24 x i64] %kizu.260, ptr %kizu.261
+//   %kizu.266 = icmp uge i64 0, 24
+//   br i1 %kizu.266, label %kizu.check.18.fail, label %kizu.check.18.pass
+// kizu.check.18.fail:
+//   call void @kizu_panic_bounds(i64 0, i64 24, i64 248, i64 25)
+//   unreachable
+// kizu.check.18.pass:
+//   %kizu.267 = getelementptr inbounds [24 x i64], ptr %kizu.261, i64 0, i64 0
+//   %kizu.268 = load i64, ptr %kizu.267, !tbaa !6
+//   call void @std__fmt__write_i64(i64 %kizu.268)
+//   br label %if.end.30
+// if.else.29:
+//   br label %in36.entry
+// in36.entry:
+//   br label %in36.match.check.2
+// in36.match.end.1:
+//   %kizu.in36.7 = phi i64 [ %kizu.in36.3, %in36.match.arm.3 ], [ %kizu.in36.6, %in36.match.arm.5 ]
+//   br label %in36.cont
+// in36.match.check.2:
+//   %kizu.in36.1 = icmp eq i64 %kizu.258, 107
+//   br i1 %kizu.in36.1, label %in36.match.arm.3, label %in36.match.check.4
+// in36.match.arm.3:
+//   %kizu.in36.3 = sub i64 0, 10
+//   br label %in36.match.end.1
+// in36.match.check.4:
+//   br label %in36.match.arm.5
+// in36.match.arm.5:
+//   %kizu.in36.6 = sub i64 0, 11
+//   br label %in36.match.end.1
+// in36.cont:
+//   call void @std__fmt__write_i64(i64 %kizu.in36.7)
+//   br label %if.end.30
+// if.end.30:
+//   %kizu.273 = call %kizu.struct.Grid @fresh(i64 20)
+//   %kizu.274.tag.ptr = getelementptr %kizu.union.Shape, ptr %kizu.274.slot, i32 0, i32 0
+//   store i64 2, ptr %kizu.274.tag.ptr, align 8
+//   %kizu.274.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.274.slot, i32 0, i32 1
+//   store %kizu.struct.Grid %kizu.273, ptr %kizu.274.payload.ptr, align 8
+//   %kizu.274 = load %kizu.union.Shape, ptr %kizu.274.slot, align 8
+//   store %kizu.union.Shape %kizu.274, ptr %kizu.275
+//   %kizu.276 = call i64 @weigh(ptr %kizu.275)
+//   call void @std__fmt__write_i64(i64 %kizu.276)
+//   %kizu.278 = load %kizu.union.Shape, ptr %kizu.275
+//   %kizu.279 = call i64 @weigh_value(%kizu.union.Shape %kizu.278)
+//   call void @std__fmt__write_i64(i64 %kizu.279)
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.281.addr, ptr %kizu.275, i64 ptrtoint (ptr getelementptr (%kizu.union.Shape, ptr null, i64 1) to i64), i1 false)
+//   %kizu.282 = load i64, ptr %kizu.281.addr
+//   br label %match.check.32
+// match.end.31:
+//   %kizu.301 = call i64 @weigh(ptr %kizu.275)
+//   call void @std__fmt__write_i64(i64 %kizu.301)
+//   %kizu.303 = load %kizu.struct.Grid, ptr %kizu.68
+//   %kizu.304.tag.ptr = getelementptr %kizu.union.Shape, ptr %kizu.304.slot, i32 0, i32 0
+//   store i64 2, ptr %kizu.304.tag.ptr, align 8
+//   %kizu.304.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.304.slot, i32 0, i32 1
+//   store %kizu.struct.Grid %kizu.303, ptr %kizu.304.payload.ptr, align 8
+//   %kizu.304 = load %kizu.union.Shape, ptr %kizu.304.slot, align 8
+//   store %kizu.union.Shape %kizu.304, ptr %kizu.275
+//   %kizu.307 = sub i64 0, 2
+//   %kizu.309 = getelementptr %kizu.struct.Grid, ptr %kizu.68, i32 0, i32 1
+//   %kizu.314 = icmp uge i64 5, 24
+//   br i1 %kizu.314, label %kizu.check.19.fail, label %kizu.check.19.pass
+// kizu.check.19.fail:
+//   call void @kizu_panic_bounds(i64 5, i64 24, i64 266, i64 16)
+//   unreachable
+// kizu.check.19.pass:
+//   %kizu.315 = getelementptr inbounds [24 x i64], ptr %kizu.309, i64 0, i64 5
+//   store i64 %kizu.307, ptr %kizu.315, !tbaa !6
+//   %kizu.318.tag.ptr = getelementptr %kizu.union.Shape, ptr %kizu.318.slot, i32 0, i32 0
+//   store i64 1, ptr %kizu.318.tag.ptr, align 8
+//   %kizu.318.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.318.slot, i32 0, i32 1
+//   store i64 8, ptr %kizu.318.payload.ptr, align 8
+//   %kizu.318 = load %kizu.union.Shape, ptr %kizu.318.slot, align 8
+//   %kizu.319 = call i64 @replace_then_read(ptr %kizu.275, %kizu.union.Shape %kizu.318)
+//   call void @std__fmt__write_i64(i64 %kizu.319)
+//   %kizu.321.tag.ptr = getelementptr %kizu.union.Shape, ptr %kizu.321.slot, i32 0, i32 0
+//   store i64 0, ptr %kizu.321.tag.ptr, align 8
+//   %kizu.321 = load %kizu.union.Shape, ptr %kizu.321.slot, align 8
+//   %kizu.322 = call i64 @replace_then_read(ptr %kizu.275, %kizu.union.Shape %kizu.321)
+//   call void @std__fmt__write_i64(i64 %kizu.322)
+//   %kizu.324 = load %kizu.union.Shape, ptr %kizu.275
+//   %kizu.325 = call i64 @weigh_value(%kizu.union.Shape %kizu.324)
+//   call void @std__fmt__write_i64(i64 %kizu.325)
+//   br label %in44.entry
+// in44.entry:
+//   br label %in44.if.else.2
+// in44.if.else.2:
+//   br label %in44.if.end.3
+// in44.if.end.3:
+//   %kizu.in44.4 = call %kizu.struct.Grid @fresh(i64 1)
+//   %kizu.in44.5.some = insertvalue %kizu.opt.Grid zeroinitializer, i8 1, 0
+//   %kizu.in44.5 = insertvalue %kizu.opt.Grid %kizu.in44.5.some, %kizu.struct.Grid %kizu.in44.4, 1
+//   br label %in44.cont
+// in44.cont:
+//   %kizu.331 = sub i64 0, 1
+//   br label %in45.entry
+// in45.entry:
+//   %kizu.in45.2 = icmp slt i64 %kizu.331, 0
+//   br i1 %kizu.in45.2, label %in45.if.then.1, label %in45.if.else.2
+// in45.if.then.1:
+//   %kizu.in45.3 = insertvalue %kizu.opt.Grid zeroinitializer, i8 0, 0
+//   %kizu.332.split2.arm0.f0 = extractvalue %kizu.opt.Grid %kizu.in45.3, 0
+//   %kizu.332.split2.arm0.f1 = extractvalue %kizu.opt.Grid %kizu.in45.3, 1
+//   br label %in45.cont
+// in45.if.else.2:
+//   br label %in45.if.end.3
+// in45.if.end.3:
+//   %kizu.in45.4 = call %kizu.struct.Grid @fresh(i64 %kizu.331)
+//   %kizu.in45.5.some = insertvalue %kizu.opt.Grid zeroinitializer, i8 1, 0
+//   %kizu.in45.5 = insertvalue %kizu.opt.Grid %kizu.in45.5.some, %kizu.struct.Grid %kizu.in45.4, 1
+//   %kizu.332.split2.arm1.f0 = extractvalue %kizu.opt.Grid %kizu.in45.5, 0
+//   %kizu.332.split2.arm1.f1 = extractvalue %kizu.opt.Grid %kizu.in45.5, 1
+//   br label %in45.cont
+// in45.cont:
+//   %kizu.332.split2.f0 = phi i8 [ %kizu.332.split2.arm0.f0, %in45.if.then.1 ], [ %kizu.332.split2.arm1.f0, %in45.if.end.3 ]
+//   %kizu.332.split2.f1 = phi %kizu.struct.Grid [ %kizu.332.split2.arm0.f1, %in45.if.then.1 ], [ %kizu.332.split2.arm1.f1, %in45.if.end.3 ]
+//   %kizu.332.split2.built0 = insertvalue %kizu.opt.Grid zeroinitializer, i8 %kizu.332.split2.f0, 0
+//   %kizu.332 = insertvalue %kizu.opt.Grid %kizu.332.split2.built0, %kizu.struct.Grid %kizu.332.split2.f1, 1
+//   %kizu.334.field0 = insertvalue %kizu.struct.Holder zeroinitializer, %kizu.opt.Grid %kizu.in44.5, 0
+//   %kizu.334.field1 = insertvalue %kizu.struct.Holder %kizu.334.field0, %kizu.opt.Grid %kizu.332, 1
+//   %kizu.334 = insertvalue %kizu.struct.Holder %kizu.334.field1, i64 0, 2
+//   %kizu.336 = sub i64 0, 1
+//   br label %in46.entry
+// in46.entry:
+//   %kizu.in46.2 = icmp slt i64 %kizu.336, 0
+//   br i1 %kizu.in46.2, label %in46.if.then.1, label %in46.if.else.2
+// in46.if.then.1:
+//   %kizu.in46.3 = insertvalue %kizu.opt.Grid zeroinitializer, i8 0, 0
+//   %kizu.337.split3.arm0.f0 = extractvalue %kizu.opt.Grid %kizu.in46.3, 0
+//   %kizu.337.split3.arm0.f1 = extractvalue %kizu.opt.Grid %kizu.in46.3, 1
+//   br label %in46.cont
+// in46.if.else.2:
+//   br label %in46.if.end.3
+// in46.if.end.3:
+//   %kizu.in46.4 = call %kizu.struct.Grid @fresh(i64 %kizu.336)
+//   %kizu.in46.5.some = insertvalue %kizu.opt.Grid zeroinitializer, i8 1, 0
+//   %kizu.in46.5 = insertvalue %kizu.opt.Grid %kizu.in46.5.some, %kizu.struct.Grid %kizu.in46.4, 1
+//   %kizu.337.split3.arm1.f0 = extractvalue %kizu.opt.Grid %kizu.in46.5, 0
+//   %kizu.337.split3.arm1.f1 = extractvalue %kizu.opt.Grid %kizu.in46.5, 1
+//   br label %in46.cont
+// in46.cont:
+//   %kizu.337.split3.f0 = phi i8 [ %kizu.337.split3.arm0.f0, %in46.if.then.1 ], [ %kizu.337.split3.arm1.f0, %in46.if.end.3 ]
+//   %kizu.337.split3.f1 = phi %kizu.struct.Grid [ %kizu.337.split3.arm0.f1, %in46.if.then.1 ], [ %kizu.337.split3.arm1.f1, %in46.if.end.3 ]
+//   %kizu.337.split3.built0 = insertvalue %kizu.opt.Grid zeroinitializer, i8 %kizu.337.split3.f0, 0
+//   %kizu.337 = insertvalue %kizu.opt.Grid %kizu.337.split3.built0, %kizu.struct.Grid %kizu.337.split3.f1, 1
+//   br label %in47.entry
+// in47.entry:
+//   br label %in47.if.else.2
+// in47.if.else.2:
+//   br label %in47.if.end.3
+// in47.if.end.3:
+//   %kizu.in47.4 = call %kizu.struct.Grid @fresh(i64 2)
+//   %kizu.in47.5.some = insertvalue %kizu.opt.Grid zeroinitializer, i8 1, 0
+//   %kizu.in47.5 = insertvalue %kizu.opt.Grid %kizu.in47.5.some, %kizu.struct.Grid %kizu.in47.4, 1
+//   br label %in47.cont
+// in47.cont:
+//   %kizu.341.field0 = insertvalue %kizu.struct.Holder zeroinitializer, %kizu.opt.Grid %kizu.337, 0
+//   %kizu.341.field1 = insertvalue %kizu.struct.Holder %kizu.341.field0, %kizu.opt.Grid %kizu.in47.5, 1
+//   %kizu.341 = insertvalue %kizu.struct.Holder %kizu.341.field1, i64 1, 2
+//   br label %in48.entry
+// in48.entry:
+//   br label %in48.if.else.2
+// in48.if.else.2:
+//   br label %in48.if.end.3
+// in48.if.end.3:
+//   %kizu.in48.4 = call %kizu.struct.Grid @fresh(i64 3)
+//   %kizu.in48.5.some = insertvalue %kizu.opt.Grid zeroinitializer, i8 1, 0
+//   %kizu.in48.5 = insertvalue %kizu.opt.Grid %kizu.in48.5.some, %kizu.struct.Grid %kizu.in48.4, 1
+//   br label %in48.cont
+// in48.cont:
+//   br label %in49.entry
+// in49.entry:
+//   br label %in49.if.else.2
+// in49.if.else.2:
+//   br label %in49.if.end.3
+// in49.if.end.3:
+//   %kizu.in49.4 = call %kizu.struct.Grid @fresh(i64 4)
+//   %kizu.in49.5.some = insertvalue %kizu.opt.Grid zeroinitializer, i8 1, 0
+//   %kizu.in49.5 = insertvalue %kizu.opt.Grid %kizu.in49.5.some, %kizu.struct.Grid %kizu.in49.4, 1
+//   br label %in49.cont
+// in49.cont:
+//   %kizu.347.field0 = insertvalue %kizu.struct.Holder zeroinitializer, %kizu.opt.Grid %kizu.in48.5, 0
+//   %kizu.347.field1 = insertvalue %kizu.struct.Holder %kizu.347.field0, %kizu.opt.Grid %kizu.in49.5, 1
+//   %kizu.347 = insertvalue %kizu.struct.Holder %kizu.347.field1, i64 2, 2
+//   store [3 x %kizu.struct.Holder] zeroinitializer, ptr %kizu.348
+//   %kizu.350 = getelementptr inbounds [3 x %kizu.struct.Holder], ptr %kizu.348, i64 0, i64 0
+//   store %kizu.struct.Holder %kizu.334, ptr %kizu.350
+//   %kizu.353 = getelementptr inbounds [3 x %kizu.struct.Holder], ptr %kizu.348, i64 0, i64 1
+//   store %kizu.struct.Holder %kizu.341, ptr %kizu.353
+//   %kizu.356 = getelementptr inbounds [3 x %kizu.struct.Holder], ptr %kizu.348, i64 0, i64 2
+//   store %kizu.struct.Holder %kizu.347, ptr %kizu.356
+//   %kizu.358 = load [3 x %kizu.struct.Holder], ptr %kizu.348
+//   store [3 x %kizu.struct.Holder] %kizu.358, ptr %kizu.359
+//   br label %for.header.36
+// match.check.32:
+//   %kizu.283 = icmp eq i64 %kizu.282, 2
+//   br i1 %kizu.283, label %match.arm.33, label %match.check.34
+// match.arm.33:
+//   %kizu.284.addr = getelementptr %kizu.union.Shape, ptr %kizu.281.addr, i32 0, i32 1
+//   %kizu.286.tag.ptr = getelementptr %kizu.union.Shape, ptr %kizu.286.slot, i32 0, i32 0
+//   store i64 1, ptr %kizu.286.tag.ptr, align 8
+//   %kizu.286.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.286.slot, i32 0, i32 1
+//   store i64 77, ptr %kizu.286.payload.ptr, align 8
+//   %kizu.286 = load %kizu.union.Shape, ptr %kizu.286.slot, align 8
+//   store %kizu.union.Shape %kizu.286, ptr %kizu.275
+//   %kizu.288.addr = getelementptr %kizu.struct.Grid, ptr %kizu.284.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.289, ptr %kizu.288.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.294 = icmp uge i64 0, 24
+//   br i1 %kizu.294, label %kizu.check.20.fail, label %kizu.check.20.pass
+// kizu.check.20.fail:
+//   call void @kizu_panic_bounds(i64 0, i64 24, i64 260, i64 29)
+//   unreachable
+// kizu.check.20.pass:
+//   %kizu.295 = getelementptr inbounds [24 x i64], ptr %kizu.289, i64 0, i64 0
+//   %kizu.296 = load i64, ptr %kizu.295, !tbaa !6
+//   call void @std__fmt__write_i64(i64 %kizu.296)
+//   br label %match.end.31
+// match.check.34:
+//   br label %match.arm.35
+// match.arm.35:
+//   %kizu.299 = sub i64 0, 1
+//   call void @std__fmt__write_i64(i64 %kizu.299)
+//   br label %match.end.31
+// for.header.36:
+//   %kizu.363 = phi i64 [ 0, %in49.cont ], [ %kizu.415, %for.step.38 ]
+//   %kizu.364 = phi i64 [ 0, %in49.cont ], [ %kizu.417, %for.step.38 ]
+//   %kizu.365 = icmp slt i64 %kizu.364, 3
+//   br i1 %kizu.365, label %for.body.37, label %for.end.39
+// for.body.37:
+//   %kizu.369 = icmp uge i64 %kizu.364, 3
+//   br i1 %kizu.369, label %kizu.check.21.fail, label %kizu.check.21.pass
+// kizu.check.21.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.364, i64 3, i64 279, i64 15)
+//   unreachable
+// kizu.check.21.pass:
+//   %kizu.370 = getelementptr inbounds [3 x %kizu.struct.Holder], ptr %kizu.359, i64 0, i64 %kizu.364
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.371.addr, ptr %kizu.370, i64 ptrtoint (ptr getelementptr (%kizu.struct.Holder, ptr null, i64 1) to i64), i1 false)
+//   %kizu.372.addr = getelementptr %kizu.struct.Holder, ptr %kizu.371.addr, i32 0, i32 0
+//   %kizu.373.addr = getelementptr %kizu.opt.Grid, ptr %kizu.372.addr, i32 0, i32 1
+//   %kizu.374.tag = load i8, ptr %kizu.372.addr
+//   %kizu.374 = icmp ne i8 %kizu.374.tag, 0
+//   br i1 %kizu.374, label %if.then.40, label %if.else.41
+// for.step.38:
+//   %kizu.417 = add i64 %kizu.364, 1
+//   br label %for.header.36
+// for.end.39:
+//   call void @std__fmt__write_i64(i64 %kizu.363)
+//   br label %for.header.43
+// if.then.40:
+//   %kizu.375 = insertvalue %kizu.opt.Grid zeroinitializer, i8 0, 0
+//   %kizu.379 = icmp uge i64 %kizu.364, 3
+//   br i1 %kizu.379, label %kizu.check.22.fail, label %kizu.check.22.pass
+// kizu.check.22.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.364, i64 3, i64 280, i64 16)
+//   unreachable
+// kizu.check.22.pass:
+//   %kizu.380 = getelementptr inbounds [3 x %kizu.struct.Holder], ptr %kizu.359, i64 0, i64 %kizu.364
+//   %kizu.381 = load %kizu.struct.Holder, ptr %kizu.380
+//   %kizu.382 = insertvalue %kizu.struct.Holder %kizu.381, %kizu.opt.Grid %kizu.375, 0
+//   %kizu.386 = icmp uge i64 %kizu.364, 3
+//   br i1 %kizu.386, label %kizu.check.23.fail, label %kizu.check.23.pass
+// kizu.check.23.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.364, i64 3, i64 280, i64 16)
+//   unreachable
+// kizu.check.23.pass:
+//   %kizu.387 = getelementptr inbounds [3 x %kizu.struct.Holder], ptr %kizu.359, i64 0, i64 %kizu.364
+//   store %kizu.struct.Holder %kizu.382, ptr %kizu.387
+//   %kizu.389.addr = getelementptr %kizu.struct.Grid, ptr %kizu.373.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.390, ptr %kizu.389.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.394 = icmp uge i64 %kizu.364, 24
+//   br i1 %kizu.394, label %kizu.check.24.fail, label %kizu.check.24.pass
+// kizu.check.24.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.364, i64 24, i64 281, i64 39)
+//   unreachable
+// kizu.check.24.pass:
+//   %kizu.395 = getelementptr inbounds [24 x i64], ptr %kizu.390, i64 0, i64 %kizu.364
+//   %kizu.396 = load i64, ptr %kizu.395, !tbaa !6
+//   %kizu.397 = add i64 %kizu.363, %kizu.396
+//   br label %if.end.42
+// if.else.41:
+//   %kizu.399 = add i64 100, %kizu.364
+//   %kizu.400 = call %kizu.struct.Grid @fresh(i64 %kizu.399)
+//   %kizu.401.some = insertvalue %kizu.opt.Grid zeroinitializer, i8 1, 0
+//   %kizu.401 = insertvalue %kizu.opt.Grid %kizu.401.some, %kizu.struct.Grid %kizu.400, 1
+//   %kizu.405 = icmp uge i64 %kizu.364, 3
+//   br i1 %kizu.405, label %kizu.check.25.fail, label %kizu.check.25.pass
+// kizu.check.25.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.364, i64 3, i64 283, i64 16)
+//   unreachable
+// kizu.check.25.pass:
+//   %kizu.406 = getelementptr inbounds [3 x %kizu.struct.Holder], ptr %kizu.359, i64 0, i64 %kizu.364
+//   %kizu.407 = load %kizu.struct.Holder, ptr %kizu.406
+//   %kizu.408 = insertvalue %kizu.struct.Holder %kizu.407, %kizu.opt.Grid %kizu.401, 0
+//   %kizu.412 = icmp uge i64 %kizu.364, 3
+//   br i1 %kizu.412, label %kizu.check.26.fail, label %kizu.check.26.pass
+// kizu.check.26.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.364, i64 3, i64 283, i64 16)
+//   unreachable
+// kizu.check.26.pass:
+//   %kizu.413 = getelementptr inbounds [3 x %kizu.struct.Holder], ptr %kizu.359, i64 0, i64 %kizu.364
+//   store %kizu.struct.Holder %kizu.408, ptr %kizu.413
+//   br label %if.end.42
+// if.end.42:
+//   %kizu.415 = phi i64 [ %kizu.397, %kizu.check.24.pass ], [ %kizu.363, %kizu.check.26.pass ]
+//   br label %for.step.38
+// for.header.43:
+//   %kizu.421 = phi i64 [ %kizu.363, %for.end.39 ], [ %kizu.467, %for.step.45 ]
+//   %kizu.422 = phi i64 [ 0, %for.end.39 ], [ %kizu.469, %for.step.45 ]
+//   %kizu.423 = icmp slt i64 %kizu.422, 3
+//   br i1 %kizu.423, label %for.body.44, label %for.end.46
+// for.body.44:
+//   %kizu.427 = icmp uge i64 %kizu.422, 3
+//   br i1 %kizu.427, label %kizu.check.27.fail, label %kizu.check.27.pass
+// kizu.check.27.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.422, i64 3, i64 288, i64 15)
+//   unreachable
+// kizu.check.27.pass:
+//   %kizu.428 = getelementptr inbounds [3 x %kizu.struct.Holder], ptr %kizu.359, i64 0, i64 %kizu.422
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.429.addr, ptr %kizu.428, i64 ptrtoint (ptr getelementptr (%kizu.struct.Holder, ptr null, i64 1) to i64), i1 false)
+//   %kizu.430.addr = getelementptr %kizu.struct.Holder, ptr %kizu.429.addr, i32 0, i32 0
+//   %kizu.431.addr = getelementptr %kizu.opt.Grid, ptr %kizu.430.addr, i32 0, i32 1
+//   %kizu.432.tag = load i8, ptr %kizu.430.addr
+//   %kizu.432 = icmp ne i8 %kizu.432.tag, 0
+//   br i1 %kizu.432, label %if.then.47, label %if.else.48
+// for.step.45:
+//   %kizu.469 = add i64 %kizu.422, 1
+//   br label %for.header.43
+// for.end.46:
+//   call void @std__fmt__write_i64(i64 %kizu.421)
+//   %kizu.in54.1 = call ptr @std__internal__builtin__mem_page_allocator()
+//   store %kizu.array zeroinitializer, ptr %kizu.473
+//   %kizu.475 = call %kizu.struct.Grid @fresh(i64 7)
+//   %kizu.476.tag.ptr = getelementptr %kizu.union.Shape, ptr %kizu.476.slot, i32 0, i32 0
+//   store i64 2, ptr %kizu.476.tag.ptr, align 8
+//   %kizu.476.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.476.slot, i32 0, i32 1
+//   store %kizu.struct.Grid %kizu.475, ptr %kizu.476.payload.ptr, align 8
+//   %kizu.array.append.len.addr.30 = getelementptr inbounds %kizu.array, ptr %kizu.473, i64 0, i32 1
+//   %kizu.array.append.len.28 = load i64, ptr %kizu.array.append.len.addr.30, !tbaa !4
+//   %kizu.array.append.cap.31 = getelementptr inbounds %kizu.array, ptr %kizu.473, i64 0, i32 2
+//   %kizu.array.append.cap.29 = load i64, ptr %kizu.array.append.cap.31, !tbaa !4
+//   %kizu.array.append.grown.32 = add i64 %kizu.array.append.len.28, 1
+//   %kizu.array.append.fits.33 = icmp slt i64 %kizu.array.append.len.28, %kizu.array.append.cap.29
+//   br i1 %kizu.array.append.fits.33, label %kizu.in55.1.ok.array.append.fast, label %kizu.in55.1.ok.array.append.slow
+// kizu.in55.1.ok.array.append.slow:
+//   %kizu.array.append.handle.null.34 = icmp eq ptr %kizu.473, null
+//   br i1 %kizu.array.append.handle.null.34, label %kizu.in55.1.ok.array.append.join, label %kizu.in55.1.ok.array.append.grow
+// kizu.in55.1.ok.array.append.grow:
+//   %kizu.array.append.data.addr.35 = getelementptr inbounds %kizu.array, ptr %kizu.473, i64 0, i32 0
+//   %kizu.array.append.data.36 = load ptr, ptr %kizu.array.append.data.addr.35, !tbaa !5
+//   %kizu.array.append.storage.37 = call { ptr, i64 } @kizu_array_grow(ptr %kizu.in54.1, ptr %kizu.array.append.data.36, i64 %kizu.array.append.cap.29, i64 %kizu.array.append.grown.32, i64 ptrtoint (ptr getelementptr (%kizu.union.Shape, ptr null, i64 1) to i64))
+//   %kizu.array.append.storage.data.38 = extractvalue { ptr, i64 } %kizu.array.append.storage.37, 0
+//   %kizu.array.append.storage.cap.39 = extractvalue { ptr, i64 } %kizu.array.append.storage.37, 1
+//   %kizu.array.append.grew.40 = icmp sge i64 %kizu.array.append.storage.cap.39, 0
+//   br i1 %kizu.array.append.grew.40, label %kizu.in55.1.ok.array.append.store, label %kizu.in55.1.ok.array.append.join
+// kizu.in55.1.ok.array.append.store:
+//   store ptr %kizu.array.append.storage.data.38, ptr %kizu.array.append.data.addr.35, !tbaa !5
+//   %kizu.array.append.cap.addr.41 = getelementptr inbounds %kizu.array, ptr %kizu.473, i64 0, i32 2
+//   store i64 %kizu.array.append.storage.cap.39, ptr %kizu.array.append.cap.addr.41, !tbaa !4
+//   br label %kizu.in55.1.ok.array.append.fast
+// kizu.in55.1.ok.array.append.fast:
+//   %kizu.array.data.addr.42 = getelementptr inbounds %kizu.array, ptr %kizu.473, i64 0, i32 0
+//   %kizu.array.data.43 = load ptr, ptr %kizu.array.data.addr.42, !tbaa !5
+//   %kizu.array.elem.44 = getelementptr inbounds %kizu.union.Shape, ptr %kizu.array.data.43, i64 %kizu.array.append.len.28
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.array.elem.44, ptr %kizu.476.slot, i64 ptrtoint (ptr getelementptr (%kizu.union.Shape, ptr null, i64 1) to i64), i1 false)
+//   store i64 %kizu.array.append.grown.32, ptr %kizu.array.append.len.addr.30, !tbaa !4
+//   br label %kizu.in55.1.ok.array.append.join
+// kizu.in55.1.ok.array.append.join:
+//   %kizu.in55.1.ok = phi i1 [ true, %kizu.in55.1.ok.array.append.fast ], [ false, %kizu.in55.1.ok.array.append.slow ], [ false, %kizu.in55.1.ok.array.append.grow ]
+//   %kizu.in55.1.code = select i1 %kizu.in55.1.ok, i64 0, i64 73
+//   %kizu.in55.1 = insertvalue %kizu.error.std__mem__Error.void zeroinitializer, i64 %kizu.in55.1.code, 0
+//   %kizu.478 = load %kizu.array, ptr %kizu.473
+//   %kizu.479.ok.code = extractvalue %kizu.error.std__mem__Error.void %kizu.in55.1, 0
+//   %kizu.479.ok = icmp eq i64 %kizu.479.ok.code, 0
+//   %kizu.479.ok.expected = call i1 @llvm.expect.i1(i1 %kizu.479.ok, i1 true)
+//   br i1 %kizu.479.ok.expected, label %kizu.479.try.ok, label %kizu.479.try.err
+// kizu.479.try.err:
+//   %kizu.array.deinit.data.46 = extractvalue %kizu.array %kizu.478, 0
+//   %kizu.array.deinit.cap.47 = extractvalue %kizu.array %kizu.478, 2
+//   %kizu.array.deinit.bytes.48 = mul i64 %kizu.array.deinit.cap.47, ptrtoint (ptr getelementptr (%kizu.union.Shape, ptr null, i64 1) to i64)
+//   %kizu.array.deinit.owns.49 = icmp ne i64 %kizu.array.deinit.bytes.48, 0
+//   br i1 %kizu.array.deinit.owns.49, label %kizu.array.deinit.owns.49.release, label %kizu.array.deinit.owns.49.done
+// kizu.array.deinit.owns.49.release:
+//   call void @kizu_array_deinit(ptr %kizu.in54.1, ptr %kizu.array.deinit.data.46, i64 %kizu.array.deinit.bytes.48)
+//   br label %kizu.array.deinit.owns.49.done
+// kizu.array.deinit.owns.49.done:
+//   %kizu.main.err.code.50 = extractvalue %kizu.error.std__mem__Error.void %kizu.in55.1, 0
+//   %kizu.main.err.name.51.row = getelementptr [109 x { ptr, i64 }], ptr @.kizu.error.names, i64 0, i64 %kizu.main.err.code.50
+//   %kizu.main.err.name.51.ptr = load ptr, ptr %kizu.main.err.name.51.row
+//   %kizu.main.err.name.51.len.addr = getelementptr { ptr, i64 }, ptr %kizu.main.err.name.51.row, i64 0, i32 1
+//   %kizu.main.err.name.51.len = load i64, ptr %kizu.main.err.name.51.len.addr
+//   call void @kizu_main_error_message(ptr %kizu.main.err.name.51.ptr, i64 %kizu.main.err.name.51.len)
+//   ret i32 1
+// kizu.479.try.ok:
+//   %kizu.481.tag.ptr = getelementptr %kizu.union.Shape, ptr %kizu.481.slot, i32 0, i32 0
+//   store i64 1, ptr %kizu.481.tag.ptr, align 8
+//   %kizu.481.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.481.slot, i32 0, i32 1
+//   store i64 5, ptr %kizu.481.payload.ptr, align 8
+//   %kizu.array.append.len.addr.54 = getelementptr inbounds %kizu.array, ptr %kizu.473, i64 0, i32 1
+//   %kizu.array.append.len.52 = load i64, ptr %kizu.array.append.len.addr.54, !tbaa !4
+//   %kizu.array.append.cap.55 = getelementptr inbounds %kizu.array, ptr %kizu.473, i64 0, i32 2
+//   %kizu.array.append.cap.53 = load i64, ptr %kizu.array.append.cap.55, !tbaa !4
+//   %kizu.array.append.grown.56 = add i64 %kizu.array.append.len.52, 1
+//   %kizu.array.append.fits.57 = icmp slt i64 %kizu.array.append.len.52, %kizu.array.append.cap.53
+//   br i1 %kizu.array.append.fits.57, label %kizu.in56.1.ok.array.append.fast, label %kizu.in56.1.ok.array.append.slow
+// kizu.in56.1.ok.array.append.slow:
+//   %kizu.array.append.handle.null.58 = icmp eq ptr %kizu.473, null
+//   br i1 %kizu.array.append.handle.null.58, label %kizu.in56.1.ok.array.append.join, label %kizu.in56.1.ok.array.append.grow
+// kizu.in56.1.ok.array.append.grow:
+//   %kizu.array.append.data.addr.59 = getelementptr inbounds %kizu.array, ptr %kizu.473, i64 0, i32 0
+//   %kizu.array.append.data.60 = load ptr, ptr %kizu.array.append.data.addr.59, !tbaa !5
+//   %kizu.array.append.storage.61 = call { ptr, i64 } @kizu_array_grow(ptr %kizu.in54.1, ptr %kizu.array.append.data.60, i64 %kizu.array.append.cap.53, i64 %kizu.array.append.grown.56, i64 ptrtoint (ptr getelementptr (%kizu.union.Shape, ptr null, i64 1) to i64))
+//   %kizu.array.append.storage.data.62 = extractvalue { ptr, i64 } %kizu.array.append.storage.61, 0
+//   %kizu.array.append.storage.cap.63 = extractvalue { ptr, i64 } %kizu.array.append.storage.61, 1
+//   %kizu.array.append.grew.64 = icmp sge i64 %kizu.array.append.storage.cap.63, 0
+//   br i1 %kizu.array.append.grew.64, label %kizu.in56.1.ok.array.append.store, label %kizu.in56.1.ok.array.append.join
+// kizu.in56.1.ok.array.append.store:
+//   store ptr %kizu.array.append.storage.data.62, ptr %kizu.array.append.data.addr.59, !tbaa !5
+//   %kizu.array.append.cap.addr.65 = getelementptr inbounds %kizu.array, ptr %kizu.473, i64 0, i32 2
+//   store i64 %kizu.array.append.storage.cap.63, ptr %kizu.array.append.cap.addr.65, !tbaa !4
+//   br label %kizu.in56.1.ok.array.append.fast
+// kizu.in56.1.ok.array.append.fast:
+//   %kizu.array.data.addr.66 = getelementptr inbounds %kizu.array, ptr %kizu.473, i64 0, i32 0
+//   %kizu.array.data.67 = load ptr, ptr %kizu.array.data.addr.66, !tbaa !5
+//   %kizu.array.elem.68 = getelementptr inbounds %kizu.union.Shape, ptr %kizu.array.data.67, i64 %kizu.array.append.len.52
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.array.elem.68, ptr %kizu.481.slot, i64 ptrtoint (ptr getelementptr (%kizu.union.Shape, ptr null, i64 1) to i64), i1 false)
+//   store i64 %kizu.array.append.grown.56, ptr %kizu.array.append.len.addr.54, !tbaa !4
+//   br label %kizu.in56.1.ok.array.append.join
+// kizu.in56.1.ok.array.append.join:
+//   %kizu.in56.1.ok = phi i1 [ true, %kizu.in56.1.ok.array.append.fast ], [ false, %kizu.in56.1.ok.array.append.slow ], [ false, %kizu.in56.1.ok.array.append.grow ]
+//   %kizu.in56.1.code = select i1 %kizu.in56.1.ok, i64 0, i64 73
+//   %kizu.in56.1 = insertvalue %kizu.error.std__mem__Error.void zeroinitializer, i64 %kizu.in56.1.code, 0
+//   %kizu.483 = load %kizu.array, ptr %kizu.473
+//   %kizu.484.ok.code = extractvalue %kizu.error.std__mem__Error.void %kizu.in56.1, 0
+//   %kizu.484.ok = icmp eq i64 %kizu.484.ok.code, 0
+//   %kizu.484.ok.expected = call i1 @llvm.expect.i1(i1 %kizu.484.ok, i1 true)
+//   br i1 %kizu.484.ok.expected, label %kizu.484.try.ok, label %kizu.484.try.err
+// kizu.484.try.err:
+//   %kizu.array.deinit.data.70 = extractvalue %kizu.array %kizu.483, 0
+//   %kizu.array.deinit.cap.71 = extractvalue %kizu.array %kizu.483, 2
+//   %kizu.array.deinit.bytes.72 = mul i64 %kizu.array.deinit.cap.71, ptrtoint (ptr getelementptr (%kizu.union.Shape, ptr null, i64 1) to i64)
+//   %kizu.array.deinit.owns.73 = icmp ne i64 %kizu.array.deinit.bytes.72, 0
+//   br i1 %kizu.array.deinit.owns.73, label %kizu.array.deinit.owns.73.release, label %kizu.array.deinit.owns.73.done
+// kizu.array.deinit.owns.73.release:
+//   call void @kizu_array_deinit(ptr %kizu.in54.1, ptr %kizu.array.deinit.data.70, i64 %kizu.array.deinit.bytes.72)
+//   br label %kizu.array.deinit.owns.73.done
+// kizu.array.deinit.owns.73.done:
+//   %kizu.main.err.code.74 = extractvalue %kizu.error.std__mem__Error.void %kizu.in56.1, 0
+//   %kizu.main.err.name.75.row = getelementptr [109 x { ptr, i64 }], ptr @.kizu.error.names, i64 0, i64 %kizu.main.err.code.74
+//   %kizu.main.err.name.75.ptr = load ptr, ptr %kizu.main.err.name.75.row
+//   %kizu.main.err.name.75.len.addr = getelementptr { ptr, i64 }, ptr %kizu.main.err.name.75.row, i64 0, i32 1
+//   %kizu.main.err.name.75.len = load i64, ptr %kizu.main.err.name.75.len.addr
+//   call void @kizu_main_error_message(ptr %kizu.main.err.name.75.ptr, i64 %kizu.main.err.name.75.len)
+//   ret i32 1
+// kizu.484.try.ok:
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.485.addr, ptr %kizu.275, i64 ptrtoint (ptr getelementptr (%kizu.union.Shape, ptr null, i64 1) to i64), i1 false)
+//   %kizu.array.append.len.addr.78 = getelementptr inbounds %kizu.array, ptr %kizu.473, i64 0, i32 1
+//   %kizu.array.append.len.76 = load i64, ptr %kizu.array.append.len.addr.78, !tbaa !4
+//   %kizu.array.append.cap.79 = getelementptr inbounds %kizu.array, ptr %kizu.473, i64 0, i32 2
+//   %kizu.array.append.cap.77 = load i64, ptr %kizu.array.append.cap.79, !tbaa !4
+//   %kizu.array.append.grown.80 = add i64 %kizu.array.append.len.76, 1
+//   %kizu.array.append.fits.81 = icmp slt i64 %kizu.array.append.len.76, %kizu.array.append.cap.77
+//   br i1 %kizu.array.append.fits.81, label %kizu.in57.1.ok.array.append.fast, label %kizu.in57.1.ok.array.append.slow
+// kizu.in57.1.ok.array.append.slow:
+//   %kizu.array.append.handle.null.82 = icmp eq ptr %kizu.473, null
+//   br i1 %kizu.array.append.handle.null.82, label %kizu.in57.1.ok.array.append.join, label %kizu.in57.1.ok.array.append.grow
+// kizu.in57.1.ok.array.append.grow:
+//   %kizu.array.append.data.addr.83 = getelementptr inbounds %kizu.array, ptr %kizu.473, i64 0, i32 0
+//   %kizu.array.append.data.84 = load ptr, ptr %kizu.array.append.data.addr.83, !tbaa !5
+//   %kizu.array.append.storage.85 = call { ptr, i64 } @kizu_array_grow(ptr %kizu.in54.1, ptr %kizu.array.append.data.84, i64 %kizu.array.append.cap.77, i64 %kizu.array.append.grown.80, i64 ptrtoint (ptr getelementptr (%kizu.union.Shape, ptr null, i64 1) to i64))
+//   %kizu.array.append.storage.data.86 = extractvalue { ptr, i64 } %kizu.array.append.storage.85, 0
+//   %kizu.array.append.storage.cap.87 = extractvalue { ptr, i64 } %kizu.array.append.storage.85, 1
+//   %kizu.array.append.grew.88 = icmp sge i64 %kizu.array.append.storage.cap.87, 0
+//   br i1 %kizu.array.append.grew.88, label %kizu.in57.1.ok.array.append.store, label %kizu.in57.1.ok.array.append.join
+// kizu.in57.1.ok.array.append.store:
+//   store ptr %kizu.array.append.storage.data.86, ptr %kizu.array.append.data.addr.83, !tbaa !5
+//   %kizu.array.append.cap.addr.89 = getelementptr inbounds %kizu.array, ptr %kizu.473, i64 0, i32 2
+//   store i64 %kizu.array.append.storage.cap.87, ptr %kizu.array.append.cap.addr.89, !tbaa !4
+//   br label %kizu.in57.1.ok.array.append.fast
+// kizu.in57.1.ok.array.append.fast:
+//   %kizu.array.data.addr.90 = getelementptr inbounds %kizu.array, ptr %kizu.473, i64 0, i32 0
+//   %kizu.array.data.91 = load ptr, ptr %kizu.array.data.addr.90, !tbaa !5
+//   %kizu.array.elem.92 = getelementptr inbounds %kizu.union.Shape, ptr %kizu.array.data.91, i64 %kizu.array.append.len.76
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.array.elem.92, ptr %kizu.485.addr, i64 ptrtoint (ptr getelementptr (%kizu.union.Shape, ptr null, i64 1) to i64), i1 false)
+//   store i64 %kizu.array.append.grown.80, ptr %kizu.array.append.len.addr.78, !tbaa !4
+//   br label %kizu.in57.1.ok.array.append.join
+// kizu.in57.1.ok.array.append.join:
+//   %kizu.in57.1.ok = phi i1 [ true, %kizu.in57.1.ok.array.append.fast ], [ false, %kizu.in57.1.ok.array.append.slow ], [ false, %kizu.in57.1.ok.array.append.grow ]
+//   %kizu.in57.1.code = select i1 %kizu.in57.1.ok, i64 0, i64 73
+//   %kizu.in57.1 = insertvalue %kizu.error.std__mem__Error.void zeroinitializer, i64 %kizu.in57.1.code, 0
+//   %kizu.487 = load %kizu.array, ptr %kizu.473
+//   %kizu.488.ok.code = extractvalue %kizu.error.std__mem__Error.void %kizu.in57.1, 0
+//   %kizu.488.ok = icmp eq i64 %kizu.488.ok.code, 0
+//   %kizu.488.ok.expected = call i1 @llvm.expect.i1(i1 %kizu.488.ok, i1 true)
+//   br i1 %kizu.488.ok.expected, label %kizu.488.try.ok, label %kizu.488.try.err
+// kizu.488.try.err:
+//   %kizu.array.deinit.data.94 = extractvalue %kizu.array %kizu.487, 0
+//   %kizu.array.deinit.cap.95 = extractvalue %kizu.array %kizu.487, 2
+//   %kizu.array.deinit.bytes.96 = mul i64 %kizu.array.deinit.cap.95, ptrtoint (ptr getelementptr (%kizu.union.Shape, ptr null, i64 1) to i64)
+//   %kizu.array.deinit.owns.97 = icmp ne i64 %kizu.array.deinit.bytes.96, 0
+//   br i1 %kizu.array.deinit.owns.97, label %kizu.array.deinit.owns.97.release, label %kizu.array.deinit.owns.97.done
+// kizu.array.deinit.owns.97.release:
+//   call void @kizu_array_deinit(ptr %kizu.in54.1, ptr %kizu.array.deinit.data.94, i64 %kizu.array.deinit.bytes.96)
+//   br label %kizu.array.deinit.owns.97.done
+// kizu.array.deinit.owns.97.done:
+//   %kizu.main.err.code.98 = extractvalue %kizu.error.std__mem__Error.void %kizu.in57.1, 0
+//   %kizu.main.err.name.99.row = getelementptr [109 x { ptr, i64 }], ptr @.kizu.error.names, i64 0, i64 %kizu.main.err.code.98
+//   %kizu.main.err.name.99.ptr = load ptr, ptr %kizu.main.err.name.99.row
+//   %kizu.main.err.name.99.len.addr = getelementptr { ptr, i64 }, ptr %kizu.main.err.name.99.row, i64 0, i32 1
+//   %kizu.main.err.name.99.len = load i64, ptr %kizu.main.err.name.99.len.addr
+//   call void @kizu_main_error_message(ptr %kizu.main.err.name.99.ptr, i64 %kizu.main.err.name.99.len)
+//   ret i32 1
+// kizu.488.try.ok:
+//   %kizu.array.len.100 = getelementptr inbounds %kizu.array, ptr %kizu.473, i64 0, i32 1
+//   %kizu.in58.1 = load i64, ptr %kizu.array.len.100, !tbaa !4
+//   br label %for.header.50
+// if.then.47:
+//   %kizu.433.addr = getelementptr %kizu.struct.Grid, ptr %kizu.431.addr, i32 0, i32 1
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.434, ptr %kizu.433.addr, i64 ptrtoint (ptr getelementptr ([24 x i64], ptr null, i64 1) to i64), i1 false)
+//   %kizu.439 = icmp uge i64 0, 24
+//   br i1 %kizu.439, label %kizu.check.101.fail, label %kizu.check.101.pass
+// kizu.check.101.fail:
+//   call void @kizu_panic_bounds(i64 0, i64 24, i64 289, i64 39)
+//   unreachable
+// kizu.check.101.pass:
+//   %kizu.440 = getelementptr inbounds [24 x i64], ptr %kizu.434, i64 0, i64 0
+//   %kizu.441 = load i64, ptr %kizu.440, !tbaa !6
+//   %kizu.442 = add i64 %kizu.421, %kizu.441
+//   br label %if.end.49
+// if.else.48:
+//   br label %if.end.49
+// if.end.49:
+//   %kizu.443 = phi i64 [ %kizu.442, %kizu.check.101.pass ], [ %kizu.421, %if.else.48 ]
+//   %kizu.447 = icmp uge i64 %kizu.422, 3
+//   br i1 %kizu.447, label %kizu.check.102.fail, label %kizu.check.102.pass
+// kizu.check.102.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.422, i64 3, i64 291, i64 23)
+//   unreachable
+// kizu.check.102.pass:
+//   %kizu.448 = getelementptr inbounds [3 x %kizu.struct.Holder], ptr %kizu.359, i64 0, i64 %kizu.422
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.449.addr, ptr %kizu.448, i64 ptrtoint (ptr getelementptr (%kizu.struct.Holder, ptr null, i64 1) to i64), i1 false)
+//   %kizu.450 = insertvalue %kizu.opt.Grid zeroinitializer, i8 0, 0
+//   %kizu.454 = icmp uge i64 %kizu.422, 3
+//   br i1 %kizu.454, label %kizu.check.103.fail, label %kizu.check.103.pass
+// kizu.check.103.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.422, i64 3, i64 292, i64 12)
+//   unreachable
+// kizu.check.103.pass:
+//   %kizu.455 = getelementptr inbounds [3 x %kizu.struct.Holder], ptr %kizu.359, i64 0, i64 %kizu.422
+//   %kizu.456 = load %kizu.struct.Holder, ptr %kizu.455
+//   %kizu.457 = insertvalue %kizu.struct.Holder %kizu.456, %kizu.opt.Grid %kizu.450, 1
+//   %kizu.461 = icmp uge i64 %kizu.422, 3
+//   br i1 %kizu.461, label %kizu.check.104.fail, label %kizu.check.104.pass
+// kizu.check.104.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.422, i64 3, i64 292, i64 12)
+//   unreachable
+// kizu.check.104.pass:
+//   %kizu.462 = getelementptr inbounds [3 x %kizu.struct.Holder], ptr %kizu.359, i64 0, i64 %kizu.422
+//   store %kizu.struct.Holder %kizu.457, ptr %kizu.462
+//   %kizu.464 = call i64 @Holder.first(ptr %kizu.449.addr)
+//   %kizu.465 = add i64 %kizu.443, %kizu.464
+//   %kizu.466 = call i64 @Holder.either(ptr %kizu.449.addr, i64 %kizu.422)
+//   %kizu.467 = add i64 %kizu.465, %kizu.466
+//   br label %for.step.45
+// for.header.50:
+//   %kizu.492 = phi i64 [ 0, %kizu.488.try.ok ], [ %kizu.503, %for.step.52 ]
+//   %kizu.493 = phi i64 [ 0, %kizu.488.try.ok ], [ %kizu.505, %for.step.52 ]
+//   %kizu.494 = icmp slt i64 %kizu.493, %kizu.in58.1
+//   br i1 %kizu.494, label %for.body.51, label %for.end.53
+// for.body.51:
+//   %kizu.array.get.panic.len.106 = getelementptr inbounds %kizu.array, ptr %kizu.473, i64 0, i32 1
+//   %kizu.array.get.panic.len.105 = load i64, ptr %kizu.array.get.panic.len.106, !tbaa !4
+//   %kizu.array.data.addr.107 = getelementptr inbounds %kizu.array, ptr %kizu.473, i64 0, i32 0
+//   %kizu.array.data.108 = load ptr, ptr %kizu.array.data.addr.107, !tbaa !5
+//   %kizu.array.get.panic.in_range.109 = icmp ult i64 %kizu.493, %kizu.array.get.panic.len.105
+//   br i1 %kizu.array.get.panic.in_range.109, label %kizu.array.get.panic.in_range.109.ok, label %kizu.array.get.panic.in_range.109.array.get.panic.bounds
+// kizu.array.get.panic.in_range.109.array.get.panic.bounds:
+//   call void @kizu_panic_bounds(i64 %kizu.493, i64 %kizu.array.get.panic.len.105, i64 0, i64 0)
+//   unreachable
+// kizu.array.get.panic.in_range.109.ok:
+//   %kizu.array.elem.110 = getelementptr inbounds %kizu.union.Shape, ptr %kizu.array.data.108, i64 %kizu.493
+//   %kizu.in59.1 = load %kizu.union.Shape, ptr %kizu.array.elem.110
+//   %kizu.496.tag.ptr = getelementptr %kizu.union.Shape, ptr %kizu.496.slot, i32 0, i32 0
+//   store i64 1, ptr %kizu.496.tag.ptr, align 8
+//   %kizu.496.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.496.slot, i32 0, i32 1
+//   store i64 %kizu.493, ptr %kizu.496.payload.ptr, align 8
+//   %kizu.array.len.112 = getelementptr inbounds %kizu.array, ptr %kizu.473, i64 0, i32 1
+//   %kizu.array.len.111 = load i64, ptr %kizu.array.len.112, !tbaa !4
+//   %kizu.array.in_range.113 = icmp ult i64 %kizu.493, %kizu.array.len.111
+//   %kizu.array.data.addr.114 = getelementptr inbounds %kizu.array, ptr %kizu.473, i64 0, i32 0
+//   %kizu.array.data.115 = load ptr, ptr %kizu.array.data.addr.114, !tbaa !5
+//   %kizu.array.elem.116 = getelementptr inbounds %kizu.union.Shape, ptr %kizu.array.data.115, i64 %kizu.493
+//   %kizu.array.checked.117 = select i1 %kizu.array.in_range.113, ptr %kizu.array.elem.116, ptr null
+//   call void @llvm.memcpy.p0.p0.i64(ptr %kizu.array.checked.117, ptr %kizu.496.slot, i64 ptrtoint (ptr getelementptr (%kizu.union.Shape, ptr null, i64 1) to i64), i1 false)
+//   %kizu.500 = call i64 @weigh_value(%kizu.union.Shape %kizu.in59.1)
+//   %kizu.501 = add i64 %kizu.492, %kizu.500
+//   store %kizu.union.Shape %kizu.in59.1, ptr %kizu.arg.0.118, align 8
+//   %kizu.502 = call i64 @weigh(ptr %kizu.arg.0.118)
+//   %kizu.503 = add i64 %kizu.501, %kizu.502
+//   br label %for.step.52
+// for.step.52:
+//   %kizu.505 = add i64 %kizu.493, 1
+//   br label %for.header.50
+// for.end.53:
+//   call void @std__fmt__write_i64(i64 %kizu.492)
+//   %kizu.array.len.119 = getelementptr inbounds %kizu.array, ptr %kizu.473, i64 0, i32 1
+//   %kizu.in62.1 = load i64, ptr %kizu.array.len.119, !tbaa !4
+//   br label %for.header.54
+// for.header.54:
+//   %kizu.509 = phi i64 [ %kizu.492, %for.end.53 ], [ %kizu.514, %for.step.56 ]
+//   %kizu.510 = phi i64 [ 0, %for.end.53 ], [ %kizu.516, %for.step.56 ]
+//   %kizu.511 = icmp slt i64 %kizu.510, %kizu.in62.1
+//   br i1 %kizu.511, label %for.body.55, label %for.end.57
+// for.body.55:
+//   %kizu.array.get.panic.len.121 = getelementptr inbounds %kizu.array, ptr %kizu.473, i64 0, i32 1
+//   %kizu.array.get.panic.len.120 = load i64, ptr %kizu.array.get.panic.len.121, !tbaa !4
+//   %kizu.array.data.addr.122 = getelementptr inbounds %kizu.array, ptr %kizu.473, i64 0, i32 0
+//   %kizu.array.data.123 = load ptr, ptr %kizu.array.data.addr.122, !tbaa !5
+//   %kizu.array.get.panic.in_range.124 = icmp ult i64 %kizu.510, %kizu.array.get.panic.len.120
+//   br i1 %kizu.array.get.panic.in_range.124, label %kizu.array.get.panic.in_range.124.ok, label %kizu.array.get.panic.in_range.124.array.get.panic.bounds
+// kizu.array.get.panic.in_range.124.array.get.panic.bounds:
+//   call void @kizu_panic_bounds(i64 %kizu.510, i64 %kizu.array.get.panic.len.120, i64 0, i64 0)
+//   unreachable
+// kizu.array.get.panic.in_range.124.ok:
+//   %kizu.array.elem.125 = getelementptr inbounds %kizu.union.Shape, ptr %kizu.array.data.123, i64 %kizu.510
+//   %kizu.in63.1 = load %kizu.union.Shape, ptr %kizu.array.elem.125
+//   %kizu.513 = call i64 @weigh_value(%kizu.union.Shape %kizu.in63.1)
+//   %kizu.514 = add i64 %kizu.509, %kizu.513
+//   br label %for.step.56
+// for.step.56:
+//   %kizu.516 = add i64 %kizu.510, 1
+//   br label %for.header.54
+// for.end.57:
+//   call void @std__fmt__write_i64(i64 %kizu.509)
+//   %kizu.518 = load %kizu.array, ptr %kizu.473
+//   %kizu.array.deinit.data.126 = extractvalue %kizu.array %kizu.518, 0
+//   %kizu.array.deinit.cap.127 = extractvalue %kizu.array %kizu.518, 2
+//   %kizu.array.deinit.bytes.128 = mul i64 %kizu.array.deinit.cap.127, ptrtoint (ptr getelementptr (%kizu.union.Shape, ptr null, i64 1) to i64)
+//   %kizu.array.deinit.owns.129 = icmp ne i64 %kizu.array.deinit.bytes.128, 0
+//   br i1 %kizu.array.deinit.owns.129, label %kizu.array.deinit.owns.129.release, label %kizu.array.deinit.owns.129.done
+// kizu.array.deinit.owns.129.release:
+//   call void @kizu_array_deinit(ptr %kizu.in54.1, ptr %kizu.array.deinit.data.126, i64 %kizu.array.deinit.bytes.128)
+//   br label %kizu.array.deinit.owns.129.done
+// kizu.array.deinit.owns.129.done:
+//   %kizu.520 = insertvalue %kizu.error.void zeroinitializer, i64 0, 0
+//   %kizu.main.ok.130.code = extractvalue %kizu.error.void %kizu.520, 0
+//   %kizu.main.ok.130 = icmp eq i64 %kizu.main.ok.130.code, 0
+//   br i1 %kizu.main.ok.130, label %kizu.main.exit.ok.132, label %kizu.main.exit.fail.133
+// kizu.main.exit.fail.133:
+//   %kizu.main.err.code.134 = extractvalue %kizu.error.void %kizu.520, 0
+//   %kizu.main.err.name.135.row = getelementptr [109 x { ptr, i64 }], ptr @.kizu.error.names, i64 0, i64 %kizu.main.err.code.134
+//   %kizu.main.err.name.135.ptr = load ptr, ptr %kizu.main.err.name.135.row
+//   %kizu.main.err.name.135.len.addr = getelementptr { ptr, i64 }, ptr %kizu.main.err.name.135.row, i64 0, i32 1
+//   %kizu.main.err.name.135.len = load i64, ptr %kizu.main.err.name.135.len.addr
+//   call void @kizu_main_error_message(ptr %kizu.main.err.name.135.ptr, i64 %kizu.main.err.name.135.len)
+//   ret i32 1
+// kizu.main.exit.ok.132:
+//   ret i32 0
+// }
+// 
+// !0 = !{!"kizu tbaa"}
+// !1 = !{!"kizu array count", !0, i64 0}
+// !2 = !{!"kizu array data", !0, i64 0}
+// !3 = !{!"kizu value", !0, i64 0}
+// !4 = !{!1, !1, i64 0}
+// !5 = !{!2, !2, i64 0}
+// !6 = !{!3, !3, i64 0}

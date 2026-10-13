@@ -1,4 +1,5 @@
 import compiler::internal::ir;
+import compiler::internal::typ;
 import std::array;
 import std::string;
 
@@ -10,7 +11,9 @@ import std::string;
 // has taken it apart. That is the cheapest form a small value has, since
 // every field ends up a register, and it is what a large one cannot afford:
 // a value of twenty thousand numbers read forty times is eight hundred
-// thousand instructions the optimizer walks before it can drop them.
+// thousand instructions the optimizer walks before it can drop them. An
+// optional, an error union or a tagged union around such a value is the same
+// aggregate with a tag in front, and costs the same.
 //
 // So a large value that nothing reads whole is kept where it already is.
 // Reading it out of storage copies the bytes into a slot of its own with one
@@ -18,7 +21,10 @@ import std::string;
 // slot again while the value is live, so it is the snapshot a load would have
 // been, and writing the storage it came from afterwards does not reach it. A
 // field of it is read through its address, storing it is another copy, and
-// passing it by value hands the slot over as it is.
+// passing it by value hands the slot over as it is. Wrapping it builds the
+// wrapper in a slot, the tag stored and the payload copied in; a wrapper kept
+// in memory has its tag loaded through its address, and its payload is that
+// payload's own address inside it.
 //
 // A large value something does read whole -- a return, a literal it becomes
 // a field of, a phi -- is the aggregate it always was, loaded from its source
@@ -36,9 +42,9 @@ import std::string;
 // for a type the module names is kept by that name's id, and a type spelled
 // out is counted when it is asked about.
 
-/// Is the most scalars a struct or fixed array value holds while it stays
-/// an LLVM aggregate whatever reads it, the Go `memoryValueLeaves`. Past it
-/// a value nothing reads whole is kept in memory.
+/// Is the most scalars a value holds while it stays an LLVM aggregate
+/// whatever reads it, the Go `memoryValueLeaves`. Past it a value nothing
+/// reads whole is kept in memory.
 ///
 /// Sixteen keeps what a program computes with -- a point, a pair, a 4x4
 /// matrix -- in registers, and is where keeping a value in memory stops
@@ -51,8 +57,9 @@ fn memory_value_leaves() -> i64 {
 
 /// Reports whether a value of the spelled type may be kept in memory rather
 /// than as an LLVM aggregate, the Go `isMemoryValueType`: a struct or fixed
-/// array of more leaves than memory_value_leaves.
-fn (self: &Emitter) is_memory_value_type(module: &ir::Module, typ_name: []u8) -> !bool {
+/// array of more leaves than memory_value_leaves, or an optional, error union
+/// or tagged union that holds one.
+fn (self: &var Emitter) is_memory_value_type(module: &ir::Module, typ_name: []u8) -> !bool {
     var seen = array::new<string::String>(self.allocator);
     defer seen.deinit(self.allocator);
     let leaves = try self.scalar_leaves(module, typ_name, &var seen);
@@ -84,13 +91,16 @@ fn (self: &var Emitter) is_memory_value_type_of(module: &ir::Module, typ_name: i
 }
 
 /// Counts what a value of a type is made of once its structs and fixed
-/// arrays are taken apart, the Go `scalarLeaves`: one for everything else, a
-/// tagged aggregate among it, which keeps its own form. The count stops at
-/// the first answer past memory_value_leaves, which is all
-/// is_memory_value_type asks and what keeps an array's length from
-/// overflowing it. A struct already on the path counts as one leaf, so a
-/// by-value cycle ends instead of recursing.
-fn (self: &Emitter) scalar_leaves(
+/// arrays are taken apart, and one for everything else, the Go
+/// `scalarLeaves`. A value that wraps another counts as what it wraps -- an
+/// optional or an error union as its payload, a tagged union as the largest
+/// payload a variant has -- since the tag rides in front of that payload and
+/// does not change what the aggregate costs. The count stops at the first
+/// answer past memory_value_leaves, which is all is_memory_value_type asks
+/// and what keeps an array's length from overflowing it. A struct or union
+/// already on the path counts as one leaf, so a by-value cycle ends instead
+/// of recursing.
+fn (self: &var Emitter) scalar_leaves(
     module: &ir::Module,
     typ_name: []u8,
     seen: &var array::Array<string::String>
@@ -126,7 +136,52 @@ fn (self: &Emitter) scalar_leaves(
         }
         return parts.count * each;
     }
+    if try self.wrapped_type(typ_name) |payload| {
+        defer payload.deinit(self.allocator);
+        let payload_bytes = payload.as_bytes();
+        return self.scalar_leaves(module, payload_bytes, seen);
+    }
+    if module.unions.at(typ_name) |declared| {
+        if contains_name(seen, typ_name) {
+            return 1;
+        }
+        let copied = try string::from_bytes(self.allocator, typ_name);
+        errdefer copied.deinit(self.allocator);
+        try seen.append(self.allocator, move copied);
+        var leaves = 1;
+        var index = 0;
+        while declared.variants.key_at(index) |variant_name| {
+            index = index + 1;
+            let variant = declared.variants.get(variant_name) orelse continue;
+            if ir::is_empty(variant.payload) {
+                continue;
+            }
+            let payload_text = ir::name_text(&module.names, variant.payload);
+            let payload_bytes = payload_text.as_bytes();
+            let each = try self.scalar_leaves(module, payload_bytes, seen);
+            if each > leaves {
+                leaves = each;
+            }
+        }
+        if seen.pop() |last| {
+            last.deinit(self.allocator);
+        }
+        return leaves;
+    }
     return 1;
+}
+
+/// Returns the payload of an optional `?T` or an error union `E!T`, the two
+/// types that are one tag and one payload, the Go `wrappedType`; null for any
+/// other spelling.
+fn (self: &var Emitter) wrapped_type(typ_name: []u8) -> !?string::String {
+    if typ::optional_elem(typ_name) |elem| {
+        return try string::from_bytes(self.allocator, elem);
+    }
+    if !contains_bytes(typ_name, "!") {
+        return null;
+    }
+    return self.error_union_success_type(typ_name);
 }
 
 /// Reports whether an instruction reads its argument at index through the
@@ -137,34 +192,87 @@ fn (self: &Emitter) scalar_leaves(
 /// which asks here. An instruction this does not name reads its arguments
 /// whole.
 ///
-/// Two answers depend on what else is read whole. The field of a value kept
-/// in memory is its own address inside that value, so a field that is read
-/// whole needs its receiver whole too. And storage whose whole value is
-/// loaded takes what is written to it whole: filled by a copy and then
-/// loaded, it is the load out of a slot again.
+/// Some answers depend on what else is read whole. A field or a payload of a
+/// value kept in memory is its own address inside that value, so one that is
+/// read whole needs what it is read out of whole too -- unless that lies in
+/// storage the caller filled (lent), which a whole value is loaded out of as
+/// out of any storage. A wrapper built in a slot copies its payload in, and
+/// built whole it takes the payload whole. And storage a whole value is
+/// loaded from takes what is written to it whole, to any part of it: filled
+/// by a copy and then loaded, it is the load out of a slot again.
 fn (self: &var Emitter) reads_address(module: &ir::Module, node: &ir::InstrNode, index: i64) -> !bool {
     match node.op {
-        LocalSlot => return index == 0 and !self.is_whole_storage(node.result.name),
-        RefStore => return index == 1 and !self.is_whole_storage(node.args.get_or_panic(0).name),
-        FieldRefSet => return index == 1 and !self.is_whole_storage(node.args.get_or_panic(0).name),
+        // Go names these in `copiedOperand`: each copies a value into storage
+        // of the runtime's or of a view, and the bytes go where they are sent
+        // whatever else reads the value.
         BoxNew => return index == 1,
         SliceStore => return index == 2,
         ArrayAppend => return index == 2,
         ArraySet => return index == 2,
         ArenaAdd => return index == 2,
         MapInsert => return index == 3,
-        Field => return index == 0 and !self.is_whole_value(node.result.name),
-        CallIndirect => return index > 0,
+        LocalSlot => return index == 0 and !self.is_whole_storage(node.result.name),
+        RefStore => return index == 1 and !self.is_whole_storage(self.storage_root(node.args.get_or_panic(0).name)),
+        FieldRefSet => return index == 1 and !self.is_whole_storage(self.storage_root(node.args.get_or_panic(0).name)),
+        CallIndirect => {
+            if index == 0 {
+                return false;
+            }
+            let arg = node.args.get_or_panic(index);
+            let takes = call_param_takes_address_of(module, node, index - 1, arg.type_name);
+            return passed_behind_pointer(module, takes, arg.type_name);
+        },
         Call => return self.call_reads_address(module, node, index),
+        _ => return index == 0 and self.reads_first_at_address(node),
+    }
+}
+
+/// Answers reads_address for the first argument of an instruction that opens
+/// or makes a value, the Go `readsFirstAtAddress`: the tag of a wrapper is
+/// always read where the wrapper lies, a wrapper built in a slot copies its
+/// payload in, and a field or a payload is read at its address by what
+/// reads_part_at_address says.
+fn (self: &Emitter) reads_first_at_address(node: &ir::InstrNode) -> bool {
+    match node.op {
+        OptHas => return true,
+        ErrorHas => return true,
+        ErrorCode => return true,
+        UnionTag => return true,
+        OptSome => return !self.is_whole_value(node.result.name),
+        ErrorOk => return !self.is_whole_value(node.result.name),
+        UnionNew => return !self.is_whole_value(node.result.name),
+        Field => return self.reads_part_at_address(node),
+        OptValue => return self.reads_part_at_address(node),
+        ErrorValue => return self.reads_part_at_address(node),
+        UnionPayload => return self.reads_part_at_address(node),
+        // A failure whose union is the function's own is returned as it is.
+        ErrorTry => return self.reads_part_at_address(node) and
+            !ir::same_name(node.args.get_or_panic(0).type_name, self.current_return),
         _ => return false,
     }
+}
+
+/// Reports whether an instruction that reads a field or a payload out of its
+/// first argument may read it at its address inside that argument, the Go
+/// `readsPartAtAddress`: the part is kept in memory too, or the argument lies
+/// in storage the caller filled.
+fn (self: &Emitter) reads_part_at_address(node: &ir::InstrNode) -> bool {
+    return !self.is_whole_value(node.result.name) or self.is_lent(node.args.get_or_panic(0).name);
+}
+
+/// Reports whether an op reads a field or a payload out of its first
+/// argument: the Go `isFieldRead(op) || isPayloadRead(op) || op ==
+/// "error.try"`, which also returns on a failure.
+fn reads_part(op: ir::Op) -> bool {
+    return op == ir::Op::Field or op == ir::Op::OptValue or op == ir::Op::ErrorValue or
+        op == ir::Op::UnionPayload or op == ir::Op::ErrorTry;
 }
 
 /// Answers reads_address for a call by name, by the way write_call hands
 /// that callee its arguments, the Go `callReadsAddress`. A module-local
 /// callee takes every struct and fixed array behind a pointer, the hosted
-/// runtime every struct, and any other callee only the parameters it declares
-/// as reading through the address of a copy.
+/// runtime every struct and union, and any other callee only the parameters
+/// it declares as reading through the address of a copy.
 fn (self: &var Emitter) call_reads_address(module: &ir::Module, node: &ir::InstrNode, index: i64) -> !bool {
     let arg = node.args.get_or_panic(index);
     match try self.call_kind(module, node) {
@@ -174,9 +282,34 @@ fn (self: &var Emitter) call_reads_address(module: &ir::Module, node: &ir::Instr
             let type_bytes = type_text.as_bytes();
             return hosted_runtime_indirect_abi(module, type_bytes);
         },
-        Internal => return true,
+        Internal => {
+            var takes = false;
+            if self.function_named(module, node.operand) |callee| {
+                if index < module.function_param_count(callee) {
+                    if module.function_param(callee, index) |param| {
+                        takes = takes_address_of(module, param.passing, param.type_name, arg.type_name);
+                    }
+                }
+            }
+            return passed_behind_pointer(module, takes, arg.type_name);
+        },
         _ => return call_param_takes_address_of(module, node, index, arg.type_name),
     }
+}
+
+/// Reports whether a function of this module is handed an argument behind a
+/// pointer, which is what internal_call_arg writes, the Go
+/// `passedBehindPointer`: a struct or fixed array always, and anything else
+/// when the parameter reads through the address of a copy, which the caller
+/// has already asked. An optional, an error union and a tagged union are
+/// passed as the values they are.
+fn passed_behind_pointer(module: &ir::Module, takes_address: bool, arg_type: ir::Name) -> bool {
+    if takes_address {
+        return true;
+    }
+    let type_text = ir::name_text(&module.names, arg_type);
+    let type_bytes = type_text.as_bytes();
+    return uses_indirect_struct_param_abi(module, type_bytes);
 }
 
 /// Reports whether a value is kept in memory, the Go `keptInMemory`: its
@@ -194,13 +327,57 @@ struct MemoryUse {
     index: i64,
 }
 
+/// Records the values of a function that lie in storage the caller filled,
+/// the Go `markLent`: a parameter passed behind a pointer, and a field or a
+/// payload read out of one. Nothing in the function writes that storage, so
+/// loading a whole value out of it is a load like any other, and reading one
+/// part of it whole is no reason to load all of it.
+fn (self: &var Emitter) mark_lent(
+    module: &ir::Module,
+    node: &ir::FunctionNode,
+    uses: &array::Array<MemoryUse>
+) -> !void {
+    if module.names.is(node.export_abi, "c") {
+        return;
+    }
+    var changed = false;
+    var param_index = 0;
+    while node.params.get(param_index) |param| {
+        param_index = param_index + 1;
+        let type_text = ir::name_text(&module.names, param.type_name);
+        let type_bytes = type_text.as_bytes();
+        if uses_indirect_struct_param_abi(module, type_bytes) and
+            try self.is_memory_value_type_of(module, param.type_name) {
+            try self.mark_lent_value(param.name);
+            changed = true;
+        }
+    }
+    while changed {
+        changed = false;
+        var use_index = 0;
+        while uses.get(use_index) |candidate| {
+            use_index = use_index + 1;
+            let use_node = module.instrs.at(candidate.instr.node);
+            if candidate.index == 0 and reads_part(use_node.op) and
+                self.is_lent(use_node.args.get_or_panic(0).name) and !self.is_lent(use_node.result.name) {
+                try self.mark_lent_value(use_node.result.name);
+                changed = true;
+            }
+        }
+    }
+    return;
+}
+
 /// Records the values of a function that something reads whole, so that
 /// every other value of a type that may be kept in memory is, and the storage
-/// a whole value is loaded from, the Go `collectWholeValues`. An argument is
-/// read whole by what reads_address says of its instruction, and since two
-/// of its answers follow from what is already whole, the arguments are asked
-/// again until none changes. Go keeps a set per function; here a name is
-/// stamped with the function's generation, the way a ValueInfo is.
+/// a whole value is loaded from, the Go `collectWholeValues`: the local, or
+/// whatever else the address it is loaded through lies in (storage_root),
+/// since a write to one part of that storage and a load of another may meet
+/// in the same bytes. An argument is read whole by what reads_address says of
+/// its instruction, and since some of its answers follow from what is already
+/// whole, the arguments are asked again until none changes. Go keeps a set
+/// per function; here a name is stamped with the function's generation, the
+/// way a ValueInfo is.
 fn (self: &var Emitter) collect_whole_values(module: &ir::Module, node: &ir::FunctionNode) -> !void {
     self.misread = ir::empty_name();
     var uses = array::new<MemoryUse>(self.allocator);
@@ -208,6 +385,7 @@ fn (self: &var Emitter) collect_whole_values(module: &ir::Module, node: &ir::Fun
     var loads = array::new<ir::Instr>(self.allocator);
     defer loads.deinit(self.allocator);
     try self.memory_uses(module, node, &var uses, &var loads);
+    try self.mark_lent(module, node, &uses);
     var changed = true;
     while changed {
         changed = false;
@@ -225,9 +403,9 @@ fn (self: &var Emitter) collect_whole_values(module: &ir::Module, node: &ir::Fun
         while loads.get(load_index) |load| {
             load_index = load_index + 1;
             let load_node = module.instrs.at(load.node);
-            let source = load_node.args.get_or_panic(0);
-            if self.is_whole_value(load_node.result.name) and !self.is_whole_storage(source.name) {
-                try self.mark_whole_storage(source.name);
+            let source = self.storage_root(load_node.args.get_or_panic(0).name);
+            if self.is_whole_value(load_node.result.name) and !self.is_whole_storage(source) {
+                try self.mark_whole_storage(source);
                 changed = true;
             }
         }
@@ -239,7 +417,8 @@ fn (self: &var Emitter) collect_whole_values(module: &ir::Module, node: &ir::Fun
 /// records what is read whole whatever else is -- a value a literal takes as
 /// a field, a phi names, a block returns or a cleanup reads whole -- and
 /// collects what has to be asked again: every argument of a type that may be
-/// kept in memory, and every load of such a value out of storage.
+/// kept in memory, and every load of such a value out of storage. It also
+/// records which address each address of a part was taken from.
 fn (self: &var Emitter) memory_uses(
     module: &ir::Module,
     node: &ir::FunctionNode,
@@ -254,6 +433,11 @@ fn (self: &var Emitter) memory_uses(
         while block_node.instrs.get(index) |instr| {
             index = index + 1;
             let instr_node = module.instrs.at(instr.node);
+            if is_address_of_part(instr_node.op) {
+                if instr_node.args.get(0) |whole| {
+                    try self.mark_part_of(instr_node.result.name, whole.name);
+                }
+            }
             var arg_index = 0;
             while instr_node.args.get(arg_index) |arg| {
                 if try self.is_memory_value_type_of(module, arg.type_name) {
@@ -276,7 +460,7 @@ fn (self: &var Emitter) memory_uses(
                 cleanup_index = cleanup_index + 1;
                 try self.mark_whole_cleanup(module, cleanup);
             }
-            if instr_node.op == ir::Op::RefLoad and
+            if is_storage_load(instr_node.op) and
                 try self.is_memory_value_type_of(module, instr_node.result.type_name) {
                 try loads.append(self.allocator, instr);
             }
@@ -284,6 +468,54 @@ fn (self: &var Emitter) memory_uses(
         try self.mark_whole(module, block_node.terminator.value);
     }
     return;
+}
+
+/// Reports whether an op reads a value out of the storage behind the borrow
+/// it is given -- all of it, or one field of a struct -- which
+/// collect_whole_values follows back to that storage, the Go `isStorageLoad`.
+fn is_storage_load(op: ir::Op) -> bool {
+    return op == ir::Op::RefLoad or op == ir::Op::UnionLoad or op == ir::Op::FieldRef;
+}
+
+/// Reports whether an op takes the address of a part of the storage its
+/// first argument is the address of, the Go `isAddressOfPart`: an element of
+/// a fixed array, a field of a struct, the payload of a union.
+fn is_address_of_part(op: ir::Op) -> bool {
+    return op == ir::Op::BufferAddr or op == ir::Op::UnionPayloadRef or op == ir::Op::FieldAddr;
+}
+
+/// Is the address the address of a part was taken from, the value of the Go
+/// `partOf` map, stamped with its function's generation the way a ValueInfo
+/// is.
+struct AddressPart {
+    whole: ir::Name,
+    generation: i64,
+}
+
+/// Records that the address `part` was taken from the address `whole`, the
+/// Go `e.partOf[part] = whole`.
+fn (self: &var Emitter) mark_part_of(part: ir::Name, whole: ir::Name) -> !void {
+    let id = ir::name_id(part);
+    let stale = AddressPart { whole: ir::empty_name(), generation: -1 };
+    while self.part_of.len() <= id {
+        try self.part_of.append(self.allocator, stale);
+    }
+    self.part_of.set(id, AddressPart { whole: whole, generation: self.generation });
+    return;
+}
+
+/// Returns the address the storage a name points into was first known by in
+/// the function being written, the Go `storageRoot`: the name itself, or
+/// what the address of a part was taken from, as far back as that goes.
+fn (self: &Emitter) storage_root(name: ir::Name) -> ir::Name {
+    var root = name;
+    while self.part_of.get(ir::name_id(root)) |part| {
+        if part.generation != self.generation {
+            break;
+        }
+        root = part.whole;
+    }
+    return root;
 }
 
 /// Records the arguments a cleanup reads whole, the Go `markWholeArgs`. A
@@ -330,6 +562,14 @@ fn (self: &var Emitter) mark_whole_storage(name: ir::Name) -> !void {
     return stamp_name(allocator, &var self.whole_storage, name, generation);
 }
 
+/// Records that a value lies in storage the caller filled, the Go
+/// `e.lent[name] = true`.
+fn (self: &var Emitter) mark_lent_value(name: ir::Name) -> !void {
+    let allocator = self.allocator;
+    let generation = self.generation;
+    return stamp_name(allocator, &var self.lent, name, generation);
+}
+
 /// Stamps a name with a function's generation in a table indexed by name id.
 fn stamp_name(allocator: Allocator, table: &var array::Array<i64>, name: ir::Name, generation: i64) -> !void {
     let id = ir::name_id(name);
@@ -353,6 +593,15 @@ fn (self: &Emitter) is_whole_value(name: ir::Name) -> bool {
 /// being written, the Go `e.wholeStorage[name]`.
 fn (self: &Emitter) is_whole_storage(name: ir::Name) -> bool {
     if self.whole_storage.get(ir::name_id(name)) |marked| {
+        return marked == self.generation;
+    }
+    return false;
+}
+
+/// Reports whether a value lies in storage the caller filled, the Go
+/// `e.lent[name]`.
+fn (self: &Emitter) is_lent(name: ir::Name) -> bool {
+    if self.lent.get(ir::name_id(name)) |marked| {
         return marked == self.generation;
     }
     return false;
@@ -429,10 +678,11 @@ fn (self: &var Emitter) copied_from_memory(
     return true;
 }
 
-/// Reads field index of a struct kept in memory at addr, the Go
-/// `writeMemoryField`. A field that is itself kept in memory is its own
-/// address inside the struct, which holds for as long as the struct does;
-/// any other field is loaded.
+/// Reads field index of a value kept in memory at addr, the Go
+/// `writeMemoryField`: a field of a struct, or the payload of a wrapper,
+/// which is the field after its tag. A field that is itself kept in memory is
+/// its own address inside the value, which holds for as long as the value
+/// does; any other field is loaded.
 fn (self: &var Emitter) write_memory_field(
     module: &ir::Module,
     node: &ir::InstrNode,
@@ -456,6 +706,53 @@ fn (self: &var Emitter) write_memory_field(
         "  %s = load %s, ptr %s%s", Arg::Str(name), Arg::Str(result_type), Arg::Str(field_addr), Arg::Lit(tag)
     );
     return self.set_value(module, node.result, name);
+}
+
+/// Makes result the value kept in memory at addr, the Go `writeMemoryAlias`,
+/// which is what an optional without a tag and its payload are to each
+/// other: the same bytes. A result something reads whole is loaded from
+/// there, which reads_address allows only out of storage the caller filled.
+fn (self: &var Emitter) write_memory_alias(module: &ir::Module, result: ir::Value, addr: ir::Name) -> !void {
+    if try self.kept_in_memory(module, result) {
+        return self.set_memory_value(module, result, addr);
+    }
+    let name = try self.local_name(module, result.name);
+    let result_type = try self.llvm_type_of(module, result.type_name);
+    try self.line3("  %s = load %s, ptr %s", Arg::Str(name), Arg::Str(result_type), Arg::Str(addr));
+    return self.set_value(module, result, name);
+}
+
+/// Reads the tag of a wrapper kept in memory at addr as name, the Go
+/// `writeMemoryTag`: the presence byte of an optional, the code of an error
+/// union, the variant number of a union. The tag is the first field of all
+/// three, so it is what the address points at.
+fn (self: &var Emitter) write_memory_tag(name: ir::Name, tag_type: []u8, addr: ir::Name) -> !void {
+    return self.line3("  %s = load %s, ptr %s", Arg::Str(name), Arg::Lit(tag_type), Arg::Str(addr));
+}
+
+/// Builds the optional or error union an instruction makes around the
+/// payload kept in memory at source, the Go `writeMemoryWrapper`: a slot of
+/// the wrapper's own, the tag stored and the payload copied in after it.
+fn (self: &var Emitter) write_memory_wrapper(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    tag: []u8,
+    source: ir::Name
+) -> !void {
+    let name = try self.local_name(module, node.result.name);
+    let slot = try self.suffixed(name, ".addr");
+    let wrapper_type = try self.llvm_type_of(module, node.result.type_name);
+    let payload_addr = try self.suffixed(name, ".payload.addr");
+    try self.line2("  %s = alloca %s", Arg::Str(slot), Arg::Str(wrapper_type));
+    try self.line2("  store %s, ptr %s", Arg::Lit(tag), Arg::Str(slot));
+    try self.line3(
+        "  %s = getelementptr %s, ptr %s, i32 0, i32 1",
+        Arg::Str(payload_addr), Arg::Str(wrapper_type), Arg::Str(slot)
+    );
+    let payload = node.args.get_or_panic(0);
+    let payload_type = try self.llvm_type_of(module, payload.type_name);
+    try self.write_memory_copy(payload_addr, source, payload_type);
+    return self.set_memory_value(module, node.result, slot);
 }
 
 /// Declares llvm.memcpy for a module that copied a value and does not

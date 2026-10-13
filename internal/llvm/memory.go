@@ -12,7 +12,9 @@ import (
 // taken it apart. That is the cheapest form a small value has, since every
 // field ends up a register, and it is what a large one cannot afford: a value
 // of twenty thousand numbers read forty times is eight hundred thousand
-// instructions the optimizer walks before it can drop them.
+// instructions the optimizer walks before it can drop them. An optional, an
+// error union or a tagged union around such a value is the same aggregate
+// with a tag in front, and costs the same.
 //
 // So a large value that nothing reads whole is kept where it already is.
 // Reading it out of storage copies the bytes into a slot of its own with one
@@ -20,7 +22,10 @@ import (
 // slot again while the value is live, so it is the snapshot a load would have
 // been, and writing the storage it came from afterwards does not reach it. A
 // field of it is read through its address, storing it is another copy, and
-// passing it by value hands the slot over as it is.
+// passing it by value hands the slot over as it is. Wrapping it builds the
+// wrapper in a slot, the tag stored and the payload copied in; a wrapper kept
+// in memory has its tag loaded through its address, and its payload is that
+// payload's own address inside it.
 //
 // A large value something does read whole -- a return, a literal it becomes a
 // field of, a phi -- is the aggregate it always was, loaded from its source
@@ -35,9 +40,9 @@ import (
 // Which types this is asked about at all is memoryValueLeaves, one count over
 // the type's own nesting, so a type is treated the same way everywhere.
 
-// memoryValueLeaves is the most scalars a struct or fixed array value holds
-// while it stays an LLVM aggregate whatever reads it. Past it a value nothing
-// reads whole is kept in memory.
+// memoryValueLeaves is the most scalars a value holds while it stays an LLVM
+// aggregate whatever reads it. Past it a value nothing reads whole is kept in
+// memory.
 //
 // Sixteen keeps what a program computes with -- a point, a pair, a 4x4
 // matrix -- in registers, and is where keeping a value in memory stops
@@ -48,8 +53,9 @@ const memoryValueLeaves = 16
 
 // isMemoryValueType reports whether a value of typ may be kept in memory
 // rather than as an LLVM aggregate: a struct or fixed array of more leaves
-// than memoryValueLeaves. The answer depends on the type alone and is asked
-// for every value that is loaded, stored or passed, so it is kept.
+// than memoryValueLeaves, or an optional, error union or tagged union that
+// holds one. The answer depends on the type alone and is asked for every
+// value that is loaded, stored or passed, so it is kept.
 func (e *emitter) isMemoryValueType(typ string) bool {
 	if known, ok := e.memoryTypes[typ]; ok {
 		return known
@@ -60,11 +66,14 @@ func (e *emitter) isMemoryValueType(typ string) bool {
 }
 
 // scalarLeaves counts what a value of typ is made of once its structs and
-// fixed arrays are taken apart: one for everything else, a tagged aggregate
-// among it, which keeps its own form. The count stops at the first answer past
+// fixed arrays are taken apart, and one for everything else. A value that
+// wraps another counts as what it wraps -- an optional or an error union as
+// its payload, a tagged union as the largest payload a variant has -- since
+// the tag rides in front of that payload and does not change what the
+// aggregate costs. The count stops at the first answer past
 // memoryValueLeaves, which is all isMemoryValueType asks and what keeps an
-// array's length from overflowing it. A struct already on the path counts as
-// one leaf, so a by-value cycle ends instead of recursing.
+// array's length from overflowing it. A struct or union already on the path
+// counts as one leaf, so a by-value cycle ends instead of recursing.
 func (e *emitter) scalarLeaves(typ string, seen []string) int {
 	if st, ok := e.module.Structs[typ]; ok {
 		if containsName(seen, typ) {
@@ -87,59 +96,152 @@ func (e *emitter) scalarLeaves(typ string, seen []string) int {
 		}
 		return int(count) * each
 	}
+	if payload, ok := e.wrappedType(typ); ok {
+		return e.scalarLeaves(payload, seen)
+	}
+	if union, ok := e.module.Unions[typ]; ok && !containsName(seen, typ) {
+		seen = append(seen, typ)
+		leaves := 1
+		for _, variant := range union.Variants {
+			if variant.Payload != "" {
+				leaves = max(leaves, e.scalarLeaves(variant.Payload, seen))
+			}
+		}
+		return leaves
+	}
 	return 1
+}
+
+// wrappedType returns the payload of an optional `?T` or an error union
+// `E!T`, the two types that are one tag and one payload.
+func (e *emitter) wrappedType(typ string) (string, bool) {
+	if elem, ok := optionalElemLLVM(typ); ok {
+		return elem, true
+	}
+	if !strings.Contains(typ, "!") {
+		return "", false
+	}
+	return e.errorUnionSuccessType(typ)
 }
 
 // readsAddress reports whether instr reads its argument at index through the
 // address of the storage it is kept in, rather than as an LLVM operand. It is
 // the one answer both sides use: collectWholeValues keeps a value in memory
 // only when every use of it says yes, and an instruction takes a value's
-// address through addressArg, which asks here first. An instruction this does
-// not name reads its arguments whole.
+// address through addressArg, which asks here. An instruction this does not
+// name reads its arguments whole.
 //
-// Two answers depend on what else is read whole. The field of a value kept in
-// memory is its own address inside that value, so a field that is read whole
-// needs its receiver whole too. And storage whose whole value is loaded takes
-// what is written to it whole: filled by a copy and then loaded, it is the
-// load out of a slot again.
+// Some answers depend on what else is read whole. A field or a payload of a
+// value kept in memory is its own address inside that value, so one that is
+// read whole needs what it is read out of whole too -- unless that lies in
+// storage the caller filled (lent), which a whole value is loaded out of as
+// out of any storage. A wrapper built in a slot copies its payload in, and
+// built whole it takes the payload whole. And storage a whole value is loaded
+// from takes what is written to it whole, to any part of it: filled by a copy
+// and then loaded, it is the load out of a slot again.
 func (e *emitter) readsAddress(instr *ir.Instr, index int) bool {
+	if position, ok := copiedOperand[instr.Op]; ok {
+		return index == position
+	}
 	switch {
 	case instr.Op == "local.slot":
 		return index == 0 && !e.wholeStorage[instr.Result.Name]
 	case instr.Op == "ref.store", strings.HasPrefix(instr.Op, "field.ref.set."):
-		return index == 1 && !e.wholeStorage[instr.Args[0].Name]
-	case instr.Op == "box.new":
-		return index == 1
-	case instr.Op == "slice.store", instr.Op == "array.append",
-		instr.Op == "array.set", instr.Op == "arena.add":
-		return index == 2
-	case instr.Op == "map.insert":
-		return index == 3
-	case isFieldRead(instr.Op):
-		return index == 0 && !e.wholeValues[instr.Result.Name]
+		return index == 1 && !e.wholeStorage[e.storageRoot(instr.Args[0].Name)]
 	case instr.Op == "call.indirect":
-		return index > 0
+		return index > 0 && e.passedBehindPointer(instr.CallParams, index-1, instr.Args[index])
 	case strings.HasPrefix(instr.Op, "call."):
 		return e.callReadsAddress(instr, index)
+	}
+	return index == 0 && e.readsFirstAtAddress(instr)
+}
+
+// copiedOperand names, for each instruction that copies a value into storage
+// of the runtime's or of a view, the operand that value is: the bytes go
+// where they are sent whatever else reads the value.
+var copiedOperand = map[string]int{
+	"box.new":      1,
+	"slice.store":  2,
+	"array.append": 2,
+	"array.set":    2,
+	"arena.add":    2,
+	"map.insert":   3,
+}
+
+// readsFirstAtAddress answers readsAddress for the first argument of an
+// instruction that opens or makes a value: the tag of a wrapper is always
+// read where the wrapper lies, a wrapper built in a slot copies its payload
+// in, and a field or a payload is read at its address by what
+// readsPartAtAddress says.
+func (e *emitter) readsFirstAtAddress(instr *ir.Instr) bool {
+	switch {
+	case isTagRead(instr.Op):
+		return true
+	case isWrap(instr.Op):
+		return !e.wholeValues[instr.Result.Name]
+	case isFieldRead(instr.Op), isPayloadRead(instr.Op):
+		return e.readsPartAtAddress(instr)
+	case instr.Op == "error.try":
+		// A failure whose union is the function's own is returned as it is.
+		return e.readsPartAtAddress(instr) && instr.Args[0].Type != e.currentReturn
 	}
 	return false
 }
 
+// readsPartAtAddress reports whether instr, which reads a field or a payload
+// out of its first argument, may read it at its address inside that argument:
+// the part is kept in memory too, or the argument lies in storage the caller
+// filled.
+func (e *emitter) readsPartAtAddress(instr *ir.Instr) bool {
+	return !e.wholeValues[instr.Result.Name] || e.lent[instr.Args[0].Name]
+}
+
+// isWrap reports whether op puts a payload behind a tag: an optional, an
+// error union or a tagged union made of the value it is given.
+func isWrap(op string) bool {
+	return op == "opt.some" || op == "error.ok" || op == "union.new"
+}
+
+// isPayloadRead reports whether op reads the payload out of a wrapper and
+// nothing else of it. `error.try` reads one too, and returns on a failure.
+func isPayloadRead(op string) bool {
+	return op == "opt.value" || op == "error.value" || op == "union.payload"
+}
+
+// isTagRead reports whether op reads the tag of a wrapper and nothing else:
+// whether an optional holds a value, whether an error union succeeded and
+// with which code it failed, and which variant a union is.
+func isTagRead(op string) bool {
+	return op == "opt.has" || op == "error.has" || op == "error.code" || op == "union.tag"
+}
+
 // callReadsAddress answers readsAddress for a call by name, by the way
 // writeCall hands that callee its arguments. A module-local callee takes every
-// struct and fixed array behind a pointer, the hosted runtime every struct,
-// and any other callee only the parameters it declares as reading through the
-// address of a copy.
+// struct and fixed array behind a pointer, the hosted runtime every struct
+// and union, and any other callee only the parameters it declares as reading
+// through the address of a copy.
 func (e *emitter) callReadsAddress(instr *ir.Instr, index int) bool {
-	switch _, kind := e.callTarget(instr); kind {
+	switch name, kind := e.callTarget(instr); kind {
 	case callBuiltin:
 		return false
 	case callHosted:
 		return e.hostedRuntimeIndirectABI(instr.Args[index].Type)
 	case callInternal:
-		return true
+		return e.passedBehindPointer(e.functionParams[name], index, instr.Args[index])
 	}
 	return callParamTakesAddressOf(instr, index)
+}
+
+// passedBehindPointer reports whether a function of this module is handed
+// arg, the index-th it takes, behind a pointer, which is what internalCallArg
+// writes: a struct or fixed array always, and anything else when the
+// parameter reads through the address of a copy. An optional, an error union
+// and a tagged union are passed as the values they are.
+func (e *emitter) passedBehindPointer(params []ir.Param, index int, arg ir.Value) bool {
+	if index < len(params) && params[index].TakesAddressOf(arg.Type) {
+		return true
+	}
+	return e.usesIndirectStructParamABI(arg.Type)
 }
 
 // keptInMemory reports whether value is kept in memory: its type allows it and
@@ -154,17 +256,49 @@ type memoryUse struct {
 	index int
 }
 
+// markLent records the values of fn that lie in storage the caller filled: a
+// parameter passed behind a pointer, and a field or a payload read out of
+// one. Nothing in fn writes that storage, so loading a whole value out of it
+// is a load like any other, and reading one part of it whole is no reason to
+// load all of it.
+func (e *emitter) markLent(fn *ir.Function, uses []memoryUse) {
+	e.lent = map[string]bool{}
+	if fn.ExportABI == "c" {
+		return
+	}
+	for _, param := range fn.Params {
+		if e.usesIndirectStructParamABI(param.Type) && e.isMemoryValueType(param.Type) {
+			e.lent[param.Name] = true
+		}
+	}
+	for changed := len(e.lent) > 0; changed; {
+		changed = false
+		for _, use := range uses {
+			op, result := use.instr.Op, use.instr.Result.Name
+			if use.index == 0 && e.lent[use.instr.Args[0].Name] && !e.lent[result] &&
+				(isFieldRead(op) || isPayloadRead(op) || op == "error.try") {
+				e.lent[result] = true
+				changed = true
+			}
+		}
+	}
+}
+
 // collectWholeValues records the values of fn that something reads whole, so
 // that every other value of a type that may be kept in memory is, and the
-// storage a whole value is loaded from. An argument is read whole by what
-// readsAddress says of its instruction, and since two of its answers follow
-// from what is already whole, the arguments are asked again until none
-// changes.
+// storage a whole value is loaded from: the local, or whatever else the
+// address it is loaded through lies in (storageRoot), since a write to one
+// part of that storage and a load of another may meet in the same bytes. An
+// argument is read whole by what readsAddress says of its instruction, and
+// since some of its answers follow from what is already whole, the arguments
+// are asked again until none changes.
 func (e *emitter) collectWholeValues(fn *ir.Function) {
 	e.wholeValues = map[string]bool{}
 	e.wholeStorage = map[string]bool{}
+	e.partOf = map[string]string{}
 	e.misread = ""
 	uses, loads := e.memoryUses(fn)
+	e.markLent(fn, uses)
 	for changed := true; changed; {
 		changed = false
 		for _, use := range uses {
@@ -175,7 +309,7 @@ func (e *emitter) collectWholeValues(fn *ir.Function) {
 			}
 		}
 		for _, load := range loads {
-			source := load.Args[0].Name
+			source := e.storageRoot(load.Args[0].Name)
 			if e.wholeValues[load.Result.Name] && !e.wholeStorage[source] {
 				e.wholeStorage[source] = true
 				changed = true
@@ -188,12 +322,16 @@ func (e *emitter) collectWholeValues(fn *ir.Function) {
 // whole whatever else is -- a value a literal takes as a field, a phi names,
 // a block returns or a cleanup reads whole -- and returns what has to be
 // asked again: every argument of a type that may be kept in memory, and every
-// load of such a value out of storage.
+// load of such a value out of storage. It also records which address each
+// address of a part was taken from.
 func (e *emitter) memoryUses(fn *ir.Function) ([]memoryUse, []*ir.Instr) {
 	var uses []memoryUse
 	var loads []*ir.Instr
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
+			if isAddressOfPart(instr.Op) && len(instr.Args) > 0 {
+				e.partOf[instr.Result.Name] = instr.Args[0].Name
+			}
 			for index, arg := range instr.Args {
 				if e.isMemoryValueType(arg.Type) {
 					uses = append(uses, memoryUse{instr, index})
@@ -208,13 +346,41 @@ func (e *emitter) memoryUses(fn *ir.Function) ([]memoryUse, []*ir.Instr) {
 			for _, cleanup := range instr.Cleanups {
 				e.markWholeArgs(cleanupInstruction(cleanup))
 			}
-			if instr.Op == "ref.load" && e.isMemoryValueType(instr.Result.Type) {
+			if isStorageLoad(instr.Op) && e.isMemoryValueType(instr.Result.Type) {
 				loads = append(loads, instr)
 			}
 		}
 		e.markWhole(block.Terminator.Value)
 	}
 	return uses, loads
+}
+
+// isStorageLoad reports whether op reads a value out of the storage behind
+// the borrow it is given -- all of it, or one field of a struct -- which
+// collectWholeValues follows back to that storage.
+func isStorageLoad(op string) bool {
+	return op == "ref.load" || op == "union.load" ||
+		strings.HasPrefix(op, "field.ref.") && !strings.HasPrefix(op, "field.ref.set.")
+}
+
+// isAddressOfPart reports whether op takes the address of a part of the
+// storage its first argument is the address of: an element of a fixed array,
+// a field of a struct, the payload of a union.
+func isAddressOfPart(op string) bool {
+	return op == "buffer.addr" || op == "union.payload_ref" || strings.HasPrefix(op, "field.addr.")
+}
+
+// storageRoot returns the address the storage name points into was first
+// known by in the function being written: name itself, or what the address
+// of a part was taken from, as far back as that goes.
+func (e *emitter) storageRoot(name string) string {
+	for {
+		whole, ok := e.partOf[name]
+		if !ok {
+			return name
+		}
+		name = whole
+	}
 }
 
 // markWholeArgs records the arguments a cleanup reads whole. A cleanup is a
@@ -289,9 +455,11 @@ func (e *emitter) copiedFromMemory(instr *ir.Instr, index int, target string) bo
 	return true
 }
 
-// writeMemoryField reads field index of a struct kept in memory at addr. A
-// field that is itself kept in memory is its own address inside the struct,
-// which holds for as long as the struct does; any other field is loaded.
+// writeMemoryField reads field index of a value kept in memory at addr: a
+// field of a struct, or the payload of a wrapper, which is the field after
+// its tag. A field that is itself kept in memory is its own address inside
+// the value, which holds for as long as the value does; any other field is
+// loaded.
 func (e *emitter) writeMemoryField(instr *ir.Instr, addr string, index int) {
 	name := localName(instr.Result.Name)
 	fieldAddr := name + ".addr"
@@ -305,6 +473,44 @@ func (e *emitter) writeMemoryField(instr *ir.Instr, addr string, index int) {
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s%s\n",
 		name, resultType, fieldAddr, e.valueTag(resultType))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
+}
+
+// writeMemoryAlias makes result the value kept in memory at addr, which is
+// what an optional without a tag and its payload are to each other: the same
+// bytes. A result something reads whole is loaded from there, which
+// readsAddress allows only out of storage the caller filled.
+func (e *emitter) writeMemoryAlias(result ir.Value, addr string) {
+	if e.keptInMemory(result) {
+		e.setMemoryValue(result, addr)
+		return
+	}
+	name := localName(result.Name)
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", name, e.llvmType(result.Type), addr)
+	e.values[result.Name] = valueInfo{typ: result.Type, operand: name}
+}
+
+// writeMemoryTag reads the tag of a wrapper kept in memory at addr as name:
+// the presence byte of an optional, the code of an error union, the variant
+// number of a union. The tag is the first field of all three, so it is what
+// the address points at.
+func (e *emitter) writeMemoryTag(name string, tagType string, addr string) {
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", name, tagType, addr)
+}
+
+// writeMemoryWrapper builds the optional or error union instr makes around
+// the payload kept in memory at source: a slot of the wrapper's own, the tag
+// stored and the payload copied in after it.
+func (e *emitter) writeMemoryWrapper(instr *ir.Instr, tag string, source string) {
+	name := localName(instr.Result.Name)
+	slot := name + ".addr"
+	wrapperType := e.llvmType(instr.Result.Type)
+	payloadAddr := name + ".payload.addr"
+	fmt.Fprintf(&e.out, "  %s = alloca %s\n", slot, wrapperType)
+	fmt.Fprintf(&e.out, "  store %s, ptr %s\n", tag, slot)
+	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i32 0, i32 1\n",
+		payloadAddr, wrapperType, slot)
+	e.writeMemoryCopy(payloadAddr, source, instr.Args[0].Type)
+	e.setMemoryValue(instr.Result, slot)
 }
 
 // writeMemoryCopyDecl declares llvm.memcpy for a module that copied a value

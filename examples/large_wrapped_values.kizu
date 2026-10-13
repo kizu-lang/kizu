@@ -1,0 +1,357 @@
+import std::array;
+import std::mem;
+
+// An optional, an error union or a tagged union around a large value is
+// still a value. Opening one yields the payload it held at that moment:
+// whatever is written afterwards to the place the wrapper was read from does
+// not reach the payload, and a wrapper copied out of a place keeps what that
+// place held. That holds for a field, a local, a by-value receiver or
+// argument, an array element, and a value a loop reads again.
+
+struct Grid {
+    cells: [24]f64,
+    marks: [24]i64,
+}
+
+struct Holder {
+    slot: ?Grid,
+    spare: ?Grid,
+    count: i64,
+}
+
+// An optional of a struct that holds a function is the struct itself, with
+// an absent function standing for the absent value.
+struct Tool {
+    apply: fn(i64) -> i64,
+    table: [24]i64,
+}
+
+struct Chest {
+    tool: ?Tool,
+    uses: i64,
+}
+
+error Fault {
+    Empty,
+    Odd,
+}
+
+union Shape {
+    Dot,
+    Line(i64),
+    Sheet(Grid),
+}
+
+fn fresh(seed: i64) -> Grid {
+    var grid = Grid { cells: [24]f64{}, marks: [24]i64{} };
+    for 0..24 |i| {
+        grid.marks[i] = seed + i;
+        grid.cells[i] = cast<f64>(seed * i) + 0.5;
+    }
+    return grid;
+}
+
+fn maybe(seed: i64) -> ?Grid {
+    if seed < 0 {
+        return null;
+    }
+    return fresh(seed);
+}
+
+fn checked(seed: i64) -> Fault!Grid {
+    if seed == 0 {
+        return Fault::Empty;
+    }
+    if seed % 2 == 1 {
+        return Fault::Odd;
+    }
+    return fresh(seed);
+}
+
+fn double(value: i64) -> i64 {
+    return value * 2;
+}
+
+fn triple(value: i64) -> i64 {
+    return value * 3;
+}
+
+fn tool(apply: fn(i64) -> i64, seed: i64) -> Tool {
+    var made = Tool { apply: apply, table: [24]i64{} };
+    for 0..24 |i| {
+        made.table[i] = seed + i;
+    }
+    return made;
+}
+
+// A by-value receiver opens the optional it was called with.
+fn (self: Holder) first() -> i64 {
+    if self.slot |grid| {
+        return grid.marks[0] + self.count;
+    }
+    return -1;
+}
+
+fn (self: Holder) either(i: i64) -> i64 {
+    let spare = self.spare orelse return -2;
+    let grid = self.slot orelse spare;
+    return grid.marks[i];
+}
+
+fn (self: &Holder) borrowed() -> i64 {
+    if self.spare |grid| {
+        return grid.marks[1];
+    }
+    return -3;
+}
+
+// The argument is the holder as it was at the call. The borrow reaches the
+// same local, and emptying it does not empty the argument.
+fn count_before(seen: Holder, live: &var Holder) -> i64 {
+    live.slot = null;
+    live.count = live.count + 100;
+    if seen.slot |grid| {
+        return grid.marks[2] + seen.count;
+    }
+    return -4;
+}
+
+fn (self: Chest) run(i: i64) -> i64 {
+    if self.tool |held| {
+        let apply = held.apply;
+        return apply(held.table[i]) + self.uses;
+    }
+    return -5;
+}
+
+// A tool read whole out of the chest the call was made with is that tool.
+fn (self: Chest) tool_or(other: Tool) -> Tool {
+    return self.tool orelse other;
+}
+
+fn weigh(shape: &Shape) -> i64 {
+    match shape {
+        Dot => return 0,
+        Line(length) => return length,
+        Sheet(grid) => return grid.marks[2] + grid.marks[3],
+    }
+}
+
+fn weigh_value(shape: Shape) -> i64 {
+    match shape {
+        Dot => return 1,
+        Line(length) => return length + 1,
+        Sheet(grid) => return grid.marks[4],
+    }
+}
+
+// The union is copied out of the borrow, and replacing what it was copied
+// from afterwards leaves the payload the copy holds.
+fn replace_then_read(shape: &var Shape, next: Shape) -> i64 {
+    let seen = shape.*;
+    shape.* = next;
+    match seen {
+        Sheet(grid) => return grid.marks[5],
+        Line(length) => return length,
+        Dot => return -6,
+    }
+}
+
+fn code(failure: Fault) -> i64 {
+    return match failure {
+        Empty => -10,
+        Odd => -11,
+    };
+}
+
+fn forward(seed: i64) -> Fault!i64 {
+    let grid = try checked(seed);
+    return grid.marks[5];
+}
+
+// A failure passes through unchanged, payload and all.
+fn again(seed: i64) -> Fault!Grid {
+    let grid = try checked(seed);
+    return grid;
+}
+
+fn main() -> !void {
+    var holder = Holder { slot: maybe(10), spare: maybe(-1), count: 3 };
+    print(holder.first());
+    print(holder.either(2));
+    print(holder.borrowed());
+
+    // The payload is what the optional held when it was opened.
+    if holder.slot |grid| {
+        holder.slot = null;
+        holder.count = 9;
+        print(grid.marks[0]);
+    }
+    print(holder.first());
+
+    // An optional copied out of a field keeps what the field held.
+    holder.spare = fresh(40);
+    let kept = holder.spare;
+    holder.spare = maybe(70);
+    if kept |grid| {
+        print(grid.marks[1]);
+    }
+    print(holder.borrowed());
+    print(holder.either(3));
+
+    // Wrapping a value copies it; the two then change apart.
+    var loose = fresh(200);
+    holder.slot = loose;
+    loose.marks[0] = -1;
+    print(holder.first());
+    print(loose.marks[0]);
+    print(count_before(holder, &var holder));
+    print(holder.first());
+    print(holder.count);
+
+    // An optional that needs no tag behaves the same way.
+    var chest = Chest { tool: tool(double, 5), uses: 1 };
+    print(chest.run(2));
+    let lent = chest.tool;
+    chest.tool = tool(triple, 9);
+    chest.uses = 2;
+    if lent |held| {
+        let apply = held.apply;
+        print(apply(held.table[3]));
+    }
+    print(chest.run(0));
+    print(chest.tool_or(tool(double, 30)).table[4]);
+    chest.tool = null;
+    print(chest.run(0));
+    print(chest.tool_or(tool(double, 30)).table[4]);
+
+    // A local error union, opened three ways.
+    var result = checked(4);
+    if result |grid| {
+        result = checked(1);
+        print(grid.marks[0]);
+    } else |failure| {
+        print(code(failure));
+    }
+    if result |grid| {
+        print(grid.marks[0]);
+    } else |failure| {
+        print(code(failure));
+    }
+    let fallback = checked(0) catch fresh(500);
+    print(fallback.marks[1]);
+    print(forward(6) catch -1);
+    print(forward(3) catch -1);
+    let passed = again(8) catch fresh(0);
+    print(passed.marks[2]);
+    if again(0) |grid| {
+        print(grid.marks[0]);
+    } else |failure| {
+        print(code(failure));
+    }
+
+    // A union's payload is read out of the union as it was matched.
+    var shape = Shape::Sheet(fresh(20));
+    print(weigh(shape));
+    print(weigh_value(shape));
+    match shape {
+        Sheet(grid) => {
+            shape = Shape::Line(77);
+            print(grid.marks[0]);
+        },
+        _ => print(-1),
+    }
+    print(weigh(shape));
+    shape = Shape::Sheet(loose);
+    loose.marks[5] = -2;
+    print(replace_then_read(&var shape, Shape::Line(8)));
+    print(replace_then_read(&var shape, Shape::Dot));
+    print(weigh_value(shape));
+
+    // The same through the elements of a fixed array and a loop.
+    var row = [3]Holder{
+        Holder { slot: maybe(1), spare: maybe(-1), count: 0 },
+        Holder { slot: maybe(-1), spare: maybe(2), count: 1 },
+        Holder { slot: maybe(3), spare: maybe(4), count: 2 },
+    };
+    var total = 0;
+    for 0..3 |i| {
+        if row[i].slot |grid| {
+            row[i].slot = null;
+            total = total + grid.marks[i];
+        } else {
+            row[i].slot = fresh(100 + i);
+        }
+    }
+    print(total);
+    for 0..3 |i| {
+        if row[i].slot |grid| {
+            total = total + grid.marks[0];
+        }
+        let each = row[i];
+        row[i].spare = null;
+        total = total + each.first() + each.either(i);
+    }
+    print(total);
+
+    // And through the elements of a growable array.
+    let allocator = mem::page_allocator();
+    var shapes = array::new<Shape>(allocator);
+    defer shapes.deinit(allocator);
+    try shapes.append(allocator, Shape::Sheet(fresh(7)));
+    try shapes.append(allocator, Shape::Line(5));
+    try shapes.append(allocator, shape);
+    var sum = 0;
+    for 0..shapes.len() |i| {
+        let each = shapes.get_or_panic(i);
+        try shapes.set(i, Shape::Line(i));
+        sum = sum + weigh_value(each) + weigh(each);
+    }
+    print(sum);
+    for 0..shapes.len() |i| {
+        sum = sum + weigh_value(shapes.get_or_panic(i));
+    }
+    print(sum);
+    return;
+}
+
+// run
+// features: optional error-union union match struct stack-buffer std-array copy mutable-borrow
+// output:
+// 13
+// -2
+// -3
+// 10
+// -1
+// 41
+// 71
+// 73
+// 209
+// -1
+// 211
+// -1
+// 109
+// 15
+// 16
+// 29
+// 13
+// -5
+// 34
+// 4
+// -11
+// 501
+// 11
+// -1
+// 10
+// -10
+// 45
+// 24
+// 20
+// 77
+// 205
+// 8
+// 1
+// 6
+// 313
+// 42
+// 48

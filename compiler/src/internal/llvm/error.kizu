@@ -56,6 +56,10 @@ fn (self: &var Emitter) write_error_ok(module: &ir::Module, node: &ir::InstrNode
             let got = try self.own(module, value.type_name);
             return try self.fail2("llvm error: error.ok expects %s, got %s", Arg::Str(success_shown), Arg::Str(got));
         }
+        if try self.address_arg(module, node, 0) |addr| {
+            try self.write_memory_wrapper(module, node, "i64 0", addr);
+            return null;
+        }
         let arg_info = try self.operand(module, value);
         let success_type = try self.llvm_type(module, success_bytes);
         try self.line4(
@@ -125,9 +129,8 @@ fn (self: &var Emitter) write_error_has(module: &ir::Module, node: &ir::InstrNod
     if try self.error_union_parts(source_type) |parts| {
         defer parts.deinit(self.allocator);
         let result_name = try self.local_name(module, node.result.name);
-        let union_type = try self.llvm_type(module, source_type);
-        let info = try self.operand(module, source);
-        try self.write_error_succeeded(result_name, union_type, info.operand);
+        let addr = try self.address_arg(module, node, 0);
+        try self.write_error_succeeded(module, result_name, source, addr);
         try self.set_value(module, node.result, result_name);
         return null;
     }
@@ -159,6 +162,10 @@ fn (self: &var Emitter) write_error_value(module: &ir::Module, node: &ir::InstrN
             let success_shown = try self.names.intern(success_bytes);
             let result_shown = try self.own(module, node.result.type_name);
             return try self.fail2("llvm error: error.value returns %s, got %s", Arg::Str(success_shown), Arg::Str(result_shown));
+        }
+        if try self.address_arg(module, node, 0) |addr| {
+            try self.write_memory_field(module, node, addr, 1);
+            return null;
         }
         let result_name = try self.local_name(module, node.result.name);
         let union_type = try self.llvm_type(module, source_type);
@@ -193,10 +200,9 @@ fn (self: &var Emitter) write_error_code(module: &ir::Module, node: &ir::InstrNo
             let result_shown = try self.own(module, node.result.type_name);
             return try self.fail2("llvm error: error.code returns %s, got %s", Arg::Str(err_shown), Arg::Str(result_shown));
         }
-        let result_name = try self.local_name(module, node.result.name);
-        let union_type = try self.llvm_type(module, source_type);
-        let info = try self.operand(module, source);
-        try self.line3("  %s = extractvalue %s %s, 0", Arg::Str(result_name), Arg::Str(union_type), Arg::Str(info.operand));
+        let addr = try self.address_arg(module, node, 0);
+        let local = try self.local_name(module, node.result.name);
+        let result_name = try self.failure_code(module, local, source, addr);
         try self.set_value(module, node.result, result_name);
         return null;
     }
@@ -220,11 +226,17 @@ fn (self: &var Emitter) write_error_failure_code(
 }
 
 /// Names whether an error union holds a success, the Go
-/// `writeErrorSucceeded`: its code is zero.
-fn (self: &var Emitter) write_error_succeeded(name: ir::Name, union_type: ir::Name, operand: ir::Name) -> !void {
+/// `writeErrorSucceeded`: its code is zero. The union is the operand it is,
+/// or the one kept in memory at addr.
+fn (self: &var Emitter) write_error_succeeded(
+    module: &ir::Module,
+    name: ir::Name,
+    source: ir::Value,
+    addr: ?ir::Name
+) -> !void {
     let code_name = try self.suffixed(name, ".code");
-    try self.line3("  %s = extractvalue %s %s, 0", Arg::Str(code_name), Arg::Str(union_type), Arg::Str(operand));
-    return self.line2("  %s = icmp eq i64 %s, 0", Arg::Str(name), Arg::Str(code_name));
+    let code = try self.failure_code(module, code_name, source, addr);
+    return self.line2("  %s = icmp eq i64 %s, 0", Arg::Str(name), Arg::Str(code));
 }
 
 /// Unwraps success or returns failure from the current function, the Go
@@ -264,13 +276,12 @@ fn (self: &var Emitter) write_error_try(module: &ir::Module, node: &ir::InstrNod
         } else {
             return try self.fail0("llvm error: error.try requires function to return !T");
         }
-        let source_value = try self.operand(module, source);
-        let source_llvm = try self.llvm_type(module, source_type);
+        let addr = try self.address_arg(module, node, 0);
         let result_name = try self.local_name(module, node.result.name);
         let ok_bool = try self.suffixed(result_name, ".ok");
         let ok_label = try self.helper_label(module, node.result.name, "try.ok");
         let err_label = try self.helper_label(module, node.result.name, "try.err");
-        try self.write_error_succeeded(ok_bool, source_llvm, source_value.operand);
+        try self.write_error_succeeded(module, ok_bool, source, addr);
         // A `try` passes a failure on rather than handling it, so the failure
         // is the rare edge. Said outright because the optimizer's own guess
         // reads `code == 0` as the unlikely side -- most values it meets are
@@ -287,7 +298,7 @@ fn (self: &var Emitter) write_error_try(module: &ir::Module, node: &ir::InstrNod
                 return move failed;
             }
         }
-        if try self.write_error_failure_return(module, source) |failed| {
+        if try self.write_error_failure_return(module, source, addr) |failed| {
             return move failed;
         }
         // Marked after the cleanups: one that opens blocks of its own marks
@@ -297,6 +308,12 @@ fn (self: &var Emitter) write_error_try(module: &ir::Module, node: &ir::InstrNod
         if mem::equal_bytes(success_bytes, "void") {
             return null;
         }
+        if addr |kept| {
+            try self.write_memory_field(module, node, kept, 1);
+            return null;
+        }
+        let source_llvm = try self.llvm_type(module, source_type);
+        let source_value = try self.operand(module, source);
         try self.line3("  %s = extractvalue %s %s, 1", Arg::Str(result_name), Arg::Str(source_llvm), Arg::Str(source_value.operand));
         try self.set_value(module, node.result, result_name);
         return null;
@@ -325,11 +342,20 @@ fn (self: &var Emitter) write_opt_some(module: &ir::Module, node: &ir::InstrNode
     let result_type = result_text.as_bytes();
     if typ::optional_elem(result_type) |elem| {
         if node.args.len() == 1 {
+            let addr = try self.address_arg(module, node, 0);
             if niche_optional_elem(module, result_type) |_| {
                 // The payload is the whole value: a live element never writes
                 // the zero its niche reserves.
+                if addr |kept| {
+                    try self.write_memory_alias(module, node.result, kept);
+                    return null;
+                }
                 let carried = try self.operand(module, node.args.get_or_panic(0));
                 try self.set_value(module, node.result, carried.operand);
+                return null;
+            }
+            if addr |kept| {
+                try self.write_memory_wrapper(module, node, "i8 1", kept);
                 return null;
             }
             let result_name = try self.local_name(module, node.result.name);
@@ -387,17 +413,22 @@ fn (self: &var Emitter) write_opt_has(module: &ir::Module, node: &ir::InstrNode)
         return try self.fail1("llvm error: opt.has expects `?T`, got %s", Arg::Str(shown));
     }
     let result_name = try self.local_name(module, node.result.name);
+    let addr = try self.address_arg(module, node, 0);
     if niche_optional_elem(module, source_type) |elem| {
-        if try self.write_niche_presence(module, elem, source, result_name) |failed| {
+        if try self.write_niche_presence(module, elem, source, addr, result_name) |failed| {
             return move failed;
         }
         try self.set_value(module, node.result, result_name);
         return null;
     }
     let tag_name = try self.suffixed(result_name, ".tag");
-    let opt_type = try self.llvm_type(module, source_type);
-    let info = try self.operand(module, source);
-    try self.line3("  %s = extractvalue %s %s, 0", Arg::Str(tag_name), Arg::Str(opt_type), Arg::Str(info.operand));
+    if addr |kept| {
+        try self.write_memory_tag(tag_name, "i8", kept);
+    } else {
+        let opt_type = try self.llvm_type(module, source_type);
+        let info = try self.operand(module, source);
+        try self.line3("  %s = extractvalue %s %s, 0", Arg::Str(tag_name), Arg::Str(opt_type), Arg::Str(info.operand));
+    }
     try self.line2("  %s = icmp ne i8 %s, 0", Arg::Str(result_name), Arg::Str(tag_name));
     try self.set_value(module, node.result, result_name);
     return null;
@@ -406,37 +437,78 @@ fn (self: &var Emitter) write_opt_has(module: &ir::Module, node: &ir::InstrNode)
 /// Tests whether a niche optional holds a value by reading the word its niche
 /// sits in and comparing it against the zero only an absent value writes, the
 /// Go `writeNichePresence`. The read is one extractvalue however deep the word
-/// is, so a niche a struct inherited costs what a bare pointer's costs.
+/// is, so a niche a struct inherited costs what a bare pointer's costs. An
+/// optional kept in memory (memory.kizu) is read at addr, where the word is
+/// one load.
 fn (self: &var Emitter) write_niche_presence(
     module: &ir::Module,
     elem: []u8,
     source: ir::Value,
+    addr: ?ir::Name,
     into: ir::Name
 ) -> !?diagnostic::Diagnostic {
     var path = string::new(self.allocator);
     defer path.deinit(self.allocator);
     let word = try niche_path(self.allocator, module, elem, &var path) orelse
         return try self.fail0("llvm error: a niche optional has no niche");
-    let carried = try self.operand(module, source);
-    var field = carried.operand;
-    if path.len() > 0 {
+    let word_type = try self.names.intern(niche_word_type(word));
+    var field = ir::empty_name();
+    if addr |kept| {
         let elem_type = try self.llvm_type(module, elem);
-        let path_bytes = path.as_bytes();
-        let indices = try self.names.intern(path_bytes);
+        let indices = try self.niche_address_indices(&path);
         let helper = try self.next_synthetic_value("opt.niche");
         field = try self.percent(helper);
+        let field_addr = try self.suffixed(field, ".addr");
         try self.line4(
-            "  %s = extractvalue %s %s, %s",
-            Arg::Str(field), Arg::Str(elem_type), Arg::Str(carried.operand), Arg::Str(indices)
+            "  %s = getelementptr %s, ptr %s, %s",
+            Arg::Str(field_addr), Arg::Str(elem_type), Arg::Str(kept), Arg::Str(indices)
         );
+        try self.line3("  %s = load %s, ptr %s", Arg::Str(field), Arg::Str(word_type), Arg::Str(field_addr));
+    } else {
+        let carried = try self.operand(module, source);
+        field = carried.operand;
+        if path.len() > 0 {
+            let elem_type = try self.llvm_type(module, elem);
+            let path_bytes = path.as_bytes();
+            let indices = try self.names.intern(path_bytes);
+            let helper = try self.next_synthetic_value("opt.niche");
+            field = try self.percent(helper);
+            try self.line4(
+                "  %s = extractvalue %s %s, %s",
+                Arg::Str(field), Arg::Str(elem_type), Arg::Str(carried.operand), Arg::Str(indices)
+            );
+        }
     }
     let zero = try self.names.intern(niche_word_zero(word));
-    let word_type = try self.names.intern(niche_word_type(word));
     try self.line4(
         "  %s = icmp ne %s %s, %s",
         Arg::Str(into), Arg::Str(word_type), Arg::Str(field), Arg::Str(zero)
     );
     return null;
+}
+
+/// Spells the getelementptr indices that reach a niche from the address of
+/// the value it sits in: the extractvalue path niche_path wrote, each index
+/// an i32 after the zero that steps through the address itself.
+fn (self: &var Emitter) niche_address_indices(path: &string::String) -> !ir::Name {
+    var indices = try string::from_bytes(self.allocator, "i32 0");
+    defer indices.deinit(self.allocator);
+    if path.len() > 0 {
+        try indices.append_bytes(self.allocator, ", i32 ");
+    }
+    let path_bytes = path.as_bytes();
+    var at = 0;
+    while at < mem::len(path_bytes) {
+        let byte = path_bytes[at];
+        at = at + 1;
+        try indices.append_byte(self.allocator, byte);
+        // The path separates its indices with ", ".
+        if byte == cast<u8>(32) {
+            try indices.append_bytes(self.allocator, "i32 ");
+        }
+    }
+    let spelled = indices.as_bytes();
+    return self.names.intern(spelled);
 }
 
 /// Extracts the payload of an optional, the Go `writeOptValue`. The caller
@@ -455,9 +527,18 @@ fn (self: &var Emitter) write_opt_value(module: &ir::Module, node: &ir::InstrNod
             let result_shown = try self.own(module, node.result.type_name);
             return try self.fail2("llvm error: opt.value returns %s, got %s", Arg::Str(elem_shown), Arg::Str(result_shown));
         }
+        let addr = try self.address_arg(module, node, 0);
         if niche_optional_elem(module, source_type) |_| {
+            if addr |kept| {
+                try self.write_memory_alias(module, node.result, kept);
+                return null;
+            }
             let carried = try self.operand(module, source);
             try self.set_value(module, node.result, carried.operand);
+            return null;
+        }
+        if addr |kept| {
+            try self.write_memory_field(module, node, kept, 1);
             return null;
         }
         let result_name = try self.local_name(module, node.result.name);
@@ -583,10 +664,10 @@ fn (self: &var Emitter) write_absorbed_error_union_return(module: &ir::Module, v
     let ok_bool = try self.percent(ok_synthetic);
     let ok_label = try self.next_synthetic_value("absorb.ok.block");
     let err_label = try self.next_synthetic_value("absorb.err.block");
-    try self.write_error_succeeded(ok_bool, source_type, source.operand);
+    try self.write_error_succeeded(module, ok_bool, value, null);
     try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(ok_bool), Arg::Str(ok_label), Arg::Str(err_label));
     try self.line1("%s:", Arg::Str(err_label));
-    if try self.write_error_failure_return(module, value) |failed| {
+    if try self.write_error_failure_return(module, value, null) |failed| {
         return move failed;
     }
     try self.line1("%s:", Arg::Str(ok_label));
@@ -639,12 +720,12 @@ fn (self: &var Emitter) write_main_error_union_return(module: &ir::Module, value
     let success = try self.error_union_success_type(value_type) orelse string::new(self.allocator);
     defer success.deinit(self.allocator);
     let success_bytes = success.as_bytes();
-    try self.write_error_succeeded(ok_bool_name, union_type, info.operand);
+    try self.write_error_succeeded(module, ok_bool_name, value, null);
     let ok_label = try self.next_synthetic_value("main.exit.ok");
     let fail_label = try self.next_synthetic_value("main.exit.fail");
     try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(ok_bool_name), Arg::Str(ok_label), Arg::Str(fail_label));
     try self.line1("%s:", Arg::Str(fail_label));
-    if try self.write_main_error_message(module, value) |failed| {
+    if try self.write_main_error_message(module, value, null) |failed| {
         return move failed;
     }
     try self.line("  ret i32 1");
@@ -738,14 +819,18 @@ fn (self: &var Emitter) write_main_exit_status_value(
 /// it exits 1 instead of failing silently, the Go `writeMainErrorMessage`.
 /// The failure is one global code, and the spelling comes from the module's
 /// table of error names.
-fn (self: &var Emitter) write_main_error_message(module: &ir::Module, source: ir::Value) -> !?diagnostic::Diagnostic {
+fn (self: &var Emitter) write_main_error_message(
+    module: &ir::Module,
+    source: ir::Value,
+    addr: ?ir::Name
+) -> !?diagnostic::Diagnostic {
     let source_text = ir::name_text(&module.names, source.type_name);
     let source_type = source_text.as_bytes();
     let parts = try self.error_union_parts(source_type) orelse return null;
     parts.deinit(self.allocator);
     let synthetic = try self.next_synthetic_value("main.err.code");
     let code_name = try self.percent(synthetic);
-    let code = try self.failure_code(module, code_name, source);
+    let code = try self.failure_code(module, code_name, source, addr);
     try self.write_main_error_name(module, code);
     return null;
 }
@@ -771,25 +856,31 @@ fn (self: &var Emitter) write_main_error_name(module: &ir::Module, code_operand:
 }
 
 /// Propagates a failed try from the current function, the Go
-/// `writeErrorFailureReturn`.
-fn (self: &var Emitter) write_error_failure_return(module: &ir::Module, source: ir::Value) -> !?diagnostic::Diagnostic {
+/// `writeErrorFailureReturn`. The failed union is the operand it is, or is
+/// kept in memory at addr; one that is the function's own is returned as it
+/// is, and is never kept (reads_address).
+fn (self: &var Emitter) write_error_failure_return(
+    module: &ir::Module,
+    source: ir::Value,
+    addr: ?ir::Name
+) -> !?diagnostic::Diagnostic {
     if self.main_returns_int {
-        if try self.write_main_error_message(module, source) |failed| {
+        if try self.write_main_error_message(module, source, addr) |failed| {
             return move failed;
         }
         try self.line("  ret i32 1");
         return null;
     }
-    let source_info = try self.operand(module, source);
     if ir::same_name(source.type_name, self.current_return) {
         let source_llvm = try self.llvm_type_of(module, source.type_name);
+        let source_info = try self.operand(module, source);
         try self.line2("  ret %s %s", Arg::Str(source_llvm), Arg::Str(source_info.operand));
         return null;
     }
     let synthetic = try self.next_synthetic_value("try.err");
     let name = try self.percent(synthetic);
     let code_name = try self.suffixed(name, ".code");
-    let code = try self.failure_code(module, code_name, source);
+    let code = try self.failure_code(module, code_name, source, addr);
     let return_text = ir::name_text(&module.names, self.current_return);
     let return_bytes = return_text.as_bytes();
     try self.write_error_failure_code(module, name, return_bytes, code);
@@ -800,8 +891,18 @@ fn (self: &var Emitter) write_error_failure_return(module: &ir::Module, source: 
 
 /// Extracts an error-union failure, the Go `failureCode`. A failure is one
 /// global code, so it reads the same i64 out of every union and needs no
-/// conversion.
-fn (self: &var Emitter) failure_code(module: &ir::Module, result_name: ir::Name, source: ir::Value) -> !ir::Name {
+/// conversion. A union kept in memory (memory.kizu) is read at addr, and any
+/// other is the operand it is, with no addr.
+fn (self: &var Emitter) failure_code(
+    module: &ir::Module,
+    result_name: ir::Name,
+    source: ir::Value,
+    addr: ?ir::Name
+) -> !ir::Name {
+    if addr |kept| {
+        try self.write_memory_tag(result_name, "i64", kept);
+        return result_name;
+    }
     let source_llvm = try self.llvm_type_of(module, source.type_name);
     let info = try self.operand(module, source);
     try self.line3("  %s = extractvalue %s %s, 0", Arg::Str(result_name), Arg::Str(source_llvm), Arg::Str(info.operand));
