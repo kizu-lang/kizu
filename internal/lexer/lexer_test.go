@@ -258,6 +258,44 @@ for 0..1 |i| { update(&value); }`
 	}
 }
 
+// TestEllipsisToken checks three dots are one token, and that a range and a
+// field access beside it still scan as they did.
+func TestEllipsisToken(t *testing.T) {
+	input := `f(a, ...) 0..n a.b values[1..] ....`
+	tests := []struct {
+		typ token.Type
+		lit string
+	}{
+		{token.Ident, "f"},
+		{token.LParen, "("},
+		{token.Ident, "a"},
+		{token.Comma, ","},
+		{token.Ellipsis, "..."},
+		{token.RParen, ")"},
+		{token.Int, "0"},
+		{token.Range, ".."},
+		{token.Ident, "n"},
+		{token.Ident, "a"},
+		{token.Dot, "."},
+		{token.Ident, "b"},
+		{token.Ident, "values"},
+		{token.LBracket, "["},
+		{token.Int, "1"},
+		{token.Range, ".."},
+		{token.RBracket, "]"},
+		{token.Ellipsis, "..."},
+		{token.Dot, "."},
+		{token.EOF, ""},
+	}
+	l := New(input)
+	for i, tt := range tests {
+		tok := l.NextToken()
+		if tok.Type != tt.typ || tok.Literal != tt.lit {
+			t.Fatalf("token %d: got (%q, %q), want (%q, %q)", i, tok.Type, tok.Literal, tt.typ, tt.lit)
+		}
+	}
+}
+
 // TestLoopControlTokens checks loop-control syntax.
 func TestLoopControlTokens(t *testing.T) {
 	input := `for 0..3 |i| { continue; }

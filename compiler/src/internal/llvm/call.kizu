@@ -81,10 +81,20 @@ fn (self: &var Emitter) write_call(module: &ir::Module, node: &ir::InstrNode) ->
         let arg_type = try self.llvm_type_of(module, arg.type_name);
         try args.append(self.allocator, try self.sprint2("%s %s", Arg::Str(arg_type), Arg::Str(value.operand)));
     }
-    let result_type = try self.llvm_type_of(module, node.result.type_name);
+    // A call to a variadic callee names the callee's whole function type, not
+    // only its result: that is what tells the target which arguments are the
+    // variadic ones, and so how each is passed.
+    var callee_type = try self.llvm_type_of(module, node.result.type_name);
+    if node.variadic_fixed > 0 {
+        var params = array::new<string::String>(self.allocator);
+        defer params.deinit(self.allocator);
+        try self.append_plain_call_params(module, node, &var params);
+        let joined_params = try string::join(self.allocator, &params, ", ");
+        callee_type = try self.text2("%s (%s)", Arg::Str(callee_type), Arg::Owned(move joined_params));
+    }
     let symbol = try self.callee_symbol(module, callee_name);
     let joined = try string::join(self.allocator, &args, ", ");
-    let call = try self.text3("call %s @%s(%s)", Arg::Str(result_type), Arg::Str(symbol), Arg::Owned(move joined));
+    let call = try self.text3("call %s @%s(%s)", Arg::Str(callee_type), Arg::Str(symbol), Arg::Owned(move joined));
     return self.write_call_line(module, node, call);
 }
 
@@ -514,8 +524,30 @@ fn (self: &var Emitter) external_call_decl(module: &ir::Module, name: ir::Name, 
     if module.names.is(node.extern_abi, "c") and try self.c_call_uses_struct_values(module, node) {
         return self.c_struct_call_decl(module, symbol, node);
     }
+    try self.append_plain_call_params(module, node, &var params);
+    let result_type = try self.llvm_type_of(module, node.result.type_name);
+    let joined = try string::join(self.allocator, &params, ", ");
+    return self.sprint3("declare %s @%s(%s)", Arg::Str(result_type), Arg::Str(symbol), Arg::Owned(move joined));
+}
+
+/// Spells the parameter list of a callee that takes every argument as the
+/// value it is, from the operands of one call to it, the Go
+/// `plainCallParams`. A C variadic callee declares only its first
+/// variadic_fixed arguments and then `...`: the arguments after them differ
+/// from call to call, and the declaration and every call have to say where
+/// they start.
+fn (self: &var Emitter) append_plain_call_params(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    params: &var array::Array<string::String>
+) -> !void {
+    var declared = node.args.len();
+    if node.variadic_fixed > 0 {
+        declared = node.variadic_fixed;
+    }
     var index = 0;
-    while node.args.get(index) |arg| {
+    while index < declared {
+        let arg = node.args.get(index) orelse break;
         // A parameter handed the address of a copy is a pointer to C.
         if call_param_takes_address_of(module, node, index, arg.type_name) {
             try params.append(self.allocator, try string::from_bytes(self.allocator, "ptr"));
@@ -526,7 +558,8 @@ fn (self: &var Emitter) external_call_decl(module: &ir::Module, name: ir::Name, 
         let arg_type = try self.llvm_type_of(module, arg.type_name);
         try params.append(self.allocator, try self.names.copy(arg_type));
     }
-    let result_type = try self.llvm_type_of(module, node.result.type_name);
-    let joined = try string::join(self.allocator, &params, ", ");
-    return self.sprint3("declare %s @%s(%s)", Arg::Str(result_type), Arg::Str(symbol), Arg::Owned(move joined));
+    if node.variadic_fixed > 0 {
+        try params.append(self.allocator, try string::from_bytes(self.allocator, "..."));
+    }
+    return;
 }

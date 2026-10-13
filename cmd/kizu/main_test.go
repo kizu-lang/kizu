@@ -1450,6 +1450,7 @@ func TestBuildTargetWASIRejectsUnavailableRuntimeCapabilities(t *testing.T) {
 		{"../../examples/io_evented.kizu", "evented std::io"},
 		{"../../examples/coro_suspend.kizu", "std::coro"},
 		{"../../examples/net_round_trip.kizu", "std::net"},
+		{"../../examples/c_variadic.kizu", "extern `c`"},
 	}
 	for _, test := range cases {
 		t.Run(filepath.Base(test.file), func(t *testing.T) {

@@ -423,7 +423,9 @@ func (p *Parser) parseFunctionSignatureAfterFn(fn *ast.FunctionDecl) bool {
 	if !p.expectPeek(token.LParen) {
 		return false
 	}
-	fn.Params = append(fn.Params, p.parseParams()...)
+	params, variadic := p.parseParams(fn.ExternABI == "c" && !fn.Receiver)
+	fn.Params = append(fn.Params, params...)
+	fn.Variadic = variadic
 	if !p.expectCur(token.RParen) {
 		return false
 	}
@@ -519,7 +521,7 @@ func (p *Parser) parseReturnClause(fn *ast.FunctionDecl) bool {
 // what says the name belongs to the receiver's type rather than to the module.
 func (p *Parser) parseReceiver(fn *ast.FunctionDecl) bool {
 	p.nextToken()
-	params := p.parseParams()
+	params, _ := p.parseParams(false)
 	if !p.expectCur(token.RParen) {
 		return false
 	}
@@ -817,45 +819,27 @@ func (p *Parser) parseUnionVariant() (ast.UnionVariant, bool) {
 	return variant, true
 }
 
-// parseParams parses a function parameter list.
-func (p *Parser) parseParams() []ast.Param {
+// parseParams parses a function parameter list, and reports whether it ends
+// in the `...` of a C variadic function. allowVariadic says whether the
+// declaration being parsed is one that may: an `extern "c" fn`.
+func (p *Parser) parseParams(allowVariadic bool) ([]ast.Param, bool) {
 	params := []ast.Param{}
+	variadic := false
 	p.nextToken()
 	if p.cur.Type == token.RParen {
-		return params
+		return params, false
 	}
 	for {
-		param := ast.Param{}
-		if p.cur.Type == token.Comptime {
-			// A compile-time value belongs in the `<...>` list, not among
-			// values that move and borrow.
-			p.errorf("compile-time parameter belongs in `<...>`, not `(...)`")
-			return params
-		}
-		if p.cur.Type != token.Ident {
-			p.errorf("expected parameter name, got %s", tokenDescription(p.cur))
-			return params
-		}
-		param.Name = p.cur.Literal
-		first := tokenSpan(p.cur)
-		if !p.expectPeek(token.Colon) {
-			return params
-		}
-		p.nextToken()
-		if p.cur.Type == token.Amp {
-			param.Borrow = true
-			p.nextToken()
-			if p.cur.Type == token.Var {
-				param.MutBorrow = true
-				p.nextToken()
+		if p.cur.Type == token.Ellipsis {
+			variadic = true
+			p.checkVariadicMarker(allowVariadic, len(params))
+		} else {
+			param, ok := p.parseParam()
+			if !ok {
+				return params, variadic
 			}
+			params = append(params, param)
 		}
-		param.TypeName = p.parseTypeName()
-		if param.TypeName == nil {
-			return params
-		}
-		param.Span = spanThrough(first, p.cur)
-		params = append(params, param)
 
 		if p.peek.Type != token.Comma {
 			break
@@ -867,9 +851,60 @@ func (p *Parser) parseParams() []ast.Param {
 		p.nextToken()
 	}
 	if !p.expectPeek(token.RParen) {
-		return params
+		return params, variadic
 	}
-	return params
+	return params, variadic
+}
+
+// checkVariadicMarker reports a `...` written where a parameter list cannot
+// end in one, with the marker as the current token. The list is parsed on
+// either way, so a misplaced marker is one diagnostic rather than a cascade
+// over the tokens after it.
+func (p *Parser) checkVariadicMarker(allowVariadic bool, named int) {
+	switch {
+	case !allowVariadic:
+		p.errorf("`...` is allowed only in an `extern \"c\" fn` declaration")
+	case named == 0:
+		p.errorf("`...` needs a named parameter before it")
+	case p.peek.Type != token.RParen:
+		p.errorf("`...` must be the last entry of the parameter list")
+	}
+}
+
+// parseParam parses one `name: T` parameter with its name as the current
+// token, reporting whether it parsed.
+func (p *Parser) parseParam() (ast.Param, bool) {
+	param := ast.Param{}
+	if p.cur.Type == token.Comptime {
+		// A compile-time value belongs in the `<...>` list, not among
+		// values that move and borrow.
+		p.errorf("compile-time parameter belongs in `<...>`, not `(...)`")
+		return param, false
+	}
+	if p.cur.Type != token.Ident {
+		p.errorf("expected parameter name, got %s", tokenDescription(p.cur))
+		return param, false
+	}
+	param.Name = p.cur.Literal
+	first := tokenSpan(p.cur)
+	if !p.expectPeek(token.Colon) {
+		return param, false
+	}
+	p.nextToken()
+	if p.cur.Type == token.Amp {
+		param.Borrow = true
+		p.nextToken()
+		if p.cur.Type == token.Var {
+			param.MutBorrow = true
+			p.nextToken()
+		}
+	}
+	param.TypeName = p.parseTypeName()
+	if param.TypeName == nil {
+		return param, false
+	}
+	param.Span = spanThrough(first, p.cur)
+	return param, true
 }
 
 // parseBlockStmt parses a brace-delimited statement block.
@@ -1840,11 +1875,18 @@ func (p *Parser) parseFuncTypeName(unsafeFn bool) typ.Type {
 	if p.peek.Type != token.RParen {
 		for {
 			p.nextToken()
-			param := p.parseTypeName()
-			if param == nil {
-				return nil
+			if p.cur.Type == token.Ellipsis {
+				// The rest of the type is parsed all the same, so the
+				// marker is one diagnostic rather than a cascade.
+				p.errorf("a function type cannot be variadic;" +
+					" `...` is allowed only in an `extern \"c\" fn` declaration")
+			} else {
+				param := p.parseTypeName()
+				if param == nil {
+					return nil
+				}
+				out.Params = append(out.Params, param)
 			}
-			out.Params = append(out.Params, param)
 			if p.peek.Type != token.Comma {
 				break
 			}
