@@ -4510,7 +4510,33 @@ func (c *Checker) checkEquality(op string, left Type, right Type, span ast.Span)
 	if !c.errorSetFits(left, right) && !c.errorSetFits(right, left) {
 		return "", operatorTypeMismatch(op, left, right, span)
 	}
+	if !c.comparesAsOneValue(left) {
+		return "", errorAt(span,
+			"type error: operator `%s` is not defined on %s\n"+
+				"note: it compares a number, a bool, an enum, an error, a raw pointer, "+
+				"a function, an Allocator or an arena handle",
+			op, left)
+	}
 	return typeBool, nil
+}
+
+// comparesAsOneValue reports whether a value of typ is one machine value, so
+// that `==` on it is one comparison (SPEC §6.9.1). A struct, an optional, a
+// view or an array is several, and comparing those is a loop the source
+// writes.
+func (c *Checker) comparesAsOneValue(value Type) bool {
+	name := string(value)
+	if numericTypes[value] || value == typeBool || value == "Allocator" || isPointerType(value) {
+		return true
+	}
+	if typ.IsFuncSpelling(name) || strings.HasPrefix(name, "std::arena::Handle<") {
+		return true
+	}
+	if _, ok := c.enums[name]; ok {
+		return true
+	}
+	_, ok := c.errorSets[name]
+	return ok
 }
 
 // operatorTypeMismatch reports both operand types for binary mismatch errors.
@@ -5996,6 +6022,12 @@ func (c *Checker) checkBuiltinTestFailEqual(
 ) (Type, error) {
 	if len(args) != 2 {
 		return "", errorf("type error: `std::testing::expect_equal<%s>` expects 2 args", typ)
+	}
+	if !c.comparesAsOneValue(typ) && typ != "[]u8" {
+		return "", errorf(
+			"type error: `std::testing::expect_equal<%s>` compares one value or `[]u8`; "+
+				"compare the parts of %s",
+			typ, typ)
 	}
 	for idx, arg := range args {
 		got, err := c.checkContextualExpr(arg, typ, env, unsafe)

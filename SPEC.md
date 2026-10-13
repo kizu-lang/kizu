@@ -927,6 +927,12 @@ if age >= 20 and age < 130 or admin {
 }
 ```
 
+`==` と `!=` の両辺は同じ型で、その型の値は 1 つの機械語値でなければ
+なりません: 整数、浮動小数、`bool`、enum、error set の値(§11.2)、raw
+pointer、関数の値、`Allocator`、`std::arena::Handle<T>`。struct、`?T`、view、
+配列は複数の値でできているので `==` を持たず、compile error です。比べる
+field や要素は source に書き、byte 列は `std::mem::equal_bytes` で比べます。
+
 ### 6.9.2 整数演算
 
 整数の二項演算子は `+ - * / %` と bit 演算の `& | ^ << >>`、単項は `-` と
