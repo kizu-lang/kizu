@@ -7456,6 +7456,23 @@ func (c *Checker) enterInstantiation(
 			key += "." + value
 		}
 	}
+	// A `Field` or a `Function` argument is its own instance too: the body
+	// reads the type of the field, or calls the function, it was bound to.
+	for _, param := range fn.sig.StaticParams {
+		if param.IsType() {
+			continue
+		}
+		switch typ.Text(param.Type) {
+		case "Field":
+			if field, ok := c.metaFields[param.Name]; ok {
+				key += "." + field.owner + "." + field.name
+			}
+		case "Function":
+			if target, ok := c.functionArgs[param.Name]; ok {
+				key += "." + target
+			}
+		}
+	}
 	if c.checkedInstances[key] {
 		return true, nil
 	}
