@@ -664,6 +664,44 @@ test "json decode reads an optional string field" {
     testing::expect_equal<[]u8>(expected, text);
 }
 
+// Where the optional sits among the fields does not matter: one that owns its
+// bytes can be the first field read.
+pub struct Tagged {
+    pub nick: ?string::String,
+    pub count: i64,
+}
+
+fn (self: Tagged) deinit(allocator: Allocator) -> void {
+    if self.nick |held| {
+        held.deinit(allocator);
+    }
+    return;
+}
+
+test "json decode reads an optional string field declared first" {
+    let allocator = mem::page_allocator();
+    var given = try json::decode<Tagged>(allocator,
+        \\{"nick": "al", "count": 2}
+    );
+    defer given.deinit(allocator);
+    testing::expect_equal<i64>(2, given.count);
+    if given.nick |held| {
+        let bytes = held.as_bytes();
+        testing::expect_equal<[]u8>("al", bytes);
+    } else {
+        testing::expect(false);
+    }
+
+    var omitted = try json::decode<Tagged>(allocator,
+        \\{"count": 3}
+    );
+    defer omitted.deinit(allocator);
+    testing::expect_equal<i64>(3, omitted.count);
+    if omitted.nick |_| {
+        testing::expect(false);
+    }
+}
+
 test "json decode reads an omitted optional field of a nested struct" {
     let allocator = mem::page_allocator();
     let document =
