@@ -121,11 +121,12 @@ func (l *lowerer) cleanupFromExpr(expr ast.Expression) (Cleanup, error) {
 	if !ok {
 		return Cleanup{}, fmt.Errorf("ir error: unsupported defer callee `%s`", name)
 	}
-	args, err := l.lowerCleanupArgs(sig.Params, call.Args)
+	params := l.variadicCallParams(sig, call.Args)
+	args, err := l.lowerCleanupArgs(params, call.Args)
 	if err != nil {
 		return Cleanup{}, err
 	}
-	return l.cleanupFromFunction(name, args)
+	return l.cleanupFromFunction(name, params, args)
 }
 
 // lowerCleanupArgs lowers a deferred call's arguments at the types the
@@ -158,8 +159,10 @@ func (l *lowerer) lowerCleanupArgs(params []Param, exprs []ast.Expression) ([]Va
 
 // cleanupFromFunction resolves a deferred call to a declared function or an
 // extern one. The signature says the call returns void; a std primitive
-// with no declared signature is not a thing a defer can name.
-func (l *lowerer) cleanupFromFunction(name string, args []Value) (Cleanup, error) {
+// with no declared signature is not a thing a defer can name. params are the
+// parameters args were lowered at: the callee's own, or with nil exactly
+// those, and for a C variadic call the ones variadicCallParams added.
+func (l *lowerer) cleanupFromFunction(name string, params []Param, args []Value) (Cleanup, error) {
 	sig, ok := l.signatures[name]
 	if !ok {
 		return Cleanup{}, fmt.Errorf("ir error: unsupported defer callee `%s`", name)
@@ -167,9 +170,12 @@ func (l *lowerer) cleanupFromFunction(name string, args []Value) (Cleanup, error
 	if sig.Return != "void" {
 		return Cleanup{}, fmt.Errorf("ir error: defer call must return void, got %s", sig.Return)
 	}
-	cleanup := Cleanup{Op: "call." + name, Args: args, Loads: ownerLoads(args, sig.Params)}
+	if params == nil {
+		params = sig.Params
+	}
+	cleanup := Cleanup{Op: "call." + name, Args: args, Loads: ownerLoads(args, params)}
 	if _, foreign := l.externDecls[name]; foreign {
-		cleanup.CallParams = sig.Params
+		cleanup.CallParams = params
 		cleanup.VariadicFixed = variadicFixed(sig)
 	}
 	if external, ok := l.externDecls[name]; ok {
@@ -241,7 +247,7 @@ func (l *lowerer) cleanupFromMethod(receiver Value, method string, rest []Value)
 		return Cleanup{Op: op, Args: args, Loads: ownerLoads(args, nil)}, nil
 	}
 	if methodName, ok := l.implMethodCalleeName(receiver.Type, method); ok {
-		return l.cleanupFromFunction(methodName, append([]Value{receiver}, rest...))
+		return l.cleanupFromFunction(methodName, nil, append([]Value{receiver}, rest...))
 	}
 	return Cleanup{}, fmt.Errorf("ir error: unknown cleanup method `%s`", method)
 }
@@ -349,6 +355,10 @@ func (l *lowerer) emitCleanups(cleanups []Cleanup) {
 			instr := l.block.Instrs[len(l.block.Instrs)-1]
 			instr.ExternABI = cleanup.ExternABI
 			instr.ExternName = cleanup.ExternName
+			// The call written here is the foreign call the cleanup stood
+			// for, so it carries the same declared passing: a struct lent
+			// as `&S` reaches C as the address of a copy either way.
+			instr.CallParams = cleanup.CallParams
 			instr.VariadicFixed = cleanup.VariadicFixed
 		}
 	}

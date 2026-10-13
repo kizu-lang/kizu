@@ -1,0 +1,50 @@
+// After the named parameters of a C variadic function, `&var s` and `&s` lend
+// an `extern "c" struct` the way a declared `&var S` / `&S` parameter does:
+// C receives a pointer to the struct. `&var s` is the caller's own storage,
+// so what C writes there is read back; `&s` is the address of a copy made for
+// the call.
+extern "c" struct Pair {
+    first: i32,
+    second: i32,
+}
+
+extern "c" struct Word {
+    first: u8,
+    second: u8,
+    end: u8,
+}
+
+extern "c" fn sscanf(text: ptr<const u8>, format: ptr<const u8>, ...) -> i32
+extern "c" fn snprintf(buffer: ptr<u8>, size: usize, format: ptr<const u8>, ...) -> i32
+extern "c" fn malloc(size: usize) -> ptr<u8>
+extern "c" fn free(p: ptr<u8>) -> void
+fn main() -> void {
+    var pair = Pair { first: 0, second: 7 };
+    // `%d` stores one `int` through its pointer, and a struct's first field
+    // sits at the struct's own address.
+    // SAFETY: pair is live for the call, and one int is written at its start.
+    let matched = unsafe sscanf(c"42", c"%d", &var pair);
+    print(matched);
+    print(pair.first);
+    print(pair.second);
+    // `%s` reads bytes up to a NUL through its pointer; word is `o`, `k`, NUL.
+    let word = Word { first: 111, second: 107, end: 0 };
+    // SAFETY: 8 bytes are requested, and the block is freed below.
+    let buffer = unsafe malloc(8);
+    // SAFETY: buffer holds 8 bytes, and the bytes of word end in a NUL.
+    let written = unsafe snprintf(buffer, 8, c"%s", &word);
+    // SAFETY: snprintf wrote that many bytes at the start of the block.
+    let text = unsafe view_from_ptr(buffer, cast<i64>(written));
+    print(text);
+    // SAFETY: buffer came from malloc above and is not used again.
+    unsafe free(buffer);
+    return;
+}
+
+// run
+// features: extern-c extern-struct borrow mutable-borrow unsafe
+// output:
+// 1
+// 42
+// 7
+// ok

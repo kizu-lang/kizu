@@ -292,8 +292,9 @@ fn (self: &var Checker) check_callable_call(
     let param_count = info.params.len();
     let count = arg_count(tree, args);
     // The arguments after a C variadic function's declared parameters are
-    // scalars and raw pointers, the only things the type checker lets
-    // through: they are read, and nothing about them moves or borrows.
+    // scalars, raw pointers and borrows of extern structs, the only things
+    // the type checker lets through: a borrow is held for the call like a
+    // declared borrow parameter's argument, and the rest are read.
     let variadic_tail = info.variadic and count > param_count;
     if count != param_count and !variadic_tail {
         return try self.error3(
@@ -321,6 +322,11 @@ fn (self: &var Checker) check_callable_call(
     if try self.activate_borrow_args(tree, env, function, 0, args, &var borrowed) |failed| {
         return move failed;
     }
+    if variadic_tail {
+        if try self.activate_variadic_borrows(tree, env, args, param_count, &var borrowed) |failed| {
+            return move failed;
+        }
+    }
     var index = 0;
     while index < param_count {
         let arg = arg_at(tree, args, index) orelse break;
@@ -332,6 +338,15 @@ fn (self: &var Checker) check_callable_call(
         index = index + 1;
     }
     while arg_at(tree, args, index) |arg| {
+        // A `&var` argument is written through, not read, the way
+        // check_user_call_arg leaves a mutable borrow parameter's alone
+        // (the Go `readVariadicArgs`).
+        if borrow_prefix(tree, arg) |prefix| {
+            if text_equals(tree, prefix.operator, "&var") {
+                index = index + 1;
+                continue;
+            }
+        }
         var ignored = empty_name();
         if try self.read_expr(tree, env, arg, &var ignored) |failed| {
             errdefer failed.deinit(self.allocator);
@@ -1400,39 +1415,78 @@ fn (self: &var Checker) activate_borrow_args(
         if !param.borrow {
             continue;
         }
-        var target = self.new_borrow_target();
-        var found = false;
-        if try self.call_borrow_target(tree, env, arg, &var found, &var target) |failed| {
-            errdefer failed.deinit(self.allocator);
-            try self.release_activated_args(borrowed);
+        if try self.activate_borrow_arg(tree, env, param.mut_borrow, arg, borrowed) |failed| {
             return move failed;
         }
-        if !found and param.mut_borrow {
-            try self.release_activated_args(borrowed);
-            return try self.error0(
-                ast::zero_span(), "borrow error: mutable borrow argument must be a local binding or direct field"
-            );
-        }
-        if !found {
-            continue;
-        }
-        let value = target.value;
-        if param.mut_borrow and self.binding(value).borrowed_param and !self.binding(value).mut_borrow {
-            try self.release_activated_args(borrowed);
-            return try self.error1(
-                tree, ast::zero_span(), "borrow error: shared borrow `%s` cannot be forwarded as mutable",
-                Arg::Str(self.binding(value).name)
-            );
-        }
-        let mutable = param.mut_borrow;
-        if try self.check_borrow_conflict_for_field(tree, env, value, target.field, mutable) |failed| {
-            errdefer failed.deinit(self.allocator);
-            try self.release_activated_args(borrowed);
-            return move failed;
-        }
-        try self.activate_borrow(value, target.field, mutable);
-        try borrowed.append(self.allocator, TemporaryBorrow { value: value, field: target.field, mutable: mutable });
     }
+    return null;
+}
+
+/// Marks the places a C variadic call borrows after its declared parameters,
+/// the Go `activateVariadicBorrows`; first is the position of the first such
+/// argument. No parameter says which of those arguments are borrows, so the
+/// `&` / `&var` written at the call does; from there each is held like a
+/// declared borrow parameter's argument.
+fn (self: &var Checker) activate_variadic_borrows(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    args: ast::ExpressionList,
+    first: i64,
+    borrowed: &var array::Array<TemporaryBorrow>
+) -> !?diagnostic::Diagnostic {
+    var index = first;
+    while arg_at(tree, args, index) |arg| {
+        index = index + 1;
+        let prefix = borrow_prefix(tree, arg) orelse continue;
+        let mutable = text_equals(tree, prefix.operator, "&var");
+        if try self.activate_borrow_arg(tree, env, mutable, arg, borrowed) |failed| {
+            return move failed;
+        }
+    }
+    return null;
+}
+
+/// Marks the place one borrowed argument names as borrowed for the call and
+/// adds it to borrowed, the Go `activateBorrowArg`. On an error it releases
+/// what borrowed already holds, so the caller has nothing left to undo.
+fn (self: &var Checker) activate_borrow_arg(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    mutable: bool,
+    arg: ast::Expression,
+    borrowed: &var array::Array<TemporaryBorrow>
+) -> !?diagnostic::Diagnostic {
+    var target = self.new_borrow_target();
+    var found = false;
+    if try self.call_borrow_target(tree, env, arg, &var found, &var target) |failed| {
+        errdefer failed.deinit(self.allocator);
+        try self.release_activated_args(borrowed);
+        return move failed;
+    }
+    if !found and mutable {
+        try self.release_activated_args(borrowed);
+        return try self.error0(
+            ast::zero_span(), "borrow error: mutable borrow argument must be a local binding or direct field"
+        );
+    }
+    if !found {
+        return null;
+    }
+    let value = target.value;
+    if mutable and self.binding(value).borrowed_param and !self.binding(value).mut_borrow {
+        try self.release_activated_args(borrowed);
+        return try self.error1(
+            tree, ast::zero_span(), "borrow error: shared borrow `%s` cannot be forwarded as mutable",
+            Arg::Str(self.binding(value).name)
+        );
+    }
+    if try self.check_borrow_conflict_for_field(tree, env, value, target.field, mutable) |failed| {
+        errdefer failed.deinit(self.allocator);
+        try self.release_activated_args(borrowed);
+        return move failed;
+    }
+    try self.activate_borrow(value, target.field, mutable);
+    try borrowed.append(self.allocator, TemporaryBorrow { value: value, field: target.field, mutable: mutable });
     return null;
 }
 

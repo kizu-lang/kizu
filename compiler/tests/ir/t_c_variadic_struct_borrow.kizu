@@ -1,0 +1,185 @@
+extern "c" struct Pair {
+    first: i32,
+    second: i32,
+}
+
+extern "c" struct Frame {
+    origin: Pair,
+    size: Pair,
+}
+
+extern "c" fn scan(text: ptr<const u8>, format: ptr<const u8>, ...) -> i32
+extern "c" fn report(format: ptr<const u8>, ...) -> void
+fn forward(pair: &var Pair, seen: &Pair) -> i32 {
+    // SAFETY: both structs are live for the call.
+    return unsafe scan(c"7", c"%d %p", &var pair, &seen);
+}
+
+fn main() -> void {
+    var frame = Frame { origin: Pair { first: 0, second: 0 }, size: Pair { first: 3, second: 4 } };
+    let fixed = Pair { first: 1, second: 2 };
+    // SAFETY: frame and fixed are live when the scope ends.
+    defer unsafe report(c"%p %p %d", &var frame, &fixed, cast<i32>(2));
+    // SAFETY: frame.origin is live for the call, and fixed is read as a copy.
+    let matched = unsafe scan(c"5", c"%d %p", &var frame.origin, &fixed);
+    print(matched);
+    // SAFETY: frame.size is live for the call.
+    print(unsafe scan(c"6", c"%p", &frame.size));
+    print(forward(&var frame.size, &fixed));
+    return;
+}
+
+// ir
+// lower:
+// fn forward(%pair: &var Pair, %seen: Pair) -> i32 {
+// entry:
+//   %1: []u8 = const "7\x00"
+//   %2: ptr<const u8> = slice.ptr %1: []u8
+//   %3: []u8 = const "%d %p\x00"
+//   %4: ptr<const u8> = slice.ptr %3: []u8
+//   %5: i32 = extern "c" call.scan %2: ptr<const u8>, %4: ptr<const u8>, %pair: &var Pair, %seen: Pair
+//   return %5: i32
+// }
+// fn main() -> void {
+// entry:
+//   %1: i32 = const 0
+//   %2: i32 = const 0
+//   %3: Pair = struct.new {first: %1: i32, second: %2: i32}
+//   %4: i32 = const 3
+//   %5: i32 = const 4
+//   %6: Pair = struct.new {first: %4: i32, second: %5: i32}
+//   %7: Frame = struct.new {origin: %3: Pair, size: %6: Pair}
+//   %8: &var Frame = local.slot %7: Frame
+//   %9: i32 = const 1
+//   %10: i32 = const 2
+//   %11: Pair = struct.new {first: %9: i32, second: %10: i32}
+//   %12: []u8 = const "%p %p %d\x00"
+//   %13: ptr<const u8> = slice.ptr %12: []u8
+//   %14: i64 = const 2
+//   %15: i32 = cast %14: i64, i32
+//   %16: []u8 = const "5\x00"
+//   %17: ptr<const u8> = slice.ptr %16: []u8
+//   %18: []u8 = const "%d %p\x00"
+//   %19: ptr<const u8> = slice.ptr %18: []u8
+//   %20: &var Pair = field.addr.origin %8: &var Frame
+//   %21: i32 = extern "c" call.scan %17: ptr<const u8>, %19: ptr<const u8>, %20: &var Pair, %11: Pair
+//   call.std::fmt::print.i32 %21: i32
+//   %23: []u8 = const "6\x00"
+//   %24: ptr<const u8> = slice.ptr %23: []u8
+//   %25: []u8 = const "%p\x00"
+//   %26: ptr<const u8> = slice.ptr %25: []u8
+//   %27: &var Pair = field.addr.size %8: &var Frame
+//   %28: i32 = extern "c" call.scan %24: ptr<const u8>, %26: ptr<const u8>, %27: &var Pair
+//   call.std::fmt::print.i32 %28: i32
+//   %30: &var Pair = field.addr.size %8: &var Frame
+//   %31: i32 = call.forward %30: &var Pair, %11: Pair
+//   call.std::fmt::print.i32 %31: i32
+//   extern "c" call.report %13: ptr<const u8>, %8: &var Frame, %11: Pair, %15: i32
+//   return void: void
+// }
+// opt:
+// fn forward(%pair: &var Pair, %seen: Pair) -> i32 {
+// entry:
+//   %1: []u8 = const "7\x00"
+//   %2: ptr<const u8> = slice.ptr %1: []u8
+//   %3: []u8 = const "%d %p\x00"
+//   %4: ptr<const u8> = slice.ptr %3: []u8
+//   %5: i32 = extern "c" call.scan %2: ptr<const u8>, %4: ptr<const u8>, %pair: &var Pair, %seen: Pair
+//   return %5: i32
+// }
+// fn main() -> void {
+// entry:
+//   %1: i32 = const 0
+//   %2: i32 = const 0
+//   %3: Pair = struct.new {first: %1: i32, second: %2: i32}
+//   %4: i32 = const 3
+//   %5: i32 = const 4
+//   %6: Pair = struct.new {first: %4: i32, second: %5: i32}
+//   %7: Frame = struct.new {origin: %3: Pair, size: %6: Pair}
+//   %8: &var Frame = local.slot %7: Frame
+//   %9: i32 = const 1
+//   %10: i32 = const 2
+//   %11: Pair = struct.new {first: %9: i32, second: %10: i32}
+//   %12: []u8 = const "%p %p %d\x00"
+//   %13: ptr<const u8> = slice.ptr %12: []u8
+//   %14: i64 = const 2
+//   %15: i32 = cast %14: i64, i32
+//   %16: []u8 = const "5\x00"
+//   %17: ptr<const u8> = slice.ptr %16: []u8
+//   %18: []u8 = const "%d %p\x00"
+//   %19: ptr<const u8> = slice.ptr %18: []u8
+//   %20: &var Pair = field.addr.origin %8: &var Frame
+//   %21: i32 = extern "c" call.scan %17: ptr<const u8>, %19: ptr<const u8>, %20: &var Pair, %11: Pair
+//   %in1.1: i64 = cast %21: i32, i64
+//   call.std::fmt::write_i64 %in1.1: i64
+//   %23: []u8 = const "6\x00"
+//   %24: ptr<const u8> = slice.ptr %23: []u8
+//   %25: []u8 = const "%p\x00"
+//   %26: ptr<const u8> = slice.ptr %25: []u8
+//   %27: &var Pair = field.addr.size %8: &var Frame
+//   %28: i32 = extern "c" call.scan %24: ptr<const u8>, %26: ptr<const u8>, %27: &var Pair
+//   %in2.1: i64 = cast %28: i32, i64
+//   call.std::fmt::write_i64 %in2.1: i64
+//   %30: &var Pair = field.addr.size %8: &var Frame
+//   %in3.1: []u8 = const "7\x00"
+//   %in3.2: ptr<const u8> = slice.ptr %in3.1: []u8
+//   %in3.3: []u8 = const "%d %p\x00"
+//   %in3.4: ptr<const u8> = slice.ptr %in3.3: []u8
+//   %in3.5: i32 = extern "c" call.scan %in3.2: ptr<const u8>, %in3.4: ptr<const u8>, %30: &var Pair, %11: Pair
+//   %in4.1: i64 = cast %in3.5: i32, i64
+//   call.std::fmt::write_i64 %in4.1: i64
+//   extern "c" call.report %13: ptr<const u8>, %8: &var Frame, %11: Pair, %15: i32
+//   return void: void
+// }
+// opt wasm:
+// fn forward(%pair: &var Pair, %seen: Pair) -> i32 {
+// entry:
+//   %1: []u8 = const "7\x00"
+//   %2: ptr<const u8> = slice.ptr %1: []u8
+//   %3: []u8 = const "%d %p\x00"
+//   %4: ptr<const u8> = slice.ptr %3: []u8
+//   %5: i32 = extern "c" call.scan %2: ptr<const u8>, %4: ptr<const u8>, %pair: &var Pair, %seen: Pair
+//   return %5: i32
+// }
+// fn main() -> void {
+// entry:
+//   %1: i32 = const 0
+//   %3: Pair = struct.new {first: %1: i32, second: %1: i32}
+//   %4: i32 = const 3
+//   %5: i32 = const 4
+//   %6: Pair = struct.new {first: %4: i32, second: %5: i32}
+//   %7: Frame = struct.new {origin: %3: Pair, size: %6: Pair}
+//   %8: &var Frame = local.slot %7: Frame
+//   %9: i32 = const 1
+//   %10: i32 = const 2
+//   %11: Pair = struct.new {first: %9: i32, second: %10: i32}
+//   %12: []u8 = const "%p %p %d\x00"
+//   %13: ptr<const u8> = slice.ptr %12: []u8
+//   %14: i64 = const 2
+//   %15: i32 = cast %14: i64, i32
+//   %16: []u8 = const "5\x00"
+//   %17: ptr<const u8> = slice.ptr %16: []u8
+//   %18: []u8 = const "%d %p\x00"
+//   %19: ptr<const u8> = slice.ptr %18: []u8
+//   %20: &var Pair = field.addr.origin %8: &var Frame
+//   %21: i32 = extern "c" call.scan %17: ptr<const u8>, %19: ptr<const u8>, %20: &var Pair, %11: Pair
+//   %in1.1: i64 = cast %21: i32, i64
+//   call.std::fmt::write_i64 %in1.1: i64
+//   %23: []u8 = const "6\x00"
+//   %24: ptr<const u8> = slice.ptr %23: []u8
+//   %25: []u8 = const "%p\x00"
+//   %26: ptr<const u8> = slice.ptr %25: []u8
+//   %27: &var Pair = field.addr.size %8: &var Frame
+//   %28: i32 = extern "c" call.scan %24: ptr<const u8>, %26: ptr<const u8>, %27: &var Pair
+//   %in2.1: i64 = cast %28: i32, i64
+//   call.std::fmt::write_i64 %in2.1: i64
+//   %30: &var Pair = field.addr.size %8: &var Frame
+//   %in3.1: []u8 = const "7\x00"
+//   %in3.2: ptr<const u8> = slice.ptr %in3.1: []u8
+//   %in3.4: ptr<const u8> = slice.ptr %18: []u8
+//   %in3.5: i32 = extern "c" call.scan %in3.2: ptr<const u8>, %in3.4: ptr<const u8>, %30: &var Pair, %11: Pair
+//   %in4.1: i64 = cast %in3.5: i32, i64
+//   call.std::fmt::write_i64 %in4.1: i64
+//   extern "c" call.report %13: ptr<const u8>, %8: &var Frame, %11: Pair, %15: i32
+//   return void: void
+// }
