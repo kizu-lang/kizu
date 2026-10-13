@@ -32,7 +32,8 @@ error も同じ note を出します。
 `expect_equal<T>` は明示 static 引数付きの generic assertion です。
 failure は `expected ... got ...` 形式の diagnostic を出し、assertion ごとの `try` は不要です。
 static 引数が type だけなので、caller は `expect_equal<i64>(1, actual)` のように
-期待型を明示します。`expect_equal<f64>` の失敗は両値を `std::float::append` の
+期待型を明示します。`T` は `==` を持つ型(SPEC §6.9.1)か `[]u8` で、struct や
+`?T` は field や payload を取り出して比べます。`expect_equal<f64>` の失敗は両値を `std::float::append` の
 最短往復表現で綴ります(`docs/std/float.md`)。type argument inference と per-type `expect_equal_i64` family は
 導入しません。
 
