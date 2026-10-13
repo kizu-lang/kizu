@@ -460,7 +460,10 @@ func (l *lowerer) slotPointer(expr ast.Expression) (Value, bool) {
 		return Value{}, false
 	}
 	value, bound := l.env.get(ident.Name)
-	if !bound || (!l.slots[ident.Name] && !l.placeSlots[value.Name] && !l.lentPlaces[value.Name]) {
+	if !bound || l.forIndexes[value.Name] {
+		return Value{}, false
+	}
+	if !l.slots[ident.Name] && !l.placeSlots[value.Name] && !l.lentPlaces[value.Name] {
 		return Value{}, false
 	}
 	return value, true
