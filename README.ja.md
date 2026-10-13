@@ -35,21 +35,21 @@ lowering は 1 本しかないため、同じプログラムが `run` と `build
 
 | 機能 | 例の数 | check | run | llvm | wasm | wasm-opt | wasm-bin | browser |
 | --- | ---: | :--: | :--: | :--: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 51 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 50/51 |
+| fn / let / struct / literals | 53 | ✅ | ✅ | ✅ | 52/53 | 52/53 | 52/53 | 51/53 |
 | arithmetic / bitwise / float | 11 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | while / break / continue / for / label | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | if / match | 19 | ✅ | ✅ | ✅ | 18/19 | 18/19 | 18/19 | 16/19 |
 | enum / union | 18 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 15/18 |
 | error union `!T` / try / errdefer | 59 | ✅ | ✅ | ✅ | 38/59 | 38/59 | 38/59 | 35/59 |
 | optional `?T` / orelse / capture | 28 | ✅ | ✅ | ✅ | 27/28 | 27/28 | 27/28 | 25/28 |
-| move / borrow | 70 | ✅ | ✅ | ✅ | 68/70 | 68/70 | 68/70 | 68/70 |
+| move / borrow | 73 | ✅ | ✅ | ✅ | 69/73 | 69/73 | 69/73 | 69/73 |
 | deinit / defer | 25 | ✅ | ✅ | ✅ | 24/25 | 24/25 | 24/25 | 24/25 |
 | arena / handle | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | comptime / reflection | 20 | ✅ | ✅ | ✅ | 18/20 | 18/20 | 18/20 | 18/20 |
-| cast / slice / stack buffer / box | 17 | ✅ | ✅ | ✅ | 16/17 | 16/17 | 16/17 | 16/17 |
-| unsafe / raw pointer / extern C | 11 | ✅ | ✅ | ✅ | 2/11 | 2/11 | 2/11 | 2/11 |
-| contract / generics | 24 | ✅ | ✅ | ✅ | 23/24 | 23/24 | 23/24 | 20/24 |
-| std::array | 26 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| cast / slice / stack buffer / box | 24 | ✅ | ✅ | ✅ | 22/24 | 22/24 | 22/24 | 22/24 |
+| unsafe / raw pointer / extern C | 18 | ✅ | ✅ | ✅ | 2/18 | 2/18 | 2/18 | 2/18 |
+| contract / generics | 26 | ✅ | ✅ | ✅ | 23/26 | 23/26 | 23/26 | 20/26 |
+| std::array | 27 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::string | 32 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::map | 17 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 16/17 |
 | std::mem / allocator | 22 | ✅ | ✅ | ✅ | 21/22 | 21/22 | 21/22 | 20/22 |
@@ -66,7 +66,7 @@ lowering は 1 本しかないため、同じプログラムが `run` と `build
 | std::fs / path / io / process | 33 | ✅ | ✅ | ✅ | 14/33 | 14/33 | 14/33 | 4/33 |
 | std::net / http | 23 | ✅ | ✅ | ✅ | 4/23 | 4/23 | 4/23 | 4/23 |
 | async / coro | 2 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| std::thread | 2 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| std::thread | 3 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 
 `✅` はその行の example が全て通ること、分数は一部だけ通ること、`❌` は 1 つも
 通らないことを表します。各行は自分の feature tag を宣言した example を数えるので、
