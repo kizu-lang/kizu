@@ -101,6 +101,10 @@ type lowerer struct {
 	// address rather than a slot of its own: a name bound by
 	// `let v = &var x` is storage the way a `&var` parameter is.
 	lentPlaces map[string]bool
+	// forIndexes names the values a `for` binds as its index. An index is a
+	// value and never storage, even when a later local of the same name is
+	// one of slots.
+	forIndexes map[string]bool
 	// callerStorageParams names the parameters that arrive as the caller's
 	// storage, apart from the locals that were given a slot of their own: a
 	// match through one binds payloads where they lie, a match on a local
@@ -1091,6 +1095,7 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 	l.indexWritten = indexWrittenLocals(fn)
 	l.placeSlots = map[string]bool{}
 	l.lentPlaces = map[string]bool{}
+	l.forIndexes = map[string]bool{}
 	l.callerStorageParams = map[string]bool{}
 	l.nextValue = 0
 	l.nextBlock = 0

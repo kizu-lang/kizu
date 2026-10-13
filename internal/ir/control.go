@@ -619,6 +619,7 @@ func (l *lowerer) lowerForStmt(stmt *ast.ForStmt) error {
 		body:  stmt.Body,
 		header: func(preheader string) (Value, error) {
 			index = l.createForIndexPhi(l.block, preheader, start)
+			l.forIndexes[index.Result.Name] = true
 			l.env.set(stmt.Name, index.Result)
 			return l.emit("binary.<", "bool", []Value{index.Result, end}, ""), nil
 		},
