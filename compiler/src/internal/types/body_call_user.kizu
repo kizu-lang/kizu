@@ -128,6 +128,15 @@ fn (self: &var Checker) check_c_variadic_arg(
     index: i64,
     argument: ast::Expression
 ) -> !?diagnostic::Diagnostic {
+    match borrow_prefix(tree, argument) {
+        None => {},
+        Value(prefix) => {
+            let retained = tree.texts.at(prefix.operator.node);
+            let operator = retained.as_bytes();
+            let mutable = mem::equal_bytes(operator, "&var");
+            return self.check_c_variadic_borrow_arg(tree, scope, name, index, argument, mutable);
+        },
+    }
     var got = empty_type();
     if try self.check_expr(tree, scope, argument, &var got) |problem| {
         return move problem;
@@ -149,10 +158,58 @@ fn (self: &var Checker) check_c_variadic_arg(
         );
         try message.append_bytes(self.allocator, fix);
     } else {
-        try message.append_bytes(self.allocator,
-            ", which a C variadic argument cannot carry; it takes `i32`, `u32`, `i64`, `u64`, `isize`, `usize`, `f64`, or a raw pointer"
-        );
+        try message.append_bytes(self.allocator, ", which a C variadic argument cannot carry; ");
+        try append_c_variadic_accepts(self.allocator, &var message);
     }
+    return try self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+// Ends the diagnostic for an argument a C variadic call cannot pass with what
+// it can, the Go `cVariadicAccepts`.
+fn append_c_variadic_accepts(allocator: Allocator, message: &var string::String) -> !void {
+    try message.append_bytes(allocator,
+        "it takes `i32`, `u32`, `i64`, `u64`, `isize`, `usize`, `f64`, a raw pointer, or a borrow of an `extern "
+    );
+    try message.append_byte(allocator, cast<u8>(34));
+    try message.append_bytes(allocator, "c");
+    try message.append_byte(allocator, cast<u8>(34));
+    return message.append_bytes(allocator, " struct`");
+}
+
+// Validates a `&x` / `&var x` written after the declared parameters of a C
+// variadic call, the Go `checkCVariadicBorrowArg`. It lends an extern struct
+// the way a declared `&S` / `&var S` parameter of a C function is lent one,
+// so the place is held to the same rules, and C receives a pointer to the
+// struct. Nothing else has a layout C can read through an address Kizu made.
+fn (self: &var Checker) check_c_variadic_borrow_arg(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    name: []u8,
+    index: i64,
+    argument: ast::Expression,
+    mutable: bool
+) -> !?diagnostic::Diagnostic {
+    var target = argument;
+    if try self.prepare_borrow_argument(tree, scope, argument, true, mutable, &var target) |problem| {
+        return move problem;
+    }
+    var got = empty_type();
+    if try self.check_expr(tree, scope, target, &var got) |problem| {
+        return move problem;
+    }
+    if try self.is_extern_struct(tree, got) {
+        return null;
+    }
+    var message = string::new(self.allocator);
+    errdefer message.deinit(self.allocator);
+    try message.append_bytes(self.allocator, "arg ");
+    try fmt::append_i64(self.allocator, &var message, index + 1);
+    try message.append_bytes(self.allocator, " of `");
+    try message.append_bytes(self.allocator, name);
+    try message.append_bytes(self.allocator, "` borrows ");
+    try self.append_checker_type(&var message, got);
+    try message.append_bytes(self.allocator, ", which a C variadic argument cannot carry; ");
+    try append_c_variadic_accepts(self.allocator, &var message);
     return try self.checker_message_at("type error", ast::zero_span(), move message);
 }
 

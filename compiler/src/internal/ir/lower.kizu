@@ -1491,6 +1491,80 @@ fn (self: &Lowerer) signature_variadic_fixed(signature: SignatureHandle) -> i64 
     return node.params.len();
 }
 
+/// Returns the signature whose params one call to signature hands its
+/// arguments over at, the Go `variadicCallParams`: the declared ones and, for
+/// a C variadic function, one more for each argument after them. A `&var x`
+/// or `&x` there lends an extern struct the way a declared `&var S` / `&S`
+/// parameter of a C function is lent one -- the caller's storage, or the
+/// address of a copy -- so it gets the Param that parameter would have had,
+/// and everything that reads how a borrow parameter is passed reads this one
+/// too. Every other variadic argument is the value it is, which is what the
+/// empty Param says. A call that passes nothing after the declared
+/// parameters gets the declaration's own signature back.
+fn (self: &var Lowerer) variadic_call_signature(
+    tree: &ast::Ast,
+    signature: SignatureHandle,
+    args: ast::ExpressionList
+) -> !SignatureHandle {
+    let fixed = self.signature_variadic_fixed(signature);
+    if fixed == 0 or ownership::arg_count(tree, args) <= fixed {
+        return signature;
+    }
+    var params = array::new<Param>(self.allocator);
+    errdefer params.deinit(self.allocator);
+    var index = 0;
+    while self.signature_param(signature, index) |param| {
+        index = index + 1;
+        try params.append(self.allocator, param);
+    }
+    while ownership::arg_at(tree, args, index) |arg| {
+        index = index + 1;
+        try params.append(self.allocator, try self.variadic_borrow_param(tree, arg));
+    }
+    let declared = self.signature_nodes.at(signature.node);
+    let return_type = declared.return_type;
+    let pointer_type = declared.pointer_type;
+    let requires_unsafe = declared.requires_unsafe;
+    // The node describes one call, not a declaration, so it is not itself
+    // variadic: its params already name every argument the call passes.
+    let handle = try self.signature_nodes.add(self.allocator, Signature {
+        params: move params,
+        return_type: return_type,
+        pointer_type: pointer_type,
+        requires_unsafe: requires_unsafe,
+        variadic: false
+    });
+    return SignatureHandle { node: handle };
+}
+
+/// Returns the Param of one argument after a C variadic function's declared
+/// parameters, the Go `variadicBorrowParam`: how a borrow of the place it
+/// names is passed, or the empty Param when it is not a borrow.
+fn (self: &var Lowerer) variadic_borrow_param(tree: &ast::Ast, arg: ast::Expression) -> !Param {
+    let plain = Param { name: empty_name(), type_name: empty_name(), passing: Passing::Value };
+    let prefix = ownership::prefix_expr(tree, arg) orelse return plain;
+    let mutable = text_is(tree, prefix.operator, "&var");
+    if !mutable and !text_is(tree, prefix.operator, "&") {
+        return plain;
+    }
+    let elem = try self.assign_target_type(tree, prefix.right);
+    if is_empty(elem) {
+        return plain;
+    }
+    if mutable {
+        return Param {
+            name: empty_name(),
+            type_name: try self.module.names.prefixed("&var ", elem),
+            passing: Passing::CallerStorage
+        };
+    }
+    return Param {
+        name: empty_name(),
+        type_name: try self.module.names.prefixed("&", elem),
+        passing: Passing::CopyAddress
+    };
+}
+
 /// Returns one parameter of a signature, or null past the last.
 fn (self: &Lowerer) signature_param(signature: SignatureHandle, index: i64) -> ?Param {
     let node = self.signature_nodes.at(signature.node);

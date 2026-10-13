@@ -135,10 +135,11 @@ fn (self: &var Lowerer) cleanup_from_expr(
         return try self.fail1(tree, "ir error: unsupported defer callee `%s`", Arg::Str(name));
     var args = array::new<Value>(self.allocator);
     defer args.deinit(self.allocator);
-    if try self.lower_cleanup_args(tree, params_of(signature), call.args, &var args) |failed| {
+    let passed = try self.variadic_call_signature(tree, signature, call.args);
+    if try self.lower_cleanup_args(tree, params_of(passed), call.args, &var args) |failed| {
         return move failed;
     }
-    return self.cleanup_from_function(tree, name, &args, out);
+    return self.cleanup_from_function(tree, name, passed, &args, out);
 }
 
 /// Spells a callee expression for a diagnostic, the Go `call.Callee.String()`.
@@ -187,9 +188,13 @@ fn (self: &var Lowerer) lower_cleanup_args(
 /// Resolves a deferred call to a declared function or an extern one, the
 /// Go `cleanupFromFunction`. The signature says the call returns void; a std
 /// primitive with no declared signature is not a thing a defer can name.
+/// passed holds the parameters args were lowered at: the callee's own, or
+/// with null exactly those, and for a C variadic call the ones
+/// variadic_call_signature added.
 fn (self: &var Lowerer) cleanup_from_function(
     tree: &var ast::Ast,
     name: Name,
+    passed: ?SignatureHandle,
     args: &array::Array<Value>,
     out: &var Cleanup
 ) -> !?diagnostic::Diagnostic {
@@ -199,12 +204,13 @@ fn (self: &var Lowerer) cleanup_from_function(
     if !self.name_is(returned, "void") {
         return try self.fail1(tree, "ir error: defer call must return void, got %s", Arg::Str(returned));
     }
-    var cleanup = try self.cleanup_of(Op::Call, name, args, self.owner_loads(args, params_of(signature)));
+    let lowered_at = passed orelse signature;
+    var cleanup = try self.cleanup_of(Op::Call, name, args, self.owner_loads(args, params_of(lowered_at)));
     if self.extern_decl(name) |external| {
         var params = array::new<Param>(self.allocator);
         defer params.deinit(self.allocator);
         var index = 0;
-        while self.signature_param(signature, index) |param| {
+        while self.signature_param(lowered_at, index) |param| {
             index = index + 1;
             try params.append(self.allocator, param);
         }
@@ -377,7 +383,7 @@ fn (self: &var Lowerer) cleanup_from_method(
         }
     }
     if try self.impl_method_callee_name(receiver.type_name, method) |method_name| {
-        return self.cleanup_from_function(tree, method_name, args, out);
+        return self.cleanup_from_function(tree, method_name, null, args, out);
     }
     return try self.fail1(tree, "ir error: unknown cleanup method `%s`", Arg::Str(method));
 }
@@ -529,6 +535,15 @@ fn (self: &var Lowerer) emit_cleanups(cleanups: &array::Array<Cleanup>) -> !void
         if !is_empty(cleanup.extern_abi) {
             if self.last_instr() |instr| {
                 self.module.set_extern_call(instr, cleanup.extern_abi, cleanup.extern_name);
+                // The call written here is the foreign call the cleanup
+                // stood for, so it carries the same declared passing: a
+                // struct lent as `&S` reaches C as the address of a copy
+                // either way.
+                var param_index = 0;
+                while self.module.cleanup_param(cleanup, param_index) |param| {
+                    param_index = param_index + 1;
+                    try self.module.add_call_param(self.allocator, instr, param);
+                }
                 self.module.set_variadic_fixed(instr, cleanup.variadic_fixed);
             }
         }

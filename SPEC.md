@@ -2376,15 +2376,20 @@ extern "c" fn snprintf(buffer: ptr<u8>, size: usize, format: ptr<const u8>, ...)
   読み方に合うこともその `unsafe` が引き受けます。
 * 続ける引数の型は `i32` / `u32` / `i64` / `u64` / `isize` / `usize` / `f64` と
   raw pointer(`ptr<T>` / `ptr<const T>` / nullable raw pointer、`c"..."` を含む)
-  だけです。
+  です。
+* これに加えて、`extern "c" struct` の値を `&x` / `&var x` と書いて貸せます。C には
+  struct への pointer が渡り、意味は名前付き引数の `&S` / `&var S` と同じです
+  (§12.2): `&var x` は呼び出し側の storage そのもの、`&x` は call のための copy の
+  address で、貸すのは call の間だけです。`&var x` には `var` の binding が要ります。
+  それ以外の borrow(通常の struct、view、owner、scalar)は渡せません。
 * C の default argument promotion はしません。`i8` / `i16` / `u8` / `u16` は
   `cast<i32>(x)`、`f32` は `cast<f64>(x)` と書かなければ compile error です。`bool` も
   渡せません。
 * 続ける引数の位置は期待型を与えません。整数 literal は `i64`、float literal は
   `f64` です(§7)。C の `int` として読まれる引数は `cast<i32>(1)` か `i32` の
   binding で渡します。
-* 可変長引数関数は `extern "c" struct` を値で受け取れず、値で返せません。`&S` /
-  `&var S` は取れます。
+* 可変長引数関数は、名前付き引数でも続ける引数でも `extern "c" struct` を値で
+  受け取れず、値で返せません。どちらの位置でも borrow では取れます。
 * 可変長引数関数の名前は関数 pointer の値になりません。名前でだけ呼べます。
 * native target だけが呼べます。wasm32-wasi と wasm32-browser は `extern "c" fn` の
   呼び出しを build error にします。

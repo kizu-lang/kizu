@@ -7293,6 +7293,9 @@ func (c *Checker) checkCVariadicArg(
 	env *scope,
 	unsafe unsafeMark,
 ) error {
+	if prefix, ok := borrowPrefix(arg); ok {
+		return c.checkCVariadicBorrowArg(name, idx, prefix, arg, env, unsafe)
+	}
 	got, err := c.checkExpr(arg, env, unsafe)
 	if err != nil {
 		return err
@@ -7305,8 +7308,40 @@ func (c *Checker) checkCVariadicArg(
 			" variadic call and Kizu does not; %s", idx+1, name, got, fix)
 	}
 	return errorf("type error: arg %d of `%s` has type %s, which a C variadic argument"+
-		" cannot carry; it takes `i32`, `u32`, `i64`, `u64`, `isize`, `usize`, `f64`,"+
-		" or a raw pointer", idx+1, name, got)
+		" cannot carry; %s", idx+1, name, got, cVariadicAccepts)
+}
+
+// cVariadicAccepts ends the diagnostic for an argument a C variadic call
+// cannot pass with what it can.
+const cVariadicAccepts = "it takes `i32`, `u32`, `i64`, `u64`, `isize`, `usize`, `f64`," +
+	" a raw pointer, or a borrow of an `extern \"c\" struct`"
+
+// checkCVariadicBorrowArg validates a `&x` / `&var x` written after the
+// declared parameters of a C variadic call. It lends an extern struct the way
+// a declared `&S` / `&var S` parameter of a C function is lent one, so the
+// place is held to the same rules, and C receives a pointer to the struct.
+// Nothing else has a layout C can read through an address Kizu made.
+func (c *Checker) checkCVariadicBorrowArg(
+	name string,
+	idx int,
+	prefix *ast.PrefixExpr,
+	arg ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) error {
+	target, err := prepareBorrowArgument(arg, true, prefix.Operator == "&var", env)
+	if err != nil {
+		return err
+	}
+	got, err := c.checkExpr(target, env, unsafe)
+	if err != nil {
+		return err
+	}
+	if c.isExternStruct(got) {
+		return nil
+	}
+	return errorf("type error: arg %d of `%s` borrows %s, which a C variadic argument"+
+		" cannot carry; %s", idx+1, name, got, cVariadicAccepts)
 }
 
 // cVariadicArgType reports the types a C variadic argument can have: the ones

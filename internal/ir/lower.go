@@ -2702,7 +2702,7 @@ func (l *lowerer) lowerNamedCallExpr(name string, rawArgs []ast.Expression) (Val
 		// A foreign callee has no body in the module, so the call carries
 		// the passing its declaration decided, the way an indirect call does.
 		sig := l.signatures[calleeName]
-		instr.CallParams = sig.Params
+		instr.CallParams = l.variadicCallParams(sig, rawArgs)
 		instr.VariadicFixed = variadicFixed(sig)
 	}
 	return result, nil
@@ -2715,6 +2715,43 @@ func variadicFixed(sig Signature) int {
 		return 0
 	}
 	return len(sig.Params)
+}
+
+// variadicCallParams returns the parameters one call to sig hands its
+// arguments over at: the declared ones and, for a C variadic function, one
+// more for each argument after them. A `&var x` or `&x` there lends an extern
+// struct the way a declared `&var S` / `&S` parameter of a C function is lent
+// one -- the caller's storage, or the address of a copy -- so it gets the
+// Param that parameter would have had, and everything that reads how a
+// borrow parameter is passed reads this one too. Every other variadic
+// argument is the value it is, which is what the zero Param says.
+func (l *lowerer) variadicCallParams(sig Signature, args []ast.Expression) []Param {
+	if !sig.Variadic || len(args) <= len(sig.Params) {
+		return sig.Params
+	}
+	params := append([]Param(nil), sig.Params...)
+	for _, arg := range args[len(sig.Params):] {
+		params = append(params, l.variadicBorrowParam(arg))
+	}
+	return params
+}
+
+// variadicBorrowParam is the Param of one argument after a C variadic
+// function's declared parameters: how a borrow of the place it names is
+// passed, or the zero Param when it is not a borrow.
+func (l *lowerer) variadicBorrowParam(arg ast.Expression) Param {
+	prefix, ok := arg.(*ast.PrefixExpr)
+	if !ok || (prefix.Operator != "&" && prefix.Operator != "&var") {
+		return Param{}
+	}
+	elem := l.assignTargetType(prefix.Right)
+	if elem == "" {
+		return Param{}
+	}
+	if prefix.Operator == "&var" {
+		return Param{Type: "&var " + elem, Passing: PassCallerStorage}
+	}
+	return Param{Type: "&" + elem, Passing: PassCopyAddress}
 }
 
 // lowerTypedNamedCallExpr lowers the small typed-call subset with backend support.
