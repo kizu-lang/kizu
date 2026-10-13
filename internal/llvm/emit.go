@@ -738,12 +738,13 @@ func (e *emitter) externalCallDecls() []string {
 // view used by declaration and call emission.
 func cleanupInstruction(cleanup ir.Cleanup) *ir.Instr {
 	return &ir.Instr{
-		Result:     ir.Value{Type: "void"},
-		Op:         cleanup.Op,
-		Args:       cleanup.Args,
-		CallParams: cleanup.CallParams,
-		ExternABI:  cleanup.ExternABI,
-		ExternName: cleanup.ExternName,
+		Result:        ir.Value{Type: "void"},
+		Op:            cleanup.Op,
+		Args:          cleanup.Args,
+		CallParams:    cleanup.CallParams,
+		VariadicFixed: cleanup.VariadicFixed,
+		ExternABI:     cleanup.ExternABI,
+		ExternName:    cleanup.ExternName,
 	}
 }
 
@@ -792,21 +793,37 @@ func (e *emitter) externalCallDecl(name string, instr *ir.Instr) string {
 				result, llvmFunctionName(name), strings.Join(params, ", "))
 		}
 	}
-	params := make([]string, 0, len(instr.Args))
-	for index, arg := range instr.Args {
+	return fmt.Sprintf(
+		"declare %s @%s(%s)",
+		e.llvmType(instr.Result.Type),
+		llvmFunctionName(name),
+		strings.Join(e.plainCallParams(instr), ", "),
+	)
+}
+
+// plainCallParams spells the parameter list of a callee that takes every
+// argument as the value it is, from the operands of one call to it. A C
+// variadic callee declares only its first VariadicFixed arguments and then
+// `...`: the arguments after them differ from call to call, and the
+// declaration and every call have to say where they start.
+func (e *emitter) plainCallParams(instr *ir.Instr) []string {
+	declared := instr.Args
+	if instr.VariadicFixed > 0 {
+		declared = instr.Args[:instr.VariadicFixed]
+	}
+	params := make([]string, 0, len(declared)+1)
+	for index, arg := range declared {
 		// A parameter handed the address of a copy is a pointer to C.
-		if index < len(instr.CallParams) && instr.CallParams[index].TakesAddressOf(arg.Type) {
+		if callParamTakesAddressOf(instr, index) {
 			params = append(params, "ptr")
 			continue
 		}
 		params = append(params, e.llvmType(arg.Type))
 	}
-	return fmt.Sprintf(
-		"declare %s @%s(%s)",
-		e.llvmType(instr.Result.Type),
-		llvmFunctionName(name),
-		strings.Join(params, ", "),
-	)
+	if instr.VariadicFixed > 0 {
+		params = append(params, "...")
+	}
+	return params
 }
 
 // cArgs describes a C call's arguments for the convention's rewriting. With
@@ -2108,9 +2125,16 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 		value := e.value(arg)
 		args = append(args, e.llvmType(arg.Type)+" "+value.operand)
 	}
+	// A call to a variadic callee names the callee's whole function type, not
+	// only its result: that is what tells the target which arguments are the
+	// variadic ones, and so how each is passed.
+	callee := e.llvmType(instr.Result.Type)
+	if instr.VariadicFixed > 0 {
+		callee += " (" + strings.Join(e.plainCallParams(instr), ", ") + ")"
+	}
 	call := fmt.Sprintf(
 		"call %s @%s(%s)",
-		e.llvmType(instr.Result.Type),
+		callee,
 		llvmFunctionName(name),
 		strings.Join(args, ", "),
 	)

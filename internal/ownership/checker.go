@@ -5471,6 +5471,14 @@ func (c *Checker) checkCallableCall(
 	env *scope,
 	sanctioned bool,
 ) (string, error) {
+	// The arguments after a C variadic function's declared parameters are
+	// scalars, raw pointers and borrows of extern structs, the only things
+	// the type checker lets through: a borrow is held for the call like a
+	// declared borrow parameter's argument, and the rest are read.
+	var variadic []ast.Expression
+	if fn.sig.Variadic && len(args) > len(fn.params) {
+		args, variadic = args[:len(fn.params)], args[len(fn.params):]
+	}
 	if len(args) != len(fn.params) {
 		return "", errorf("move error: `%s` expects %d args, got %d",
 			name, len(fn.params), len(args))
@@ -5488,13 +5496,36 @@ func (c *Checker) checkCallableCall(
 	if err != nil {
 		return "", err
 	}
+	borrowed, err = c.activateVariadicBorrows(variadic, env, borrowed)
+	if err != nil {
+		return "", err
+	}
 	defer releaseTemporaryBorrows(borrowed)
 	for idx, arg := range args {
 		if err := c.checkUserCallArg(fn, idx, arg, env, sanctioned); err != nil {
 			return "", err
 		}
 	}
+	if err := c.readVariadicArgs(variadic, env); err != nil {
+		return "", err
+	}
 	return returnTypeName(fn), nil
+}
+
+// readVariadicArgs applies the ownership effect of the arguments after a C
+// variadic function's declared parameters: each is read, except a `&var`
+// argument, which is written through and left alone the way checkUserCallArg
+// leaves a mutable borrow parameter's.
+func (c *Checker) readVariadicArgs(args []ast.Expression, env *scope) error {
+	for _, arg := range args {
+		if prefix, ok := borrowPrefix(arg); ok && prefix.Operator == "&var" {
+			continue
+		}
+		if _, err := c.readExpr(arg, env); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // checkUserCallArg applies one argument's ownership effect for a user call:
@@ -7425,6 +7456,23 @@ func (c *Checker) enterInstantiation(
 			key += "." + value
 		}
 	}
+	// A `Field` or a `Function` argument is its own instance too: the body
+	// reads the type of the field, or calls the function, it was bound to.
+	for _, param := range fn.sig.StaticParams {
+		if param.IsType() {
+			continue
+		}
+		switch typ.Text(param.Type) {
+		case "Field":
+			if field, ok := c.metaFields[param.Name]; ok {
+				key += "." + field.owner + "." + field.name
+			}
+		case "Function":
+			if target, ok := c.functionArgs[param.Name]; ok {
+				key += "." + target
+			}
+		}
+	}
 	if c.checkedInstances[key] {
 		return true, nil
 	}
@@ -8888,37 +8936,74 @@ func (c *Checker) activateBorrowArgs(
 		if !fn.params[idx].borrow {
 			continue
 		}
-		value, field, err := c.callBorrowTarget(arg, env)
+		var err error
+		borrowed, err = c.activateBorrowArg(fn.params[idx].mutBorrow, arg, env, borrowed)
 		if err != nil {
-			releaseTemporaryBorrows(borrowed)
 			return nil, err
-		}
-		if value == nil && fn.params[idx].mutBorrow {
-			releaseTemporaryBorrows(borrowed)
-			return nil, errorf(
-				"borrow error: mutable borrow argument must be a local binding or direct field",
-			)
-		}
-		if value != nil {
-			if fn.params[idx].mutBorrow && value.borrowedParam && !value.mutBorrow {
-				releaseTemporaryBorrows(borrowed)
-				return nil, errorf(
-					"borrow error: shared borrow `%s` cannot be forwarded as mutable",
-					value.name,
-				)
-			}
-			mutable := fn.params[idx].mutBorrow
-			if err := checkBorrowConflictForField(env, value, field, mutable); err != nil {
-				releaseTemporaryBorrows(borrowed)
-				return nil, err
-			}
-			c.activateBorrow(value, field, mutable)
-			borrowed = append(borrowed, temporaryBorrow{
-				value: value, field: field, mutable: mutable,
-			})
 		}
 	}
 	return borrowed, nil
+}
+
+// activateVariadicBorrows marks the places a C variadic call borrows after
+// its declared parameters. No parameter says which of those arguments are
+// borrows, so the `&` / `&var` written at the call does; from there each is
+// held like a declared borrow parameter's argument.
+func (c *Checker) activateVariadicBorrows(
+	args []ast.Expression,
+	env *scope,
+	borrowed []temporaryBorrow,
+) ([]temporaryBorrow, error) {
+	for _, arg := range args {
+		prefix, ok := borrowPrefix(arg)
+		if !ok {
+			continue
+		}
+		var err error
+		borrowed, err = c.activateBorrowArg(prefix.Operator == "&var", arg, env, borrowed)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return borrowed, nil
+}
+
+// activateBorrowArg marks the place one borrowed argument names as borrowed
+// for the call and adds it to borrowed. On an error it releases what borrowed
+// already holds, so the caller has nothing left to undo.
+func (c *Checker) activateBorrowArg(
+	mutable bool,
+	arg ast.Expression,
+	env *scope,
+	borrowed []temporaryBorrow,
+) ([]temporaryBorrow, error) {
+	value, field, err := c.callBorrowTarget(arg, env)
+	if err != nil {
+		releaseTemporaryBorrows(borrowed)
+		return nil, err
+	}
+	if value == nil && mutable {
+		releaseTemporaryBorrows(borrowed)
+		return nil, errorf(
+			"borrow error: mutable borrow argument must be a local binding or direct field",
+		)
+	}
+	if value == nil {
+		return borrowed, nil
+	}
+	if mutable && value.borrowedParam && !value.mutBorrow {
+		releaseTemporaryBorrows(borrowed)
+		return nil, errorf(
+			"borrow error: shared borrow `%s` cannot be forwarded as mutable",
+			value.name,
+		)
+	}
+	if err := checkBorrowConflictForField(env, value, field, mutable); err != nil {
+		releaseTemporaryBorrows(borrowed)
+		return nil, err
+	}
+	c.activateBorrow(value, field, mutable)
+	return append(borrowed, temporaryBorrow{value: value, field: field, mutable: mutable}), nil
 }
 
 // callBorrowTarget resolves call-scoped borrowable places and ignores non-place shared values.

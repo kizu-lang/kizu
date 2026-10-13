@@ -101,6 +101,10 @@ type lowerer struct {
 	// address rather than a slot of its own: a name bound by
 	// `let v = &var x` is storage the way a `&var` parameter is.
 	lentPlaces map[string]bool
+	// forIndexes names the values a `for` binds as its index. An index is a
+	// value and never storage, even when a later local of the same name is
+	// one of slots.
+	forIndexes map[string]bool
 	// callerStorageParams names the parameters that arrive as the caller's
 	// storage, apart from the locals that were given a slot of their own: a
 	// match through one binds payloads where they lie, a match on a local
@@ -1031,8 +1035,9 @@ func (l *lowerer) lowerSignature(sig ast.FunctionSignature) Signature {
 	returned := l.lowerReturnType(declaredReturn)
 	return Signature{
 		Params: params, Return: returned,
-		Pointer: l.declaredFunctionPointerType(sig, declaredReturn),
-		Unsafe:  sig.RequiresUnsafe,
+		Pointer:  l.declaredFunctionPointerType(sig, declaredReturn),
+		Unsafe:   sig.RequiresUnsafe,
+		Variadic: sig.Variadic,
 	}
 }
 
@@ -1091,6 +1096,7 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 	l.indexWritten = indexWrittenLocals(fn)
 	l.placeSlots = map[string]bool{}
 	l.lentPlaces = map[string]bool{}
+	l.forIndexes = map[string]bool{}
 	l.callerStorageParams = map[string]bool{}
 	l.nextValue = 0
 	l.nextBlock = 0
@@ -2695,9 +2701,57 @@ func (l *lowerer) lowerNamedCallExpr(name string, rawArgs []ast.Expression) (Val
 		instr.ExternName = external.name
 		// A foreign callee has no body in the module, so the call carries
 		// the passing its declaration decided, the way an indirect call does.
-		instr.CallParams = l.signatures[calleeName].Params
+		sig := l.signatures[calleeName]
+		instr.CallParams = l.variadicCallParams(sig, rawArgs)
+		instr.VariadicFixed = variadicFixed(sig)
 	}
 	return result, nil
+}
+
+// variadicFixed is what a call to sig records as its VariadicFixed: the
+// declared parameter count of a C variadic function, zero for any other.
+func variadicFixed(sig Signature) int {
+	if !sig.Variadic {
+		return 0
+	}
+	return len(sig.Params)
+}
+
+// variadicCallParams returns the parameters one call to sig hands its
+// arguments over at: the declared ones and, for a C variadic function, one
+// more for each argument after them. A `&var x` or `&x` there lends an extern
+// struct the way a declared `&var S` / `&S` parameter of a C function is lent
+// one -- the caller's storage, or the address of a copy -- so it gets the
+// Param that parameter would have had, and everything that reads how a
+// borrow parameter is passed reads this one too. Every other variadic
+// argument is the value it is, which is what the zero Param says.
+func (l *lowerer) variadicCallParams(sig Signature, args []ast.Expression) []Param {
+	if !sig.Variadic || len(args) <= len(sig.Params) {
+		return sig.Params
+	}
+	params := append([]Param(nil), sig.Params...)
+	for _, arg := range args[len(sig.Params):] {
+		params = append(params, l.variadicBorrowParam(arg))
+	}
+	return params
+}
+
+// variadicBorrowParam is the Param of one argument after a C variadic
+// function's declared parameters: how a borrow of the place it names is
+// passed, or the zero Param when it is not a borrow.
+func (l *lowerer) variadicBorrowParam(arg ast.Expression) Param {
+	prefix, ok := arg.(*ast.PrefixExpr)
+	if !ok || (prefix.Operator != "&" && prefix.Operator != "&var") {
+		return Param{}
+	}
+	elem := l.assignTargetType(prefix.Right)
+	if elem == "" {
+		return Param{}
+	}
+	if prefix.Operator == "&var" {
+		return Param{Type: "&var " + elem, Passing: PassCallerStorage}
+	}
+	return Param{Type: "&" + elem, Passing: PassCopyAddress}
 }
 
 // lowerTypedNamedCallExpr lowers the small typed-call subset with backend support.

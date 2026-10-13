@@ -460,7 +460,10 @@ func (l *lowerer) slotPointer(expr ast.Expression) (Value, bool) {
 		return Value{}, false
 	}
 	value, bound := l.env.get(ident.Name)
-	if !bound || (!l.slots[ident.Name] && !l.placeSlots[value.Name] && !l.lentPlaces[value.Name]) {
+	if !bound || l.forIndexes[value.Name] {
+		return Value{}, false
+	}
+	if !l.slots[ident.Name] && !l.placeSlots[value.Name] && !l.lentPlaces[value.Name] {
 		return Value{}, false
 	}
 	return value, true
@@ -608,7 +611,7 @@ func (l *lowerer) sharedBorrowAddress(expr ast.Expression) (Value, bool) {
 // lowerCallArgs lowers the arguments of a call to name.
 func (l *lowerer) lowerCallArgs(name string, args []ast.Expression) ([]Value, error) {
 	if sig, ok := l.signatures[name]; ok {
-		return l.lowerCallArgsAs(sig.Params, args)
+		return l.lowerCallArgsAs(l.variadicCallParams(sig, args), args)
 	}
 	return l.lowerCallArgsAs(corePrimitiveParams(name), args)
 }

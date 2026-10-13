@@ -108,6 +108,8 @@ union TypeCollectionIssue {
     CHostBorrowParam(CollectionHostParamIssue),
     CHostParam(CollectionHostParamIssue),
     CHostReturn(CollectionNamedTypeIssue),
+    CVariadicStructParam(CollectionHostParamIssue),
+    CVariadicStructReturn(CollectionNamedTypeIssue),
     CExportMethod(CollectionSpanIssue),
     CExportStaticParams(CollectionSpanIssue),
     CExportMain(ast::Span),
@@ -832,6 +834,43 @@ fn (self: &Checker) validate_c_host_function_types(
         };
         return TypeCollectionIssue::CHostReturn(issue);
     }
+    return self.validate_c_variadic_function(tree, signature, params, return_type);
+}
+
+/// Refuses a C variadic declaration that passes or returns a struct by value,
+/// the Go `validateCVariadicFunction`. The backend rewrites such a struct
+/// into the registers or the memory the target's convention gives it
+/// (llvm/cabi.kizu), so the declared parameters are no longer one LLVM
+/// parameter each, and a variadic call has to say exactly where they end. A
+/// struct lent as `&S` is one pointer and stays allowed.
+fn (self: &Checker) validate_c_variadic_function(
+    tree: &ast::Ast,
+    signature: &ast::FunctionSignature,
+    params: &array::Array<Type>,
+    return_type: Type
+) -> !?TypeCollectionIssue {
+    if !signature.variadic {
+        return null;
+    }
+    var index = 0;
+    while params.get(index) |parameter_type| {
+        var lent = false;
+        if signature.params.at(index) |parameter| {
+            lent = parameter.borrow or parameter.mut_borrow;
+        }
+        if !lent and try self.is_extern_struct(tree, parameter_type) {
+            return TypeCollectionIssue::CVariadicStructParam(
+                self.host_param_issue(signature, index, parameter_type)
+            );
+        }
+        index = index + 1;
+    }
+    if try self.is_extern_struct(tree, return_type) {
+        let issue = CollectionNamedTypeIssue {
+            name: signature.name, type_name: return_type, span: signature.span
+        };
+        return TypeCollectionIssue::CVariadicStructReturn(issue);
+    }
     return null;
 }
 
@@ -1047,6 +1086,7 @@ fn (self: &var Checker) cache_function_signature(tree: &ast::Ast, source: &ast::
         static_params: array::new<StaticParamType>(self.allocator),
         params: array::new<SignatureParamType>(self.allocator),
         return_type: empty_type(),
+        variadic: source.variadic,
         requires_unsafe: source.requires_unsafe,
         std: source.std
     };
@@ -1392,6 +1432,26 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
             try message.append_bytes(self.allocator, " returns `");
             try self.append_checker_type(&var message, named.type_name);
             try message.append_bytes(self.allocator, "`, which C cannot produce");
+        },
+        CVariadicStructParam(host_param) => {
+            span = host_param.span;
+            try message.append_bytes(self.allocator, "C variadic ");
+            try append_function_name(self.allocator, &var message, tree, host_param.name);
+            try message.append_bytes(self.allocator, " parameter ");
+            try fmt::append_i64(self.allocator, &var message, host_param.index);
+            try message.append_bytes(self.allocator, " passes `");
+            try self.append_checker_type(&var message, host_param.type_name);
+            try message.append_bytes(self.allocator, "` by value; lend it as `&");
+            try self.append_checker_type(&var message, host_param.type_name);
+            try message.append_byte(self.allocator, cast<u8>(96));
+        },
+        CVariadicStructReturn(named) => {
+            span = named.span;
+            try message.append_bytes(self.allocator, "C variadic ");
+            try append_function_name(self.allocator, &var message, tree, named.name);
+            try message.append_bytes(self.allocator, " cannot return `");
+            try self.append_checker_type(&var message, named.type_name);
+            try message.append_bytes(self.allocator, "` by value");
         },
         CExportMethod(spanned) => {
             span = spanned.span;

@@ -98,6 +98,18 @@ fn (self: &var Checker) check_ident_expr(
                     "type error", expression.span, move message
                 );
             }
+            if function.signature.variadic {
+                var message = string::new(self.allocator);
+                errdefer message.deinit(self.allocator);
+                try message.append_bytes(self.allocator, "C variadic function `");
+                try message.append_bytes(self.allocator, name);
+                try message.append_bytes(self.allocator,
+                    "` cannot be used as a function pointer; call it by name"
+                );
+                return try self.checker_message_at(
+                    "type error", expression.span, move message
+                );
+            }
         }
     }
     // A top-level function's name is the one value a function pointer takes.
@@ -495,7 +507,6 @@ fn (self: &var Checker) check_logical(
     return try self.checker_text_diagnostic_at(span, move message);
 }
 
-// Validates equality operands.
 // Validates equality operands. Two error sets compare when one holds every
 // member of the other -- a set and a union it is part of. A member is one
 // value whichever set carries it (SPEC §11.2), so the comparison is the same
@@ -510,8 +521,48 @@ fn (self: &var Checker) check_equality(
     if !self.error_set_fits(left, right) and !self.error_set_fits(right, left) {
         return try self.operator_type_mismatch(operator, left, right, span);
     }
+    if !self.compares_as_one_value(left) {
+        var message = string::new(self.allocator);
+        errdefer message.deinit(self.allocator);
+        try message.append_bytes(self.allocator, "type error: operator `");
+        try message.append_bytes(self.allocator, operator);
+        try message.append_bytes(self.allocator, "` is not defined on ");
+        try self.append_checker_type(&var message, left);
+        try message.append_byte(self.allocator, cast<u8>(10));
+        try message.append_bytes(
+            self.allocator,
+            "note: it compares a number, a bool, an enum, an error, a raw pointer, a function, an Allocator or an arena handle"
+        );
+        return try self.checker_text_diagnostic_at(span, move message);
+    }
     out.* = try self.types.bool_type();
     return null;
+}
+
+// Reports whether a value of the type is one machine value, so that `==` on
+// it is one comparison (SPEC §6.9.1), the Go `comparesAsOneValue`. A struct,
+// an optional, a view or an array is several, and comparing those is a loop
+// the source writes.
+fn (self: &Checker) compares_as_one_value(value: Type) -> bool {
+    let handle = value.node orelse return false;
+    let entry = self.types.entries.at(handle);
+    let name = entry.spelling.as_bytes();
+    if is_numeric_type(name) or mem::equal_bytes(name, "bool") or mem::equal_bytes(name, "Allocator") {
+        return true;
+    }
+    if mem::starts_with(name, "ptr<") or mem::starts_with(name, "?ptr<") {
+        return true;
+    }
+    if typ::is_func_spelling(name) or mem::starts_with(name, "std::arena::Handle<") {
+        return true;
+    }
+    if self.metadata.enums_by_name.get(name) |_| {
+        return true;
+    }
+    if self.metadata.error_sets_by_name.get(name) |_| {
+        return true;
+    }
+    return false;
 }
 
 // Reports both operand types for a binary mismatch.

@@ -290,6 +290,7 @@ fn (self: &Parser) function_stub(
             name: name,
             static_params: array::new<ast::StaticParam>(self.allocator),
             params: array::new<ast::Param>(self.allocator),
+            variadic: false,
             return_type: null,
             requires_unsafe: false,
             extern_abi: extern_abi,
@@ -1156,13 +1157,16 @@ fn (self: &var Parser) parse_function_signature_after_fn(
     if !try self.expect_peek(token::Kind::LParen) {
         return false;
     }
-    let params = try self.parse_params(tree);
+    let allow_variadic = text_equal(tree, signature.extern_abi, "c") and !signature.receiver;
+    var variadic = false;
+    let params = try self.parse_params(tree, allow_variadic, &var variadic);
     defer params.deinit(self.allocator);
     var index = 0;
     while params.get(index) |param| {
         try signature.params.append(self.allocator, param);
         index = index + 1;
     }
+    signature.variadic = variadic;
     if !try self.expect_current(token::Kind::RParen) {
         return false;
     }
@@ -1253,8 +1257,14 @@ fn (self: &var Parser) parse_return_clause(
     return false;
 }
 
+/// Parses a function parameter list, the Go `parseParams`. variadic is set
+/// when the list ends in the `...` of a C variadic function; allow_variadic
+/// says whether the declaration being parsed is one that may, an
+/// `extern "c" fn`.
 fn (self: &var Parser) parse_params(
-    tree: &var ast::Ast
+    tree: &var ast::Ast,
+    allow_variadic: bool,
+    variadic: &var bool
 ) -> !array::Array<ast::Param> {
     var params = array::new<ast::Param>(self.allocator);
     errdefer params.deinit(self.allocator);
@@ -1263,6 +1273,19 @@ fn (self: &var Parser) parse_params(
         return move params;
     }
     while true {
+        if self.current_kind() == token::Kind::Ellipsis {
+            variadic.* = true;
+            try self.check_variadic_marker(allow_variadic, params.len());
+            if self.peek_kind() != token::Kind::Comma {
+                break;
+            }
+            try self.next_token();
+            if self.peek_kind() == token::Kind::RParen {
+                break;
+            }
+            try self.next_token();
+            continue;
+        }
         if self.current_kind() == token::Kind::Comptime {
             try self.error_text(
                 "compile-time parameter belongs in `<...>`, not `(...)`"
@@ -1315,11 +1338,43 @@ fn (self: &var Parser) parse_params(
     return move params;
 }
 
+/// Reports a `...` written where a parameter list cannot end in one, the Go
+/// `checkVariadicMarker`, with the marker as the current token. The list is
+/// parsed on either way, so a misplaced marker is one diagnostic rather than
+/// a cascade over the tokens after it.
+fn (self: &var Parser) check_variadic_marker(allow_variadic: bool, named: i64) -> !void {
+    if !allow_variadic {
+        return self.error_variadic_declaration("");
+    }
+    if named == 0 {
+        return self.error_text("`...` needs a named parameter before it");
+    }
+    if self.peek_kind() != token::Kind::RParen {
+        return self.error_text("`...` must be the last entry of the parameter list");
+    }
+    return;
+}
+
+/// Records prefix followed by the one place `...` may be written, at the
+/// current token.
+fn (self: &var Parser) error_variadic_declaration(prefix: []u8) -> !void {
+    var entry = try self.error_entry();
+    errdefer entry.deinit(self.allocator);
+    try entry.message.append_bytes(self.allocator, prefix);
+    try entry.message.append_bytes(self.allocator, "`...` is allowed only in an `extern ");
+    try entry.message.append_byte(self.allocator, cast<u8>(34));
+    try entry.message.append_bytes(self.allocator, "c");
+    try entry.message.append_byte(self.allocator, cast<u8>(34));
+    try entry.message.append_bytes(self.allocator, " fn` declaration");
+    return self.record(move entry);
+}
+
 fn (self: &var Parser) parse_receiver(
     tree: &var ast::Ast
 ) -> !?array::Array<ast::Param> {
     try self.next_token();
-    var params = try self.parse_params(tree);
+    var receiver_variadic = false;
+    var params = try self.parse_params(tree, false, &var receiver_variadic);
     errdefer params.deinit(self.allocator);
     if !try self.expect_current(token::Kind::RParen) {
         params.deinit(self.allocator);
@@ -3237,12 +3292,18 @@ fn (self: &var Parser) parse_func_type_with(
     if self.peek_kind() != token::Kind::RParen {
         while true {
             try self.next_token();
-            let parsed = try self.parse_type_node(builder);
-            if parsed |param| {
-                try params.append(self.allocator, param);
+            if self.current_kind() == token::Kind::Ellipsis {
+                // The rest of the type is parsed all the same, so the marker
+                // is one diagnostic rather than a cascade.
+                try self.error_variadic_declaration("a function type cannot be variadic; ");
             } else {
-                params.deinit(self.allocator);
-                return null;
+                let parsed = try self.parse_type_node(builder);
+                if parsed |param| {
+                    try params.append(self.allocator, param);
+                } else {
+                    params.deinit(self.allocator);
+                    return null;
+                }
             }
             if self.peek_kind() != token::Kind::Comma {
                 break;
