@@ -35,7 +35,16 @@
 #include <time.h>
 #include <ucontext.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+/* The iOS SDK ships no <sys/random.h>; libSystem exports getentropy there
+   from iOS 10 on, with the signature macOS declares. */
+int getentropy(void *buffer, size_t size);
+#else
 #include <sys/random.h>
+#endif
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #include <sys/event.h>

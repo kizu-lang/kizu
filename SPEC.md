@@ -3232,8 +3232,9 @@ std::target::is_linux()   -> bool    comptime-if-only
 OS を問う 2 つは native build の operating system を答えます。native build では
 ちょうど 1 つが true で、wasm build では両方 false です。`build --target native
 --triple` は triple の OS を、それ以外の native command は compiler が動いている
-host の OS を選びます。native target の OS は darwin と linux で、他の OS を名指す
-triple は build を拒否します。同じ OS 名を manifest の `[native.<os>]`(§3)が使います。
+host の OS を選びます。native target の OS は darwin と linux で、macOS と iOS の
+triple はどちらも darwin です。他の OS を名指す triple は build を拒否します。
+同じ OS 名を manifest の `[native.<os>]`(§3)が使います。
 
 述語に runtime の値はありません。`std::target` という source module を import する
 形でもなく、利用者が同じ述語を定義することもできません。選ばれた branch だけを
