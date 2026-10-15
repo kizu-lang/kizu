@@ -34,6 +34,20 @@ func TestRuntimeKeyNamesTheClang(t *testing.T) {
 	}
 }
 
+// TestRuntimeKeyNamesTheSDK keys the runtime by the SDK Apple's clang reads
+// from SDKROOT: one compiled against the macOS SDK is not one for iOS.
+func TestRuntimeKeyNamesTheSDK(t *testing.T) {
+	options := Options{LibC: "on", Runtime: "hosted", Emit: "obj", Linker: "clang",
+		Triple: "arm64-apple-ios17.0"}
+	t.Setenv("SDKROOT", "")
+	unset := runtimeCacheTarget(options, "Apple clang version 17.0.0")
+	t.Setenv("SDKROOT", "/sdk/iPhoneOS.sdk")
+	set := runtimeCacheTarget(options, "Apple clang version 17.0.0")
+	if unset == set {
+		t.Fatalf("two SDKs share the key %q", set)
+	}
+}
+
 // TestExecutableAndRuntimeKeysDoNotCollide checks the two artifacts a native
 // build stores are told apart by their keys. They are built from different
 // content by the same toolchain, so only the name they are filed under keeps a
@@ -144,9 +158,11 @@ func TestFrameworkNeedsDarwin(t *testing.T) {
 // build for.
 func TestTargetForTriple(t *testing.T) {
 	cases := map[string]stdtarget.Target{
-		"arm64-apple-darwin":       stdtarget.NativeDarwin,
-		"x86_64-apple-macos":       stdtarget.NativeDarwin,
-		"x86_64-unknown-linux-gnu": stdtarget.NativeLinux,
+		"arm64-apple-darwin":            stdtarget.NativeDarwin,
+		"x86_64-apple-macos":            stdtarget.NativeDarwin,
+		"arm64-apple-ios17.0":           stdtarget.NativeDarwin,
+		"arm64-apple-ios17.0-simulator": stdtarget.NativeDarwin,
+		"x86_64-unknown-linux-gnu":      stdtarget.NativeLinux,
 	}
 	for triple, want := range cases {
 		got, err := TargetFor(triple)

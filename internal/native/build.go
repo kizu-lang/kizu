@@ -179,16 +179,18 @@ func linkerVersion(options Options) (string, error) {
 }
 
 // TargetFor returns the native target a triple names. An omitted triple
-// names the host; explicit Apple Darwin and macOS triples name Darwin, Linux
-// triples name Linux, and a triple for any other OS is refused because the
-// runtime is not built for it.
+// names the host; explicit Apple Darwin, macOS and iOS triples name Darwin,
+// Linux triples name Linux, and a triple for any other OS is refused because
+// the runtime is not built for it. iOS is matched with its separator because
+// the OS field is the only place it is spelled.
 func TargetFor(triple string) (stdtarget.Target, error) {
 	if triple == "" {
 		return stdtarget.Host()
 	}
 	lower := strings.ToLower(triple)
 	switch {
-	case strings.Contains(lower, "darwin") || strings.Contains(lower, "macos"):
+	case strings.Contains(lower, "darwin") || strings.Contains(lower, "macos") ||
+		strings.Contains(lower, "-ios"):
 		return stdtarget.NativeDarwin, nil
 	case strings.Contains(lower, "linux"):
 		return stdtarget.NativeLinux, nil
@@ -275,11 +277,18 @@ func executableCacheTarget(options Options, runtimeSource string) string {
 }
 
 // toolchainKey spells what builds an artifact rather than what it is built
-// from: the driver, the machine it targets, and the flags it is asked to honour.
+// from: the driver, the machine it targets, the flags it is asked to honour,
+// and the SDK it compiles against. Apple's clang takes the SDK from SDKROOT
+// and falls back to the macOS one whatever the triple, so an iOS runtime
+// built before SDKROOT was set must not be what a later build links.
 func toolchainKey(options Options) []string {
 	key := []string{options.Linker, runtime.GOOS + "-" + runtime.GOARCH}
 	key = append(key, clangFlags(options)...)
-	return append(key, linkFlags(options)...)
+	key = append(key, linkFlags(options)...)
+	if sdk := os.Getenv("SDKROOT"); sdk != "" {
+		key = append(key, "SDKROOT="+sdk)
+	}
+	return key
 }
 
 // compileRuntime compiles the runtime source into one object file.
