@@ -109,6 +109,9 @@ type emitter struct {
 	// optionLocals are the current function's optionals held as a presence
 	// local and a payload local instead of a frame slot (optionLocalsOf).
 	optionLocals map[string]bool
+	// phiStorage is where the current function's memory-backed phis keep
+	// their values (planFrame, registerFrameValues).
+	phiStorage map[string]phiCell
 	// loopHoists are the current function's loops' hoisted reads, by loop
 	// header (planLoopHoists); hoisted holds those of the loops being written.
 	loopHoists map[string][]loopHoist

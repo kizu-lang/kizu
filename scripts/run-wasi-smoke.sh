@@ -137,6 +137,15 @@ run_example "loop_in_called_function" "examples/loop_in_called_function.kizu" "0
 0
 1
 3"
+run_example "loop_carries_struct_values" "examples/loop_carries_struct_values.kizu" "2
+2
+2
+10
+10
+10
+31
+13
+31"
 # A function pointer reaches wasm as a table index, so this crosses the header's
 # type declaration, the elem segment, and call_indirect.
 run_example "function_pointer" "examples/function_pointer.kizu" "42

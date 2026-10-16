@@ -12,6 +12,7 @@ import std::string;
 /// Is one fixed frame slot and the function generation that owns it.
 struct FrameSlot {
     offset: i64,
+    size: i64,
     generation: i64,
 }
 
@@ -90,8 +91,130 @@ fn (self: &var Emitter) plan_frame(
             }
         }
     }
+    if try self.plan_phi_cells(module, node) |failed| {
+        return move failed;
+    }
     self.frame_size = wasm_align_up(self.frame_size, 8);
     return null;
+}
+
+/// Reports whether a phi result is memory-backed, the Go `hasPhiCell`. Every
+/// other memory-backed value owns the result slot its instruction writes, but
+/// that instruction writes the same slot again on the next trip around a
+/// loop, so a phi that only pointed at its incoming value would see the value
+/// change under it while it is still live -- two phis fed the same value, or
+/// one fed a value its own loop rebuilds. The phi copies the bytes into a
+/// slot of its own instead.
+fn (self: &var Emitter) has_phi_cell(module: &ir::Module, result: ir::Value) -> !bool {
+    return try self.is_memory_type(module, result.type_name) and !self.is_flag_result(result.name) and
+        !self.is_option_local(result.name);
+}
+
+/// Reserves each memory-backed phi's slot, and a park slot for the ones
+/// another phi of the same block reads, the Go `planPhiCells`.
+fn (self: &var Emitter) plan_phi_cells(
+    module: &ir::Module,
+    node: &ir::FunctionNode
+) -> !?diagnostic::Diagnostic {
+    let allocator = self.allocator;
+    let generation = self.generation;
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if instr_node.op != ir::Op::Phi or !try self.has_phi_cell(module, instr_node.result) {
+                continue;
+            }
+            let outcome = try self.type_layout(module, instr_node.result.type_name);
+            match outcome {
+                Error(failed) => return move failed,
+                Layout(layout) => {
+                    let retained = ir::name_text(&module.names, instr_node.result.name);
+                    let bytes = retained.as_bytes();
+                    var slot_key = try phi_slot_key(allocator, "phi:", bytes);
+                    defer slot_key.deinit(allocator);
+                    let slot_bytes = slot_key.as_bytes();
+                    try allocate_frame_slot(
+                        allocator,
+                        generation,
+                        &var self.frame_size,
+                        &var self.local_slots,
+                        slot_bytes,
+                        layout
+                    );
+                    if phi_read_by_phis(module, block_node, instr_node.result.name) {
+                        var park_key = try phi_slot_key(allocator, "phi-park:", bytes);
+                        defer park_key.deinit(allocator);
+                        let park_bytes = park_key.as_bytes();
+                        try allocate_frame_slot(
+                            allocator,
+                            generation,
+                            &var self.frame_size,
+                            &var self.local_slots,
+                            park_bytes,
+                            layout
+                        );
+                    }
+                },
+            }
+        }
+    }
+    return null;
+}
+
+/// Reports whether another phi of block takes the phi named name as an
+/// incoming value, the Go `phisReadByPhis`.
+fn phi_read_by_phis(module: &ir::Module, block: &ir::BlockNode, name: ir::Name) -> bool {
+    var instr_index = 0;
+    while block.instrs.get(instr_index) |instr| {
+        instr_index = instr_index + 1;
+        let instr_node = module.instrs.at(instr.node);
+        if instr_node.op != ir::Op::Phi or ir::same_name(instr_node.result.name, name) {
+            continue;
+        }
+        var incoming_index = 0;
+        while instr_node.incoming.get(incoming_index) |incoming| {
+            incoming_index = incoming_index + 1;
+            if ir::same_name(incoming.value.name, name) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// Builds the frame-map key of a phi's slot (prefix `phi:`) or park slot
+/// (prefix `phi-park:`).
+fn phi_slot_key(allocator: Allocator, prefix: []u8, name: []u8) -> !string::String {
+    var out = try string::from_bytes(allocator, prefix);
+    errdefer out.deinit(allocator);
+    try out.append_bytes(allocator, name);
+    return move out;
+}
+
+/// Is where a memory-backed phi keeps a value: the slot's address and size.
+struct PhiCell {
+    expr: ir::Name,
+    size: i64,
+}
+
+/// Returns the planned slot of a memory-backed phi under prefix, or null for
+/// a phi that has none.
+fn (self: &var Emitter) phi_cell(module: &ir::Module, result: ir::Value, prefix: []u8) -> !?PhiCell {
+    let retained = ir::name_text(&module.names, result.name);
+    let bytes = retained.as_bytes();
+    var key = try phi_slot_key(self.allocator, prefix, bytes);
+    defer key.deinit(self.allocator);
+    let key_bytes = key.as_bytes();
+    let slot = self.local_slots.get(key_bytes) orelse return null;
+    if slot.generation != self.generation {
+        return null;
+    }
+    return PhiCell { expr: try self.frame_slot_expr(slot.offset), size: slot.size };
 }
 
 /// Returns storage for one wasm value placed in an addressable cell.
@@ -271,7 +394,7 @@ fn allocate_frame_slot(
         }
     }
     let offset = wasm_align_up(frame_size.*, layout.align);
-    try slots.insert(allocator, name, FrameSlot { offset: offset, generation: generation });
+    try slots.insert(allocator, name, FrameSlot { offset: offset, size: layout.size, generation: generation });
     frame_size.* = offset + wasm_max(layout.size, 1);
     return;
 }

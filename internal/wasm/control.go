@@ -898,7 +898,8 @@ func (e *emitter) isBackEdge(s *structure, source string, target string) bool {
 // another phi of the block has to read it before that phi is assigned. Copies
 // are written once nothing still waiting reads what they assign; a cycle of
 // them, a pair of phis trading values, parks one phi's value in the temporary
-// phiTempLocal declares for its type first.
+// phiTempLocal declares for its type first. A memory-backed phi takes the
+// bytes into its own slot (hasPhiCell) and parks them in its park slot.
 func (e *emitter) writePhiCopies(source string, target string, s *structure) {
 	block := s.blocks[target]
 	if block == nil {
@@ -925,18 +926,29 @@ func (e *emitter) writePhiCopies(source string, target string, s *structure) {
 		}
 		if ready < 0 {
 			parked := pending[0].dst
-			temp := phiTempLocal(e.wasmType(parked.Type))
 			read := "(local.get " + symbolName(parked.Name) + ")"
-			fmt.Fprintf(&e.out, "            (local.set %s %s)\n", temp, read)
+			held := "(local.get " + phiTempLocal(e.wasmType(parked.Type)) + ")"
+			if cell, ok := e.phiStorage[parked.Name]; ok {
+				e.writeMemoryCopy(cell.park, read, cell.size)
+				held = cell.park
+			} else {
+				fmt.Fprintf(&e.out, "            (local.set %s %s)\n",
+					phiTempLocal(e.wasmType(parked.Type)), read)
+			}
 			for index := range pending {
 				if pending[index].src == read {
-					pending[index].src = "(local.get " + temp + ")"
+					pending[index].src = held
 				}
 			}
 			continue
 		}
 		next := pending[ready]
-		fmt.Fprintf(&e.out, "            (local.set %s %s)\n", symbolName(next.dst.Name), next.src)
+		src := next.src
+		if cell, ok := e.phiStorage[next.dst.Name]; ok {
+			e.writeMemoryCopy(cell.slot, next.src, cell.size)
+			src = cell.slot
+		}
+		fmt.Fprintf(&e.out, "            (local.set %s %s)\n", symbolName(next.dst.Name), src)
 		e.values[next.dst.Name] = valueInfo{expr: "(local.get " + symbolName(next.dst.Name) + ")"}
 		pending = append(pending[:ready], pending[ready+1:]...)
 	}
