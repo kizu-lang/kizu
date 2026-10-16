@@ -46,14 +46,124 @@ func (e *emitter) planFrame(fn *ir.Function) (*frameLayout, error) {
 			}
 		}
 	}
+	if err := e.planPhiCells(frame, fn); err != nil {
+		return nil, err
+	}
 	frame.size = alignUp(frame.size, 8)
 	return frame, nil
+}
+
+// phiCell is the storage of one memory-backed phi: the slot that holds its
+// value and, when another phi of its block reads it, the slot a cycle of
+// copies parks its old value in.
+type phiCell struct {
+	slot string
+	park string
+	size int
+}
+
+// hasPhiCell reports whether the phi result is memory-backed. Every other
+// memory-backed value owns the result slot its instruction writes, but that
+// instruction writes the same slot again on the next trip around a loop, so a
+// phi that only pointed at its incoming value would see the value change
+// under it while it is still live -- two phis fed the same value, or one fed
+// a value its own loop rebuilds. The phi copies the bytes into a slot of its
+// own instead.
+func (e *emitter) hasPhiCell(result ir.Value) bool {
+	return e.isMemoryType(result.Type) && !e.flagResults[result.Name] &&
+		!e.optionLocals[result.Name]
+}
+
+// planPhiCells reserves each memory-backed phi's slot, and a park slot for the
+// ones another phi of the same block reads.
+func (e *emitter) planPhiCells(frame *frameLayout, fn *ir.Function) error {
+	for _, block := range fn.Blocks {
+		read := phisReadByPhis(block)
+		for _, instr := range block.Instrs {
+			if instr.Op != "phi" || !e.hasPhiCell(instr.Result) {
+				continue
+			}
+			layout, err := e.typeLayout(instr.Result.Type)
+			if err != nil {
+				return err
+			}
+			frame.allocate(phiSlotKey(instr.Result.Name), layout)
+			if read[instr.Result.Name] {
+				frame.allocate(phiParkSlotKey(instr.Result.Name), layout)
+			}
+		}
+	}
+	return nil
+}
+
+// phisReadByPhis names the phis of block that another phi of block takes as
+// an incoming value.
+func phisReadByPhis(block *ir.Block) map[string]bool {
+	phis := map[string]bool{}
+	for _, instr := range block.Instrs {
+		if instr.Op == "phi" {
+			phis[instr.Result.Name] = true
+		}
+	}
+	read := map[string]bool{}
+	for _, instr := range block.Instrs {
+		if instr.Op != "phi" {
+			continue
+		}
+		for _, incoming := range instr.Incoming {
+			if phis[incoming.Value.Name] && incoming.Value.Name != instr.Result.Name {
+				read[incoming.Value.Name] = true
+			}
+		}
+	}
+	return read
+}
+
+// registerPhiCells resolves the planned phi slots of fn to addresses.
+func (e *emitter) registerPhiCells(fn *ir.Function) error {
+	e.phiStorage = map[string]phiCell{}
+	for _, block := range fn.Blocks {
+		read := phisReadByPhis(block)
+		for _, instr := range block.Instrs {
+			if instr.Op != "phi" || !e.hasPhiCell(instr.Result) {
+				continue
+			}
+			layout, err := e.typeLayout(instr.Result.Type)
+			if err != nil {
+				return err
+			}
+			cell := phiCell{size: layout.size}
+			if cell.slot, err = e.frameSlot(phiSlotKey(instr.Result.Name)); err != nil {
+				return err
+			}
+			if read[instr.Result.Name] {
+				if cell.park, err = e.frameSlot(phiParkSlotKey(instr.Result.Name)); err != nil {
+					return err
+				}
+			}
+			e.phiStorage[instr.Result.Name] = cell
+		}
+	}
+	return nil
+}
+
+// phiSlotKey separates phi storage from the other frame slots.
+func phiSlotKey(name string) string {
+	return "phi:" + name
+}
+
+// phiParkSlotKey names the slot a cycle of phi copies parks a phi's value in.
+func phiParkSlotKey(name string) string {
+	return "phi-park:" + name
 }
 
 // registerFrameValues makes fixed-address results available before blocks are
 // written. A merge block can be printed before the predecessor that defines an
 // incoming value, but its runtime edge still reads the same frame address.
 func (e *emitter) registerFrameValues(fn *ir.Function) error {
+	if err := e.registerPhiCells(fn); err != nil {
+		return err
+	}
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
 			if e.isMemoryType(instr.Result.Type) &&

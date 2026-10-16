@@ -1233,7 +1233,9 @@ struct PhiCopy {
 /// another phi of the block has to read it before that phi is assigned.
 /// Copies are written once nothing still waiting reads what they assign; a
 /// cycle of them, a pair of phis trading values, parks one phi's value in the
-/// temporary phi_temp_local names for its type first.
+/// temporary phi_temp_local names for its type first. A memory-backed phi
+/// takes the bytes into its own slot (has_phi_cell) and parks them in its
+/// park slot.
 fn (self: &var Emitter) write_phi_copies(
     module: &ir::Module,
     function: &ir::FunctionNode,
@@ -1295,12 +1297,17 @@ fn (self: &var Emitter) write_phi_copies(
             let parked_text = ir::name_text(&module.names, parked.name);
             let parked_bytes = parked_text.as_bytes();
             let read = try self.local_expr(parked_bytes);
-            try self.line2("            (local.set %s %s)", Arg::Str(temp), Arg::Str(read));
-            let temp_read = try self.local_get_expr(temp);
+            var held = try self.local_get_expr(temp);
+            if try self.phi_cell(module, parked, "phi-park:") |park| {
+                try self.write_memory_copy(park.expr, read, park.size);
+                held = park.expr;
+            } else {
+                try self.line2("            (local.set %s %s)", Arg::Str(temp), Arg::Str(read));
+            }
             index = 0;
             while pending.get(index) |candidate| {
                 if !candidate.done and ir::same_name(candidate.src, read) {
-                    try pending.set(index, PhiCopy { dst: candidate.dst, src: temp_read, done: false });
+                    try pending.set(index, PhiCopy { dst: candidate.dst, src: held, done: false });
                 }
                 index = index + 1;
             }
@@ -1310,7 +1317,12 @@ fn (self: &var Emitter) write_phi_copies(
         let dst_text = ir::name_text(&module.names, next.dst.name);
         let dst_bytes = dst_text.as_bytes();
         let symbol = try self.symbol_name_of(dst_bytes);
-        try self.line2("            (local.set %s %s)", Arg::Str(symbol), Arg::Str(next.src));
+        var src = next.src;
+        if try self.phi_cell(module, next.dst, "phi:") |cell| {
+            try self.write_memory_copy(cell.expr, next.src, cell.size);
+            src = cell.expr;
+        }
+        try self.line2("            (local.set %s %s)", Arg::Str(symbol), Arg::Str(src));
         let expr = try self.local_expr(dst_bytes);
         try self.set_value(module, next.dst, expr);
         try pending.set(ready, PhiCopy { dst: next.dst, src: next.src, done: true });
