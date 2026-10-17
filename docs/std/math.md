@@ -38,6 +38,9 @@ std::math::cos<T>(value: T) -> T
 std::math::sin_cos<T>(value: T) -> SinCos     // { sin: f64, cos: f64 }
 std::math::sin_with<fused: bool>(value: f64) -> f64
 std::math::cos_with<fused: bool>(value: f64) -> f64
+std::math::exp_with<fused: bool>(value: f64) -> f64
+std::math::log_with<fused: bool>(value: f64) -> f64
+std::math::pow_with<fused: bool>(base: f64, exponent: f64) -> f64
 std::math::tan<T>(value: T) -> T
 std::math::asin<T>(value: T) -> T
 std::math::acos<T>(value: T) -> T
@@ -66,12 +69,16 @@ trusted primitive です。backend はそれぞれを 1 命令(LLVM intrinsic、
 `f64.sqrt` など)で出すので、正しく丸めた値がどの target でも同じ bit で返ります。
 `sqrt` は負の値に NaN を、`-0.0` に `-0.0` を返します。
 
-残りはこの 4 つと `std::float::bits` の上に Kizu で書いてあります。native では
-`x * y + z` を 1 回で丸める fused multiply-add も primitive `f64_fma` で
-1 命令になり、`exp` / `log` / `pow` / `sin` / `cos` の核はそれを使います。wasm
-には fma 命令が無いので、そこでは積と和を別々に丸めます。どちらの target も
-真の値から 1 ulp 以内ですが、この 5 つ(とそれに乗る `tanh` など)は native
-と wasm で最後の bit が違うことがあります。それ以外は target によりません。
+残りはこの 4 つと `std::float::bits` の上に Kizu で書いてあり、どの target でも
+同じ bit を返します。`exp` / `log` / `pow` / `sin` / `cos` の核は積と和を別々に
+丸めます。wasm には `x * y + z` を 1 回で丸める fused multiply-add の命令が無いので、
+native もそれに揃えています。
+
+`sin_with` / `cos_with` / `exp_with` / `log_with` / `pow_with` は `fused` で核を選び
+ます。`false` は `sin` などと同じです。`true` は積と和を 1 回で丸める核で、こちらも
+どの target でも同じ bit ですが、`sin` などとは最後の bit が違うことがあります。
+native では fma 命令 1 つなので速く、wasm では `fma` のソフトウェア実装を使うので
+遅くなります。どちらも真の値から 1 ulp 以内です。
 
 - `round` は最も近い整数値で、半分は零から遠い側へ丸めます(`round(0.5)` は
   `1.0`、`round(-0.5)` は `-1.0`)。`0.49999999999999994` は `0.0` です。
@@ -111,18 +118,16 @@ double-double で持って指数を掛け、それを `exp` の核に渡しま�
 - `ldexp` は `fraction * 2^exponent` で、範囲を超えれば無限大か 0、正規化数の
   下は 1 回だけ丸めて非正規化数にします。
 
-`sin_with` / `cos_with` は、fused multiply-add 命令のある target(`fused = true`、
-native)とない target(`false`、wasm)がそれぞれ計算する bit を、どの target の上でも
-返します。`sin<f64>` は native では `sin_with<true>`、wasm では `sin_with<false>` です。
-compiler はこれで `comptime math::sin<f64>(x)` を build 中の target の値に畳みます。
+compiler は `comptime math::sin<f64>(x)` を `sin_with<false>` の値に畳みます。
+実行時に計算する値と同じ bit です。
 
 `sin` / `cos` も table 駆動です。引数を円の 128 点 k pi/64 の最寄りに落とし
 (2^17 未満は 30 bit ずつの pi/64 を引く msun の形、それ以上は 4/pi を 1217 bit
 持った Payne–Hanek reduction)、表の sin(k pi/64)、cos(k pi/64)(double-double)と
 残り r の短い多項式から加法定理で組みます。答えの零点(sin なら 0 と pi)から
-3 点以内では表の値と多項式が打ち消し合うので、native の `sin` / `cos` は fused
-multiply-add で積と和の丸め誤差を厳密に拾い(分岐なし)、`sin_cos` と wasm は
-零点からの距離を直接多項式に入れます。`sin_cos` は同じ角の両方を 1 回の縮約と
+3 点以内では表の値と多項式が打ち消し合うので、`sin` / `cos` / `sin_cos` は
+零点からの距離を直接多項式に入れます。`fused = true` の核は代わりに fused
+multiply-add で積と和の丸め誤差を厳密に拾います(分岐なし)。`sin_cos` は同じ角の両方を 1 回の縮約と
 表引きで返すので、片方とほとんど同じ費用です。`tan` は Cephes の算法(Go と同じ)で pi/4 の 8 分円に
 落とします。`sin(1e22)` も `sin(1e300)` も正しい値です。
 
@@ -141,7 +146,7 @@ multiply-add で積と和の丸め誤差を厳密に拾い(分岐なし)、`sin_
   は 2 回丸めるので、`fma(0.1, 10.0, -1.0)` は `0.1 * 10.0` の誤差
   `5.551115123125783e-17` を返し、書き下した式は `0.0` です。積を 128 bit で
   正確に作り、`z` を揃えて 1 度だけ偶数丸めするので、hardware の fma と同じ bit
-  です。
+  です。native はその hardware の命令を使い、wasm はこのソフトウェア実装を使います。
 - `frexp` は `fraction * 2^exponent`(fraction は [1/2, 1))に、`modf` は整数部と
   小数部(どちらも元の符号)に分け、struct で 2 つの値を返します。
 

@@ -195,7 +195,7 @@ func (c *Checker) evalComptimeMathCall(expr *ast.CallExpr) (comptimeValue, bool,
 		}
 		args = append(args, value.f)
 	}
-	result, ok := stdmath.Call(name, args, c.target.IsNative())
+	result, ok := stdmath.Call(name, args)
 	if !ok {
 		return comptimeValue{}, true, errorf(
 			"comptime error: `%s` takes %d arguments here", name, len(args))

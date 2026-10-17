@@ -374,7 +374,7 @@ func (c *Checker) floatLiteral(expr ast.Expression) (float64, bool) {
 			args = append(args, value)
 		}
 		name, _ := qualifiedName(e.Callee.(*ast.TypeApplyExpr).Callee)
-		return stdmath.Call(name, args, c.target.IsNative())
+		return stdmath.Call(name, args)
 	}
 	return 0, false
 }

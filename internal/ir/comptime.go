@@ -131,7 +131,7 @@ func (l *lowerer) constMathCall(expr *ast.CallExpr) (float64, bool) {
 		}
 		args = append(args, value)
 	}
-	return stdmath.Call(apply.Callee.String(), args, l.target.IsNative())
+	return stdmath.Call(apply.Callee.String(), args)
 }
 
 // targetPredicateCall answers a compiler-defined `std::target` predicate and

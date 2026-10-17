@@ -4,10 +4,9 @@
 // same target. It is a port of lib/kizu/std/src/math, not an approximation
 // of it: the same reduction, tables, polynomials and rounding order.
 //
-// The std answers differ between targets. With a fused multiply-add
-// instruction (native) a product and a sum round once; without one (wasm)
-// they round in turn, and near a zero of the answer the kernel takes another
-// route. Native says which.
+// std computes the unfused kernels on every target; std::math::sin_with<true>
+// rounds a product and a sum once instead, and near a zero of the answer
+// takes another route. The native argument names the fused kernels.
 //
 // Go may fuse x*y + z on its own; every product that must round on its own
 // is written float64(x * y), which the language defines to round.
@@ -23,8 +22,7 @@ func Sqrt(x float64) float64 {
 	return math.Sqrt(x)
 }
 
-// Sin is std::math::sin<f64> on a target with or without a fused
-// multiply-add.
+// Sin is std::math::sin_with<native>.
 func Sin(x float64, native bool) float64 {
 	if (math.Float64bits(x)>>52)&0x7ff >= 0x410 {
 		return sinHuge(x, native)
@@ -36,8 +34,7 @@ func Sin(x float64, native bool) float64 {
 	return sinAt(a.k, a.r, a.tail, native)
 }
 
-// Cos is std::math::cos<f64> on a target with or without a fused
-// multiply-add.
+// Cos is std::math::cos_with<native>.
 func Cos(x float64, native bool) float64 {
 	if (math.Float64bits(x)>>52)&0x7ff >= 0x410 {
 		return cosHuge(x, native)
@@ -46,7 +43,7 @@ func Cos(x float64, native bool) float64 {
 	return cosAt(a.k, a.r, a.tail, native)
 }
 
-// fmaFast is std's fma_fast: one rounding on native, two on wasm.
+// fmaFast is std's fma_on: one rounding when native, two otherwise.
 func fmaFast(x, y, z float64, native bool) float64 {
 	if native {
 		return math.FMA(x, y, z)
