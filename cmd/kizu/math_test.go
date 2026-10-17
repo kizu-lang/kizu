@@ -40,6 +40,10 @@ var mathUnaryFunctions = []struct {
 	{"log10", math.Log10, 2},
 	{"sin", math.Sin, 1},
 	{"cos", math.Cos, 1},
+	{"sin_fused", math.Sin, 1},
+	{"cos_fused", math.Cos, 1},
+	{"exp_fused", math.Exp, 1},
+	{"log_fused", math.Log, 1},
 	// tan ends in a reciprocal, which doubles what the fused multiply-add
 	// moved.
 	{"tan", math.Tan, 2},
@@ -61,7 +65,8 @@ var mathUnaryFunctions = []struct {
 }
 
 // mathHelpers are the functions the generated program defines itself, to
-// print one number of a std::math answer that has two.
+// print one number of a std::math answer that has two, and to call the fused
+// kernels (`_with<true>`) by a bare name.
 const mathHelpers = `fn frexp_fraction(value: f64) -> f64 {
     return math::frexp<f64>(value).fraction;
 }
@@ -76,6 +81,26 @@ fn modf_whole(value: f64) -> f64 {
 
 fn modf_fraction(value: f64) -> f64 {
     return math::modf<f64>(value).fraction;
+}
+
+fn sin_fused(value: f64) -> f64 {
+    return math::sin_with<true>(value);
+}
+
+fn cos_fused(value: f64) -> f64 {
+    return math::cos_with<true>(value);
+}
+
+fn exp_fused(value: f64) -> f64 {
+    return math::exp_with<true>(value);
+}
+
+fn log_fused(value: f64) -> f64 {
+    return math::log_with<true>(value);
+}
+
+fn pow_fused(base: f64, exponent: f64) -> f64 {
+    return math::pow_with<true>(base, exponent);
 }
 
 `
@@ -121,6 +146,7 @@ var mathBinaryFunctions = []struct {
 	}, 0},
 	// pow multiplies an exp of a log, so the last bit of each can add up.
 	{"pow", math.Pow, 2},
+	{"pow_fused", math.Pow, 2},
 	{"fmod", math.Mod, 0},
 	{"atan2", math.Atan2, 1},
 }
@@ -230,6 +256,7 @@ type mathExpectation struct {
 // and Exp, which sinh and cosh end in, overflows a little below the true
 // threshold. The arm64 build runs msun for those and checks them exactly.
 func goAnswersWrongly(name string, x float64) bool {
+	name = strings.TrimSuffix(name, "_fused")
 	switch name {
 	case "sin", "cos":
 		// Below 2^29 Go subtracts pi/4 in three pieces that hold about 100
@@ -260,7 +287,7 @@ func goAnswersWrongly(name string, x float64) bool {
 // exponent and with |y log x|: Pow(0.1, 10) is 4 ulp off and Pow(1e300, 0.1)
 // 44. std::math's pow was checked against 60-digit references instead.
 func goAnswersWronglyOnPair(name string, x, y float64) bool {
-	if name != "pow" {
+	if strings.TrimSuffix(name, "_fused") != "pow" {
 		return false
 	}
 	return math.Abs(y) > 2 || math.Abs(y*math.Log(math.Abs(x))) > 1
@@ -396,7 +423,8 @@ func TestMath(t *testing.T) {
 
 // TestMathWASM runs the same std::math comparison on the wasm32-wasi target, so
 // the float instructions of the wasm backend and its binary encoder answer
-// exactly what the native target does.
+// exactly what the native target does: std::math promises the same bits on
+// every target, so the two outputs must be equal line for line.
 func TestMathWASM(t *testing.T) {
 	wasmtime, err := exec.LookPath("wasmtime")
 	if err != nil {
@@ -419,6 +447,32 @@ func TestMathWASM(t *testing.T) {
 		t.Fatalf("wasmtime failed: %v\n%s", err, output)
 	}
 	compareMathOutput(t, bits, string(output))
+	native, err := runKizuEnv(nil, "run", source)
+	if err != nil {
+		t.Fatalf("run failed: %v\n%s", err, native)
+	}
+	wasmLines := strings.Split(string(output), "\n")
+	nativeLines := strings.Split(native, "\n")
+	for i := range wasmLines {
+		if i >= len(nativeLines) || wasmLines[i] == nativeLines[i] ||
+			mathBothNaN(wasmLines[i], nativeLines[i]) {
+			continue
+		}
+		t.Fatalf("%s: wasm printed %s, native %s", mathLabel(bits, i), wasmLines[i], nativeLines[i])
+	}
+	if len(wasmLines) != len(nativeLines) {
+		t.Fatalf("wasm printed %d lines, native %d", len(wasmLines), len(nativeLines))
+	}
+}
+
+// mathBothNaN reports whether two printed bit patterns are both NaN. wasm
+// leaves the sign and payload of a NaN an operation produces to the engine,
+// so only NaN-ness is the same bits across targets.
+func mathBothNaN(left, right string) bool {
+	a, errA := strconv.ParseInt(left, 10, 64)
+	b, errB := strconv.ParseInt(right, 10, 64)
+	return errA == nil && errB == nil &&
+		math.IsNaN(math.Float64frombits(uint64(a))) && math.IsNaN(math.Float64frombits(uint64(b)))
 }
 
 // mathSingleValues lists the f32 values the single-precision path is checked

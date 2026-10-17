@@ -2928,10 +2928,10 @@ f64、単項演算、二項演算、および §13.1 の `std::meta` 述語だ�
 
 f64 で評価できるのは、float literal、単項 `-`、`+ - * /`、比較、comptime 整数の
 `cast<f64>`、および `std::math` の `sin` / `cos` / `sqrt` / `pi` / `tau`(型引数
-`f64`)です。結果は literal に畳まれ、その bit は build 中の target で同じ式が
-実行時に計算する値と一致します: `sin` / `cos` は compiler の host の数学ライブラリ
-ではなく std の実装そのもの(native は fused multiply-add あり、wasm はなし)で
-評価します。`comptime` を付けて変わるのは計算する時点であり、値ではありません。
+`f64`)です。結果は literal に畳まれ、その bit は同じ式が実行時に計算する値と
+一致します: `sin` / `cos` は compiler の host の数学ライブラリではなく std の実装
+そのもので評価し、std はどの target でも同じ bit を返します。`comptime` を付けて
+変わるのは計算する時点であり、値ではありません。
 無限大と NaN は literal にならないので compile error です。f32 と、他の `std::math`
 関数は評価しません。
 

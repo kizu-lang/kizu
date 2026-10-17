@@ -7,10 +7,10 @@ import (
 
 // Call evaluates one std::math function a compile-time float expression may
 // call, by its qualified name, and reports whether the name is one. The set
-// is the one whose value std fixes bit for bit on every target it names:
-// sqrt is correctly rounded everywhere, pi and tau are literals, and sin and
-// cos are this package's port of std.
-func Call(name string, args []float64, native bool) (float64, bool) {
+// is the one whose value std fixes bit for bit on every target: sqrt is
+// correctly rounded everywhere, pi and tau are literals, and sin and cos are
+// this package's port of std, which is unfused on every target.
+func Call(name string, args []float64) (float64, bool) {
 	switch {
 	case name == "std::math::pi" && len(args) == 0:
 		return 3.141592653589793, true
@@ -19,9 +19,9 @@ func Call(name string, args []float64, native bool) (float64, bool) {
 	case name == "std::math::sqrt" && len(args) == 1:
 		return Sqrt(args[0]), true
 	case name == "std::math::sin" && len(args) == 1:
-		return Sin(args[0], native), true
+		return Sin(args[0], false), true
 	case name == "std::math::cos" && len(args) == 1:
-		return Cos(args[0], native), true
+		return Cos(args[0], false), true
 	default:
 		return 0, false
 	}

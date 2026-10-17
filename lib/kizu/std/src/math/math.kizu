@@ -4,10 +4,10 @@ import std::float;
 //
 // Four of them are one IEEE 754 operation each -- `sqrt`, `floor`, `ceil`
 // and `trunc` -- and rest on the backend, which has each as one instruction
-// or intrinsic and answers the correctly rounded value; the native target
-// adds the fused multiply-add, which wasm gets in software (fma_fast).
-// Everything else is written over those and over the bits of a float, so
-// the answer is the same on every target.
+// or intrinsic and answers the correctly rounded value. Everything else is
+// written over those and over the bits of a float, so the answer is the same
+// on every target. The kernels round a product and a sum in turn (fma_on<false>)
+// unless a caller asks for the fused ones (`exp_with<true>` and the like).
 
 // sqrt returns the square root of value, correctly rounded. A negative value
 // gives NaN; -0.0 gives -0.0.
@@ -183,16 +183,21 @@ fn exponent_mask() -> u64 { return cast<u64>(2047) << 52; }
 // exp returns e raised to value. Above about 709.78 the answer is infinity;
 // below about -745.13 it is 0.
 fn exp_f64(value: f64) -> f64 {
+    return exp_on<false>(value);
+}
+
+// exp_on is exp with the kernels' products and sums fused or not.
+fn exp_on<fused: bool>(value: f64) -> f64 {
     // The exponent of value above 2^-54; below that it wraps past 2^31.
     let top = ((float::bits(value) >> 52) & 0x7ff) - 0x3c9;
     if top >= 0x3f {
-        return exp_edges(value);
+        return exp_edges<fused>(value);
     }
-    return exp_kernel(value, 0.0, 0, false);
+    return exp_kernel<fused>(value, 0.0, 0, false);
 }
 
 // exp_edges is exp of a value below 2^-54 or at least 512 in magnitude.
-fn exp_edges(value: f64) -> f64 {
+fn exp_edges<fused: bool>(value: f64) -> f64 {
     let top = ((float::bits(value) >> 52) & 0x7ff) - 0x3c9;
     if top >= 0x80000000 {
         return 1.0 + value;
@@ -206,22 +211,7 @@ fn exp_edges(value: f64) -> f64 {
     if value < -745.133219101941108420 {
         return 0.0;
     }
-    return exp_kernel(value, 0.0, 0, true);
-}
-
-// fma_fast is x * y + z: on the native target the fused multiply-add
-// instruction, one rounding; on wasm, which has no such instruction, the
-// product and the sum rounded in turn. The kernels below use it only where
-// either is within their error budget, so both targets answer within one
-// unit in the last place, though not always the same bit. (The software
-// fma of `math::fma` would give the same bits but costs a hundred
-// instructions a call.)
-fn fma_fast(x: f64, y: f64, z: f64) -> f64 {
-    comptime if std::target::is_native() {
-        return std::internal::builtin::f64_fma(x, y, z);
-    } else {
-        return x * y + z;
-    }
+    return exp_kernel<fused>(value, 0.0, 0, true);
 }
 
 // exp_kernel returns exp(value + tail), negated when sign_bias is set, for
@@ -230,26 +220,26 @@ fn fma_fast(x: f64, y: f64, z: f64) -> f64 {
 // and exp(r) from a polynomial. The tail carries the low half of a
 // double-double argument (pow); edge says the scale by 2^(k/128) alone
 // could overflow or come out subnormal.
-fn exp_kernel(value: f64, tail: f64, sign_bias: u64, edge: bool) -> f64 {
+fn exp_kernel<fused: bool>(value: f64, tail: f64, sign_bias: u64, edge: bool) -> f64 {
     // Adding 1.5 * 2^52 rounds value * 128/ln2 to an integer whose low bits
     // sit in the low bits of the sum.
     let shift = 6755399441055744.0;
-    let kd = fma_fast(value, 184.6649652337873, shift);
+    let kd = fma_on<fused>(value, 184.6649652337873, shift);
     let ki = float::bits(kd);
     let k = kd - shift;
-    var r = fma_fast(k, -0.005415212348111709, value);
-    r = fma_fast(k, -1.2864023111638346e-14, r);
+    var r = fma_on<fused>(k, -0.005415212348111709, value);
+    r = fma_on<fused>(k, -1.2864023111638346e-14, r);
     r = r + tail;
     let index = cast<i64>(ki & 127);
     let sbits = exp_scale_bits(index) + ((ki + sign_bias) << 45);
     let r2 = r * r;
-    let low = fma_fast(r2, fma_fast(r, 0.16666666666666666, 0.5), float::from_bits(exp_tail_bits(index)) + r);
-    let tmp = fma_fast(r2 * r2, fma_fast(r, 0.008333333333333333, 0.041666666666666664), low);
+    let low = fma_on<fused>(r2, fma_on<fused>(r, 0.16666666666666666, 0.5), float::from_bits(exp_tail_bits(index)) + r);
+    let tmp = fma_on<fused>(r2 * r2, fma_on<fused>(r, 0.008333333333333333, 0.041666666666666664), low);
     if edge {
         return exp_edge_scale(tmp, sbits, ki);
     }
     let scale = float::from_bits(sbits);
-    return fma_fast(scale, tmp, scale);
+    return fma_on<fused>(scale, tmp, scale);
 }
 
 // exp_edge_scale finishes exp_kernel where 2^(k/128) alone would overflow
@@ -319,13 +309,13 @@ fn exp2_kernel(value: f64, edge: bool) -> f64 {
     let index = cast<i64>(ki & 127);
     let sbits = exp_scale_bits(index) + (ki << 45);
     let r2 = r * r;
-    let low = fma_fast(r2, fma_fast(r, 0.05550410866482158, 0.24022650695910072), fma_fast(r, 0.6931471805599453, float::from_bits(exp_tail_bits(index))));
-    let tmp = fma_fast(r2 * r2, fma_fast(r, 0.0013333558146428443, 0.009618129107628477), low);
+    let low = fma_on<false>(r2, fma_on<false>(r, 0.05550410866482158, 0.24022650695910072), fma_on<false>(r, 0.6931471805599453, float::from_bits(exp_tail_bits(index))));
+    let tmp = fma_on<false>(r2 * r2, fma_on<false>(r, 0.0013333558146428443, 0.009618129107628477), low);
     if edge {
         return exp_edge_scale(tmp, sbits, ki);
     }
     let scale = float::from_bits(sbits);
-    return fma_fast(scale, tmp, scale);
+    return fma_on<false>(scale, tmp, scale);
 }
 
 // expm1 returns exp(value) - 1, accurate where the subtraction itself would
@@ -440,6 +430,11 @@ fn scale_exponent(value: f64, k: i64) -> f64 {
 // log returns the natural logarithm of value. A negative value gives NaN and
 // zero gives negative infinity.
 fn log_f64(value: f64) -> f64 {
+    return log_on<false>(value);
+}
+
+// log_on is log with the kernel's products and sums fused or not.
+fn log_on<fused: bool>(value: f64) -> f64 {
     let ix = float::bits(value);
     // In [1 - 1/16, 1 + 1/16) log(1 + f) is taken straight from f = value - 1,
     // which is exact there.
@@ -447,13 +442,13 @@ fn log_f64(value: f64) -> f64 {
         return log_near_one(value - 1.0);
     }
     if (ix >> 48) - 0x0010 >= 0x7fe0 {
-        return log_edges(value);
+        return log_edges<fused>(value);
     }
-    return log_kernel(ix);
+    return log_kernel<fused>(ix);
 }
 
 // log_edges is log of zero, a subnormal, a negative value, infinity or NaN.
-fn log_edges(value: f64) -> f64 {
+fn log_edges<fused: bool>(value: f64) -> f64 {
     if float::is_nan(value) {
         return value;
     }
@@ -468,7 +463,7 @@ fn log_edges(value: f64) -> f64 {
         return value;
     }
     // A subnormal: value * 2^52 is normal.
-    return log_kernel(float::bits(value * 4503599627370496.0) - (cast<u64>(52) << 52));
+    return log_kernel<fused>(float::bits(value * 4503599627370496.0) - (cast<u64>(52) << 52));
 }
 
 // log_kernel is log of the normal positive value with bits ix, at least
@@ -476,7 +471,7 @@ fn log_edges(value: f64) -> f64 {
 // for the table centre c of z's sub-interval, and
 // log(value) = k ln2 + log(c) + log(1 + r) with |r| below 1/256. k ln2 and
 // log(c) are each split in two so that the sum of the high parts is exact.
-fn log_kernel(ix: u64) -> f64 {
+fn log_kernel<fused: bool>(ix: u64) -> f64 {
     let tmp = ix - 0x3fe6000000000000;
     let index = cast<i64>((tmp >> 45) & 127);
     let k = cast<f64>(cast<i64>(tmp) >> 52);
@@ -484,14 +479,14 @@ fn log_kernel(ix: u64) -> f64 {
     let r = (z - float::from_bits(log_centre_bits(index))) * float::from_bits(log_inverse_bits(index));
     // k ln2 + log(c) + r as hi + lo, with ln2 in two parts so that k times
     // the first is exact.
-    let w = fma_fast(k, 0.6931471805598903, float::from_bits(log_c_bits(index)));
+    let w = fma_on<fused>(k, 0.6931471805598903, float::from_bits(log_c_bits(index)));
     let hi = w + r;
-    let lo = fma_fast(k, 5.497923018708371e-14, w - hi + r) + float::from_bits(log_c_tail_bits(index));
+    let lo = fma_on<fused>(k, 5.497923018708371e-14, w - hi + r) + float::from_bits(log_c_tail_bits(index));
     let r2 = r * r;
     // -r^2/2 + r^3/3 - ... + r^7/7
-    let high = fma_fast(r2, 0.14285714285714285, fma_fast(r, -0.16666666666666666, 0.2));
-    let mid = fma_fast(r2, high, fma_fast(r, -0.25, 0.3333333333333333));
-    return fma_fast(r * r2, mid, fma_fast(r2, -0.5, lo)) + hi;
+    let high = fma_on<fused>(r2, 0.14285714285714285, fma_on<fused>(r, -0.16666666666666666, 0.2));
+    let mid = fma_on<fused>(r2, high, fma_on<fused>(r, -0.25, 0.3333333333333333));
+    return fma_on<fused>(r * r2, mid, fma_on<fused>(r2, -0.5, lo)) + hi;
 }
 
 // log_near_one is log(1 + f) for |f| below 1/16, the msun kernel on
@@ -631,6 +626,11 @@ fn log10_f64(value: f64) -> f64 {
 // non-integral exponent is NaN, and 0 and the infinities follow the sign
 // and parity of the exponent.
 fn pow_f64(base: f64, exponent: f64) -> f64 {
+    return pow_on<false>(base, exponent);
+}
+
+// pow_on is pow with the kernels' products and sums fused or not.
+fn pow_on<fused: bool>(base: f64, exponent: f64) -> f64 {
     var ix = float::bits(base);
     let iy = float::bits(exponent);
     var sign_bias = cast<u64>(0);
@@ -644,20 +644,20 @@ fn pow_f64(base: f64, exponent: f64) -> f64 {
         ix = edge.bits;
         sign_bias = edge.sign_bias;
     }
-    let lg = pow_log(ix);
+    let lg = pow_log<fused>(ix);
     // exponent * log(base) as a double-double: the product's rounding is
-    // recovered by a fused multiply-add where there is one, and elsewhere
-    // the halves are cut to 26 bits so that their product is exact.
+    // recovered by a fused multiply-add when fused, and otherwise the halves
+    // are cut to 26 bits so that their product is exact.
     let ehi = exponent * lg.hi;
     var elo = 0.0;
-    comptime if std::target::is_native() {
-        elo = fma_fast(exponent, lg.lo, fma_fast(exponent, lg.hi, -ehi));
+    comptime if fused {
+        elo = fma_on<fused>(exponent, lg.lo, fma_on<fused>(exponent, lg.hi, -ehi));
     } else {
         let yhi = float::from_bits(iy & ~((cast<u64>(1) << 27) - 1));
         let ylo = exponent - yhi;
         let lhi = float::from_bits(float::bits(lg.hi) & ~((cast<u64>(1) << 27) - 1));
         let llo = lg.hi - lhi + lg.lo;
-        elo = fma_fast(ylo, lhi, exponent * llo) + (yhi * lhi - ehi);
+        elo = fma_on<fused>(ylo, lhi, exponent * llo) + (yhi * lhi - ehi);
     }
     let top = ((float::bits(ehi) >> 52) & 0x7ff) - 0x3c9;
     if top >= 0x3f {
@@ -678,9 +678,9 @@ fn pow_f64(base: f64, exponent: f64) -> f64 {
         if ehi < -745.133219101941108420 {
             return float::from_bits(sign_bias << 45);
         }
-        return exp_kernel(ehi, elo, sign_bias, true);
+        return exp_kernel<fused>(ehi, elo, sign_bias, true);
     }
-    return exp_kernel(ehi, elo, sign_bias, false);
+    return exp_kernel<fused>(ehi, elo, sign_bias, false);
 }
 
 // PowEdge is what pow_edges settled: either the answer (done), or the bits
@@ -800,7 +800,7 @@ struct LogParts {
 // log_kernel, value = 2^k z with z = c (1 + r) and z in [0.70508, 1.41016),
 // but 1/c = j/256 for an integer j, which has so few bits that r = z/c - 1
 // is exact, and every rounding of the sum is carried into lo.
-fn pow_log(ix: u64) -> LogParts {
+fn pow_log<fused: bool>(ix: u64) -> LogParts {
     let tmp = ix - 0x3fe6900000000000;
     let k = cast<f64>(cast<i64>(tmp) >> 52);
     let iz = ix - (tmp & (cast<u64>(0xfff) << 52));
@@ -810,18 +810,18 @@ fn pow_log(ix: u64) -> LogParts {
     let index = cast<i64>((tmp >> 44) & 255);
     let invc = cast<f64>(pow_j_bits(index)) * 0.00390625;
     // r = z/c - 1 exactly, and lo3, what the rounding of ar2 = -r^2/2
-    // dropped: with a fused multiply-add each is one instruction; without
-    // one, r comes from the halves of z, whose products with so short a
-    // 1/c are exact, as is the square of r's top half.
+    // dropped: fused, each is one fused multiply-add; otherwise r comes from
+    // the halves of z, whose products with so short a 1/c are exact, as is
+    // the square of r's top half.
     var r = 0.0;
     var ar = 0.0;
     var ar2 = 0.0;
     var lo3 = 0.0;
-    comptime if std::target::is_native() {
-        r = fma_fast(z, invc, -1.0);
+    comptime if fused {
+        r = fma_on<fused>(z, invc, -1.0);
         ar = -0.5 * r;
         ar2 = r * ar;
-        lo3 = fma_fast(ar, r, -ar2);
+        lo3 = fma_on<fused>(ar, r, -ar2);
     } else {
         let zhi = float::from_bits((iz + (cast<u64>(1) << 31)) & (cast<u64>(0xffffffff) << 32));
         let zlo = z - zhi;
@@ -835,16 +835,16 @@ fn pow_log(ix: u64) -> LogParts {
     }
     let ar3 = r * ar2;
     // k ln2 + log(c) + r, with the rounding of each step kept.
-    let t1 = fma_fast(k, 0.6931471805598903, float::from_bits(pow_log_c_bits(index)));
+    let t1 = fma_on<fused>(k, 0.6931471805598903, float::from_bits(pow_log_c_bits(index)));
     let t2 = t1 + r;
-    let lo1 = fma_fast(k, 5.497923018708371e-14, float::from_bits(pow_log_c_tail_bits(index)));
+    let lo1 = fma_on<fused>(k, 5.497923018708371e-14, float::from_bits(pow_log_c_tail_bits(index)));
     let lo2 = t1 - t2 + r;
     let hi = t2 + ar2;
     let lo4 = t2 - hi + ar2;
     // r^3/3 - r^4/4 + ... + r^9/9, written on ar2 and ar3.
-    let inner = fma_fast(ar2, 1.7777777777777777, fma_fast(r, 1.0, -1.1428571428571428));
-    let middle = fma_fast(ar2, inner, fma_fast(r, -0.6666666666666666, 0.8));
-    let p = ar3 * fma_fast(ar2, middle, fma_fast(r, 0.5, -0.6666666666666666));
+    let inner = fma_on<fused>(ar2, 1.7777777777777777, fma_on<fused>(r, 1.0, -1.1428571428571428));
+    let middle = fma_on<fused>(ar2, inner, fma_on<fused>(r, -0.6666666666666666, 0.8));
+    let p = ar3 * fma_on<fused>(ar2, middle, fma_on<fused>(r, 0.5, -0.6666666666666666));
     let lo = lo1 + lo2 + lo3 + lo4 + p;
     let y = hi + lo;
     return LogParts { hi: y, lo: hi - y + lo };
@@ -994,42 +994,33 @@ fn inv_ln10() -> f64 { return 0.43429448190325182765; }
 // within one unit in the last place.
 
 // fma_on is x * y + z rounded once when fused, and the product and the sum
-// rounded in turn when not: fma_fast with the target named by the caller
-// rather than read off the build. The sine and cosine below take `fused` as a
-// static value so that `sin_with<false>` computes on a native build the bits
-// a wasm build of `sin` does -- which is how the compiler folds
-// `comptime math::sin<f64>(x)` for whichever target it is building.
+// rounded in turn when not. The kernels use it only where either is within
+// their error budget, so both answer within one unit in the last place, and
+// each answers the same bits on every target: unfused is two IEEE 754
+// operations, and fused rounds once, with the native instruction or, where
+// there is none (wasm), the software fma of `math::fma`, which costs a
+// hundred instructions a call. The public functions are unfused; the
+// `_with<true>` ones are the fused kernels for a caller who wants native's
+// instruction and accepts the other bits.
 fn fma_on<fused: bool>(x: f64, y: f64, z: f64) -> f64 {
     comptime if fused {
-        return std::internal::builtin::f64_fma(x, y, z);
+        return fma_f64(x, y, z);
     } else {
         return x * y + z;
     }
 }
 
-// sin_f64, cos_f64 and sin_cos_f64 are the target's own: fused on native.
+// sin_f64, cos_f64 and sin_cos_f64 are unfused on every target.
 fn sin_f64(value: f64) -> f64 {
-    comptime if std::target::is_native() {
-        return sin_on<true>(value);
-    } else {
-        return sin_on<false>(value);
-    }
+    return sin_on<false>(value);
 }
 
 fn cos_f64(value: f64) -> f64 {
-    comptime if std::target::is_native() {
-        return cos_on<true>(value);
-    } else {
-        return cos_on<false>(value);
-    }
+    return cos_on<false>(value);
 }
 
 fn sin_cos_f64(value: f64) -> SinCos {
-    comptime if std::target::is_native() {
-        return sin_cos_on<true>(value);
-    } else {
-        return sin_cos_on<false>(value);
-    }
+    return sin_cos_on<false>(value);
 }
 
 // Arc is an angle taken apart as k pi/64 + (r + tail), k in [0, 128).
@@ -1179,8 +1170,8 @@ fn both_at<fused: bool>(k: u64, r: f64, tail: f64) -> SinCos {
 // of either would be a large part of what is left. With a fused
 // multiply-add the product's rounding is recovered exactly, and the sum's
 // by Fast2Sum (|big| is at least |m r| wherever big is not zero), so the
-// answer is rounded once; the wasm target has no such instruction and
-// takes the sine of the distance to the zero instead (sin_near_zero).
+// answer is rounded once; unfused takes the sine of the distance to the
+// zero instead (sin_near_zero).
 fn sum_of<fused: bool>(big: f64, m: f64, r: f64, small: f64) -> f64 {
     comptime if fused {
         let product = m * r;
@@ -1892,6 +1883,16 @@ fn fraction_mask() -> u64 { return (cast<u64>(1) << 52) - 1; }
 // aligned to it with the bits shifted out compressed into a sticky bit, and
 // the sum is rounded once to the nearest even. From Go's math.FMA.
 fn fma_f64(x: f64, y: f64, z: f64) -> f64 {
+    // Rounded once, the answer is the same bits whoever computes it, so
+    // native takes its instruction and other targets compute it below.
+    comptime if std::target::is_native() {
+        return std::internal::builtin::f64_fma(x, y, z);
+    } else {
+        return fma_software(x, y, z);
+    }
+}
+
+fn fma_software(x: f64, y: f64, z: f64) -> f64 {
     let bx = float::bits(x);
     let by = float::bits(y);
     let bz = float::bits(z);
@@ -2390,15 +2391,29 @@ pub fn sin<T>(value: T) -> T {
     }
 }
 
-// sin_with and cos_with are sin and cos at f64 as a target with (fused =
-// true, native) or without (false, wasm) a fused multiply-add computes them:
-// `sin<f64>` is `sin_with<true>` on native and `sin_with<false>` on wasm.
+// sin_with, cos_with, exp_with, log_with and pow_with are the functions at
+// f64 with the kernels' products and sums rounded once (fused = true) or in
+// turn (false, which is what `sin<f64>` and the others are). Either answers
+// the same bits on every target; fused is faster on native, where it is one
+// instruction, and much slower elsewhere.
 pub fn sin_with<fused: bool>(value: f64) -> f64 {
     return sin_on<fused>(value);
 }
 
 pub fn cos_with<fused: bool>(value: f64) -> f64 {
     return cos_on<fused>(value);
+}
+
+pub fn exp_with<fused: bool>(value: f64) -> f64 {
+    return exp_on<fused>(value);
+}
+
+pub fn log_with<fused: bool>(value: f64) -> f64 {
+    return log_on<fused>(value);
+}
+
+pub fn pow_with<fused: bool>(base: f64, exponent: f64) -> f64 {
+    return pow_on<fused>(base, exponent);
 }
 
 pub fn cos<T>(value: T) -> T {
