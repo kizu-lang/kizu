@@ -56,8 +56,11 @@ jobs:
         run: |
           set -eu
           clang --version | head -1
-          # The seed compiles the Kizu compiler and is not shipped.
-          go build -trimpath -o seed/kizu ./cmd/kizu
+          # The seed compiles the Kizu compiler and is not shipped. It is built
+          # outside the checkout: an untracked file in the tree would make the
+          # version line below say `modified`.
+          seed="$RUNNER_TEMP/seed/kizu"
+          go build -trimpath -o "$seed" ./cmd/kizu
           # The released binary has no linker flag to stamp, so the version it
           # names is generated with it, from the tag this release is cut from.
           go run -ldflags \
@@ -65,7 +68,7 @@ jobs:
             ./scripts/gen-selfhost-version
           prefix="dist/kizu-${KIZU_RELEASE:-devel}-${{ matrix.target }}"
           mkdir -p "$prefix/bin" "$prefix/lib"
-          ./seed/kizu build --target native --opt -o "$prefix/bin/kizu" compiler
+          "$seed" build --target native --opt -o "$prefix/bin/kizu" compiler
           cp -R lib/kizu "$prefix/lib/kizu"
           tar -C dist -czf "$prefix.tar.gz" "$(basename "$prefix")"
       - name: Smoke
@@ -77,7 +80,10 @@ jobs:
           # tree: what a user gets after extracting the tarball.
           prefix="$PWD/dist/kizu-${KIZU_RELEASE:-devel}-${{ matrix.target }}"
           cd "$(mktemp -d)"
-          "$prefix/bin/kizu" version
+          # The checkout is clean, so the binary must not call itself modified.
+          line="$("$prefix/bin/kizu" version)"
+          echo "$line"
+          case "$line" in *modified*) echo "the version line says modified"; exit 1;; esac
           "$prefix/bin/kizu" run "$GITHUB_WORKSPACE/examples/hello.kizu"
           "$prefix/bin/kizu" build --target wasm32-browser --emit esm \
             -o browser "$GITHUB_WORKSPACE/examples/hello.kizu"
