@@ -14,6 +14,8 @@ const (
 	ArchArm64 Arch = iota
 	// ArchX86_64 follows the System V AMD64 ABI.
 	ArchX86_64
+	// ArchX86_64Windows follows the Windows x64 convention.
+	ArchX86_64Windows
 	// ArchOther names a machine whose C convention the emitter does not
 	// follow; a C struct by value is refused there.
 	ArchOther
@@ -136,6 +138,9 @@ func (r *cRegisters) takeScalar(typ string) {
 // cArgPassing is how a C struct argument of type typ goes to the callee.
 func (e *emitter) cArgPassing(typ string, regs *cRegisters) cPassing {
 	leaves, size, align := e.cStructLeaves(typ, 0, nil)
+	if e.arch == ArchX86_64Windows {
+		return win64Passing(size, align)
+	}
 	if e.arch == ArchX86_64 {
 		parts, ok := sysVParts(leaves, size)
 		if !ok {
@@ -173,6 +178,9 @@ func (e *emitter) cArgPassing(typ string, regs *cRegisters) cPassing {
 // cReturnPassing is how a C struct result of type typ comes back.
 func (e *emitter) cReturnPassing(typ string) cPassing {
 	leaves, size, align := e.cStructLeaves(typ, 0, nil)
+	if e.arch == ArchX86_64Windows {
+		return win64Passing(size, align)
+	}
 	if e.arch == ArchX86_64 {
 		parts, ok := sysVParts(leaves, size)
 		if !ok {
@@ -195,6 +203,18 @@ func (e *emitter) cReturnPassing(typ string) cPassing {
 		return cPassing{kind: cPassIndirect, align: align}
 	}
 	return cPassing{kind: cPassDirect, parts: []string{aapcsWords(size)}, align: align}
+}
+
+// win64Passing is how the Windows x64 convention moves a C struct, as an
+// argument and as a result alike: in one integer register when it is exactly
+// 1, 2, 4 or 8 bytes, whatever its fields are, and otherwise as the address of
+// a copy the caller makes, which for a result is `sret` storage.
+func win64Passing(size int, align int) cPassing {
+	switch size {
+	case 1, 2, 4, 8:
+		return cPassing{kind: cPassDirect, parts: []string{fmt.Sprintf("i%d", size*8)}, align: align}
+	}
+	return cPassing{kind: cPassIndirect, align: align}
 }
 
 // homogeneousFloats reports an AAPCS64 homogeneous float aggregate: one to

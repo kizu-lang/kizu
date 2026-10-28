@@ -2675,8 +2675,8 @@ extern "c" fn clock_gettime(clock: i32, out: &var Timespec) -> i32
   渡り方も負うものも同じです(§12.4)。
 * `extern "c" fn` は `extern "c" struct` を値で受け取り、値で返せます。渡し方は
   native target の C 呼び出し規約に従い、C compiler と同じく register か memory に
-  載せます。compiler が従う規約は arm64(AAPCS64)と x86-64(System V)で、それ以外の
-  machine と Windows では値渡しを含む call を build error にします。target を持たない LLVM
+  載せます。compiler が従う規約は arm64(AAPCS64)、x86-64(System V)、Windows の
+  x86-64(x64)で、それ以外では値渡しを含む call を build error にします。target を持たない LLVM
   text は arm64 の規則で書きます。値渡しの struct を持つ C 関数は名前でだけ呼べ、
   `extern "c" fn(...)` の値としては取り出せません。`export "c" fn` は struct を
   値で受け取りません。
