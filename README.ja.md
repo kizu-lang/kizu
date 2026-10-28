@@ -108,6 +108,11 @@ interpreter はありません。`kizu test` は `kizu run` が `main` をビル
 `clang` は 15 以上が要ります(clang 14 は `expected type` で拒否します)。
 no-libc / freestanding build は build policy としては受理済みですが、未実装です。
 
+Windows 向けの executable は `--triple x86_64-w64-windows-gnu` で build します。link は
+[llvm-mingw](https://github.com/mstorsjo/llvm-mingw) の `x86_64-w64-mingw32-clang` が行うので、
+その `bin` を PATH に入れてください。macOS / Linux からの cross build も同じです。
+できた `.exe` は Windows 10 以降に最初からある DLL だけを使います。
+
 ## Roadmap
 
 上の表は「今動くもの」を測った結果です。ここには予定・進行中・意図的に採らないものを

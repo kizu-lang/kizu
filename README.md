@@ -117,6 +117,12 @@ native build path already had. The emitted LLVM IR uses opaque pointers, so
 freestanding builds are part of the accepted build policy but are not
 implemented.
 
+A Windows executable is built with `--triple x86_64-w64-windows-gnu`. It is
+linked by [llvm-mingw](https://github.com/mstorsjo/llvm-mingw)'s
+`x86_64-w64-mingw32-clang`, so put its `bin` on PATH; a cross build from macOS
+or Linux works the same way. The `.exe` uses only DLLs that ship with Windows
+10 and later.
+
 ## Roadmap
 
 The table above measures what runs. This is what is planned, in progress, or

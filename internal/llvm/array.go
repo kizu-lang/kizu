@@ -39,7 +39,7 @@ func (e *emitter) writeArrayRuntimeDecls() {
 		e.out.WriteByte('\n')
 		return
 	}
-	e.out.WriteString("declare { ptr, i64 } @kizu_array_grow(ptr, ptr, i64, i64, i64)\n")
+	e.out.WriteString("declare void @kizu_array_grow(ptr, ptr, ptr, i64, i64, i64)\n")
 	e.out.WriteString("declare i1 @kizu_array_append_bytes(ptr, ptr, ptr, i64)\n")
 	e.out.WriteString("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n")
 	e.out.WriteString("declare i1 @kizu_array_reserve(ptr, ptr, i64, i64)\n")
@@ -348,7 +348,10 @@ func (e *emitter) writeArrayAppendPaths(
 // writeArrayGrowth asks the runtime for storage that holds grown elements,
 // handing it the data pointer and capacity rather than the header, and stores
 // what comes back before continuing at fastLabel; a refusal goes to
-// joinLabel.
+// joinLabel. The answer comes back through a slot of the caller's rather than
+// as a returned pair: C returns a two-word struct in registers on System V
+// and AAPCS64 but through memory on Windows, and a slot is the one spelling
+// every convention agrees on.
 func (e *emitter) writeArrayGrowth(
 	instr *ir.Instr,
 	elem string,
@@ -363,15 +366,19 @@ func (e *emitter) writeArrayGrowth(
 	data := "%" + e.nextSyntheticValue("array.append.data")
 	fmt.Fprintf(&e.out, "  %s = load ptr, ptr %s%s\n", data, dataAddr, e.tbaaTag(tbaaPointer))
 	storage := "%" + e.nextSyntheticValue("array.append.storage")
+	fmt.Fprintf(&e.out, "  %s = alloca { ptr, i64 }, align 8\n", storage)
 	fmt.Fprintf(&e.out,
-		"  %s = call { ptr, i64 } @kizu_array_grow(ptr %s, ptr %s, i64 %s, i64 %s, i64 %s)\n",
+		"  call void @kizu_array_grow(ptr %s, ptr %s, ptr %s, i64 %s, i64 %s, i64 %s)\n",
 		storage, e.value(instr.Args[1]).operand, data, capacity, grown,
 		e.elementSizeOperand(elem))
 	storageData := "%" + e.nextSyntheticValue("array.append.storage.data")
+	storageCapAddr := "%" + e.nextSyntheticValue("array.append.storage.cap.addr")
 	storageCap := "%" + e.nextSyntheticValue("array.append.storage.cap")
 	grew := "%" + e.nextSyntheticValue("array.append.grew")
-	fmt.Fprintf(&e.out, "  %s = extractvalue { ptr, i64 } %s, 0\n", storageData, storage)
-	fmt.Fprintf(&e.out, "  %s = extractvalue { ptr, i64 } %s, 1\n", storageCap, storage)
+	fmt.Fprintf(&e.out, "  %s = load ptr, ptr %s, align 8\n", storageData, storage)
+	fmt.Fprintf(&e.out, "  %s = getelementptr inbounds { ptr, i64 }, ptr %s, i64 0, i32 1\n",
+		storageCapAddr, storage)
+	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s, align 8\n", storageCap, storageCapAddr)
 	fmt.Fprintf(&e.out, "  %s = icmp sge i64 %s, 0\n", grew, storageCap)
 	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", grew, storeLabel, joinLabel)
 	fmt.Fprintf(&e.out, "%s:\n", storeLabel)

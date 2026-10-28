@@ -63,11 +63,13 @@ func TestExecutableAndRuntimeKeysDoNotCollide(t *testing.T) {
 // TestModuleForLinkerFollowsTheClang checks a Darwin link hands the linker the
 // probe it writes: Apple's helper under Apple's clang, which takes any other
 // probe name for a function to call, and the inline probe the module was
-// emitted with under upstream clang, which stops at the helper's name. A link
-// for another target keeps the module as it is whatever links it.
+// emitted with under upstream clang, which stops at the helper's name. A
+// Windows link drops the probe, which that target reads as a function name. A
+// link for another target keeps the module as it is whatever links it.
 func TestModuleForLinkerFollowsTheClang(t *testing.T) {
 	module := "attributes #0 = { " + inlineStackProbe + " \"stack-probe-size\"=\"4096\" }\n"
 	apple := "attributes #0 = { " + appleStackProbe + " \"stack-probe-size\"=\"4096\" }\n"
+	windows := "attributes #0 = { \"stack-probe-size\"=\"4096\" }\n"
 	cases := []struct {
 		version string
 		triple  string
@@ -76,6 +78,7 @@ func TestModuleForLinkerFollowsTheClang(t *testing.T) {
 		{"Apple clang version 15.0.0 (clang-1500.3.9.4)", "arm64-apple-darwin", apple},
 		{"clang version 21.1.8", "arm64-apple-darwin", module},
 		{"Apple clang version 15.0.0 (clang-1500.3.9.4)", "x86_64-unknown-linux-gnu", module},
+		{"clang version 21.1.8", "x86_64-w64-windows-gnu", windows},
 	}
 	for _, tt := range cases {
 		target, err := TargetFor(tt.triple)
@@ -127,6 +130,52 @@ func TestLinkFlagsFollowTheLinkerOrder(t *testing.T) {
 	if got := strings.Join(linkFlags(Options{Libraries: []string{"m"}}), " "); got != "-lm -lpthread" {
 		t.Fatalf("linkFlags(m) = %q", got)
 	}
+	// A Windows executable is static and links Winsock and bcrypt besides.
+	windows := Options{Target: stdtarget.NativeWindows, Libraries: []string{"user32"}}
+	got = strings.Join(linkFlags(windows), " ")
+	if want := "-static -luser32 -lm -lpthread -lws2_32 -lbcrypt"; got != want {
+		t.Fatalf("linkFlags(windows) = %q, want %q", got, want)
+	}
+}
+
+// TestWindowsRunsTheMinGWDriver runs llvm-mingw's driver for the machine a
+// Windows triple names, and the linker as named for every other target.
+func TestWindowsRunsTheMinGWDriver(t *testing.T) {
+	cases := map[string]string{
+		"x86_64-w64-windows-gnu":   "x86_64-w64-mingw32-clang",
+		"aarch64-w64-windows-gnu":  "aarch64-w64-mingw32-clang",
+		"x86_64-unknown-linux-gnu": "clang",
+	}
+	for triple, want := range cases {
+		target, err := TargetFor(triple)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := driver(Options{Target: target, Triple: triple, Linker: "clang"}); got != want {
+			t.Errorf("driver(%s) = %q, want %q", triple, got, want)
+		}
+	}
+}
+
+// TestWindowsLinksUnderTheExeName links a Windows executable whose name has no
+// extension under the name the MinGW driver would give it, and anything else
+// under the name asked for.
+func TestWindowsLinksUnderTheExeName(t *testing.T) {
+	windows := Options{Target: stdtarget.NativeWindows, Emit: "exe"}
+	if got := linkedOutput("out/app", windows); got != "out/app.exe" {
+		t.Errorf("linkedOutput(app) = %q", got)
+	}
+	if got := linkedOutput("out/app.exe", windows); got != "out/app.exe" {
+		t.Errorf("linkedOutput(app.exe) = %q", got)
+	}
+	windows.Emit = "obj"
+	if got := linkedOutput("out/app", windows); got != "out/app" {
+		t.Errorf("linkedOutput(obj) = %q", got)
+	}
+	linux := Options{Target: stdtarget.NativeLinux, Emit: "exe"}
+	if got := linkedOutput("out/app", linux); got != "out/app" {
+		t.Errorf("linkedOutput(linux) = %q", got)
+	}
 }
 
 // TestExecutableKeyNamesTheLibrariesItLinks keys the executable by what it
@@ -155,7 +204,7 @@ func TestFrameworkNeedsDarwin(t *testing.T) {
 
 // TestTargetForTriple maps the OS a triple names to the target the comptime
 // predicates and the manifest read, and refuses an OS the runtime has no
-// build for.
+// build for and the MSVC environment Windows is not built for.
 func TestTargetForTriple(t *testing.T) {
 	cases := map[string]stdtarget.Target{
 		"arm64-apple-darwin":            stdtarget.NativeDarwin,
@@ -163,6 +212,8 @@ func TestTargetForTriple(t *testing.T) {
 		"arm64-apple-ios17.0":           stdtarget.NativeDarwin,
 		"arm64-apple-ios17.0-simulator": stdtarget.NativeDarwin,
 		"x86_64-unknown-linux-gnu":      stdtarget.NativeLinux,
+		"x86_64-w64-windows-gnu":        stdtarget.NativeWindows,
+		"x86_64-w64-mingw32":            stdtarget.NativeWindows,
 	}
 	for triple, want := range cases {
 		got, err := TargetFor(triple)
@@ -170,9 +221,13 @@ func TestTargetForTriple(t *testing.T) {
 			t.Fatalf("TargetFor(%q) = (%v, %v), want %v", triple, got, err, want)
 		}
 	}
-	if _, err := TargetFor("x86_64-pc-windows-msvc"); err == nil ||
+	if _, err := TargetFor("x86_64-unknown-freebsd"); err == nil ||
 		!strings.Contains(err.Error(), "names no supported OS") {
 		t.Fatalf("expected an unsupported OS error, got %v", err)
+	}
+	if _, err := TargetFor("x86_64-pc-windows-msvc"); err == nil ||
+		!strings.Contains(err.Error(), "names the MSVC environment") {
+		t.Fatalf("expected an MSVC error, got %v", err)
 	}
 	host, err := TargetFor("")
 	if err != nil || !host.IsNative() {

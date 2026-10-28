@@ -37,7 +37,7 @@ func linkModule(module *ir.Module, path string) (string, error) {
 		return "", err
 	}
 	ir.KeepTargetReachableFunctions(module, "c", "main")
-	llvmIR, err := llvm.EmitNative(module, host == stdtarget.NativeDarwin, nativeArch(""))
+	llvmIR, err := llvm.EmitNative(module, host == stdtarget.NativeDarwin, nativeArch("", host))
 	if err != nil {
 		return "", err
 	}
@@ -357,10 +357,14 @@ func wasmExportABI(target wasm.Target) string {
 	return ""
 }
 
-// nativeArch is the machine a native triple names, the host when it is
-// omitted.
-func nativeArch(triple string) llvm.Arch {
+// nativeArch is the C calling convention a native target follows: the
+// machine its triple names, the host when it is omitted. Windows on x86-64
+// passes a struct by value its own way, which the emitter does not follow,
+// so it is the convention a struct by value is refused under.
+func nativeArch(triple string, target stdtarget.Target) llvm.Arch {
 	switch {
+	case target == stdtarget.NativeWindows:
+		return llvm.ArchOther
 	case native.TargetIsArm64(triple):
 		return llvm.ArchArm64
 	case native.TargetIsX86_64(triple):
@@ -391,7 +395,7 @@ func emitNativeFile(args []string) error {
 		return err
 	}
 	llvmIR, err := llvm.EmitNative(module, target == stdtarget.NativeDarwin,
-		nativeArch(options.Triple))
+		nativeArch(options.Triple, target))
 	if err != nil {
 		return err
 	}

@@ -9,7 +9,14 @@ import std::testing;
 // path を返し、`std::fs::real_path(io, allocator, path)` は symlink と
 // `.` / `..` を実体へ解決する。どちらの値も実行環境で変わるので、ここでは
 // 「絶対 path が返る」「その path が実在する」「解決結果も実在する」ことを
-// 約束する。
+// 約束する。Windows の絶対 path は drive から始まる(`C:/...`)。
+
+fn is_absolute(bytes: []u8) -> bool {
+    comptime if std::target::is_windows() {
+        return mem::len(bytes) > 2 and bytes[1] == cast<u8>(58) and bytes[2] == cast<u8>(47);
+    }
+    return mem::len(bytes) > 0 and bytes[0] == cast<u8>(47);
+}
 
 test "executable_path names the running binary" {
     let allocator = mem::page_allocator();
@@ -17,8 +24,7 @@ test "executable_path names the running binary" {
     let executable = try process::executable_path(allocator);
     defer executable.deinit(allocator);
     let bytes = executable.as_bytes();
-    testing::expect(mem::len(bytes) > 0);
-    testing::expect(bytes[0] == cast<u8>(47));
+    testing::expect(is_absolute(bytes));
     let found = try fs::exists(io, bytes);
     testing::expect(found);
     let name = path::basename(bytes);
@@ -34,7 +40,7 @@ test "real_path resolves the running binary to a file that exists" {
     let resolved = try fs::real_path(io, allocator, bytes);
     defer resolved.deinit(allocator);
     let resolved_bytes = resolved.as_bytes();
-    testing::expect(resolved_bytes[0] == cast<u8>(47));
+    testing::expect(is_absolute(resolved_bytes));
     let found = try fs::exists(io, resolved_bytes);
     testing::expect(found);
 }

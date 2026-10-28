@@ -126,10 +126,10 @@ func TestParseManifestRejectsUnknownNativeOS(t *testing.T) {
 	_, err := ParseManifest(`[package]
 name = "app"
 
-[native.windows]
+[native.freebsd]
 library_search = ["vendor/lib"]
 `)
-	want := "unsupported section `native.windows`: native targets are darwin, linux"
+	want := "unsupported section `native.freebsd`: native targets are darwin, linux, windows"
 	if err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("expected unsupported section error, got %v", err)
 	}

@@ -7,10 +7,11 @@ import "testing"
 // the predicates that describe it.
 func TestPredicatesRoundTrip(t *testing.T) {
 	answers := map[Target][]Predicate{
-		NativeDarwin: {IsNative, IsDarwin},
-		NativeLinux:  {IsNative, IsLinux},
-		WasmWASI:     {IsWASI},
-		WasmBrowser:  {IsBrowser},
+		NativeDarwin:  {IsNative, IsDarwin},
+		NativeLinux:   {IsNative, IsLinux},
+		NativeWindows: {IsNative, IsWindows},
+		WasmWASI:      {IsWASI},
+		WasmBrowser:   {IsBrowser},
 	}
 	for _, predicate := range Predicates() {
 		name := Spelling(predicate)
@@ -43,7 +44,7 @@ func TestNativeOSRoundTrip(t *testing.T) {
 			t.Fatalf("NativeFor(%q) = (%v, %t)", os, target, ok)
 		}
 	}
-	if _, ok := NativeFor("windows"); ok {
+	if _, ok := NativeFor("freebsd"); ok {
 		t.Fatal("an unsupported OS named a native target")
 	}
 	if WasmWASI.OS() != "" {

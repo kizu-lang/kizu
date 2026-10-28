@@ -155,9 +155,16 @@ const (
 
 // moduleForLinker returns the module as the linker is to compile it: with
 // Apple's stack probe when Apple's clang, named by its version line, links a
-// Darwin target. The choice waits until the link so that the module, and the
-// executable cache keyed by it, is the same whichever clang links it.
+// Darwin target, and with none asked for on Windows. Windows probes every
+// frame wider than a page itself, through __chkstk, because that is how its
+// own thread stacks grow; there LLVM reads the probe attribute as the name of
+// a function to call instead, and no function is named `inline-asm`. The
+// choice waits until the link so that the module, and the executable cache
+// keyed by it, is the same whichever clang links it.
 func moduleForLinker(options Options, version string) string {
+	if options.Target == stdtarget.NativeWindows {
+		return strings.Replace(options.LLVMIR, inlineStackProbe+" ", "", 1)
+	}
 	if options.Target != stdtarget.NativeDarwin || !strings.Contains(version, "Apple clang") {
 		return options.LLVMIR
 	}
@@ -170,9 +177,9 @@ func moduleForLinker(options Options, version string) string {
 // path and flags are the same: the runtime object is keyed by it, and the
 // Darwin stack probe is chosen by it.
 func linkerVersion(options Options) (string, error) {
-	out, err := exec.Command(options.Linker, "--version").Output()
+	out, err := exec.Command(driver(options), "--version").Output()
 	if err != nil {
-		return "", fmt.Errorf("native error: %s --version failed: %w", options.Linker, err)
+		return "", fmt.Errorf("native error: %s --version failed: %w", driver(options), err)
 	}
 	line, _, _ := strings.Cut(string(out), "\n")
 	return strings.Trim(line, " \t\r"), nil
@@ -180,9 +187,15 @@ func linkerVersion(options Options) (string, error) {
 
 // TargetFor returns the native target a triple names. An omitted triple
 // names the host; explicit Apple Darwin, macOS and iOS triples name Darwin,
-// Linux triples name Linux, and a triple for any other OS is refused because
-// the runtime is not built for it. iOS is matched with its separator because
-// the OS field is the only place it is spelled.
+// Linux triples name Linux, MinGW triples name Windows, and a triple for any
+// other OS is refused because the runtime is not built for it. iOS is matched
+// with its separator because the OS field is the only place it is spelled.
+//
+// Windows is the GNU environment only: the executable is linked by
+// llvm-mingw, which brings its own C runtime and import libraries and runs on
+// any host, where the MSVC environment needs Microsoft's on the machine that
+// links. A Windows triple that does not say gnu or mingw is MSVC to clang, so
+// it is refused rather than read as the other one.
 func TargetFor(triple string) (stdtarget.Target, error) {
 	if triple == "" {
 		return stdtarget.Host()
@@ -194,6 +207,12 @@ func TargetFor(triple string) (stdtarget.Target, error) {
 		return stdtarget.NativeDarwin, nil
 	case strings.Contains(lower, "linux"):
 		return stdtarget.NativeLinux, nil
+	case strings.Contains(lower, "mingw") ||
+		strings.Contains(lower, "windows") && strings.HasSuffix(lower, "-gnu"):
+		return stdtarget.NativeWindows, nil
+	case strings.Contains(lower, "windows"):
+		return 0, fmt.Errorf("native error: --triple %s names the MSVC environment; "+
+			"a Windows target is built for the GNU one (x86_64-w64-windows-gnu)", triple)
 	default:
 		return 0, fmt.Errorf("native error: --triple %s names no supported OS (%s)",
 			triple, strings.Join(stdtarget.NativeOS(), ", "))
@@ -282,7 +301,7 @@ func executableCacheTarget(options Options, runtimeSource string) string {
 // and falls back to the macOS one whatever the triple, so an iOS runtime
 // built before SDKROOT was set must not be what a later build links.
 func toolchainKey(options Options) []string {
-	key := []string{options.Linker, runtime.GOOS + "-" + runtime.GOARCH}
+	key := []string{driver(options), runtime.GOOS + "-" + runtime.GOARCH}
 	key = append(key, clangFlags(options)...)
 	key = append(key, linkFlags(options)...)
 	if sdk := os.Getenv("SDKROOT"); sdk != "" {
@@ -303,9 +322,9 @@ func compileRuntime(source string, output string, options Options) error {
 		return err
 	}
 	args := append(clangFlags(options), "-c", sourcePath, "-o", output)
-	out, err := exec.Command(options.Linker, args...).CombinedOutput()
+	out, err := exec.Command(driver(options), args...).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("native error: %s failed: %w\n%s", options.Linker, err, out)
+		return fmt.Errorf("native error: %s failed: %w\n%s", driver(options), err, out)
 	}
 	return nil
 }
@@ -394,25 +413,66 @@ func runClang(irPath string, runtimePath string, output string, options Options)
 	if options.Emit == "obj" {
 		args = append(args, "-r", "-nostdlib")
 	}
-	args = append(args, irPath, runtimePath, "-o", output)
+	linked := linkedOutput(output, options)
+	args = append(args, irPath, runtimePath, "-o", linked)
 	if options.Emit != "obj" {
 		args = append(args, linkFlags(options)...)
 	}
-	cmd := exec.Command(options.Linker, args...)
+	cmd := exec.Command(driver(options), args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("native error: %s failed: %w\n%s", options.Linker, err, out)
+		return nil, fmt.Errorf("native error: %s failed: %w\n%s", driver(options), err, out)
 	}
-	return append([]string{options.Linker}, args...), nil
+	if linked != output {
+		if err := os.Rename(linked, output); err != nil {
+			return nil, err
+		}
+	}
+	return append([]string{driver(options)}, args...), nil
+}
+
+// linkedOutput is the name the linker writes output under. Linking a Windows
+// executable, the MinGW driver adds `.exe` to a name that has no extension,
+// so such an output is linked under that name and moved to the one asked
+// for: the artifact is the file the caller named, and the cache's scratch
+// file has no extension.
+func linkedOutput(output string, options Options) string {
+	if options.Target != stdtarget.NativeWindows || options.Emit == "obj" ||
+		filepath.Ext(output) != "" {
+		return output
+	}
+	return output + ".exe"
+}
+
+// driver is the clang executable a build runs. A Windows target runs
+// llvm-mingw's driver for its machine, `x86_64-w64-mingw32-clang`: the name
+// is what selects the target's headers, C runtime and linker, and it is the
+// same name on a Windows host and on any other. Every other target runs the
+// linker by the name it was given.
+func driver(options Options) string {
+	if options.Target != stdtarget.NativeWindows {
+		return options.Linker
+	}
+	if TargetIsArm64(options.Triple) {
+		return "aarch64-w64-mingw32-" + options.Linker
+	}
+	return "x86_64-w64-mingw32-" + options.Linker
 }
 
 // linkFlags spells what the linker resolves foreign symbols from: the search
 // paths the manifest adds, then each library and framework the program's
-// extern declarations named, then libm, which the runtime needs whatever
+// extern declarations named, then the libraries the runtime needs whatever
 // the program declares. The order is the linker's: a path must be known
 // before the library looked for in it.
+//
+// A Windows executable is linked static, so it needs only the DLLs every
+// Windows has: winpthread, which the runtime's threads are, is otherwise a
+// DLL of its own that a machine without llvm-mingw does not have.
 func linkFlags(options Options) []string {
 	flags := []string{}
+	if options.Target == stdtarget.NativeWindows {
+		flags = append(flags, "-static")
+	}
 	for _, dir := range options.LibrarySearch {
 		flags = append(flags, "-L"+dir)
 	}
@@ -430,12 +490,20 @@ func linkFlags(options Options) []string {
 
 // runtimeLibraries are the libraries the runtime shim itself needs, whatever
 // the program declares: libm for the float intrinsics and libpthread for
-// std::thread. On Darwin both are part of libSystem and the names are harmless.
-var runtimeLibraries = []string{"m", "pthread"}
+// std::thread. On Darwin both are part of libSystem and the names are
+// harmless. Windows adds Winsock for std::net and bcrypt for the random bytes
+// std::crypto draws.
+func runtimeLibraries(target stdtarget.Target) []string {
+	if target == stdtarget.NativeWindows {
+		return []string{"m", "pthread", "ws2_32", "bcrypt"}
+	}
+	return []string{"m", "pthread"}
+}
 
 // linkLibraries lists every library the executable links, the program's
 // then the runtime's, each once.
 func linkLibraries(options Options) []string {
+	runtimeLibraries := runtimeLibraries(options.Target)
 	libraries := make([]string, 0, len(options.Libraries)+len(runtimeLibraries))
 	for _, library := range slices.Concat(options.Libraries, runtimeLibraries) {
 		if !slices.Contains(libraries, library) {

@@ -39,7 +39,8 @@ fs は自分の storage を持ちません。
 
 `real_path` は symlink と `.` / `..` を file system に対して解決するので、path が
 存在している必要があります。存在を要求しない純粋な正規化は
-[`std::path::clean`](path.md) です。
+[`std::path::clean`](path.md) です。Windows でも結果は slash 区切り(`C:/...`)で、
+`std::path` がそのまま読めます。
 
 `read_dir` は entry を **name 順**で並べた `Array<DirEntry>` として返します。
 host の `readdir` が返す順は file system 次第で 2 台の間で食い違うので、順序を

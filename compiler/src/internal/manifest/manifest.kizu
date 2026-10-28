@@ -23,13 +23,14 @@ pub struct Manifest {
     /// to look in for what `@link_library` / `@link_framework` name, relative
     /// to the manifest. The names live in the source beside the extern
     /// declaration; where they are found is the package's build input, so it
-    /// lives here (SPEC §12.2). native_darwin and native_linux hold the
-    /// `[native.<os>]` sections that add to it for one operating system, the
-    /// Go `NativeByOS` map with one field per name the `std::target`
-    /// predicates use.
+    /// lives here (SPEC §12.2). native_darwin, native_linux and
+    /// native_windows hold the `[native.<os>]` sections that add to it for
+    /// one operating system, the Go `NativeByOS` map with one field per name
+    /// the `std::target` predicates use.
     pub native: SearchPaths,
     pub native_darwin: SearchPaths,
     pub native_linux: SearchPaths,
+    pub native_windows: SearchPaths,
 }
 
 /// Is what one `[native]` or `[native.<os>]` section tells the linker to
@@ -58,6 +59,9 @@ pub fn (self: &Manifest) native_search(allocator: Allocator, os: []u8) -> !Searc
         if target == stdtarget::Target::NativeDarwin {
             try append_cloned(allocator, &self.native_darwin.libraries, &var out.libraries);
             try append_cloned(allocator, &self.native_darwin.frameworks, &var out.frameworks);
+        } else if target == stdtarget::Target::NativeWindows {
+            try append_cloned(allocator, &self.native_windows.libraries, &var out.libraries);
+            try append_cloned(allocator, &self.native_windows.frameworks, &var out.frameworks);
         } else {
             try append_cloned(allocator, &self.native_linux.libraries, &var out.libraries);
             try append_cloned(allocator, &self.native_linux.frameworks, &var out.frameworks);
@@ -94,6 +98,7 @@ enum Section {
     Native,
     NativeDarwin,
     NativeLinux,
+    NativeWindows,
 }
 
 // Holds the two sides of one `key = value` line.
@@ -130,7 +135,8 @@ fn parse(allocator: Allocator, source: []u8, allow_reserved_name: bool) -> !Pars
         paths: array::new<string::String>(allocator),
         native: new_search_paths(allocator),
         native_darwin: new_search_paths(allocator),
-        native_linux: new_search_paths(allocator)
+        native_linux: new_search_paths(allocator),
+        native_windows: new_search_paths(allocator)
     };
     errdefer manifest.deinit(allocator);
     if try parse_into(allocator, source, allow_reserved_name, &var manifest) |failure| {
@@ -260,13 +266,16 @@ fn native_section(target: stdtarget::Target) -> Section {
     if target == stdtarget::Target::NativeDarwin {
         return Section::NativeDarwin;
     }
+    if target == stdtarget::Target::NativeWindows {
+        return Section::NativeWindows;
+    }
     return Section::NativeLinux;
 }
 
 // is_native_section reports the `[native]` and `[native.<os>]` sections.
 fn is_native_section(section: Section) -> bool {
     return section == Section::Native or section == Section::NativeDarwin or
-        section == Section::NativeLinux;
+        section == Section::NativeLinux or section == Section::NativeWindows;
 }
 
 // parse_assignment parses one key/value assignment into out.
@@ -338,6 +347,10 @@ fn assign_native_value(
             try replace_list(allocator, &var manifest.native_darwin.libraries, &var parsed);
             return null;
         }
+        if section == Section::NativeWindows {
+            try replace_list(allocator, &var manifest.native_windows.libraries, &var parsed);
+            return null;
+        }
         try replace_list(allocator, &var manifest.native_linux.libraries, &var parsed);
         return null;
     }
@@ -348,6 +361,10 @@ fn assign_native_value(
         }
         if section == Section::NativeDarwin {
             try replace_list(allocator, &var manifest.native_darwin.frameworks, &var parsed);
+            return null;
+        }
+        if section == Section::NativeWindows {
+            try replace_list(allocator, &var manifest.native_windows.frameworks, &var parsed);
             return null;
         }
         try replace_list(allocator, &var manifest.native_linux.frameworks, &var parsed);
@@ -386,6 +403,7 @@ fn section_spelling(section: Section) -> []u8 {
         Native => "native",
         NativeDarwin => "native.darwin",
         NativeLinux => "native.linux",
+        NativeWindows => "native.windows",
     };
 }
 

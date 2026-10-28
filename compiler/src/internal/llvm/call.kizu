@@ -328,10 +328,13 @@ fn deref_borrow_type(name: []u8) -> []u8 {
     return name;
 }
 
-/// Reports whether a std hosted runtime call uses the explicit out-pointer
-/// ABI instead of the platform C aggregate return ABI, the Go
-/// `usesHostedRuntimeABI`. Error unions and optionals are both C-side
-/// aggregates, so both go out through the pointer.
+/// Reports whether a std hosted runtime call uses the explicit pointer ABI
+/// instead of the platform C aggregate ABI, the Go `usesHostedRuntimeABI`.
+/// Error unions and optionals are both C-side aggregates, so both go out
+/// through the pointer; an aggregate argument goes in through one. How C
+/// passes an aggregate by value is the platform's to say -- two registers on
+/// System V and AAPCS64 for a slice, a hidden address on Windows -- and a
+/// pointer is the one spelling every platform agrees on.
 fn (self: &var Emitter) uses_hosted_runtime_abi(module: &ir::Module, name: ir::Name, node: &ir::InstrNode) -> !bool {
     let symbol = try self.callee_symbol(module, name);
     if !self.names.starts_with(symbol, "std__internal__builtin__") {
@@ -343,7 +346,19 @@ fn (self: &var Emitter) uses_hosted_runtime_abi(module: &ir::Module, name: ir::N
         success.deinit(self.allocator);
         return true;
     }
-    return is_optional_type(result_type);
+    if is_optional_type(result_type) {
+        return true;
+    }
+    var index = 0;
+    while node.args.get(index) |arg| {
+        index = index + 1;
+        let type_text = ir::name_text(&module.names, arg.type_name);
+        let type_bytes = type_text.as_bytes();
+        if hosted_runtime_indirect_abi(module, type_bytes) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /// Appends the lowered parameter ABI for hosted runtime calls, the Go
