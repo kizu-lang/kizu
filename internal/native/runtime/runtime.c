@@ -1,8 +1,8 @@
 
-/* The ucontext routines are how a coroutine changes stacks. Apple marks them
-   deprecated and hides them behind _XOPEN_SOURCE; they still work, and the
-   alternative is a hand-written switch per architecture. This is the seam to
-   replace when one is written. */
+/* The ucontext routines are how a coroutine changes stacks on Darwin and
+   Linux. Apple marks them deprecated and hides them behind _XOPEN_SOURCE; they
+   still work, and the alternative is a hand-written switch per architecture,
+   which is what Windows, having no ucontext, has (kizu_context_switch). */
 #if defined(__APPLE__)
 #if !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 600
@@ -14,6 +14,27 @@
 #endif
 #endif
 
+/* Windows is reached through llvm-mingw, whose C library already has the
+   POSIX calls that are only names for the same thing (stat, dirent, pthread
+   by way of winpthread). What Windows does differently -- sockets, child
+   processes, stacks, wide-character paths -- goes through the Win32 calls
+   directly, each behind a kizu_os_ or kizu_net_ function with one body per
+   host. Windows is reached on x86-64 only, because the coroutine switch is
+   written for it. */
+#if defined(_WIN32)
+#if !defined(__x86_64__)
+#error "the Kizu runtime is built for x86-64 Windows only"
+#endif
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <bcrypt.h>
+#include <direct.h>
+#include <io.h>
+#endif
+
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -23,18 +44,20 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <sys/stat.h>
+#include <pthread.h>
+#include <time.h>
+#include <unistd.h>
+#if !defined(_WIN32)
 #include <sys/mman.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
 #include <sys/wait.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
-#include <pthread.h>
-#include <time.h>
 #include <ucontext.h>
-#include <unistd.h>
+#endif
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif
@@ -42,13 +65,13 @@
 /* The iOS SDK ships no <sys/random.h>; libSystem exports getentropy there
    from iOS 10 on, with the signature macOS declares. */
 int getentropy(void *buffer, size_t size);
-#else
+#elif !defined(_WIN32)
 #include <sys/random.h>
 #endif
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #include <sys/event.h>
-#else
+#elif !defined(_WIN32)
 #include <sys/epoll.h>
 #endif
 
@@ -388,11 +411,37 @@ static int64_t kizu_array_grow_capacity(int64_t minimum, int64_t elem_size);
 static int kizu_runtime_argc = 0;
 static char **kizu_runtime_argv = NULL;
 
+#if defined(_WIN32)
+/* Windows hands main its arguments in the ANSI code page, which cannot spell
+   most of what a path or an argument holds, so the runtime reads the command
+   line again in UTF-16 and keeps a UTF-8 copy for the life of the process.
+   Standard streams are put in binary mode: text mode turns every \n the
+   program writes into \r\n, and a program's bytes are what it wrote. */
+static char *kizu_utf8_from_wide(const wchar_t *wide);
+static char **kizu_win_utf8_argv(int *argc);
+
+void kizu_runtime_init_args(int32_t argc, char **argv) {
+    (void)argc;
+    (void)argv;
+    int count = 0;
+    char **utf8 = kizu_win_utf8_argv(&count);
+    if (utf8) {
+        kizu_runtime_argc = count;
+        kizu_runtime_argv = utf8;
+    }
+    _setmode(_fileno(stdin), _O_BINARY);
+    _setmode(_fileno(stdout), _O_BINARY);
+    _setmode(_fileno(stderr), _O_BINARY);
+    WSADATA wsa;
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+}
+#else
 void kizu_runtime_init_args(int32_t argc, char **argv) {
     kizu_runtime_argc = argc;
     kizu_runtime_argv = argv;
     signal(SIGPIPE, SIG_IGN);
 }
+#endif
 
 static KizuSliceU8 kizu_slice_from_cstr(const char *value) {
     KizuSliceU8 out;
@@ -540,6 +589,540 @@ static char *kizu_slice_to_cstr(KizuSliceU8 value) {
     out[value.len] = '\0';
     return out;
 }
+
+#if defined(_WIN32)
+/* Kizu text is UTF-8 and Windows names files, variables and command lines in
+   UTF-16. These convert at that boundary; each answer is malloc'd and NULL
+   when the input is not text the other side can spell. */
+static wchar_t *kizu_wide_from_utf8(const char *text) {
+    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, -1, NULL, 0);
+    if (count <= 0) {
+        return NULL;
+    }
+    wchar_t *wide = (wchar_t *)malloc((size_t)count * sizeof *wide);
+    if (wide && MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, -1, wide, count) != count) {
+        free(wide);
+        return NULL;
+    }
+    return wide;
+}
+
+static char *kizu_utf8_from_wide(const wchar_t *wide) {
+    int count = WideCharToMultiByte(CP_UTF8, 0, wide, -1, NULL, 0, NULL, NULL);
+    if (count <= 0) {
+        return NULL;
+    }
+    char *text = (char *)malloc((size_t)count);
+    if (text && WideCharToMultiByte(CP_UTF8, 0, wide, -1, text, count, NULL, NULL) != count) {
+        free(text);
+        return NULL;
+    }
+    return text;
+}
+
+/* Splits the command line the way the C runtime splits it for main: blanks
+   separate arguments outside quotes, a quote toggles, 2n backslashes before a
+   quote are n backslashes and the quote still toggles, 2n+1 are n and a
+   literal quote, and backslashes before anything else are themselves. The
+   program name is read up to its closing quote with no escapes, as Windows
+   itself reads it. */
+static char **kizu_win_utf8_argv(int *argc) {
+    const wchar_t *line = GetCommandLineW();
+    size_t length = wcslen(line);
+    wchar_t *buffer = (wchar_t *)malloc((length + 1) * sizeof *buffer);
+    wchar_t **starts = (wchar_t **)malloc((length / 2 + 2) * sizeof *starts);
+    if (!buffer || !starts) {
+        free(buffer);
+        free(starts);
+        return NULL;
+    }
+    const wchar_t *in = line;
+    wchar_t *out = buffer;
+    int count = 0;
+    starts[count++] = out;
+    if (*in == L'"') {
+        in++;
+        while (*in && *in != L'"') {
+            *out++ = *in++;
+        }
+        if (*in == L'"') {
+            in++;
+        }
+    } else {
+        while (*in && *in != L' ' && *in != L'\t') {
+            *out++ = *in++;
+        }
+    }
+    *out++ = L'\0';
+    for (;;) {
+        while (*in == L' ' || *in == L'\t') {
+            in++;
+        }
+        if (!*in) {
+            break;
+        }
+        starts[count++] = out;
+        int quoted = 0;
+        while (*in && (quoted || (*in != L' ' && *in != L'\t'))) {
+            size_t slashes = 0;
+            while (*in == L'\\') {
+                slashes++;
+                in++;
+            }
+            if (*in == L'"') {
+                for (size_t i = 0; i < slashes / 2; i++) {
+                    *out++ = L'\\';
+                }
+                if (slashes % 2 == 1) {
+                    *out++ = *in++;
+                } else if (quoted && in[1] == L'"') {
+                    *out++ = L'"';
+                    in += 2;
+                } else {
+                    quoted = !quoted;
+                    in++;
+                }
+            } else {
+                for (size_t i = 0; i < slashes; i++) {
+                    *out++ = L'\\';
+                }
+                if (*in && (quoted || (*in != L' ' && *in != L'\t'))) {
+                    *out++ = *in++;
+                }
+            }
+        }
+        *out++ = L'\0';
+    }
+    char **argv = (char **)calloc((size_t)count + 1, sizeof *argv);
+    for (int i = 0; argv && i < count; i++) {
+        argv[i] = kizu_utf8_from_wide(starts[i]);
+        if (!argv[i]) {
+            argv[i] = (char *)"";
+        }
+    }
+    free(buffer);
+    free(starts);
+    *argc = count;
+    return argv;
+}
+#endif
+
+/* ---------------------------------------------------------------------------
+ * The host's file system, randomness and memory protection
+ *
+ * Each call answers the way the POSIX call it is named after does, 0 or -1
+ * with errno, so the std builtins above them are written once. On Windows a
+ * path is UTF-8 converted to UTF-16 at this boundary, and a Win32 failure is
+ * translated to the errno that names the same thing.
+ * ------------------------------------------------------------------------ */
+
+#if defined(_WIN32)
+static int kizu_win_errno(DWORD code) {
+    switch (code) {
+    case ERROR_FILE_NOT_FOUND:
+    case ERROR_PATH_NOT_FOUND:
+    case ERROR_INVALID_NAME:
+        return ENOENT;
+    case ERROR_ACCESS_DENIED:
+    case ERROR_SHARING_VIOLATION:
+        return EACCES;
+    case ERROR_ALREADY_EXISTS:
+    case ERROR_FILE_EXISTS:
+        return EEXIST;
+    case ERROR_DIR_NOT_EMPTY:
+        return ENOTEMPTY;
+    case ERROR_DIRECTORY:
+        return ENOTDIR;
+    case ERROR_DISK_FULL:
+    case ERROR_HANDLE_DISK_FULL:
+        return ENOSPC;
+    case ERROR_TOO_MANY_OPEN_FILES:
+        return EMFILE;
+    default:
+        return EIO;
+    }
+}
+
+static int kizu_win_fail(void) {
+    errno = kizu_win_errno(GetLastError());
+    return -1;
+}
+
+/* A path that is not UTF-8 names nothing Windows can open. */
+static wchar_t *kizu_os_wide_path(const char *path) {
+    wchar_t *wide = kizu_wide_from_utf8(path);
+    if (!wide) {
+        errno = ENOENT;
+    }
+    return wide;
+}
+
+/* Windows says a path is not found where POSIX says ENOTDIR: when a component
+   before the last names a file. A failure that was ENOENT is looked at again
+   for that, so the error a program sees names the same thing on every host.
+   Returns -1 so a caller can return it. */
+static int kizu_os_refine_not_found(const char *path) {
+    if (errno != ENOENT) {
+        return -1;
+    }
+    size_t length = strlen(path);
+    char *prefix = (char *)malloc(length + 1);
+    if (!prefix) {
+        return -1;
+    }
+    for (size_t end = 1; end < length; end++) {
+        if (path[end] != '/' && path[end] != '\\') {
+            continue;
+        }
+        memcpy(prefix, path, end);
+        prefix[end] = '\0';
+        wchar_t *wide = kizu_wide_from_utf8(prefix);
+        DWORD attributes = wide ? GetFileAttributesW(wide) : INVALID_FILE_ATTRIBUTES;
+        free(wide);
+        if (attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            errno = ENOTDIR;
+            break;
+        }
+    }
+    free(prefix);
+    return -1;
+}
+
+/* std::path reads a path as slash-separated text, and every Win32 call takes
+   a slash where it takes a backslash, so a path the runtime hands to Kizu is
+   spelled with slashes. */
+static void kizu_os_slash_path(char *path) {
+    for (; *path; path++) {
+        if (*path == '\\') {
+            *path = '/';
+        }
+    }
+}
+
+static int kizu_os_entropy(void *buffer, size_t size) {
+    NTSTATUS status = BCryptGenRandom(
+        NULL, (PUCHAR)buffer, (ULONG)size, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    return status == 0 ? 0 : -1;
+}
+
+/* The environment as UTF-8, read once. Windows names variables without
+   regard to ASCII case, so the lookup does not either. */
+static char **kizu_win_environment = NULL;
+static pthread_once_t kizu_win_environment_once = PTHREAD_ONCE_INIT;
+
+static void kizu_win_load_environment(void) {
+    wchar_t *block = GetEnvironmentStringsW();
+    if (!block) {
+        return;
+    }
+    size_t count = 0;
+    for (wchar_t *entry = block; *entry; entry += wcslen(entry) + 1) {
+        count++;
+    }
+    char **table = (char **)calloc(count + 1, sizeof *table);
+    if (table) {
+        size_t index = 0;
+        for (wchar_t *entry = block; *entry; entry += wcslen(entry) + 1) {
+            char *text = kizu_utf8_from_wide(entry);
+            if (text) {
+                table[index++] = text;
+            }
+        }
+    }
+    FreeEnvironmentStringsW(block);
+    kizu_win_environment = table;
+}
+
+static const char *kizu_os_getenv(const char *name) {
+    pthread_once(&kizu_win_environment_once, kizu_win_load_environment);
+    size_t length = strlen(name);
+    if (length == 0 || !kizu_win_environment) {
+        return NULL;
+    }
+    for (char **entry = kizu_win_environment; *entry; entry++) {
+        if (_strnicmp(*entry, name, length) == 0 && (*entry)[length] == '=') {
+            return *entry + length + 1;
+        }
+    }
+    return NULL;
+}
+
+static FILE *kizu_os_fopen(const char *path, const char *mode) {
+    wchar_t *wide = kizu_os_wide_path(path);
+    wchar_t *wide_mode = kizu_wide_from_utf8(mode);
+    FILE *file = wide && wide_mode ? _wfopen(wide, wide_mode) : NULL;
+    free(wide);
+    free(wide_mode);
+    if (!file) {
+        kizu_os_refine_not_found(path);
+    }
+    return file;
+}
+
+/* The final path of an open handle is the one with every link resolved, which
+   is what realpath answers. Windows spells it with the \\?\ prefix that lifts
+   the length limit; the answer drops it, so it is the path a user would
+   write, and spells it with slashes. */
+static char *kizu_os_realpath(const char *path) {
+    wchar_t *wide = kizu_os_wide_path(path);
+    if (!wide) {
+        return NULL;
+    }
+    HANDLE handle = CreateFileW(
+        wide, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    free(wide);
+    if (handle == INVALID_HANDLE_VALUE) {
+        kizu_win_fail();
+        kizu_os_refine_not_found(path);
+        return NULL;
+    }
+    DWORD room = GetFinalPathNameByHandleW(handle, NULL, 0, FILE_NAME_NORMALIZED);
+    wchar_t *final = room ? (wchar_t *)malloc((size_t)room * sizeof *final) : NULL;
+    DWORD length = final ? GetFinalPathNameByHandleW(handle, final, room, FILE_NAME_NORMALIZED) : 0;
+    int code = room && final && length && length < room ? 0 : kizu_win_errno(GetLastError());
+    CloseHandle(handle);
+    if (code != 0) {
+        free(final);
+        errno = code;
+        return NULL;
+    }
+    const wchar_t *start = final;
+    if (wcsncmp(start, L"\\\\?\\UNC\\", 8) == 0) {
+        start += 6;
+        final[6] = L'\\';
+    } else if (wcsncmp(start, L"\\\\?\\", 4) == 0) {
+        start += 4;
+    }
+    char *resolved = kizu_utf8_from_wide(start);
+    free(final);
+    if (!resolved) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    kizu_os_slash_path(resolved);
+    return resolved;
+}
+
+/* rename replaces what is at the destination, which MoveFileEx does only when
+   asked. */
+static int kizu_os_rename(const char *from, const char *to) {
+    wchar_t *wide_from = kizu_os_wide_path(from);
+    wchar_t *wide_to = wide_from ? kizu_os_wide_path(to) : NULL;
+    int result = -1;
+    if (wide_from && wide_to) {
+        result = MoveFileExW(wide_from, wide_to, MOVEFILE_REPLACE_EXISTING) ? 0 : kizu_win_fail();
+    }
+    free(wide_from);
+    free(wide_to);
+    return result;
+}
+
+static _Bool kizu_os_exists(const char *path) {
+    wchar_t *wide = kizu_os_wide_path(path);
+    _Bool found = wide && GetFileAttributesW(wide) != INVALID_FILE_ATTRIBUTES;
+    free(wide);
+    return found;
+}
+
+static int kizu_os_stat(const char *path, int64_t *size, _Bool *is_dir) {
+    wchar_t *wide = kizu_os_wide_path(path);
+    if (!wide) {
+        return -1;
+    }
+    struct _stat64 st;
+    int result = _wstat64(wide, &st);
+    free(wide);
+    if (result != 0) {
+        return kizu_os_refine_not_found(path);
+    }
+    *size = (int64_t)st.st_size;
+    *is_dir = (st.st_mode & _S_IFMT) == _S_IFDIR;
+    return 0;
+}
+
+static int kizu_os_mkdir(const char *path) {
+    wchar_t *wide = kizu_os_wide_path(path);
+    int result = wide ? _wmkdir(wide) : -1;
+    free(wide);
+    return result;
+}
+
+static int kizu_os_rmdir(const char *path) {
+    wchar_t *wide = kizu_os_wide_path(path);
+    int result = wide ? _wrmdir(wide) : -1;
+    free(wide);
+    return result;
+}
+
+static int kizu_os_unlink(const char *path) {
+    wchar_t *wide = kizu_os_wide_path(path);
+    int result = wide ? _wunlink(wide) : -1;
+    free(wide);
+    return result;
+}
+
+/* A directory being read: the search handle, the entry it found last but has
+   not handed out, and the UTF-8 name it handed out last, which lives until
+   the next read. */
+typedef struct {
+    HANDLE handle;
+    WIN32_FIND_DATAW found;
+    int pending;
+    char *name;
+} KizuOsDir;
+
+static KizuOsDir *kizu_os_opendir(const char *path) {
+    size_t length = strlen(path);
+    char *pattern = (char *)malloc(length + 3);
+    if (!pattern) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    memcpy(pattern, path, length);
+    size_t end = length;
+    if (end > 0 && path[end - 1] != '/' && path[end - 1] != '\\') {
+        pattern[end++] = '\\';
+    }
+    pattern[end++] = '*';
+    pattern[end] = '\0';
+    wchar_t *wide = kizu_os_wide_path(pattern);
+    free(pattern);
+    KizuOsDir *dir = wide ? (KizuOsDir *)calloc(1, sizeof *dir) : NULL;
+    if (!dir) {
+        free(wide);
+        return NULL;
+    }
+    dir->handle = FindFirstFileW(wide, &dir->found);
+    free(wide);
+    if (dir->handle == INVALID_HANDLE_VALUE) {
+        kizu_win_fail();
+        free(dir);
+        return NULL;
+    }
+    dir->pending = 1;
+    return dir;
+}
+
+static const char *kizu_os_readdir(KizuOsDir *dir) {
+    free(dir->name);
+    dir->name = NULL;
+    if (!dir->pending) {
+        if (!FindNextFileW(dir->handle, &dir->found)) {
+            DWORD code = GetLastError();
+            if (code != ERROR_NO_MORE_FILES) {
+                errno = kizu_win_errno(code);
+            }
+            return NULL;
+        }
+    }
+    dir->pending = 0;
+    dir->name = kizu_utf8_from_wide(dir->found.cFileName);
+    if (!dir->name) {
+        errno = ENOMEM;
+    }
+    return dir->name;
+}
+
+static int kizu_os_closedir(KizuOsDir *dir) {
+    int result = FindClose(dir->handle) ? 0 : kizu_win_fail();
+    free(dir->name);
+    free(dir);
+    return result;
+}
+
+static long kizu_os_page_size(void) {
+    SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    return (long)info.dwPageSize;
+}
+
+static int kizu_os_protect(void *address, size_t size, int accessible) {
+    DWORD previous = 0;
+    DWORD protection = accessible ? PAGE_READWRITE : PAGE_NOACCESS;
+    return VirtualProtect(address, size, protection, &previous) ? 0 : -1;
+}
+
+static long kizu_os_cpu_count(void) {
+    return (long)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+}
+#else
+static int kizu_os_entropy(void *buffer, size_t size) {
+    return getentropy(buffer, size);
+}
+
+static const char *kizu_os_getenv(const char *name) {
+    return getenv(name);
+}
+
+static FILE *kizu_os_fopen(const char *path, const char *mode) {
+    return fopen(path, mode);
+}
+
+/* realpath resolves symlinks and `.` / `..` against the real file system, so
+ * unlike std::path::clean it needs the path to exist. POSIX.1-2008 lets it
+ * allocate the answer, which keeps PATH_MAX out of this. */
+static char *kizu_os_realpath(const char *path) {
+    return realpath(path, NULL);
+}
+
+static int kizu_os_rename(const char *from, const char *to) {
+    return rename(from, to);
+}
+
+static _Bool kizu_os_exists(const char *path) {
+    return access(path, F_OK) == 0;
+}
+
+static int kizu_os_stat(const char *path, int64_t *size, _Bool *is_dir) {
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        return -1;
+    }
+    *size = (int64_t)st.st_size;
+    *is_dir = S_ISDIR(st.st_mode);
+    return 0;
+}
+
+static int kizu_os_mkdir(const char *path) {
+    return mkdir(path, 0755);
+}
+
+static int kizu_os_rmdir(const char *path) {
+    return rmdir(path);
+}
+
+static int kizu_os_unlink(const char *path) {
+    return unlink(path);
+}
+
+typedef DIR KizuOsDir;
+
+static KizuOsDir *kizu_os_opendir(const char *path) {
+    return opendir(path);
+}
+
+static const char *kizu_os_readdir(KizuOsDir *dir) {
+    struct dirent *entry = readdir(dir);
+    return entry ? entry->d_name : NULL;
+}
+
+static int kizu_os_closedir(KizuOsDir *dir) {
+    return closedir(dir);
+}
+
+static long kizu_os_page_size(void) {
+    return sysconf(_SC_PAGESIZE);
+}
+
+static int kizu_os_protect(void *address, size_t size, int accessible) {
+    return mprotect(address, size, accessible ? PROT_READ | PROT_WRITE : PROT_NONE);
+}
+
+static long kizu_os_cpu_count(void) {
+    return sysconf(_SC_NPROCESSORS_ONLN);
+}
+#endif
 
 void kizu_print_string(const unsigned char *s, int64_t len) {
     fwrite(s, 1, (size_t)len, stdout);
@@ -956,7 +1539,7 @@ static KizuErrorVoid kizu_std_builtin_crypto_random_into_result(
         if (want > 256) {
             want = 256;
         }
-        if (getentropy(array->data + array->len + filled, want) != 0) {
+        if (kizu_os_entropy(array->data + array->len + filled, want) != 0) {
             return kizu_err_void(KIZU_ERR_STD_CRYPTO_ERROR_READ_FAILED);
         }
         filled += (int64_t)want;
@@ -993,7 +1576,7 @@ static KizuOptSliceU8 kizu_std_builtin_process_env_result(KizuSliceU8 name) {
     if (!key) {
         return kizu_opt_null_slice();
     }
-    char *value = getenv(key);
+    const char *value = kizu_os_getenv(key);
     free(key);
     if (!value) {
         return kizu_opt_null_slice();
@@ -1014,9 +1597,10 @@ static int kizu_string_append_bytes(
 }
 
 /* The path of the running executable as the kernel reports it: Linux keeps it
- * in /proc/self/exe and macOS answers _NSGetExecutablePath. Neither reads a
- * file the program named, so this is process identity like argv, not I/O. A
- * path that does not fit is reported rather than truncated. */
+ * in /proc/self/exe, macOS answers _NSGetExecutablePath and Windows
+ * GetModuleFileNameW. None reads a file the program named, so this is process
+ * identity like argv, not I/O. A path that does not fit is reported rather
+ * than truncated. */
 static KizuErrorVoid kizu_std_builtin_process_executable_path_into_result(
     void *allocator, KizuString *dst) {
     int64_t start = dst->len;
@@ -1033,6 +1617,22 @@ static KizuErrorVoid kizu_std_builtin_process_executable_path_into_result(
         return kizu_err_void(KIZU_ERR_STD_PROCESS_ERROR_EXECUTABLE_PATH_UNKNOWN);
     }
     length = (int64_t)strlen(buffer);
+#elif defined(_WIN32)
+    wchar_t wide[4096];
+    DWORD wrote = GetModuleFileNameW(NULL, wide, 4096);
+    if (wrote == 0 || wrote >= 4096) {
+        return kizu_err_void(KIZU_ERR_STD_PROCESS_ERROR_EXECUTABLE_PATH_UNKNOWN);
+    }
+    int written = WideCharToMultiByte(CP_UTF8, 0, wide, (int)wrote, buffer, (int)room, NULL, NULL);
+    if (written <= 0) {
+        return kizu_err_void(KIZU_ERR_STD_PROCESS_ERROR_EXECUTABLE_PATH_UNKNOWN);
+    }
+    for (int i = 0; i < written; i++) {
+        if (buffer[i] == '\\') {
+            buffer[i] = '/';
+        }
+    }
+    length = (int64_t)written;
 #else
     ssize_t written = readlink("/proc/self/exe", buffer, (size_t)room);
     if (written <= 0 || written >= room) {
@@ -1072,6 +1672,96 @@ int64_t std__internal__builtin__process_unix_millis(void) {
     return ((int64_t)ts.tv_sec * 1000) + ((int64_t)ts.tv_nsec / 1000000);
 }
 
+#if defined(_WIN32)
+/* Appends one argument to a command line so that the child's C runtime splits
+   it back out unchanged: quoted when it holds a blank or a quote or is empty,
+   with each quote and each run of backslashes before a quote or the closing
+   quote doubled. */
+static wchar_t *kizu_win_quote_arg(wchar_t *out, const wchar_t *arg) {
+    if (*arg && !wcspbrk(arg, L" \t\n\v\"")) {
+        while (*arg) {
+            *out++ = *arg++;
+        }
+        return out;
+    }
+    *out++ = L'"';
+    for (;;) {
+        size_t slashes = 0;
+        while (*arg == L'\\') {
+            slashes++;
+            arg++;
+        }
+        if (!*arg) {
+            for (size_t i = 0; i < slashes * 2; i++) {
+                *out++ = L'\\';
+            }
+            break;
+        }
+        if (*arg == L'"') {
+            for (size_t i = 0; i < slashes * 2 + 1; i++) {
+                *out++ = L'\\';
+            }
+        } else {
+            for (size_t i = 0; i < slashes; i++) {
+                *out++ = L'\\';
+            }
+        }
+        *out++ = *arg++;
+    }
+    *out++ = L'"';
+    return out;
+}
+
+/* Runs argv as a child with this process's standard streams and waits for it.
+   CreateProcessW looks the program up on PATH the way execvp does when its
+   name has no directory. A child that cannot start is 127, as it is after
+   execvp fails. */
+static int kizu_run_child_process(char *const argv[]) {
+    size_t room = 1;
+    wchar_t *wide[8] = {0};
+    int count = 0;
+    int code = 127;
+    for (; argv[count]; count++) {
+        wide[count] = kizu_wide_from_utf8(argv[count]);
+        if (!wide[count]) {
+            goto done;
+        }
+        room += wcslen(wide[count]) * 2 + 3;
+    }
+    wchar_t *line = (wchar_t *)malloc(room * sizeof *line);
+    if (!line) {
+        goto done;
+    }
+    wchar_t *end = line;
+    for (int i = 0; i < count; i++) {
+        if (i > 0) {
+            *end++ = L' ';
+        }
+        end = kizu_win_quote_arg(end, wide[i]);
+    }
+    *end = L'\0';
+    STARTUPINFOW startup;
+    memset(&startup, 0, sizeof startup);
+    startup.cb = sizeof startup;
+    PROCESS_INFORMATION child;
+    fflush(stdout);
+    fflush(stderr);
+    if (CreateProcessW(NULL, line, NULL, NULL, TRUE, 0, NULL, NULL, &startup, &child)) {
+        DWORD status = 127;
+        WaitForSingleObject(child.hProcess, INFINITE);
+        GetExitCodeProcess(child.hProcess, &status);
+        CloseHandle(child.hThread);
+        CloseHandle(child.hProcess);
+        code = (int)status;
+    }
+    free(line);
+done:
+    for (int i = 0; i < 8; i++) {
+        free(wide[i]);
+    }
+    return code;
+}
+#else
 static int kizu_run_child_process(char *const argv[]) {
     pid_t pid = fork();
     if (pid < 0) {
@@ -1096,6 +1786,7 @@ static int kizu_run_child_process(char *const argv[]) {
     }
     return 127;
 }
+#endif
 
 void std__internal__builtin__process_spawn_wait8(
     KizuErrorI64 *out,
@@ -1147,7 +1838,7 @@ static KizuErrorVoid kizu_std_builtin_fs_read_file_into_result(
     if (!cpath) {
         return kizu_err_void(KIZU_ERR_STD_FS_ERROR_INVALID_PATH);
     }
-    FILE *file = fopen(cpath, "rb");
+    FILE *file = kizu_os_fopen(cpath, "rb");
     int code = errno;
     free(cpath);
     if (!file) {
@@ -1184,9 +1875,8 @@ void std__internal__builtin__fs_read_file_into(
     *out = kizu_std_builtin_fs_read_file_into_result(io, allocator, *path, dst, max);
 }
 
-/* realpath resolves symlinks and `.` / `..` against the real file system, so
- * unlike std::path::clean it needs the path to exist. POSIX.1-2008 lets it
- * allocate the answer, which keeps PATH_MAX out of this. */
+/* The real path needs the path to exist, unlike std::path::clean: it is the
+ * file system's answer, with links and `.` / `..` resolved against it. */
 static KizuErrorVoid kizu_std_builtin_fs_real_path_into_result(
     void *io,
     void *allocator,
@@ -1200,7 +1890,7 @@ static KizuErrorVoid kizu_std_builtin_fs_real_path_into_result(
     if (!cpath) {
         return kizu_err_void(KIZU_ERR_STD_FS_ERROR_INVALID_PATH);
     }
-    char *resolved = realpath(cpath, NULL);
+    char *resolved = kizu_os_realpath(cpath);
     int code = errno;
     free(cpath);
     if (!resolved) {
@@ -1236,7 +1926,7 @@ static KizuErrorVoid kizu_std_builtin_fs_write_file_result(
     if (!cpath) {
         return kizu_err_void(KIZU_ERR_STD_FS_ERROR_INVALID_PATH);
     }
-    FILE *file = fopen(cpath, "wb");
+    FILE *file = kizu_os_fopen(cpath, "wb");
     int code = errno;
     free(cpath);
     if (!file) {
@@ -1274,7 +1964,7 @@ static KizuErrorVoid kizu_std_builtin_fs_rename_result(
         free(cto);
         return kizu_err_void(KIZU_ERR_STD_FS_ERROR_INVALID_PATH);
     }
-    int result = rename(cfrom, cto);
+    int result = kizu_os_rename(cfrom, cto);
     int code = errno;
     free(cfrom);
     free(cto);
@@ -1301,7 +1991,7 @@ static KizuErrorBool kizu_std_builtin_fs_exists_result(void *io, KizuSliceU8 pat
     if (!cpath) {
         return kizu_err_bool(KIZU_ERR_STD_FS_ERROR_INVALID_PATH);
     }
-    _Bool found = access(cpath, F_OK) == 0;
+    _Bool found = kizu_os_exists(cpath);
     free(cpath);
     return kizu_ok_bool(found);
 }
@@ -1318,16 +2008,13 @@ static KizuErrorFsMetadata kizu_std_builtin_fs_metadata_result(void *io, KizuSli
     if (!cpath) {
         return kizu_err_metadata(KIZU_ERR_STD_FS_ERROR_INVALID_PATH);
     }
-    struct stat st;
-    if (stat(cpath, &st) != 0) {
+    KizuFsMetadata out;
+    if (kizu_os_stat(cpath, &out.size, &out.is_dir) != 0) {
         int code = errno;
         free(cpath);
         return kizu_err_metadata(kizu_errno_failure(code));
     }
     free(cpath);
-    KizuFsMetadata out;
-    out.size = (int64_t)st.st_size;
-    out.is_dir = S_ISDIR(st.st_mode);
     return kizu_ok_metadata(out);
 }
 
@@ -1432,7 +2119,7 @@ static KizuErrorArray kizu_std_builtin_fs_read_dir_result(
     if (!cpath) {
         return kizu_err_array(KIZU_ERR_STD_FS_ERROR_INVALID_PATH);
     }
-    DIR *dir = opendir(cpath);
+    KizuOsDir *dir = kizu_os_opendir(cpath);
     if (!dir) {
         int code = errno;
         free(cpath);
@@ -1442,18 +2129,18 @@ static KizuErrorArray kizu_std_builtin_fs_read_dir_result(
     int64_t failure = 0;
     for (;;) {
         errno = 0;
-        struct dirent *entry = readdir(dir);
-        if (!entry) {
+        const char *name = kizu_os_readdir(dir);
+        if (!name) {
             if (errno != 0) {
                 failure = kizu_errno_failure(errno);
             }
             break;
         }
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
             continue;
         }
         KizuFsDirEntry item;
-        if (!kizu_fs_dir_entry_init(allocator, cpath, entry->d_name, &item)) {
+        if (!kizu_fs_dir_entry_init(allocator, cpath, name, &item)) {
             failure = KIZU_ERR_STD_FS_ERROR_OUT_OF_MEMORY;
             break;
         }
@@ -1464,8 +2151,9 @@ static KizuErrorArray kizu_std_builtin_fs_read_dir_result(
             failure = KIZU_ERR_STD_FS_ERROR_OUT_OF_MEMORY;
             break;
         }
-        struct stat st;
-        item.is_dir = stat(entry_path, &st) == 0 && S_ISDIR(st.st_mode);
+        int64_t entry_size = 0;
+        _Bool entry_is_dir = 0;
+        item.is_dir = kizu_os_stat(entry_path, &entry_size, &entry_is_dir) == 0 && entry_is_dir;
         free(entry_path);
         if (!kizu_array_append(
                 allocator, &array, &item, (int64_t)sizeof(KizuFsDirEntry))) {
@@ -1474,7 +2162,7 @@ static KizuErrorArray kizu_std_builtin_fs_read_dir_result(
             break;
         }
     }
-    int close_result = closedir(dir);
+    int close_result = kizu_os_closedir(dir);
     int close_code = errno;
     free(cpath);
     if (failure == 0 && close_result != 0) {
@@ -1501,7 +2189,7 @@ static KizuErrorVoid kizu_std_builtin_fs_create_dir_result(void *io, KizuSliceU8
     if (!cpath) {
         return kizu_err_void(KIZU_ERR_STD_FS_ERROR_INVALID_PATH);
     }
-    int result = mkdir(cpath, 0755);
+    int result = kizu_os_mkdir(cpath);
     int code = errno;
     free(cpath);
     if (result != 0 && code != EEXIST) {
@@ -1522,7 +2210,7 @@ static KizuErrorVoid kizu_std_builtin_fs_remove_dir_result(void *io, KizuSliceU8
     if (!cpath) {
         return kizu_err_void(KIZU_ERR_STD_FS_ERROR_INVALID_PATH);
     }
-    int result = rmdir(cpath);
+    int result = kizu_os_rmdir(cpath);
     int code = errno;
     free(cpath);
     if (result != 0) {
@@ -1543,7 +2231,7 @@ static KizuErrorVoid kizu_std_builtin_fs_remove_file_result(void *io, KizuSliceU
     if (!cpath) {
         return kizu_err_void(KIZU_ERR_STD_FS_ERROR_INVALID_PATH);
     }
-    int result = unlink(cpath);
+    int result = kizu_os_unlink(cpath);
     int code = errno;
     free(cpath);
     if (result != 0) {
@@ -1577,6 +2265,203 @@ void std__internal__builtin__fs_remove_file(KizuErrorVoid *out, void *io, const 
  * stopped reading cannot hold the caller past its deadline by more than this,
  * and large enough that a body which fits goes in one call. */
 #define KIZU_NET_WRITE_CHUNK INT64_C(65536)
+
+/* The socket calls std::net is built on, one body per host. Each answers
+ * the way the POSIX call it is named after does, -1 with errno on failure, so
+ * the builtins below are written once. A Winsock SOCKET is a handle rather
+ * than a descriptor, but the values Windows hands out are small multiples of
+ * four, so it travels in the same int; INVALID_SOCKET is -1 there too.
+ *
+ * Every socket is non-blocking (see kizu_net_set_nonblocking), so a send asks
+ * for only what fits on either host: Darwin needs MSG_DONTWAIT for that, and
+ * Windows has no such flag and needs none. */
+#if defined(_WIN32)
+static int kizu_wsa_errno(int code) {
+    switch (code) {
+    case WSAEWOULDBLOCK:
+        return EWOULDBLOCK;
+    case WSAEINPROGRESS:
+    case WSAEALREADY:
+        return EINPROGRESS;
+    case WSAEINTR:
+        return EINTR;
+    case WSAEADDRINUSE:
+        return EADDRINUSE;
+    case WSAEACCES:
+        return EACCES;
+    case WSAECONNREFUSED:
+        return ECONNREFUSED;
+    case WSAECONNRESET:
+    case WSAECONNABORTED:
+    case WSAENETRESET:
+        return ECONNRESET;
+    case WSAESHUTDOWN:
+        return EPIPE;
+    case WSAENOTCONN:
+        return ENOTCONN;
+    case WSAEMFILE:
+        return EMFILE;
+    case WSAETIMEDOUT:
+        return ETIMEDOUT;
+    case WSAEADDRNOTAVAIL:
+        return EADDRNOTAVAIL;
+    case WSAEAFNOSUPPORT:
+        return EAFNOSUPPORT;
+    case WSAENOBUFS:
+        return ENOMEM;
+    default:
+        return EIO;
+    }
+}
+
+static int kizu_net_fail(void) {
+    errno = kizu_wsa_errno(WSAGetLastError());
+    return -1;
+}
+
+static int kizu_net_socket(int family, int type, int protocol) {
+    SOCKET fd = socket(family, type, protocol);
+    return fd == INVALID_SOCKET ? kizu_net_fail() : (int)fd;
+}
+
+static int kizu_net_close(int fd) {
+    return closesocket((SOCKET)fd) == 0 ? 0 : kizu_net_fail();
+}
+
+static void kizu_net_set_nonblocking(int fd) {
+    u_long on = 1;
+    ioctlsocket((SOCKET)fd, FIONBIO, &on);
+}
+
+static void kizu_net_set_option(int fd, int level, int name, int value) {
+    setsockopt((SOCKET)fd, level, name, (const char *)&value, sizeof value);
+}
+
+/* The error a non-blocking connect finished with, as an errno. */
+static int kizu_net_pending_error(int fd, int *error) {
+    int code = 0;
+    int length = sizeof code;
+    if (getsockopt((SOCKET)fd, SOL_SOCKET, SO_ERROR, (char *)&code, &length) != 0) {
+        return kizu_net_fail();
+    }
+    *error = code == 0 ? 0 : kizu_wsa_errno(code);
+    return 0;
+}
+
+static int kizu_net_bind(int fd, const struct sockaddr *address, size_t length) {
+    return bind((SOCKET)fd, address, (int)length) == 0 ? 0 : kizu_net_fail();
+}
+
+static int kizu_net_listen(int fd, int backlog) {
+    return listen((SOCKET)fd, backlog) == 0 ? 0 : kizu_net_fail();
+}
+
+/* A non-blocking connect that has not finished is WSAEWOULDBLOCK on Windows
+   and EINPROGRESS on POSIX; the caller waits for either the same way. */
+static int kizu_net_connect(int fd, const struct sockaddr *address, size_t length) {
+    if (connect((SOCKET)fd, address, (int)length) == 0) {
+        return 0;
+    }
+    kizu_net_fail();
+    if (errno == EWOULDBLOCK) {
+        errno = EINPROGRESS;
+    }
+    return -1;
+}
+
+static int kizu_net_accept(int fd) {
+    SOCKET conn = accept((SOCKET)fd, NULL, NULL);
+    return conn == INVALID_SOCKET ? kizu_net_fail() : (int)conn;
+}
+
+static int64_t kizu_net_recv(int fd, void *buffer, size_t length) {
+    int want = length > INT32_MAX ? INT32_MAX : (int)length;
+    int got = recv((SOCKET)fd, (char *)buffer, want, 0);
+    return got == SOCKET_ERROR ? kizu_net_fail() : (int64_t)got;
+}
+
+static int64_t kizu_net_send(int fd, const void *buffer, size_t length) {
+    int want = length > INT32_MAX ? INT32_MAX : (int)length;
+    int wrote = send((SOCKET)fd, (const char *)buffer, want, 0);
+    return wrote == SOCKET_ERROR ? kizu_net_fail() : (int64_t)wrote;
+}
+
+static int kizu_net_poll(struct pollfd *fds, size_t count, int timeout_ms) {
+    int ready = WSAPoll(fds, (ULONG)count, timeout_ms);
+    return ready == SOCKET_ERROR ? kizu_net_fail() : ready;
+}
+
+static int kizu_net_local_address(int fd, struct sockaddr_storage *address) {
+    int length = sizeof *address;
+    return getsockname((SOCKET)fd, (struct sockaddr *)address, &length) == 0 ? 0 : kizu_net_fail();
+}
+
+static void kizu_net_shutdown_write(int fd) {
+    shutdown((SOCKET)fd, SD_SEND);
+}
+#else
+static int kizu_net_socket(int family, int type, int protocol) {
+    return socket(family, type, protocol);
+}
+
+static int kizu_net_close(int fd) {
+    return close(fd);
+}
+
+static void kizu_net_set_nonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) {
+        return;
+    }
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+static void kizu_net_set_option(int fd, int level, int name, int value) {
+    setsockopt(fd, level, name, &value, sizeof value);
+}
+
+static int kizu_net_pending_error(int fd, int *error) {
+    socklen_t length = sizeof *error;
+    return getsockopt(fd, SOL_SOCKET, SO_ERROR, error, &length);
+}
+
+static int kizu_net_bind(int fd, const struct sockaddr *address, size_t length) {
+    return bind(fd, address, (socklen_t)length);
+}
+
+static int kizu_net_listen(int fd, int backlog) {
+    return listen(fd, backlog);
+}
+
+static int kizu_net_connect(int fd, const struct sockaddr *address, size_t length) {
+    return connect(fd, address, (socklen_t)length);
+}
+
+static int kizu_net_accept(int fd) {
+    return accept(fd, NULL, NULL);
+}
+
+static int64_t kizu_net_recv(int fd, void *buffer, size_t length) {
+    return (int64_t)recv(fd, buffer, length, 0);
+}
+
+static int64_t kizu_net_send(int fd, const void *buffer, size_t length) {
+    return (int64_t)send(fd, buffer, length, MSG_DONTWAIT);
+}
+
+static int kizu_net_poll(struct pollfd *fds, size_t count, int timeout_ms) {
+    return poll(fds, (nfds_t)count, timeout_ms);
+}
+
+static int kizu_net_local_address(int fd, struct sockaddr_storage *address) {
+    socklen_t length = sizeof *address;
+    return getsockname(fd, (struct sockaddr *)address, &length);
+}
+
+static void kizu_net_shutdown_write(int fd) {
+    shutdown(fd, SHUT_WR);
+}
+#endif
 
 static int64_t kizu_net_errno_failure(int code) {
     switch (code) {
@@ -1626,13 +2511,6 @@ static int64_t kizu_net_errno_failure(int code) {
  *
  * Nothing above sees this. Without a deadline the poll waits forever, which is
  * the blocking behaviour the API already promised. */
-static void kizu_net_set_nonblocking(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0) {
-        return;
-    }
-    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-}
 
 static int64_t kizu_net_deadline(int64_t timeout_ms) {
     if (timeout_ms < 0) {
@@ -1680,7 +2558,7 @@ static int64_t kizu_net_wait(void *io, int fd, short events, int64_t remaining) 
     pfd.fd = fd;
     pfd.events = events;
     pfd.revents = 0;
-    int ready = poll(&pfd, 1, budget);
+    int ready = kizu_net_poll(&pfd, 1, budget);
     if (ready > 0) {
         return KIZU_NET_WAIT_READY;
     }
@@ -1756,22 +2634,21 @@ static KizuErrorI64 kizu_std_builtin_net_listen_result(
     }
     int64_t last = KIZU_ERR_STD_NET_ERROR_OPERATION_FAILED;
     for (struct addrinfo *it = list; it; it = it->ai_next) {
-        int fd = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
+        int fd = kizu_net_socket(it->ai_family, it->ai_socktype, it->ai_protocol);
         if (fd < 0) {
             last = kizu_net_errno_failure(errno);
             continue;
         }
-        int one = 1;
-        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-        if (bind(fd, it->ai_addr, it->ai_addrlen) != 0) {
+        kizu_net_set_option(fd, SOL_SOCKET, SO_REUSEADDR, 1);
+        if (kizu_net_bind(fd, it->ai_addr, it->ai_addrlen) != 0) {
             last = kizu_net_errno_failure(errno);
-            close(fd);
+            kizu_net_close(fd);
             continue;
         }
         kizu_net_set_nonblocking(fd);
-        if (listen(fd, KIZU_NET_BACKLOG) != 0) {
+        if (kizu_net_listen(fd, KIZU_NET_BACKLOG) != 0) {
             last = kizu_net_errno_failure(errno);
-            close(fd);
+            kizu_net_close(fd);
             continue;
         }
         freeaddrinfo(list);
@@ -1804,8 +2681,7 @@ static int64_t kizu_net_finish_connect(void *io, int fd, int64_t deadline) {
         return wait;
     }
     int error = 0;
-    socklen_t length = sizeof error;
-    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length) != 0) {
+    if (kizu_net_pending_error(fd, &error) != 0) {
         return kizu_net_errno_failure(errno);
     }
     if (error != 0) {
@@ -1831,7 +2707,7 @@ static KizuErrorI64 kizu_std_builtin_net_connect_result(
     int64_t deadline = kizu_net_deadline(timeout_ms);
     int64_t last = KIZU_ERR_STD_NET_ERROR_OPERATION_FAILED;
     for (struct addrinfo *it = list; it; it = it->ai_next) {
-        int fd = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
+        int fd = kizu_net_socket(it->ai_family, it->ai_socktype, it->ai_protocol);
         if (fd < 0) {
             last = kizu_net_errno_failure(errno);
             continue;
@@ -1839,23 +2715,22 @@ static KizuErrorI64 kizu_std_builtin_net_connect_result(
         kizu_net_set_nonblocking(fd);
         int connected;
         do {
-            connected = connect(fd, it->ai_addr, it->ai_addrlen);
+            connected = kizu_net_connect(fd, it->ai_addr, it->ai_addrlen);
         } while (connected != 0 && errno == EINTR);
         if (connected != 0) {
             if (errno != EINPROGRESS) {
                 last = kizu_net_errno_failure(errno);
-                close(fd);
+                kizu_net_close(fd);
                 continue;
             }
             int64_t pending = kizu_net_finish_connect(io, fd, deadline);
             if (pending != 0) {
                 last = pending;
-                close(fd);
+                kizu_net_close(fd);
                 continue;
             }
         }
-        int one = 1;
-        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        kizu_net_set_option(fd, IPPROTO_TCP, TCP_NODELAY, 1);
         freeaddrinfo(list);
         return kizu_ok_i64((int64_t)fd);
     }
@@ -1893,10 +2768,9 @@ static KizuErrorI64 kizu_std_builtin_net_accept_result(
         if (wait != KIZU_NET_WAIT_READY) {
             return kizu_err_i64(wait);
         }
-        int conn = accept((int)fd, NULL, NULL);
+        int conn = kizu_net_accept((int)fd);
         if (conn >= 0) {
-            int one = 1;
-            setsockopt(conn, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+            kizu_net_set_option(conn, IPPROTO_TCP, TCP_NODELAY, 1);
             kizu_net_set_nonblocking(conn);
             return kizu_ok_i64((int64_t)conn);
         }
@@ -1950,7 +2824,7 @@ static KizuErrorI64 kizu_std_builtin_net_read_result(
     }
     int64_t deadline = kizu_net_deadline(timeout_ms);
     for (;;) {
-        ssize_t got = recv((int)fd, array->data + array->len, (size_t)want, 0);
+        int64_t got = kizu_net_recv((int)fd, array->data + array->len, (size_t)want);
         if (got >= 0) {
             array->len += (int64_t)got;
             return kizu_ok_i64((int64_t)got);
@@ -2017,7 +2891,7 @@ static KizuErrorVoid kizu_std_builtin_net_write_all_result(
         if (want > KIZU_NET_WRITE_CHUNK) {
             want = KIZU_NET_WRITE_CHUNK;
         }
-        ssize_t wrote = send((int)fd, bytes.ptr + sent, (size_t)want, MSG_DONTWAIT);
+        int64_t wrote = kizu_net_send((int)fd, bytes.ptr + sent, (size_t)want);
         if (wrote < 0) {
             if (errno == EINTR) {
                 continue;
@@ -2046,6 +2920,11 @@ static KizuErrorVoid kizu_std_builtin_net_write_all_result(
  * to the wait with the rest still in hand rather than holding the thread until
  * a slow peer has taken everything.
  *
+ * What fits is at most one chunk. Winsock takes a whole non-blocking send
+ * into the kernel whenever its buffer has any room left, so on Windows
+ * nothing else would stop a peer that is not reading from being handed the
+ * whole body at once.
+ *
  * It never waits, so a deadline has nothing to bound here. The waiting is the
  * poller's, and the deadline that matters is the one on that wait. */
 static KizuErrorI64 kizu_std_builtin_net_write_some_result(
@@ -2065,8 +2944,9 @@ static KizuErrorI64 kizu_std_builtin_net_write_some_result(
     if (bytes.len == 0) {
         return kizu_ok_i64(0);
     }
+    int64_t want = bytes.len > KIZU_NET_WRITE_CHUNK ? KIZU_NET_WRITE_CHUNK : bytes.len;
     for (;;) {
-        ssize_t wrote = send((int)fd, bytes.ptr, (size_t)bytes.len, MSG_DONTWAIT);
+        int64_t wrote = kizu_net_send((int)fd, bytes.ptr, (size_t)want);
         if (wrote >= 0) {
             return kizu_ok_i64((int64_t)wrote);
         }
@@ -2104,16 +2984,35 @@ void std__internal__builtin__net_write_all(
  * which connection is which, what to do when one is ready -- is Kizu source,
  * because the readiness itself is all the kernel knows.
  *
- * The two host mechanisms report the same fact in different shapes. kqueue
- * gives one event per filter, so a descriptor that is both readable and
- * writable arrives twice; epoll gives one event with both bits. The Kizu side
- * sees whatever the host said, because collapsing them here would be inventing
- * an order the host did not have. */
+ * The host mechanisms report the same fact in different shapes. kqueue gives
+ * one event per filter, so a descriptor that is both readable and writable
+ * arrives twice; epoll gives one event with both bits. The Kizu side sees
+ * whatever the host said, because collapsing them here would be inventing an
+ * order the host did not have.
+ *
+ * Windows has no kernel-side interest set for sockets that answers readiness
+ * (its completion ports answer completed transfers instead), so its poller is
+ * the interest set kept here and handed to WSAPoll on every wait. That is
+ * level-triggered like the other two, and like epoll it gives one event per
+ * socket with every bit that is true. */
 
 #define KIZU_POLL_READ INT64_C(1)
 #define KIZU_POLL_WRITE INT64_C(2)
 #define KIZU_POLL_CLOSED INT64_C(4)
 
+#if defined(_WIN32)
+typedef struct {
+    struct pollfd *watched;
+    int64_t *tokens;
+    int watched_count;
+    int watched_cap;
+    /* What the last wait answered: the index into watched of each ready
+       socket, at most capacity of them. */
+    int *ready;
+    int count;
+    int capacity;
+} KizuPoller;
+#else
 typedef struct {
     int fd;
     int count;
@@ -2124,6 +3023,7 @@ typedef struct {
     struct epoll_event *events;
 #endif
 } KizuPoller;
+#endif
 
 /* The handle a Kizu Poller holds. It is this pointer, which is the one thing
  * safe Kizu never sees: the owner keeps it private and its consuming deinit is
@@ -2146,6 +3046,15 @@ static KizuErrorI64 kizu_std_builtin_net_poller_new_result(void *io, int64_t cap
     if (!poller) {
         return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_OUT_OF_MEMORY);
     }
+#if defined(_WIN32)
+    poller->ready = (int *)calloc((size_t)capacity, sizeof *poller->ready);
+    if (!poller->ready) {
+        free(poller);
+        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_OUT_OF_MEMORY);
+    }
+    poller->capacity = (int)capacity;
+    return kizu_ok_i64((int64_t)(intptr_t)poller);
+#else
 #if defined(__APPLE__)
     poller->events = (struct kevent *)calloc((size_t)capacity, sizeof *poller->events);
 #else
@@ -2169,7 +3078,20 @@ static KizuErrorI64 kizu_std_builtin_net_poller_new_result(void *io, int64_t cap
         return kizu_err_i64(failure);
     }
     return kizu_ok_i64((int64_t)(intptr_t)poller);
+#endif
 }
+
+#if defined(_WIN32)
+/* The slot fd is watched in, or -1. */
+static int kizu_poller_find(KizuPoller *poller, int64_t fd) {
+    for (int i = 0; i < poller->watched_count; i++) {
+        if ((int64_t)poller->watched[i].fd == fd) {
+            return i;
+        }
+    }
+    return -1;
+}
+#endif
 
 void std__internal__builtin__net_poller_new(
     KizuErrorI64 *out,
@@ -2196,7 +3118,38 @@ static KizuErrorVoid kizu_std_builtin_net_poller_add_result(
     if ((interest & (KIZU_POLL_READ | KIZU_POLL_WRITE)) == 0) {
         return kizu_err_void(KIZU_ERR_STD_NET_ERROR_INVALID_LENGTH);
     }
-#if defined(__APPLE__)
+#if defined(_WIN32)
+    short events = 0;
+    if (interest & KIZU_POLL_READ) {
+        events |= POLLIN;
+    }
+    if (interest & KIZU_POLL_WRITE) {
+        events |= POLLOUT;
+    }
+    int slot = kizu_poller_find(poller, fd);
+    if (slot < 0) {
+        if (poller->watched_count == poller->watched_cap) {
+            int cap = poller->watched_cap == 0 ? 16 : poller->watched_cap * 2;
+            struct pollfd *watched =
+                (struct pollfd *)realloc(poller->watched, (size_t)cap * sizeof *watched);
+            if (!watched) {
+                return kizu_err_void(KIZU_ERR_STD_NET_ERROR_OUT_OF_MEMORY);
+            }
+            poller->watched = watched;
+            int64_t *tokens = (int64_t *)realloc(poller->tokens, (size_t)cap * sizeof *tokens);
+            if (!tokens) {
+                return kizu_err_void(KIZU_ERR_STD_NET_ERROR_OUT_OF_MEMORY);
+            }
+            poller->tokens = tokens;
+            poller->watched_cap = cap;
+        }
+        slot = poller->watched_count++;
+        poller->watched[slot].fd = (SOCKET)fd;
+    }
+    poller->watched[slot].events = events;
+    poller->watched[slot].revents = 0;
+    poller->tokens[slot] = token;
+#elif defined(__APPLE__)
     struct kevent changes[2];
     int count = 0;
     if (interest & KIZU_POLL_READ) {
@@ -2261,7 +3214,18 @@ static KizuErrorVoid kizu_std_builtin_net_poller_remove_result(
     if (!poller || fd < 0) {
         return kizu_err_void(KIZU_ERR_STD_NET_ERROR_CLOSED);
     }
-#if defined(__APPLE__)
+#if defined(_WIN32)
+    /* The last wait's answer names slots by index, so the slots after this
+       one keep their places. */
+    int slot = kizu_poller_find(poller, fd);
+    if (slot >= 0) {
+        int rest = poller->watched_count - slot - 1;
+        memmove(&poller->watched[slot], &poller->watched[slot + 1], (size_t)rest * sizeof *poller->watched);
+        memmove(&poller->tokens[slot], &poller->tokens[slot + 1], (size_t)rest * sizeof *poller->tokens);
+        poller->watched_count--;
+        poller->count = 0;
+    }
+#elif defined(__APPLE__)
     struct kevent changes[2];
     EV_SET(&changes[0], (uintptr_t)fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
     EV_SET(&changes[1], (uintptr_t)fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
@@ -2304,7 +3268,28 @@ static KizuErrorI64 kizu_std_builtin_net_poller_wait_result(
     for (;;) {
         int64_t remaining = kizu_net_remaining(deadline);
         int ready;
-#if defined(__APPLE__)
+#if defined(_WIN32)
+        int budget = -1;
+        if (remaining >= 0) {
+            budget = remaining > INT32_MAX ? INT32_MAX : (int)remaining;
+        }
+        if (poller->watched_count == 0) {
+            /* WSAPoll refuses an empty set, where epoll waits out the
+               budget with nothing to report. */
+            Sleep(budget < 0 ? INFINITE : (DWORD)budget);
+            return kizu_ok_i64(0);
+        }
+        ready = kizu_net_poll(poller->watched, (size_t)poller->watched_count, budget);
+        if (ready > 0) {
+            int found = 0;
+            for (int i = 0; i < poller->watched_count && found < poller->capacity; i++) {
+                if (poller->watched[i].revents != 0) {
+                    poller->ready[found++] = i;
+                }
+            }
+            ready = found;
+        }
+#elif defined(__APPLE__)
         struct timespec wait;
         struct timespec *waitp = NULL;
         if (remaining >= 0) {
@@ -2347,7 +3332,9 @@ int64_t std__internal__builtin__net_poller_token(int64_t handle, int64_t index) 
     if (!poller || index < 0 || index >= poller->count) {
         return 0;
     }
-#if defined(__APPLE__)
+#if defined(_WIN32)
+    return poller->tokens[poller->ready[index]];
+#elif defined(__APPLE__)
     return (int64_t)(intptr_t)poller->events[index].udata;
 #else
     return (int64_t)poller->events[index].data.u64;
@@ -2360,7 +3347,18 @@ int64_t std__internal__builtin__net_poller_flags(int64_t handle, int64_t index) 
         return 0;
     }
     int64_t flags = 0;
-#if defined(__APPLE__)
+#if defined(_WIN32)
+    short events = poller->watched[poller->ready[index]].revents;
+    if (events & POLLIN) {
+        flags |= KIZU_POLL_READ;
+    }
+    if (events & POLLOUT) {
+        flags |= KIZU_POLL_WRITE;
+    }
+    if (events & (POLLHUP | POLLERR)) {
+        flags |= KIZU_POLL_CLOSED;
+    }
+#elif defined(__APPLE__)
     struct kevent *event = &poller->events[index];
     if (event->filter == EVFILT_READ) {
         flags |= KIZU_POLL_READ;
@@ -2393,10 +3391,16 @@ void std__internal__builtin__net_poller_close(int64_t handle) {
     if (!poller) {
         return;
     }
+#if defined(_WIN32)
+    free(poller->watched);
+    free(poller->tokens);
+    free(poller->ready);
+#else
     if (poller->fd >= 0) {
         close(poller->fd);
     }
     free(poller->events);
+#endif
     free(poller);
 }
 
@@ -2432,8 +3436,14 @@ typedef struct {
 } KizuStack;
 
 typedef struct KizuCoro {
+#if defined(_WIN32)
+    /* The stack pointer each side was switched away from. */
+    void *inside;
+    void *outside;
+#else
     ucontext_t inside;
     ucontext_t outside;
+#endif
     KizuStack stack;
     void (*entry)(int64_t);
     int64_t arg;
@@ -2511,7 +3521,7 @@ static KizuStackResult kizu_stack_new(
     if (stack_bytes > 64 * 1024 * 1024) {
         return KIZU_STACK_OUT_OF_MEMORY;
     }
-    long page = sysconf(_SC_PAGESIZE);
+    long page = kizu_os_page_size();
     if (page < KIZU_STACK_PROBE_BYTES ||
         (uint64_t)page > (uint64_t)INT64_MAX / 2) {
         return KIZU_STACK_PROTECTION_FAILED;
@@ -2530,7 +3540,7 @@ static KizuStackResult kizu_stack_new(
     uintptr_t remainder = address % (uintptr_t)page_bytes;
     size_t padding = remainder == 0 ? 0 : (size_t)((uintptr_t)page_bytes - remainder);
     void *guard = allocation + padding;
-    if (mprotect(guard, (size_t)page_bytes, PROT_NONE) != 0) {
+    if (kizu_os_protect(guard, (size_t)page_bytes, 0) != 0) {
         kizu_rt_free(allocator, allocation, allocation_size);
         return KIZU_STACK_PROTECTION_FAILED;
     }
@@ -2543,14 +3553,114 @@ static KizuStackResult kizu_stack_new(
     return KIZU_STACK_READY;
 }
 
+#if defined(_WIN32)
+/* Windows has no ucontext, so a stack is changed by hand. kizu_context_switch
+   saves everything the x64 calling convention says a callee keeps -- rbx,
+   rbp, rdi, rsi, r12 to r15 and xmm6 to xmm15 -- on the stack it is leaving,
+   writes that stack pointer to *from, and restores the same from `to`. It
+   also carries the stack bounds the thread block holds (StackBase,
+   StackLimit, DeallocationStack at gs:0x08, 0x10 and 0x1478): Windows checks
+   a fault's stack against them, and a fault on a coroutine stack outside them
+   is not reported but ends the process silently.
+
+   A stack not yet run is made to look like one that was switched away from
+   (kizu_context_prepare): the restore pops zeros, this stack's bounds and the
+   entry into r12, and returns into kizu_context_boot, which calls r12 with
+   the shadow space the convention gives every callee. The entry never
+   returns: it switches away for the last time. */
+void kizu_context_switch(void **from, void *to);
+void kizu_context_boot(void);
+
+__asm__(
+    ".text\n"
+    ".globl kizu_context_switch\n"
+    "kizu_context_switch:\n"
+    "    pushq %rbp\n"
+    "    pushq %rbx\n"
+    "    pushq %rdi\n"
+    "    pushq %rsi\n"
+    "    pushq %r12\n"
+    "    pushq %r13\n"
+    "    pushq %r14\n"
+    "    pushq %r15\n"
+    "    pushq %gs:0x08\n"
+    "    pushq %gs:0x10\n"
+    "    pushq %gs:0x1478\n"
+    "    subq $160, %rsp\n"
+    "    movaps %xmm6, 0(%rsp)\n"
+    "    movaps %xmm7, 16(%rsp)\n"
+    "    movaps %xmm8, 32(%rsp)\n"
+    "    movaps %xmm9, 48(%rsp)\n"
+    "    movaps %xmm10, 64(%rsp)\n"
+    "    movaps %xmm11, 80(%rsp)\n"
+    "    movaps %xmm12, 96(%rsp)\n"
+    "    movaps %xmm13, 112(%rsp)\n"
+    "    movaps %xmm14, 128(%rsp)\n"
+    "    movaps %xmm15, 144(%rsp)\n"
+    "    movq %rsp, (%rcx)\n"
+    "    movq %rdx, %rsp\n"
+    "    movaps 0(%rsp), %xmm6\n"
+    "    movaps 16(%rsp), %xmm7\n"
+    "    movaps 32(%rsp), %xmm8\n"
+    "    movaps 48(%rsp), %xmm9\n"
+    "    movaps 64(%rsp), %xmm10\n"
+    "    movaps 80(%rsp), %xmm11\n"
+    "    movaps 96(%rsp), %xmm12\n"
+    "    movaps 112(%rsp), %xmm13\n"
+    "    movaps 128(%rsp), %xmm14\n"
+    "    movaps 144(%rsp), %xmm15\n"
+    "    addq $160, %rsp\n"
+    "    popq %gs:0x1478\n"
+    "    popq %gs:0x10\n"
+    "    popq %gs:0x08\n"
+    "    popq %r15\n"
+    "    popq %r14\n"
+    "    popq %r13\n"
+    "    popq %r12\n"
+    "    popq %rsi\n"
+    "    popq %rdi\n"
+    "    popq %rbx\n"
+    "    popq %rbp\n"
+    "    ret\n"
+    ".globl kizu_context_boot\n"
+    "kizu_context_boot:\n"
+    "    subq $32, %rsp\n"
+    "    callq *%r12\n"
+    "    ud2\n");
+
+/* The words kizu_context_switch restores, lowest address first. */
+enum {
+    KIZU_CONTEXT_XMM_WORDS = 20,
+    KIZU_CONTEXT_DEALLOCATION = 20,
+    KIZU_CONTEXT_LIMIT = 21,
+    KIZU_CONTEXT_BASE = 22,
+    KIZU_CONTEXT_R12 = 26,
+    KIZU_CONTEXT_RETURN = 31,
+    KIZU_CONTEXT_WORDS = 32
+};
+
+/* Lays out a stack not yet run so that switching to it calls entry, and
+   returns the stack pointer to switch to. The return slot is the top word,
+   at an address 8 past a multiple of 16 as a call would leave it, so the
+   saved area under it is aligned for the xmm moves. */
+static void *kizu_context_prepare(KizuStack *stack, void (*entry)(void)) {
+    uintptr_t top = ((uintptr_t)stack->base + stack->size) & ~(uintptr_t)15;
+    uint64_t *frame = (uint64_t *)(top - KIZU_CONTEXT_WORDS * sizeof(uint64_t));
+    memset(frame, 0, KIZU_CONTEXT_WORDS * sizeof(uint64_t));
+    frame[KIZU_CONTEXT_DEALLOCATION] = (uint64_t)(uintptr_t)stack->guard;
+    frame[KIZU_CONTEXT_LIMIT] = (uint64_t)(uintptr_t)stack->base;
+    frame[KIZU_CONTEXT_BASE] = (uint64_t)top;
+    frame[KIZU_CONTEXT_R12] = (uint64_t)(uintptr_t)entry;
+    frame[KIZU_CONTEXT_RETURN] = (uint64_t)(uintptr_t)kizu_context_boot;
+    return frame;
+}
+#endif
+
 static void kizu_stack_release(KizuStack *stack, void *allocator) {
     if (!stack->allocation) {
         return;
     }
-    if (mprotect(
-            stack->guard,
-            stack->guard_size,
-            PROT_READ | PROT_WRITE) != 0) {
+    if (kizu_os_protect(stack->guard, stack->guard_size, 1) != 0) {
         /* An allocator may inspect the block it releases. It must never be
            handed a block that still contains an inaccessible page. */
         abort();
@@ -2578,7 +3688,11 @@ static void kizu_coro_trampoline(void) {
         coro->entry(coro->arg);
     }
     coro->finished = 1;
+#if defined(_WIN32)
+    kizu_context_switch(&coro->inside, coro->outside);
+#else
     /* uc_link takes it back to whoever resumed it. */
+#endif
 }
 
 void std__internal__builtin__coro_new(
@@ -2628,6 +3742,14 @@ int64_t std__internal__builtin__coro_resume(int64_t handle) {
     KizuCoro *previous = kizu_coro_current;
     kizu_coro_current = coro;
     coro->running = 1;
+#if defined(_WIN32)
+    if (!coro->started) {
+        coro->started = 1;
+        coro->inside = kizu_context_prepare(&coro->stack, kizu_coro_trampoline);
+        kizu_coro_starting = coro;
+    }
+    kizu_context_switch(&coro->outside, coro->inside);
+#else
     if (!coro->started) {
         coro->started = 1;
         getcontext(&coro->inside);
@@ -2638,6 +3760,7 @@ int64_t std__internal__builtin__coro_resume(int64_t handle) {
         makecontext(&coro->inside, kizu_coro_trampoline, 0);
     }
     swapcontext(&coro->outside, &coro->inside);
+#endif
     coro->running = 0;
     kizu_coro_current = previous;
     return coro->finished ? 0 : 1;
@@ -2650,7 +3773,11 @@ void std__internal__builtin__coro_suspend(void) {
     if (!coro) {
         return;
     }
+#if defined(_WIN32)
+    kizu_context_switch(&coro->inside, coro->outside);
+#else
     swapcontext(&coro->inside, &coro->outside);
+#endif
 }
 
 #if defined(__clang__)
@@ -2705,6 +3832,10 @@ typedef struct {
     int64_t participant;
     pthread_t id;
     KizuStack stack;
+#if defined(_WIN32)
+    /* The thread's own stack while the helper runs on the one above. */
+    void *thread_stack;
+#endif
 } KizuPoolHelper;
 
 struct KizuPool {
@@ -3063,6 +4194,27 @@ static void kizu_pool_release(KizuPool *pool, int64_t started, void *allocator) 
     kizu_rt_free(allocator, pool, (int64_t)sizeof *pool);
 }
 
+#if defined(_WIN32)
+/* A Windows thread cannot be created on a stack it is given, so a helper's
+   thread starts on its own and moves onto the pool's stack before it does
+   anything, the way a coroutine's first resume does, and moves back to end. */
+static _Thread_local KizuPoolHelper *kizu_pool_helper_starting = NULL;
+
+static void kizu_pool_helper_entry(void) {
+    KizuPoolHelper *helper = kizu_pool_helper_starting;
+    void *on_stack = NULL;
+    kizu_pool_helper_main(helper);
+    kizu_context_switch(&on_stack, helper->thread_stack);
+}
+
+static void *kizu_pool_helper_thread(void *arg) {
+    KizuPoolHelper *helper = (KizuPoolHelper *)arg;
+    kizu_pool_helper_starting = helper;
+    kizu_context_switch(&helper->thread_stack, kizu_context_prepare(&helper->stack, kizu_pool_helper_entry));
+    return NULL;
+}
+#endif
+
 /* Starts one helper on a stack bought from the pool's allocator, with the same
    guard page a coroutine stack has. */
 static int64_t kizu_pool_start_helper(
@@ -3073,6 +4225,9 @@ static int64_t kizu_pool_start_helper(
             ? KIZU_ERR_STD_THREAD_ERROR_STACK_PROTECTION_FAILED
             : KIZU_ERR_STD_THREAD_ERROR_OUT_OF_MEMORY;
     }
+#if defined(_WIN32)
+    int failed = pthread_create(&helper->id, NULL, kizu_pool_helper_thread, helper) != 0;
+#else
     pthread_attr_t attr;
     if (pthread_attr_init(&attr) != 0) {
         return KIZU_ERR_STD_THREAD_ERROR_SPAWN_FAILED;
@@ -3080,6 +4235,7 @@ static int64_t kizu_pool_start_helper(
     int failed = pthread_attr_setstack(&attr, helper->stack.base, helper->stack.size) != 0 ||
         pthread_create(&helper->id, &attr, kizu_pool_helper_main, helper) != 0;
     pthread_attr_destroy(&attr);
+#endif
     return failed ? KIZU_ERR_STD_THREAD_ERROR_SPAWN_FAILED : 0;
 }
 
@@ -3248,7 +4404,7 @@ void std__internal__builtin__thread_pool_close(int64_t handle, void *allocator) 
    the caller is always one. */
 int64_t std__internal__builtin__thread_cpu_count(void *io) {
     (void)io;
-    long count = sysconf(_SC_NPROCESSORS_ONLN);
+    long count = kizu_os_cpu_count();
     return count < 1 ? 1 : (int64_t)count;
 }
 
@@ -3471,7 +4627,7 @@ static int kizu_loop_turn(KizuLoop *loop) {
             }
             budget = left > INT32_MAX ? INT32_MAX : (int)left;
         }
-        int ready = poll(loop->pfds, (nfds_t)waiting, budget);
+        int ready = kizu_net_poll(loop->pfds, waiting, budget);
         if (ready > 0) {
             for (size_t i = 0; i < waiting; i += 1) {
                 if (loop->pfds[i].revents != 0) {
@@ -3967,9 +5123,8 @@ static KizuErrorI64 kizu_std_builtin_net_local_port_result(int64_t fd) {
         return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_CLOSED);
     }
     struct sockaddr_storage addr;
-    socklen_t length = sizeof addr;
     memset(&addr, 0, sizeof addr);
-    if (getsockname((int)fd, (struct sockaddr *)&addr, &length) != 0) {
+    if (kizu_net_local_address((int)fd, &addr) != 0) {
         return kizu_err_i64(kizu_net_errno_failure(errno));
     }
     if (addr.ss_family == AF_INET) {
@@ -3993,7 +5148,7 @@ void std__internal__builtin__net_local_port(KizuErrorI64 *out, int64_t fd) {
  * write that made them. */
 void std__internal__builtin__net_close(int64_t fd) {
     if (fd >= 0) {
-        close((int)fd);
+        kizu_net_close((int)fd);
     }
 }
 
@@ -4002,7 +5157,7 @@ void std__internal__builtin__net_close(int64_t fd) {
 // more has nothing to half-close, and nothing to report about it.
 void std__internal__builtin__net_shutdown_write(int64_t fd) {
     if (fd >= 0) {
-        shutdown((int)fd, SHUT_WR);
+        kizu_net_shutdown_write((int)fd);
     }
 }
 

@@ -22,7 +22,8 @@ source に出てくる。
   * x86-64(System V): 16 byte 以下は eightbyte ごとに整数 / SSE register。それより
     大きいもの、または残りの register に収まらないものは stack(`byval`)。
     16 byte を超える戻り値は `sret`。
-  * それ以外の machine では値渡しを含む call を build error にする。
+  * それ以外の machine と Windows(x64 規約は 1/2/4/8 byte 以外を address で渡す)では
+    値渡しを含む call を build error にする。
 * target を持たない LLVM text(`kizu check`、`--emit-llvm`、corpus)は arm64 Linux の
   規則で書く。
 * `extern "c" fn(...)` の関数 pointer 型は値渡しの struct を持てないままにする。

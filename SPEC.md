@@ -179,8 +179,8 @@ root module を持たなくてもよく、std の source root 直下には produ
 `[native]` は native link の探索 directory です。`@link_library` / `@link_framework`
 (§12.2)が名指す library をどこで探すかだけを持ち、何を link するかは持ちません。
 相対 path は manifest のある directory から解決します。`[native.darwin]` /
-`[native.linux]` は同じ key を持ち、build が選んだ OS(§13.3)の section だけが
-`[native]` の後ろに加わります。他の OS 名の section は manifest error です。
+`[native.linux]` / `[native.windows]` は同じ key を持ち、build が選んだ OS(§13.3)の
+section だけが `[native]` の後ろに加わります。他の OS 名の section は manifest error です。
 
 ```toml
 [native]
@@ -2676,7 +2676,7 @@ extern "c" fn clock_gettime(clock: i32, out: &var Timespec) -> i32
 * `extern "c" fn` は `extern "c" struct` を値で受け取り、値で返せます。渡し方は
   native target の C 呼び出し規約に従い、C compiler と同じく register か memory に
   載せます。compiler が従う規約は arm64(AAPCS64)と x86-64(System V)で、それ以外の
-  machine では値渡しを含む call を build error にします。target を持たない LLVM
+  machine と Windows では値渡しを含む call を build error にします。target を持たない LLVM
   text は arm64 の規則で書きます。値渡しの struct を持つ C 関数は名前でだけ呼べ、
   `extern "c" fn(...)` の値としては取り出せません。`export "c" fn` は struct を
   値で受け取りません。
@@ -3220,6 +3220,7 @@ std::target::is_wasi()    -> bool    comptime-if-only
 std::target::is_browser() -> bool    comptime-if-only
 std::target::is_darwin()  -> bool    comptime-if-only
 std::target::is_linux()   -> bool    comptime-if-only
+std::target::is_windows() -> bool    comptime-if-only
 ```
 
 述語は引数も static 引数も取りません。build family を問う 3 つは、1 回の build で
@@ -3229,11 +3230,13 @@ std::target::is_linux()   -> bool    comptime-if-only
 選びます。`fmt` の semantic validation も native を使い、`parse` は target を
 選びません。
 
-OS を問う 2 つは native build の operating system を答えます。native build では
-ちょうど 1 つが true で、wasm build では両方 false です。`build --target native
+OS を問う 3 つは native build の operating system を答えます。native build では
+ちょうど 1 つが true で、wasm build ではすべて false です。`build --target native
 --triple` は triple の OS を、それ以外の native command は compiler が動いている
-host の OS を選びます。native target の OS は darwin と linux で、macOS と iOS の
-triple はどちらも darwin です。他の OS を名指す triple は build を拒否します。
+host の OS を選びます。native target の OS は darwin、linux、windows で、macOS と iOS の
+triple はどちらも darwin です。windows は GNU 環境の triple(`x86_64-w64-windows-gnu`、
+`x86_64-w64-mingw32`)だけで、MSVC 環境の triple と他の OS を名指す triple は build を
+拒否します。
 同じ OS 名を manifest の `[native.<os>]`(§3)が使います。
 
 述語に runtime の値はありません。`std::target` という source module を import する

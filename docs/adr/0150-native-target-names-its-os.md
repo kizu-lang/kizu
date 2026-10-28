@@ -1,4 +1,4 @@
-# ADR-0150: native target は OS を darwin / linux の 1 語で名乗る
+# ADR-0150: native target は OS を darwin / linux / windows の 1 語で名乗る
 
 ## 背景
 
@@ -9,9 +9,9 @@ Linux の build にも渡していた。
 
 ## 決定
 
-native target は OS を持つ。`std::target::is_darwin()` / `is_linux()` を `is_native()`
-と同じ comptime-if-only 述語として足し、manifest は `[native.darwin]` / `[native.linux]`
-で OS 別の探索 directory を `[native]` に加える。述語と section は同じ OS 名を使い、
+native target は OS を持つ。`std::target::is_darwin()` / `is_linux()` / `is_windows()` を
+`is_native()` と同じ comptime-if-only 述語として足し、manifest は `[native.darwin]` /
+`[native.linux]` / `[native.windows]` で OS 別の探索 directory を `[native]` に加える。述語と section は同じ OS 名を使い、
 その名前は compiler が 1 か所(`stdtarget`)で持つ。OS は `--triple` か host から
 1 回決め、comptime 選択・manifest・link がその 1 つの答えを読む。
 

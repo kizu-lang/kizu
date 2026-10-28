@@ -342,8 +342,8 @@ func (e *emitter) writeHeader() {
 	// The shared attribute makes large frames touch each page before they can
 	// cross a coroutine guard. Small frames receive no added instructions.
 	// The probe asked for is LLVM's own inline one; a Darwin link by Apple's
-	// clang, which wants its system helper instead, swaps it
-	// (native.moduleForLinker).
+	// clang, which wants its system helper instead, swaps it, and a Windows
+	// link, whose target probes on its own, drops it (native.moduleForLinker).
 	// Darwin's arm64 ABI has every function that calls keep a frame record,
 	// which is what its unwinders and profilers walk; its compilers keep one
 	// by default, and code without one also runs a call-heavy recursion

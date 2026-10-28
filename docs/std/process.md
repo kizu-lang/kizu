@@ -42,7 +42,8 @@ pub fn spawn_wait8(
 `executable_path` は走っている実行ファイルの path を caller-owned な `String`
 として返すので、起動された directory に依存せず横に置かれたものを見つけられます。
 返るのは kernel が報告する path そのままで、install tree との間に symlink がある
-場合は [`std::fs::real_path`](fs.md) が解決します。
+場合は [`std::fs::real_path`](fs.md) が解決します。Windows では区切りを slash に
+揃えて返します。
 
 ## 時刻
 
