@@ -132,6 +132,41 @@ func TestCStructReturns(t *testing.T) {
 	}
 }
 
+// TestCStructWindows pins the Windows x64 convention against clang for
+// x86_64-w64-windows-gnu: a struct of exactly 1, 2, 4 or 8 bytes is one
+// integer register both ways, and any other is the address of a copy, or
+// `sret` storage as a result.
+func TestCStructWindows(t *testing.T) {
+	tests := []struct {
+		name   string
+		param  string
+		result string
+	}{
+		{"I4", "i32", "i32"},
+		{"F2", "i64", "i64"},
+		{"B3", "ptr", "void"},
+		{"I12", "ptr", "void"},
+		{"D2", "ptr", "void"},
+		{"L3", "ptr", "void"},
+		{"BP", "ptr", "void"},
+	}
+	e := cabiEmitter(false, ArchX86_64Windows)
+	for _, tt := range tests {
+		_, params := e.cCallSignature("void", []cArg{{typ: tt.name, byValue: true}})
+		if got := strings.Join(params, ", "); got != tt.param {
+			t.Errorf("%s argument: got %q, want %q", tt.name, got, tt.param)
+		}
+		result, params := e.cCallSignature(tt.name, nil)
+		if result != tt.result {
+			t.Errorf("%s result: got %q, want %q", tt.name, result, tt.result)
+		}
+		sret := len(params) == 1 && strings.HasPrefix(params[0], "ptr sret(")
+		if sret != (tt.result == "void") {
+			t.Errorf("%s result params %q", tt.name, params)
+		}
+	}
+}
+
 // TestCStructOutOfRegisters passes a struct in memory on x86-64 once the
 // integer registers it needs are taken, as clang does, where AAPCS64 leaves
 // the same choice to the backend.

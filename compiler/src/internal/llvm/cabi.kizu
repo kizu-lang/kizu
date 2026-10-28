@@ -19,6 +19,8 @@ pub enum Arch {
     Arm64,
     /// Follows the System V AMD64 ABI.
     X86_64,
+    /// Follows the Windows x64 convention.
+    X86_64Windows,
     /// Names a machine whose C convention the emitter does not follow; a C
     /// struct by value is refused there.
     Other,
@@ -195,6 +197,9 @@ fn (self: &var Emitter) c_arg_passing(
     let text = ir::name_text(&module.names, type_name);
     let bytes = text.as_bytes();
     let layout = try self.c_struct_leaves(module, bytes, 0, &var leaves);
+    if self.arch == Arch::X86_64Windows {
+        return self.win64_passing(layout);
+    }
     if self.arch == Arch::X86_64 {
         let passing = try self.sys_v_parts(&leaves, layout);
         if passing.kind != CPassKind::Direct {
@@ -237,6 +242,9 @@ fn (self: &var Emitter) c_return_passing(module: &ir::Module, type_name: ir::Nam
     let text = ir::name_text(&module.names, type_name);
     let bytes = text.as_bytes();
     let layout = try self.c_struct_leaves(module, bytes, 0, &var leaves);
+    if self.arch == Arch::X86_64Windows {
+        return self.win64_passing(layout);
+    }
     if self.arch == Arch::X86_64 {
         let passing = try self.sys_v_parts(&leaves, layout);
         if passing.kind != CPassKind::Direct {
@@ -251,6 +259,18 @@ fn (self: &var Emitter) c_return_passing(module: &ir::Module, type_name: ir::Nam
         return c_passing_memory(CPassKind::Indirect, layout.align);
     }
     return c_passing_one(try self.aapcs_words(layout.size), false, layout.align);
+}
+
+/// Is how the Windows x64 convention moves a C struct, as an argument and as
+/// a result alike, the Go `win64Passing`: in one integer register when it is
+/// exactly 1, 2, 4 or 8 bytes, whatever its fields are, and otherwise as the
+/// address of a copy the caller makes, which for a result is `sret` storage.
+fn (self: &var Emitter) win64_passing(layout: Layout) -> !CPassing {
+    if layout.size == 1 or layout.size == 2 or layout.size == 4 or layout.size == 8 {
+        let part = try self.text1("i%d", Arg::Int(layout.size * 8));
+        return c_passing_one(part, false, layout.align);
+    }
+    return c_passing_memory(CPassKind::Indirect, layout.align);
 }
 
 /// Names the register part of an AAPCS64 homogeneous float aggregate: one

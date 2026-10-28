@@ -358,11 +358,12 @@ func wasmExportABI(target wasm.Target) string {
 }
 
 // nativeArch is the C calling convention a native target follows: the
-// machine its triple names, the host when it is omitted. Windows on x86-64
-// passes a struct by value its own way, which the emitter does not follow,
-// so it is the convention a struct by value is refused under.
+// machine its triple names, the host when it is omitted, and on x86-64 the
+// OS too, since Windows passes a struct by value its own way.
 func nativeArch(triple string, target stdtarget.Target) llvm.Arch {
 	switch {
+	case target == stdtarget.NativeWindows && native.TargetIsX86_64(triple):
+		return llvm.ArchX86_64Windows
 	case target == stdtarget.NativeWindows:
 		return llvm.ArchOther
 	case native.TargetIsArm64(triple):
