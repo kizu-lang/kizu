@@ -1124,9 +1124,125 @@ static long kizu_os_cpu_count(void) {
 }
 #endif
 
+/* ---------------------------------------------------------------------------
+ * Text a program writes to its standard streams
+ *
+ * Kizu text is UTF-8 and the runtime writes its bytes as they are. A Windows
+ * console is the one reader that does not take bytes: it reads them in its
+ * code page, CP932 on a Japanese system, so the same bytes that are right in
+ * a pipe or a file come out garbled on screen. When stdout or stderr is a
+ * console, the text goes through WriteConsoleW as UTF-16 instead, as Go and
+ * Rust write it. The console's code page is left alone: changing it would
+ * outlast the process. A sequence a write ends in the middle of is held until
+ * the next write finishes it.
+ *
+ * Every write of a program's own bytes goes through kizu_write_stream; what
+ * the runtime spells itself is ASCII and goes to the C library as it is.
+ * ------------------------------------------------------------------------ */
+
+#if defined(_WIN32)
+typedef struct {
+    HANDLE handle;
+    pthread_mutex_t lock;
+    unsigned char carry[4];
+    size_t carry_len;
+} KizuConsole;
+
+static KizuConsole kizu_consoles[2] = {
+    {NULL, PTHREAD_MUTEX_INITIALIZER, {0}, 0},
+    {NULL, PTHREAD_MUTEX_INITIALIZER, {0}, 0},
+};
+static pthread_once_t kizu_consoles_once = PTHREAD_ONCE_INIT;
+
+static void kizu_find_consoles(void) {
+    FILE *streams[2] = {stdout, stderr};
+    for (int i = 0; i < 2; i++) {
+        HANDLE handle = (HANDLE)_get_osfhandle(_fileno(streams[i]));
+        DWORD mode = 0;
+        if (handle != INVALID_HANDLE_VALUE && GetConsoleMode(handle, &mode)) {
+            kizu_consoles[i].handle = handle;
+        }
+    }
+}
+
+/* How many bytes at the end of text start a UTF-8 sequence it does not
+   finish. */
+static size_t kizu_utf8_unfinished(const unsigned char *text, size_t len) {
+    for (size_t back = 1; back <= 3 && back <= len; back++) {
+        unsigned char byte = text[len - back];
+        if ((byte & 0xC0) == 0x80) {
+            continue;
+        }
+        size_t need = byte >= 0xF0 ? 4 : byte >= 0xE0 ? 3 : byte >= 0xC0 ? 2 : 1;
+        return need > back ? back : 0;
+    }
+    return 0;
+}
+
+/* Writes UTF-8 to a console as UTF-16, a slice at a time that never ends
+   between the two halves of a surrogate pair. */
+static int kizu_console_write(HANDLE handle, const unsigned char *text, size_t len) {
+    if (len == 0) {
+        return 1;
+    }
+    if (len > INT32_MAX) {
+        return 0;
+    }
+    int count = MultiByteToWideChar(CP_UTF8, 0, (const char *)text, (int)len, NULL, 0);
+    wchar_t *wide = count > 0 ? (wchar_t *)malloc((size_t)count * sizeof *wide) : NULL;
+    if (!wide) {
+        return 0;
+    }
+    MultiByteToWideChar(CP_UTF8, 0, (const char *)text, (int)len, wide, count);
+    int ok = 1;
+    for (int start = 0; ok && start < count;) {
+        int step = count - start > 8192 ? 8192 : count - start;
+        if (start + step < count && wide[start + step - 1] >= 0xD800 && wide[start + step - 1] <= 0xDBFF) {
+            step--;
+        }
+        DWORD wrote = 0;
+        ok = WriteConsoleW(handle, wide + start, (DWORD)step, &wrote, NULL) && wrote > 0;
+        start += (int)wrote;
+    }
+    free(wide);
+    return ok;
+}
+
+/* Answers len when every byte was taken, as fwrite does. */
+static size_t kizu_write_stream(FILE *stream, const void *bytes, size_t len) {
+    pthread_once(&kizu_consoles_once, kizu_find_consoles);
+    KizuConsole *console = stream == stdout ? &kizu_consoles[0]
+        : stream == stderr ? &kizu_consoles[1] : NULL;
+    if (!console || !console->handle) {
+        return fwrite(bytes, 1, len, stream);
+    }
+    pthread_mutex_lock(&console->lock);
+    /* What the C library still holds for this stream goes out first. */
+    fflush(stream);
+    size_t total = console->carry_len + len;
+    unsigned char *text = (unsigned char *)malloc(total ? total : 1);
+    int ok = text != NULL;
+    if (ok) {
+        memcpy(text, console->carry, console->carry_len);
+        memcpy(text + console->carry_len, bytes, len);
+        size_t keep = kizu_utf8_unfinished(text, total);
+        ok = kizu_console_write(console->handle, text, total - keep);
+        memcpy(console->carry, text + total - keep, keep);
+        console->carry_len = keep;
+        free(text);
+    }
+    pthread_mutex_unlock(&console->lock);
+    return ok ? len : 0;
+}
+#else
+static size_t kizu_write_stream(FILE *stream, const void *bytes, size_t len) {
+    return fwrite(bytes, 1, len, stream);
+}
+#endif
+
 void kizu_print_string(const unsigned char *s, int64_t len) {
-    fwrite(s, 1, (size_t)len, stdout);
-    fputc('\n', stdout);
+    kizu_write_stream(stdout, s, (size_t)len);
+    kizu_write_stream(stdout, "\n", 1);
 }
 
 /* The test that is running, and the statement of it that ran last. A test
@@ -1161,12 +1277,12 @@ static void kizu_test_note(void) {
         return;
     }
     fputs("note: in test \"", stderr);
-    fwrite(kizu_test_name, 1, (size_t)kizu_test_name_len, stderr);
+    kizu_write_stream(stderr, kizu_test_name, (size_t)kizu_test_name_len);
     fputc('"', stderr);
     if (kizu_test_line > 0) {
         fputs(" at ", stderr);
         if (kizu_test_file_len > 0) {
-            fwrite(kizu_test_file, 1, (size_t)kizu_test_file_len, stderr);
+            kizu_write_stream(stderr, kizu_test_file, (size_t)kizu_test_file_len);
             fputc(':', stderr);
         }
         fprintf(stderr, "%lld:%lld", (long long)kizu_test_line, (long long)kizu_test_column);
@@ -1184,7 +1300,7 @@ static void kizu_panic_abort(void) {
 
 void kizu_main_error_message(const unsigned char *s, int64_t len) {
     fwrite("runtime error: ", 1, 15, stderr);
-    fwrite(s, 1, (size_t)len, stderr);
+    kizu_write_stream(stderr, s, (size_t)len);
     fputc('\n', stderr);
     kizu_test_note();
 }
@@ -1315,7 +1431,7 @@ int64_t kizu_arena_origin(void) {
 void kizu_panic_test_fail(const unsigned char *s, int64_t len,
                           int64_t line, int64_t column) {
     fputs("runtime error: ", stderr);
-    fwrite(s, 1, (size_t)len, stderr);
+    kizu_write_stream(stderr, s, (size_t)len);
     kizu_panic_at(line, column);
     kizu_panic_abort();
 }
@@ -1323,7 +1439,7 @@ void kizu_panic_test_fail(const unsigned char *s, int64_t len,
 void kizu_panic_fail(const unsigned char *s, int64_t len,
                      int64_t line, int64_t column) {
     fputs("runtime error: ", stderr);
-    fwrite(s, 1, (size_t)len, stderr);
+    kizu_write_stream(stderr, s, (size_t)len);
     kizu_panic_at(line, column);
     kizu_panic_abort();
 }
@@ -1348,9 +1464,9 @@ void kizu_panic_expect_equal_bytes(const unsigned char *expected, int64_t expect
                                    const unsigned char *actual, int64_t actual_len,
                                    int64_t line, int64_t column) {
     fputs("runtime error: expected \"", stderr);
-    fwrite(expected, 1, (size_t)expected_len, stderr);
+    kizu_write_stream(stderr, expected, (size_t)expected_len);
     fputs("\", got \"", stderr);
-    fwrite(actual, 1, (size_t)actual_len, stderr);
+    kizu_write_stream(stderr, actual, (size_t)actual_len);
     fputc('"', stderr);
     kizu_panic_at(line, column);
     kizu_panic_abort();
@@ -1401,7 +1517,7 @@ static KizuErrorVoid kizu_std_builtin_io_write_result(FILE *stream, KizuSliceU8 
         return kizu_ok_void();
     }
     size_t len = (size_t)bytes.len;
-    if (fwrite(bytes.ptr, 1, len, stream) != len || fflush(stream) != 0) {
+    if (kizu_write_stream(stream, bytes.ptr, len) != len || fflush(stream) != 0) {
         return kizu_err_void(KIZU_ERR_STD_IO_ERROR_WRITE_FAILED);
     }
     return kizu_ok_void();
