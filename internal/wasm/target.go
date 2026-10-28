@@ -54,6 +54,7 @@ func (e *emitter) validateTarget() error {
 		{processMonotonicBuiltin, "std::process::monotonic_millis"},
 		{processUnixBuiltin, "std::process::unix_millis"},
 		{processSpawnWaitBuiltin, "std::process::spawn_wait8"},
+		{processSpawnOutputBuiltin, "std::process::spawn_output8"},
 	}
 	for _, unsupported := range unsupportedProcess {
 		if e.usesBuiltinCall(unsupported.builtin) {

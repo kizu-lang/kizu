@@ -20,6 +20,11 @@ pub fn spawn_wait8(
     arg0: &[]u8, arg1: &[]u8, arg2: &[]u8, arg3: &[]u8,
     arg4: &[]u8, arg5: &[]u8, arg6: &[]u8, arg7: &[]u8,
 ) -> std::process::Error!i64
+pub fn spawn_output8(
+    allocator: Allocator, stdout: &var std::string::String, argc: i64,
+    arg0: &[]u8, arg1: &[]u8, arg2: &[]u8, arg3: &[]u8,
+    arg4: &[]u8, arg5: &[]u8, arg6: &[]u8, arg7: &[]u8,
+) -> std::process::Error!i64
 ```
 
 ## 終了
@@ -59,8 +64,14 @@ pub fn spawn_wait8(
 引数は最大 8 つ(実行ファイルとその引数 7 つ)の固定並びで、`argc` が実際に
 使う数です。可変長の引数列は、それを渡す言語側の形が決まってから扱います。
 
+`spawn_output8` は同じ子プロセスを起動し、その標準出力を `stdout` に追記して
+exit status を返します。標準エラー出力はこのプロセスのものをそのまま使います。
+`stdout` を伸ばせなかった場合は `stdout` を呼び出し前の状態に戻して
+`OutOfMemory` を返し、子が書いたものを一部だけ残すことはしません。子が書いた
+量に関わらず、子は最後まで読まれて終了を待たれます。
+
 `wasm32-wasi` の WASI preview1 host boundary は子プロセスを提供しません。
-`spawn_wait8` に到達する program は build 時に target 非対応として拒否します。
+`spawn_wait8` / `spawn_output8` に到達する program は build 時に target 非対応として拒否します。
 到達しない helper は module から除かれるため、それだけで host capability を要求しません。
 
 `wasm32-browser` は process を持つように偽装しません。`std::process` の API に到達する
