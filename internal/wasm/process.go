@@ -12,6 +12,7 @@ const (
 	processMonotonicBuiltin    = "std::internal::builtin::process_monotonic_millis"
 	processUnixBuiltin         = "std::internal::builtin::process_unix_millis"
 	processSpawnWaitBuiltin    = "std::internal::builtin::process_spawn_wait8"
+	processSpawnOutputBuiltin  = "std::internal::builtin::process_spawn_output8"
 	processArgBoundsError      = "ArgIndexOutOfBounds"
 	processExecutableUnknown   = "ExecutablePathUnknown"
 	processOutOfMemory         = "OutOfMemory"
@@ -93,6 +94,9 @@ func (e *emitter) usesProcessClock() bool {
 func (e *emitter) validateProcessTarget() error {
 	if e.usesBuiltinCall(processSpawnWaitBuiltin) {
 		return fmt.Errorf("wasm error: target wasm32-wasi does not support std::process::spawn_wait8")
+	}
+	if e.usesBuiltinCall(processSpawnOutputBuiltin) {
+		return fmt.Errorf("wasm error: target wasm32-wasi does not support std::process::spawn_output8")
 	}
 	return nil
 }

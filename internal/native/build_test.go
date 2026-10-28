@@ -130,10 +130,12 @@ func TestLinkFlagsFollowTheLinkerOrder(t *testing.T) {
 	if got := strings.Join(linkFlags(Options{Libraries: []string{"m"}}), " "); got != "-lm -lpthread" {
 		t.Fatalf("linkFlags(m) = %q", got)
 	}
-	// A Windows executable is static and links Winsock and bcrypt besides.
+	// A Windows executable is static, has the main stack the other OSes
+	// give, and links Winsock and bcrypt besides.
 	windows := Options{Target: stdtarget.NativeWindows, Libraries: []string{"user32"}}
 	got = strings.Join(linkFlags(windows), " ")
-	if want := "-static -luser32 -lm -lpthread -lws2_32 -lbcrypt"; got != want {
+	want = "-static -Wl,--stack,8388608 -luser32 -lm -lpthread -lws2_32 -lbcrypt"
+	if got != want {
 		t.Fatalf("linkFlags(windows) = %q, want %q", got, want)
 	}
 }

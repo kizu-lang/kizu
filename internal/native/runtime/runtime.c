@@ -1788,6 +1788,22 @@ int64_t std__internal__builtin__process_unix_millis(void) {
     return ((int64_t)ts.tv_sec * 1000) + ((int64_t)ts.tv_nsec / 1000000);
 }
 
+/* Where a child's standard output goes: this process's own when there is no
+   capture, or a pipe whose bytes are appended to a String. A String that
+   cannot grow stops taking bytes, but the pipe is still drained, so the
+   child is never left blocked on a write nobody reads. */
+typedef struct {
+    void *allocator;
+    KizuString *dst;
+    int failed;
+} KizuChildOutput;
+
+static void kizu_child_output_take(KizuChildOutput *output, const char *bytes, int64_t len) {
+    if (!output->failed && !kizu_string_append_bytes(output->allocator, output->dst, bytes, len)) {
+        output->failed = 1;
+    }
+}
+
 #if defined(_WIN32)
 /* Appends one argument to a command line so that the child's C runtime splits
    it back out unchanged: quoted when it holds a blank or a quote or is empty,
@@ -1828,11 +1844,11 @@ static wchar_t *kizu_win_quote_arg(wchar_t *out, const wchar_t *arg) {
     return out;
 }
 
-/* Runs argv as a child with this process's standard streams and waits for it.
-   CreateProcessW looks the program up on PATH the way execvp does when its
-   name has no directory. A child that cannot start is 127, as it is after
-   execvp fails. */
-static int kizu_run_child_process(char *const argv[]) {
+/* Runs argv as a child with this process's standard streams, or its standard
+   output on a pipe when output is given, and waits for it. CreateProcessW
+   looks the program up on PATH the way execvp does when its name has no
+   directory. A child that cannot start is 127, as it is after execvp fails. */
+static int kizu_run_child_process(char *const argv[], KizuChildOutput *output) {
     size_t room = 1;
     wchar_t *wide[8] = {0};
     int count = 0;
@@ -1859,16 +1875,47 @@ static int kizu_run_child_process(char *const argv[]) {
     STARTUPINFOW startup;
     memset(&startup, 0, sizeof startup);
     startup.cb = sizeof startup;
+    HANDLE read_end = NULL;
+    HANDLE write_end = NULL;
+    if (output) {
+        SECURITY_ATTRIBUTES inherit = {sizeof inherit, NULL, TRUE};
+        if (!CreatePipe(&read_end, &write_end, &inherit, 0)) {
+            free(line);
+            goto done;
+        }
+        /* Only the child's end is inherited: a read end the child held
+           open would keep the pipe from ever reporting its end. */
+        SetHandleInformation(read_end, HANDLE_FLAG_INHERIT, 0);
+        startup.dwFlags = STARTF_USESTDHANDLES;
+        startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+        startup.hStdOutput = write_end;
+        startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    }
     PROCESS_INFORMATION child;
     fflush(stdout);
     fflush(stderr);
     if (CreateProcessW(NULL, line, NULL, NULL, TRUE, 0, NULL, NULL, &startup, &child)) {
+        if (output) {
+            CloseHandle(write_end);
+            write_end = NULL;
+            char buffer[4096];
+            DWORD got = 0;
+            while (ReadFile(read_end, buffer, sizeof buffer, &got, NULL) && got > 0) {
+                kizu_child_output_take(output, buffer, (int64_t)got);
+            }
+        }
         DWORD status = 127;
         WaitForSingleObject(child.hProcess, INFINITE);
         GetExitCodeProcess(child.hProcess, &status);
         CloseHandle(child.hThread);
         CloseHandle(child.hProcess);
         code = (int)status;
+    }
+    if (write_end) {
+        CloseHandle(write_end);
+    }
+    if (read_end) {
+        CloseHandle(read_end);
     }
     free(line);
 done:
@@ -1878,15 +1925,48 @@ done:
     return code;
 }
 #else
-static int kizu_run_child_process(char *const argv[]) {
+static int kizu_run_child_process(char *const argv[], KizuChildOutput *output) {
+    int pipe_fds[2] = {-1, -1};
+    if (output) {
+        if (pipe(pipe_fds) != 0) {
+            return 127;
+        }
+        /* Neither end outlives an exec: another child started meanwhile
+           holding the write end would keep this pipe from ending. */
+        fcntl(pipe_fds[0], F_SETFD, FD_CLOEXEC);
+        fcntl(pipe_fds[1], F_SETFD, FD_CLOEXEC);
+    }
     pid_t pid = fork();
     if (pid < 0) {
+        if (output) {
+            close(pipe_fds[0]);
+            close(pipe_fds[1]);
+        }
         return 127;
     }
     if (pid == 0) {
         signal(SIGPIPE, SIG_DFL);
+        if (output) {
+            dup2(pipe_fds[1], STDOUT_FILENO);
+        }
         execvp(argv[0], argv);
         _exit(127);
+    }
+    if (output) {
+        close(pipe_fds[1]);
+        char buffer[4096];
+        for (;;) {
+            ssize_t got = read(pipe_fds[0], buffer, sizeof buffer);
+            if (got > 0) {
+                kizu_child_output_take(output, buffer, (int64_t)got);
+                continue;
+            }
+            if (got < 0 && errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+        close(pipe_fds[0]);
     }
     int status = 0;
     while (waitpid(pid, &status, 0) < 0) {
@@ -1904,6 +1984,35 @@ static int kizu_run_child_process(char *const argv[]) {
 }
 #endif
 
+/* Runs the first argc of eight arguments as a child and waits for it. The
+   arguments are bytes, not C strings, so each is copied with its NUL. */
+static KizuErrorI64 kizu_spawn_wait(
+    int64_t argc, const KizuSliceU8 raw_args[8], KizuChildOutput *output) {
+    char *owned_args[8] = {0};
+    char *argv[9] = {0};
+    if (argc < 1 || argc > 8) {
+        return kizu_err_i64(KIZU_ERR_STD_PROCESS_ERROR_INVALID_ARGUMENT_COUNT);
+    }
+    if (raw_args[0].len == 0) {
+        return kizu_err_i64(KIZU_ERR_STD_PROCESS_ERROR_MISSING_EXECUTABLE);
+    }
+    for (int index = 0; index < argc; index++) {
+        owned_args[index] = kizu_slice_to_cstr(raw_args[index]);
+        if (!owned_args[index]) {
+            for (int free_index = 0; free_index < 8; free_index++) {
+                free(owned_args[free_index]);
+            }
+            return kizu_err_i64(KIZU_ERR_STD_PROCESS_ERROR_OUT_OF_MEMORY);
+        }
+        argv[index] = owned_args[index];
+    }
+    int code = kizu_run_child_process(argv, output);
+    for (int free_index = 0; free_index < 8; free_index++) {
+        free(owned_args[free_index]);
+    }
+    return kizu_ok_i64((int64_t)code);
+}
+
 void std__internal__builtin__process_spawn_wait8(
     KizuErrorI64 *out,
     int64_t argc,
@@ -1917,32 +2026,34 @@ void std__internal__builtin__process_spawn_wait8(
     const KizuSliceU8 *arg7
 ) {
     KizuSliceU8 raw_args[] = {*arg0, *arg1, *arg2, *arg3, *arg4, *arg5, *arg6, *arg7};
-    char *owned_args[8] = {0};
-    char *argv[9] = {0};
-    if (argc < 1 || argc > 8) {
-        *out = kizu_err_i64(KIZU_ERR_STD_PROCESS_ERROR_INVALID_ARGUMENT_COUNT);
-        return;
+    *out = kizu_spawn_wait(argc, raw_args, NULL);
+}
+
+/* spawn_wait8 with the child's standard output appended to dst. A String
+   that could not take all of it is left as it was, and the run reports
+   OutOfMemory rather than a status for output it lost. */
+void std__internal__builtin__process_spawn_output8(
+    KizuErrorI64 *out,
+    void *allocator,
+    KizuString *dst,
+    int64_t argc,
+    const KizuSliceU8 *arg0,
+    const KizuSliceU8 *arg1,
+    const KizuSliceU8 *arg2,
+    const KizuSliceU8 *arg3,
+    const KizuSliceU8 *arg4,
+    const KizuSliceU8 *arg5,
+    const KizuSliceU8 *arg6,
+    const KizuSliceU8 *arg7
+) {
+    KizuSliceU8 raw_args[] = {*arg0, *arg1, *arg2, *arg3, *arg4, *arg5, *arg6, *arg7};
+    int64_t start = dst->len;
+    KizuChildOutput output = {allocator, dst, 0};
+    *out = kizu_spawn_wait(argc, raw_args, &output);
+    if (output.failed) {
+        dst->len = start;
+        *out = kizu_err_i64(KIZU_ERR_STD_PROCESS_ERROR_OUT_OF_MEMORY);
     }
-    if (raw_args[0].len == 0) {
-        *out = kizu_err_i64(KIZU_ERR_STD_PROCESS_ERROR_MISSING_EXECUTABLE);
-        return;
-    }
-    for (int index = 0; index < argc; index++) {
-        owned_args[index] = kizu_slice_to_cstr(raw_args[index]);
-        if (!owned_args[index]) {
-            for (int free_index = 0; free_index < 8; free_index++) {
-                free(owned_args[free_index]);
-            }
-            *out = kizu_err_i64(KIZU_ERR_STD_PROCESS_ERROR_OUT_OF_MEMORY);
-            return;
-        }
-        argv[index] = owned_args[index];
-    }
-    int code = kizu_run_child_process(argv);
-    for (int free_index = 0; free_index < 8; free_index++) {
-        free(owned_args[free_index]);
-    }
-    *out = kizu_ok_i64((int64_t)code);
 }
 
 static KizuErrorVoid kizu_std_builtin_fs_read_file_into_result(

@@ -467,11 +467,13 @@ func driver(options Options) string {
 //
 // A Windows executable is linked static, so it needs only the DLLs every
 // Windows has: winpthread, which the runtime's threads are, is otherwise a
-// DLL of its own that a machine without llvm-mingw does not have.
+// DLL of its own that a machine without llvm-mingw does not have. Its main
+// thread gets the 8 MiB stack macOS and Linux give theirs, not the 1 MiB a
+// PE image has by default, so a program recurses as deep on every OS.
 func linkFlags(options Options) []string {
 	flags := []string{}
 	if options.Target == stdtarget.NativeWindows {
-		flags = append(flags, "-static")
+		flags = append(flags, "-static", "-Wl,--stack,8388608")
 	}
 	for _, dir := range options.LibrarySearch {
 		flags = append(flags, "-L"+dir)
