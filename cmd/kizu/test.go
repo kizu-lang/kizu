@@ -5,13 +5,19 @@ import (
 	"strconv"
 
 	"github.com/kizu-lang/kizu/internal/ir"
+	"github.com/kizu-lang/kizu/internal/native"
+	"github.com/kizu-lang/kizu/internal/stdtarget"
 )
 
 // testFile runs Kizu test blocks and reports a minimal test result. A seed
 // given on the command line is what std::testing::seed answers, so a failed
 // randomized run replays (SPEC §14.5).
 func testFile(path string, args []string, seed *int64) error {
-	module, err := lowerTestTarget(path)
+	host, err := stdtarget.Host()
+	if err != nil {
+		return err
+	}
+	module, err := lowerTestTarget(path, host)
 	if err != nil {
 		return err
 	}
@@ -29,12 +35,34 @@ func testFile(path string, args []string, seed *int64) error {
 	return nil
 }
 
-// lowerTestTarget includes package-only test files while loose files remain explicit.
-func lowerTestTarget(path string) (*ir.Module, error) {
-	if isPackageRoot(path) {
-		return lowerTestPackage(path, false)
+// buildTestFile builds the executable `kizu test` would run, for the machine
+// --triple names, and writes it where -o says instead of running it. That is
+// how a test reaches a machine the compiler does not run on: the executable
+// exits 0 when every test passes and reports a failure the way a run does.
+func buildTestFile(options testArgs) error {
+	target, err := native.TargetFor(options.Triple)
+	if err != nil {
+		return err
 	}
-	return lowerFile(path, false)
+	module, err := lowerTestTarget(options.Path, target)
+	if err != nil {
+		return err
+	}
+	if err := addTestMain(module, options.Seed); err != nil {
+		return err
+	}
+	return linkNativeModule(module, nativeBuildArgs{
+		Path: options.Path, Output: options.Output, Triple: options.Triple,
+		LibC: "on", Runtime: "hosted", Emit: "exe", Linker: "clang",
+	}, target)
+}
+
+// lowerTestTarget includes package-only test files while loose files remain explicit.
+func lowerTestTarget(path string, target stdtarget.Target) (*ir.Module, error) {
+	if isPackageRoot(path) {
+		return lowerPackageModeForTarget(path, false, true, target)
+	}
+	return lowerFileForTarget(path, false, target)
 }
 
 // addTestMain builds an entry that runs every lowered test block in order,

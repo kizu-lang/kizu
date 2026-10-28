@@ -121,7 +121,9 @@ A Windows executable is built with `--triple x86_64-w64-windows-gnu`. It is
 linked by [llvm-mingw](https://github.com/mstorsjo/llvm-mingw)'s
 `x86_64-w64-mingw32-clang`, so put its `bin` on PATH; a cross build from macOS
 or Linux works the same way. The `.exe` uses only DLLs that ship with Windows
-10 and later.
+10 and later. `kizu test --triple x86_64-w64-windows-gnu -o tests.exe <package>`
+builds the test executable without running it, for the Windows machine to run;
+it exits 0 when every test passes.
 
 ## Roadmap
 

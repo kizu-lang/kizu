@@ -126,7 +126,7 @@ fn main() -> !process::ExitStatus {
         return exit_of(code);
     }
     if mem::equal_bytes(command, "test") {
-        let code = try test_command(io, allocator, lib_dir_bytes, target, next, count);
+        let code = try test_command(io, allocator, lib_dir_bytes, next, count);
         return exit_of(code);
     }
     if mem::equal_bytes(command, "cache") {
@@ -622,6 +622,7 @@ fn version_command(io: Io, next: i64, count: i64) -> !i64 {
 fn usage(io: Io) -> !void {
     try io::write_stderr_line(io, "usage: kizu <parse|run|check|test> <file> [-- args...]");
     try io::write_stderr_line(io, "usage: kizu test [--seed N] <file|package> [-- args...]");
+    try io::write_stderr_line(io, "usage: kizu test [--seed N] [--triple T] -o file <file|package>");
     try io::write_stderr_line(io, "usage: kizu init [path]");
     try io::write_stderr_line(io, "usage: kizu fmt [--write] <file>");
     try io::write_stderr_line(io, "usage: kizu ir [--opt] <file>");
@@ -1988,37 +1989,63 @@ fn run_command(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, next: 
     return native_target(io, allocator, lib_dir, target, NativeCommand::Run, &var options, null, child_start, child_count);
 }
 
-/// Runs `test <file|package> [-- args...]`, the Go `dispatchTest`.
-/// Runs `test [--seed N] <file|package> [-- args...]`, the Go `dispatchTest`.
-/// A seed on the command line is what std::testing::seed answers, so a failed
-/// randomized run replays (SPEC §14.5).
-fn test_command(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, next: i64, count: i64) -> !i64 {
-    let has_flag = mem::equal_bytes(target, "--seed");
+/// Runs `test [--seed N] [--triple T] [-o file] <file|package> [-- args...]`,
+/// the Go `dispatchTest`. A seed on the command line is what
+/// std::testing::seed answers, so a failed randomized run replays (SPEC
+/// §14.5). With -o the test executable is built for the machine --triple
+/// names and written there instead of being run, so it takes no program args,
+/// and --triple needs -o since an executable for another machine cannot run
+/// here.
+fn test_command(io: Io, allocator: Allocator, lib_dir: []u8, next: i64, count: i64) -> !i64 {
+    var options = try default_native_options(allocator);
+    defer options.deinit(allocator);
+    var seed: ?i64 = null;
     var path_index = next + 1;
-    var path = target;
-    if has_flag {
-        if count - next < 4 {
-            try usage(io);
-            try io::write_stderr_line(io, "error: test error: --seed expects an integer");
-            return 1;
-        }
-        path_index = next + 3;
-        path = try process::arg(path_index);
-    }
-    let seed = try seed_flag(next, has_flag);
-    if has_flag {
-        if seed |_| {} else {
-            let spelled = try process::arg(next + 2);
+    while path_index < count {
+        let flag = try process::arg(path_index);
+        if mem::equal_bytes(flag, "--seed") {
+            var spelled = string::new(allocator);
+            defer spelled.deinit(allocator);
+            path_index = try take_flag_value(io, allocator, path_index + 1, count, "--seed", &var spelled);
+            if path_index < 0 {
+                return 1;
+            }
+            let spelled_bytes = spelled.as_bytes();
+            if parse_seed(spelled_bytes) |given| {
+                seed = given;
+                continue;
+            }
             try usage(io);
             var message = try string::from_bytes(allocator, "error: test error: --seed expects an integer, got `");
             defer message.deinit(allocator);
-            try message.append_bytes(allocator, spelled);
+            try message.append_bytes(allocator, spelled_bytes);
             try message.append_bytes(allocator, "`");
             let text = message.as_bytes();
             try io::write_stderr_line(io, text);
             return 1;
         }
+        if mem::equal_bytes(flag, "--triple") {
+            path_index = try take_flag_value(io, allocator, path_index + 1, count, "--triple", &var options.triple);
+            if path_index < 0 {
+                return 1;
+            }
+            continue;
+        }
+        if mem::equal_bytes(flag, "-o") {
+            path_index = try take_flag_value(io, allocator, path_index + 1, count, "-o", &var options.output);
+            if path_index < 0 {
+                return 1;
+            }
+            continue;
+        }
+        break;
     }
+    if path_index >= count {
+        try usage(io);
+        try io::write_stderr_line(io, "error: missing source file");
+        return 1;
+    }
+    let path = try process::arg(path_index);
     let child_start = path_index + 2;
     var child_count = 0;
     if count - path_index >= 2 {
@@ -2027,19 +2054,17 @@ fn test_command(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, next:
             child_count = count - child_start;
         }
     }
-    var options = try default_native_options(allocator);
-    defer options.deinit(allocator);
-    return native_target(io, allocator, lib_dir, path, NativeCommand::Test, &var options, seed, child_start, child_count);
-}
-
-/// Returns the seed after `--seed`, or null when the flag was not given or
-/// its value is not an integer; the caller tells those apart by has_flag.
-fn seed_flag(next: i64, has_flag: bool) -> !?i64 {
-    if !has_flag {
-        return null;
+    if options.triple.len() > 0 and options.output.len() == 0 {
+        try usage(io);
+        try io::write_stderr_line(io, "error: test error: --triple builds a test executable to run elsewhere; name it with -o");
+        return 1;
     }
-    let spelled = try process::arg(next + 2);
-    return parse_seed(spelled);
+    if options.output.len() > 0 and child_count > 0 {
+        try usage(io);
+        try io::write_stderr_line(io, "error: test error: -o builds the test executable without running it, so it takes no program args");
+        return 1;
+    }
+    return native_target(io, allocator, lib_dir, path, NativeCommand::Test, &var options, seed, child_start, child_count);
 }
 
 /// Reads the decimal seed `--seed` was given, the Go `strconv.ParseInt`.
@@ -2358,7 +2383,9 @@ fn native_target(
                         try report(io, allocator, &loader.sources, &failed);
                         return 1;
                     }
-                    if command == NativeCommand::Build {
+                    // Build, and a test built with -o, write the
+                    // executable where they were asked instead of running it.
+                    if options.output.len() > 0 {
                         if try native::build(io, allocator, &var temps, options, &host, &text, &std_errors.sets) |failed| {
                             defer failed.deinit(allocator);
                             try report(io, allocator, &loader.sources, &failed);

@@ -141,15 +141,6 @@ func lowerPackage(path string, opt bool) (*ir.Module, error) {
 	return lowerPackageModeForTarget(path, opt, false, host)
 }
 
-// lowerTestPackage includes package test files before checking and lowering.
-func lowerTestPackage(path string, opt bool) (*ir.Module, error) {
-	host, err := stdtarget.Host()
-	if err != nil {
-		return nil, err
-	}
-	return lowerPackageModeForTarget(path, opt, true, host)
-}
-
 // lowerPackageForTarget lowers a production package for one selected target.
 func lowerPackageForTarget(
 	path string,

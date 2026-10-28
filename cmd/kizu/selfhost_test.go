@@ -89,6 +89,27 @@ func TestSelfhostFrontend(t *testing.T) {
 	t.Run("build-native-opt", func(t *testing.T) {
 		compareNativeBuild(t, selfhost, file, true)
 	})
+	t.Run("test-executable", func(t *testing.T) {
+		compareTestExecutable(t, selfhost)
+	})
+}
+
+// compareTestExecutable builds a test executable with both compilers without
+// running it, then runs both: the seed given at build time is the one the
+// executable's tests answer with, so it passes on its own.
+func compareTestExecutable(t *testing.T, selfhost string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "seed_test.kizu")
+	writeTestFile(t, path, []byte(`import std::testing;
+
+test "seed" {
+    testing::expect_equal<i64>(42, testing::seed());
+}
+`))
+	run := compareNativeArtifact(t, selfhost, path, []string{"test", "--seed", "42"}, false)
+	if run.code != 0 {
+		t.Fatalf("test executable exited %d\nstderr:\n%s", run.code, run.output.stderr)
+	}
 }
 
 // runSelfhostFmtCases compares the formatter across the CLI boundary: each
@@ -890,6 +911,11 @@ func cliRepresentativeArguments() []cliArguments {
 		{"wasm_browser_esm_missing_output", []string{
 			"build", "--target", "wasm32-browser", "--emit", "esm", file,
 		}},
+		{"test_missing_seed", []string{"test", "--seed"}},
+		{"test_invalid_seed", []string{"test", "--seed", "x", file}},
+		{"test_missing_file", []string{"test", "-o", "unused"}},
+		{"test_triple_without_output", []string{"test", "--triple", "x86_64-w64-windows-gnu", file}},
+		{"test_output_with_args", []string{"test", "-o", "unused", file, "--", "arg"}},
 		{"target_not_found", []string{"parse", "../../examples/missing.kizu"}},
 		{"target_is_directory", []string{"parse", pkg}},
 		{"target_under_file", []string{"parse", file + "/inner.kizu"}},
@@ -1293,19 +1319,32 @@ func isClangFailure(out cliOutput) bool {
 // absolute path normalized.
 func compareNativeBuild(t *testing.T, selfhost string, target string, opt bool) {
 	t.Helper()
-	if goCheckOutput(target).failed {
-		t.Skip("target does not check")
-	}
-	goOut := filepath.Join(t.TempDir(), "program")
-	selfOut := filepath.Join(t.TempDir(), "program")
 	args := []string{"build", "--target", "native"}
 	if opt {
 		args = append(args, "--opt")
 	}
+	_ = compareNativeArtifact(t, selfhost, target, args, opt)
+}
+
+// compareNativeArtifact runs one command that writes an executable where -o
+// says, with both compilers, and compares what they print, what the
+// executables do and what the metadata records. It returns what the Go-built
+// executable did, or the Go build's own failure.
+func compareNativeArtifact(
+	t *testing.T, selfhost string, target string, args []string, opt bool,
+) nativeCLIResult {
+	t.Helper()
+	if goCheckOutput(target).failed {
+		t.Skip("target does not check")
+		return nativeCLIResult{}
+	}
+	goOut := filepath.Join(t.TempDir(), "program")
+	selfOut := filepath.Join(t.TempDir(), "program")
 	wantArgs := append(append([]string{}, args...), "-o", goOut, target)
 	want := runNativeCLI(t, kizuBinaryPath, wantArgs...)
 	if isClangFailure(want.output) {
 		t.Skip("clang failure output cannot be captured by the selfhost CLI")
+		return want
 	}
 	gotArgs := append(append([]string{}, args...), "-o", selfOut, target)
 	got := runNativeCLI(t, selfhost, gotArgs...)
@@ -1317,10 +1356,10 @@ func compareNativeBuild(t *testing.T, selfhost string, target string, opt bool) 
 			"--- got (code=%d)\nstdout:\n%sstderr:\n%s",
 			target, want.code, want.output.stdout, want.output.stderr,
 			got.code, got.output.stdout, got.output.stderr)
-		return
+		return want
 	}
 	if want.output.failed {
-		return
+		return want
 	}
 	wantRun := runNativeCLI(t, goOut)
 	gotRun := runNativeCLI(t, selfOut)
@@ -1336,6 +1375,7 @@ func compareNativeBuild(t *testing.T, selfhost string, target string, opt bool) 
 	if gotMetadata != wantMetadata {
 		t.Errorf("metadata for %s differs\n--- want\n%s\n--- got\n%s", target, wantMetadata, gotMetadata)
 	}
+	return wantRun
 }
 
 // assertNativeMetadata checks the artifact built above records the requested
