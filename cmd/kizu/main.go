@@ -117,20 +117,65 @@ func dispatchRun(args []string) error {
 	return runFile(path, programArgs)
 }
 
-// dispatchTest runs a program's tests through the Go-owned path.
+// dispatchTest runs a program's tests through the Go-owned path, or with -o
+// builds the test executable without running it.
 func dispatchTest(args []string) error {
-	var seed *int64
-	if len(args) >= 2 && args[0] == "--seed" {
-		value, err := strconv.ParseInt(args[1], 10, 64)
-		if err != nil {
-			usage()
-			return fmt.Errorf("test error: --seed expects an integer, got `%s`", args[1])
+	options, err := parseTestArgs(args)
+	if err != nil {
+		usage()
+		return err
+	}
+	if options.Output != "" {
+		return buildTestFile(options)
+	}
+	return testFile(options.Path, options.Args, options.Seed)
+}
+
+// testArgs is what one `kizu test` command line asks for.
+type testArgs struct {
+	Path   string
+	Args   []string
+	Seed   *int64
+	Triple string
+	Output string
+}
+
+// parseTestArgs reads the flags before the target, then the target and the
+// program args after `--`. A test executable built with -o is not run here,
+// so it takes no program args, and one built for another machine cannot be
+// run here, so --triple needs -o to say where it goes.
+func parseTestArgs(args []string) (testArgs, error) {
+	var parsed testArgs
+	for len(args) > 0 && (args[0] == "--seed" || args[0] == "--triple" || args[0] == "-o") {
+		if len(args) < 2 {
+			return testArgs{}, fmt.Errorf("missing value after %s", args[0])
 		}
-		seed = &value
+		switch args[0] {
+		case "--seed":
+			value, err := strconv.ParseInt(args[1], 10, 64)
+			if err != nil {
+				return testArgs{}, fmt.Errorf("test error: --seed expects an integer, got `%s`", args[1])
+			}
+			parsed.Seed = &value
+		case "--triple":
+			parsed.Triple = args[1]
+		default:
+			parsed.Output = args[1]
+		}
 		args = args[2:]
 	}
-	path, programArgs := splitProgramArgs(args)
-	return testFile(path, programArgs, seed)
+	parsed.Path, parsed.Args = splitProgramArgs(args)
+	switch {
+	case parsed.Path == "":
+		return testArgs{}, fmt.Errorf("missing source file")
+	case parsed.Triple != "" && parsed.Output == "":
+		return testArgs{}, fmt.Errorf("test error: --triple builds a test executable " +
+			"to run elsewhere; name it with -o")
+	case parsed.Output != "" && len(parsed.Args) > 0:
+		return testArgs{}, fmt.Errorf("test error: -o builds the test executable " +
+			"without running it, so it takes no program args")
+	}
+	return parsed, nil
 }
 
 const wasmWATUsage = "usage: kizu build --target wasm32-wasi " +
@@ -152,6 +197,7 @@ const browserESMUsage = "usage: kizu build --target wasm32-browser " +
 func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check|test> <file> [-- args...]")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu test [--seed N] <file|package> [-- args...]")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu test [--seed N] [--triple T] -o file <file|package>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu init [path]")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu fmt [--write] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu ir [--opt] <file>")

@@ -392,6 +392,12 @@ func emitNativeFile(args []string) error {
 	if err != nil {
 		return err
 	}
+	return linkNativeModule(module, options, target)
+}
+
+// linkNativeModule emits one lowered module for a native target and builds
+// the artifact the options name, then prints where it went.
+func linkNativeModule(module *ir.Module, options nativeBuildArgs, target stdtarget.Target) error {
 	if err := keepNativeRoots(module, options.Emit); err != nil {
 		return err
 	}

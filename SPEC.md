@@ -3568,6 +3568,10 @@ runtime に伝えるのは test body だけで、production code は何も伝え
 `kizu test --seed N <path>` は `std::testing::seed()` が返す値を `N` にします。
 flag が無ければ runtime が run ごとに seed を選び、`seed()` を呼んだ後の失敗は
 その seed を `note:` で報告するので、同じ flag で再生できます(`docs/std/testing.md`)。
+`kizu test -o <file> <path>` は test の executable を実行せずに `<file>` へ書き、
+`--triple` はその executable を別の machine 向けに build します(`kizu build` と同じ
+triple)。executable は test がすべて通れば exit 0 で終わり、失敗は `kizu test` と同じ形で
+報告します。`--triple` は `-o` を、`-o` は program 引数が無いことを要求します。
 package test では、production fileに加えて `_test.kizu` fileを同じdirectoryのmodule
 へ加えます。test fileは同じmoduleのprivate宣言を使え、test helperも同じmoduleの
 他のtest fileから使えます。file-local importの規則はtest fileにも適用します。
