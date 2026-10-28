@@ -262,7 +262,7 @@ pub fn runtime_source() -> []u8 {
         \\   allocation from it fails; nothing ever writes to it. */
         \\static KizuFixedBuffer kizu_fixed_empty = {KIZU_ALLOC_FIXED, NULL, 0, 0};
         \\
-        \\void *std__internal__builtin__mem_fixed_buffer(KizuSliceU8 view) {
+        \\static void *kizu_fixed_buffer(KizuSliceU8 view) {
         \\    if (!view.ptr || view.len <= 0) {
         \\        return &kizu_fixed_empty;
         \\    }
@@ -279,6 +279,10 @@ pub fn runtime_source() -> []u8 {
         \\    fixed->cap = (int64_t)(end - data);
         \\    fixed->offset = 0;
         \\    return fixed;
+        \\}
+        \\
+        \\void std__internal__builtin__mem_fixed_buffer(void **out, const KizuSliceU8 *view) {
+        \\    *out = kizu_fixed_buffer(*view);
         \\}
         \\
         \\/* Small allocations align to their own size class, so byte-sized map keys do
@@ -4152,22 +4156,25 @@ pub fn runtime_source() -> []u8 {
         \\ * pointer and the capacity it now has, or a capacity of -1 when the allocator
         \\ * refused. The native backend calls kizu_array_grow with the header's words
         \\ * rather than the header's address, so the header never escapes the function
-        \\ * appending to it and its length is not the runtime's to change. */
+        \\ * appending to it and its length is not the runtime's to change. The answer
+        \\ * is written to the caller's slot rather than returned, because a two-word
+        \\ * struct comes back in registers on System V and AAPCS64 but through memory
+        \\ * on Windows. */
         \\typedef struct {
         \\    unsigned char *data;
         \\    int64_t cap;
         \\} KizuArrayStorage;
         \\
-        \\KizuArrayStorage kizu_array_grow(
-        \\    void *allocator, unsigned char *data, int64_t cap, int64_t needed, int64_t elem_size) {
+        \\void kizu_array_grow(KizuArrayStorage *out, void *allocator, unsigned char *data, int64_t cap,
+        \\                     int64_t needed, int64_t elem_size) {
         \\    KizuArray array = {data, 0, cap};
-        \\    KizuArrayStorage grown = {data, -1};
+        \\    out->data = data;
+        \\    out->cap = -1;
         \\    if (!kizu_array_reserve_storage(allocator, &array, needed, elem_size)) {
-        \\        return grown;
+        \\        return;
         \\    }
-        \\    grown.data = array.data;
-        \\    grown.cap = array.cap;
-        \\    return grown;
+        \\    out->data = array.data;
+        \\    out->cap = array.cap;
         \\}
         \\
         \\_Bool kizu_array_append(void *allocator, void *handle, const void *elem, int64_t elem_size) {

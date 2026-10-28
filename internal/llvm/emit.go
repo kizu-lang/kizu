@@ -2340,9 +2340,12 @@ func (e *emitter) copyAddressArg(instr *ir.Instr, argIndex int, index int) strin
 }
 
 // usesHostedRuntimeABI reports whether a std hosted runtime call uses the
-// explicit out-pointer ABI instead of the platform C aggregate return ABI.
-// Error unions and optionals are both C-side aggregates, so both go out
-// through the pointer.
+// explicit pointer ABI instead of the platform C aggregate ABI. Error unions
+// and optionals are both C-side aggregates, so both go out through the
+// pointer; an aggregate argument goes in through one. How C passes an
+// aggregate by value is the platform's to say -- two registers on System V
+// and AAPCS64 for a slice, a hidden address on Windows -- and a pointer is
+// the one spelling every platform agrees on.
 func (e *emitter) usesHostedRuntimeABI(name string, instr *ir.Instr) bool {
 	if !strings.HasPrefix(llvmFunctionName(name), "std__internal__builtin__") {
 		return false
@@ -2350,8 +2353,15 @@ func (e *emitter) usesHostedRuntimeABI(name string, instr *ir.Instr) bool {
 	if _, ok := e.errorUnionSuccessType(instr.Result.Type); ok {
 		return true
 	}
-	_, ok := optionalElemLLVM(instr.Result.Type)
-	return ok
+	if _, ok := optionalElemLLVM(instr.Result.Type); ok {
+		return true
+	}
+	for _, arg := range instr.Args {
+		if e.hostedRuntimeIndirectABI(arg.Type) {
+			return true
+		}
+	}
+	return false
 }
 
 // hostedRuntimeParamTypes returns the lowered parameter ABI for hosted runtime

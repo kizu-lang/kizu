@@ -149,7 +149,7 @@ fn (self: &var Emitter) write_array_runtime_decls(module: &ir::Module) -> !void 
     if !self.uses_array_runtime(module) {
         return self.line("");
     }
-    try self.line("declare { ptr, i64 } @kizu_array_grow(ptr, ptr, i64, i64, i64)");
+    try self.line("declare void @kizu_array_grow(ptr, ptr, ptr, i64, i64, i64)");
     try self.line("declare i1 @kizu_array_append_bytes(ptr, ptr, ptr, i64)");
     try self.line("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)");
     try self.line("declare i1 @kizu_array_reserve(ptr, ptr, i64, i64)");
@@ -536,19 +536,30 @@ fn (self: &var Emitter) write_array_append_paths(
     let storage = try self.percent(storage_synthetic);
     let allocator = try self.operand(module, node.args.get_or_panic(1));
     let size = try self.element_size_operand_bytes(module, elem_bytes);
+    // The answer comes back through a slot of the caller's rather than as a
+    // returned pair: C returns a two-word struct in registers on System V and
+    // AAPCS64 but through memory on Windows, and a slot is the one spelling
+    // every convention agrees on.
+    try self.line1("  %s = alloca { ptr, i64 }, align 8", Arg::Str(storage));
     try self.line6(
-        "  %s = call { ptr, i64 } @kizu_array_grow(ptr %s, ptr %s, i64 %s, i64 %s, i64 %s)",
+        "  call void @kizu_array_grow(ptr %s, ptr %s, ptr %s, i64 %s, i64 %s, i64 %s)",
         Arg::Str(storage), Arg::Str(allocator.operand), Arg::Str(data),
         Arg::Str(capacity), Arg::Str(grown), Arg::Str(size)
     );
     let storage_data_synthetic = try self.next_synthetic_value("array.append.storage.data");
     let storage_data = try self.percent(storage_data_synthetic);
+    let storage_cap_addr_synthetic = try self.next_synthetic_value("array.append.storage.cap.addr");
+    let storage_cap_addr = try self.percent(storage_cap_addr_synthetic);
     let storage_cap_synthetic = try self.next_synthetic_value("array.append.storage.cap");
     let storage_cap = try self.percent(storage_cap_synthetic);
     let grew_synthetic = try self.next_synthetic_value("array.append.grew");
     let grew = try self.percent(grew_synthetic);
-    try self.line2("  %s = extractvalue { ptr, i64 } %s, 0", Arg::Str(storage_data), Arg::Str(storage));
-    try self.line2("  %s = extractvalue { ptr, i64 } %s, 1", Arg::Str(storage_cap), Arg::Str(storage));
+    try self.line2("  %s = load ptr, ptr %s, align 8", Arg::Str(storage_data), Arg::Str(storage));
+    try self.line2(
+        "  %s = getelementptr inbounds { ptr, i64 }, ptr %s, i64 0, i32 1",
+        Arg::Str(storage_cap_addr), Arg::Str(storage)
+    );
+    try self.line2("  %s = load i64, ptr %s, align 8", Arg::Str(storage_cap), Arg::Str(storage_cap_addr));
     try self.line2("  %s = icmp sge i64 %s, 0", Arg::Str(grew), Arg::Str(storage_cap));
     try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(grew), Arg::Str(store_label), Arg::Str(join_label));
     try self.line1("%s:", Arg::Str(store_label));
