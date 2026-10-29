@@ -183,8 +183,9 @@ The safe-code memory-safety contract is documented in
 Prebuilt binaries are attached to
 [GitHub Releases](https://github.com/kizu-lang/kizu/releases); each names its
 version with `kizu version`, so an old binary identifies itself instead of
-producing confusing parse errors against newer sources. The flake builds the
-same layout locally:
+producing confusing parse errors against newer sources. Windows gets a zip
+with `bin/kizu.exe`; it links through llvm-mingw, so put that on PATH as
+above. The flake builds the same layout locally:
 
 ```sh
 nix build   # ./result/bin/kizu with its library tree in ./result/lib/kizu

@@ -2,13 +2,15 @@
 # and they name their version (`kizu version`). A binary that says what it is
 # cannot silently go stale the way an anonymous local build can.
 #
-# The Kizu backend links through the host clang, so there is no cross build:
-# each target is built on a runner of that platform and the four artifacts are
-# collected afterwards.
+# The Kizu backend links through the host clang, so each Unix target is built
+# on a runner of that platform. Windows is the exception: it links with
+# llvm-mingw, which cross builds from Linux the same as on Windows
+# (ADR-0154), and a Windows runner only smoke-tests what Linux built.
 #
-# The tarball layout is <prefix>/bin/kizu + <prefix>/lib/kizu, the same shape
+# The archive layout is <prefix>/bin/kizu + <prefix>/lib/kizu, the same shape
 # the binary resolves its library tree from and the same shape `nix build`
-# installs.
+# installs. Windows gets bin/kizu.exe in a zip, the archive it opens without
+# other tools.
 name: release
 
 # There is no x86_64 macOS build. Actions retired the macOS 13 image in
@@ -28,6 +30,11 @@ on:
 permissions:
   contents: write
 
+env:
+  # The llvm-mingw release the Windows build links with and is smoke-tested
+  # against.
+  LLVM_MINGW: "20261020"
+
 jobs:
   build:
     strategy:
@@ -40,6 +47,9 @@ jobs:
             os: ubuntu-24.04-arm
           - target: darwin-arm64
             os: macos-14
+          - target: windows-amd64
+            os: ubuntu-latest
+            triple: x86_64-w64-windows-gnu
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -47,6 +57,14 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+      - name: Install llvm-mingw
+        if: matrix.triple != ''
+        run: |
+          set -eu
+          name="llvm-mingw-$LLVM_MINGW-ucrt-ubuntu-22.04-x86_64"
+          curl -fsSL "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW/$name.tar.xz" |
+            tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/$name/bin" >> "$GITHUB_PATH"
       - name: Build
         env:
           KIZU_LIB_DIR: ${{ github.workspace }}/lib/kizu
@@ -68,10 +86,21 @@ jobs:
             ./scripts/gen-selfhost-version
           prefix="dist/kizu-${KIZU_RELEASE:-devel}-${{ matrix.target }}"
           mkdir -p "$prefix/bin" "$prefix/lib"
-          "$seed" build --target native --opt -o "$prefix/bin/kizu" compiler
+          triple="${{ matrix.triple }}"
+          if [ -n "$triple" ]; then
+            "$seed" build --target native --opt --triple "$triple" -o "$prefix/bin/kizu.exe" compiler
+          else
+            "$seed" build --target native --opt -o "$prefix/bin/kizu" compiler
+          fi
           cp -R lib/kizu "$prefix/lib/kizu"
-          tar -C dist -czf "$prefix.tar.gz" "$(basename "$prefix")"
+          if [ -n "$triple" ]; then
+            (cd dist && zip -qr "$(basename "$prefix").zip" "$(basename "$prefix")")
+          else
+            tar -C dist -czf "$prefix.tar.gz" "$(basename "$prefix")"
+          fi
       - name: Smoke
+        # A Windows executable is smoke-tested on Windows, by smoke-windows.
+        if: matrix.triple == ''
         env:
           KIZU_RELEASE: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
         run: |
@@ -92,11 +121,51 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: kizu-${{ matrix.target }}
-          path: dist/*.tar.gz
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
           if-no-files-found: error
 
-  release:
+  smoke-windows:
     needs: build
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: kizu-windows-amd64
+          path: dist
+      - name: Smoke
+        shell: bash
+        env:
+          KIZU_RELEASE: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+        run: |
+          set -eu
+          temp="$(cygpath -u "$RUNNER_TEMP")"
+          name="llvm-mingw-$LLVM_MINGW-ucrt-x86_64"
+          curl -fsSL -o "$temp/$name.zip" \
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW/$name.zip"
+          unzip -q "$temp/$name.zip" -d "$temp"
+          export PATH="$temp/$name/bin:$PATH"
+          unzip -q dist/*.zip -d "$temp/kizu"
+          kizu="$temp/kizu/kizu-${KIZU_RELEASE:-devel}-windows-amd64/bin/kizu.exe"
+          hello="$(cygpath -w "$GITHUB_WORKSPACE/examples/hello.kizu")"
+          # From an unrelated directory with nothing pointing at a library
+          # tree, as after the zip is opened.
+          cd "$(mktemp -d)"
+          line="$("$kizu" version)"
+          echo "$line"
+          case "$line" in *modified*) echo "the version line says modified"; exit 1;; esac
+          "$kizu" run "$hello"
+          "$kizu" build --target wasm32-browser --emit esm -o browser "$hello"
+          test -f browser/app.wasm
+          test -f browser/app.mjs
+          "$kizu" init demo
+          "$kizu" run demo
+
+  release:
+    needs: [build, smoke-windows]
     # A dry run stops after the artifacts are built and smoke-tested.
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
@@ -110,6 +179,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz \
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.zip \
             --title "$GITHUB_REF_NAME" --generate-notes \
             --repo "$GITHUB_REPOSITORY"
