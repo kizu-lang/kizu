@@ -45,13 +45,51 @@ pub error Error {
 
 /// Returns a cleaned absolute path, the Go `filepath.Abs`. std does not expose
 /// getcwd, so the caller supplies the shell-maintained PWD through the process
-/// environment; selfhost differential runners pin it to os.Getwd.
-pub fn absolute(allocator: Allocator, target: []u8) -> !string::String {
+/// environment; selfhost differential runners pin it to os.Getwd. Windows
+/// keeps no PWD: there the working directory is asked of the filesystem.
+pub fn absolute(io: Io, allocator: Allocator, target: []u8) -> !string::String {
+    comptime if std::target::is_windows() {
+        return absolute_on_windows(io, allocator, target);
+    }
     if mem::len(target) > 0 and target[0] == cast<u8>(47) {
         return path::clean(allocator, target);
     }
     let working = process::env("PWD") orelse return Error::MissingWorkingDirectory;
     return path::join(allocator, working, target);
+}
+
+/// Returns a cleaned absolute path on Windows, spelled with the slashes
+/// every path the runtime hands back has. A path with a drive letter is
+/// absolute already; one that starts at a root is on the working
+/// directory's drive.
+fn absolute_on_windows(io: Io, allocator: Allocator, target: []u8) -> !string::String {
+    var given = string::new(allocator);
+    defer given.deinit(allocator);
+    var index = 0;
+    while index < mem::len(target) {
+        var byte = target[index];
+        if byte == cast<u8>(92) {
+            byte = cast<u8>(47);
+        }
+        try given.append_byte(allocator, byte);
+        index = index + 1;
+    }
+    let slashed = given.as_bytes();
+    let size = mem::len(slashed);
+    if size >= 2 and slashed[1] == cast<u8>(58) {
+        return path::clean(allocator, slashed);
+    }
+    let working = try fs::real_path(io, allocator, ".");
+    defer working.deinit(allocator);
+    let working_bytes = working.as_bytes();
+    if size > 0 and slashed[0] == cast<u8>(47) and mem::len(working_bytes) >= 2 {
+        var rooted = try string::from_bytes(allocator, working_bytes[0..2]);
+        defer rooted.deinit(allocator);
+        try rooted.append_bytes(allocator, slashed);
+        let rooted_bytes = rooted.as_bytes();
+        return path::clean(allocator, rooted_bytes);
+    }
+    return path::join(allocator, working_bytes, slashed);
 }
 
 /// Appends the platform cache directory, the Go `os.UserCacheDir`: on

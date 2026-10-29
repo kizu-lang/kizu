@@ -173,7 +173,8 @@ safe code のメモリ安全契約は
 prebuilt binary は [GitHub Releases](https://github.com/kizu-lang/kizu/releases)
 に添付します。それぞれ `kizu version` で自分の version を名乗るので、古い binary が
 新しい source に対して不可解な parse error を出す代わりに、自分が古いことを言います。
-同じ layout は flake でも build できます。
+Windows 版は `bin/kizu.exe` を含む zip です。link に llvm-mingw を使うので、上のとおり
+PATH に入れてください。同じ layout は flake でも build できます。
 
 ```sh
 nix build   # ./result/bin/kizu と ./result/lib/kizu
