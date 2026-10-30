@@ -879,68 +879,54 @@ fn (self: &var Lowerer) lower_call_args(tree: &var ast::Ast, name: Name, args: a
         let passed = try self.variadic_call_signature(tree, signature, args);
         return self.lower_call_args_as(tree, params_of(passed), args, out);
     }
-    let named = try self.core_primitive_param_types(name);
-    return self.lower_call_args_named(tree, named, args, out);
+    return self.lower_core_primitive_args(tree, name, args, out);
 }
 
-/// Names the arguments of a std::internal::builtin the lowerer has no
-/// declared signature for, the Go `corePrimitiveParams`. Only the
-/// destinations matter: a primitive that appends into the caller's String
-/// receives that String's storage, so the growth the runtime does is visible
-/// to the caller. The other argument kinds carry their own types to the call
+/// Lowers the arguments of a std::internal::builtin the lowerer has no
+/// declared signature for, the Go `corePrimitiveParams` plus
+/// `lowerCallArgsAs`. Only the destinations matter: a primitive that appends
+/// into the caller's String receives that String's storage, at whatever
+/// position it takes it, so the growth the runtime does is visible to the
+/// caller. The other argument kinds carry their own types to the call
 /// already.
-fn (self: &var Lowerer) core_primitive_param_types(name: Name) -> !NamedTypes {
-    let position = self.string_out_position(name);
-    if position < 0 {
-        return no_named_types();
+fn (self: &var Lowerer) lower_core_primitive_args(
+    tree: &var ast::Ast,
+    name: Name,
+    args: ast::ExpressionList,
+    out: &var array::Array<Value>
+) -> !?diagnostic::Diagnostic {
+    let string_out = try self.module.names.intern(stdprim::arg_kind_spelling(stdprim::ArgKind::StringOut));
+    var index = 0;
+    while ownership::arg_at(tree, args, index) |arg| {
+        var want = empty_name();
+        if self.is_string_out_arg(name, index) {
+            want = string_out;
+        }
+        index = index + 1;
+        var value = empty_value();
+        if try self.lower_contextual_expr(tree, arg, want, &var value) |failed| {
+            return move failed;
+        }
+        try out.append(self.allocator, value);
     }
-    let spelled = try self.module.names.intern(stdprim::arg_kind_spelling(stdprim::ArgKind::StringOut));
-    return with_named_type(no_named_types(), position, spelled);
+    return null;
 }
 
-/// Returns the argument position a std::internal::builtin appends into, or
-/// -1 when it has none. Reading the registry borrows the name table, so the
-/// interning the caller does happens after the borrow is over.
-fn (self: &Lowerer) string_out_position(name: Name) -> i64 {
+/// Reports whether a std::internal::builtin appends into the String at one
+/// argument position. Reading the registry borrows the name table, so it
+/// answers with a bool and the borrow is over before the caller lowers.
+fn (self: &Lowerer) is_string_out_arg(name: Name, index: i64) -> bool {
     let retained = name_text(&self.module.names, name);
     let spelling = retained.as_bytes();
-    var position = -1;
     if stdprim::simple_core_signature(spelling) |signature| {
-        var index = 0;
-        while index < signature.args_len() {
-            let kind = signature.arg_at(index) orelse break;
-            if is_string_out(kind) {
-                position = index;
-            }
-            index = index + 1;
+        if signature.arg_at(index) |kind| {
+            return match kind {
+                StringOut => true,
+                _ => false,
+            };
         }
     }
-    return position;
-}
-
-/// Reports whether a primitive argument is a String the callee appends into.
-fn is_string_out(kind: stdprim::ArgKind) -> bool {
-    return match kind {
-        StringOut => true,
-        _ => false,
-    };
-}
-
-/// Returns the record with one argument position named.
-fn with_named_type(types: NamedTypes, index: i64, spelled: Name) -> NamedTypes {
-    if index == 0 {
-        return NamedTypes { first: spelled, second: types.second, third: types.third, fourth: types.fourth };
-    }
-    if index == 1 {
-        return NamedTypes { first: types.first, second: spelled, third: types.third, fourth: types.fourth };
-    }
-    if index == 2 {
-        return NamedTypes { first: types.first, second: types.second, third: spelled, fourth: types.fourth };
-    }
-    if index == 3 {
-        return NamedTypes { first: types.first, second: types.second, third: types.third, fourth: spelled };
-    }
-    return types;
+    return false;
 }
 
 /// Lowers call arguments at the types the call names for them, for callees
