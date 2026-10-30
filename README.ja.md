@@ -108,9 +108,10 @@ interpreter はありません。`kizu test` は `kizu run` が `main` をビル
 `clang` は 15 以上が要ります(clang 14 は `expected type` で拒否します)。
 no-libc / freestanding build は build policy としては受理済みですが、未実装です。
 
-Windows 向けの executable は `--triple x86_64-w64-windows-gnu` で build します。link は
-[llvm-mingw](https://github.com/mstorsjo/llvm-mingw) の `x86_64-w64-mingw32-clang` が行うので、
-その `bin` を PATH に入れてください。macOS / Linux からの cross build も同じです。
+Windows では `kizu` 自身がそのまま動き、既定で Windows 向けに build します。link は
+`clang` ではなく [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) の
+`x86_64-w64-mingw32-clang` が行うので、その `bin` を PATH に入れてください。macOS / Linux
+からは同じ llvm-mingw を使い、`--triple x86_64-w64-windows-gnu` で cross build します。
 できた `.exe` は Windows 10 以降に最初からある DLL だけを使います。
 `kizu test --triple x86_64-w64-windows-gnu -o tests.exe <package>` は test の executable を
 実行せずに build するので、それを Windows 機で実行します。test がすべて通れば exit 0 です。
