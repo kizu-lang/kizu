@@ -27,15 +27,25 @@ import (
 // in memory has its tag loaded through its address, and its payload is that
 // payload's own address inside it.
 //
-// A large value something does read whole -- a return, a literal it becomes a
-// field of, a phi -- is the aggregate it always was, loaded from its source
-// where it is made, and every use of it is written as if this file were not
-// here. The aggregate is never loaded back out of a slot: the optimizer takes
-// such a load apart into one read per leaf and an insertvalue chain it cannot
-// fold again, which costs more than the load it replaced. So the two forms do
-// not mix in one value, and readsAddress is what decides between them, for
-// the pass that sorts a function's values and for every instruction that
-// reads one alike.
+// A large value something does read whole -- a phi, or an instruction that
+// does not name it below -- is the aggregate it always was, loaded from its
+// source where it is made, and every use of it is written as if this file
+// were not here. The aggregate is never loaded back out of a slot the
+// function filled itself: the optimizer takes such a load apart into one read
+// per leaf and an insertvalue chain it cannot fold again, which costs more
+// than the load it replaced. So the two forms do not mix in one value, and
+// readsAddress is what decides between them, for the pass that sorts a
+// function's values and for every instruction that reads one alike.
+//
+// A struct or fixed array of such a size never crosses a call whole either.
+// It is passed as the address of a slot (functionParamABI), and returned
+// through one the caller hands over (returnsThroughSlot): code generators that
+// take an aggregate operand apart one leaf at a time -- x86-64 at -O0 is one
+// -- spend minutes on a call that returns a value of a hundred thousand bytes,
+// and the same bytes moved by one llvm.memcpy cost them nothing. A literal is
+// built in a slot of its own, one field at a time, a field written into a
+// value is written into a copy of it, and a zero array kept in memory is
+// written with one llvm.memset.
 //
 // Which types this is asked about at all is memoryValueLeaves, one count over
 // the type's own nesting, so a type is treated the same way everywhere.
@@ -136,7 +146,9 @@ func (e *emitter) wrappedType(typ string) (string, bool) {
 // read whole needs what it is read out of whole too -- unless that lies in
 // storage the caller filled (lent), which a whole value is loaded out of as
 // out of any storage. A wrapper built in a slot copies its payload in, and
-// built whole it takes the payload whole. And storage a whole value is loaded
+// built whole it takes the payload whole; a field write built in a slot copies
+// the value and the field in, and built whole takes both whole (a literal is
+// the same, and collectWholeValues asks it). And storage a whole value is loaded
 // from takes what is written to it whole, to any part of it: filled by a copy
 // and then loaded, it is the load out of a slot again.
 func (e *emitter) readsAddress(instr *ir.Instr, index int) bool {
@@ -150,6 +162,8 @@ func (e *emitter) readsAddress(instr *ir.Instr, index int) bool {
 		return index == 1 && !e.wholeStorage[e.storageRoot(instr.Args[0].Name)]
 	case instr.Op == "call.indirect":
 		return index > 0 && e.passedBehindPointer(instr.CallParams, index-1, instr.Args[index])
+	case strings.HasPrefix(instr.Op, "field.set."):
+		return !e.wholeValues[instr.Result.Name]
 	case strings.HasPrefix(instr.Op, "call."):
 		return e.callReadsAddress(instr, index)
 	}
@@ -296,11 +310,24 @@ func (e *emitter) collectWholeValues(fn *ir.Function) {
 	e.wholeValues = map[string]bool{}
 	e.wholeStorage = map[string]bool{}
 	e.partOf = map[string]string{}
+	e.useCounts = map[string]int{}
+	e.ownSlots = map[string]string{}
 	e.misread = ""
-	uses, loads := e.memoryUses(fn)
+	uses, loads, literals := e.memoryUses(fn)
 	e.markLent(fn, uses)
 	for changed := true; changed; {
 		changed = false
+		for _, literal := range literals {
+			if !e.wholeValues[literal.Result.Name] {
+				continue
+			}
+			for _, field := range literal.Fields {
+				if e.isMemoryValueType(field.Value.Type) && !e.wholeValues[field.Value.Name] {
+					e.wholeValues[field.Value.Name] = true
+					changed = true
+				}
+			}
+		}
 		for _, use := range uses {
 			arg := use.instr.Args[use.index]
 			if !e.wholeValues[arg.Name] && !e.readsAddress(use.instr, use.index) {
@@ -319,14 +346,18 @@ func (e *emitter) collectWholeValues(fn *ir.Function) {
 }
 
 // memoryUses walks fn once for collectWholeValues. It records what is read
-// whole whatever else is -- a value a literal takes as a field, a phi names,
-// a block returns or a cleanup reads whole -- and returns what has to be
-// asked again: every argument of a type that may be kept in memory, and every
-// load of such a value out of storage. It also records which address each
-// address of a part was taken from.
-func (e *emitter) memoryUses(fn *ir.Function) ([]memoryUse, []*ir.Instr) {
+// whole whatever else is -- a value a phi names, a block returns from a
+// function that does not return through a slot, or a cleanup reads whole --
+// and returns what has to be asked again: every argument of a type that may
+// be kept in memory, every load of such a value out of storage, and every
+// literal of such a type, whose fields are read whole only when it is. It
+// also records which address each address of a part was taken from, and how
+// many times each value of such a type is named.
+func (e *emitter) memoryUses(fn *ir.Function) ([]memoryUse, []*ir.Instr, []*ir.Instr) {
 	var uses []memoryUse
 	var loads []*ir.Instr
+	var literals []*ir.Instr
+	returnsWhole := !e.returnsThroughSlot(fn.Return)
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
 			if isAddressOfPart(instr.Op) && len(instr.Args) > 0 {
@@ -335,13 +366,18 @@ func (e *emitter) memoryUses(fn *ir.Function) ([]memoryUse, []*ir.Instr) {
 			for index, arg := range instr.Args {
 				if e.isMemoryValueType(arg.Type) {
 					uses = append(uses, memoryUse{instr, index})
+					e.useCounts[arg.Name]++
 				}
 			}
+			if len(instr.Fields) > 0 && e.isMemoryValueType(instr.Result.Type) {
+				literals = append(literals, instr)
+			}
 			for _, field := range instr.Fields {
-				e.markWhole(field.Value)
+				e.countUse(field.Value)
 			}
 			for _, incoming := range instr.Incoming {
 				e.markWhole(incoming.Value)
+				e.countUse(incoming.Value)
 			}
 			for _, cleanup := range instr.Cleanups {
 				e.markWholeArgs(cleanupInstruction(cleanup))
@@ -350,9 +386,20 @@ func (e *emitter) memoryUses(fn *ir.Function) ([]memoryUse, []*ir.Instr) {
 				loads = append(loads, instr)
 			}
 		}
-		e.markWhole(block.Terminator.Value)
+		if returnsWhole {
+			e.markWhole(block.Terminator.Value)
+		}
+		e.countUse(block.Terminator.Value)
 	}
-	return uses, loads
+	return uses, loads, literals
+}
+
+// countUse counts one more place value is named, when its type is one that
+// may be kept in memory.
+func (e *emitter) countUse(value ir.Value) {
+	if e.isMemoryValueType(value.Type) {
+		e.useCounts[value.Name]++
+	}
 }
 
 // isStorageLoad reports whether op reads a value out of the storage behind
@@ -383,11 +430,16 @@ func (e *emitter) storageRoot(name string) string {
 	}
 }
 
-// markWholeArgs records the arguments a cleanup reads whole. A cleanup is a
-// deferred call, whose answer depends on nothing else, so it is asked once.
+// markWholeArgs records the arguments a cleanup reads whole, and counts each
+// it names. A cleanup is a deferred call, whose answer depends on nothing
+// else, so it is asked once.
 func (e *emitter) markWholeArgs(instr *ir.Instr) {
 	for index, arg := range instr.Args {
-		if e.isMemoryValueType(arg.Type) && !e.readsAddress(instr, index) {
+		if !e.isMemoryValueType(arg.Type) {
+			continue
+		}
+		e.useCounts[arg.Name]++
+		if !e.readsAddress(instr, index) {
 			e.wholeValues[arg.Name] = true
 		}
 	}
@@ -440,19 +492,133 @@ func (e *emitter) copiedIntoMemory(result ir.Value, source string) bool {
 	addr := localName(result.Name) + ".addr"
 	fmt.Fprintf(&e.out, "  %s = alloca %s\n", addr, e.llvmType(result.Type))
 	e.writeMemoryCopy(addr, source, result.Type)
-	e.setMemoryValue(result, addr)
+	e.setOwnMemoryValue(result, addr)
 	return true
 }
 
 // copiedFromMemory writes the argument of instr at index into the storage at
-// target when that argument is kept in memory, and reports whether it did.
+// target when that argument is kept in memory or is a zero array of a type
+// that may be, and reports whether it did.
 func (e *emitter) copiedFromMemory(instr *ir.Instr, index int, target string) bool {
 	addr, ok := e.addressArg(instr, index)
 	if !ok {
-		return false
+		return e.zeroedMemory(instr.Args[index], target)
 	}
 	e.writeMemoryCopy(target, addr, instr.Args[index].Type)
 	return true
+}
+
+// zeroedMemory sets the storage at target to value with one llvm.memset when
+// value is the zero array (writeBufferNew) of a type that may be kept in
+// memory, and reports whether it did. Stored as the constant it is, such a
+// zero is one store per leaf to the code generator.
+func (e *emitter) zeroedMemory(value ir.Value, target string) bool {
+	if e.values[value.Name].operand != "zeroinitializer" || !e.isMemoryValueType(value.Type) {
+		return false
+	}
+	e.memorySetUsed = true
+	fmt.Fprintf(&e.out, "  call void @llvm.memset.p0.i64(ptr %s, i8 0, i64 %s, i1 false)\n",
+		target, e.elementSizeOperand(value.Type))
+	return true
+}
+
+// writeValueAt writes value into the storage at target: copied there when it
+// is kept in memory, set there when it is a zero array, and stored as the
+// operand it is otherwise. It is what a literal, a field write and a return
+// through a slot put their parts in with, after collectWholeValues has
+// decided which of them are read whole.
+func (e *emitter) writeValueAt(value ir.Value, target string) {
+	if found := e.values[value.Name]; found.addr != "" {
+		e.writeMemoryCopy(target, found.addr, value.Type)
+		return
+	}
+	if e.zeroedMemory(value, target) {
+		return
+	}
+	llvmType := e.llvmType(value.Type)
+	fmt.Fprintf(&e.out, "  store %s %s, ptr %s%s\n",
+		llvmType, e.value(value).operand, target, e.valueTag(llvmType))
+}
+
+// returnSlot is the parameter a function that returns through a slot is
+// handed that slot by. `return` is a keyword, so no local is called it.
+const returnSlot = "%kizu.return"
+
+// returnsThroughSlot reports whether a function of this module returning typ
+// returns it through a slot its caller hands over, as the first parameter,
+// rather than as a value: a struct or fixed array that may be kept in memory.
+// What C calls or is called by never returns one (SPEC §12), so the rule
+// needs nothing but the type, and a direct call, a call through a function
+// pointer and the definition all agree on it.
+func (e *emitter) returnsThroughSlot(typ string) bool {
+	return e.usesIndirectStructParamABI(typ) && e.isMemoryValueType(typ)
+}
+
+// writeSlotCall writes a call of callee, which returns the result of instr
+// through a slot, with args after that slot. The result is what the callee
+// wrote there: kept in memory at the slot, or loaded out of it when something
+// reads it whole.
+func (e *emitter) writeSlotCall(instr *ir.Instr, callee string, args []string) {
+	name := localName(instr.Result.Name)
+	slot := name + ".addr"
+	resultType := e.llvmType(instr.Result.Type)
+	fmt.Fprintf(&e.out, "  %s = alloca %s\n", slot, resultType)
+	fmt.Fprintf(&e.out, "  call void %s(%s)\n",
+		callee, strings.Join(append([]string{"ptr " + slot}, args...), ", "))
+	if e.keptInMemory(instr.Result) {
+		e.setOwnMemoryValue(instr.Result, slot)
+		return
+	}
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", name, resultType, slot)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
+}
+
+// writeMemoryLiteral builds the struct literal instr makes in a slot of its
+// own, one field at a time, with fields in the order its struct declares them.
+func (e *emitter) writeMemoryLiteral(instr *ir.Instr, fields []ir.Value) {
+	name := localName(instr.Result.Name)
+	slot := name + ".addr"
+	structType := e.llvmType(instr.Result.Type)
+	fmt.Fprintf(&e.out, "  %s = alloca %s\n", slot, structType)
+	for index, value := range fields {
+		fieldAddr := fmt.Sprintf("%s.field%d", name, index)
+		fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i32 0, i32 %d\n",
+			fieldAddr, structType, slot, index)
+		e.writeValueAt(value, fieldAddr)
+	}
+	e.setOwnMemoryValue(instr.Result, slot)
+}
+
+// writeMemoryFieldSet writes the field write instr makes into a copy of its
+// receiver in a slot of its own: the receiver copied in, then field index.
+// A receiver that is named nowhere else and lies in a slot of its own, filled
+// in this same block, is not read again, so its slot is taken over as it is:
+// a field written through a borrow, `a.b.c = v`, copies b out and back once
+// rather than twice. The block is what keeps a write in a loop from reaching
+// a receiver made before it, which every turn reads afresh.
+func (e *emitter) writeMemoryFieldSet(instr *ir.Instr, index int) {
+	name := localName(instr.Result.Name)
+	receiver := instr.Args[0]
+	slot := e.values[receiver.Name].addr
+	structType := e.llvmType(instr.Result.Type)
+	fieldAddr := name + ".field.addr"
+	if e.ownSlots[receiver.Name] != e.currentBlock || e.useCounts[receiver.Name] != 1 {
+		slot = name + ".addr"
+		fmt.Fprintf(&e.out, "  %s = alloca %s\n", slot, structType)
+		e.writeValueAt(receiver, slot)
+	}
+	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i32 0, i32 %d\n",
+		fieldAddr, structType, slot, index)
+	e.writeValueAt(instr.Args[1], fieldAddr)
+	e.setOwnMemoryValue(instr.Result, slot)
+}
+
+// setOwnMemoryValue records that result is the bytes at addr, as
+// setMemoryValue does, and that addr is a slot made for result alone, filled
+// in the block being written.
+func (e *emitter) setOwnMemoryValue(result ir.Value, addr string) {
+	e.setMemoryValue(result, addr)
+	e.ownSlots[result.Name] = e.currentBlock
 }
 
 // writeMemoryField reads field index of a value kept in memory at addr: a
@@ -513,11 +679,14 @@ func (e *emitter) writeMemoryWrapper(instr *ir.Instr, tag string, source string)
 	e.setMemoryValue(instr.Result, slot)
 }
 
-// writeMemoryCopyDecl declares llvm.memcpy for a module that copied a value
-// and does not already declare it for the Array runtime.
-func (e *emitter) writeMemoryCopyDecl() {
-	if !e.memoryCopyUsed || e.usesArrayRuntime() {
-		return
+// writeMemoryDecls declares llvm.memcpy for a module that copied a value and
+// does not already declare it for the Array runtime, and llvm.memset for one
+// that zeroed a value.
+func (e *emitter) writeMemoryDecls() {
+	if e.memoryCopyUsed && !e.usesArrayRuntime() {
+		e.out.WriteString("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n\n")
 	}
-	e.out.WriteString("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n\n")
+	if e.memorySetUsed {
+		e.out.WriteString("declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n\n")
+	}
 }

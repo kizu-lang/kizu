@@ -89,8 +89,11 @@ type emitter struct {
 	// names for the address of a part the address it was taken from, lent
 	// names the values that lie in storage the caller filled, misread is the
 	// first value kept in memory that was asked for whole all the same, and
-	// memoryCopyUsed records that a value was copied, so the module declares
-	// llvm.memcpy (memory.go).
+	// memoryCopyUsed and memorySetUsed record that a value was copied or
+	// zeroed, so the module declares llvm.memcpy or llvm.memset. useCounts
+	// counts the places each such value is named, and ownSlots names, for
+	// each value that lies in a slot made for it alone, the block that filled
+	// the slot (memory.go).
 	memoryTypes    map[string]bool
 	wholeValues    map[string]bool
 	wholeStorage   map[string]bool
@@ -98,6 +101,9 @@ type emitter struct {
 	lent           map[string]bool
 	misread        string
 	memoryCopyUsed bool
+	memorySetUsed  bool
+	useCounts      map[string]int
+	ownSlots       map[string]string
 }
 
 // valueInfo is how one SSA value is written: the LLVM operand that stands for
@@ -129,7 +135,7 @@ func (e *emitter) emit() error {
 			return err
 		}
 	}
-	e.writeMemoryCopyDecl()
+	e.writeMemoryDecls()
 	e.writeTBAATable()
 	return nil
 }
@@ -1125,6 +1131,8 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 	e.mainReturnsInt = fn.Name == "main" && (fn.Return == "void" || returnsErrorUnion)
 	if e.mainReturnsInt {
 		returnType = "i32"
+	} else if e.returnsThroughSlot(fn.Return) {
+		returnType = "void"
 	}
 	params := e.definitionParams(fn)
 	returnAttrs := ""
@@ -1177,12 +1185,16 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 
 // definitionParams spells the parameter list of the function being written and
 // registers each parameter as a value of the body. The entry point takes the
-// C arguments it is started with, and a C export takes each value as C passes it.
+// C arguments it is started with, a C export takes each value as C passes it,
+// and a function that returns through a slot takes that slot first.
 func (e *emitter) definitionParams(fn *ir.Function) []string {
 	if e.mainReturnsInt {
 		return []string{"i32 %kizu.argc", "ptr %kizu.argv"}
 	}
-	params := make([]string, 0, len(fn.Params))
+	params := make([]string, 0, len(fn.Params)+1)
+	if e.returnsThroughSlot(fn.Return) {
+		params = append(params, "ptr noalias "+returnSlot)
+	}
 	for _, param := range fn.Params {
 		e.values[param.Name] = valueInfo{typ: param.Type, operand: localName(param.Name)}
 		if fn.ExportABI == "c" {
@@ -2041,6 +2053,10 @@ func (e *emitter) writeIndirectCall(instr *ir.Instr) error {
 		}
 		args = append(args, callArg)
 	}
+	if e.returnsThroughSlot(instr.Result.Type) {
+		e.writeSlotCall(instr, callee.operand, args)
+		return nil
+	}
 	call := fmt.Sprintf(
 		"call %s %s(%s)",
 		e.llvmType(instr.Result.Type),
@@ -2276,6 +2292,10 @@ func (e *emitter) writeInternalCall(name string, instr *ir.Instr) error {
 		}
 		args = append(args, callArg)
 	}
+	if e.returnsThroughSlot(instr.Result.Type) {
+		e.writeSlotCall(instr, "@"+llvmFunctionName(name), args)
+		return nil
+	}
 	call := fmt.Sprintf(
 		"call %s @%s(%s)",
 		e.llvmType(instr.Result.Type),
@@ -2319,7 +2339,9 @@ func (e *emitter) internalCallArg(
 	}
 	slotName := "%" + e.nextSyntheticValue(fmt.Sprintf("arg.%d", index))
 	fmt.Fprintf(&e.out, "  %s = alloca %s\n", slotName, argType)
-	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n", argType, e.value(arg).operand, slotName)
+	if !e.zeroedMemory(arg, slotName) {
+		fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n", argType, e.value(arg).operand, slotName)
+	}
 	return "ptr " + slotName, nil
 }
 
@@ -2639,10 +2661,8 @@ func (e *emitter) writeStructNew(instr *ir.Instr) error {
 		}
 		values[field.Name] = field.Value
 	}
-	structType := e.llvmType(instr.Result.Type)
-	aggregate := "zeroinitializer"
-	resultName := localName(instr.Result.Name)
-	for index, field := range st.Fields {
+	ordered := make([]ir.Value, 0, len(st.Fields))
+	for _, field := range st.Fields {
 		value, ok := values[field.Name]
 		if !ok {
 			return fmt.Errorf("llvm error: missing struct field `%s.%s`", st.Name, field.Name)
@@ -2656,7 +2676,17 @@ func (e *emitter) writeStructNew(instr *ir.Instr) error {
 				value.Type,
 			)
 		}
-		fieldValue := e.value(value)
+		ordered = append(ordered, value)
+	}
+	if e.keptInMemory(instr.Result) {
+		e.writeMemoryLiteral(instr, ordered)
+		return nil
+	}
+	structType := e.llvmType(instr.Result.Type)
+	aggregate := "zeroinitializer"
+	resultName := localName(instr.Result.Name)
+	for index, field := range st.Fields {
+		fieldValue := e.value(ordered[index])
 		name := fmt.Sprintf("%s.field%d", resultName, index)
 		if index == len(st.Fields)-1 {
 			name = resultName
@@ -2815,6 +2845,10 @@ func (e *emitter) writeFieldSet(instr *ir.Instr) error {
 			receiver.Type,
 			instr.Result.Type,
 		)
+	}
+	if e.keptInMemory(instr.Result) {
+		e.writeMemoryFieldSet(instr, index)
+		return nil
 	}
 	value := e.value(instr.Args[1])
 	name := localName(instr.Result.Name)
@@ -3572,6 +3606,11 @@ func helperLabel(base string, suffix string) string {
 func (e *emitter) writeTerminator(term ir.Terminator) error {
 	switch term.Op {
 	case "return":
+		if !e.mainReturnsInt && e.returnsThroughSlot(e.currentReturn) {
+			e.writeValueAt(term.Value, returnSlot)
+			e.out.WriteString("  ret void\n")
+			return nil
+		}
 		if _, ok := e.errorUnionSuccessType(e.currentReturn); ok {
 			return e.writeErrorUnionReturn(term.Value)
 		}

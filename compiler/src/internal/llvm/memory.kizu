@@ -1,3 +1,4 @@
+import compiler::internal::diagnostic;
 import compiler::internal::ir;
 import compiler::internal::typ;
 import std::array;
@@ -26,15 +27,25 @@ import std::string;
 // in memory has its tag loaded through its address, and its payload is that
 // payload's own address inside it.
 //
-// A large value something does read whole -- a return, a literal it becomes
-// a field of, a phi -- is the aggregate it always was, loaded from its source
-// where it is made, and every use of it is written as if this file were not
-// here. The aggregate is never loaded back out of a slot: the optimizer takes
-// such a load apart into one read per leaf and an insertvalue chain it cannot
-// fold again, which costs more than the load it replaced. So the two forms do
-// not mix in one value, and reads_address is what decides between them, for
-// the pass that sorts a function's values and for every instruction that
-// reads one alike.
+// A large value something does read whole -- a phi, or an instruction that
+// does not name it below -- is the aggregate it always was, loaded from its
+// source where it is made, and every use of it is written as if this file
+// were not here. The aggregate is never loaded back out of a slot the
+// function filled itself: the optimizer takes such a load apart into one read
+// per leaf and an insertvalue chain it cannot fold again, which costs more
+// than the load it replaced. So the two forms do not mix in one value, and
+// reads_address is what decides between them, for the pass that sorts a
+// function's values and for every instruction that reads one alike.
+//
+// A struct or fixed array of such a size never crosses a call whole either.
+// It is passed as the address of a slot (function_param_abi), and returned
+// through one the caller hands over (returns_through_slot): code generators
+// that take an aggregate operand apart one leaf at a time -- x86-64 at -O0 is
+// one -- spend minutes on a call that returns a value of a hundred thousand
+// bytes, and the same bytes moved by one llvm.memcpy cost them nothing. A
+// literal is built in a slot of its own, one field at a time, a field written
+// into a value is written into a copy of it, and a zero array kept in memory
+// is written with one llvm.memset.
 //
 // Which types this is asked about at all is memory_value_leaves, one count
 // over the type's own nesting, so a type is treated the same way everywhere.
@@ -197,9 +208,12 @@ fn (self: &var Emitter) wrapped_type(typ_name: []u8) -> !?string::String {
 /// read whole needs what it is read out of whole too -- unless that lies in
 /// storage the caller filled (lent), which a whole value is loaded out of as
 /// out of any storage. A wrapper built in a slot copies its payload in, and
-/// built whole it takes the payload whole. And storage a whole value is
-/// loaded from takes what is written to it whole, to any part of it: filled
-/// by a copy and then loaded, it is the load out of a slot again.
+/// built whole it takes the payload whole; a field write built in a slot
+/// copies the value and the field in, and built whole takes both whole (a
+/// literal is the same, and collect_whole_values asks it). And storage a
+/// whole value is loaded from takes what is written to it whole, to any part
+/// of it: filled by a copy and then loaded, it is the load out of a slot
+/// again.
 fn (self: &var Emitter) reads_address(module: &ir::Module, node: &ir::InstrNode, index: i64) -> !bool {
     match node.op {
         // Go names these in `copiedOperand`: each copies a value into storage
@@ -223,6 +237,7 @@ fn (self: &var Emitter) reads_address(module: &ir::Module, node: &ir::InstrNode,
             return passed_behind_pointer(module, takes, arg.type_name);
         },
         Call => return self.call_reads_address(module, node, index),
+        FieldSet => return !self.is_whole_value(node.result.name),
         _ => return index == 0 and self.reads_first_at_address(node),
     }
 }
@@ -384,11 +399,30 @@ fn (self: &var Emitter) collect_whole_values(module: &ir::Module, node: &ir::Fun
     defer uses.deinit(self.allocator);
     var loads = array::new<ir::Instr>(self.allocator);
     defer loads.deinit(self.allocator);
-    try self.memory_uses(module, node, &var uses, &var loads);
+    var literals = array::new<ir::Instr>(self.allocator);
+    defer literals.deinit(self.allocator);
+    try self.memory_uses(module, node, &var uses, &var loads, &var literals);
     try self.mark_lent(module, node, &uses);
     var changed = true;
     while changed {
         changed = false;
+        var literal_index = 0;
+        while literals.get(literal_index) |literal| {
+            literal_index = literal_index + 1;
+            let literal_node = module.instrs.at(literal.node);
+            if !self.is_whole_value(literal_node.result.name) {
+                continue;
+            }
+            var field_index = 0;
+            while literal_node.fields.get(field_index) |field| {
+                field_index = field_index + 1;
+                if try self.is_memory_value_type_of(module, field.value.type_name) and
+                    !self.is_whole_value(field.value.name) {
+                    try self.mark_whole_value(field.value.name);
+                    changed = true;
+                }
+            }
+        }
         var use_index = 0;
         while uses.get(use_index) |candidate| {
             use_index = use_index + 1;
@@ -414,17 +448,22 @@ fn (self: &var Emitter) collect_whole_values(module: &ir::Module, node: &ir::Fun
 }
 
 /// Walks a function once for collect_whole_values, the Go `memoryUses`. It
-/// records what is read whole whatever else is -- a value a literal takes as
-/// a field, a phi names, a block returns or a cleanup reads whole -- and
-/// collects what has to be asked again: every argument of a type that may be
-/// kept in memory, and every load of such a value out of storage. It also
-/// records which address each address of a part was taken from.
+/// records what is read whole whatever else is -- a value a phi names, a
+/// block returns from a function that does not return through a slot, or a
+/// cleanup reads whole -- and collects what has to be asked again: every
+/// argument of a type that may be kept in memory, every load of such a value
+/// out of storage, and every literal of such a type, whose fields are read
+/// whole only when it is. It also records which address each address of a
+/// part was taken from, and how many times each value of such a type is
+/// named.
 fn (self: &var Emitter) memory_uses(
     module: &ir::Module,
     node: &ir::FunctionNode,
     uses: &var array::Array<MemoryUse>,
-    loads: &var array::Array<ir::Instr>
+    loads: &var array::Array<ir::Instr>,
+    literals: &var array::Array<ir::Instr>
 ) -> !void {
+    let returns_whole = !try self.returns_through_slot_of(module, node.return_type);
     var block_index = 0;
     while node.blocks.get(block_index) |block| {
         block_index = block_index + 1;
@@ -442,18 +481,24 @@ fn (self: &var Emitter) memory_uses(
             while instr_node.args.get(arg_index) |arg| {
                 if try self.is_memory_value_type_of(module, arg.type_name) {
                     try uses.append(self.allocator, MemoryUse { instr: instr, index: arg_index });
+                    try self.count_name_use(arg.name);
                 }
                 arg_index = arg_index + 1;
+            }
+            if instr_node.fields.len() > 0 and
+                try self.is_memory_value_type_of(module, instr_node.result.type_name) {
+                try literals.append(self.allocator, instr);
             }
             var field_index = 0;
             while instr_node.fields.get(field_index) |field| {
                 field_index = field_index + 1;
-                try self.mark_whole(module, field.value);
+                try self.count_use(module, field.value);
             }
             var arm = 0;
             while instr_node.incoming.get(arm) |incoming| {
                 arm = arm + 1;
                 try self.mark_whole(module, incoming.value);
+                try self.count_use(module, incoming.value);
             }
             var cleanup_index = 0;
             while instr_node.cleanups.get(cleanup_index) |cleanup| {
@@ -465,9 +510,55 @@ fn (self: &var Emitter) memory_uses(
                 try loads.append(self.allocator, instr);
             }
         }
-        try self.mark_whole(module, block_node.terminator.value);
+        if returns_whole {
+            try self.mark_whole(module, block_node.terminator.value);
+        }
+        try self.count_use(module, block_node.terminator.value);
     }
     return;
+}
+
+/// Is how many places name a value of a type that may be kept in memory, the
+/// value of the Go `useCounts` map, stamped with its function's generation
+/// the way a ValueInfo is.
+struct UseCount {
+    count: i64,
+    generation: i64,
+}
+
+/// Counts one more place a value is named, when its type is one that may be
+/// kept in memory, the Go `countUse`.
+fn (self: &var Emitter) count_use(module: &ir::Module, value: ir::Value) -> !void {
+    if ir::is_empty(value.type_name) {
+        return;
+    }
+    if try self.is_memory_value_type_of(module, value.type_name) {
+        try self.count_name_use(value.name);
+    }
+    return;
+}
+
+/// Counts one more place a name is named, the Go `e.useCounts[name]++`.
+fn (self: &var Emitter) count_name_use(name: ir::Name) -> !void {
+    let id = ir::name_id(name);
+    let stale = UseCount { count: 0, generation: -1 };
+    while self.use_counts.len() <= id {
+        try self.use_counts.append(self.allocator, stale);
+    }
+    let count = self.use_count(name) + 1;
+    self.use_counts.set(id, UseCount { count: count, generation: self.generation });
+    return;
+}
+
+/// Returns how many places in the function being written name a value, the
+/// Go `e.useCounts[name]`.
+fn (self: &Emitter) use_count(name: ir::Name) -> i64 {
+    if self.use_counts.get(ir::name_id(name)) |known| {
+        if known.generation == self.generation {
+            return known.count;
+        }
+    }
+    return 0;
 }
 
 /// Reports whether an op reads a value out of the storage behind the borrow
@@ -518,17 +609,19 @@ fn (self: &Emitter) storage_root(name: ir::Name) -> ir::Name {
     return root;
 }
 
-/// Records the arguments a cleanup reads whole, the Go `markWholeArgs`. A
-/// cleanup is a deferred call, whose answer depends on nothing else, so it
-/// is asked once.
+/// Records the arguments a cleanup reads whole, and counts each it names,
+/// the Go `markWholeArgs`. A cleanup is a deferred call, whose answer depends
+/// on nothing else, so it is asked once.
 fn (self: &var Emitter) mark_whole_cleanup(module: &ir::Module, cleanup: ir::Cleanup) -> !void {
     var instr = try self.cleanup_instr(module, cleanup);
     defer instr.deinit(self.allocator);
     var index = 0;
     while instr.args.get(index) |arg| {
-        if try self.is_memory_value_type_of(module, arg.type_name) and
-            !try self.reads_address(module, &instr, index) {
-            try self.mark_whole_value(arg.name);
+        if try self.is_memory_value_type_of(module, arg.type_name) {
+            try self.count_name_use(arg.name);
+            if !try self.reads_address(module, &instr, index) {
+                try self.mark_whole_value(arg.name);
+            }
         }
         index = index + 1;
     }
@@ -658,24 +751,218 @@ fn (self: &var Emitter) copied_into_memory(module: &ir::Module, result: ir::Valu
     let result_type = try self.llvm_type_of(module, result.type_name);
     try self.line2("  %s = alloca %s", Arg::Str(addr), Arg::Str(result_type));
     try self.write_memory_copy(addr, source, result_type);
-    try self.set_memory_value(module, result, addr);
+    try self.set_own_memory_value(module, result, addr);
     return true;
 }
 
 /// Writes the argument of an instruction at index into the storage at
-/// target when that argument is kept in memory, and reports whether it did,
-/// the Go `copiedFromMemory`.
+/// target when that argument is kept in memory or is a zero array of a type
+/// that may be, and reports whether it did, the Go `copiedFromMemory`.
 fn (self: &var Emitter) copied_from_memory(
     module: &ir::Module,
     node: &ir::InstrNode,
     index: i64,
     target: ir::Name
 ) -> !bool {
-    let addr = try self.address_arg(module, node, index) orelse return false;
     let value = node.args.get_or_panic(index);
+    let addr = try self.address_arg(module, node, index) orelse return self.zeroed_memory(module, value, target);
     let value_type = try self.llvm_type_of(module, value.type_name);
     try self.write_memory_copy(target, addr, value_type);
     return true;
+}
+
+/// Returns what the function being written has recorded for a value, the Go
+/// `e.values[name]`, without asking for it as an operand: an empty
+/// ValueInfo when nothing is recorded.
+fn (self: &Emitter) recorded_value(name: ir::Name) -> ValueInfo {
+    if self.values.get(ir::name_id(name)) |found| {
+        if found.generation == self.generation {
+            return found;
+        }
+    }
+    return ValueInfo {
+        typ: ir::empty_name(),
+        operand: ir::empty_name(),
+        addr: ir::empty_name(),
+        generation: -1,
+    };
+}
+
+/// Sets the storage at target to a value with one llvm.memset when the value
+/// is the zero array (write_buffer_new) of a type that may be kept in memory,
+/// and reports whether it did, the Go `zeroedMemory`. Stored as the constant
+/// it is, such a zero is one store per leaf to the code generator.
+fn (self: &var Emitter) zeroed_memory(module: &ir::Module, value: ir::Value, target: ir::Name) -> !bool {
+    let found = self.recorded_value(value.name);
+    if ir::is_empty(found.operand) or !self.names.is(found.operand, "zeroinitializer") or
+        !try self.is_memory_value_type_of(module, value.type_name) {
+        return false;
+    }
+    self.memory_set_used = true;
+    let value_type = try self.llvm_type_of(module, value.type_name);
+    let size = try self.size_of_llvm_type(value_type);
+    try self.line2(
+        "  call void @llvm.memset.p0.i64(ptr %s, i8 0, i64 %s, i1 false)",
+        Arg::Str(target), Arg::Str(size)
+    );
+    return true;
+}
+
+/// Writes a value into the storage at target, the Go `writeValueAt`: copied
+/// there when it is kept in memory, set there when it is a zero array, and
+/// stored as the operand it is otherwise. It is what a literal, a field write
+/// and a return through a slot put their parts in with, after
+/// collect_whole_values has decided which of them are read whole.
+fn (self: &var Emitter) write_value_at(module: &ir::Module, value: ir::Value, target: ir::Name) -> !void {
+    let value_type = try self.llvm_type_of(module, value.type_name);
+    let found = self.recorded_value(value.name);
+    if !ir::is_empty(found.addr) {
+        return self.write_memory_copy(target, found.addr, value_type);
+    }
+    if try self.zeroed_memory(module, value, target) {
+        return;
+    }
+    let operand = try self.operand(module, value);
+    let tag = self.value_tag(value_type);
+    return self.line4(
+        "  store %s %s, ptr %s%s",
+        Arg::Str(value_type), Arg::Str(operand.operand), Arg::Str(target), Arg::Lit(tag)
+    );
+}
+
+/// Is the parameter a function that returns through a slot is handed that
+/// slot by, the Go `returnSlot`. `return` is a keyword, so no local is called
+/// it.
+fn return_slot() -> []u8 {
+    return "%kizu.return";
+}
+
+/// Reports whether a function of this module returning the spelled type
+/// returns it through a slot its caller hands over, as the first parameter,
+/// rather than as a value, the Go `returnsThroughSlot`: a struct or fixed
+/// array that may be kept in memory. What C calls or is called by never
+/// returns one (SPEC §12), so the rule needs nothing but the type, and a
+/// direct call, a call through a function pointer and the definition all
+/// agree on it.
+fn (self: &var Emitter) returns_through_slot_of(module: &ir::Module, typ_name: ir::Name) -> !bool {
+    let type_text = ir::name_text(&module.names, typ_name);
+    let type_bytes = type_text.as_bytes();
+    if !uses_indirect_struct_param_abi(module, type_bytes) {
+        return false;
+    }
+    return self.is_memory_value_type_of(module, typ_name);
+}
+
+/// Writes a call of callee, which returns the result of an instruction
+/// through a slot, with args after that slot, the Go `writeSlotCall`. The
+/// result is what the callee wrote there: kept in memory at the slot, or
+/// loaded out of it when something reads it whole.
+fn (self: &var Emitter) write_slot_call(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    callee: ir::Name,
+    args: &array::Array<string::String>
+) -> !?diagnostic::Diagnostic {
+    let name = try self.local_name(module, node.result.name);
+    let slot = try self.suffixed(name, ".addr");
+    let result_type = try self.llvm_type_of(module, node.result.type_name);
+    try self.line2("  %s = alloca %s", Arg::Str(slot), Arg::Str(result_type));
+    if args.len() == 0 {
+        try self.line2("  call void %s(ptr %s)", Arg::Str(callee), Arg::Str(slot));
+    } else {
+        let joined = try string::join(self.allocator, args, ", ");
+        try self.line3("  call void %s(ptr %s, %s)", Arg::Str(callee), Arg::Str(slot), Arg::Owned(move joined));
+    }
+    if try self.kept_in_memory(module, node.result) {
+        try self.set_own_memory_value(module, node.result, slot);
+        return null;
+    }
+    try self.line3("  %s = load %s, ptr %s", Arg::Str(name), Arg::Str(result_type), Arg::Str(slot));
+    try self.set_value(module, node.result, name);
+    return null;
+}
+
+/// Builds the struct literal an instruction makes in a slot of its own, one
+/// field at a time, the Go `writeMemoryLiteral`, with fields in the order its
+/// struct declares them.
+fn (self: &var Emitter) write_memory_literal(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    fields: &array::Array<ir::Value>
+) -> !void {
+    let name = try self.local_name(module, node.result.name);
+    let slot = try self.suffixed(name, ".addr");
+    let struct_type = try self.llvm_type_of(module, node.result.type_name);
+    try self.line2("  %s = alloca %s", Arg::Str(slot), Arg::Str(struct_type));
+    var index = 0;
+    while fields.get(index) |value| {
+        let field_addr = try self.text2("%s.field%d", Arg::Str(name), Arg::Int(index));
+        try self.line4(
+            "  %s = getelementptr %s, ptr %s, i32 0, i32 %d",
+            Arg::Str(field_addr), Arg::Str(struct_type), Arg::Str(slot), Arg::Int(index)
+        );
+        try self.write_value_at(module, value, field_addr);
+        index = index + 1;
+    }
+    return self.set_own_memory_value(module, node.result, slot);
+}
+
+/// Writes the field write an instruction makes into a copy of its receiver
+/// in a slot of its own, the Go `writeMemoryFieldSet`: the receiver copied
+/// in, then the field at index. A receiver that is named nowhere else and
+/// lies in a slot of its own, filled in this same block, is not read again,
+/// so its slot is taken over as it is: a field written through a borrow,
+/// `a.b.c = v`, copies b out and back once rather than twice. The block is
+/// what keeps a write in a loop from reaching a receiver made before it,
+/// which every turn reads afresh.
+fn (self: &var Emitter) write_memory_field_set(module: &ir::Module, node: &ir::InstrNode, index: i64) -> !void {
+    let name = try self.local_name(module, node.result.name);
+    let receiver = node.args.get_or_panic(0);
+    var slot = self.recorded_value(receiver.name).addr;
+    let struct_type = try self.llvm_type_of(module, node.result.type_name);
+    let field_addr = try self.suffixed(name, ".field.addr");
+    if !self.owns_slot_in_current_block(receiver.name) or self.use_count(receiver.name) != 1 {
+        slot = try self.suffixed(name, ".addr");
+        try self.line2("  %s = alloca %s", Arg::Str(slot), Arg::Str(struct_type));
+        try self.write_value_at(module, receiver, slot);
+    }
+    try self.line4(
+        "  %s = getelementptr %s, ptr %s, i32 0, i32 %d",
+        Arg::Str(field_addr), Arg::Str(struct_type), Arg::Str(slot), Arg::Int(index)
+    );
+    try self.write_value_at(module, node.args.get_or_panic(1), field_addr);
+    return self.set_own_memory_value(module, node.result, slot);
+}
+
+/// Is the block that filled the slot made for a value alone, the value of
+/// the Go `ownSlots` map, stamped with its function's generation the way a
+/// ValueInfo is.
+struct OwnSlot {
+    block: ir::Name,
+    generation: i64,
+}
+
+/// Records that result is the bytes at addr, as set_memory_value does, and
+/// that addr is a slot made for result alone, filled in the block being
+/// written, the Go `setOwnMemoryValue`.
+fn (self: &var Emitter) set_own_memory_value(module: &ir::Module, result: ir::Value, addr: ir::Name) -> !void {
+    try self.set_memory_value(module, result, addr);
+    let id = ir::name_id(result.name);
+    let stale = OwnSlot { block: ir::empty_name(), generation: -1 };
+    while self.own_slots.len() <= id {
+        try self.own_slots.append(self.allocator, stale);
+    }
+    self.own_slots.set(id, OwnSlot { block: self.current_block, generation: self.generation });
+    return;
+}
+
+/// Reports whether a value lies in a slot made for it alone, filled in the
+/// block being written, the Go `e.ownSlots[name] == e.currentBlock`.
+fn (self: &Emitter) owns_slot_in_current_block(name: ir::Name) -> bool {
+    if self.own_slots.get(ir::name_id(name)) |own| {
+        return own.generation == self.generation and ir::same_name(own.block, self.current_block);
+    }
+    return false;
 }
 
 /// Reads field index of a value kept in memory at addr, the Go
@@ -756,11 +1043,16 @@ fn (self: &var Emitter) write_memory_wrapper(
 }
 
 /// Declares llvm.memcpy for a module that copied a value and does not
-/// already declare it for the Array runtime, the Go `writeMemoryCopyDecl`.
-fn (self: &var Emitter) write_memory_copy_decl(module: &ir::Module) -> !void {
-    if !self.memory_copy_used or self.uses_array_runtime(module) {
-        return;
+/// already declare it for the Array runtime, and llvm.memset for one that
+/// zeroed a value, the Go `writeMemoryDecls`.
+fn (self: &var Emitter) write_memory_decls(module: &ir::Module) -> !void {
+    if self.memory_copy_used and !self.uses_array_runtime(module) {
+        try self.line("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)");
+        try self.out.append_byte(self.allocator, cast<u8>(10));
     }
-    try self.line("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)");
-    return self.out.append_byte(self.allocator, cast<u8>(10));
+    if self.memory_set_used {
+        try self.line("declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)");
+        try self.out.append_byte(self.allocator, cast<u8>(10));
+    }
+    return;
 }
