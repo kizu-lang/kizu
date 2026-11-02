@@ -164,6 +164,9 @@ fn (self: &var Emitter) write_indirect_call(module: &ir::Module, node: &ir::Inst
         );
         index = index + 1;
     }
+    if try self.returns_through_slot_of(module, node.result.type_name) {
+        return self.write_slot_call(module, node, callee.operand, &args);
+    }
     let result_type = try self.llvm_type_of(module, node.result.type_name);
     let joined = try string::join(self.allocator, &args, ", ");
     let call = try self.text3(
@@ -218,8 +221,12 @@ fn (self: &var Emitter) write_internal_call(
         try args.append(self.allocator, try self.internal_call_arg(module, node, index, passing, param_type, index));
         index = index + 1;
     }
-    let result_type = try self.llvm_type_of(module, node.result.type_name);
     let symbol = try self.callee_symbol(module, node.operand);
+    if try self.returns_through_slot_of(module, node.result.type_name) {
+        let callee_name = try self.text1("@%s", Arg::Str(symbol));
+        return self.write_slot_call(module, node, callee_name, &args);
+    }
+    let result_type = try self.llvm_type_of(module, node.result.type_name);
     let joined = try string::join(self.allocator, &args, ", ");
     let call = try self.text3("call %s @%s(%s)", Arg::Str(result_type), Arg::Str(symbol), Arg::Owned(move joined));
     return self.write_call_line(module, node, call);
@@ -257,8 +264,10 @@ fn (self: &var Emitter) internal_call_arg(
     }
     let slot_name = try self.next_arg_slot(index);
     try self.line2("  %s = alloca %s", Arg::Str(slot_name), Arg::Str(arg_type));
-    let value = try self.operand(module, arg);
-    try self.line3("  store %s %s, ptr %s", Arg::Str(arg_type), Arg::Str(value.operand), Arg::Str(slot_name));
+    if !try self.zeroed_memory(module, arg, slot_name) {
+        let value = try self.operand(module, arg);
+        try self.line3("  store %s %s, ptr %s", Arg::Str(arg_type), Arg::Str(value.operand), Arg::Str(slot_name));
+    }
     return self.sprint2("ptr %s", Arg::Str(slot_name), Arg::None);
 }
 

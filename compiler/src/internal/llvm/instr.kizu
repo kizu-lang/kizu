@@ -485,8 +485,8 @@ fn (self: &var Emitter) write_integer_cast(module: &ir::Module, node: &ir::Instr
     return null;
 }
 
-/// Lowers a checked struct literal to an LLVM aggregate value, the Go
-/// `writeStructNew`.
+/// Lowers a checked struct literal to an LLVM aggregate value, or builds it
+/// in a slot when it is kept in memory, the Go `writeStructNew`.
 fn (self: &var Emitter) write_struct_new(allocator: Allocator, module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let result_text = ir::name_text(&module.names, node.result.type_name);
     let result_type = result_text.as_bytes();
@@ -509,11 +509,11 @@ fn (self: &var Emitter) write_struct_new(allocator: Allocator, module: &ir::Modu
                 return try self.fail_name2(module, "llvm error: unknown struct field `%s.%s`", declared.name, field.name);
             }
         }
-        let struct_type = try self.llvm_type(module, result_type);
-        var aggregate = try self.names.intern("zeroinitializer");
-        var result_name = try self.local_name(module, node.result.name);
-        var index = 0;
-        while declared.fields.get(index) |field| {
+        var ordered = array::new<ir::Value>(self.allocator);
+        defer ordered.deinit(self.allocator);
+        var check_index = 0;
+        while declared.fields.get(check_index) |field| {
+            check_index = check_index + 1;
             let field_text = ir::name_text(&module.names, field.name);
             let field_bytes = field_text.as_bytes();
             if values.get(field_bytes) |value| {
@@ -523,21 +523,33 @@ fn (self: &var Emitter) write_struct_new(allocator: Allocator, module: &ir::Modu
                         declared.name, field.name, field.type_name, value.type_name
                     );
                 }
-                let field_value = try self.operand(module, value);
-                var name = try self.text2("%s.field%d", Arg::Str(result_name), Arg::Int(index));
-                if index == declared.fields.len() - 1 {
-                    name = result_name;
-                }
-                let field_type = try self.llvm_type_of(module, field.type_name);
-                try self.line6(
-                    "  %s = insertvalue %s %s, %s %s, %d",
-                    Arg::Str(name), Arg::Str(struct_type), Arg::Str(aggregate),
-                    Arg::Str(field_type), Arg::Str(field_value.operand), Arg::Int(index)
-                );
-                aggregate = name;
+                try ordered.append(self.allocator, value);
             } else {
                 return try self.fail_name2(module, "llvm error: missing struct field `%s.%s`", declared.name, field.name);
             }
+        }
+        if try self.kept_in_memory(module, node.result) {
+            try self.write_memory_literal(module, node, &ordered);
+            return null;
+        }
+        let struct_type = try self.llvm_type(module, result_type);
+        var aggregate = try self.names.intern("zeroinitializer");
+        var result_name = try self.local_name(module, node.result.name);
+        var index = 0;
+        while declared.fields.get(index) |field| {
+            let value = ordered.get_or_panic(index);
+            let field_value = try self.operand(module, value);
+            var name = try self.text2("%s.field%d", Arg::Str(result_name), Arg::Int(index));
+            if index == declared.fields.len() - 1 {
+                name = result_name;
+            }
+            let field_type = try self.llvm_type_of(module, field.type_name);
+            try self.line6(
+                "  %s = insertvalue %s %s, %s %s, %d",
+                Arg::Str(name), Arg::Str(struct_type), Arg::Str(aggregate),
+                Arg::Str(field_type), Arg::Str(field_value.operand), Arg::Int(index)
+            );
+            aggregate = name;
             index = index + 1;
         }
         if declared.fields.len() == 0 {
@@ -693,6 +705,10 @@ fn (self: &var Emitter) write_field_set(module: &ir::Module, node: &ir::InstrNod
                     module, "llvm error: field write on `%s` returns %s, got %s",
                     declared.name, receiver.type_name, node.result.type_name, ir::empty_name()
                 );
+            }
+            if try self.kept_in_memory(module, node.result) {
+                try self.write_memory_field_set(module, node, index);
+                return null;
             }
             let value = try self.operand(module, new_value);
             let name = try self.local_name(module, node.result.name);
