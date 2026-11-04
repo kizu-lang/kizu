@@ -2,7 +2,7 @@
 # Searches random runs of the generated Quint machines for a broken property, and
 # fails if the runs never reach the state the properties are about. Quint comes
 # through npx at a fixed version and is not a dependency of the repository. This is
-# a search and not a proof: `quint verify` would be exhaustive but needs Java.
+# a search and not a proof: spec-verify.sh is exhaustive but needs Java.
 set -euo pipefail
 cd "$(dirname "$0")/../spec"
 

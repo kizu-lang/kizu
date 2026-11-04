@@ -52,7 +52,7 @@ func TestTlsSpecTablesComeFromStdTls(t *testing.T) {
 		}
 		if want != string(written) {
 			t.Fatalf("spec/%s.qnt is out of step with std::tls; "+
-				"run `just spec-table` and `just spec-quint`", name)
+				"run `just spec-table`", name)
 		}
 	}
 }

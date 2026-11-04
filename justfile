@@ -122,12 +122,16 @@ backend-matrix:
 compress-fixtures:
     go run ./scripts/gen-compress-fixtures
 
-# Regenerate the tables of the TLS specification from std::tls (spec/README.md).
-spec-table:
+# Regenerate the tables of the TLS specification from std::tls, then check them (spec/README.md).
+spec-table: && spec-verify
     go run ./cmd/kizu run spec/tls_machine.kizu | go run ./scripts/machine-lean spec/Tls.lean client server
     go run ./cmd/kizu run spec/tls_machine.kizu | go run ./scripts/machine-quint spec/tls_client.qnt spec/tls_server.qnt
 
-# Search random runs of the Quint machines for a broken property (spec/README.md).
+# Check every reachable state of the Quint machines with TLC (spec/README.md).
+spec-verify:
+    scripts/spec-verify.sh
+
+# Search random runs of the Quint machines for a broken property, without Java (spec/README.md).
 spec-quint:
     scripts/spec-quint.sh
 

@@ -50,18 +50,24 @@ trace は checked in なので、example を走らせるのに Lean は要りま
 変えた人だけが作り直します。
 
 ```sh
-just spec-table     # std::tls を読んで spec/Tls.lean の block と Quint の機械を作り直す
-just spec-quint     # Quint のランダムな実行で性質を探す(npx で取る。Java は要らない)
+just spec-table     # std::tls を読んで spec/Tls.lean の block と Quint の機械を作り直し、spec-verify を流す
+just spec-verify    # 到達できる全部の状態で Quint の性質を TLC で確かめる(Java が要る)
+just spec-quint     # Quint のランダムな実行で性質を探す(Java は要らない)
 just spec-trace     # lean --run spec/<Name>.lean > examples/fixtures/<name>_trace.json
 ```
 
-`go test` は Lean も Quint も動かしません。表を変えた人が `just spec-trace` で定理を、
-`just spec-quint` で性質を確かめます。
+`go test` も CI も Lean と Quint を動かしません。対応する箇所を変えた人が手元で回します
+(`AGENTS.md`)。
 
 Lean と Quint は役割が違います。Lean は上限のない列について証明し、Quint は破れた時に
-そこへ至る手順を反例で出します。`spec-quint` はランダムな探索で、全数の検査ではありません
-(`quint verify` は Java が要ります)。半分の手は終わりへ行かない事象から選ぶので、実行は
-`Connected` まで届きます。届いた実行が無ければ、検査は失敗します。
+そこへ至る手順を反例で出します。`spec-verify` は `quint verify --backend=tlc` で、到達できる
+全部の状態を調べます。Java は `PATH` のものか nixpkgs の JDK を使い、どちらも無ければ
+失敗します。既定の Apalache の backend は同じ検査が 8 分で終わらなかったので使いません。
+`Connected` に届かない機械は `Connected` についての性質を素通りするので、`notConnected` が
+破れなければ検査は失敗します。
+
+`spec-quint` はランダムな探索で、全数の検査ではありません。半分の手は終わりへ行かない
+事象から選ぶので、実行は `Connected` まで届き、届いた実行が無ければ検査は失敗します。
 
 `lean` は [elan](https://github.com/leanprover/elan) が `spec/lean-toolchain` の版を
 用意します。Mathlib は使いません。

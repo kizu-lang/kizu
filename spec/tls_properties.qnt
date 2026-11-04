@@ -7,6 +7,8 @@ module tls_client_properties {
 
   val reachedConnected = state == Connected
 
+  val notConnected = not(reachedConnected)
+
   val connectedOnlyByFinished =
     state == Connected implies (previous == Connected or (previous == WaitFinished and event == Finished))
 
@@ -20,6 +22,8 @@ module tls_server_properties {
   import tls_server.* from "./tls_server"
 
   val reachedConnected = state == Connected
+
+  val notConnected = not(reachedConnected)
 
   val connectedOnlyByFinished =
     state == Connected implies (previous == Connected or (previous == WaitFinished and event == Finished))

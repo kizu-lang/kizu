@@ -92,6 +92,19 @@ commit 前は原則 `pre-commit run --all-files` を通してください(数秒
 `go test ./...` は pre-push hook にあり、commit 時ではなく push 時に走ります。
 Kizu compiler 自身の test(`kizu test compiler`)もそこに含まれます。
 
+## 形式仕様
+
+`spec/` の Lean と Quint は `go test` でも CI でも動かしません。CI を長くしないためで、
+対応する箇所を変えた人が手元で回します。形は `spec/README.md` にあります。
+
+| 変えたもの | 流すもの |
+| --- | --- |
+| `std::tls` の状態機械 | `just spec-table`(生成と TLC の検査)、`just spec-trace`(Lean) |
+| `spec/tls_properties.qnt` | `just spec-verify` |
+| `spec/*.lean` | `just spec-trace` |
+
+`std::tls` を変えて生成物が古いままなら `go test` が落ちます。生成された範囲と
+`spec/*.qnt` の生成物は手で書き換えず、検査を通すために性質を弱めません。
 
 ## PR Workflow
 

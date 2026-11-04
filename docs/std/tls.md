@@ -146,8 +146,8 @@ server の機械は `WaitClientHello` → (自分の flight を送って)`WaitFi
 
 `spec/Tls.lean` の表は、`spec/tls_machine.kizu` が `advance` と `advance_server` の全組
 (client 96 組、server 36 組)を `std::machine` で読んで作ります。`go test` は表が今の
-`std::tls` と同じことを確かめるので、機械を変えたら `just spec-table`、`just spec-trace`、
-`just spec-quint` を流し、Lean の証明と Quint の探索が通ることを確かめます。
+`std::tls` と同じことを確かめるので、機械を変えたら `just spec-table` で作り直して Quint の性質を全数で
+確かめ、`just spec-trace` で Lean の証明が通ることを確かめます。
 
 ## key schedule
 
