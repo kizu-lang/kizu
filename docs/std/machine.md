@@ -49,8 +49,8 @@ compile error です。組は実行時に数えられる有限個なので、`pr
 `is_end` が常に偽の機械は、止まらない機械として `unreached` だけを確かめます。
 
 `to_json` は `{ states, events, outcomes, start, ends, moves }` を 1 項目 1 行で書きます。file に
-残して commit すれば、遷移の変更が差分の行に出ます。Lean や Quint の仕様は、この JSON を
-外の道具で変換して作ります。
+残して commit すれば、遷移の変更が差分の行に出ます。Lean の表は `scripts/machine-lean` が
+この JSON から作ります(`spec/README.md`)。
 
 ```kizu
 fn step(job: Job, signal: Signal) -> ?Job { ... }

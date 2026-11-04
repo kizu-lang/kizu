@@ -3,8 +3,9 @@
 TLS 1.3(RFC 8446)の client と server です。`connect` が TCP 接続の上で client
 として、`accept` が server として handshake を終え、`Connection` が application
 data を読み書きします。構成は 4 つです。handshake の状態機械(client と server の
-遷移表は `spec/Tls.lean` が仕様として持ち、性質を証明し、client の trace を出力
-します。`examples/tls_conformance.kizu` がその trace を `std::tls` で再生します)、
+遷移表は `std::tls` のコードにあり、`spec/Tls.lean` がそれを読み取って性質を証明し、
+client の trace を出力します。`examples/tls_conformance.kizu` がその trace を
+`std::tls` で再生します)、
 key schedule、record layer、handshake message の codec です。証明書の検証と鍵 file
 は `std::crypto::x509`、算術は全部 `std::crypto` で、C は link しません。
 
@@ -141,8 +142,12 @@ server の機械は `WaitClientHello` → (自分の flight を送って)`WaitFi
 `spec/Tls.lean` の `serverTable` と、`Connected` に至るのは待っていた `Finished` だけ
 (`server_connected_only_by_finished`)、`WaitFinished` に至るのは `ClientHello` だけ
 (`server_wait_finished_by_hello`)、証明書は決して受けない
-(`server_takes_no_certificate`)、の証明が対応します。表の全 36 組は
-`tests/behavior/src/tls/` が Lean の表と突き合わせます。
+(`server_takes_no_certificate`)、の証明が対応します。
+
+`spec/Tls.lean` の表は、`spec/tls_machine.kizu` が `advance` と `advance_server` の全組
+(client 96 組、server 36 組)を `std::machine` で読んで作ります。`go test` は表が今の
+`std::tls` と同じことを確かめるので、機械を変えたら `just spec-table` と `just spec-trace`
+を流し、Lean の証明が通ることを確かめます。
 
 ## key schedule
 

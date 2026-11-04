@@ -6,7 +6,9 @@
 ```
 spec/Ledger.lean                  帳簿: 送金の意味、総和保存と再送の冪等性の証明、trace 生成
 spec/Agreement.lean               契約: 状態と事象の遷移表、終了の吸収性などの証明、trace 生成
-spec/Tls.lean                     TLS 1.3 client の handshake: server の message と状態の遷移表、順序の証明、trace 生成
+spec/Tls.lean                     TLS 1.3 の handshake: std::tls から生成した遷移表、順序の証明、trace 生成
+spec/tls_machine.kizu             std::tls の全組を読んで表を JSON で出す program
+scripts/machine-lean              その JSON を spec/Tls.lean の生成の block に書く道具
 spec/lean-toolchain               elan が読む Lean の版
 examples/fixtures/*_trace.json    生成した trace(checked in)
 examples/*_conformance.kizu       trace を実装に流して食い違う手を名指しする program
@@ -23,8 +25,14 @@ suspended だけ)です。
 (`closed_absorbing`)、connected になるのは待っていた `Finished` によってだけ
 (`connected_only_by_finished`)、application data は connected でだけ受け取り
 (`data_needs_connection`)、`CertificateVerify` は `Certificate` の後にだけ来ます
-(`verify_needs_certificate`、`certificate_first`)。`std::tls` の handshake が
-この表で、`examples/tls_conformance.kizu` が trace を流します。
+(`verify_needs_certificate`、`certificate_first`)。
+
+`Tls.lean` の表は手で書きません。`-- BEGIN GENERATED` と `-- END GENERATED` の間は
+`std::tls` の `advance` と `advance_server` の全組から作るので、証明は実際に動く表に
+ついてのものです。`go test` は block が今の `std::tls` と同じことを Lean 無しで確かめ、
+定理は手で書いたままなので、性質を壊す変更は `lean` で落ちます。その代わり、RFC と
+照らす独立した表ではなくなりました。誤った変更を止めるのは定理の範囲までです。
+`examples/tls_conformance.kizu` が trace を流します。
 
 仕様が持つのは 3 つです。**定義**(`Ledger.lean` なら `Book.post`: 1 件の送金が
 状態をどう変え、どの結果を返すか)、**性質の証明**(`total_reachable`: 到達可能な
@@ -40,8 +48,12 @@ trace は checked in なので、example を走らせるのに Lean は要りま
 変えた人だけが作り直します。
 
 ```sh
+just spec-table     # std::tls を読んで spec/Tls.lean の block を作り直す(Lean は要らない)
 just spec-trace     # lean --run spec/<Name>.lean > examples/fixtures/<name>_trace.json
 ```
+
+`go test` は Lean を動かしません。`Tls.lean` の block を変えた人が `just spec-trace` で
+定理も確かめます。
 
 `lean` は [elan](https://github.com/leanprover/elan) が `spec/lean-toolchain` の版を
 用意します。Mathlib は使いません。
