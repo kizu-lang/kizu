@@ -1,0 +1,64 @@
+import std::machine;
+import std::mem;
+import std::string;
+import std::tls;
+
+// Writes what std::tls does with every state and message as two JSON documents,
+// the client's then the server's. scripts/machine-lean turns them into the
+// tables spec/Tls.lean proves its properties of.
+
+fn client_next(state: tls::State, event: tls::Event) -> tls::State {
+    return tls::advance(state, event).state;
+}
+
+fn client_outcome(state: tls::State, event: tls::Event) -> tls::Outcome {
+    return tls::advance(state, event).outcome;
+}
+
+fn client_end(state: tls::State) -> bool {
+    return state == tls::State::Closed;
+}
+
+fn server_next(state: tls::ServerState, event: tls::ServerEvent) -> tls::ServerState {
+    return tls::advance_server(state, event).state;
+}
+
+fn server_outcome(state: tls::ServerState, event: tls::ServerEvent) -> tls::Outcome {
+    return tls::advance_server(state, event).outcome;
+}
+
+fn server_end(state: tls::ServerState) -> bool {
+    return state == tls::ServerState::Closed;
+}
+
+fn write_table(allocator: Allocator, table: &machine::Table) -> mem::Error!void {
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    try table.to_json(allocator, &var out);
+    let text = out.as_bytes();
+    print(text);
+    return;
+}
+
+fn main() -> mem::Error!void {
+    let allocator = mem::page_allocator();
+    let client = try machine::answers<tls::State, tls::Event, tls::Outcome>(
+        allocator,
+        client_next,
+        client_outcome,
+        tls::State::WaitServerHello,
+        client_end
+    );
+    defer client.deinit(allocator);
+    try write_table(allocator, &client);
+    let server = try machine::answers<tls::ServerState, tls::ServerEvent, tls::Outcome>(
+        allocator,
+        server_next,
+        server_outcome,
+        tls::ServerState::WaitClientHello,
+        server_end
+    );
+    defer server.deinit(allocator);
+    try write_table(allocator, &server);
+    return;
+}

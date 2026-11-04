@@ -122,6 +122,10 @@ backend-matrix:
 compress-fixtures:
     go run ./scripts/gen-compress-fixtures
 
+# Regenerate the tables of the TLS specification from std::tls (spec/README.md).
+spec-table:
+    go run ./cmd/kizu run spec/tls_machine.kizu | go run ./scripts/machine-lean spec/Tls.lean client server
+
 # Regenerate the traces from the Lean specifications (spec/README.md).
 spec-trace:
     cd spec && lean --run Ledger.lean > ../examples/fixtures/ledger_trace.json
