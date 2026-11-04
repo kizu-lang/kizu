@@ -95,6 +95,7 @@ var groups = []featureGroup{
 	{"std::json", []string{"std-json", "encode", "decode", "nested"}},
 	{"std::compress", []string{"std-compress", "compress", "gzip"}},
 	{"std::sort", []string{"std-sort"}},
+	{"std::machine", []string{"std-machine"}},
 	{"std::float", []string{"std-float", "append", "parse", "shortest"}},
 	{"std::math", []string{
 		"std-math", "generic", "f32", "sqrt", "floor", "ceil", "trunc", "round", "hypot",

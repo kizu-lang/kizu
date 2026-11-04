@@ -1,0 +1,274 @@
+// std::machine reads a finite state machine out of the function that runs it.
+// The program keeps one transition function; the table, its checks and its
+// JSON all come from calling that function, so none of them can drift from it.
+
+// Move is one entry of a table: in `from`, the event `event` leads to `to`, and
+// `outcome` says what was done with it.
+pub struct Move {
+    pub from: []u8,
+    pub event: []u8,
+    pub outcome: []u8,
+    pub to: []u8,
+}
+
+// Table is what a transition function does for every state and event, by name
+// and in declaration order.
+pub struct Table {
+    pub states: std::array::Array<[]u8>,
+    pub events: std::array::Array<[]u8>,
+    pub outcomes: std::array::Array<[]u8>,
+    pub start: []u8,
+    pub ends: std::array::Array<[]u8>,
+    pub moves: std::array::Array<Move>,
+}
+
+// table calls `step` once for every state and event. The pairs come from the
+// enums, so a variant added later is walked without being named here, and a
+// type with a payload is a compile error rather than a state left out. A pair
+// answered with null has no move, and every other is `applied`.
+pub fn table<S, E>(
+    allocator: Allocator,
+    step: fn(S, E) -> ?S,
+    start: S,
+    is_end: fn(S) -> bool,
+) -> std::mem::Error!Table {
+    comptime if !std::meta::is_enum<S>() {
+        std::meta::unsupported<S>();
+    }
+    comptime if !std::meta::is_enum<E>() {
+        std::meta::unsupported<E>();
+    }
+    var result = try empty<S, E>(allocator, start, is_end);
+    errdefer result.deinit(allocator);
+    try result.outcomes.append(allocator, "applied");
+    comptime for std::meta::variants<S>() |s| {
+        comptime for std::meta::variants<E>() |e| {
+            if step(std::meta::variant<S, s>(), std::meta::variant<E, e>()) |next| {
+                try result.moves.append(allocator, Move {
+                    from: std::meta::variant_name<S, s>(),
+                    event: std::meta::variant_name<E, e>(),
+                    outcome: "applied",
+                    to: name_of<S>(next),
+                });
+            }
+        }
+    }
+    return move result;
+}
+
+// answers is `table` for a machine that answers every pair and names what it
+// did, so a refusal is a move with its own outcome and its own next state.
+pub fn answers<S, E, O>(
+    allocator: Allocator,
+    next: fn(S, E) -> S,
+    outcome: fn(S, E) -> O,
+    start: S,
+    is_end: fn(S) -> bool,
+) -> std::mem::Error!Table {
+    comptime if !std::meta::is_enum<S>() {
+        std::meta::unsupported<S>();
+    }
+    comptime if !std::meta::is_enum<E>() {
+        std::meta::unsupported<E>();
+    }
+    comptime if !std::meta::is_enum<O>() {
+        std::meta::unsupported<O>();
+    }
+    var result = try empty<S, E>(allocator, start, is_end);
+    errdefer result.deinit(allocator);
+    comptime for std::meta::variants<O>() |o| {
+        try result.outcomes.append(allocator, std::meta::variant_name<O, o>());
+    }
+    comptime for std::meta::variants<S>() |s| {
+        comptime for std::meta::variants<E>() |e| {
+            let state = std::meta::variant<S, s>();
+            let event = std::meta::variant<E, e>();
+            try result.moves.append(allocator, Move {
+                from: std::meta::variant_name<S, s>(),
+                event: std::meta::variant_name<E, e>(),
+                outcome: name_of<O>(outcome(state, event)),
+                to: name_of<S>(next(state, event)),
+            });
+        }
+    }
+    return move result;
+}
+
+fn empty<S, E>(allocator: Allocator, start: S, is_end: fn(S) -> bool) -> std::mem::Error!Table {
+    var states = std::array::new<[]u8>(allocator);
+    errdefer states.deinit(allocator);
+    var events = std::array::new<[]u8>(allocator);
+    errdefer events.deinit(allocator);
+    var outcomes = std::array::new<[]u8>(allocator);
+    errdefer outcomes.deinit(allocator);
+    var ends = std::array::new<[]u8>(allocator);
+    errdefer ends.deinit(allocator);
+    var moves = std::array::new<Move>(allocator);
+    errdefer moves.deinit(allocator);
+    comptime for std::meta::variants<E>() |e| {
+        try events.append(allocator, std::meta::variant_name<E, e>());
+    }
+    comptime for std::meta::variants<S>() |s| {
+        try states.append(allocator, std::meta::variant_name<S, s>());
+        if is_end(std::meta::variant<S, s>()) {
+            try ends.append(allocator, std::meta::variant_name<S, s>());
+        }
+    }
+    return Table {
+        states: move states,
+        events: move events,
+        outcomes: move outcomes,
+        start: name_of<S>(start),
+        ends: move ends,
+        moves: move moves,
+    };
+}
+
+fn name_of<T>(value: T) -> []u8 {
+    comptime match value |v| {
+        return std::meta::variant_name<T, v>();
+    }
+}
+
+// deinit releases the lists. The names are the program's own text.
+pub fn (self: Table) deinit(allocator: Allocator) -> void {
+    self.states.deinit(allocator);
+    self.events.deinit(allocator);
+    self.outcomes.deinit(allocator);
+    self.ends.deinit(allocator);
+    self.moves.deinit(allocator);
+}
+
+// problems returns one line for each thing wrong with the table, empty when
+// there is none:
+//
+//   unreached <state>                 no moves lead there from the start
+//   stuck <state>                     reached, but no end can be reached from it
+//   escape <end> <event> <state>      an end moves to another state
+//
+// A table with no ends has nothing to get stuck short of, so a machine that
+// runs forever is checked for the first kind only.
+pub fn (self: &Table) problems(allocator: Allocator) -> std::mem::Error!std::array::Array<std::string::String> {
+    var found = std::array::new<std::string::String>(allocator);
+    errdefer found.deinit(allocator);
+    var reached = try self.marks(allocator);
+    defer reached.deinit(allocator);
+    var finishing = try self.marks(allocator);
+    defer finishing.deinit(allocator);
+    mark(&var reached, self.index_of(self.start));
+    self.spread(&var reached, true);
+    var index = 0;
+    while self.ends.at(index) |end| {
+        mark(&var finishing, self.index_of(end.*));
+        index = index + 1;
+    }
+    self.spread(&var finishing, false);
+    index = 0;
+    while self.states.at(index) |state| {
+        if !is_marked(&reached, index) {
+            try add(allocator, &var found, "unreached ", state.*, "", "");
+        } else if self.ends.len() > 0 and !is_marked(&finishing, index) {
+            try add(allocator, &var found, "stuck ", state.*, "", "");
+        }
+        index = index + 1;
+    }
+    index = 0;
+    while self.moves.at(index) |entry| {
+        if !std::mem::equal_bytes(entry.from, entry.to) and self.is_end_name(entry.from) {
+            try add(allocator, &var found, "escape ", entry.from, entry.event, entry.to);
+        }
+        index = index + 1;
+    }
+    return move found;
+}
+
+fn (self: &Table) marks(allocator: Allocator) -> std::mem::Error!std::array::Array<bool> {
+    var marks = std::array::new<bool>(allocator);
+    errdefer marks.deinit(allocator);
+    var index = 0;
+    while index < self.states.len() {
+        try marks.append(allocator, false);
+        index = index + 1;
+    }
+    return move marks;
+}
+
+// spread marks every state a marked one leads to, or that leads to a marked
+// one, until a pass marks nothing new.
+fn (self: &Table) spread(marks: &var std::array::Array<bool>, forward: bool) -> void {
+    var changed = true;
+    while changed {
+        changed = false;
+        var index = 0;
+        while self.moves.at(index) |entry| {
+            let from = self.index_of(if forward { entry.from } else { entry.to });
+            let to = self.index_of(if forward { entry.to } else { entry.from });
+            if is_marked(marks, from) and !is_marked(marks, to) {
+                mark(marks, to);
+                changed = true;
+            }
+            index = index + 1;
+        }
+    }
+}
+
+fn (self: &Table) index_of(name: []u8) -> i64 {
+    var index = 0;
+    while self.states.at(index) |state| {
+        if std::mem::equal_bytes(state.*, name) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+fn (self: &Table) is_end_name(name: []u8) -> bool {
+    var index = 0;
+    while self.ends.at(index) |end| {
+        if std::mem::equal_bytes(end.*, name) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn mark(marks: &var std::array::Array<bool>, index: i64) -> void {
+    if marks.at_mut(index) |value| {
+        value.* = true;
+    }
+}
+
+fn add(
+    allocator: Allocator,
+    found: &var std::array::Array<std::string::String>,
+    kind: []u8,
+    first: []u8,
+    second: []u8,
+    third: []u8,
+) -> std::mem::Error!void {
+    var line = try std::string::from_bytes(allocator, kind);
+    errdefer line.deinit(allocator);
+    try line.append_bytes(allocator, first);
+    if std::mem::len(second) > 0 {
+        try line.append_bytes(allocator, " ");
+        try line.append_bytes(allocator, second);
+        try line.append_bytes(allocator, " ");
+        try line.append_bytes(allocator, third);
+    }
+    return found.append(allocator, move line);
+}
+
+fn is_marked(marks: &std::array::Array<bool>, index: i64) -> bool {
+    if marks.at(index) |value| {
+        return value.*;
+    }
+    return false;
+}
+
+// to_json writes the table one field per line, so a table kept in a file shows
+// a changed move as a changed line of its diff.
+pub fn (self: &Table) to_json(allocator: Allocator, out: &var std::string::String) -> std::mem::Error!void {
+    return std::json::encode_with_spaces<Table>(allocator, 2, self, out);
+}

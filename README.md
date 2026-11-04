@@ -38,27 +38,28 @@ not in any one execution path.
 
 | Feature | Examples | check | run | llvm | wasm | wasm-opt | wasm-bin | browser |
 | --- | ---: | :--: | :--: | :--: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 53 | ✅ | ✅ | ✅ | 52/53 | 52/53 | 52/53 | 51/53 |
+| fn / let / struct / literals | 55 | ✅ | ✅ | ✅ | 54/55 | 54/55 | 54/55 | 53/55 |
 | arithmetic / bitwise / float | 11 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| while / break / continue / for / label | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| if / match | 19 | ✅ | ✅ | ✅ | 18/19 | 18/19 | 18/19 | 16/19 |
-| enum / union | 18 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 15/18 |
-| error union `!T` / try / errdefer | 59 | ✅ | ✅ | ✅ | 38/59 | 38/59 | 38/59 | 35/59 |
-| optional `?T` / orelse / capture | 28 | ✅ | ✅ | ✅ | 27/28 | 27/28 | 27/28 | 25/28 |
-| move / borrow | 73 | ✅ | ✅ | ✅ | 69/73 | 69/73 | 69/73 | 69/73 |
+| while / break / continue / for / label | 11 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| if / match | 21 | ✅ | ✅ | ✅ | 20/21 | 20/21 | 20/21 | 18/21 |
+| enum / union | 20 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 17/20 |
+| error union `!T` / try / errdefer | 61 | ✅ | ✅ | ✅ | 39/61 | 39/61 | 39/61 | 36/61 |
+| optional `?T` / orelse / capture | 30 | ✅ | ✅ | ✅ | 29/30 | 29/30 | 29/30 | 27/30 |
+| move / borrow | 74 | ✅ | ✅ | ✅ | 70/74 | 70/74 | 70/74 | 70/74 |
 | deinit / defer | 25 | ✅ | ✅ | ✅ | 24/25 | 24/25 | 24/25 | 24/25 |
 | arena / handle | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | comptime / reflection | 20 | ✅ | ✅ | ✅ | 18/20 | 18/20 | 18/20 | 18/20 |
-| cast / slice / stack buffer / box | 24 | ✅ | ✅ | ✅ | 22/24 | 22/24 | 22/24 | 22/24 |
+| cast / slice / stack buffer / box | 25 | ✅ | ✅ | ✅ | 23/25 | 23/25 | 23/25 | 23/25 |
 | unsafe / raw pointer / extern C | 18 | ✅ | ✅ | ✅ | 2/18 | 2/18 | 2/18 | 2/18 |
-| contract / generics | 26 | ✅ | ✅ | ✅ | 23/26 | 23/26 | 23/26 | 20/26 |
-| std::array | 27 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| contract / generics | 28 | ✅ | ✅ | ✅ | 25/28 | 25/28 | 25/28 | 22/28 |
+| std::array | 28 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::string | 32 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::map | 17 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 16/17 |
 | std::mem / allocator | 22 | ✅ | ✅ | ✅ | 21/22 | 21/22 | 21/22 | 20/22 |
 | std::json | 18 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 15/18 |
 | std::compress | 3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::sort | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| std::machine | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::float | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::math | 5 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::rand | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -66,7 +67,7 @@ not in any one execution path.
 | std::date | 2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::fmt | 7 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::testing | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::fs / path / io / process | 33 | ✅ | ✅ | ✅ | 14/33 | 14/33 | 14/33 | 4/33 |
+| std::fs / path / io / process | 34 | ✅ | ✅ | ✅ | 14/34 | 14/34 | 14/34 | 4/34 |
 | std::net / http | 23 | ✅ | ✅ | ✅ | 4/23 | 4/23 | 4/23 | 4/23 |
 | async / coro | 2 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | std::thread | 3 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
