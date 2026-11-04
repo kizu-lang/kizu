@@ -147,7 +147,10 @@ func parseBegin(line string) (string, Options, error) {
 // Render writes the state and event types and the two functions of a table. A
 // table of every pair is required: a pair left out would have no answer in post.
 func Render(table Table, options Options) (string, error) {
-	if err := validate(table, options); err != nil {
+	if !contains(table.Outcomes, options.Applied) {
+		return "", fmt.Errorf("applied outcome %q is not one of %v", options.Applied, table.Outcomes)
+	}
+	if err := table.Validate(); err != nil {
 		return "", err
 	}
 	out := strings.Builder{}
@@ -189,11 +192,8 @@ func writeInductive(out *strings.Builder, name string, variants []string) {
 	out.WriteString("deriving Repr, DecidableEq\n\n")
 }
 
-// validate refuses a table that does not answer every pair exactly once.
-func validate(table Table, options Options) error {
-	if !contains(table.Outcomes, options.Applied) {
-		return fmt.Errorf("applied outcome %q is not one of %v", options.Applied, table.Outcomes)
-	}
+// Validate refuses a table that does not answer every pair exactly once.
+func (table Table) Validate() error {
 	seen := map[[2]string]bool{}
 	for _, move := range table.Moves {
 		if !contains(table.States, move.From) || !contains(table.States, move.To) {

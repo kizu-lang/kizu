@@ -9,6 +9,8 @@ spec/Agreement.lean               契約: 状態と事象の遷移表、終了�
 spec/Tls.lean                     TLS 1.3 の handshake: std::tls から生成した遷移表、順序の証明、trace 生成
 spec/tls_machine.kizu             std::tls の全組を読んで表を JSON で出す program
 scripts/machine-lean              その JSON を spec/Tls.lean の生成の block に書く道具
+spec/tls_client.qnt, tls_server.qnt  同じ JSON から scripts/machine-quint が作る Quint の機械
+spec/tls_properties.qnt           その機械が守る性質(手書き)
 spec/lean-toolchain               elan が読む Lean の版
 examples/fixtures/*_trace.json    生成した trace(checked in)
 examples/*_conformance.kizu       trace を実装に流して食い違う手を名指しする program
@@ -48,12 +50,18 @@ trace は checked in なので、example を走らせるのに Lean は要りま
 変えた人だけが作り直します。
 
 ```sh
-just spec-table     # std::tls を読んで spec/Tls.lean の block を作り直す(Lean は要らない)
+just spec-table     # std::tls を読んで spec/Tls.lean の block と Quint の機械を作り直す
+just spec-quint     # Quint のランダムな実行で性質を探す(npx で取る。Java は要らない)
 just spec-trace     # lean --run spec/<Name>.lean > examples/fixtures/<name>_trace.json
 ```
 
-`go test` は Lean を動かしません。`Tls.lean` の block を変えた人が `just spec-trace` で
-定理も確かめます。
+`go test` は Lean も Quint も動かしません。表を変えた人が `just spec-trace` で定理を、
+`just spec-quint` で性質を確かめます。
+
+Lean と Quint は役割が違います。Lean は上限のない列について証明し、Quint は破れた時に
+そこへ至る手順を反例で出します。`spec-quint` はランダムな探索で、全数の検査ではありません
+(`quint verify` は Java が要ります)。半分の手は終わりへ行かない事象から選ぶので、実行は
+`Connected` まで届きます。届いた実行が無ければ、検査は失敗します。
 
 `lean` は [elan](https://github.com/leanprover/elan) が `spec/lean-toolchain` の版を
 用意します。Mathlib は使いません。

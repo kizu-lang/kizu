@@ -7,10 +7,12 @@ import (
 	"testing"
 
 	"github.com/kizu-lang/kizu/internal/machinelean"
+	"github.com/kizu-lang/kizu/internal/machinequint"
 )
 
 // TestTlsSpecTablesComeFromStdTls checks the generated blocks of spec/Tls.lean
-// are what std::tls does now. Lean is not needed here: a change the proofs would
+// and the generated Quint modules are what std::tls does now. Neither Lean nor
+// Quint is needed here: a change the proofs would
 // have to answer for shows as a stale block, and `just spec-table` brings it up
 // to date for `lean --run` to judge.
 func TestTlsSpecTablesComeFromStdTls(t *testing.T) {
@@ -38,5 +40,19 @@ func TestTlsSpecTablesComeFromStdTls(t *testing.T) {
 	}
 	if got != string(source) {
 		t.Fatal("spec/Tls.lean is out of step with std::tls; run `just spec-table` and `just spec-trace`")
+	}
+	for index, name := range []string{"tls_client", "tls_server"} {
+		want, err := machinequint.Render(name, tables[index])
+		if err != nil {
+			t.Fatal(err)
+		}
+		written, err := os.ReadFile(filepath.Join(root, "spec", name+".qnt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want != string(written) {
+			t.Fatalf("spec/%s.qnt is out of step with std::tls; "+
+				"run `just spec-table` and `just spec-quint`", name)
+		}
 	}
 }

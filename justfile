@@ -125,6 +125,11 @@ compress-fixtures:
 # Regenerate the tables of the TLS specification from std::tls (spec/README.md).
 spec-table:
     go run ./cmd/kizu run spec/tls_machine.kizu | go run ./scripts/machine-lean spec/Tls.lean client server
+    go run ./cmd/kizu run spec/tls_machine.kizu | go run ./scripts/machine-quint spec/tls_client.qnt spec/tls_server.qnt
+
+# Search random runs of the Quint machines for a broken property (spec/README.md).
+spec-quint:
+    scripts/spec-quint.sh
 
 # Regenerate the traces from the Lean specifications (spec/README.md).
 spec-trace:
