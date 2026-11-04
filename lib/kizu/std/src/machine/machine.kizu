@@ -2,18 +2,21 @@
 // The program keeps one transition function; the table, its checks and its
 // JSON all come from calling that function, so none of them can drift from it.
 
-// Move is one entry of a table: in `from`, the event `event` leads to `to`.
+// Move is one entry of a table: in `from`, the event `event` leads to `to`, and
+// `outcome` says what was done with it.
 pub struct Move {
     pub from: []u8,
     pub event: []u8,
+    pub outcome: []u8,
     pub to: []u8,
 }
 
 // Table is what a transition function does for every state and event, by name
-// and in declaration order. A pair the function refuses has no move.
+// and in declaration order.
 pub struct Table {
     pub states: std::array::Array<[]u8>,
     pub events: std::array::Array<[]u8>,
+    pub outcomes: std::array::Array<[]u8>,
     pub start: []u8,
     pub ends: std::array::Array<[]u8>,
     pub moves: std::array::Array<Move>,
@@ -21,7 +24,8 @@ pub struct Table {
 
 // table calls `step` once for every state and event. The pairs come from the
 // enums, so a variant added later is walked without being named here, and a
-// type with a payload is a compile error rather than a state left out.
+// type with a payload is a compile error rather than a state left out. A pair
+// answered with null has no move, and every other is `applied`.
 pub fn table<S, E>(
     allocator: Allocator,
     step: fn(S, E) -> ?S,
@@ -34,10 +38,69 @@ pub fn table<S, E>(
     comptime if !std::meta::is_enum<E>() {
         std::meta::unsupported<E>();
     }
+    var result = try empty<S, E>(allocator, start, is_end);
+    errdefer result.deinit(allocator);
+    try result.outcomes.append(allocator, "applied");
+    comptime for std::meta::variants<S>() |s| {
+        comptime for std::meta::variants<E>() |e| {
+            if step(std::meta::variant<S, s>(), std::meta::variant<E, e>()) |next| {
+                try result.moves.append(allocator, Move {
+                    from: std::meta::variant_name<S, s>(),
+                    event: std::meta::variant_name<E, e>(),
+                    outcome: "applied",
+                    to: name_of<S>(next),
+                });
+            }
+        }
+    }
+    return move result;
+}
+
+// answers is `table` for a machine that answers every pair and names what it
+// did, so a refusal is a move with its own outcome and its own next state.
+pub fn answers<S, E, O>(
+    allocator: Allocator,
+    next: fn(S, E) -> S,
+    outcome: fn(S, E) -> O,
+    start: S,
+    is_end: fn(S) -> bool,
+) -> std::mem::Error!Table {
+    comptime if !std::meta::is_enum<S>() {
+        std::meta::unsupported<S>();
+    }
+    comptime if !std::meta::is_enum<E>() {
+        std::meta::unsupported<E>();
+    }
+    comptime if !std::meta::is_enum<O>() {
+        std::meta::unsupported<O>();
+    }
+    var result = try empty<S, E>(allocator, start, is_end);
+    errdefer result.deinit(allocator);
+    comptime for std::meta::variants<O>() |o| {
+        try result.outcomes.append(allocator, std::meta::variant_name<O, o>());
+    }
+    comptime for std::meta::variants<S>() |s| {
+        comptime for std::meta::variants<E>() |e| {
+            let state = std::meta::variant<S, s>();
+            let event = std::meta::variant<E, e>();
+            try result.moves.append(allocator, Move {
+                from: std::meta::variant_name<S, s>(),
+                event: std::meta::variant_name<E, e>(),
+                outcome: name_of<O>(outcome(state, event)),
+                to: name_of<S>(next(state, event)),
+            });
+        }
+    }
+    return move result;
+}
+
+fn empty<S, E>(allocator: Allocator, start: S, is_end: fn(S) -> bool) -> std::mem::Error!Table {
     var states = std::array::new<[]u8>(allocator);
     errdefer states.deinit(allocator);
     var events = std::array::new<[]u8>(allocator);
     errdefer events.deinit(allocator);
+    var outcomes = std::array::new<[]u8>(allocator);
+    errdefer outcomes.deinit(allocator);
     var ends = std::array::new<[]u8>(allocator);
     errdefer ends.deinit(allocator);
     var moves = std::array::new<Move>(allocator);
@@ -50,19 +113,11 @@ pub fn table<S, E>(
         if is_end(std::meta::variant<S, s>()) {
             try ends.append(allocator, std::meta::variant_name<S, s>());
         }
-        comptime for std::meta::variants<E>() |e| {
-            if step(std::meta::variant<S, s>(), std::meta::variant<E, e>()) |next| {
-                try moves.append(allocator, Move {
-                    from: std::meta::variant_name<S, s>(),
-                    event: std::meta::variant_name<E, e>(),
-                    to: name_of<S>(next),
-                });
-            }
-        }
     }
     return Table {
         states: move states,
         events: move events,
+        outcomes: move outcomes,
         start: name_of<S>(start),
         ends: move ends,
         moves: move moves,
@@ -79,6 +134,7 @@ fn name_of<T>(value: T) -> []u8 {
 pub fn (self: Table) deinit(allocator: Allocator) -> void {
     self.states.deinit(allocator);
     self.events.deinit(allocator);
+    self.outcomes.deinit(allocator);
     self.ends.deinit(allocator);
     self.moves.deinit(allocator);
 }

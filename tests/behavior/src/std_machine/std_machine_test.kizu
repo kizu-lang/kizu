@@ -76,15 +76,15 @@ fn broken_no_end(state: Broken) -> bool {
     return false;
 }
 
-fn tls_step(state: tls::State, event: tls::Event) -> ?tls::State {
-    let transition = tls::advance(state, event);
-    if transition.outcome == tls::Outcome::Applied {
-        return transition.state;
-    }
-    return null;
+fn client_next(state: tls::State, event: tls::Event) -> tls::State {
+    return tls::advance(state, event).state;
 }
 
-fn tls_end(state: tls::State) -> bool {
+fn client_outcome(state: tls::State, event: tls::Event) -> tls::Outcome {
+    return tls::advance(state, event).outcome;
+}
+
+fn client_end(state: tls::State) -> bool {
     return state == tls::State::Closed;
 }
 
@@ -176,22 +176,28 @@ test "json is the table by name" {
         \\    "Finish",
         \\    "Cancel"
         \\  ],
+        \\  "outcomes": [
+        \\    "applied"
+        \\  ],
         \\  "start": "Waiting",
         \\  "ends": [],
         \\  "moves": [
         \\    {
         \\      "from": "Waiting",
         \\      "event": "Begin",
+        \\      "outcome": "applied",
         \\      "to": "Running"
         \\    },
         \\    {
         \\      "from": "Running",
         \\      "event": "Finish",
+        \\      "outcome": "applied",
         \\      "to": "Done"
         \\    },
         \\    {
         \\      "from": "Running",
         \\      "event": "Cancel",
+        \\      "outcome": "applied",
         \\      "to": "Waiting"
         \\    }
         \\  ]
@@ -201,13 +207,36 @@ test "json is the table by name" {
     );
 }
 
+test "answers hold every pair with its outcome and where a refusal leaves it" {
+    let allocator = mem::page_allocator();
+    let table = try machine::answers<tls::State, tls::Event, tls::Outcome>(
+        allocator,
+        client_next,
+        client_outcome,
+        tls::State::WaitServerHello,
+        client_end
+    );
+    defer table.deinit(allocator);
+    testing::expect_equal<i64>(96, table.moves.len());
+    testing::expect_equal<i64>(3, table.outcomes.len());
+    if table.moves.at(1) |entry| {
+        testing::expect_equal<[]u8>("WaitServerHello", entry.from);
+        testing::expect_equal<[]u8>("HelloRetryRequest", entry.event);
+        testing::expect_equal<[]u8>("Unsupported", entry.outcome);
+        testing::expect_equal<[]u8>("Closed", entry.to);
+    } else {
+        testing::fail("second move is missing");
+    }
+}
+
 test "the client handshake reads as a sound machine" {
     let allocator = mem::page_allocator();
-    let table = try machine::table<tls::State, tls::Event>(
+    let table = try machine::answers<tls::State, tls::Event, tls::Outcome>(
         allocator,
-        tls_step,
+        client_next,
+        client_outcome,
         tls::State::WaitServerHello,
-        tls_end
+        client_end
     );
     defer table.deinit(allocator);
     var problems = try table.problems(allocator);
