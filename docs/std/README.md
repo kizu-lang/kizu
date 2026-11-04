@@ -41,6 +41,7 @@
 | [process](process.md) | 引数・環境変数・時刻・終了 status |
 | [time](time.md) | ミリ秒の `Duration` と、monotonic / Unix の瞬間 |
 | [date](date.md) | proleptic Gregorian の `Date` と UTC の `DateTime`、ISO 8601 |
+| [machine](machine.md) | 遷移関数から読む有限状態機械の表、検査、JSON |
 | [testing](testing.md) | assertion |
 | [rand](rand.md) | seed から決まる擬似乱数列 |
 | [float](float.md) | 浮動小数点値の文字列変換と bit 表現 |

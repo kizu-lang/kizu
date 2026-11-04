@@ -1,0 +1,216 @@
+import std::array;
+import std::machine;
+import std::mem;
+import std::string;
+import std::testing;
+import std::tls;
+
+enum Job {
+    Waiting,
+    Running,
+    Done,
+}
+
+enum Signal {
+    Begin,
+    Finish,
+    Cancel,
+}
+
+fn job_step(job: Job, signal: Signal) -> ?Job {
+    match job {
+        Waiting => match signal {
+            Begin => return Job::Running,
+            _ => {},
+        },
+        Running => match signal {
+            Finish => return Job::Done,
+            Cancel => return Job::Waiting,
+            _ => {},
+        },
+        Done => {},
+    }
+    return null;
+}
+
+fn job_end(job: Job) -> bool {
+    return job == Job::Done;
+}
+
+fn no_end(job: Job) -> bool {
+    return false;
+}
+
+// Finished leaves for Idle, Running can never finish, and Lost is entered by nothing.
+enum Broken {
+    Idle,
+    Running,
+    Finished,
+    Lost,
+}
+
+fn broken_step(state: Broken, signal: Signal) -> ?Broken {
+    match state {
+        Idle => match signal {
+            Begin => return Broken::Running,
+            _ => {},
+        },
+        Running => {},
+        Finished => match signal {
+            Cancel => return Broken::Idle,
+            _ => {},
+        },
+        Lost => match signal {
+            Finish => return Broken::Finished,
+            _ => {},
+        },
+    }
+    return null;
+}
+
+fn broken_end(state: Broken) -> bool {
+    return state == Broken::Finished;
+}
+
+fn broken_no_end(state: Broken) -> bool {
+    return false;
+}
+
+fn tls_step(state: tls::State, event: tls::Event) -> ?tls::State {
+    let transition = tls::advance(state, event);
+    if transition.outcome == tls::Outcome::Applied {
+        return transition.state;
+    }
+    return null;
+}
+
+fn tls_end(state: tls::State) -> bool {
+    return state == tls::State::Closed;
+}
+
+fn expect_problems(problems: &array::Array<string::String>, index: i64, expected: []u8) -> void {
+    if problems.at(index) |line| {
+        let actual = line.as_bytes();
+        testing::expect_equal<[]u8>(expected, actual);
+    } else {
+        testing::fail("problem is missing");
+    }
+}
+
+fn expect_none(problems: &array::Array<string::String>) -> void {
+    if problems.at(0) |line| {
+        let bytes = line.as_bytes();
+        testing::fail(bytes);
+    }
+}
+
+test "a table holds every move the function answers, in declaration order" {
+    let allocator = mem::page_allocator();
+    let table = try machine::table<Job, Signal>(allocator, job_step, Job::Waiting, job_end);
+    defer table.deinit(allocator);
+    testing::expect_equal<i64>(3, table.states.len());
+    testing::expect_equal<i64>(3, table.events.len());
+    testing::expect_equal<i64>(1, table.ends.len());
+    testing::expect_equal<[]u8>("Waiting", table.start);
+    testing::expect_equal<i64>(3, table.moves.len());
+    if table.moves.at(2) |entry| {
+        testing::expect_equal<[]u8>("Running", entry.from);
+        testing::expect_equal<[]u8>("Cancel", entry.event);
+        testing::expect_equal<[]u8>("Waiting", entry.to);
+    } else {
+        testing::fail("third move is missing");
+    }
+}
+
+test "a sound machine has no problems" {
+    let allocator = mem::page_allocator();
+    let table = try machine::table<Job, Signal>(allocator, job_step, Job::Waiting, job_end);
+    defer table.deinit(allocator);
+    var problems = try table.problems(allocator);
+    defer problems.deinit(allocator);
+    expect_none(&problems);
+}
+
+test "problems name the state and the move" {
+    let allocator = mem::page_allocator();
+    let table = try machine::table<Broken, Signal>(allocator, broken_step, Broken::Idle, broken_end);
+    defer table.deinit(allocator);
+    var problems = try table.problems(allocator);
+    defer problems.deinit(allocator);
+    testing::expect_equal<i64>(5, problems.len());
+    expect_problems(&problems, 0, "stuck Idle");
+    expect_problems(&problems, 1, "stuck Running");
+    expect_problems(&problems, 2, "unreached Finished");
+    expect_problems(&problems, 3, "unreached Lost");
+    expect_problems(&problems, 4, "escape Finished Cancel Idle");
+}
+
+test "a machine with no ends is checked for reach alone" {
+    let allocator = mem::page_allocator();
+    let table = try machine::table<Broken, Signal>(allocator, broken_step, Broken::Idle, broken_no_end);
+    defer table.deinit(allocator);
+    var problems = try table.problems(allocator);
+    defer problems.deinit(allocator);
+    testing::expect_equal<i64>(2, problems.len());
+    expect_problems(&problems, 0, "unreached Finished");
+    expect_problems(&problems, 1, "unreached Lost");
+}
+
+test "json is the table by name" {
+    let allocator = mem::page_allocator();
+    let table = try machine::table<Job, Signal>(allocator, job_step, Job::Waiting, no_end);
+    defer table.deinit(allocator);
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    try table.to_json(allocator, &var out);
+    let text = out.as_bytes();
+    testing::expect_equal<[]u8>(
+        \\{
+        \\  "states": [
+        \\    "Waiting",
+        \\    "Running",
+        \\    "Done"
+        \\  ],
+        \\  "events": [
+        \\    "Begin",
+        \\    "Finish",
+        \\    "Cancel"
+        \\  ],
+        \\  "start": "Waiting",
+        \\  "ends": [],
+        \\  "moves": [
+        \\    {
+        \\      "from": "Waiting",
+        \\      "event": "Begin",
+        \\      "to": "Running"
+        \\    },
+        \\    {
+        \\      "from": "Running",
+        \\      "event": "Finish",
+        \\      "to": "Done"
+        \\    },
+        \\    {
+        \\      "from": "Running",
+        \\      "event": "Cancel",
+        \\      "to": "Waiting"
+        \\    }
+        \\  ]
+        \\}
+    ,
+        text
+    );
+}
+
+test "the client handshake reads as a sound machine" {
+    let allocator = mem::page_allocator();
+    let table = try machine::table<tls::State, tls::Event>(
+        allocator,
+        tls_step,
+        tls::State::WaitServerHello,
+        tls_end
+    );
+    defer table.deinit(allocator);
+    var problems = try table.problems(allocator);
+    defer problems.deinit(allocator);
+    expect_none(&problems);
+}
