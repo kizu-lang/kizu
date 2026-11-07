@@ -116,18 +116,21 @@ func TestLinkerVersionIsTheFirstLine(t *testing.T) {
 // TestLinkFlagsFollowTheLinkerOrder hands the linker the search paths before
 // the libraries looked for in them, and libm and libpthread last whatever the
 // program declared, since the runtime needs them.
+// A Darwin link asks Apple's ld for a reproducible output first.
 func TestLinkFlagsFollowTheLinkerOrder(t *testing.T) {
 	options := Options{
 		Libraries: []string{"fftw3"}, Frameworks: []string{"Accelerate"},
 		LibrarySearch: []string{"/opt/lib"}, FrameworkSearch: []string{"/opt/frameworks"},
 	}
 	got := strings.Join(linkFlags(options), " ")
-	want := "-L/opt/lib -F/opt/frameworks -lfftw3 -lm -lpthread -framework Accelerate"
+	want := "-Wl,-reproducible -L/opt/lib -F/opt/frameworks" +
+		" -lfftw3 -lm -lpthread -framework Accelerate"
 	if got != want {
 		t.Fatalf("linkFlags = %q, want %q", got, want)
 	}
 	// A program that names libm itself is not handed it twice.
-	if got := strings.Join(linkFlags(Options{Libraries: []string{"m"}}), " "); got != "-lm -lpthread" {
+	linux := Options{Target: stdtarget.NativeLinux, Libraries: []string{"m"}}
+	if got := strings.Join(linkFlags(linux), " "); got != "-lm -lpthread" {
 		t.Fatalf("linkFlags(m) = %q", got)
 	}
 	// A Windows executable is static, has the main stack the other OSes
