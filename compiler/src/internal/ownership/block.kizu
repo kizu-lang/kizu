@@ -295,6 +295,7 @@ fn (self: &var Checker) read_deferred_call(
             if try self.check_deferred_release_args(tree, env, receiver_type, &field, call.args) |failed| {
                 return move failed;
             }
+            try self.record_deferred_method_callee(tree, call.callee, field, receiver_type);
             if self.lookup_ident(tree, env, field.receiver) |found| {
                 if try self.method_consumes_receiver(found, tree, field.name) {
                     owner.value = found;
@@ -318,6 +319,28 @@ fn (self: &var Checker) read_deferred_call(
         }
     }
     return null;
+}
+
+/// Records the declaration a registered cleanup's method call reaches, the
+/// Go `recordDeferredMethodCallee`. The call runs at the exit, so it is not
+/// checked as a call here, and the receiver's type is what names the method.
+fn (self: &var Checker) record_deferred_method_callee(
+    tree: &ast::Ast,
+    callee: ast::Expression,
+    field: ast::FieldExpr,
+    receiver_type: Name
+) -> !void {
+    var value_type = receiver_type;
+    if try self.names.explicit_borrow(receiver_type) |parts| {
+        value_type = parts.inner;
+    }
+    let method = try self.names.intern_text(tree, field.name);
+    if try self.std_container_base(value_type) |base| {
+        let name = try self.names.format("%s.%s", base, method, empty_name());
+        return self.record_method_callee(callee, name);
+    }
+    let function = self.impl_method(value_type, method) orelse return;
+    return self.record_method_callee(callee, self.functions.at(function.index).name);
 }
 
 /// Reads one `move x` argument of a deferred call and makes `x` the owner
