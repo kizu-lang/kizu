@@ -514,9 +514,23 @@ func (m *moduleFile) rejectUnusedImports() error {
 		if m.used[alias] {
 			continue
 		}
-		return fmt.Errorf("module error: unused import `%s` in `%s`", m.namespaces[alias], m.name())
+		return locate(fmt.Errorf("module error: unused import `%s` in `%s`",
+			m.namespaces[alias], m.name()), m.importSpan(alias))
 	}
 	return nil
+}
+
+// importSpan returns where this file declares the import that binds alias, so
+// an unused import is reported at its own line rather than at the module, which
+// may be spread over several files.
+func (m *moduleFile) importSpan(alias string) ast.Span {
+	for _, decl := range m.program.Decls {
+		importDecl, ok := decl.(*ast.ImportDecl)
+		if ok && importDecl.Path[len(importDecl.Path)-1] == alias {
+			return importDecl.DeclarationSpan()
+		}
+	}
+	return ast.Span{}
 }
 
 // sortedAliases lists the names a module's imports bind, in a stable order so
