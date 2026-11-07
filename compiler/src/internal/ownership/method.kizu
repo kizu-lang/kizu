@@ -36,7 +36,54 @@ fn (self: &var Checker) check_consuming_receiver_owned(
     );
 }
 
+/// callee is the call's callee expression, the method call's identity: the
+/// method check that settles which declaration the receiver reaches records
+/// it against callee (claim_method_callee).
 fn (self: &var Checker) check_method_call_expr(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    callee: ast::Expression,
+    field: ast::FieldExpr,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let outer = self.method_call;
+    self.method_call = callee;
+    if try self.dispatch_method_call(tree, env, field, args, out) |failed| {
+        self.method_call = outer;
+        return move failed;
+    }
+    self.method_call = outer;
+    return null;
+}
+
+/// Records callee as the declaration the method call being dispatched
+/// resolved to, the Go `claimMethodCallee`. The first resolution claims the
+/// call, so a check the method makes afterwards cannot answer for it.
+fn (self: &var Checker) claim_method_callee(callee: Name) -> !void {
+    let call = self.method_call orelse return;
+    self.method_call = null;
+    return self.record_method_callee(call, callee);
+}
+
+/// Adds callee to the declarations the method call resolved to, the Go
+/// `recordMethodCallee`. A body checked twice -- a loop to its fixed point,
+/// a generic for one type twice -- resolves the same call to the same
+/// declaration, which is recorded once.
+fn (self: &var Checker) record_method_callee(call: ast::Expression, callee: Name) -> !void {
+    var index = 0;
+    while self.result.method_callees.get(index) |known| {
+        index = index + 1;
+        if known.callee.node == call.node and same_name(known.name, callee) {
+            return;
+        }
+    }
+    return self.result.method_callees.append(self.allocator, MethodCallee {
+        callee: call, name: callee
+    });
+}
+
+fn (self: &var Checker) dispatch_method_call(
     tree: &var ast::Ast,
     env: ScopeHandle,
     field: ast::FieldExpr,

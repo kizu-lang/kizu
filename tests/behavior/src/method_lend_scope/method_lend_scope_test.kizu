@@ -1,0 +1,69 @@
+import behavior::method_lend_scope_other;
+import std::testing;
+
+pub struct Point {
+    pub x: i64,
+    pub y: i64,
+}
+
+pub union Slot {
+    Empty,
+    Full(Point),
+}
+
+fn (self: &Slot) poke(n: i64) -> i64 {
+    return n;
+}
+
+pub struct Tally {
+    pub seen: i64,
+}
+
+fn (self: &Tally) note(slot: &Slot) -> i64 {
+    return match slot {
+        Empty => self.seen,
+        Full(point) => self.seen + point.x,
+    };
+}
+
+fn bump(point: &var Point) -> void {
+    point.x = point.x + 10;
+}
+
+fn full_x(slot: Slot) -> i64 {
+    return match slot {
+        Empty => 0,
+        Full(point) => point.x,
+    };
+}
+
+// Whether a call lends a local as `&var` is a fact of the method the call
+// reaches, not of its name. `Slot.poke` and `Tally.note` only read, while
+// the methods of the same name in method_lend_scope_other take `&var`; a
+// borrow handed to the shared ones still binds the payload of a later match
+// where it lies, so the write through it reaches the slot it borrows.
+test "a method lends only what its own declaration takes as &var" {
+    var slot = Slot::Full(Point { x: 3, y: 4 });
+    let receiver = &var slot;
+    testing::expect_equal<i64>(1, receiver.poke(1));
+    match receiver {
+        Empty => testing::expect(false),
+        Full(point) => bump(point),
+    }
+    testing::expect_equal<i64>(13, full_x(slot));
+
+    let tally = Tally { seen: 1 };
+    let argument = &var slot;
+    testing::expect_equal<i64>(14, tally.note(argument));
+    match argument {
+        Empty => testing::expect(false),
+        Full(point) => bump(point),
+    }
+    testing::expect_equal<i64>(23, full_x(slot));
+
+    var counter = method_lend_scope_other::Counter { n: 0 };
+    testing::expect_equal<i64>(5, counter.poke(5));
+    var total = 2;
+    counter.note(&var total);
+    testing::expect_equal<i64>(7, total);
+}

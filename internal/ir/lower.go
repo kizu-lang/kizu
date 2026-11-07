@@ -48,8 +48,8 @@ type lowerer struct {
 	types      *typ.Table
 	signatures map[string]Signature
 	// methodSigs groups the signatures by the method name they end with, so a
-	// method call reaches the handful of methods that could answer it instead
-	// of every declaration in the program.
+	// method call the ownership checker did not resolve reaches the handful of
+	// methods that could answer it instead of every declaration in the program.
 	methodSigs map[string][]Signature
 
 	// testName and testFile are set while a test block lowers. A test body
@@ -862,9 +862,17 @@ func (l *lowerer) indexMethodSignatures() {
 		if !ok || len(decl.Params) == 0 || !decl.Params[0].MutBorrow {
 			continue
 		}
-		l.methodSigs[method] = append(l.methodSigs[method],
-			Signature{Params: []Param{{Passing: PassCallerStorage}}})
+		l.methodSigs[method] = append(l.methodSigs[method], genericReceiverSignature(decl))
 	}
+}
+
+// genericReceiverSignature is what the slot analysis reads of a generic method
+// before any instance exists: whether the receiver arrives as storage.
+func genericReceiverSignature(decl *ast.FunctionDecl) Signature {
+	if len(decl.Params) == 0 || !decl.Params[0].MutBorrow {
+		return Signature{}
+	}
+	return Signature{Params: []Param{{Passing: PassCallerStorage}}}
 }
 
 // genericMethodName returns the method a generic declaration name ends with.

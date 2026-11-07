@@ -309,17 +309,29 @@ func (l *lowerer) markLentArgs(expr *ast.CallExpr, found map[string]bool) {
 	}
 }
 
-// markLentMethodArgs records the names a method call may hand over as storage.
-// The receiver's type is unknown before lowering, so the walk unions every
-// method bearing the name: a position is marked when any method the call could
-// resolve to receives it as the caller's storage. Marking a name that resolves
-// elsewhere costs it its SSA form, never its meaning.
+// markLentMethodArgs records the names a method call hands over as storage.
+// The receiver's type is unknown before lowering, so the walk reads the
+// methods the call can reach and marks a position when any of them receives
+// it as the caller's storage. Which methods those are is the ownership
+// checker's answer where it resolved the call: one method per receiver type
+// the call was checked with, one per instantiation in a generic body. A name
+// alone is not enough to pick them, because a name marked for another type's
+// `&var` parameter loses more than its SSA form -- a match through it moves
+// the payload out instead of binding it where it lies.
+//
+// A call the checker never dispatches as a method -- one in a `comptime`
+// branch its instantiation does not take, a view initializer, a std body
+// it does not walk -- can reach any method bearing the name.
 func (l *lowerer) markLentMethodArgs(
 	field *ast.FieldExpr,
 	args []ast.Expression,
 	found map[string]bool,
 ) {
-	for _, sig := range l.methodSigs[field.Name] {
+	sigs := l.methodSigs[field.Name]
+	if callees, resolved := l.ownership.MethodCallees(field); resolved {
+		sigs = l.calleeSignatures(callees)
+	}
+	for _, sig := range sigs {
 		if len(sig.Params) > 0 && sig.Params[0].Passing == PassCallerStorage {
 			markIfName(field.Receiver, found)
 		}
@@ -329,6 +341,20 @@ func (l *lowerer) markLentMethodArgs(
 			}
 		}
 	}
+}
+
+// calleeSignatures returns the signatures of the declarations a method call
+// was resolved to, read the way indexMethodSignatures reads them.
+func (l *lowerer) calleeSignatures(callees []string) []Signature {
+	sigs := make([]Signature, 0, len(callees))
+	for _, callee := range callees {
+		if sig, ok := l.signatures[callee]; ok {
+			sigs = append(sigs, sig)
+		} else if decl := l.genericDecls[callee]; decl != nil {
+			sigs = append(sigs, genericReceiverSignature(decl))
+		}
+	}
+	return sigs
 }
 
 // markLentGenericArgs records the names a generic call lends. Like the direct

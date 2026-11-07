@@ -81,6 +81,12 @@ type Checker struct {
 	// one that covers nothing is the leak the exit reports.
 	pendingMovedPlaces []*binding
 	currentFunction    *functionInfo
+	// methodCall is the method call whose dispatch is being checked and has
+	// not resolved yet. The method check that settles which declaration the
+	// receiver reaches claims it (claimMethodCallee); every other call clears
+	// it for its own duration, so a call nested in the receiver or the
+	// arguments never resolves the outer one.
+	methodCall *ast.FieldExpr
 	// collectMissingMarkers switches the missing `move` diagnostic from an
 	// error into a recorded site, so MissingMoveMarkers can report every one.
 	collectMissingMarkers bool
@@ -989,6 +995,7 @@ func (c *Checker) readDeferredCall(
 		if err := c.checkDeferredReleaseArgs(receiverType, field, call.Args, env); err != nil {
 			return nil, nil, err
 		}
+		c.recordDeferredMethodCallee(field, receiverType)
 		if ident, ok := field.Receiver.(*ast.IdentExpr); ok {
 			if found, exists := env.lookup(ident.Name); exists &&
 				c.methodConsumesReceiver(found, field.Name) {
@@ -1025,6 +1032,31 @@ func (c *Checker) readDeferredCall(
 		owner, ownerExpr = found, place
 	}
 	return owner, ownerExpr, nil
+}
+
+// recordDeferredMethodCallee records the declaration a registered cleanup's
+// method call reaches. The call runs at the exit, so it is not checked as a
+// call here, and the receiver's type is what names the method.
+func (c *Checker) recordDeferredMethodCallee(field *ast.FieldExpr, receiverType string) {
+	receiverType = borrowedOwnershipValueType(receiverType)
+	if base, ok := stdContainerBase(receiverType); ok {
+		c.result.recordMethodCallee(field, stdmethod.MethodName(base, field.Name))
+		return
+	}
+	if info := c.implMethod(receiverType, field.Name); info != nil {
+		c.result.recordMethodCallee(field, info.name)
+	}
+}
+
+// claimMethodCallee records callee as the declaration the method call being
+// dispatched resolved to. The first resolution claims the call, so a check
+// the method makes afterwards cannot answer for it.
+func (c *Checker) claimMethodCallee(callee string) {
+	if c.methodCall == nil {
+		return
+	}
+	c.result.recordMethodCallee(c.methodCall, callee)
+	c.methodCall = nil
 }
 
 // methodConsumesReceiver reports whether calling method on value takes the
@@ -5197,7 +5229,10 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope) (string, error) 
 	// The call consumes what its arguments handed it; what stays pending
 	// after it is its own result, when that result owns something.
 	pending, places := len(c.pendingOwnerTemps), len(c.pendingMovedPlaces)
+	outer := c.methodCall
+	c.methodCall = nil
 	result, err := c.dispatchCallExpr(expr, env)
+	c.methodCall = outer
 	if err != nil {
 		return result, err
 	}
@@ -8231,6 +8266,9 @@ func (c *Checker) checkMethodCallExpr(
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
+	outer := c.methodCall
+	c.methodCall = field
+	defer func() { c.methodCall = outer }()
 	if err := c.checkConsumingReceiverOwned(field, env); err != nil {
 		return "", err
 	}
@@ -8597,6 +8635,7 @@ func (c *Checker) checkImplMethodCall(
 	if method == nil {
 		return "", false, nil
 	}
+	c.claimMethodCallee(method.name)
 	if len(method.params) == 0 {
 		return "", true, errorf("move error: method `%s` must have self parameter",
 			method.name)
