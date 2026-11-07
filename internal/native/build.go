@@ -470,10 +470,21 @@ func driver(options Options) string {
 // DLL of its own that a machine without llvm-mingw does not have. Its main
 // thread gets the 8 MiB stack macOS and Linux give theirs, not the 1 MiB a
 // PE image has by default, so a program recurses as deep on every OS.
+//
+// A Darwin executable is linked with Apple's ld asked for a reproducible
+// output. The driver hands ld the -O0 a debug build is compiled with, and at
+// -O0 Apple's ld (ld-1230 of Xcode 26 at least) lays out the import stubs
+// and GOT slots in an order that changes from one link of the same object
+// to the next: the code calls fputs through a different stub each time, so
+// the compiler stops reproducing itself. -reproducible fixes the order, and
+// the UUID and ad-hoc signature that hash the output then agree as well.
 func linkFlags(options Options) []string {
 	flags := []string{}
 	if options.Target == stdtarget.NativeWindows {
 		flags = append(flags, "-static", "-Wl,--stack,8388608")
+	}
+	if options.Target == stdtarget.NativeDarwin {
+		flags = append(flags, "-Wl,-reproducible")
 	}
 	for _, dir := range options.LibrarySearch {
 		flags = append(flags, "-L"+dir)
