@@ -734,10 +734,13 @@ func (c *Checker) defineParams(fn *functionInfo, env *scope, subst map[string]st
 		value.borrowedParam = fn.params[idx].borrow
 		value.mutBorrow = fn.params[idx].mutBorrow
 		receiver := fn.sig.Receiver && idx == 0
-		if receiver && !value.borrowedParam && !value.mutBorrow && !functionConsumesReceiver(fn) {
+		if receiver && !value.borrowedParam && !value.mutBorrow && !functionConsumesReceiver(fn) &&
+			!c.isPlainDataType(typeName, nil) {
 			// A by-value receiver of a method that does not consume it is the
 			// caller's value read in place (SPEC §8): the body holds it the
 			// way a `&T` parameter is held, so nothing can be taken out of it.
+			// A copy aggregate is exempt: copying it out leaves no cleanup
+			// obligation and no live borrow behind, so `self` is a value.
 			value.borrowedParam = true
 		}
 		// A method receiver is written as a by-value param but is not a
