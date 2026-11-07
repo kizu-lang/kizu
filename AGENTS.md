@@ -43,6 +43,11 @@ package doc にあります。
   `go test` は自分で走らせる)。`compiler/` の test block は
   `go test ./internal/selfhost` が走らせる。commit hook は `kizu check compiler`
   までで、test は push 時と CI に回る。
+- コンパイラの挙動を変える変更は、言語機能の追加でなくバグ修正でも、Go 実装と
+  `compiler/` の両方に同じ変更を入れる。片方だけ直して完了としない。
+  完了の判定は相互検証が全部通ること(`go test ./cmd/kizu` の Selfhost 系
+  —— Behavior / Bootstrap / corpus —— と `just selfhost`)。
+  片方しか直せていない状態では commit せず、残っている側と理由を報告して止まる。
 - Go の comment は英語で書く。package comment と `package main` の command
   comment は必須(pre-commit の `go comments` が見ている)。
 
