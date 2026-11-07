@@ -399,6 +399,18 @@ pub struct Lowerer {
     retired: array::Array<RetiredReceiver>,
     // Argument places ownership proved an indirect call lends as &var.
     function_pointer_mut_borrows: array::Array<ast::Expression>,
+    // method_callees names the declarations each method call resolved to in
+    // the ownership check, the Go `ownership.Result.MethodCallees`: the slot
+    // analysis reads only the methods a call reaches, not every method that
+    // shares its name.
+    method_callees: array::Array<ResolvedMethodCall>,
+}
+
+/// Is one declaration a method call resolved to: the call's callee
+/// expression and the declaration's name.
+struct ResolvedMethodCall {
+    callee: ast::Expression,
+    name: Name,
 }
 
 pub struct ExternDecl {
@@ -564,7 +576,8 @@ pub fn new_lowerer_for_target(
         deinit_owners: move deinit_owners,
         release_allocators: move release_allocators,
         retired: array::new<RetiredReceiver>(allocator),
-        function_pointer_mut_borrows: array::new<ast::Expression>(allocator)
+        function_pointer_mut_borrows: array::new<ast::Expression>(allocator),
+        method_callees: array::new<ResolvedMethodCall>(allocator)
     };
     errdefer lowerer.deinit(allocator);
     try lowerer.collect_facts(tree, program);
@@ -698,7 +711,8 @@ fn (self: &var Lowerer) intern_type(tree: &ast::Ast, value: typ::Type) -> !Name 
     return self.module.names.intern_owned(move rendered);
 }
 
-/// Copies the errdefer receivers the ownership checker retired, the Go
+/// Copies the errdefer receivers the ownership checker retired, the
+/// indirect-call lends and the method calls it resolved, the Go
 /// `ownership.Result`, so no borrow of the checker is kept.
 fn (self: &var Lowerer) copy_retired(checker: &ownership::Checker) -> !void {
     var index = 0;
@@ -727,6 +741,19 @@ fn (self: &var Lowerer) copy_retired(checker: &ownership::Checker) -> !void {
     while checker.function_pointer_mut_borrow_at(index) |expression| {
         index = index + 1;
         try self.function_pointer_mut_borrows.append(self.allocator, expression);
+    }
+    var callee_name = string::new(self.allocator);
+    defer callee_name.deinit(self.allocator);
+    index = 0;
+    while checker.method_callee_at(index) |callee| {
+        callee_name.clear();
+        try checker.append_method_callee_name(index, &var callee_name);
+        index = index + 1;
+        let bytes = callee_name.as_bytes();
+        let name = try self.module.names.intern(bytes);
+        try self.method_callees.append(self.allocator, ResolvedMethodCall {
+            callee: callee, name: name
+        });
     }
     return;
 }

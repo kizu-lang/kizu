@@ -590,7 +590,7 @@ fn expression_children(
 fn (self: &var Lowerer) mark_lent_args(tree: &var ast::Ast, call: ast::CallExpr) -> !void {
     if ownership::field_expr(tree, call.callee) |field| {
         if !field.namespace {
-            return self.mark_lent_method_args(tree, field, call.args);
+            return self.mark_lent_method_args(tree, call.callee, field, call.args);
         }
     }
     if ownership::type_apply_expr(tree, call.callee) |type_apply| {
@@ -609,17 +609,34 @@ fn (self: &var Lowerer) mark_lent_args(tree: &var ast::Ast, call: ast::CallExpr)
     return;
 }
 
-/// Records the names a method call may hand over as storage, the Go
+/// Records the names a method call hands over as storage, the Go
 /// `markLentMethodArgs`. The receiver's type is unknown before lowering, so
-/// the walk unions every method bearing the name: a position is marked when
-/// any method the call could resolve to receives it as the caller's storage.
-/// Marking a name that resolves elsewhere costs it its SSA form, never its
-/// meaning.
+/// the walk reads the methods the call can reach and marks a position when
+/// any of them receives it as the caller's storage. Which methods those are
+/// is the ownership checker's answer where it resolved the call: one method
+/// per receiver type the call was checked with, one per instantiation in a
+/// generic body. A name alone is not enough to pick them, because a name
+/// marked for another type's `&var` parameter loses more than its SSA form
+/// -- a match through it moves the payload out instead of binding it where
+/// it lies.
+///
+/// A call the checker never dispatches as a method -- one in a `comptime`
+/// branch its instantiation does not take, a view initializer, a std body it
+/// does not walk -- can reach any method bearing the name.
 fn (self: &var Lowerer) mark_lent_method_args(
     tree: &var ast::Ast,
+    callee: ast::Expression,
     field: ast::FieldExpr,
     args: ast::ExpressionList
 ) -> !void {
+    if self.resolved_method_call(callee) {
+        var position = 0;
+        while self.resolved_method_signature_at(callee, position) |signature| {
+            position = position + 1;
+            try self.mark_lent_method_signature(tree, signature, field, args);
+        }
+        return;
+    }
     var method = string::new(self.allocator);
     defer method.deinit(self.allocator);
     try append_text(self.allocator, tree, field.name, &var method);
@@ -627,22 +644,82 @@ fn (self: &var Lowerer) mark_lent_method_args(
     var position = 0;
     while self.method_signature_at(method_bytes, position) |signature| {
         position = position + 1;
-        if self.signature_param(signature, 0) |first| {
-            if first.passing == Passing::CallerStorage {
-                try self.mark_if_name(tree, field.receiver);
-            }
-        }
-        var index = 0;
-        while ownership::arg_at(tree, args, index) |arg| {
-            if self.signature_param(signature, index + 1) |param| {
-                if param.passing == Passing::CallerStorage {
-                    try self.mark_if_name(tree, arg);
-                }
-            }
-            index = index + 1;
-        }
+        try self.mark_lent_method_signature(tree, signature, field, args);
     }
     return;
+}
+
+/// Marks the receiver and arguments one method signature receives as the
+/// caller's storage.
+fn (self: &var Lowerer) mark_lent_method_signature(
+    tree: &var ast::Ast,
+    signature: SignatureHandle,
+    field: ast::FieldExpr,
+    args: ast::ExpressionList
+) -> !void {
+    if self.signature_param(signature, 0) |first| {
+        if first.passing == Passing::CallerStorage {
+            try self.mark_if_name(tree, field.receiver);
+        }
+    }
+    var index = 0;
+    while ownership::arg_at(tree, args, index) |arg| {
+        if self.signature_param(signature, index + 1) |param| {
+            if param.passing == Passing::CallerStorage {
+                try self.mark_if_name(tree, arg);
+            }
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+/// Reports whether the ownership checker resolved the method call whose
+/// callee is callee, the `resolved` half of the Go `MethodCallees`.
+fn (self: &Lowerer) resolved_method_call(callee: ast::Expression) -> bool {
+    var index = 0;
+    while self.method_callees.get(index) |known| {
+        index = index + 1;
+        if known.callee.node == callee.node {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Returns the position-th signature among the declarations the method call
+/// resolved to, read the way index_method_signatures reads them, the Go
+/// `calleeSignatures`; null past the last. A generic method whose receiver is
+/// not handed over as storage has nothing to read and is skipped.
+fn (self: &Lowerer) resolved_method_signature_at(callee: ast::Expression, position: i64) -> ?SignatureHandle {
+    var seen = 0;
+    var index = 0;
+    while self.method_callees.get(index) |known| {
+        index = index + 1;
+        if known.callee.node != callee.node {
+            continue;
+        }
+        let signature = self.callee_signature(known.name) orelse continue;
+        if seen == position {
+            return signature;
+        }
+        seen = seen + 1;
+    }
+    return null;
+}
+
+/// Returns the signature the slot analysis reads for one declaration: the
+/// lowered one, or for a generic method not yet instantiated, whether its
+/// receiver arrives as the binding's storage.
+fn (self: &Lowerer) callee_signature(name: Name) -> ?SignatureHandle {
+    if self.signature_named(name) |signature| {
+        return signature;
+    }
+    let decl = self.generic_decl(name) orelse return null;
+    if self.decl_param_count(decl) > 0 and self.decl_param(decl, 0).mut_borrow {
+        return self.storage_self_signature;
+    }
+    return null;
 }
 
 /// Records the names a generic call lends, the Go `markLentGenericArgs`.

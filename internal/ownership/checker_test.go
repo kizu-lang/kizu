@@ -1563,14 +1563,17 @@ fn main() {
 			want: "moved value `users` was used",
 		},
 		{
+			// Cleanups run in reverse, so the deinit runs before the
+			// cleanup registered ahead of it reads the borrow.
 			name: "borrowed at cleanup",
 			source: `struct User { name: []u8 }
+fn show(users: &std::arena::Arena<User>) {}
 fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
     let borrowed = &users;
+    defer show(borrowed);
     defer users.deinit(allocator);
-    while false { print(borrowed); }
 }`,
 			want: "`Arena.deinit` cannot run while arena is borrowed",
 		},
