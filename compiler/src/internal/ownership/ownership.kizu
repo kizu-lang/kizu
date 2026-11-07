@@ -42,6 +42,20 @@ pub struct Result {
     // recover a local pointer's type from syntax alone, so ownership carries
     // that checked fact forward.
     pub function_pointer_mut_borrows: array::Array<ast::Expression>,
+    // The declarations each method call resolved to, one entry per receiver
+    // type a generic instantiation gave it, the Go `methodCallees`. Which
+    // `&var` parameter a call lends is a fact of the method it reaches, and
+    // only the checked receiver type says which method that is: two types may
+    // declare the same method name with `&var` at different positions.
+    pub method_callees: array::Array<MethodCallee>,
+}
+
+/// Is one declaration a method call resolved to: the call's callee
+/// expression, which is the method call's identity, and the declaration's
+/// registered name.
+pub struct MethodCallee {
+    pub callee: ast::Expression,
+    pub name: Name,
 }
 
 /// Is the try expression half of Result.
@@ -54,7 +68,8 @@ fn new_result(allocator: Allocator) -> Result {
     return Result {
         return_retired_err_defers: array::new<RetiredErrDefers>(allocator),
         try_retired_err_defers: array::new<RetiredTry>(allocator),
-        function_pointer_mut_borrows: array::new<ast::Expression>(allocator)
+        function_pointer_mut_borrows: array::new<ast::Expression>(allocator),
+        method_callees: array::new<MethodCallee>(allocator)
     };
 }
 
@@ -62,6 +77,7 @@ fn (self: Result) deinit(allocator: Allocator) -> void {
     self.return_retired_err_defers.deinit(allocator);
     self.try_retired_err_defers.deinit(allocator);
     self.function_pointer_mut_borrows.deinit(allocator);
+    self.method_callees.deinit(allocator);
     return;
 }
 
@@ -574,6 +590,13 @@ pub struct Checker {
     capture_condition: bool,
     view_capture_call: ?ast::Expression,
     borrow_return: bool,
+    // method_call is the callee of the method call whose dispatch is being
+    // checked and has not resolved yet, the Go `methodCall`. The method
+    // check that settles which declaration the receiver reaches claims it
+    // (claim_method_callee); every other call clears it for its own
+    // duration, so a call nested in the receiver or the arguments never
+    // resolves the outer one.
+    method_call: ?ast::Expression,
     // lazy_default names the `orelse` or `catch` whose default is being
     // read, or is empty. A default runs only when the payload is absent, so
     // a named owner consumed inside it would be consumed on one path and
@@ -657,6 +680,7 @@ pub fn new_checker_for_target(
         capture_condition: false,
         view_capture_call: null,
         borrow_return: false,
+        method_call: null,
         lazy_default: empty_name(),
         returned_views: array::new<ast::Expression>(allocator),
         result: new_result(allocator)
@@ -813,6 +837,23 @@ pub fn (self: &Checker) retired_try_at(index: i64) -> ?ast::Expression {
 /// Returns the argument place at index among indirect-call &var borrows.
 pub fn (self: &Checker) function_pointer_mut_borrow_at(index: i64) -> ?ast::Expression {
     return self.result.function_pointer_mut_borrows.get(index);
+}
+
+/// Returns the method call callee at index among the resolved method calls,
+/// null past the last, the Go `Result.MethodCallees` read one entry at a time.
+pub fn (self: &Checker) method_callee_at(index: i64) -> ?ast::Expression {
+    if self.result.method_callees.get(index) |entry| {
+        return entry.callee;
+    }
+    return null;
+}
+
+/// Appends the declaration name of the resolved method call at index.
+pub fn (self: &Checker) append_method_callee_name(index: i64, out: &var string::String) -> !void {
+    let entry = self.result.method_callees.get(index) orelse return;
+    let retained = name_text(&self.names, entry.name);
+    let bytes = retained.as_bytes();
+    return out.append_bytes(self.allocator, bytes);
 }
 
 /// Runs the setup phases and then every body, stopping at the first error,
