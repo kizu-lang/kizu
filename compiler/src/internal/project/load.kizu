@@ -290,7 +290,7 @@ fn (self: &var Loader) program(tree: &var ast::Ast) -> !LoadResult {
                     merged.deinit(self.allocator);
                     return LoadResult::Error(move failed);
                 }
-                if try self.reject_unused_imports(file) |failed| {
+                if try self.reject_unused_imports(tree, file) |failed| {
                     merged.deinit(self.allocator);
                     return LoadResult::Error(move failed);
                 }
@@ -627,6 +627,7 @@ fn (self: &Loader) duplicate_import(
 /// what counts as used is what resolution actually went through rather than a
 /// second reading of the source.
 fn (self: &Loader) reject_unused_imports(
+    tree: &ast::Ast,
     file: arena::Handle<ModuleFile>
 ) -> !?diagnostic::Diagnostic {
     let entry = self.files.at(file);
@@ -639,6 +640,7 @@ fn (self: &Loader) reject_unused_imports(
         if entry.used.contains(alias_bytes) {
             continue;
         }
+        let span = try self.import_span(tree, file, alias_bytes);
         var text = try module_error_text(self.allocator);
         errdefer text.deinit(self.allocator);
         try text.append_bytes(self.allocator, "unused import `");
@@ -648,7 +650,36 @@ fn (self: &Loader) reject_unused_imports(
         try text.append_bytes(self.allocator, "` in `");
         try self.append_module_name(&var text, file);
         try text.append_bytes(self.allocator, "`");
-        return try module_error(self.allocator, move text);
+        let problem = try module_error(self.allocator, move text);
+        return diagnostic::locate(move problem, span);
     }
     return null;
+}
+
+/// Returns where this file declares the import that binds alias, so an unused
+/// import is reported at its own line rather than at the module, which may be
+/// spread over several files.
+fn (self: &Loader) import_span(
+    tree: &ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    alias: []u8
+) -> !ast::Span {
+    let declarations = try self.declarations_of(file);
+    defer declarations.deinit(self.allocator);
+    var index = 0;
+    while declarations.at(index) |declaration_handle| {
+        let declaration = declaration_handle.*;
+        index = index + 1;
+        match tree.declarations.at(declaration.node) {
+            Import(value) => {
+                let last = value.path.get_or_panic(value.path.len() - 1);
+                let text = tree.texts.at(last.node);
+                if text_is(text, alias) {
+                    return tree.declaration_span(declaration);
+                }
+            },
+            _ => {},
+        }
+    }
+    return ast::zero_span();
 }
