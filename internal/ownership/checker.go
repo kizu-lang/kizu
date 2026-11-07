@@ -9927,16 +9927,15 @@ func (c *Checker) fieldPathType(typeName string, path string) (string, bool) {
 }
 
 // blockLastUses returns the last statement index where each identifier
-// appears. A name a loop body reads is read again on every turn, so it is
-// kept past the block's end; a name a registered cleanup reads is read when
-// the block exits, so it is kept until the end whatever else follows.
+// appears. A loop counts as one statement: every turn it runs is over once
+// the statement is, and the body is checked against its own scope, which
+// this block's releases never reach. A name a registered cleanup reads is
+// read when the block exits, so it is kept until the end whatever else
+// follows.
 func blockLastUses(block *ast.BlockStmt) map[string]int {
 	lastUses := map[string]int{}
 	end := len(block.Statements)
 	for idx, stmt := range block.Statements {
-		for _, name := range loopIdentUses(stmt) {
-			lastUses[name] = end + 1
-		}
 		at := idx
 		if cleanupStmt(stmt) {
 			at = end
@@ -9959,18 +9958,6 @@ func cleanupStmt(stmt ast.Statement) bool {
 		return true
 	}
 	return false
-}
-
-// loopIdentUses returns identifiers used inside loop bodies.
-func loopIdentUses(stmt ast.Statement) []string {
-	switch s := stmt.(type) {
-	case *ast.WhileStmt:
-		return blockIdentUses(s.Body)
-	case *ast.ForStmt:
-		return blockIdentUses(s.Body)
-	default:
-		return nil
-	}
 }
 
 // stmtIdentUses collects identifier reads from one statement.
