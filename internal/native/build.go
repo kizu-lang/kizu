@@ -408,11 +408,23 @@ func camelToSnake(name string) string {
 // resolves nothing outside itself, the C library included: the libraries its
 // extern declarations name are the host link's to pass, and the build
 // metadata lists them.
+//
+// The module names no target triple: the driver's triple is the one it is
+// compiled for, and clang fills it in. Clang reports that as overriding the
+// module's triple even though the module's is empty, on every build, so the
+// warning is turned off here. It cannot hide a mismatch, because the emitter
+// writes no triple to mismatch; naming the triple in the module instead would
+// cost each link another clang run to ask for it (`-print-effective-triple`;
+// the `--version` line names the driver's default, which is not the one
+// Darwin compiles for), and a triple guessed without asking turns the filled
+// in one into a real override. The flag stays out of clangFlags, which key
+// the runtime object: it is about the IR input, which the runtime is not.
 func runClang(irPath string, runtimePath string, output string, options Options) ([]string, error) {
 	args := clangFlags(options)
 	if options.Emit == "obj" {
 		args = append(args, "-r", "-nostdlib")
 	}
+	args = append(args, "-Wno-override-module")
 	linked := linkedOutput(output, options)
 	args = append(args, irPath, runtimePath, "-o", linked)
 	if options.Emit != "obj" {
