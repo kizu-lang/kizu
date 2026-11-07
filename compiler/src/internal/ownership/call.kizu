@@ -28,9 +28,13 @@ fn (self: &var Checker) check_call(
     // after it is its own result, when that result owns something.
     let pending = self.pending_owner_temps.len();
     let places = self.pending_moved_places.len();
+    let outer = self.method_call;
+    self.method_call = null;
     if try self.dispatch_call_expr(tree, env, expression, call, out) |failed| {
+        self.method_call = outer;
         return move failed;
     }
+    self.method_call = outer;
     let result = out.*;
     try self.settle_owner_temps(pending, places, result, expression);
     if try self.check_borrow_optional_result(tree, env, call, result) |failed| {
@@ -105,7 +109,7 @@ fn (self: &var Checker) dispatch_call_expr(
         sanctioned = sanctioned_call.node == expression.node;
     }
     if field_expr(tree, call.callee) |field| {
-        return self.check_field_call(tree, env, field, call.args, sanctioned, out);
+        return self.check_field_call(tree, env, call.callee, field, call.args, sanctioned, out);
     }
     if type_apply_expr(tree, call.callee) |apply| {
         return self.check_type_apply_call_expr(tree, env, apply, call.args, sanctioned, out);
@@ -860,6 +864,7 @@ fn merge_view_root(allocator: Allocator, out: &var array::Array<BindingHandle>, 
 fn (self: &var Checker) check_field_call(
     tree: &var ast::Ast,
     env: ScopeHandle,
+    callee: ast::Expression,
     field: ast::FieldExpr,
     args: ast::ExpressionList,
     sanctioned: bool,
@@ -884,7 +889,7 @@ fn (self: &var Checker) check_field_call(
     if handled {
         return null;
     }
-    return self.check_method_call_expr(tree, env, field, args, out);
+    return self.check_method_call_expr(tree, env, callee, field, args, out);
 }
 
 /// Validates ownership for source-loaded qualified calls, the Go

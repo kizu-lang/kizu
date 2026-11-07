@@ -38,6 +38,7 @@ func (c *Checker) checkStdMethodCall(
 	if method == nil {
 		return "", errorf("%s error: %s has no method `%s`", container.Kind, container.Label, name)
 	}
+	c.claimMethodCallee(stdmethod.MethodName(base, name))
 	if err := checkStdReceiverKind(container, method, receiver, name); err != nil {
 		return "", err
 	}

@@ -7,22 +7,22 @@ import std::map;
 // local borrows once their binding is no longer used.
 
 /// Returns the last statement index where each identifier appears, the Go
-/// `blockLastUses`. A name a loop body reads is read again on every turn,
-/// so it is kept past the block's end; a name a registered cleanup reads is
-/// read when the block exits, so it is kept until the end whatever else
-/// follows.
+/// `blockLastUses`. A loop counts as one statement: every turn it runs is
+/// over once the statement is, and the body is checked against its own
+/// scope, which this block's releases never reach. A name a registered
+/// cleanup reads is read when the block exits, so it is kept until the end
+/// whatever else follows.
 pub fn block_last_uses(allocator: Allocator, tree: &ast::Ast, block: ast::Block) -> !map::Map<[]u8, i64> {
     var last_uses = map::new<[]u8, i64>(allocator);
     errdefer last_uses.deinit(allocator);
     let count = block_len(tree, block);
     var index = 0;
     while block_statement_at(tree, block, index) |statement| {
-        try loop_ident_uses(allocator, tree, statement, count + 1, &var last_uses, true);
         var at = index;
         if cleanup_stmt(tree, statement) {
             at = count;
         }
-        try stmt_ident_uses(allocator, tree, statement, at, &var last_uses, false, count);
+        try stmt_ident_uses(allocator, tree, statement, at, &var last_uses, count);
         index = index + 1;
     }
     return move last_uses;
@@ -40,30 +40,11 @@ fn cleanup_stmt(tree: &ast::Ast, statement: ast::Statement) -> bool {
     return false;
 }
 
-/// Records the identifiers used inside loop bodies, the Go `loopIdentUses`.
-fn loop_ident_uses(
-    allocator: Allocator,
-    tree: &ast::Ast,
-    statement: ast::Statement,
-    at: i64,
-    out: &var map::Map<[]u8, i64>,
-    force: bool
-) -> !void {
-    if while_stmt(tree, statement) |value| {
-        return block_ident_uses(allocator, tree, value.body, at, out, force, 0);
-    }
-    if for_stmt(tree, statement) |value| {
-        return block_ident_uses(allocator, tree, value.body, at, out, force, 0);
-    }
-    return;
-}
-
-/// Records the index at which a name was used: when force is set every
-/// recorded name takes the index; otherwise a name already kept to the
-/// block's end or past it (count or above) keeps that position.
-fn record_use(allocator: Allocator, out: &var map::Map<[]u8, i64>, name: []u8, at: i64, force: bool, count: i64) -> !void {
+/// Records the index at which a name was used: a name already kept to the
+/// block's end (count) keeps that position.
+fn record_use(allocator: Allocator, out: &var map::Map<[]u8, i64>, name: []u8, at: i64, count: i64) -> !void {
     if out.at_mut(name) |slot| {
-        if !force and slot.* >= count {
+        if slot.* >= count {
             return;
         }
         slot.* = at;
@@ -79,55 +60,54 @@ fn stmt_ident_uses(
     statement: ast::Statement,
     at: i64,
     out: &var map::Map<[]u8, i64>,
-    force: bool,
     count: i64
 ) -> !void {
     match tree.statements.at(statement.node) {
-        Let(value) => return expr_ident_uses(allocator, tree, value.value, at, out, force, count),
+        Let(value) => return expr_ident_uses(allocator, tree, value.value, at, out, count),
         Assign(value) => {
-            try expr_ident_uses(allocator, tree, value.value, at, out, force, count);
-            return expr_ident_uses(allocator, tree, value.target, at, out, force, count);
+            try expr_ident_uses(allocator, tree, value.value, at, out, count);
+            return expr_ident_uses(allocator, tree, value.target, at, out, count);
         },
         Return(value) => {
             if value.value |returned| {
-                return expr_ident_uses(allocator, tree, returned, at, out, force, count);
+                return expr_ident_uses(allocator, tree, returned, at, out, count);
             }
             return;
         },
-        Defer(value) => return expr_ident_uses(allocator, tree, value.expr, at, out, force, count),
-        ErrDefer(value) => return expr_ident_uses(allocator, tree, value.expr, at, out, force, count),
-        Expr(value) => return expr_ident_uses(allocator, tree, value.expr, at, out, force, count),
+        Defer(value) => return expr_ident_uses(allocator, tree, value.expr, at, out, count),
+        ErrDefer(value) => return expr_ident_uses(allocator, tree, value.expr, at, out, count),
+        Expr(value) => return expr_ident_uses(allocator, tree, value.expr, at, out, count),
         If(value) => {
-            try expr_ident_uses(allocator, tree, value.condition, at, out, force, count);
-            try block_ident_uses(allocator, tree, value.consequence, at, out, force, count);
+            try expr_ident_uses(allocator, tree, value.condition, at, out, count);
+            try block_ident_uses(allocator, tree, value.consequence, at, out, count);
             if value.alternative |alternative| {
-                return block_ident_uses(allocator, tree, alternative, at, out, force, count);
+                return block_ident_uses(allocator, tree, alternative, at, out, count);
             }
             return;
         },
         While(value) => {
-            try expr_ident_uses(allocator, tree, value.condition, at, out, force, count);
-            return block_ident_uses(allocator, tree, value.body, at, out, force, count);
+            try expr_ident_uses(allocator, tree, value.condition, at, out, count);
+            return block_ident_uses(allocator, tree, value.body, at, out, count);
         },
         For(value) => {
-            try expr_ident_uses(allocator, tree, value.start, at, out, force, count);
-            try expr_ident_uses(allocator, tree, value.end, at, out, force, count);
-            return block_ident_uses(allocator, tree, value.body, at, out, force, count);
+            try expr_ident_uses(allocator, tree, value.start, at, out, count);
+            try expr_ident_uses(allocator, tree, value.end, at, out, count);
+            return block_ident_uses(allocator, tree, value.body, at, out, count);
         },
         Match(value) => {
-            try expr_ident_uses(allocator, tree, value.value, at, out, force, count);
+            try expr_ident_uses(allocator, tree, value.value, at, out, count);
             var index = 0;
             while value.arms.get(index) |arm| {
-                try stmt_ident_uses(allocator, tree, arm.body, at, out, force, count);
+                try stmt_ident_uses(allocator, tree, arm.body, at, out, count);
                 index = index + 1;
             }
             return;
         },
         ComptimeIf(value) => {
-            try expr_ident_uses(allocator, tree, value.condition, at, out, force, count);
-            try block_ident_uses(allocator, tree, value.consequence, at, out, force, count);
+            try expr_ident_uses(allocator, tree, value.condition, at, out, count);
+            try block_ident_uses(allocator, tree, value.consequence, at, out, count);
             if value.alternative |alternative| {
-                return block_ident_uses(allocator, tree, alternative, at, out, force, count);
+                return block_ident_uses(allocator, tree, alternative, at, out, count);
             }
             return;
         },
@@ -142,12 +122,11 @@ fn block_ident_uses(
     block: ast::Block,
     at: i64,
     out: &var map::Map<[]u8, i64>,
-    force: bool,
     count: i64
 ) -> !void {
     var index = 0;
     while block_statement_at(tree, block, index) |statement| {
-        try stmt_ident_uses(allocator, tree, statement, at, out, force, count);
+        try stmt_ident_uses(allocator, tree, statement, at, out, count);
         index = index + 1;
     }
     return;
@@ -160,53 +139,52 @@ fn expr_ident_uses(
     expression: ast::Expression,
     at: i64,
     out: &var map::Map<[]u8, i64>,
-    force: bool,
     count: i64
 ) -> !void {
     if transparent_expr_value(tree, expression) |inner| {
-        return expr_ident_uses(allocator, tree, inner, at, out, force, count);
+        return expr_ident_uses(allocator, tree, inner, at, out, count);
     }
     match tree.expressions.at(expression.node) {
         Ident(value) => {
             let retained = tree.texts.at(value.name.node);
             let bytes = retained.as_bytes();
-            return record_use(allocator, out, bytes, at, force, count);
+            return record_use(allocator, out, bytes, at, count);
         },
         Binary(value) => {
-            try expr_ident_uses(allocator, tree, value.left, at, out, force, count);
-            return expr_ident_uses(allocator, tree, value.right, at, out, force, count);
+            try expr_ident_uses(allocator, tree, value.left, at, out, count);
+            return expr_ident_uses(allocator, tree, value.right, at, out, count);
         },
         Call(value) => {
-            try expr_ident_uses(allocator, tree, value.callee, at, out, force, count);
+            try expr_ident_uses(allocator, tree, value.callee, at, out, count);
             let args = tree.expression_lists.at(value.args.node);
             var index = 0;
             while args.get(index) |arg| {
-                try expr_ident_uses(allocator, tree, arg, at, out, force, count);
+                try expr_ident_uses(allocator, tree, arg, at, out, count);
                 index = index + 1;
             }
             return;
         },
-        Cast(value) => return expr_ident_uses(allocator, tree, value.value, at, out, force, count),
-        Try(value) => return expr_ident_uses(allocator, tree, value.value, at, out, force, count),
+        Cast(value) => return expr_ident_uses(allocator, tree, value.value, at, out, count),
+        Try(value) => return expr_ident_uses(allocator, tree, value.value, at, out, count),
         // A hand-off reads the place it hands off. Missing it here would end
         // the value's live range at its previous statement, and everything a
         // last use releases -- the borrows it holds, the allocator it is tied
         // to -- would be released one statement early.
-        Move(value) => return expr_ident_uses(allocator, tree, value.value, at, out, force, count),
+        Move(value) => return expr_ident_uses(allocator, tree, value.value, at, out, count),
         StructLiteral(value) => {
             var index = 0;
             while value.fields.get(index) |field| {
-                try expr_ident_uses(allocator, tree, field.value, at, out, force, count);
+                try expr_ident_uses(allocator, tree, field.value, at, out, count);
                 index = index + 1;
             }
             return;
         },
-        Field(value) => return expr_ident_uses(allocator, tree, value.receiver, at, out, force, count),
-        Deref(value) => return expr_ident_uses(allocator, tree, value.receiver, at, out, force, count),
+        Field(value) => return expr_ident_uses(allocator, tree, value.receiver, at, out, count),
+        Deref(value) => return expr_ident_uses(allocator, tree, value.receiver, at, out, count),
         VectorLiteral(value) => {
             var index = 0;
             while value.lanes.get(index) |lane| {
-                try expr_ident_uses(allocator, tree, lane, at, out, force, count);
+                try expr_ident_uses(allocator, tree, lane, at, out, count);
                 index = index + 1;
             }
             return;
@@ -214,51 +192,51 @@ fn expr_ident_uses(
         BufferLiteral(value) => {
             var index = 0;
             while value.elements.get(index) |element| {
-                try expr_ident_uses(allocator, tree, element, at, out, force, count);
+                try expr_ident_uses(allocator, tree, element, at, out, count);
                 index = index + 1;
             }
             return;
         },
         Index(value) => {
-            try expr_ident_uses(allocator, tree, value.target, at, out, force, count);
+            try expr_ident_uses(allocator, tree, value.target, at, out, count);
             if value.index |present| {
-                try expr_ident_uses(allocator, tree, present, at, out, force, count);
+                try expr_ident_uses(allocator, tree, present, at, out, count);
             }
             if value.start |present| {
-                try expr_ident_uses(allocator, tree, present, at, out, force, count);
+                try expr_ident_uses(allocator, tree, present, at, out, count);
             }
             if value.end |present| {
-                return expr_ident_uses(allocator, tree, present, at, out, force, count);
+                return expr_ident_uses(allocator, tree, present, at, out, count);
             }
             return;
         },
-        Comptime(value) => return expr_ident_uses(allocator, tree, value.expr, at, out, force, count),
+        Comptime(value) => return expr_ident_uses(allocator, tree, value.expr, at, out, count),
         // An `if` or `match` standing as a value reads whatever its branches
         // read, and a guard's exit reads whatever it returns.
         If(value) => {
-            try expr_ident_uses(allocator, tree, value.condition, at, out, force, count);
-            try block_ident_uses(allocator, tree, value.consequence, at, out, force, count);
+            try expr_ident_uses(allocator, tree, value.condition, at, out, count);
+            try block_ident_uses(allocator, tree, value.consequence, at, out, count);
             if value.alternative |alternative| {
-                return block_ident_uses(allocator, tree, alternative, at, out, force, count);
+                return block_ident_uses(allocator, tree, alternative, at, out, count);
             }
             return;
         },
         Match(value) => {
-            try expr_ident_uses(allocator, tree, value.value, at, out, force, count);
+            try expr_ident_uses(allocator, tree, value.value, at, out, count);
             var index = 0;
             while value.arms.get(index) |arm| {
-                try stmt_ident_uses(allocator, tree, arm.body, at, out, force, count);
+                try stmt_ident_uses(allocator, tree, arm.body, at, out, count);
                 index = index + 1;
             }
             return;
         },
         OrelseGuard(value) => {
-            try expr_ident_uses(allocator, tree, value.condition, at, out, force, count);
-            return stmt_ident_uses(allocator, tree, value.exit, at, out, force, count);
+            try expr_ident_uses(allocator, tree, value.condition, at, out, count);
+            return stmt_ident_uses(allocator, tree, value.exit, at, out, count);
         },
         CatchGuard(value) => {
-            try expr_ident_uses(allocator, tree, value.condition, at, out, force, count);
-            return stmt_ident_uses(allocator, tree, value.exit, at, out, force, count);
+            try expr_ident_uses(allocator, tree, value.condition, at, out, count);
+            return stmt_ident_uses(allocator, tree, value.exit, at, out, count);
         },
         _ => return,
     }
