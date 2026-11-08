@@ -62,6 +62,8 @@ var boundsKnownShapes = []runtimeCase{
 		Expect: []string{"1 1: -7 1", "1 0: 0 1"}},
 	{Bucket: "below-is-not-enough", Prog: []string{"lt K", "read K", "end"},
 		Expect: []string{"2 -1: panic"}},
+	{Bucket: "next-index", Prog: []string{"for 0", "read I1", "end"},
+		Expect: []string{"3 0: panic", "0 0: 0 0"}},
 }
 
 // deferKnownShapes mirrors spec/ir/defer_test.qnt.
@@ -77,6 +79,9 @@ var deferKnownShapes = []runtimeCase{
 	{Bucket: "nested-error-unwind",
 		Prog:   []string{"defer 1", "if 0", "errdefer 2", "loop 3", "defer 4", "fail 1", "end", "end"},
 		Expect: []string{"03: 4 2 1 -1", "01: 4 4 1 0", "00: 1 0"}},
+	{Bucket: "block-exit-order",
+		Prog:   []string{"if 0", "defer 1", "defer 2", "note 100", "end", "note 101"},
+		Expect: []string{"01: 100 2 1 101 0", "00: 101 0"}},
 }
 
 // knownDivergences are the divergences findings/ir-safety-quint-findings.md
