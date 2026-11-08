@@ -35,14 +35,14 @@ lowering は 1 本しかないため、同じプログラムが `run` と `build
 
 | 機能 | 例の数 | check | run | llvm | wasm | wasm-opt | wasm-bin | browser |
 | --- | ---: | :--: | :--: | :--: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 55 | ✅ | ✅ | ✅ | 54/55 | 54/55 | 54/55 | 53/55 |
+| fn / let / struct / literals | 56 | ✅ | ✅ | ✅ | 55/56 | 55/56 | 55/56 | 54/56 |
 | arithmetic / bitwise / float | 11 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | while / break / continue / for / label | 11 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | if / match | 21 | ✅ | ✅ | ✅ | 20/21 | 20/21 | 20/21 | 18/21 |
 | enum / union | 20 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 17/20 |
 | error union `!T` / try / errdefer | 61 | ✅ | ✅ | ✅ | 39/61 | 39/61 | 39/61 | 36/61 |
 | optional `?T` / orelse / capture | 30 | ✅ | ✅ | ✅ | 29/30 | 29/30 | 29/30 | 27/30 |
-| move / borrow | 74 | ✅ | ✅ | ✅ | 70/74 | 70/74 | 70/74 | 70/74 |
+| move / borrow | 75 | ✅ | ✅ | ✅ | 71/75 | 71/75 | 71/75 | 71/75 |
 | deinit / defer | 25 | ✅ | ✅ | ✅ | 24/25 | 24/25 | 24/25 | 24/25 |
 | arena / handle | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | comptime / reflection | 20 | ✅ | ✅ | ✅ | 18/20 | 18/20 | 18/20 | 18/20 |
@@ -129,7 +129,7 @@ Windows では `kizu` 自身がそのまま動き、既定で Windows 向けに 
 | raw pointer の実行時操作 | **check のみ。** `pointer_policy.kizu` と `raw_pointer_deref.kizu` は検査だけで実行しません |
 | type alias | **未着手** |
 | `kizu lint` | **未着手** |
-| TLS / HTTPS、middleware | **未着手。** `std::http` は平文 TCP 上の HTTP/1 です。middleware は closure 待ちです |
+| HTTP の middleware | **未着手。** middleware は closure 待ちです。`std::http` は平文 TCP か TLS 1.3(`std::tls`)の上で HTTP/1 の server と client を持ちます |
 | full generics | **その形では予定しません。** 明示的な static 引数のみ。推論・bounds・HKT は入れません(ADR-0066) |
 | `async fn` / `await` 構文 | **採用しません。** function coloring はこの言語が払わないコストです(ADR-0025) |
 | Rust の `Send` / `Sync` trait | **採用しません。** 代わりに置くものは、ユーザーが読める 1 つの規則であって、手書きの whitelist ではありません(ADR-0025) |
@@ -191,7 +191,7 @@ go run ./cmd/kizu run examples/hello.kizu
 ## 開発環境
 
 推奨する開発環境は Nix flake です。shell には Go、golangci-lint、pre-commit、just、
-wasmtime、Node.js が入ります。
+wasmtime、Node.js と LLVM 21 の clang が入ります。
 
 ```sh
 nix develop
@@ -215,14 +215,14 @@ just wasi-smoke      # wasm の例を wasmtime で走らせる
 - `kizu check <file-or-package>` は type / ownership / move / borrow / arena check を実行します。
 - `kizu run <file-or-package>` は native 実行ファイルを作って実行します。
 - `kizu test <file-or-package>` は check 済みの top-level test block を、`main` を呼ばずに実行します。
-- `kizu fmt [--write|-w] <file>` は canonical token formatter output を出力、または書き込みます。source-preserving formatter ではありません。line comment は落としませんが、canonical form では 1 つ 1 行になるので、code に続く trailing comment は次の行へ移ります。
+- `kizu fmt [--write|-w] <file>` は formatter の出力を表示、または書き込みます。決めるのは空白、indent、複数行の宣言の末尾 comma です。改行は書き手が置いた位置のままなので、1 行に書いた block は 1 行のまま、文の間の空行 1 つは残り、comment は行と column を保ちます。
 - `kizu init [path]` は package の雛形を作ります。
 - `kizu ir [--opt] <file>` は typed SSA IR を表示します。
 - `kizu build --emit-llvm [--opt] <file>` は LLVM IR text を出力します。
-- `kizu build --target wasm32-wasi [--opt] [--emit wat] [-o <out>] <file>` は WASI-compatible WAT を stdout、または指定した `-o` へ出力します。
-- `kizu build --target wasm32-wasi [--opt] --emit wasm -o <out> <file>` は binary `.wasm` を書きます。binary を暗黙に terminal へ出力することはありません。
-- `kizu build --target wasm32-browser [--opt] [--emit wat] [-o <out>] <file>` は inspection 用の browser-hosted WAT を出力します。
-- `kizu build --target wasm32-browser [--opt] --emit wasm -o <out> <file>` は browser 用 `.wasm` を書きます。host adapter と capability 境界は [`docs/wasm-browser.md`](docs/wasm-browser.md) にあります。
+- `kizu build --target wasm32-wasi [--opt] [--emit wat] [-o <out>] <file|package>` は WASI-compatible WAT を stdout、または指定した `-o` へ出力します。
+- `kizu build --target wasm32-wasi [--opt] --emit wasm -o <out> <file|package>` は binary `.wasm` を書きます。binary を暗黙に terminal へ出力することはありません。
+- `kizu build --target wasm32-browser [--opt] [--emit wat] [-o <out>] <file|package>` は inspection 用の browser-hosted WAT を出力します。
+- `kizu build --target wasm32-browser [--opt] --emit wasm -o <out> <file|package>` は browser 用 `.wasm` を書きます。host adapter と capability 境界は [`docs/wasm-browser.md`](docs/wasm-browser.md) にあります。
 - `kizu build --target native [--opt] [--triple <triple>] [--cpu <cpu>] [--abi <abi>] [--libc on|off] [--runtime hosted|freestanding] [--emit exe|obj|llvm] [--linker clang] [-o <out>] <file>` は native executable を link します。
 - `kizu cache status` / `kizu cache prune` はローカルビルドキャッシュの表示と削除です。
 - `kizu import-c-header <file>` は対応する C prototype を Kizu extern に変換します。
