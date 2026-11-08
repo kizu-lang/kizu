@@ -12,13 +12,14 @@ oracle でもあります。以前の selfhost は独立した第二実装とし
 偽装して緑を保ったため削除しました。今回は Go の構造と挙動を保った機械移植にし、
 両者の差分を corpus で突き合わせています(ADR-0130)。
 
-規模感(2026-08 時点): Kizu 製 compiler 約 94k 行、Go 実装 約 52k 行 + テスト
-約 21k 行、Kizu 製 std 約 9k 行、examples 約 15k 行。
+規模感(2026-11 時点): Kizu 製 compiler 約 131k 行(`compiler/src`、`*_test.kizu` を
+除く)、Go 実装 約 83k 行 + テスト 約 29k 行、Kizu 製 std 約 28k 行、examples 約 25k 行。
 
 ## 2. リポジトリ地図
 
 ```
 cmd/kizu/            CLI 本体と、パッケージ横断の統合テスト・conformance
+cmd/kizu-lsp/        LSP server(実体は internal/lsp)
 internal/            Go 実装(1 パッケージ = 1 責務)
   source, token, lexer, parser, ast   入力 text・字句・構文・AST
   typ                           型の綴りを 1 度だけ parse した形(文字列手術の代わり)
@@ -27,6 +28,8 @@ internal/            Go 実装(1 パッケージ = 1 責務)
   project, stdlib, manifest     パッケージ/モジュール解決(std も含む)、std の在処、kizu.toml
   stdmethod, stdprim, stdmeta, stdtarget
                                 std の method / primitive と compiler-defined form
+  staticexpr, stdmath           static 引数の整数式と、comptime の sin / cos(std::math と同じ bit)
+  machinelean, machinequint     std::machine の表を Lean / Quint へ書き出す
   unsafecap                     unsafe が覆う操作の種類と診断文言
   conformance                   example が末尾に宣言する case の読み取り
   version, selfhost             binary の名乗りと、移植先が読めない生成 source
@@ -136,13 +139,14 @@ CLI のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 | 層 | 実行方法 | 内容 |
 | --- | --- | --- |
 | conformance | `go test ./cmd/kizu` | `examples/`、`tests/behavior/`、`docs/tutorial/` を全件実行。case を書いていない例があれば落ちる |
-| ユニット | `go test ./...`(pre-push hook) | 各 internal パッケージ + CLI smoke + std lexer/parser parity(native 実行)|
+| ユニット | `go test ./...`(pre-push hook) | 各 internal パッケージ + CLI smoke |
 | 両実装の突き合わせ | `go test ./cmd/kizu`(`TestSelfhostFrontend` / `TestSelfhostBehavior`) | Kizu compiler と Go seed の出力差分。`compiler/tests/` の corpus は `-update` で両方を同時に更新する |
 | bootstrap | `go test ./cmd/kizu -run TestSelfhostBootstrap` | Kizu compiler が自分自身を build し、byte 単位で同じ実行ファイルになること |
 | Kizu 側 unit test | `go test ./internal/selfhost`(= `kizu test compiler`、`just selfhost` でも) | `compiler/src/**/*_test.kizu`。seed が compiler とその test を 1 つの実行ファイルにして走らせる。`cmd/kizu` と並んで走るよう別 package |
 | commit hooks | `pre-commit run --all-files` | gofmt / golangci-lint / コメント検査 + `kizu check compiler`。数秒で終わるものだけ |
 
-CI は push/PR ごとに 1 job(`go test ./...` + gofmt)を macOS / Linux の両方で回します。
+CI は push/PR ごとに 1 job(`go test ./...` + gofmt)を macOS / Linux の両方で回します
+(`internal/selfhost` は host に依らないので macOS だけ)。
 定時実行は置きません。
 言語機能を足したら `examples/` に実例を足し、その末尾に case を書きます。
 書式は `internal/conformance` の package doc にあります。
