@@ -327,13 +327,17 @@ func (loop *versionedLoop) findChecks() {
 }
 
 // findViewCheck records a view bounds check `index < 0` or `index >= len`
-// whose index the counter walks.
+// whose index the counter walks, or the one `u64(index) >= u64(len)`.
 func (loop *versionedLoop) findViewCheck(instr *Instr, add func(boundedCheck, *Instr)) {
 	if len(instr.Args) == 0 || instr.Immediate != "bounds" {
 		return
 	}
 	cond, ok := loop.defs[instr.Args[0].Name]
 	if !ok || len(cond.Args) != 2 {
+		return
+	}
+	if index, length, ok := unsignedIndexCheck(cond, loop.defs); ok {
+		loop.findUnsignedViewCheck(instr, index, length, add)
 		return
 	}
 	base, ok := loop.indexBase(cond.Args[0])
@@ -351,6 +355,25 @@ func (loop *versionedLoop) findViewCheck(instr *Instr, add func(boundedCheck, *I
 			add(boundedCheck{container: length.Args[0], base: base, view: true}, instr)
 		}
 	}
+}
+
+// findUnsignedViewCheck records the one view bounds check
+// `u64(index) >= u64(len)` whose index the counter walks: it asks both what
+// `index < 0` and `index >= len` ask, so it needs the base not negative as
+// well as the room.
+func (loop *versionedLoop) findUnsignedViewCheck(
+	instr *Instr,
+	index Value,
+	length Value,
+	add func(boundedCheck, *Instr),
+) {
+	base, ok := loop.indexBase(index)
+	view, viewOK := loop.defs[length.Name]
+	if !ok || !viewOK || view.Op != "slice.len" || !loop.invariant(length) {
+		return
+	}
+	add(boundedCheck{base: base}, instr)
+	add(boundedCheck{container: view.Args[0], base: base, view: true}, instr)
 }
 
 // version makes the copy and the test that picks it.
