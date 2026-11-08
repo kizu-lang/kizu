@@ -27,6 +27,16 @@ import (
 // one. The step cannot wrap where it is taken below a known bound, so a
 // counter is trusted only when every step is; otherwise the function is walked
 // again without it.
+//
+// An index check reads the index and the length as u64, so one comparison
+// fails for a negative index and for one past the length. It cannot fail when
+// the index is known not to be negative and below the length, and when the
+// length is known not to be negative its passing says both: read unsigned, a
+// length below 2^63 holds every index below it there too.
+//
+// Equal constants are one value to what is known, so a loop bound and the
+// length of a fixed buffer spelled as two constants of the same number answer
+// each other.
 func EliminateBoundsChecks(module *Module) {
 	for _, fn := range module.Functions {
 		eliminateBoundsChecksIn(fn)
@@ -100,9 +110,11 @@ type boundsPlan struct {
 
 // boundsWalker carries the function-wide tables one walk reads.
 type boundsWalker struct {
-	fn      *Function
-	defs    map[string]*Instr
-	counter map[string]bool
+	fn   *Function
+	defs map[string]*Instr
+	// constants maps each i64 constant to the first one of the same number.
+	constants map[string]string
+	counter   map[string]bool
 	// steps maps a step's result to the counters it feeds.
 	steps map[string][]string
 	// order and tree are the function's reverse postorder and dominator
@@ -118,11 +130,18 @@ func eliminateBoundsChecksIn(fn *Function) {
 	if len(fn.Blocks) == 0 {
 		return
 	}
-	w := &boundsWalker{fn: fn, defs: map[string]*Instr{}}
+	w := &boundsWalker{fn: fn, defs: map[string]*Instr{}, constants: map[string]string{}}
+	first := map[int64]string{}
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
 			if instr.Result.Name != "" {
 				w.defs[instr.Result.Name] = instr
+			}
+			if number, ok := constantValue(instr.Result, w.defs); ok {
+				if _, seen := first[number]; !seen {
+					first[number] = instr.Result.Name
+				}
+				w.constants[instr.Result.Name] = first[number]
 			}
 		}
 	}
@@ -421,6 +440,10 @@ func (w *boundsWalker) visitCondFail(facts *boundsFacts, instr *Instr) {
 		return
 	}
 	cond, ok := w.defs[instr.Args[0].Name]
+	if index, length, unsigned := unsignedIndexCheck(cond, w.defs); ok && unsigned {
+		w.visitUnsignedCheck(facts, instr, index, length)
+		return
+	}
 	if ok && len(cond.Args) == 2 && cond.Args[0].Type == "i64" {
 		left, right := cond.Args[0], cond.Args[1]
 		switch cond.Op {
@@ -437,6 +460,49 @@ func (w *boundsWalker) visitCondFail(facts *boundsFacts, instr *Instr) {
 		}
 	}
 	w.learnCondition(facts, instr.Args[0], false)
+}
+
+// unsignedOf returns the i64 a cast to u64 reads. The cast keeps the bits, so
+// the two name one number read two ways.
+func unsignedOf(value Value, defs map[string]*Instr) (Value, bool) {
+	instr, ok := defs[value.Name]
+	if !ok || instr.Op != "cast" || instr.Result.Type != "u64" || len(instr.Args) != 1 ||
+		instr.Args[0].Type != "i64" {
+		return Value{}, false
+	}
+	return instr.Args[0], true
+}
+
+// unsignedIndexCheck reads cond as `u64(index) >= u64(length)`, the
+// comparison an index check makes, and returns the index and the length.
+func unsignedIndexCheck(cond *Instr, defs map[string]*Instr) (Value, Value, bool) {
+	if cond == nil || cond.Op != "binary.>=" || len(cond.Args) != 2 {
+		return Value{}, Value{}, false
+	}
+	index, indexOK := unsignedOf(cond.Args[0], defs)
+	length, lengthOK := unsignedOf(cond.Args[1], defs)
+	return index, length, indexOK && lengthOK
+}
+
+// visitUnsignedCheck drops an index check `u64(index) >= u64(length)` that
+// cannot fail: the index is not negative and below the length. One that stays
+// says, once passed, that the index is not negative and below the length, when
+// the length is not negative.
+func (w *boundsWalker) visitUnsignedCheck(
+	facts *boundsFacts,
+	instr *Instr,
+	index Value,
+	length Value,
+) {
+	pair := [2]string{w.resolvedName(index.Name), w.resolvedName(length.Name)}
+	if w.nonNegative(facts, index) && facts.less[pair] {
+		w.plan.drops[instr] = true
+		return
+	}
+	if w.nonNegative(facts, length) {
+		facts.nonneg[pair[0]] = true
+		facts.less[pair] = true
+	}
 }
 
 // nonNegative reports whether value is known not to be negative.
@@ -489,15 +555,20 @@ func (w *boundsWalker) visitArrayCheck(facts *boundsFacts, instr *Instr) {
 	}
 }
 
-// resolvedName follows the length aliases the walk has made.
+// resolvedName follows the length aliases the walk has made, and names a
+// constant by the first constant of its number.
 func (w *boundsWalker) resolvedName(name string) string {
 	for {
 		next, ok := w.plan.aliases[name]
 		if !ok {
-			return name
+			break
 		}
 		name = next.Name
 	}
+	if first, ok := w.constants[name]; ok {
+		return first
+	}
+	return name
 }
 
 // applyBoundsPlan rewrites the function the way a walk planned.
