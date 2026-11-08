@@ -30,13 +30,10 @@ pub fn default_max_bytes() -> i64 {
     return 268435456;
 }
 
-/// Stores local Kizu build artifacts, the Go `Cache`. It also owns the
-/// sha256 hasher every key derivation reads, so the bitwise tables are
-/// built once per cache rather than once per key.
+/// Stores local Kizu build artifacts, the Go `Cache`.
 pub struct Cache {
     pub dir: string::String,
     pub max_bytes: i64,
-    hasher: sha256::Hasher,
     scratch_sequence: i64,
 }
 
@@ -95,11 +92,9 @@ pub fn new(io: Io, allocator: Allocator) -> !Cache {
     var dir = string::new(allocator);
     errdefer dir.deinit(allocator);
     try resolve_cache_dir(io, allocator, &var dir);
-    let hasher = try sha256::new(allocator);
     return Cache {
         dir: move dir,
         max_bytes: default_max_bytes(),
-        hasher: move hasher,
         scratch_sequence: 0
     };
 }
@@ -123,8 +118,7 @@ pub fn (self: &Cache) append_content_hash(
     bytes: []u8,
     out: &var string::String
 ) -> !void {
-    let hasher = &self.hasher;
-    return hasher.append_hex_digest(allocator, bytes, out);
+    return sha256::append_hex_digest(allocator, bytes, out);
 }
 
 /// Keys an artifact by everything it is made of, the Go `newInput`: the
@@ -135,10 +129,9 @@ pub fn (self: &Cache) new_input(
     target: []u8,
     content: []u8
 ) -> !CacheInput {
-    let hasher = &self.hasher;
     var source_hash = string::new(allocator);
     errdefer source_hash.deinit(allocator);
-    try hasher.append_hex_digest(allocator, content, &var source_hash);
+    try sha256::append_hex_digest(allocator, content, &var source_hash);
     var message = string::new(allocator);
     defer message.deinit(allocator);
     try message.append_bytes(allocator, version());
@@ -151,7 +144,7 @@ pub fn (self: &Cache) new_input(
     var key = string::new(allocator);
     errdefer key.deinit(allocator);
     let message_bytes = message.as_bytes();
-    try hasher.append_hex_digest(allocator, message_bytes, &var key);
+    try sha256::append_hex_digest(allocator, message_bytes, &var key);
     let target_copy = try string::from_bytes(allocator, target);
     return CacheInput {
         key: move key,
