@@ -70,6 +70,10 @@ pub struct Binding {
     // projection back to the owner binding and its field.
     pub field_owner: ?BindingHandle,
     pub field_owner_name: Name,
+    // owner_type records that type_name carries a deinit contract, the Go
+    // `ownerType`. The type never changes once the binding is defined, so the
+    // scope can keep its owners apart and an exit check reads only those.
+    pub owner_type: bool,
 }
 
 fn (self: Binding) deinit(allocator: Allocator) -> void {
@@ -84,6 +88,10 @@ fn (self: Binding) deinit(allocator: Allocator) -> void {
 struct Scope {
     parent: ?ScopeHandle,
     values: map::Map<[]u8, BindingHandle>,
+    // owners holds the bound values whose type carries a deinit contract:
+    // the only ones an exit can leak. An exit check, run at every `try`,
+    // reads these instead of every binding in the chain.
+    owners: array::Array<BindingHandle>,
 }
 
 /// Owns the bindings and lexical scopes of one checker run.
@@ -145,7 +153,8 @@ fn (self: &ScopeStore) blank_binding(id: i64, name: Name, type_name: Name) -> Bi
         decl_span: ast::zero_span(),
         moved_at: null,
         field_owner: null,
-        field_owner_name: empty_name()
+        field_owner_name: empty_name(),
+        owner_type: false
     };
 }
 
@@ -180,7 +189,8 @@ fn (self: &var ScopeStore) new_scope(parent: ?ScopeHandle) -> !ScopeHandle {
     return ScopeHandle {
         node: try self.scopes.add(self.allocator, Scope {
             parent: parent,
-            values: map::new<[]u8, BindingHandle>(self.allocator)
+            values: map::new<[]u8, BindingHandle>(self.allocator),
+            owners: array::new<BindingHandle>(self.allocator)
         })
     };
 }
@@ -198,9 +208,31 @@ fn (self: &var ScopeStore) define(scope: ScopeHandle, name: []u8, value: Binding
     return handle;
 }
 
-/// Binds an already retained binding in the current scope.
+/// Binds an already retained binding in the current scope. A name already
+/// bound there is replaced, and so leaves the scope's owners.
 fn (self: &var ScopeStore) define_handle(allocator: Allocator, scope: ScopeHandle, name: []u8, handle: BindingHandle) -> !void {
+    let owner_type = self.at(handle).owner_type;
+    var previous = none_binding();
+    let target = self.scopes.at(scope.node);
+    if target.values.get(name) |found| {
+        if self.at(found).owner_type {
+            previous = found;
+        }
+    }
     if self.scopes.at_mut(scope.node) |current| {
+        if previous |replaced| {
+            var index = 0;
+            while current.owners.get(index) |owner| {
+                if owner.node == replaced.node {
+                    let _ = try current.owners.remove(index);
+                    break;
+                }
+                index = index + 1;
+            }
+        }
+        if owner_type {
+            try current.owners.append(allocator, handle);
+        }
         if current.values.at_mut(name) |slot| {
             slot.* = handle;
             return;
@@ -253,6 +285,47 @@ fn (self: &var Walker) next(store: &ScopeStore) -> ?BindingHandle {
         }
         self.current = retained.parent;
         self.index = 0;
+    }
+    return null;
+}
+
+/// Visits the bindings of a scope chain whose type carries a deinit
+/// contract, the Go `walkOwners`.
+pub struct OwnerWalker {
+    current: ?ScopeHandle,
+    index: i64,
+}
+
+fn (self: &ScopeStore) walk_owners(scope: ScopeHandle) -> OwnerWalker {
+    return OwnerWalker { current: scope, index: 0 };
+}
+
+fn (self: &var OwnerWalker) next(store: &ScopeStore) -> ?BindingHandle {
+    while self.current |handle| {
+        let retained = store.scopes.at(handle.node);
+        if retained.owners.get(self.index) |owner| {
+            self.index = self.index + 1;
+            return owner;
+        }
+        self.current = retained.parent;
+        self.index = 0;
+    }
+    return null;
+}
+
+/// Resolves the binding bound to name with this id, the Go `lookupNamedID`.
+/// A binding is bound under its own name, so this answers what find_by_id
+/// does while reading one map entry per scope.
+fn (self: &ScopeStore) find_named_id(scope: ScopeHandle, name: []u8, id: i64) -> ?BindingHandle {
+    var current = optional_scope(scope);
+    while current |handle| {
+        let retained = self.scopes.at(handle.node);
+        if retained.values.get(name) |value| {
+            if self.at(value).id == id {
+                return value;
+            }
+        }
+        current = retained.parent;
     }
     return null;
 }
@@ -604,7 +677,8 @@ fn (self: &ScopeStore) clone_binding(handle: BindingHandle) -> !Binding {
         decl_span: value.decl_span,
         moved_at: value.moved_at,
         field_owner: value.field_owner,
-        field_owner_name: value.field_owner_name
+        field_owner_name: value.field_owner_name,
+        owner_type: value.owner_type
     };
 }
 

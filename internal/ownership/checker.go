@@ -31,6 +31,9 @@ type Checker struct {
 	unions       map[string]map[string]string
 	nextID       int
 	consumeNeeds map[string]bool
+	// plainData memoizes isPlainDataAggregate by type name once every
+	// declaration and method is collected; nil while they are still coming.
+	plainData    map[string]bool
 	deinitOwners map[string]bool
 	// releaseAllocators names the types whose deinit takes an allocator, which
 	// a generic cleanup asks before calling one (ADR-0132).
@@ -199,6 +202,10 @@ type binding struct {
 	// borrow lands where argument borrows of the same place land.
 	fieldOwner     *binding
 	fieldOwnerName string
+	// ownerType records that typeName carries a deinit contract. The type
+	// never changes once the binding is defined, so the scope can keep its
+	// owners apart and an exit check reads only those.
+	ownerType bool
 }
 
 // allocTied reports an owner allocated from a frame-tied allocator: it keeps
@@ -241,6 +248,10 @@ type borrowSource struct {
 type scope struct {
 	parent *scope
 	values map[string]*binding
+	// owners holds the bound values whose type carries a deinit contract:
+	// the only ones an exit can leak. An exit check, run at every `try`,
+	// reads these instead of every binding in the chain.
+	owners []*binding
 }
 
 type directFieldReceiver struct {
@@ -296,6 +307,7 @@ func (c *Checker) Result() Result {
 // Check validates ownership rules and returns the first move error.
 func (c *Checker) Check(program *ast.Program) error {
 	c.result = newResult()
+	c.plainData = nil
 	c.deinitOwners = ast.DeinitOwners(program)
 	c.releaseAllocators = ast.ReleaseNamesAllocator(program)
 	c.declaredDeinits = ast.DeclaredDeinits(program)
@@ -311,6 +323,7 @@ func (c *Checker) Check(program *ast.Program) error {
 	if err := c.collectFunctions(program); err != nil {
 		return err
 	}
+	c.plainData = map[string]bool{}
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.FunctionDecl:
@@ -363,6 +376,7 @@ func (c *Checker) MissingMoveMarkers(program *ast.Program) ([]MissingMarker, err
 // every independent move error at once. Setup phases still fail fast.
 func (c *Checker) CheckAll(program *ast.Program) []error {
 	c.result = newResult()
+	c.plainData = nil
 	c.deinitOwners = ast.DeinitOwners(program)
 	c.releaseAllocators = ast.ReleaseNamesAllocator(program)
 	c.declaredDeinits = ast.DeclaredDeinits(program)
@@ -378,6 +392,7 @@ func (c *Checker) CheckAll(program *ast.Program) []error {
 	if err := c.collectFunctions(program); err != nil {
 		return []error{err}
 	}
+	c.plainData = map[string]bool{}
 	var errs []error
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
@@ -717,7 +732,7 @@ func (c *Checker) defineParams(fn *functionInfo, env *scope, subst map[string]st
 		if param.IsType() {
 			continue
 		}
-		env.define(c.newBinding(param.Name, typ.Text(param.Type)))
+		c.define(env, c.newBinding(param.Name, typ.Text(param.Type)))
 	}
 	for idx, param := range fn.sig.Params {
 		typeName := fn.params[idx].typeName
@@ -748,7 +763,7 @@ func (c *Checker) defineParams(fn *functionInfo, env *scope, subst map[string]st
 		// locals), and a consume primitive keeps its value by design
 		// (ADR-0091): neither carries a consume obligation.
 		value.consumeExempt = receiver || isConsumePrimitive(fn.name)
-		env.define(value)
+		c.define(env, value)
 	}
 	return nil
 }
@@ -1149,7 +1164,7 @@ func (c *Checker) validateErrDeferReceivers(env *scope) ([]ast.Expression, error
 		if entry.id == 0 {
 			continue
 		}
-		value, exists := env.lookupID(entry.id)
+		value, exists := env.lookupNamedID(entry.name, entry.id)
 		if !exists {
 			continue
 		}
@@ -1297,7 +1312,8 @@ type loopStart struct {
 func (c *Checker) checkOwnersConsumed(env *scope, sinceID int, exit leakExit) error {
 	errorPath := exit.kind == exitTry || exit.kind == exitErrorReturn
 	var leaked *binding
-	env.walkBindings(func(value *binding) {
+	// Only a value whose type carries a deinit contract can need consuming.
+	env.walkOwners(func(value *binding) {
 		if value.id <= sinceID || !c.bindingNeedsConsume(value) {
 			return
 		}
@@ -1768,7 +1784,7 @@ func (c *Checker) checkLetStmtForm(stmt *ast.LetStmt, env *scope) error {
 	if err := c.attachAllocProvenance(value); err != nil {
 		return err
 	}
-	env.define(value)
+	c.define(env, value)
 	return nil
 }
 
@@ -2051,7 +2067,7 @@ func (c *Checker) checkReturnedBorrowLetStmt(
 	if err := c.attachAllocProvenance(value); err != nil {
 		return err
 	}
-	env.define(value)
+	c.define(env, value)
 	return nil
 }
 
@@ -2074,7 +2090,7 @@ func (c *Checker) checkExplicitReturnedBorrowLetStmt(
 	if err := c.bindBorrowSources(value, sources, mutable); err != nil {
 		return err
 	}
-	env.define(value)
+	c.define(env, value)
 	return nil
 }
 
@@ -2417,7 +2433,7 @@ func (c *Checker) checkStringViewLetStmt(
 	value.localBorrow = true
 	value.borrowTargets = []borrowSource{{target: target, field: path}}
 	value.mutBorrow = mutable
-	env.define(value)
+	c.define(env, value)
 	return nil
 }
 
@@ -2761,7 +2777,7 @@ func (c *Checker) checkBoxBorrowLetStmt(
 	value.localBorrow = true
 	value.borrowTargets = []borrowSource{{target: target, field: field}}
 	value.mutBorrow = mutable
-	env.define(value)
+	c.define(env, value)
 	return nil
 }
 
@@ -2842,7 +2858,7 @@ func (c *Checker) checkBorrowLetStmt(
 	value.localBorrow = true
 	value.borrowTargets = []borrowSource{{target: target, field: field}}
 	value.mutBorrow = mutable
-	env.define(value)
+	c.define(env, value)
 	return nil
 }
 
@@ -3401,7 +3417,7 @@ func (c *Checker) defineIfErrCapture(stmt *ast.IfStmt, condType string, rightSco
 	errName, _, _ := c.errorUnionParts(condType)
 	errBinding := c.newBinding(stmt.ErrCapture, errName)
 	errBinding.declSpan = expressionSpan(stmt.Condition)
-	rightScope.define(errBinding)
+	c.define(rightScope, errBinding)
 }
 
 // checkLoopConsumesNothingOutside rejects a loop body that consumes a binding
@@ -3616,7 +3632,7 @@ func (c *Checker) defineCapture(
 		if err != nil {
 			return false, err
 		}
-		body.define(capture)
+		c.define(body, capture)
 		return false, nil
 	}
 	capture := c.newCaptureBinding(name, condType, cond)
@@ -3630,7 +3646,7 @@ func (c *Checker) defineCapture(
 			return false, err
 		}
 	}
-	body.define(capture)
+	c.define(body, capture)
 	return consumes, nil
 }
 
@@ -3793,7 +3809,7 @@ func (c *Checker) checkForStmt(stmt *ast.ForStmt, env *scope) error {
 		return err
 	}
 	enter := func(_, child *scope) error {
-		child.define(c.newBinding(stmt.Name, "i64"))
+		c.define(child, c.newBinding(stmt.Name, "i64"))
 		return nil
 	}
 	leave := func(*scope) error { return nil }
@@ -4136,7 +4152,7 @@ func (c *Checker) defineMatchArmPayload(
 			return err
 		}
 		if tied {
-			child.define(value)
+			c.define(child, value)
 			return nil
 		}
 	}
@@ -4147,7 +4163,7 @@ func (c *Checker) defineMatchArmPayload(
 	if !owned {
 		value.borrowedParam = true
 	}
-	child.define(value)
+	c.define(child, value)
 	return nil
 }
 
@@ -7755,7 +7771,7 @@ func (c *Checker) checkRawPointerBorrowLetStmt(stmt *ast.LetStmt, env *scope) (b
 	value.borrowedParam = true
 	value.localBorrow = true
 	value.mutBorrow = prefix.Operator == "&var"
-	env.define(value)
+	c.define(env, value)
 	return true, nil
 }
 
@@ -7788,7 +7804,7 @@ func (c *Checker) checkRawViewLetStmt(stmt *ast.LetStmt, env *scope) (bool, erro
 	value.borrowedParam = true
 	value.localBorrow = true
 	value.mutBorrow = ident.Name == "mut_view_from_ptr"
-	env.define(value)
+	c.define(env, value)
 	return true, nil
 }
 
@@ -8278,11 +8294,25 @@ func (c *Checker) checkMethodCallExpr(
 	if typ, ok, err := c.checkDirectFieldReceiverMethod(field, args, env); ok || err != nil {
 		return typ, err
 	}
-	if typ, ok, err := c.checkBoxReceiverExpr(field, args, env); ok || err != nil {
+	// The receiver is read once and its type handed to both receiver forms
+	// below. Reading it per form re-checked the whole receiver chain at every
+	// level of `a.f(x).g(y)...`, which grew as 2^depth, and the second read
+	// saw the first one's moves.
+	receiverType, err := c.readExpr(field.Receiver, env)
+	if err != nil {
+		// Only a copy temporary reports its read error; any other receiver
+		// form says what is wrong with it as a receiver.
+		if _, ok := field.Receiver.(*ast.CallExpr); ok {
+			return "", err
+		}
+		return c.checkLocalReceiverMethod(field, args, env)
+	}
+	if typ, ok, err := c.checkBoxReceiverExpr(field, receiverType, args, env); ok || err != nil {
 		return typ, err
 	}
-	if typ, ok, err := c.checkCopyTemporaryReceiverMethod(field, args, env); ok || err != nil {
-		return typ, err
+	result, ok, err := c.checkCopyTemporaryReceiverMethod(field, receiverType, args, env)
+	if ok || err != nil {
+		return result, err
 	}
 	return c.checkLocalReceiverMethod(field, args, env)
 }
@@ -8294,15 +8324,12 @@ func (c *Checker) checkMethodCallExpr(
 // still need one.
 func (c *Checker) checkCopyTemporaryReceiverMethod(
 	field *ast.FieldExpr,
+	receiverType string,
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
 	if _, ok := field.Receiver.(*ast.CallExpr); !ok {
 		return "", false, nil
-	}
-	receiverType, err := c.readExpr(field.Receiver, env)
-	if err != nil {
-		return "", true, err
 	}
 	if !c.isCopyType(receiverType) {
 		return "", false, nil
@@ -8549,13 +8576,10 @@ func (c *Checker) checkDirectFieldReceiverByType(
 // checkBoxReceiverExpr validates methods on local Box values and direct Box fields.
 func (c *Checker) checkBoxReceiverExpr(
 	field *ast.FieldExpr,
+	typeName string,
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
-	typeName, err := c.readExpr(field.Receiver, env)
-	if err != nil {
-		return "", false, nil
-	}
 	base, _, ok := splitGenericType(typeName)
 	if !ok || base != "std::mem::Box" {
 		return "", false, nil
@@ -9636,9 +9660,27 @@ func (c *Checker) isPlainDataType(typeName string, seen map[string]bool) bool {
 	return c.isPlainDataAggregate(typeName, seen)
 }
 
-// isPlainDataAggregate walks a declared struct / union for isPlainDataType.
-// A declared deinit keeps the type move-only regardless of its fields.
+// isPlainDataAggregate walks a declared struct / union for isPlainDataType,
+// remembering the answer once declarations are complete. A type reached
+// twice through different fields -- `struct D { a: E, b: E }` -- is walked
+// once, not once per path. A true answer met no cut on seen, and a false one
+// from the root of a walk had no path above it, so both hold anywhere; a
+// false one inside a walk may come from that walk's path and is not kept.
 func (c *Checker) isPlainDataAggregate(typeName string, seen map[string]bool) bool {
+	if plain, ok := c.plainData[typeName]; ok {
+		return plain
+	}
+	root := len(seen) == 0
+	plain := c.walkPlainDataAggregate(typeName, seen)
+	if c.plainData != nil && (plain || root) {
+		c.plainData[typeName] = plain
+	}
+	return plain
+}
+
+// walkPlainDataAggregate checks the fields or payloads of a declared struct /
+// union. A declared deinit keeps the type move-only regardless of its fields.
+func (c *Checker) walkPlainDataAggregate(typeName string, seen map[string]bool) bool {
 	fields, isStruct := c.structs[typeName]
 	variants, isUnion := c.unions[typeName]
 	if (!isStruct && !isUnion) || c.implMethod(typeName, "deinit") != nil {
@@ -9790,9 +9832,49 @@ func (s *scope) child() *scope {
 	return newScope(s)
 }
 
-// define binds a local name in the current scope.
+// define binds a local name in the current scope. A name already bound here
+// is replaced, and so leaves the scope's owners.
 func (s *scope) define(value *binding) {
+	if prev, ok := s.values[value.name]; ok && prev.ownerType {
+		for index, owner := range s.owners {
+			if owner == prev {
+				s.owners = append(s.owners[:index], s.owners[index+1:]...)
+				break
+			}
+		}
+	}
 	s.values[value.name] = value
+	if value.ownerType {
+		s.owners = append(s.owners, value)
+	}
+}
+
+// define binds value in env, recording first whether its type owes cleanup.
+func (c *Checker) define(env *scope, value *binding) {
+	value.ownerType = c.valueTypeNeedsConsume(value.typeName)
+	env.define(value)
+}
+
+// walkOwners visits the bindings of this scope chain whose type carries a
+// deinit contract.
+func (s *scope) walkOwners(visit func(*binding)) {
+	for cur := s; cur != nil; cur = cur.parent {
+		for _, value := range cur.owners {
+			visit(value)
+		}
+	}
+}
+
+// lookupNamedID resolves the binding bound to name with this id. A binding is
+// bound under its own name, so this answers what lookupID does while reading
+// one map entry per scope.
+func (s *scope) lookupNamedID(name string, id int) (*binding, bool) {
+	for cur := s; cur != nil; cur = cur.parent {
+		if value, ok := cur.values[name]; ok && value.id == id {
+			return value, true
+		}
+	}
+	return nil, false
 }
 
 // lookup resolves a local name by walking parent scopes.
@@ -10205,6 +10287,9 @@ func (s *scope) clone() *scope {
 		copyValue.borrowTargets = append([]borrowSource(nil), value.borrowTargets...)
 		cloned.values[name] = &copyValue
 	}
+	for _, owner := range s.owners {
+		cloned.owners = append(cloned.owners, cloned.values[owner.name])
+	}
 	return cloned
 }
 
@@ -10267,20 +10352,6 @@ func (s *scope) collectBindings(out map[int]*binding) {
 	s.walkBindings(func(value *binding) {
 		out[value.id] = value
 	})
-}
-
-// lookupID finds the binding with this id, innermost scope first. A clone
-// keeps the id of the binding it copied, so this reaches the current state of
-// a value even where a later `let` of the same name hides it from lookup.
-func (s *scope) lookupID(id int) (*binding, bool) {
-	for cur := s; cur != nil; cur = cur.parent {
-		for _, value := range cur.values {
-			if value.id == id {
-				return value, true
-			}
-		}
-	}
-	return nil, false
 }
 
 // walkBindings visits all bindings in this scope chain.
