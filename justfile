@@ -135,6 +135,18 @@ spec-verify:
 spec-quint:
     scripts/spec-quint.sh
 
+# Test the internal/ir models, search them for a broken property, and resample the
+# programs internal/ir replays against the lowerer and the optimizer (spec/ir/README.md).
+spec-ir:
+    cd spec/ir && quint test slots_test.qnt && quint test bounds_test.qnt && quint test defer_test.qnt
+    cd spec/ir && quint run slots.qnt --backend rust --seed 0x1 --max-samples 2000 --max-steps 20 \
+        --invariant soundness
+    cd spec/ir && quint run bounds.qnt --backend rust --seed 0x1 --max-samples 1000 --max-steps 20 \
+        --invariant soundness
+    cd spec/ir && quint run defer.qnt --backend rust --seed 0x1 --max-samples 1000 --max-steps 20 \
+        --invariant soundness
+    go run ./scripts/ir-mbt
+
 # Regenerate the traces from the Lean specifications (spec/README.md).
 spec-trace:
     cd spec && lean --run Ledger.lean > ../examples/fixtures/ledger_trace.json
