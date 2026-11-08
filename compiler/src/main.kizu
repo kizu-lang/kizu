@@ -1694,7 +1694,8 @@ fn lower_target(
 
 /// Exposes the root module main as the native entrypoint, the Go
 /// `addPackageMain`, so a package uses the same entry rule as a single
-/// file: `fn main`. It writes IR by hand, so it verifies what it produced.
+/// file: `fn main`. It writes IR by hand, so it verifies what it produced:
+/// the one function it added, since lowering already verified the rest.
 fn add_package_main(allocator: Allocator, module: &var ir::Module, entry: []u8) -> !?diagnostic::Diagnostic {
     if module.function_named("main") |_| {
         return null;
@@ -1724,7 +1725,7 @@ fn add_package_main(allocator: Allocator, module: &var ir::Module, entry: []u8) 
     let call = module.blank_instr(result, ir::Op::Call, callee, ir::empty_name());
     let _ = try module.add_instr(allocator, block, move call);
     module.set_terminator(block, ir::return_terminator(result));
-    return ir::verify(allocator, module);
+    return ir::verify_appended(allocator, module, main_function);
 }
 
 /// Reports whether path names a package root: a directory or a manifest.
@@ -2510,7 +2511,10 @@ fn add_test_main(allocator: Allocator, module: &var ir::Module, seed: ?i64) -> !
     let ok_instr = module.blank_instr(ok, ir::Op::ErrorOk, ir::empty_name(), ir::empty_name());
     let _ = try module.add_instr(allocator, block, move ok_instr);
     module.set_terminator(block, ir::return_terminator(ok));
-    return ir::verify(allocator, module);
+    // Lowering verified the rest, and dropping a main it had takes away only
+    // a declaration calls were checked against, so the new main is all that
+    // is left to check.
+    return ir::verify_appended(allocator, module, main_function);
 }
 
 /// Runs a linked executable with the arguments after `--` and returns its
