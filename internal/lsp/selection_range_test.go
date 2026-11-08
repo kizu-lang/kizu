@@ -17,7 +17,6 @@ func TestSelectionRangeExpandsOutward(t *testing.T) {
 		t.Fatalf("selectionRanges = %#v, want one non-nil hierarchy", ranges)
 	}
 
-	// Innermost node covers the identifier itself.
 	innermost := ranges[0]
 	if got := textIn(source, innermost.Range); got != "inspect" {
 		t.Fatalf("innermost range covers %q, want %q", got, "inspect")
