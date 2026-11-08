@@ -4421,6 +4421,9 @@ func (c *Checker) checkBorrowPrefix(
 		if err := requireMutableBorrowArg(expr.Right, typ, env); err != nil {
 			return "", false, err
 		}
+		if err := c.requireUnsafeFieldLend(expr.Right, env, unsafe); err != nil {
+			return "", false, err
+		}
 	}
 	return typ, mutable, nil
 }
@@ -4964,7 +4967,7 @@ func (c *Checker) checkFuncPointerCall(
 				return "", err
 			}
 		}
-		got, err := c.checkContextualExpr(checkedArg, want, env, unsafe)
+		got, err := c.checkLentArg(checkedArg, want, wantMutable, env, unsafe)
 		if err != nil {
 			return "", err
 		}
@@ -7212,7 +7215,7 @@ func (c *Checker) checkGenericUserArg(
 			return err
 		}
 	}
-	got, err := c.checkContextualExpr(checkedArg, want, env, unsafe)
+	got, err := c.checkLentArg(checkedArg, want, fn.mutBorrowParams[idx], env, unsafe)
 	if err != nil {
 		return err
 	}
@@ -7338,6 +7341,9 @@ func (c *Checker) checkCVariadicBorrowArg(
 		return err
 	}
 	if c.isExternStruct(got) {
+		if prefix.Operator == "&var" {
+			return c.requireUnsafeFieldLend(target, env, unsafe)
+		}
 		return nil
 	}
 	return errorf("type error: arg %d of `%s` borrows %s, which a C variadic argument"+
@@ -7391,7 +7397,7 @@ func (c *Checker) checkUserCallArg(
 			return err
 		}
 	}
-	got, err := c.checkContextualExpr(checkedArg, fn.params[idx], env, unsafe)
+	got, err := c.checkLentArg(checkedArg, fn.params[idx], fn.mutBorrowParams[idx], env, unsafe)
 	if err != nil {
 		return err
 	}
@@ -8882,6 +8888,9 @@ func (c *Checker) checkMethodArgs(
 		if err := requireMutableSelfReceiver(method, receiverExpr, env); err != nil {
 			return "", err
 		}
+		if err := c.requireUnsafeFieldLend(receiverExpr, env, unsafe); err != nil {
+			return "", err
+		}
 	}
 	return c.checkCallableArgs(method, 1, span, args, env, unsafe)
 }
@@ -8955,7 +8964,7 @@ func (c *Checker) checkCallableArgs(
 				return "", err
 			}
 		}
-		got, err := c.checkContextualExpr(checkedArg, want, env, unsafe)
+		got, err := c.checkLentArg(checkedArg, want, method.mutBorrowParams[idx+offset], env, unsafe)
 		if err != nil {
 			return "", err
 		}

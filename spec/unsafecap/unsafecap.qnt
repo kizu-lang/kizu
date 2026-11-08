@@ -37,7 +37,7 @@ module unsafecap {
   const UNSAFE_FN_BODY_COVERED: bool
   // A function pointer binding takes any function, whatever its type says.
   const LOOSE_FN_TYPES: bool
-  // Lending `&var b.n` is not a write to `b.n` (what the checker does: findings F1).
+  // Lending `&var b.n` is not a write to `b.n` (the checker before #1925: findings F1).
   const BORROW_IS_NOT_WRITE: bool
   // Whether the generator writes `setn(&var b.n)` at all.
   const GEN_FIELD_BORROW: bool
@@ -604,7 +604,7 @@ module mutantLooseFnTypes {
   ).*
 }
 
-// The checker as it is: lending `&var b.n` is not charged as a write.
+// The checker before #1925: lending `&var b.n` is not charged as a write.
 module asImplemented {
   import unsafecap(
     INHERIT_CALLER_MARK = false,

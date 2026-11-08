@@ -2310,6 +2310,10 @@ fileの中だけに閉じます。別fileでは `unsafe` を付けても拒否�
 不変条件を作る操作 —— 構築と field への書き込み —— には `unsafe` が要ります。
 field の読みには要りません。読み出した raw pointer は、それを使う操作の側が
 `unsafe` を要求します。
+field を `&var` で貸すこと —— `set(&var b.len)`、`let r = &var b.len;`、field に
+対する `&var self` method の呼び出し —— は field への書き込みに含みます。借り手が
+何を書くかは呼び先を跨いで追えないので、貸した時点を書き込みとします。`&` での
+貸し出しは読みです。
 
 ```kizu
 fn size(b: &Bytes) -> usize {
@@ -2496,7 +2500,7 @@ fn update(node: ptr<Node>) -> void {
 | `ptr_view` | `view_from_ptr(p, count)` / `mut_view_from_ptr(p, count)` |
 | `extern_call` | `extern "..." fn` call / C 関数 pointer を通した call |
 | `unsafe_call` | `unsafe fn` call |
-| `struct_invariant` | `unsafe struct` の構築 / field write |
+| `struct_invariant` | `unsafe struct` の構築 / field write(`&var` での field の貸し出しを含む) |
 | `volatile` | volatile read/write primitive |
 
 この表の名前はソースには書きません。マーカーは `unsafe` の 1 語で、種類は

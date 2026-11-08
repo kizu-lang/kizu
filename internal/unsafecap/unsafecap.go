@@ -46,7 +46,8 @@ var capabilities = []Info{
 	{
 		Name: "struct_invariant",
 		ShortPermit: "covers establishing or changing the invariant of an " +
-			"`unsafe struct`, which is its construction and its field writes",
+			"`unsafe struct`, which is its construction, its field writes, " +
+			"and `&var` borrows of its fields",
 	},
 	{
 		Name:        "unsafe_call",
