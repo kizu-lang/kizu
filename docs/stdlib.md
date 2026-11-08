@@ -17,10 +17,10 @@ std からしか届かず、user code からの直接呼び出しは拒否され
 
 | 領域 | trusted primitive | 上に載る Kizu API |
 | --- | --- | --- |
-| memory | `mem_page_allocator`、`mem_fixed_buffer`、`mem_allocator_from`、`mem_len` | `std::mem` |
+| memory | `mem_page_allocator`、`mem_fixed_buffer`、`mem_allocator_from`、`mem_len`、`mem_compare`、`mem_size_of` | `std::mem` |
 | storage | `array_*`、`map_*`、`arena_*`、`box_*` | `std::array`、`std::map`、`std::arena`、`std::mem::Box` |
 | host I/O | `io_*`、`fs_*`、`net_*`、`process_*`、`crypto_random_into` | `std::io`、`std::fs`、`std::net`、`std::process`、`std::crypto::random_bytes` |
-| 実行 | `coro_*`、`task_*` | `std::coro`、`std::io` の `async` / `TaskSet` |
+| 実行 | `coro_*`、`task_*`、`thread_*` | `std::coro`、`std::io` の `async` / `TaskSet`、`std::thread` |
 | trap | `panic`、`test_fail`、`test_fail_equal<T>` | `std::json` の誤用 trap、`std::testing` |
 | test | `test_seed`、`test_seed_set` | `std::testing::seed`(`kizu test --seed`) |
 | diagnostic | `print_line` | `std::fmt::print`(builtin `print` の body、SPEC §14.1) |
