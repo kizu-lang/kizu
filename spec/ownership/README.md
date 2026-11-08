@@ -83,19 +83,47 @@ internal/ownership/mbt_test.go      fixture を Kizu にして checker に当て
 
 ## モデルベーステスト
 
-生成器には 3 つのモードがあり、どれも `--invariant soundness` を検査しながら走ります。
+生成器には 4 つのモードがあり、どれも `--invariant soundness` を検査しながら走ります。
 
 * `initGuided`: 規則を 1 つも破らない文だけを足す。受理されるプログラム、特に
   入れ子ループと持ち越し読みを含むものが多く出ます。
 * `initOneMistake`: 規則違反をちょうど 1 回まで許す。診断が 1 クラスに決まる
   プログラムで、checker がどの規則を適用したかを最もよく区別します。
 * `initFree`: 何でも足す。複数の誤りが重なる形。
+* `initTargeted`: 最初に診断クラスの組(`TARGETS`、実現できる 23 通り)を 1 つ選び、
+  その組の規則だけを破り、ちょうどその組で終わるプログラムだけを完成させる。
+  半分の実行は単一クラス(`SINGLE_TARGETS`)から選びます。
+
+`initTargeted` は結果の種類での層化です。他のモードでは結果の分布が「どの文を
+足すと何が壊れやすいか」で決まり、`Leak` と `UseAfterMove` が大半を占めます。
+seed `0x1` の 3,000 回で `Borrowed` だけ / `DoubleDefer` だけで終わる実行は `initFree` で
+9 / 12、`initOneMistake` で 44 / 23、`initTargeted` で 111 / 112 です。sweep 全体の
+相異なるプログラムでは、旧来の 2,049 本のうち `Borrowed` だけ 21、`DoubleDefer` だけ 15、
+`Borrowed+DoubleDefer` 3、`DoubleDefer+Leak` 2 だったものが、506 / 417 / 26 / 34 に
+なりました。
+
+simulator は `any` の有効な枝を等しく選ぶので、重みは枝の構造で付けます。
+
+* `step` は `any { aim, prepare, any { 通常の文 } }` の入れ子です。targeted の実行では
+  `aim`(目標の規則を新たに破る文)と `prepare`(目標の規則が破れる前提: `defer`、
+  view / borrow、ループ、consume)が、それぞれ通常の文すべてと同じ重みで選ばれます。
+  他のモードでは 2 つは無効で、`step` は前と同じ一様な選択です。
+* `initTargeted` の単一クラス / 全体の半々は `nondet roll` で付けます。
 
 `scripts/ownership-mbt` は各モード × seed の trace から完成したプログラムを重複なく
 集め、「予測された診断クラスの組 × 使っている構文(`loop` / `while` / `nested` /
-`carried` / `defer` / `unrelated` / `mutate`)」の bucket に分け、bucket ごとに 1 本だけ
-残します。何千回の実行で埋まる bucket も、まれな分岐で 1 回だけ埋まる bucket も
-同じ重みになります。
+`carried` / `defer` / `unrelated` / `mutate` / `short`)」の bucket に分け、bucket ごとに
+1 本だけ残します。何千回の実行で埋まる bucket も、まれな分岐で 1 回だけ埋まる bucket も
+同じ重みになります。`short` は 2 文以下のプログラム(生成器の境界)で、長いものと
+同じ bucket にあると hash の選択でほぼ残らないので分けています。最後にモードごとの
+完成数と、診断クラスの組ごとのプログラム数・bucket 数を表示します。
+
+seed は 32 bit に散らして渡します。rust backend では隣り合う seed(`0x1` と `0x2`)の
+実行列が数十本目から一致し、旧来の 3 seed は実質 1.5 seed 分しか探索していません
+でした(`initGuided` の相異なるプログラムは同じ 3,000 回で 979 本 → 1,612 本)。
+`--max-samples` を 10,000 にすると quint(node)が trace を書く前に 4 GB の heap を
+使い切るので、広げるときは `-seeds` を増やします。trace は 1 回の実行ごとに読んで
+消します。
 
 `mbt_test.go` は各プログラムを Kizu にし、`kizu check` と同じ type check → ownership
 check を in-process で走らせ、診断の文面をクラスに分類して比べます。不一致は
@@ -110,10 +138,25 @@ fixture に当てられます。
 
 ### 規模と結果(2026-11-08)
 
-* checked-in fixture: 相異なる 2,049 本から 490 本(受理 56、単一クラス 112、
-  複数クラス 322)。in-process で約 7.5 秒。食い違い **0**。
-* 一回限りの広いスイープ: 相異なる 2,880 本(入れ子 1,857 本、`while` 1,816 本、
-  持ち越し読み 949 本)。食い違い **0**。
+* 生成: 4 モード × 3 seed × 3,000 回(36,000 trace、旧 3 モード × 3 × 1,000 = 9,000)。
+  相異なる 16,697 本、1,034 bucket(旧 2,049 本、490 bucket)。`just spec-ownership`
+  全体で約 113 秒(旧 約 34 秒)。
+* checked-in fixture: 1,034 本。in-process で約 5.4 秒(旧 490 本で約 2.6 秒)。
+  食い違い **0**。
+* 一回限りの広いスイープ(`-seeds 10 -per 1000000`): 相異なる 54,020 本、1,178 bucket。
+  生成 約 310 秒、replay 約 253 秒。食い違い **0**。
+* mutant 確認(一時的に壊して戻したもの。食い違いの本数は 旧 fixture → 新 fixture):
+
+  | 壊したもの | 旧 | 新 |
+  | --- | --- | --- |
+  | checker: 2 つ目の `defer` を許す | 9 | 44 |
+  | checker: `try` の error exit の leak を見ない | 17 | 41 |
+  | checker: ループ内の consume を許す | 1 | 3 |
+  | checker: 借用中の `move` を許す | 2 | 14 |
+  | モデル: ループ本体の `defer` がターン終了時に借用中でも `Borrowed` にしない(F1) | 1 | 4 |
+
+  最後のものは `soundness` では見つかりません(どのプログラムも `LoopConsume` で
+  拒否されるので受理の集合が変わらない)。
 * ハーネスの自己検証: #1913 の修正前(`eb407c46^`)の checker に同じ test を当てると、
   広いスイープで 230 本、checked-in fixture で 20 本、既知形で 5 本(#1913 の 4 形と
   入れ子の 1 形)が食い違います。どれもループ内の読みの後の `deinit` / `move` /
@@ -140,6 +183,8 @@ Quint を動かさず、checked-in の fixture だけを読みます。モデル
   checker をこの fixture に当てる経路は `go test` に入っていません(binary の build が要る)。
 * **`&var` / `as_mut_bytes`、`if` / `match`、field path 借用、`errdefer`** への拡張(範囲の節)。
 * **複数クラスの予測が多い**。誤りが重なるプログラムは受理 / 拒否しか鋭く区別しない
-  ので、`initOneMistake` の比率を上げるか、bucket を予測クラスの数で重み付けする余地が
-  あります。受理側で `mutate` を含むものは少なめです(`mutate` の前に `defer` が要る)。
+  ので、`LoopConsume` を外す mutant は 3 本でしか落ちません(ループ内の consume は
+  次のターンの `UseAfterMove` を必ず伴い、checker はそちらを先に報告しうる)。
+* **targeted の完成率**。目標ごとに 5〜77% で、`Borrowed+DoubleDefer` が最も低い。
+  完成しない実行は MAX_LEN までに目標へ届かず止まるもので、数で補っています。
 * **`quint verify`(Apalache)による網羅検査**。Java が無い環境ではランダム探索だけです。
