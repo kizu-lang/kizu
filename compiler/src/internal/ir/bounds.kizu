@@ -1,6 +1,7 @@
 import std::array;
 import std::fmt;
 import std::map;
+import std::mem;
 import std::string;
 
 // Mechanical port of internal/ir/bounds.go: removing the index checks a
@@ -916,7 +917,7 @@ fn apply_bounds_plan(allocator: Allocator, module: &var Module, function: Functi
     if plan.aliases.len() > 0 {
         try replace_function_values(allocator, module, function, &plan.aliases);
     }
-    var site = 0;
+    var site = last_bounds_site(module, function);
     var present = map::new<i64, bool>(allocator);
     defer present.deinit(allocator);
     var position = 0;
@@ -966,6 +967,38 @@ fn apply_bounds_plan(allocator: Allocator, module: &var Module, function: Functi
         }
     }
     return;
+}
+
+/// Returns the highest site an earlier pass already spelled into a
+/// %bce<site>. name in the function, so a later pass numbers after it rather
+/// than defining a value twice, the Go `lastBoundsSite`.
+fn last_bounds_site(module: &Module, function: Function) -> i64 {
+    var last = 0;
+    var position = 0;
+    while function_block_at(module, function, position) |block| {
+        position = position + 1;
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let node = module.instrs.at(instr.node);
+            let text = name_text(&module.names, node.result.name);
+            let bytes = text.as_bytes();
+            if !mem::starts_with(bytes, "%bce") {
+                continue;
+            }
+            let length = mem::len(bytes);
+            var index = 4;
+            var site = 0;
+            while index < length and bytes[index] >= cast<u8>(48) and bytes[index] <= cast<u8>(57) {
+                site = site * 10 + cast<i64>(bytes[index] - cast<u8>(48));
+                index = index + 1;
+            }
+            if site > last {
+                last = site;
+            }
+        }
+    }
+    return last;
 }
 
 /// Reports whether an instruction is an opt.has of a borrow known present.
