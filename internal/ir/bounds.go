@@ -505,7 +505,7 @@ func applyBoundsPlan(fn *Function, plan boundsPlan) {
 	if len(plan.aliases) > 0 {
 		replaceFunctionValues(fn, plan.aliases)
 	}
-	site := 0
+	site := lastBoundsSite(fn)
 	present := map[string]bool{}
 	for _, block := range fn.Blocks {
 		out := make([]*Instr, 0, len(block.Instrs))
@@ -534,6 +534,27 @@ func applyBoundsPlan(fn *Function, plan boundsPlan) {
 			}
 		}
 	}
+}
+
+// lastBoundsSite returns the highest site an earlier pass already spelled into
+// a %bce<site>. name in the function, so a later pass numbers after it rather
+// than defining a value twice (the wasm pipeline runs the pass twice).
+func lastBoundsSite(fn *Function) int {
+	last := 0
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			rest, ok := strings.CutPrefix(instr.Result.Name, "%bce")
+			if !ok {
+				continue
+			}
+			site := 0
+			for i := 0; i < len(rest) && rest[i] >= '0' && rest[i] <= '9'; i++ {
+				site = site*10 + int(rest[i]-'0')
+			}
+			last = max(last, site)
+		}
+	}
+	return last
 }
 
 // answeredAccess returns the instructions an Array operation with an answered
