@@ -332,12 +332,32 @@ fn (self: &var Checker) release_last_use_borrows(
     statement_index: i64,
     last_uses: &map::Map<[]u8, i64>
 ) -> !void {
+    // Only the scope's borrowers can have targets to release. A release only
+    // lowers borrow counts, so the bindings it unblocks end up released
+    // whatever order they are visited in.
     var index = 0;
-    while self.store.scope_value_at(env, index) |value| {
-        try self.release_if_unused(env, value, statement_index, last_uses);
+    while self.store.scope_borrower_at(env, index) |value| {
+        if self.is_local_binding(env, value) {
+            try self.release_if_unused(env, value, statement_index, last_uses);
+        }
         index = index + 1;
     }
-    return;
+    var keep = array::new<bool>(self.allocator);
+    defer keep.deinit(self.allocator);
+    index = 0;
+    while self.store.scope_borrower_at(env, index) |value| {
+        try keep.append(self.allocator,
+            self.has_borrow_targets(value) and self.is_local_binding(env, value));
+        index = index + 1;
+    }
+    return self.store.retain_scope_borrowers(env, &keep);
+}
+
+/// Reports whether value is what its own name is bound to in env, the Go
+/// `s.values[value.name] == value`: false once a later define shadowed it.
+fn (self: &Checker) is_local_binding(env: ScopeHandle, value: BindingHandle) -> bool {
+    let held = self.lookup_local_name(env, self.binding(value).name) orelse return false;
+    return held.node == value.node;
 }
 
 /// Releases one binding's borrow targets once it is past its last use and
