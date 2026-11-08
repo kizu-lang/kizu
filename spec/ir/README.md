@@ -135,14 +135,21 @@ slots / defer は 2 本、bounds は 1 本残します(bounds は 1 本あたり
 * slots: #1914 修正前(`1c3db9a7^`)の lowerer に同じ test を当てると、checked-in の
   283 本のうち `name-differs` bucket の 100 本ちょうどが食い違い、それ以外は 0 本。
   既知形 `issue1914/shared-methods-lend-nothing` も落ちます。
-* bounds / defer: 一時 worktree で本体に変異を入れて当てた結果(変異は commit していません)。
+* 本体に変異を 1 つずつ入れて当てた結果(変異は commit していません)。B3 の `next-index` と
+  D3 の `block-exit-order` は、fixture だけでは捕まえ方が薄い変異のために足した既知形です。
 
 | 変異 | 内容 | 食い違うプログラム |
 | --- | --- | --- |
+| S1 | `markLentMethodArgs` が引数の位置を receiver の分ずらさずに読む(`Params[index]`) | 131 本 + 既知形 1 |
+| S2 | `defer` の receiver を storage にしない(`errdefer` はそのまま) | 105 本 + 既知形 1 |
 | B1 | `leavesHeaders` が `array.pop` を header を変えないと扱う | 24 本 + 既知形 2 |
 | B2 | `i < n` から `i >= 0` も学ぶ | 11 本 + 既知形 1 |
+| B3 | `i < n` から `i + 1 < n` も学ぶ(`<` と `<=` の取り違え) | 19 本 + 既知形 1 |
+| B4 | 合流点で、dominator からの経路の pop / append を見ずに header の事実を引き継ぐ | 9 本 + 既知形 1 |
 | D1 | `break` / `continue` が loop 本体の frame の cleanup を飛ばす | 6 本 + 既知形 1 |
 | D2 | error return で errdefer を走らせない | 21 本 + 既知形 2 |
+| D3 | block を抜けるとき、その frame の defer を登録の順に走らせる | 5 本 + 既知形 1 |
+| D4 | 成功の `return` でも errdefer を走らせる | 84 本 + 既知形 1 |
 
 ## 実行方法
 
