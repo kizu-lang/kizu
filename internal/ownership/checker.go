@@ -202,6 +202,10 @@ type binding struct {
 	// borrow lands where argument borrows of the same place land.
 	fieldOwner     *binding
 	fieldOwnerName string
+	// ownerType records that typeName carries a deinit contract. The type
+	// never changes once the binding is defined, so the scope can keep its
+	// owners apart and an exit check reads only those.
+	ownerType bool
 }
 
 // allocTied reports an owner allocated from a frame-tied allocator: it keeps
@@ -244,6 +248,10 @@ type borrowSource struct {
 type scope struct {
 	parent *scope
 	values map[string]*binding
+	// owners holds the bound values whose type carries a deinit contract:
+	// the only ones an exit can leak. An exit check, run at every `try`,
+	// reads these instead of every binding in the chain.
+	owners []*binding
 }
 
 type directFieldReceiver struct {
@@ -724,7 +732,7 @@ func (c *Checker) defineParams(fn *functionInfo, env *scope, subst map[string]st
 		if param.IsType() {
 			continue
 		}
-		env.define(c.newBinding(param.Name, typ.Text(param.Type)))
+		c.define(env, c.newBinding(param.Name, typ.Text(param.Type)))
 	}
 	for idx, param := range fn.sig.Params {
 		typeName := fn.params[idx].typeName
@@ -755,7 +763,7 @@ func (c *Checker) defineParams(fn *functionInfo, env *scope, subst map[string]st
 		// locals), and a consume primitive keeps its value by design
 		// (ADR-0091): neither carries a consume obligation.
 		value.consumeExempt = receiver || isConsumePrimitive(fn.name)
-		env.define(value)
+		c.define(env, value)
 	}
 	return nil
 }
@@ -1156,7 +1164,7 @@ func (c *Checker) validateErrDeferReceivers(env *scope) ([]ast.Expression, error
 		if entry.id == 0 {
 			continue
 		}
-		value, exists := env.lookupID(entry.id)
+		value, exists := env.lookupNamedID(entry.name, entry.id)
 		if !exists {
 			continue
 		}
@@ -1304,7 +1312,8 @@ type loopStart struct {
 func (c *Checker) checkOwnersConsumed(env *scope, sinceID int, exit leakExit) error {
 	errorPath := exit.kind == exitTry || exit.kind == exitErrorReturn
 	var leaked *binding
-	env.walkBindings(func(value *binding) {
+	// Only a value whose type carries a deinit contract can need consuming.
+	env.walkOwners(func(value *binding) {
 		if value.id <= sinceID || !c.bindingNeedsConsume(value) {
 			return
 		}
@@ -1775,7 +1784,7 @@ func (c *Checker) checkLetStmtForm(stmt *ast.LetStmt, env *scope) error {
 	if err := c.attachAllocProvenance(value); err != nil {
 		return err
 	}
-	env.define(value)
+	c.define(env, value)
 	return nil
 }
 
@@ -2058,7 +2067,7 @@ func (c *Checker) checkReturnedBorrowLetStmt(
 	if err := c.attachAllocProvenance(value); err != nil {
 		return err
 	}
-	env.define(value)
+	c.define(env, value)
 	return nil
 }
 
@@ -2081,7 +2090,7 @@ func (c *Checker) checkExplicitReturnedBorrowLetStmt(
 	if err := c.bindBorrowSources(value, sources, mutable); err != nil {
 		return err
 	}
-	env.define(value)
+	c.define(env, value)
 	return nil
 }
 
@@ -2424,7 +2433,7 @@ func (c *Checker) checkStringViewLetStmt(
 	value.localBorrow = true
 	value.borrowTargets = []borrowSource{{target: target, field: path}}
 	value.mutBorrow = mutable
-	env.define(value)
+	c.define(env, value)
 	return nil
 }
 
@@ -2768,7 +2777,7 @@ func (c *Checker) checkBoxBorrowLetStmt(
 	value.localBorrow = true
 	value.borrowTargets = []borrowSource{{target: target, field: field}}
 	value.mutBorrow = mutable
-	env.define(value)
+	c.define(env, value)
 	return nil
 }
 
@@ -2849,7 +2858,7 @@ func (c *Checker) checkBorrowLetStmt(
 	value.localBorrow = true
 	value.borrowTargets = []borrowSource{{target: target, field: field}}
 	value.mutBorrow = mutable
-	env.define(value)
+	c.define(env, value)
 	return nil
 }
 
@@ -3408,7 +3417,7 @@ func (c *Checker) defineIfErrCapture(stmt *ast.IfStmt, condType string, rightSco
 	errName, _, _ := c.errorUnionParts(condType)
 	errBinding := c.newBinding(stmt.ErrCapture, errName)
 	errBinding.declSpan = expressionSpan(stmt.Condition)
-	rightScope.define(errBinding)
+	c.define(rightScope, errBinding)
 }
 
 // checkLoopConsumesNothingOutside rejects a loop body that consumes a binding
@@ -3623,7 +3632,7 @@ func (c *Checker) defineCapture(
 		if err != nil {
 			return false, err
 		}
-		body.define(capture)
+		c.define(body, capture)
 		return false, nil
 	}
 	capture := c.newCaptureBinding(name, condType, cond)
@@ -3637,7 +3646,7 @@ func (c *Checker) defineCapture(
 			return false, err
 		}
 	}
-	body.define(capture)
+	c.define(body, capture)
 	return consumes, nil
 }
 
@@ -3800,7 +3809,7 @@ func (c *Checker) checkForStmt(stmt *ast.ForStmt, env *scope) error {
 		return err
 	}
 	enter := func(_, child *scope) error {
-		child.define(c.newBinding(stmt.Name, "i64"))
+		c.define(child, c.newBinding(stmt.Name, "i64"))
 		return nil
 	}
 	leave := func(*scope) error { return nil }
@@ -4143,7 +4152,7 @@ func (c *Checker) defineMatchArmPayload(
 			return err
 		}
 		if tied {
-			child.define(value)
+			c.define(child, value)
 			return nil
 		}
 	}
@@ -4154,7 +4163,7 @@ func (c *Checker) defineMatchArmPayload(
 	if !owned {
 		value.borrowedParam = true
 	}
-	child.define(value)
+	c.define(child, value)
 	return nil
 }
 
@@ -7762,7 +7771,7 @@ func (c *Checker) checkRawPointerBorrowLetStmt(stmt *ast.LetStmt, env *scope) (b
 	value.borrowedParam = true
 	value.localBorrow = true
 	value.mutBorrow = prefix.Operator == "&var"
-	env.define(value)
+	c.define(env, value)
 	return true, nil
 }
 
@@ -7795,7 +7804,7 @@ func (c *Checker) checkRawViewLetStmt(stmt *ast.LetStmt, env *scope) (bool, erro
 	value.borrowedParam = true
 	value.localBorrow = true
 	value.mutBorrow = ident.Name == "mut_view_from_ptr"
-	env.define(value)
+	c.define(env, value)
 	return true, nil
 }
 
@@ -9822,9 +9831,49 @@ func (s *scope) child() *scope {
 	return newScope(s)
 }
 
-// define binds a local name in the current scope.
+// define binds a local name in the current scope. A name already bound here
+// is replaced, and so leaves the scope's owners.
 func (s *scope) define(value *binding) {
+	if prev, ok := s.values[value.name]; ok && prev.ownerType {
+		for index, owner := range s.owners {
+			if owner == prev {
+				s.owners = append(s.owners[:index], s.owners[index+1:]...)
+				break
+			}
+		}
+	}
 	s.values[value.name] = value
+	if value.ownerType {
+		s.owners = append(s.owners, value)
+	}
+}
+
+// define binds value in env, recording first whether its type owes cleanup.
+func (c *Checker) define(env *scope, value *binding) {
+	value.ownerType = c.valueTypeNeedsConsume(value.typeName)
+	env.define(value)
+}
+
+// walkOwners visits the bindings of this scope chain whose type carries a
+// deinit contract.
+func (s *scope) walkOwners(visit func(*binding)) {
+	for cur := s; cur != nil; cur = cur.parent {
+		for _, value := range cur.owners {
+			visit(value)
+		}
+	}
+}
+
+// lookupNamedID resolves the binding bound to name with this id. A binding is
+// bound under its own name, so this answers what lookupID does while reading
+// one map entry per scope.
+func (s *scope) lookupNamedID(name string, id int) (*binding, bool) {
+	for cur := s; cur != nil; cur = cur.parent {
+		if value, ok := cur.values[name]; ok && value.id == id {
+			return value, true
+		}
+	}
+	return nil, false
 }
 
 // lookup resolves a local name by walking parent scopes.
@@ -10237,6 +10286,9 @@ func (s *scope) clone() *scope {
 		copyValue.borrowTargets = append([]borrowSource(nil), value.borrowTargets...)
 		cloned.values[name] = &copyValue
 	}
+	for _, owner := range s.owners {
+		cloned.owners = append(cloned.owners, cloned.values[owner.name])
+	}
 	return cloned
 }
 
@@ -10299,20 +10351,6 @@ func (s *scope) collectBindings(out map[int]*binding) {
 	s.walkBindings(func(value *binding) {
 		out[value.id] = value
 	})
-}
-
-// lookupID finds the binding with this id, innermost scope first. A clone
-// keeps the id of the binding it copied, so this reaches the current state of
-// a value even where a later `let` of the same name hides it from lookup.
-func (s *scope) lookupID(id int) (*binding, bool) {
-	for cur := s; cur != nil; cur = cur.parent {
-		for _, value := range cur.values {
-			if value.id == id {
-				return value, true
-			}
-		}
-	}
-	return nil, false
 }
 
 // walkBindings visits all bindings in this scope chain.
