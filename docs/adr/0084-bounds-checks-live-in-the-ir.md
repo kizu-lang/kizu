@@ -105,17 +105,17 @@ Swift のようにループ外へ巻き上げられる。
 | | 例 | 文言の置き場所 |
 | --- | --- | --- |
 | 停止する | 範囲外 index、`get_or_panic`、空 `Array` の pop、無効な arena handle、test の失敗 | runtime C |
-| 値として返る | `Array.append` の `!void`、`Array.get` の `!T`、`Map.get` の `!T` | module global |
+| 値として返る | `Array.append` / `Map.insert` の `std::mem::Error!void`、`Array.swap` の `std::array::Error!void` | std の error set の member |
 
 停止する失敗は、報告して終わるので runtime に文言を置ける。値として返る失敗は
-`!T` の payload として Kizu コードに戻るため、module のデータとして存在しなければ
-ならない。この 2 つを混ぜていたのが、同じ「範囲外」が 4 通りに実装されていた
+`!T` の error として Kizu コードに戻るため、std が宣言した error set の member で
+なければならない(ADR-0086)。この 2 つを混ぜていたのが、同じ「範囲外」が 4 通りに実装されていた
 理由である。
 
 それぞれ 1 つのテーブルが持つ。
 
 - `panicEntries`: 停止する失敗。key → runtime entry と引数型
-- `failureValues`: 値として返る失敗。key → メッセージ
+- `failureErrors`: 値として返る失敗。key → error set と member(番号は std の宣言から読む)
 
 どちらも「モジュールが実際に使う分だけ」宣言する。以前は `Array` を使うだけで
 5 つのメッセージ global が無条件に出ていた。
