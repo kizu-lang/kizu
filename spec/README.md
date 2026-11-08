@@ -11,6 +11,7 @@ spec/tls_machine.kizu             std::tls の全組を読んで表を JSON で�
 scripts/machine-lean              その JSON を spec/Tls.lean の生成の block に書く道具
 spec/tls_client.qnt, tls_server.qnt  同じ JSON から scripts/machine-quint が作る Quint の機械
 spec/tls_properties.qnt           その機械が守る性質(手書き)
+spec/ir/                          internal/ir の slot 判定・index check・defer 配置の Quint モデルと、lowerer に当てるプログラムの生成(README.md)
 spec/ownership/                   ownership checker の Quint モデルと、checker に当てるプログラムの生成(README.md)
 spec/unsafecap/                   `unsafe` マーカー検査の Quint モデルと、checker に当てるプログラムの生成(README.md)
 spec/lean-toolchain               elan が読む Lean の版
