@@ -32,6 +32,9 @@ type Checker struct {
 	unions       map[string]map[string]string
 	nextID       int
 	consumeNeeds map[string]bool
+	// plainData memoizes isPlainDataAggregate by type name once every
+	// declaration and method is collected; nil while they are still coming.
+	plainData    map[string]bool
 	deinitOwners map[string]bool
 	// releaseAllocators names the types whose deinit takes an allocator, which
 	// a generic cleanup asks before calling one (ADR-0132).
@@ -300,6 +303,7 @@ func (c *Checker) Result() Result {
 // Check validates ownership rules and returns the first move error.
 func (c *Checker) Check(program *ast.Program) error {
 	c.result = newResult()
+	c.plainData = nil
 	c.deinitOwners = ast.DeinitOwners(program)
 	c.releaseAllocators = ast.ReleaseNamesAllocator(program)
 	c.declaredDeinits = ast.DeclaredDeinits(program)
@@ -315,6 +319,7 @@ func (c *Checker) Check(program *ast.Program) error {
 	if err := c.collectFunctions(program); err != nil {
 		return err
 	}
+	c.plainData = map[string]bool{}
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.FunctionDecl:
@@ -367,6 +372,7 @@ func (c *Checker) MissingMoveMarkers(program *ast.Program) ([]MissingMarker, err
 // every independent move error at once. Setup phases still fail fast.
 func (c *Checker) CheckAll(program *ast.Program) []error {
 	c.result = newResult()
+	c.plainData = nil
 	c.deinitOwners = ast.DeinitOwners(program)
 	c.releaseAllocators = ast.ReleaseNamesAllocator(program)
 	c.declaredDeinits = ast.DeclaredDeinits(program)
@@ -382,6 +388,7 @@ func (c *Checker) CheckAll(program *ast.Program) []error {
 	if err := c.collectFunctions(program); err != nil {
 		return []error{err}
 	}
+	c.plainData = map[string]bool{}
 	var errs []error
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
@@ -8282,11 +8289,25 @@ func (c *Checker) checkMethodCallExpr(
 	if typ, ok, err := c.checkDirectFieldReceiverMethod(field, args, env); ok || err != nil {
 		return typ, err
 	}
-	if typ, ok, err := c.checkBoxReceiverExpr(field, args, env); ok || err != nil {
+	// The receiver is read once and its type handed to both receiver forms
+	// below. Reading it per form re-checked the whole receiver chain at every
+	// level of `a.f(x).g(y)...`, which grew as 2^depth, and the second read
+	// saw the first one's moves.
+	receiverType, err := c.readExpr(field.Receiver, env)
+	if err != nil {
+		// Only a copy temporary reports its read error; any other receiver
+		// form says what is wrong with it as a receiver.
+		if _, ok := field.Receiver.(*ast.CallExpr); ok {
+			return "", err
+		}
+		return c.checkLocalReceiverMethod(field, args, env)
+	}
+	if typ, ok, err := c.checkBoxReceiverExpr(field, receiverType, args, env); ok || err != nil {
 		return typ, err
 	}
-	if typ, ok, err := c.checkCopyTemporaryReceiverMethod(field, args, env); ok || err != nil {
-		return typ, err
+	result, ok, err := c.checkCopyTemporaryReceiverMethod(field, receiverType, args, env)
+	if ok || err != nil {
+		return result, err
 	}
 	return c.checkLocalReceiverMethod(field, args, env)
 }
@@ -8298,15 +8319,12 @@ func (c *Checker) checkMethodCallExpr(
 // still need one.
 func (c *Checker) checkCopyTemporaryReceiverMethod(
 	field *ast.FieldExpr,
+	receiverType string,
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
 	if _, ok := field.Receiver.(*ast.CallExpr); !ok {
 		return "", false, nil
-	}
-	receiverType, err := c.readExpr(field.Receiver, env)
-	if err != nil {
-		return "", true, err
 	}
 	if !c.isCopyType(receiverType) {
 		return "", false, nil
@@ -8553,13 +8571,10 @@ func (c *Checker) checkDirectFieldReceiverByType(
 // checkBoxReceiverExpr validates methods on local Box values and direct Box fields.
 func (c *Checker) checkBoxReceiverExpr(
 	field *ast.FieldExpr,
+	typeName string,
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
-	typeName, err := c.readExpr(field.Receiver, env)
-	if err != nil {
-		return "", false, nil
-	}
 	base, _, ok := splitGenericType(typeName)
 	if !ok || base != "std::mem::Box" {
 		return "", false, nil
@@ -9640,9 +9655,27 @@ func (c *Checker) isPlainDataType(typeName string, seen map[string]bool) bool {
 	return c.isPlainDataAggregate(typeName, seen)
 }
 
-// isPlainDataAggregate walks a declared struct / union for isPlainDataType.
-// A declared deinit keeps the type move-only regardless of its fields.
+// isPlainDataAggregate walks a declared struct / union for isPlainDataType,
+// remembering the answer once declarations are complete. A type reached
+// twice through different fields -- `struct D { a: E, b: E }` -- is walked
+// once, not once per path. A true answer met no cut on seen, and a false one
+// from the root of a walk had no path above it, so both hold anywhere; a
+// false one inside a walk may come from that walk's path and is not kept.
 func (c *Checker) isPlainDataAggregate(typeName string, seen map[string]bool) bool {
+	if plain, ok := c.plainData[typeName]; ok {
+		return plain
+	}
+	root := len(seen) == 0
+	plain := c.walkPlainDataAggregate(typeName, seen)
+	if c.plainData != nil && (plain || root) {
+		c.plainData[typeName] = plain
+	}
+	return plain
+}
+
+// walkPlainDataAggregate checks the fields or payloads of a declared struct /
+// union. A declared deinit keeps the type move-only regardless of its fields.
+func (c *Checker) walkPlainDataAggregate(typeName string, seen map[string]bool) bool {
 	fields, isStruct := c.structs[typeName]
 	variants, isUnion := c.unions[typeName]
 	if (!isStruct && !isUnion) || c.implMethod(typeName, "deinit") != nil {
