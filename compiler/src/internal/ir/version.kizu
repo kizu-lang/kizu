@@ -501,6 +501,27 @@ fn (self: &var VersionedLoop) find_checks(allocator: Allocator, module: &Module,
     return;
 }
 
+/// Records the one view bounds check `u64(index) >= u64(len)` whose index the
+/// counter walks: it asks both what `index < 0` and `index >= len` ask, so it
+/// needs the base not negative as well as the room.
+fn (self: &var VersionedLoop) find_unsigned_view_check(
+    allocator: Allocator,
+    module: &Module,
+    index: Value,
+    length: Value,
+    key: i64
+) -> !void {
+    let base = self.index_base(module, index) orelse return;
+    let view = self.defs.get(name_id(length.name)) orelse return;
+    let view_node = module.instrs.at(view.node);
+    if view_node.op != Op::SliceLen or !self.invariant(module, length) {
+        return;
+    }
+    let viewed = view_node.args.get_or_panic(0);
+    try self.add_check(allocator, BoundedCheck { container: empty_value(), base: base, view: false }, key);
+    return self.add_check(allocator, BoundedCheck { container: viewed, base: base, view: true }, key);
+}
+
 /// Records a view bounds check `index < 0` or `index >= len` whose index the
 /// counter walks, the Go `versionedLoop.findViewCheck`.
 fn (self: &var VersionedLoop) find_view_check(allocator: Allocator, module: &Module, instr: Instr, key: i64) -> !void {
@@ -516,10 +537,17 @@ fn (self: &var VersionedLoop) find_view_check(allocator: Allocator, module: &Mod
     }
     let left = cond_node.args.get_or_panic(0);
     let right = cond_node.args.get_or_panic(1);
-    let base = self.index_base(module, left) orelse return;
     if cond_node.op != Op::Binary {
         return;
     }
+    if module.names.is(cond_node.operand, ">=") {
+        if unsigned_of(module, &self.defs, left) |index| {
+            if unsigned_of(module, &self.defs, right) |length| {
+                return self.find_unsigned_view_check(allocator, module, index, length, key);
+            }
+        }
+    }
+    let base = self.index_base(module, left) orelse return;
     if module.names.is(cond_node.operand, "<") {
         if constant_value(module, right, &self.defs) |zero| {
             if zero == 0 {
