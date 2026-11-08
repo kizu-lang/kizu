@@ -81,7 +81,7 @@ checker 層が受理したプログラムについて、義務層が次を守る
 | `mutantInherit` | 呼び出しの marker が呼び先の本体も覆う | `noCalleeLeak` |
 | `mutantUnsafeFnBody` | `unsafe fn` の本体全体が覆われる | `noUncoveredOp` ほか |
 | `mutantLooseFnTypes` | 関数 pointer の束縛で型を見ない | `noLaundering` |
-| `asImplemented` | `&var b.n` の貸し出しを書き込みとみなさない(**今の checker**) | `invariantAudited` |
+| `asImplemented` | `&var b.n` の貸し出しを書き込みとみなさない(#1925 で直る前の checker) | `invariantAudited` |
 
 `asImplemented` が反例を出すことが `findings/unsafecap-quint-findings.md` の F1 です。
 `spec` が SPEC どおりのモデルで、fixture はここから作ります。`specBorrow` は `spec` に
@@ -120,7 +120,7 @@ ownership check を in-process で走らせます。missing marker は help 行
   unsafe 操作は必ず拒否として検出される`)を含みます。さらに各形を判定を反転させて
   もう一度当て、必ず食い違いとして出ることを確かめます。どの形も同じ理由で落ちる
   renderer や、何にでも一致する分類器はここで落ちます。
-* `TestUnsafeModelKnownDivergences`: findings の F1 / F3 の形を、checker の今の答え
+* `TestUnsafeModelKnownDivergences`: findings の F3 の形を、checker の今の答え
   ごと固定します。checker が直ってモデルと一致すると落ち、既知形へ移すよう促します。
 * `TestUnsafeModelTraces`: fixture の再生。
 
@@ -159,8 +159,9 @@ Quint を動かさず、checked-in の fixture だけを読みます。モデル
 
 ## 残課題
 
-* **F1 の判断**(findings)。直したら `specBorrow` で fixture を作り、
-  `mbtKnownDivergences` の F1 の 3 形を既知形へ移します。
+* **F1 の fixture**。checker は #1925 で直り、F1 の 3 形は既知形へ移しました。
+  checked-in の fixture はまだ `spec`(`&var b.n` を生成しない)から作ったもので、
+  `specBorrow` で作り直すのが残りです。
 * **selfhost compiler への適用**。この環境には clang が無く、`compiler/` の native binary
   を build できませんでした。F1 / F2 の `compiler/` 側はソースを読んでの確認です。
   `KIZU_MBT_BIN` の経路は seed の Go binary で動作を確かめてあります。

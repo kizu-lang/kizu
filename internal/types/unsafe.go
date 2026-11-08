@@ -126,3 +126,47 @@ func requireObligationDoc(requiresUnsafe bool, doc string, subject string, want 
 func obligationDocMissing(requiresUnsafe bool, doc string) bool {
 	return requiresUnsafe && doc == ""
 }
+
+// checkLentArg checks a call argument against its parameter type and, for a
+// `&var` parameter, holds the lent place to requireUnsafeFieldLend.
+func (c *Checker) checkLentArg(
+	arg ast.Expression,
+	want Type,
+	mutable bool,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	got, err := c.checkContextualExpr(arg, want, env, unsafe)
+	if err != nil || !mutable {
+		return got, err
+	}
+	return got, c.requireUnsafeFieldLend(arg, env, unsafe)
+}
+
+// requireUnsafeFieldLend holds a `&var` lend of a field path to the rule for a
+// write to that field. Whatever the borrower stores lands in the field, and no
+// rule can follow the borrow into a callee that takes a plain `&var i64`, so
+// the lend itself is where an `unsafe struct` invariant is put at risk. Every
+// struct along the path counts: `&var b.inner.v` changes `b.inner` as surely
+// as `b.inner.v = 1` does. A place that is not a field path lends no field.
+func (c *Checker) requireUnsafeFieldLend(
+	place ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) error {
+	for {
+		field, ok := place.(*ast.FieldExpr)
+		if !ok || field.Namespace {
+			return nil
+		}
+		_, decl, err := c.resolveFieldExpr(field, env, unsafe)
+		if err != nil {
+			return err
+		}
+		if err := requireUnsafeStructInvariant(unsafe, decl,
+			"mutable borrow of field", field.Name, field.Span); err != nil {
+			return err
+		}
+		place = field.Receiver
+	}
+}
