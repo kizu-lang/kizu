@@ -1025,7 +1025,7 @@ fn main() {
 	}
 }
 
-// TestCheckRejectsArenaHandleProvenanceErrors checks Phase 6 provenance errors.
+// TestCheckRejectsArenaHandleProvenanceErrors checks arena handle provenance errors.
 func TestCheckRejectsArenaHandleProvenanceErrors(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -1267,10 +1267,10 @@ fn main() -> !void {
 	runErrorCases(t, cases)
 }
 
-// TestCheckAcceptsArenaParamHandleUnknowns keeps the derived pairing lenient
-// where a side is unknown or the signature is ambiguous: the contract chains
-// through forwarding helpers, and a signature with two arenas of the same T
-// derives nothing.
+// arenaForwardedContractSource is a source for the derived pairing staying
+// lenient where a side is unknown or the signature is ambiguous: the contract
+// chains through forwarding helpers, and a signature with two arenas of the
+// same T derives nothing.
 const arenaForwardedContractSource = `struct User { name: []u8 }
 fn show(users: &std::arena::Arena<User>, user: std::arena::Handle<User>) -> void {
     print(users.at(user).name);
