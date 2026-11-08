@@ -277,10 +277,9 @@ Rust では規約と lint だが、Kizu は言語規則にする。理由は 2 �
 `unsafe` を書く側が unsafe を理解しているとは限らず、規約は理解している人に
 しか効かない。そして Kizu には既存コードが 8 箇所しかなく、今なら必須にできる。
 
-**この決定は lexer の変更を要求する。** 現在 `internal/lexer/lexer.go:74` は
-`//` 行コメントを読み捨て、保持するのは `///` だけである(`skipLineComment` と
-`clearDocComments`)。`// SAFETY:` を token に載せる必要がある。`token.Token` は
-既に `DocComments []string` を持つので、同じ機構を広げる。
+**この決定は lexer の変更を要求した。** それまで lexer は `//` 行コメントを
+読み捨て、保持するのは `///` だけだった。`// SAFETY:` も `///` と同じ機構で
+token に載せる(`internal/lexer` の `readSafetyComment`、`token.Token.Safety`)。
 
 ## 強制できる範囲
 
@@ -345,28 +344,7 @@ Rust では規約と lint だが、Kizu は言語規則にする。理由は 2 �
 - `lib/kizu/std/src` に `@unsafe` も `ptr<` も 0 件なので、std の書き換えは無い
 - `internal/fmt` と `internal/lsp` は新 surface に追従する。LSP の capability
   completion は不要になる
-- `internal/lexer` は `// SAFETY:` を読み捨てずに token へ載せる。現在は
-  `///` 以外の行コメントをすべて捨てている
 - `internal/fmt` は `// SAFETY:` を対応する文に固定して出力する
-
-## 移行順序
-
-1. **未使用 capability を error にする**(単独 PR)。今は
-   `@unsafe(ptr_write, volatile, extern_call, ptr_int_cast) { print(1); }` が
-   exit 0 で通る。`internal/types` の `unsafeCaps` は平坦な map を入れ子ごとに
-   コピーしていて出所が消えるので、親子を鎖にして最も内側の与えた枠に使用印を
-   立てる。副産物として入れ子の重複宣言も検出できる。
-   これを先に入れないと、式形への機械的な書き換えが正しいか判定できない
-2. `unsafe` 式マーカーと `unsafe fn` を実装し、`@unsafe` / `@requires_unsafe` を
-   削除する
-3. `unsafe struct` と決定 3/4 を実装する
-4. 決定 5 を実装する。`///` の存在検査が先、`// SAFETY:` は lexer 変更を伴う
-   ので後段にする
-5. SPEC §12 を書き換える。capability 表は診断の説明として残す
-
-`comptime if` は選ばれた branch だけを検査するので(SPEC §13)、選ばれなかった
-branch でしか使わない capability は未使用と判定される。挙動としては正しいが、
-1 の規則として明記する。
 
 ## 再評価条件
 
