@@ -73,20 +73,6 @@ registration order. Normal exits skip `errdefer` entries. Error exits execute
 both `defer` and `errdefer` entries. The ownership checker validates the cleanup
 receiver on each path where the entry can run.
 
-## Selfhost Application
-
-For #992, selfhost code should move toward these shapes:
-
-- local `Map`, `Array`, `String`, `Arena`, and `Box` owners use immediate
-  `defer owner.deinit()` unless the owner is returned
-- fallible builders that return owners use `errdefer owner.deinit()`
-- renderer and inspection APIs borrow owned compiler records instead of taking
-  them by value
-- `MirFunction`, `MirStmt`, and `MirExprInst` expose explicit `deinit` methods
-  while they contain owned arrays
-- #991 can still refactor MIR into tagged-union payloads later; this ADR defines
-  the cleanup contract both before and after that representation change
-
 ## Consequences
 
 - Cleanup boundaries stay visible in source.
