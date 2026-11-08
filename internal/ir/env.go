@@ -37,19 +37,25 @@ func (e *env) set(name string, value Value) {
 }
 
 // remove unbinds name, which is what a scope does to its declarations when it
-// ends.
+// ends. Scopes end in the reverse of the order they bound their names in, so
+// the name is almost always the last one bound and comes off the end; a name
+// further in is cut out in place, keeping the order of the rest.
 func (e *env) remove(name string) {
 	if _, bound := e.values[name]; !bound {
 		return
 	}
 	delete(e.values, name)
-	kept := make([]string, 0, len(e.order)-1)
-	for _, bound := range e.order {
-		if bound != name {
-			kept = append(kept, bound)
+	last := len(e.order) - 1
+	if e.order[last] == name {
+		e.order = e.order[:last]
+		return
+	}
+	for index, bound := range e.order {
+		if bound == name {
+			e.order = append(e.order[:index], e.order[index+1:]...)
+			return
 		}
 	}
-	e.order = kept
 }
 
 // names returns the bound names in the order they were bound. The result is
