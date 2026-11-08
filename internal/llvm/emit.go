@@ -819,7 +819,6 @@ func (e *emitter) plainCallParams(instr *ir.Instr) []string {
 	}
 	params := make([]string, 0, len(declared)+1)
 	for index, arg := range declared {
-		// A parameter handed the address of a copy is a pointer to C.
 		if callParamTakesAddressOf(instr, index) {
 			params = append(params, "ptr")
 			continue
