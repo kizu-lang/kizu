@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	diag "github.com/kizu-lang/kizu/internal/diagnostic"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -119,7 +120,10 @@ type Checker struct {
 	// fields of a struct literal it builds. The escape refusals let these
 	// through; everything else the return evaluates is refused as usual.
 	returnedViews map[ast.Expression]bool
-	result        Result
+	// identUses keeps each block's identifier reads for the last-use
+	// analysis, collected once per block.
+	identUses identUses
+	result    Result
 }
 
 // allocTaint is one tied allocator a call consumed while its result has not
@@ -810,7 +814,7 @@ func (c *Checker) checkTestDecl(decl *ast.TestDecl) error {
 
 // checkBlock validates statements in a lexical block.
 func (c *Checker) checkBlock(block *ast.BlockStmt, env *scope) error {
-	lastUses := blockLastUses(block)
+	lastUses := c.identUses.blockLastUses(block)
 	defers := []*ast.DeferStmt{}
 	errDeferMark := len(c.liveErrDefers)
 	defer c.restoreErrDefers(errDeferMark)
@@ -5048,7 +5052,7 @@ func (c *Checker) checkBlockValue(block *ast.BlockStmt, env *scope, moveTail boo
 	if block == nil || len(block.Statements) == 0 {
 		return "", errorf("move error: expression block must end with a value")
 	}
-	lastUses := blockLastUses(block)
+	lastUses := c.identUses.blockLastUses(block)
 	defers := []*ast.DeferStmt{}
 	errDeferMark := len(c.liveErrDefers)
 	defer c.restoreErrDefers(errDeferMark)
@@ -10049,21 +10053,34 @@ func (c *Checker) fieldPathType(typeName string, path string) (string, bool) {
 	return current, true
 }
 
+// identUses collects the identifier reads the last-use analysis works from.
+// Every block checkBlock enters asks for its own last uses, and each one
+// reads its nested blocks' names; collecting a nested block once and keeping
+// its deduplicated names keeps that linear. Walking each subtree again at
+// every depth made deep nesting -- and a long else-if chain, which parses as
+// nested blocks -- cubic. The names depend only on the syntax, which no check
+// rewrites, so one entry serves every instantiation and expansion of a body.
+type identUses struct {
+	blocks map[*ast.BlockStmt][]string
+}
+
 // blockLastUses returns the last statement index where each identifier
 // appears. A loop counts as one statement: every turn it runs is over once
 // the statement is, and the body is checked against its own scope, which
 // this block's releases never reach. A name a registered cleanup reads is
 // read when the block exits, so it is kept until the end whatever else
 // follows.
-func blockLastUses(block *ast.BlockStmt) map[string]int {
+func (u *identUses) blockLastUses(block *ast.BlockStmt) map[string]int {
 	lastUses := map[string]int{}
 	end := len(block.Statements)
+	var names []string
 	for idx, stmt := range block.Statements {
 		at := idx
 		if cleanupStmt(stmt) {
 			at = end
 		}
-		for _, name := range stmtIdentUses(stmt) {
+		names = u.stmt(stmt, names[:0])
+		for _, name := range names {
 			if lastUses[name] >= end {
 				continue
 			}
@@ -10083,47 +10100,45 @@ func cleanupStmt(stmt ast.Statement) bool {
 	return false
 }
 
-// stmtIdentUses collects identifier reads from one statement.
-func stmtIdentUses(stmt ast.Statement) []string {
+// stmt appends the identifier reads of one statement to out.
+func (u *identUses) stmt(stmt ast.Statement, out []string) []string {
 	switch s := stmt.(type) {
 	case *ast.LetStmt:
-		return exprIdentUses(s.Value)
+		return u.expr(s.Value, out)
 	case *ast.AssignStmt:
-		uses := exprIdentUses(s.Value)
-		return append(uses, exprIdentUses(s.Target)...)
+		out = u.expr(s.Value, out)
+		return u.expr(s.Target, out)
 	case *ast.ReturnStmt:
-		return exprIdentUses(s.Value)
+		return u.expr(s.Value, out)
 	case *ast.DeferStmt:
-		return exprIdentUses(s.Expr)
+		return u.expr(s.Expr, out)
 	case *ast.ErrDeferStmt:
-		return exprIdentUses(s.Expr)
+		return u.expr(s.Expr, out)
 	case *ast.ExprStmt:
-		return exprIdentUses(s.Expr)
+		return u.expr(s.Expr, out)
 	case *ast.IfStmt:
-		uses := exprIdentUses(s.Condition)
-		uses = append(uses, blockIdentUses(s.Consequence)...)
-		uses = append(uses, blockIdentUses(s.Alternative)...)
-		return uses
+		out = u.expr(s.Condition, out)
+		out = append(out, u.block(s.Consequence)...)
+		return append(out, u.block(s.Alternative)...)
 	case *ast.WhileStmt:
-		uses := exprIdentUses(s.Condition)
-		return append(uses, blockIdentUses(s.Body)...)
+		out = u.expr(s.Condition, out)
+		return append(out, u.block(s.Body)...)
 	case *ast.ForStmt:
-		uses := exprIdentUses(s.Start)
-		uses = append(uses, exprIdentUses(s.End)...)
-		return append(uses, blockIdentUses(s.Body)...)
+		out = u.expr(s.Start, out)
+		out = u.expr(s.End, out)
+		return append(out, u.block(s.Body)...)
 	case *ast.MatchStmt:
-		uses := exprIdentUses(s.Value)
+		out = u.expr(s.Value, out)
 		for _, arm := range s.Arms {
-			uses = append(uses, stmtIdentUses(arm.Body)...)
+			out = u.stmt(arm.Body, out)
 		}
-		return uses
+		return out
 	case *ast.ComptimeIfStmt:
-		uses := exprIdentUses(s.Condition)
-		uses = append(uses, blockIdentUses(s.Consequence)...)
-		uses = append(uses, blockIdentUses(s.Alternative)...)
-		return uses
+		out = u.expr(s.Condition, out)
+		out = append(out, u.block(s.Consequence)...)
+		return append(out, u.block(s.Alternative)...)
 	default:
-		return nil
+		return out
 	}
 }
 
@@ -10141,63 +10156,73 @@ func wrappedExprValue(expr ast.Expression) ast.Expression {
 	}
 }
 
-// blockIdentUses collects identifier reads inside a nested block.
-func blockIdentUses(block *ast.BlockStmt) []string {
+// block returns the distinct identifier reads inside a nested block,
+// collected on the first request and kept for the rest.
+func (u *identUses) block(block *ast.BlockStmt) []string {
 	if block == nil {
 		return nil
 	}
-	uses := []string{}
-	for _, stmt := range block.Statements {
-		uses = append(uses, stmtIdentUses(stmt)...)
+	if names, ok := u.blocks[block]; ok {
+		return names
 	}
-	return uses
+	var names []string
+	for _, stmt := range block.Statements {
+		names = u.stmt(stmt, names)
+	}
+	slices.Sort(names)
+	names = slices.Clip(slices.Compact(names))
+	if u.blocks == nil {
+		u.blocks = map[*ast.BlockStmt][]string{}
+	}
+	u.blocks[block] = names
+	return names
 }
 
-// exprIdentUses collects identifier reads from an expression.
-func exprIdentUses(expr ast.Expression) []string {
+// expr appends the identifier reads of an expression to out.
+func (u *identUses) expr(expr ast.Expression, out []string) []string {
 	if inner, ok := transparentExprValue(expr); ok {
-		return exprIdentUses(inner)
+		return u.expr(inner, out)
 	}
 	switch e := expr.(type) {
 	case nil:
-		return nil
+		return out
 	case *ast.IdentExpr:
-		return []string{e.Name}
+		return append(out, e.Name)
 	case *ast.BinaryExpr:
-		return append(exprIdentUses(e.Left), exprIdentUses(e.Right)...)
+		out = u.expr(e.Left, out)
+		return u.expr(e.Right, out)
 	case *ast.CallExpr:
-		uses := exprIdentUses(e.Callee)
+		out = u.expr(e.Callee, out)
 		for _, arg := range e.Args {
-			uses = append(uses, exprIdentUses(arg)...)
+			out = u.expr(arg, out)
 		}
-		return uses
+		return out
 	case *ast.CastExpr, *ast.TryExpr, *ast.MoveExpr:
 		// One-operand wrappers read whatever they wrap. A `move` is among
 		// them: missing it would end the value's live range at its previous
 		// statement, and everything a last use releases -- the borrows it
 		// holds, the allocator it is tied to -- would go one statement early.
-		return exprIdentUses(wrappedExprValue(e))
+		return u.expr(wrappedExprValue(e), out)
 	case *ast.StructLiteralExpr:
-		uses := []string{}
 		for _, field := range e.Fields {
-			uses = append(uses, exprIdentUses(field.Value)...)
+			out = u.expr(field.Value, out)
 		}
-		return uses
+		return out
 	case *ast.FieldExpr:
-		return exprIdentUses(e.Receiver)
+		return u.expr(e.Receiver, out)
 	case *ast.DerefExpr:
-		return exprIdentUses(e.Receiver)
+		return u.expr(e.Receiver, out)
 	case *ast.VectorLiteralExpr, *ast.BufferLiteralExpr:
-		return valuesIdentUses(listedValues(e))
+		return u.values(listedValues(e), out)
 	case *ast.IndexExpr:
-		uses := exprIdentUses(e.Target)
-		uses = append(uses, exprIdentUses(e.Index)...)
-		uses = append(uses, exprIdentUses(e.Start)...)
-		return append(uses, exprIdentUses(e.End)...)
+		out = u.expr(e.Target, out)
+		out = u.expr(e.Index, out)
+		out = u.expr(e.Start, out)
+		return u.expr(e.End, out)
 	case *ast.ComptimeExpr:
-		return exprIdentUses(e.Expr)
+		return u.expr(e.Expr, out)
 	default:
-		return valueStmtIdentUses(expr)
+		return u.valueStmt(expr, out)
 	}
 }
 
@@ -10209,31 +10234,32 @@ func listedValues(expr ast.Expression) []ast.Expression {
 	return expr.(*ast.BufferLiteralExpr).Elements
 }
 
-// valuesIdentUses collects the identifier reads of the values a vector or
-// array literal lists.
-func valuesIdentUses(values []ast.Expression) []string {
-	uses := []string{}
+// values appends the identifier reads of the values a vector or array
+// literal lists to out.
+func (u *identUses) values(values []ast.Expression, out []string) []string {
 	for _, value := range values {
-		uses = append(uses, exprIdentUses(value)...)
+		out = u.expr(value, out)
 	}
-	return uses
+	return out
 }
 
-// valueStmtIdentUses collects identifier reads from the expressions that
-// carry statements: an `if` or `match` standing as a value reads whatever its
+// valueStmt appends the identifier reads of the expressions that carry
+// statements: an `if` or `match` standing as a value reads whatever its
 // branches read, and a guard's exit reads whatever it returns.
-func valueStmtIdentUses(expr ast.Expression) []string {
+func (u *identUses) valueStmt(expr ast.Expression, out []string) []string {
 	switch e := expr.(type) {
 	case *ast.IfStmt:
-		return stmtIdentUses(e)
+		return u.stmt(e, out)
 	case *ast.MatchStmt:
-		return stmtIdentUses(e)
+		return u.stmt(e, out)
 	case *ast.OrelseGuardExpr:
-		return append(exprIdentUses(e.Cond), stmtIdentUses(e.Exit)...)
+		out = u.expr(e.Cond, out)
+		return u.stmt(e.Exit, out)
 	case *ast.CatchGuardExpr:
-		return append(exprIdentUses(e.Cond), stmtIdentUses(e.Exit)...)
+		out = u.expr(e.Cond, out)
+		return u.stmt(e.Exit, out)
 	default:
-		return nil
+		return out
 	}
 }
 
