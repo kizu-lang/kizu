@@ -20,7 +20,7 @@ type Unit struct {
 }
 
 // EmitUnits formats a module as the units a native build compiles. Unsplit,
-// it is one unit with the text EmitNative writes. Split, it is one unit per
+// it is one unit with the text emit writes for the target. Split, it is one unit per
 // module and the program unit last, each a module LLVM compiles alone: a
 // unit's text depends only on its own functions, so an edit to one module
 // changes the text of that unit alone, and what the toolchain made of the

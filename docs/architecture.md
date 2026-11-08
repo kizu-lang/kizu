@@ -75,17 +75,28 @@ source.kizu
 言って落ち、後者はループがスタックを 1 回転ごとに食って guard page で死にます。
 命令の形は固定しません。
 
-その実行ファイルは build cache に残ります。鍵は LLVM IR・runtime の source・
-toolchain、つまり実行ファイルが**何でできているか**だけで、ファイル名も時刻も
-入りません。front end は数 ms なので毎回通り、そこから先の link を飛ばします。
-runtime object の鍵にはさらに `clang --version` の 1 行目が入ります。clang を
-替えても path と flag は同じなので、そこだけが古い object と新しい clang が作る
-object を区別します。この問い合わせは link するときだけで、cache にある実行
-ファイルを走らせるだけの `run` は toolchain に触れません。
+debug build の LLVM IR は module ごとの unit と、全体から決まるもの(package の
+`main`、test runner、error 名の表)を持つ program unit に割ります(`llvm.EmitUnits`)。
+unit の順は依存が先の module 順、最後に program unit で、関数の所属は lowerer が
+宣言の module から写した `ir.Function.Module` だけで決めます。unit を跨いで呼ばれうる
+関数は `hidden` で、symbol は `kz-` で始まります。`-` は C の識別子にも Kizu の
+symbol 名にも現れないので、unit 外へ出しても runtime の libc 呼び出しを横取りしません。
+generic instance は使う側の unit がそれぞれ `linkonce_odr` で持ち、linker が 1 つ残します
+(ELF / COFF は comdat、Mach-O は weak 定義の合併)。`--opt` は 1 unit のままです。
+
+unit の object と実行ファイルは build cache に残ります。鍵は LLVM IR・runtime の
+source・toolchain、つまり**何でできているか**だけで、ファイル名も時刻も入りません。
+front end は毎回通り、text が変わらない unit の compile と、全 unit が変わらなければ
+link を飛ばします。object と runtime object の鍵にはさらに `clang --version` の 1 行目が
+入ります。clang を替えても path と flag は同じなので、そこだけが古い object と新しい
+clang が作る object を区別します。この問い合わせは link するときだけで、cache にある
+実行ファイルを走らせるだけの `run` は toolchain に触れません。
 桁の目安は `kizu run examples/hello.kizu` で初回 ~0.5s(うち大半が clang の
 link)、2 回目以降 ~10ms —— 絶対値は host と clang によります。
-`build --target native` は逆に、利用者が名前を指定した成果物とその build 記録を
-書くコマンドなので cache から読まず、毎回 link します。
+`build --target native` は利用者が名前を指定した成果物とその build 記録を書くコマンド
+なので実行ファイルは cache から読まず毎回 link しますが、unit の object は cache から
+読みます。selfhost の bootstrap 検査は第 2 段を空の cache で build し、object を
+compile し直した結果が第 1 段と一致することを見ます。
 
 `internal/wasm` は typed SSA IR を 1 度だけ WebAssembly module へ lower し、その同じ
 module を inspection 用 WAT と deterministic な binary `.wasm` に描画します。Go seed と

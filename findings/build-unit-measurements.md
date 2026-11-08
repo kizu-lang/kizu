@@ -31,3 +31,23 @@ module ごとの IR 量(関数本体の行数、symbol 名からの集計。gene
 最大 module(`internal/types`)は全体の 18.8%。使う generic instance を足しても
 2 割強で、設計の見込み(2 割弱)とほぼ合う。1 module 編集で clang がやり直す量は
 今の 2.2s の 2 割前後になる見込み。
+
+## A1: debug build を module ごとの unit に分割した後
+
+同じ host。compiler は 47 unit(46 module + program unit)に割れる。
+
+| 項目 | A0 | A1 |
+| --- | --- | --- |
+| `internal/types` を 1 か所編集した `run compiler` | 4.38s | 2.77〜2.83s(3 回) |
+| うち clang が compile し直す object | `compiler.ll` 全体 1 本(2.22s) | `internal/types` の unit 1 本(約 0.55s) |
+| 全 object が hit し link だけする `run compiler` | ― | 2.21〜2.26s(front end + emit 約 1.8s + link 約 0.4s) |
+| cold `run compiler`(`just perf-cache`) | 4.36s | 7.55s |
+| warm `run compiler` | 1.79s | 1.83s |
+| 1 編集あたりに増えた `native-obj` | ― | 1 個(47 → 50、3 回編集) |
+
+1 module 編集の rebuild は 4.4s → 2.8s。clang の再 compile は全体の 2.2s から
+編集した unit の 0.55s(25%)になり、A0 の見込み(2 割前後)とほぼ合う。
+
+cold build は遅くなった(4.4s → 7.6s)。unit ごとに clang を 1 回ずつ順に起動するのと、
+generic instance を使う unit の数だけ compile するため。A2(unit の並行 compile)が
+これを縮める対象。

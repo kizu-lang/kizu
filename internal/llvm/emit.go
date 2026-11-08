@@ -19,13 +19,6 @@ func Emit(module *ir.Module) (string, error) {
 	return emit(module, false, ArchArm64)
 }
 
-// EmitNative formats a module for the native target, which on Darwin keeps a
-// frame record in every function that calls, and passes a C struct by value
-// the way arch's C calling convention does.
-func EmitNative(module *ir.Module, darwin bool, arch Arch) (string, error) {
-	return emit(module, darwin, arch)
-}
-
 // emit formats a module for a target: darwin keeps frame records.
 func emit(module *ir.Module, darwin bool, arch Arch) (string, error) {
 	return newEmitter(module, darwin, arch).finish()

@@ -39,7 +39,15 @@ baseline として `examples/user_registry.kizu` を使います。
 | artifact | cache key | 保存条件 |
 | --- | --- | --- |
 | runtime object | runtime C source + toolchain + `clang --version` の 1 行目 | native link のたび(`build --target native` も含む。初回だけ compile) |
-| run/test 実行ファイル | LLVM IR + runtime C source の hash + toolchain | `run` / `test` の link |
+| unit object(`native-obj`) | unit の LLVM IR + toolchain + `clang --version` の 1 行目 | debug の native link で miss した unit(`build --target native` も含む) |
+| run/test 実行ファイル | 全 unit の LLVM IR の hash を unit 順に並べたもの + runtime C source の hash + toolchain | `run` / `test` の link |
+
+debug build は LLVM IR を module ごとの unit と program unit(package の `main`、test
+runner、error 名の表)に割り、unit ごとに object を作って link します。1 module の
+編集で clang が compile し直すのはその unit だけで、署名や型を変えたときはそれを
+参照する unit も変わります。`--opt` は 1 unit のまま clang に -O3 で丸ごと渡します。
+実行ファイルの鍵に clang の版は入らないので、cache にある実行ファイルを走らせる
+`run` は toolchain に触れません。
 
 toolchain は driver・target・flag・SDK です。`build --emit-llvm` の LLVM IR と
 `build --target wasm32-wasi` の出力は cache せず、毎回 lower します(ADR-0126)。
