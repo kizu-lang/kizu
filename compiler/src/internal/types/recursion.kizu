@@ -13,12 +13,26 @@ import std::string;
 /// have no end. A value held through `std::mem::Box<T>`, an Array, a view, or
 /// a pointer is behind a fixed-size handle and ends the chain; a stack buffer,
 /// an optional, and an error union hold their element inline and continue it.
+///
+/// One pass over the by-value graph finds which types sit on a cycle; only
+/// the first such declaration walks again to spell the path it reports.
 fn (self: &Checker) check_inline_recursion(
     tree: &ast::Ast,
     program: &ast::Program
 ) -> !?diagnostic::Diagnostic {
     var declared = map::new<[]u8, ast::Declaration>(self.allocator);
     defer declared.deinit(self.allocator);
+    var cycles = InlineCycles {
+        numbers: map::new<[]u8, i64>(self.allocator),
+        declarations: array::new<ast::Declaration>(self.allocator),
+        index: array::new<i64>(self.allocator),
+        low: array::new<i64>(self.allocator),
+        on_stack: array::new<bool>(self.allocator),
+        cyclic: array::new<bool>(self.allocator),
+        stack: array::new<i64>(self.allocator),
+        next: 0,
+    };
+    defer cycles.deinit(self.allocator);
     var index = 0;
     while program.declarations.get(index) |declaration| {
         index = index + 1;
@@ -26,7 +40,24 @@ fn (self: &Checker) check_inline_recursion(
             let retained = tree.texts.at(name.node);
             let bytes = retained.as_bytes();
             try declared.insert(self.allocator, bytes, declaration);
+            if cycles.numbers.get(bytes) |number| {
+                try cycles.declarations.set(number, declaration);
+            } else {
+                try cycles.numbers.insert(self.allocator, bytes, cycles.declarations.len());
+                try cycles.declarations.append(self.allocator, declaration);
+                try cycles.index.append(self.allocator, -1);
+                try cycles.low.append(self.allocator, 0);
+                try cycles.on_stack.append(self.allocator, false);
+                try cycles.cyclic.append(self.allocator, false);
+            }
         }
+    }
+    var node = 0;
+    while node < cycles.declarations.len() {
+        if cycles.index.get_or_panic(node) < 0 {
+            try inline_visit(self.allocator, tree, &var cycles, node);
+        }
+        node = node + 1;
     }
     index = 0;
     while program.declarations.get(index) |declaration| {
@@ -34,6 +65,10 @@ fn (self: &Checker) check_inline_recursion(
         let name = inline_type_decl_name(tree, declaration) orelse continue;
         let retained = tree.texts.at(name.node);
         let target = retained.as_bytes();
+        let number = cycles.numbers.get(target) orelse continue;
+        if !cycles.cyclic.get_or_panic(number) {
+            continue;
+        }
         var seen = map::new<[]u8, bool>(self.allocator);
         defer seen.deinit(self.allocator);
         var path = array::new<string::String>(self.allocator);
@@ -61,6 +96,90 @@ fn (self: &Checker) check_inline_recursion(
         }
     }
     return null;
+}
+
+/// Is Tarjan's strongly connected components over the by-value graph, the Go
+/// `inlineCycles`: nodes are the program's non-generic structs and unions in
+/// declaration order, and a type is cyclic when its component has more than
+/// one member or it holds itself directly.
+struct InlineCycles {
+    numbers: map::Map<[]u8, i64>,
+    declarations: array::Array<ast::Declaration>,
+    index: array::Array<i64>,
+    low: array::Array<i64>,
+    on_stack: array::Array<bool>,
+    cyclic: array::Array<bool>,
+    stack: array::Array<i64>,
+    next: i64,
+}
+
+fn (self: InlineCycles) deinit(allocator: Allocator) -> void {
+    self.numbers.deinit(allocator);
+    self.declarations.deinit(allocator);
+    self.index.deinit(allocator);
+    self.low.deinit(allocator);
+    self.on_stack.deinit(allocator);
+    self.cyclic.deinit(allocator);
+    self.stack.deinit(allocator);
+    return;
+}
+
+/// Numbers `node` and everything it reaches by value, closing each
+/// component as its root finishes, the Go `inlineCycles.visit`.
+fn inline_visit(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    cycles: &var InlineCycles,
+    node: i64
+) -> !void {
+    try cycles.index.set(node, cycles.next);
+    try cycles.low.set(node, cycles.next);
+    cycles.next = cycles.next + 1;
+    try cycles.stack.append(allocator, node);
+    try cycles.on_stack.set(node, true);
+    var self_loop = false;
+    var parts = try inline_parts(allocator, tree, cycles.declarations.get_or_panic(node));
+    defer parts.deinit(allocator);
+    var index = 0;
+    while parts.at(index) |part| {
+        index = index + 1;
+        let text = part.type_text.as_bytes();
+        let found = inline_type_name(text, 0) orelse continue;
+        let inner = cycles.numbers.get(text[found.start..found.end]) orelse continue;
+        if inner == node {
+            self_loop = true;
+        }
+        if cycles.index.get_or_panic(inner) < 0 {
+            try inline_visit(allocator, tree, cycles, inner);
+            let reached = cycles.low.get_or_panic(inner);
+            if reached < cycles.low.get_or_panic(node) {
+                try cycles.low.set(node, reached);
+            }
+        } else if cycles.on_stack.get_or_panic(inner) {
+            let reached = cycles.index.get_or_panic(inner);
+            if reached < cycles.low.get_or_panic(node) {
+                try cycles.low.set(node, reached);
+            }
+        }
+    }
+    if cycles.low.get_or_panic(node) != cycles.index.get_or_panic(node) {
+        return;
+    }
+    var start = cycles.stack.len() - 1;
+    while cycles.stack.get_or_panic(start) != node {
+        start = start - 1;
+    }
+    let cyclic = self_loop or cycles.stack.len() - start > 1;
+    while cycles.stack.pop() |member| {
+        try cycles.on_stack.set(member, false);
+        if cyclic {
+            try cycles.cyclic.set(member, true);
+        }
+        if member == node {
+            break;
+        }
+    }
+    return;
 }
 
 /// Returns the name of a non-generic struct or union a declaration declares.
@@ -107,12 +226,7 @@ fn inline_path_to(
         let text = part.type_text.as_bytes();
         let found = inline_type_name(text, 0) orelse continue;
         let inner = text[found.start..found.end];
-        var step = string::new(allocator);
-        errdefer step.deinit(allocator);
-        try step.append_string(allocator, &part.label);
-        try step.append_bytes(allocator, ": ");
-        try step.append_bytes(allocator, text);
-        try path.append(allocator, move step);
+        try path.append(allocator, try inline_step(allocator, tree, part));
         if mem::equal_bytes(inner, target) {
             return true;
         }
@@ -126,6 +240,27 @@ fn inline_path_to(
         }
     }
     return false;
+}
+
+/// Spells a part as one link of the reported path, the Go `inlinePart.step`.
+fn inline_step(allocator: Allocator, tree: &ast::Ast, part: &InlinePart) -> !string::String {
+    let owner = tree.texts.at(part.owner.node);
+    let member = tree.texts.at(part.member.node);
+    var step = string::new(allocator);
+    errdefer step.deinit(allocator);
+    if part.payload {
+        try step.append_bytes(allocator, "payload `");
+        try step.append_string(allocator, owner);
+        try step.append_bytes(allocator, "::");
+    } else {
+        try step.append_bytes(allocator, "field `");
+        try step.append_string(allocator, owner);
+        try step.append_bytes(allocator, ".");
+    }
+    try step.append_string(allocator, member);
+    try step.append_bytes(allocator, "`: ");
+    try step.append_string(allocator, &part.type_text);
+    return move step;
 }
 
 /// Returns the declared type name with the tree's lifetime, so the walk does
@@ -145,12 +280,13 @@ fn declared_name(
 /// Is one field of a struct or payload of a union variant, the Go
 /// `inlinePart`.
 struct InlinePart {
-    label: string::String,
+    owner: ast::Text,
+    member: ast::Text,
+    payload: bool,
     type_text: string::String,
 }
 
 fn (self: InlinePart) deinit(allocator: Allocator) -> void {
-    self.label.deinit(allocator);
     self.type_text.deinit(allocator);
     return;
 }
@@ -166,36 +302,20 @@ fn inline_parts(
     errdefer parts.deinit(allocator);
     match tree.declarations.at(declaration.node) {
         Struct(value) => {
-            let owner = tree.texts.at(value.name.node);
             var index = 0;
             while value.fields.at(index) |field| {
                 index = index + 1;
-                let field_name = tree.texts.at(field.name.node);
-                var label = try string::from_bytes(allocator, "field `");
-                errdefer label.deinit(allocator);
-                try label.append_string(allocator, owner);
-                try label.append_bytes(allocator, ".");
-                try label.append_string(allocator, field_name);
-                try label.append_bytes(allocator, "`");
                 let type_text = try typ::render(allocator, &tree.types, field.type_name);
-                try parts.append(allocator, InlinePart { label: move label, type_text: move type_text });
+                try parts.append(allocator, InlinePart { owner: value.name, member: field.name, payload: false, type_text: move type_text });
             }
         },
         Union(value) => {
-            let owner = tree.texts.at(value.name.node);
             var index = 0;
             while value.variants.at(index) |variant| {
                 index = index + 1;
                 let payload = variant.payload orelse continue;
-                let variant_name = tree.texts.at(variant.name.node);
-                var label = try string::from_bytes(allocator, "payload `");
-                errdefer label.deinit(allocator);
-                try label.append_string(allocator, owner);
-                try label.append_bytes(allocator, "::");
-                try label.append_string(allocator, variant_name);
-                try label.append_bytes(allocator, "`");
                 let type_text = try typ::render(allocator, &tree.types, payload);
-                try parts.append(allocator, InlinePart { label: move label, type_text: move type_text });
+                try parts.append(allocator, InlinePart { owner: value.name, member: variant.name, payload: true, type_text: move type_text });
             }
         },
         _ => {},
