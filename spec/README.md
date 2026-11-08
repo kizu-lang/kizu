@@ -11,6 +11,7 @@ spec/tls_machine.kizu             std::tls の全組を読んで表を JSON で�
 scripts/machine-lean              その JSON を spec/Tls.lean の生成の block に書く道具
 spec/tls_client.qnt, tls_server.qnt  同じ JSON から scripts/machine-quint が作る Quint の機械
 spec/tls_properties.qnt           その機械が守る性質(手書き)
+spec/ownership/                   ownership checker の Quint モデルと、checker に当てるプログラムの生成(README.md)
 spec/lean-toolchain               elan が読む Lean の版
 examples/fixtures/*_trace.json    生成した trace(checked in)
 examples/*_conformance.kizu       trace を実装に流して食い違う手を名指しする program
@@ -54,6 +55,7 @@ just spec-table     # std::tls を読んで spec/Tls.lean の block と Quint �
 just spec-verify    # 到達できる全部の状態で Quint の性質を TLC で確かめる(Java が要る)
 just spec-quint     # Quint のランダムな実行で性質を探す(Java は要らない)
 just spec-trace     # lean --run spec/<Name>.lean > examples/fixtures/<name>_trace.json
+just spec-ownership # ownership モデルの quint test と健全性の探索、internal/ownership の fixture の再生成
 ```
 
 `go test` も CI も Lean と Quint を動かしません。対応する箇所を変えた人が手元で回します
