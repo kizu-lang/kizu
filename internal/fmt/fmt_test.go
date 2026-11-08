@@ -485,7 +485,6 @@ func TestFormatMultilineStringPreservesNewlines(t *testing.T) {
 		"    print(h);\n" +
 		"}\n"
 	got := Format(src)
-	// Round-trip: Format(Format(src)) should equal Format(src).
 	if got2 := Format(got); got2 != got {
 		t.Fatalf("non-idempotent multiline string:\n--- got1 ---\n%s\n--- got2 ---\n%s", got, got2)
 	}
