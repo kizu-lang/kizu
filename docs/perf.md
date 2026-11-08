@@ -38,12 +38,14 @@ baseline として `examples/user_registry.kizu` を使います。
 
 | artifact | cache key | 保存条件 |
 | --- | --- | --- |
-| LLVM IR text | source path + source hash + optimization mode | `build --emit-llvm` |
-| wasm text | source path + source hash + optimization mode | `build --target wasm32-wasi` |
-| runtime object | runtime C source + toolchain | native link のたび(初回だけ compile) |
-| run/test 実行ファイル | LLVM IR + runtime object + toolchain | `run` / `test` の link |
+| runtime object | runtime C source + toolchain + `clang --version` の 1 行目 | native link のたび(`build --target native` も含む。初回だけ compile) |
+| run/test 実行ファイル | LLVM IR + runtime C source の hash + toolchain | `run` / `test` の link |
 
-`cache prune` が全消し、上限超過分は古い順に落ちます。
+toolchain は driver・target・flag・SDK です。`build --emit-llvm` の LLVM IR と
+`build --target wasm32-wasi` の出力は cache せず、毎回 lower します(ADR-0126)。
+Go seed と Kizu 製 compiler は同じ directory と同じ key を共有します。
+
+`cache prune` が全消し、既定の上限(256 MiB)を超えた分は古い順に落ちます。
 
 CI は `KIZU_CACHE_DIR` を runner の一時 directory に固定し、commit ごとの key で
 content-addressed artifact を復元・保存します。新しい commit は直近 cache を prefix
@@ -55,9 +57,9 @@ build するため、fixed point の検査は cache hit で省略しません。
 ## cache 設計の制約
 
 - 既定の上限を持ち、`cache status` で見え、`cache prune` で消せる
-- module-aware cache key は compiler version、manifest hash、module graph hash、
-  source hash、public interface hash、target、backend、optimization mode、
-  stdlib hash を含む
+- cache key は artifact が何でできているか(LLVM IR・runtime source・toolchain)
+  だけから作り、source path や時刻を入れない。compiler が変われば IR が変わるので
+  key も変わる(ADR-0126)
 - debug artifact は明示 opt-in
 - build script と proc macro による隠れた依存を作らない
 - CI の必須 path に巨大 artifact 生成や無制限 cache population を入れない
