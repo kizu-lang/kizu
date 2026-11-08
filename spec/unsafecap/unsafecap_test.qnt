@@ -198,12 +198,26 @@ module unsafecap_test {
   }
 
   // The view and the raw borrow are let-initializer operations of their own.
+  // The checker names the form, not the kind, for the unmarked raw borrow (findings F2).
   run viewAndRawBorrowTest = all {
     assert(and {
       errorsOf(fn1(List(form(ViewS, 1, NO_EXPR, true)))) == Set(),
       errorsOf(fn1(List(form(ViewS, 0, NO_EXPR, false)))) == Set(Missing(PtrView)),
       errorsOf(fn1(List(form(DerefBorrow, 0, NO_EXPR, false)))) == Set(Missing(PtrDeref)),
     }),
+  }
+
+  // A marker changes neither the type nor the value of what it covers (SPEC
+  // §12), so a let initializer or a deferred call under two markers is still
+  // that form, and the outer marker is merely unused. The checker reads these
+  // forms with exactly one marker and reports a form error instead (findings
+  // F3); the generator does not draw them, mbt_test.go pins them.
+  run stackedMarkersOnFormsTest = all {
+    val stacked = Set(form(ViewS, 2, NO_EXPR, true), form(DerefBorrow, 2, NO_EXPR, true), deferCall(2, Ev, true))
+    assert(stacked.forall(s => and {
+      errorsOf(fn1(List(s))) == Set(Unused),
+      allDischarged(fn1(List(s))),
+    })),
   }
 
   // The repair the generator uses yields an accepted statement from any drawn one.
