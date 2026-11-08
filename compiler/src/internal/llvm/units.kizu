@@ -1,0 +1,640 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import compiler::internal::typ;
+import std::array;
+import std::map;
+import std::string;
+
+// Mechanical port of internal/llvm/units.go: a native debug build formats
+// the program as one unit per module and a program unit, each an LLVM module
+// clang compiles on its own. Go hands each unit's emitter a copy of the
+// module holding that unit's functions; a Kizu Module cannot be copied, so
+// emit_units puts the unit's functions in the module's own list while the
+// unit is written and the whole list back after.
+
+/// Is one part of a program the native toolchain compiles on its own, the
+/// Go `Unit`. The unit of the empty module path is the program unit: it
+/// holds what the compiler writes for the whole program (the package entry
+/// point, the test runner, the table of error names), and a loose file's
+/// functions with them.
+pub struct Unit {
+    pub module: string::String,
+    pub text: string::String,
+}
+
+/// Is one unit before it is written, the Go `unitPlan`: its module and the
+/// functions it defines, in the order the module holds them.
+struct UnitPlan {
+    module: ir::Name,
+    functions: array::Array<ir::Function>,
+}
+
+/// Formats a module as the units a native build compiles, the Go
+/// `EmitUnits`. Unsplit, it is one unit with the text emit_native writes.
+/// Split, it is one unit per module and the program unit last, each a module
+/// LLVM compiles alone: a unit's text depends only on its own functions, so
+/// an edit to one module changes the text of that unit alone, and what the
+/// toolchain made of the others can be reused.
+///
+/// A unit is decided by data alone -- each function's module, the order of
+/// ir::Module.modules, the order of the module's functions -- never by a
+/// map's iteration order, so the compiler and the compiler it builds split a
+/// program the same way and link the same executable.
+pub fn emit_units(
+    allocator: Allocator,
+    module: &var ir::Module,
+    darwin: bool,
+    arch: Arch,
+    split: bool,
+    units: &var array::Array<Unit>
+) -> !?diagnostic::Diagnostic {
+    if !split {
+        var text = string::new(allocator);
+        errdefer text.deinit(allocator);
+        if try emit_for_native_target(allocator, module, &var text, darwin, arch) |failed| {
+            text.deinit(allocator);
+            return move failed;
+        }
+        try append_unit(allocator, units, "", move text);
+        return null;
+    }
+    var whole = try new_emitter(allocator, module, darwin, arch);
+    defer whole.deinit(allocator);
+    if try whole.validate_foreign_boundary(module) |failed| {
+        return move failed;
+    }
+    if try whole.validate_module_types(module) |failed| {
+        return move failed;
+    }
+    let error_names = try whole.needs_error_name_table(module);
+    var program = try module.functions.clone(allocator);
+    defer program.deinit(allocator);
+    var plans = try partition_units(allocator, module);
+    defer plans.deinit(allocator);
+    var plan_index = 0;
+    while plans.at(plan_index) |plan| {
+        plan_index = plan_index + 1;
+        try replace_functions(allocator, module, &plan.functions);
+        var text = string::new(allocator);
+        defer text.deinit(allocator);
+        var emitter = try new_emitter(allocator, module, darwin, arch);
+        defer emitter.deinit(allocator);
+        emitter.split = true;
+        emitter.program_unit = ir::is_empty(plan.module);
+        emitter.program_error_names = error_names;
+        var function_index = 0;
+        while program.get(function_index) |function| {
+            function_index = function_index + 1;
+            try emitter.program_functions.append(allocator, function);
+        }
+        if try emitter.finish(module, &var text) |failed| {
+            errdefer failed.deinit(allocator);
+            try replace_functions(allocator, module, &program);
+            return move failed;
+        }
+        let path = ir::name_text(&module.names, plan.module);
+        let path_bytes = path.as_bytes();
+        var copied = string::new(allocator);
+        errdefer copied.deinit(allocator);
+        try copied.append_string(allocator, &text);
+        try append_unit(allocator, units, path_bytes, move copied);
+    }
+    try replace_functions(allocator, module, &program);
+    return null;
+}
+
+/// Appends one written unit.
+fn append_unit(
+    allocator: Allocator,
+    units: &var array::Array<Unit>,
+    path: []u8,
+    text: string::String
+) -> !void {
+    errdefer text.deinit(allocator);
+    let module = try string::from_bytes(allocator, path);
+    return units.append(allocator, Unit { module: move module, text: move text });
+}
+
+/// Makes functions the module's function list.
+fn replace_functions(
+    allocator: Allocator,
+    module: &var ir::Module,
+    functions: &array::Array<ir::Function>
+) -> !void {
+    module.functions.clear(allocator);
+    var index = 0;
+    while functions.get(index) |function| {
+        index = index + 1;
+        try module.functions.append(allocator, function);
+    }
+    return;
+}
+
+/// Splits a module's functions into units, the Go `partitionUnits`: the
+/// modules in the order ir::Module.modules lists them, then any module it
+/// does not list in the order its first function appears, then the program
+/// unit. A module none of whose functions survived reachability has no unit;
+/// the program unit is always written, since it holds the error names every
+/// unit may read.
+///
+/// A generic instance is defined by every unit whose functions reach it,
+/// directly or through other instances: its code depends on the static
+/// arguments its caller chose, so it belongs to the unit that asked for it
+/// and not to the one that declared the generic, and choosing one owner from
+/// the whole program would move it whenever another module began to use it.
+fn partition_units(allocator: Allocator, module: &ir::Module) -> !array::Array<UnitPlan> {
+    var order = array::new<ir::Name>(allocator);
+    defer order.deinit(allocator);
+    var listed = map::new<i64, bool>(allocator);
+    defer listed.deinit(allocator);
+    try listed.insert(allocator, ir::name_id(ir::empty_name()), true);
+    var index = 0;
+    while module.modules.get(index) |path| {
+        index = index + 1;
+        if !listed.contains(ir::name_id(path)) {
+            try listed.insert(allocator, ir::name_id(path), true);
+            try order.append(allocator, path);
+        }
+    }
+    var by_name = map::new<i64, ir::Function>(allocator);
+    defer by_name.deinit(allocator);
+    index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        try by_name.insert(allocator, ir::name_id(node.name), function);
+        if !node.instance and !listed.contains(ir::name_id(node.module)) {
+            try listed.insert(allocator, ir::name_id(node.module), true);
+            try order.append(allocator, node.module);
+        }
+    }
+    try order.append(allocator, ir::empty_name());
+    var plans = array::new<UnitPlan>(allocator);
+    errdefer plans.deinit(allocator);
+    var order_index = 0;
+    while order.get(order_index) |path| {
+        order_index = order_index + 1;
+        var members = map::new<i64, bool>(allocator);
+        defer members.deinit(allocator);
+        var queue = array::new<ir::Function>(allocator);
+        defer queue.deinit(allocator);
+        index = 0;
+        while module.functions.get(index) |function| {
+            index = index + 1;
+            let node = module.function_nodes.at(function.node);
+            if !node.instance and ir::same_name(node.module, path) {
+                try members.insert(allocator, ir::name_id(node.name), true);
+                try queue.append(allocator, function);
+            }
+        }
+        if queue.len() == 0 and !ir::is_empty(path) {
+            continue;
+        }
+        var head = 0;
+        while queue.get(head) |function| {
+            head = head + 1;
+            var callees = try ir::direct_callees(allocator, module, function);
+            defer callees.deinit(allocator);
+            var callee_index = 0;
+            while callees.get(callee_index) |name| {
+                callee_index = callee_index + 1;
+                let callee = by_name.get(ir::name_id(name)) orelse continue;
+                let callee_node = module.function_nodes.at(callee.node);
+                if callee_node.instance and !members.contains(ir::name_id(name)) {
+                    try members.insert(allocator, ir::name_id(name), true);
+                    try queue.append(allocator, callee);
+                }
+            }
+        }
+        var functions = array::new<ir::Function>(allocator);
+        errdefer functions.deinit(allocator);
+        index = 0;
+        while module.functions.get(index) |function| {
+            index = index + 1;
+            if members.contains(ir::name_id(module.function_name(function))) {
+                try functions.append(allocator, function);
+            }
+        }
+        try plans.append(allocator, UnitPlan { module: path, functions: move functions });
+    }
+    return move plans;
+}
+
+/// Starts the symbol of every Kizu function a split unit shares with the
+/// others, the Go `unitSymbolPrefix`. A unit calls another's functions, so
+/// those cannot keep the internal linkage that keeps a program's names from
+/// answering the C runtime's calls (function_linkage); the `-` keeps them
+/// apart instead, because no C identifier and nothing append_llvm_name_part
+/// writes holds one.
+fn unit_symbol_prefix() -> []u8 {
+    return "kz-";
+}
+
+/// Names the symbol a function is defined and called by, the Go
+/// `functionSymbol`.
+fn (self: &var Emitter) function_symbol(module: &ir::Module, name: ir::Name) -> !ir::Name {
+    let retained = ir::name_text(&module.names, name);
+    let bytes = retained.as_bytes();
+    let plain = try self.llvm_function_name(bytes);
+    if !self.split {
+        return plain;
+    }
+    let function = self.function_named(module, name) orelse return plain;
+    if try self.owns_symbol(module, module.function_nodes.at(function.node)) {
+        return plain;
+    }
+    return self.text2("%s%s", Arg::Lit(unit_symbol_prefix()), Arg::Str(plain));
+}
+
+/// Reports whether a function is defined under the symbol its name spells,
+/// the Go `ownsSymbol`: the entry point, and a C export whose symbol is its
+/// own name.
+fn (self: &var Emitter) owns_symbol(module: &ir::Module, node: &ir::FunctionNode) -> !bool {
+    if module.names.is(node.name, "main") {
+        return true;
+    }
+    return self.exports_in_place(module, node);
+}
+
+/// Reports whether a C export's symbol is its own name, so it needs no alias.
+fn (self: &var Emitter) exports_in_place(module: &ir::Module, node: &ir::FunctionNode) -> !bool {
+    if !module.names.is(node.export_abi, "c") {
+        return false;
+    }
+    let name_text = ir::name_text(&module.names, node.name);
+    let name_bytes = name_text.as_bytes();
+    let symbol = try self.llvm_function_name(name_bytes);
+    let export_text = ir::name_text(&module.names, node.export_name);
+    let export_bytes = export_text.as_bytes();
+    return self.names.is(symbol, export_bytes);
+}
+
+/// Is the linkage a function of a split unit is defined with, the Go
+/// `splitLinkage`. Every function another unit may call is visible to the
+/// other units and hidden from everything outside the program. Which
+/// functions another unit calls is not asked: the answer would come from the
+/// other units, and an edit to one of them would change this unit's text. A
+/// generic instance is one copy among those every unit that reaches it
+/// carries, and the linker keeps one.
+fn split_linkage(owns_symbol: bool, instance: bool) -> []u8 {
+    if owns_symbol {
+        return "";
+    }
+    if instance {
+        return "linkonce_odr hidden ";
+    }
+    return "hidden ";
+}
+
+/// Writes the comdat a copy the linker may find in several units is grouped
+/// by, and returns the clause its definition names it with, the Go
+/// `writeComdat`. ELF and COFF keep one copy per comdat; Mach-O has no
+/// comdats, and its linker keeps one of the weak definitions linkonce_odr
+/// writes there.
+fn (self: &var Emitter) write_comdat(symbol: ir::Name) -> ![]u8 {
+    if self.darwin {
+        return "";
+    }
+    try self.line1("$%s = comdat any", Arg::Str(symbol));
+    return " comdat";
+}
+
+/// Is the linkage of an adapter the runtime calls a worker through, the Go
+/// `thunkLinkage`. Unsplit it is internal; split, every unit that spawns a
+/// worker of one state type carries the same adapter, as it would a generic
+/// instance.
+fn (self: &Emitter) thunk_linkage() -> []u8 {
+    if !self.split {
+        return "internal ";
+    }
+    return "linkonce_odr hidden ";
+}
+
+/// Writes the comdat of an adapter a split unit shares, and returns the
+/// clause its definition names it with, the comdat half of the Go
+/// `thunkLinkage`.
+fn (self: &var Emitter) thunk_comdat(symbol: ir::Name) -> ![]u8 {
+    if !self.split {
+        return "";
+    }
+    return self.write_comdat(symbol);
+}
+
+/// Declares the Kizu functions the unit calls or takes the address of that
+/// another unit defines, in name order, the Go `writeUnitFunctionDecls`.
+fn (self: &var Emitter) write_unit_function_decls(module: &ir::Module) -> !void {
+    if !self.split {
+        return;
+    }
+    var names = try self.unit_external_functions(module);
+    defer names.deinit(self.allocator);
+    var index = 0;
+    while names.at(index) |name| {
+        index = index + 1;
+        let bytes = name.as_bytes();
+        let function = self.function_names.get(bytes) orelse continue;
+        try self.write_function_decl(module, module.function_nodes.at(function.node));
+    }
+    if names.len() > 0 {
+        try self.line("");
+    }
+    return;
+}
+
+/// Names, sorted, the Kizu functions the unit's own functions name but
+/// another unit defines, the Go `unitExternalFunctions`.
+fn (self: &var Emitter) unit_external_functions(module: &ir::Module) -> !array::Array<string::String> {
+    var defined = map::new<i64, bool>(self.allocator);
+    defer defined.deinit(self.allocator);
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        try defined.insert(self.allocator, ir::name_id(module.function_name(function)), true);
+    }
+    var seen = map::new<[]u8, bool>(self.allocator);
+    defer seen.deinit(self.allocator);
+    index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        var callees = try ir::direct_callees(self.allocator, module, function);
+        defer callees.deinit(self.allocator);
+        var callee_index = 0;
+        while callees.get(callee_index) |name| {
+            callee_index = callee_index + 1;
+            if defined.contains(ir::name_id(name)) {
+                continue;
+            }
+            if self.function_named(module, name) |_| {
+                let retained = ir::name_text(&module.names, name);
+                let bytes = retained.as_bytes();
+                try seen.insert(self.allocator, bytes, true);
+            }
+        }
+    }
+    return sorted_keys(self.allocator, &seen);
+}
+
+/// Declares a function another unit defines, the Go `functionDecl`, with
+/// the parameters write_function defines it with: a function that returns
+/// through a slot takes that slot first, a C export takes each value as C
+/// passes it, and a struct otherwise arrives as the address of the caller's
+/// copy.
+fn (self: &var Emitter) write_function_decl(module: &ir::Module, node: &ir::FunctionNode) -> !void {
+    var return_type = try self.llvm_type_of(module, node.return_type);
+    var params = array::new<string::String>(self.allocator);
+    defer params.deinit(self.allocator);
+    if try self.returns_through_slot_of(module, node.return_type) {
+        return_type = try self.names.intern("void");
+        try params.append(self.allocator, try string::from_bytes(self.allocator, "ptr"));
+    }
+    let exports_c = module.names.is(node.export_abi, "c");
+    var index = 0;
+    while node.params.get(index) |param| {
+        index = index + 1;
+        let param_type = try self.llvm_type_of(module, param.type_name);
+        let type_text = ir::name_text(&module.names, param.type_name);
+        let type_bytes = type_text.as_bytes();
+        if exports_c {
+            let extension = c_param_attribute(c_extension(type_bytes));
+            try params.append(self.allocator, try self.sprint2("%s%s", Arg::Str(param_type), Arg::Lit(extension)));
+        } else if uses_indirect_struct_param_abi(module, type_bytes) {
+            try params.append(self.allocator, try string::from_bytes(self.allocator, "ptr"));
+        } else {
+            try params.append(self.allocator, try self.names.copy(param_type));
+        }
+    }
+    var return_attrs = "";
+    if exports_c {
+        let return_text = ir::name_text(&module.names, node.return_type);
+        let return_bytes = return_text.as_bytes();
+        return_attrs = c_return_attribute(c_extension(return_bytes));
+    }
+    var visibility = "hidden ";
+    if try self.owns_symbol(module, node) {
+        visibility = "";
+    }
+    let symbol = try self.function_symbol(module, node.name);
+    let joined = try string::join(self.allocator, &params, ", ");
+    return self.line5(
+        "declare %s%s%s @%s(%s)",
+        Arg::Lit(visibility),
+        Arg::Lit(return_attrs),
+        Arg::Str(return_type),
+        Arg::Str(symbol),
+        Arg::Owned(move joined)
+    );
+}
+
+/// Reports whether this emitter defines the table of error names, the Go
+/// `writesErrorNameTable`: the whole program does when anything in it can
+/// carry an error, and of a split program the program unit does.
+fn (self: &var Emitter) writes_error_name_table(module: &ir::Module) -> !bool {
+    if !self.split {
+        return self.needs_error_name_table(module);
+    }
+    return self.program_unit and self.program_error_names;
+}
+
+/// Records the structs and unions a split unit writes the definitions of,
+/// the Go `collectTypeScope`: every one its functions spell, those the
+/// functions it declares spell, and what the fields and payloads of those
+/// hold, transitively. A unit that wrote every type of the program would
+/// change whenever any module added one. Unsplit, every type is written.
+fn (self: &var Emitter) collect_type_scope(module: &ir::Module) -> !void {
+    if !self.split {
+        return;
+    }
+    var visited = map::new<i64, bool>(self.allocator);
+    defer visited.deinit(self.allocator);
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        try self.visit_function_types(module, &var visited, module.function_nodes.at(function.node));
+    }
+    var names = try self.unit_external_functions(module);
+    defer names.deinit(self.allocator);
+    index = 0;
+    while names.at(index) |name| {
+        index = index + 1;
+        let bytes = name.as_bytes();
+        let function = self.function_names.get(bytes) orelse continue;
+        let node = module.function_nodes.at(function.node);
+        try self.visit_scope_type(module, &var visited, node.return_type);
+        var param_index = 0;
+        while node.params.get(param_index) |param| {
+            param_index = param_index + 1;
+            try self.visit_scope_type(module, &var visited, param.type_name);
+        }
+    }
+    return;
+}
+
+/// Hands every type a function spells to visit_scope_type, the Go
+/// `visitFunctionTypes`: its signature, the values its instructions take and
+/// make, and the type `mem_size_of<T>` names in its immediate.
+fn (self: &var Emitter) visit_function_types(
+    module: &ir::Module,
+    visited: &var map::Map<i64, bool>,
+    node: &ir::FunctionNode
+) -> !void {
+    try self.visit_scope_type(module, visited, node.return_type);
+    var param_index = 0;
+    while node.params.get(param_index) |param| {
+        param_index = param_index + 1;
+        try self.visit_scope_type(module, visited, param.type_name);
+    }
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            try self.visit_scope_type(module, visited, instr_node.result.type_name);
+            if instr_node.op == ir::Op::Call and
+                module.names.is(instr_node.operand, "std::internal::builtin::mem_size_of") {
+                try self.visit_scope_type(module, visited, instr_node.immediate);
+            }
+            var arg_index = 0;
+            while instr_node.args.get(arg_index) |arg| {
+                arg_index = arg_index + 1;
+                try self.visit_scope_type(module, visited, arg.type_name);
+            }
+            var field_index = 0;
+            while instr_node.fields.get(field_index) |field| {
+                field_index = field_index + 1;
+                try self.visit_scope_type(module, visited, field.value.type_name);
+            }
+            var incoming_index = 0;
+            while instr_node.incoming.get(incoming_index) |incoming| {
+                incoming_index = incoming_index + 1;
+                try self.visit_scope_type(module, visited, incoming.value.type_name);
+            }
+            var call_param_index = 0;
+            while instr_node.call_params.get(call_param_index) |param| {
+                call_param_index = call_param_index + 1;
+                try self.visit_scope_type(module, visited, param.type_name);
+            }
+            var cleanup_index = 0;
+            while instr_node.cleanups.get(cleanup_index) |cleanup| {
+                cleanup_index = cleanup_index + 1;
+                var cleanup_arg_index = 0;
+                while module.cleanup_arg(cleanup, cleanup_arg_index) |arg| {
+                    cleanup_arg_index = cleanup_arg_index + 1;
+                    try self.visit_scope_type(module, visited, arg.type_name);
+                }
+            }
+        }
+        try self.visit_scope_type(module, visited, block_node.terminator.value.type_name);
+        try self.visit_scope_type(module, visited, block_node.terminator.cond.type_name);
+    }
+    return;
+}
+
+/// Records the struct or union one type spelling names and every one its
+/// parsed nodes name, the visit of the Go `collectTypeScope`. A spelling is
+/// visited once: the scope it adds is the same each time.
+fn (self: &var Emitter) visit_scope_type(
+    module: &ir::Module,
+    visited: &var map::Map<i64, bool>,
+    name: ir::Name
+) -> !void {
+    if ir::is_empty(name) or visited.contains(ir::name_id(name)) {
+        return;
+    }
+    try visited.insert(self.allocator, ir::name_id(name), true);
+    let retained = ir::name_text(&module.names, name);
+    let bytes = retained.as_bytes();
+    try self.add_scoped_type(module, visited, bytes);
+    let parsed = try self.types.parse(bytes);
+    return self.add_scoped_nodes(module, visited, parsed);
+}
+
+/// Records what every node of a parsed type names, outermost first, the
+/// `typ.Walk` of the Go `collectTypeScope`.
+fn (self: &var Emitter) add_scoped_nodes(
+    module: &ir::Module,
+    visited: &var map::Map<i64, bool>,
+    value: typ::Type
+) -> !void {
+    var rendered = try typ::render(self.allocator, &self.types, value);
+    defer rendered.deinit(self.allocator);
+    let rendered_bytes = rendered.as_bytes();
+    try self.add_scoped_type(module, visited, rendered_bytes);
+    match typ::root_node(&self.types, value) {
+        Name(node) => {
+            var index = 0;
+            while node.args.get(index) |arg| {
+                index = index + 1;
+                try self.add_scoped_nodes(module, visited, typ::child_type(value, arg));
+            }
+            return;
+        },
+        Slice(node) => return self.add_scoped_nodes(module, visited, typ::child_type(value, node.elem)),
+        Buffer(node) => return self.add_scoped_nodes(module, visited, typ::child_type(value, node.elem)),
+        Borrow(node) => return self.add_scoped_nodes(module, visited, typ::child_type(value, node.elem)),
+        Optional(node) => return self.add_scoped_nodes(module, visited, typ::child_type(value, node.elem)),
+        Const(node) => return self.add_scoped_nodes(module, visited, typ::child_type(value, node.elem)),
+        ErrorUnion(node) => {
+            if node.err |err| {
+                try self.add_scoped_nodes(module, visited, typ::child_type(value, err));
+            }
+            return self.add_scoped_nodes(module, visited, typ::child_type(value, node.ok));
+        },
+        Func(node) => {
+            var index = 0;
+            while node.params.get(index) |param| {
+                index = index + 1;
+                try self.add_scoped_nodes(module, visited, typ::child_type(value, param));
+            }
+            return self.add_scoped_nodes(module, visited, typ::child_type(value, node.result));
+        },
+    }
+}
+
+/// Records a struct or union the unit spells, and visits what it holds the
+/// first time, the Go `addScopedType`.
+fn (self: &var Emitter) add_scoped_type(
+    module: &ir::Module,
+    visited: &var map::Map<i64, bool>,
+    name: []u8
+) -> !void {
+    if self.type_scope.contains(name) {
+        return;
+    }
+    if module.structs.at(name) |declared| {
+        try self.insert_scoped_type(name);
+        var field_index = 0;
+        while declared.fields.get(field_index) |field| {
+            field_index = field_index + 1;
+            try self.visit_scope_type(module, visited, field.type_name);
+        }
+        return;
+    }
+    if module.unions.at(name) |declared| {
+        try self.insert_scoped_type(name);
+        var variant_index = 0;
+        while declared.variants.key_at(variant_index) |variant_name| {
+            variant_index = variant_index + 1;
+            if declared.variants.get(variant_name) |variant| {
+                try self.visit_scope_type(module, visited, variant.payload);
+            }
+        }
+    }
+    return;
+}
+
+/// Adds one name to the type scope under a spelling the emitter retains.
+fn (self: &var Emitter) insert_scoped_type(name: []u8) -> !void {
+    let retained_name = try self.names.intern(name);
+    let retained = ir::name_text(&self.names, retained_name);
+    let bytes = retained.as_bytes();
+    return self.type_scope.insert(self.allocator, bytes, true);
+}
+
+/// Reports whether the unit writes the definition of a struct or union, the
+/// Go `inTypeScope`.
+fn (self: &Emitter) in_type_scope(name: []u8) -> bool {
+    return !self.split or self.type_scope.contains(name);
+}

@@ -37,7 +37,7 @@ func linkModule(module *ir.Module, path string) (string, error) {
 		return "", err
 	}
 	ir.KeepTargetReachableFunctions(module, "c", "main")
-	llvmIR, err := llvm.EmitNative(module, host == stdtarget.NativeDarwin, nativeArch("", host))
+	units, err := emitUnits(module, host, nativeArch("", host), false)
 	if err != nil {
 		return "", err
 	}
@@ -46,13 +46,31 @@ func linkModule(module *ir.Module, path string) (string, error) {
 		return "", err
 	}
 	options := native.Options{
-		LLVMIR: llvmIR, ErrorSets: errorSets, Target: host,
+		Units: units, ErrorSets: errorSets, Target: host,
 		LibC: "on", Runtime: "hosted", Emit: "exe", Linker: "clang",
 	}
 	if err := setLinkInputs(&options, module, path); err != nil {
 		return "", err
 	}
 	return native.Executable(options)
+}
+
+// emitUnits emits a lowered module as the units the native link compiles: one
+// per module for a debug build, so the objects of the modules an edit did not
+// touch are reused, and one for an optimized build, which clang optimizes
+// whole.
+func emitUnits(
+	module *ir.Module, target stdtarget.Target, arch llvm.Arch, opt bool,
+) ([]string, error) {
+	units, err := llvm.EmitUnits(module, target == stdtarget.NativeDarwin, arch, !opt)
+	if err != nil {
+		return nil, err
+	}
+	texts := make([]string, 0, len(units))
+	for _, unit := range units {
+		texts = append(texts, unit.Text)
+	}
+	return texts, nil
 }
 
 // setLinkInputs fills what the linker resolves foreign symbols from: the
@@ -401,8 +419,7 @@ func linkNativeModule(module *ir.Module, options nativeBuildArgs, target stdtarg
 	if err := keepNativeRoots(module, options.Emit); err != nil {
 		return err
 	}
-	llvmIR, err := llvm.EmitNative(module, target == stdtarget.NativeDarwin,
-		nativeArch(options.Triple, target))
+	units, err := emitUnits(module, target, nativeArch(options.Triple, target), options.Opt)
 	if err != nil {
 		return err
 	}
@@ -411,7 +428,7 @@ func linkNativeModule(module *ir.Module, options nativeBuildArgs, target stdtarg
 		return err
 	}
 	buildOptions := native.Options{
-		LLVMIR: llvmIR, Output: options.Output, ErrorSets: errorSets,
+		Units: units, Output: options.Output, ErrorSets: errorSets,
 		Target: target, Triple: options.Triple,
 		CPU: options.CPU, ABI: options.ABI, LibC: options.LibC,
 		Runtime: options.Runtime, Emit: options.Emit, Linker: options.Linker,
