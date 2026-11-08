@@ -271,7 +271,7 @@ fn exit_of(code: i64) -> process::ExitStatus {
 
 /// Names what a lowered module produces: its IR dump, LLVM IR, WebAssembly
 /// text or binary, the browser binary beside its ESM host, or nothing but the
-/// promise that emitting succeeded, which is what `check` prints.
+/// promise that lowering and IR verify succeeded, which is what `check` prints.
 enum Output {
     Ir,
     Llvm,
@@ -1487,10 +1487,11 @@ fn write_browser_esm(
 /// `emitWASMFile`: a package also gets the `main` entry wrapper the native
 /// build adds. The text is emitted fresh every time (ADR-0126).
 ///
-/// `Output::Check` runs the same path and throws the LLVM text away, the Go
-/// `checkFile`: `check: ok` promises the backend accepts the program, not just
-/// the checkers, so a lowering or emitter gap surfaces here rather than at the
-/// first `run`, and the promise cannot drift from what `run` does.
+/// `Output::Check` runs the same lowering and stops once the module is
+/// verified, the Go `checkFile`: `check: ok` promises the checkers and the IR
+/// verifier accept the program, so a lowering gap surfaces here rather than at
+/// the first `run`. Emitting is left to `run`, `build` and `test`, and check
+/// does not prune to the entry closure, which only chose what the emitter sees.
 fn lower_target(
     io: Io,
     allocator: Allocator,
@@ -1577,6 +1578,10 @@ fn lower_target(
                             return 1;
                         }
                     }
+                    if output == Output::Check {
+                        try io::write_stdout_line(io, "check: ok");
+                        return 0;
+                    }
                     if output == Output::Wasm or output == Output::WasmBinary or
                         output == Output::WasmBrowser or
                         output == Output::WasmBrowserBinary or
@@ -1657,7 +1662,7 @@ fn lower_target(
                         try io::write_stdout_line(io, text_bytes);
                         return 0;
                     }
-                    if output == Output::Llvm or output == Output::Check {
+                    if output == Output::Llvm {
                         try keep_target_program(
                             allocator, &var lowerer.module, "c"
                         );
@@ -1667,10 +1672,6 @@ fn lower_target(
                             defer failed.deinit(allocator);
                             try report(io, allocator, &loader.sources, &failed);
                             return 1;
-                        }
-                        if output == Output::Check {
-                            try io::write_stdout_line(io, "check: ok");
-                            return 0;
                         }
                         let text_bytes = text.as_bytes();
                         try io::write_stdout_line(io, text_bytes);
