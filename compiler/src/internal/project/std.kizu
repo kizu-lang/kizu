@@ -2,7 +2,6 @@ import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::lexer;
 import compiler::internal::manifest;
-import compiler::internal::parser;
 import compiler::internal::token;
 import std::array;
 import std::fs;
@@ -498,8 +497,13 @@ pub fn (self: &Loader) std_error_codes() -> !StdErrorCodesResult {
     }
 }
 
-/// Parses one std file on its own and records the error sets it declares
-/// under their module-qualified names, numbering members from code on.
+/// Reads one std file and records the error sets it declares under their
+/// module-qualified names, numbering members from code on, the Go
+/// `scanErrorSets`. Only the names and their order decide the numbers, so the
+/// source is read as tokens rather than parsed: an error set is declared at
+/// the top level only, which is where the brackets around a token are all
+/// closed, and `error` followed by a name begins one nowhere else. Most std
+/// files never spell `error` at all, and those are not lexed.
 fn (self: &Loader) collect_error_sets(
     allocator: Allocator,
     file: []u8,
@@ -509,42 +513,128 @@ fn (self: &Loader) collect_error_sets(
 ) -> !?diagnostic::Diagnostic {
     let text = try fs::read_file(self.io, self.allocator, file, mem::Limit::Unlimited);
     defer text.deinit(self.allocator);
-    var tree = ast::new(self.allocator);
-    defer tree.deinit(self.allocator);
     let bytes = text.as_bytes();
-    let scanner = lexer::new(self.allocator, bytes);
-    var source_parser = try parser::new(self.allocator, move scanner);
-    defer source_parser.deinit(self.allocator);
-    let program = try source_parser.parse_program(&var tree);
-    defer program.deinit(self.allocator);
-    if source_parser.diagnostic(0) |first| {
-        return try first.clone(self.allocator);
+    if !contains_bytes(bytes, "error") {
+        return null;
     }
-    var index = 0;
-    while program.declarations.get(index) |declaration| {
-        index = index + 1;
-        match tree.declarations.at(declaration.node) {
-            ErrorSet(set) => {
-                var members = map::new<[]u8, i64>(self.allocator);
-                errdefer members.deinit(self.allocator);
-                var member_index = 0;
-                while set.members.at(member_index) |member| {
-                    member_index = member_index + 1;
-                    let member_text = tree.texts.at(member.node);
-                    let member_bytes = member_text.as_bytes();
-                    try members.insert(allocator, member_bytes, code.*);
-                    code.* = code.* + 1;
-                }
-                var qualified = try string::from_bytes(self.allocator, module_path);
-                defer qualified.deinit(self.allocator);
-                try qualified.append_bytes(self.allocator, "::");
-                let set_name = tree.texts.at(set.name.node);
-                try qualified.append_string(self.allocator, set_name);
-                let qualified_bytes = qualified.as_bytes();
-                try sets.insert(allocator, qualified_bytes, move members);
-            },
-            _ => {},
+    var scanner = lexer::new(allocator, bytes);
+    defer scanner.deinit(allocator);
+    var depth = 0;
+    while true {
+        let current = try scanner.next_token();
+        defer current.deinit(allocator);
+        let kind = current.kind;
+        if kind == token::Kind::Eof {
+            return null;
         }
+        if kind == token::Kind::LBrace or kind == token::Kind::LParen or kind == token::Kind::LBracket {
+            depth = depth + 1;
+            continue;
+        }
+        if kind == token::Kind::RBrace or kind == token::Kind::RParen or kind == token::Kind::RBracket {
+            depth = depth - 1;
+            continue;
+        }
+        if depth != 0 or kind != token::Kind::Ident or !text_is(&current.literal, "error") {
+            continue;
+        }
+        let name = try scanner.next_token();
+        defer name.deinit(allocator);
+        if name.kind != token::Kind::Ident {
+            continue;
+        }
+        var members = map::new<[]u8, i64>(allocator);
+        errdefer members.deinit(allocator);
+        if !try scan_error_set_members(allocator, &var scanner, &var members, code) {
+            members.deinit(allocator);
+            return try malformed_error_set(allocator, file, &name.literal);
+        }
+        var qualified = try string::from_bytes(allocator, module_path);
+        defer qualified.deinit(allocator);
+        try qualified.append_bytes(allocator, "::");
+        try qualified.append_string(allocator, &name.literal);
+        let qualified_bytes = qualified.as_bytes();
+        try sets.insert(allocator, qualified_bytes, move members);
     }
     return null;
+}
+
+/// Reports whether needle occurs anywhere in text, the Go `strings.Contains`.
+fn contains_bytes(text: []u8, needle: []u8) -> bool {
+    let length = mem::len(text);
+    let width = mem::len(needle);
+    if width == 0 {
+        return true;
+    }
+    let first = needle[0];
+    var index = 0;
+    while index + width <= length {
+        if text[index] == first {
+            if mem::equal_bytes(text[index..index + width], needle) {
+                return true;
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+/// Reads what follows `error Name`, the Go `scanErrorSetMembers`: the member
+/// names of a `{ A, B }` set, numbered from code on, or none for a
+/// `= A or B;` set, which keeps no codes of its own. It stops after the `{ }`
+/// list, or on the `=`, so the caller's bracket depth stays right, and
+/// reports false for anything else.
+fn scan_error_set_members(
+    allocator: Allocator,
+    scanner: &var lexer::Lexer,
+    members: &var map::Map<[]u8, i64>,
+    code: &var i64
+) -> !bool {
+    let open = try scanner.next_token();
+    defer open.deinit(allocator);
+    if open.kind == token::Kind::Assign {
+        return true;
+    }
+    if open.kind != token::Kind::LBrace {
+        return false;
+    }
+    while true {
+        let current = try scanner.next_token();
+        defer current.deinit(allocator);
+        if current.kind == token::Kind::RBrace {
+            return true;
+        }
+        if current.kind != token::Kind::Ident {
+            return false;
+        }
+        let member_bytes = current.literal.as_bytes();
+        try members.insert(allocator, member_bytes, code.*);
+        code.* = code.* + 1;
+        let separator = try scanner.next_token();
+        defer separator.deinit(allocator);
+        if separator.kind == token::Kind::RBrace {
+            return true;
+        }
+        if separator.kind != token::Kind::Comma {
+            return false;
+        }
+    }
+    return false;
+}
+
+/// Reports a std error set that is neither a `{ }` list of names nor an `=`
+/// combination, naming the file it is in.
+fn malformed_error_set(allocator: Allocator, file: []u8, name: &string::String) -> !diagnostic::Diagnostic {
+    var text = string::new(allocator);
+    defer text.deinit(allocator);
+    try text.append_bytes(allocator, file);
+    try text.append_bytes(allocator, ": malformed error set ");
+    try text.append_string(allocator, name);
+    let bytes = text.as_bytes();
+    let built = try diagnostic::from_text(allocator,
+        diagnostic::Severity::Error,
+        ast::zero_span(),
+        bytes
+    );
+    return move built;
 }
