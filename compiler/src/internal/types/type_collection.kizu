@@ -414,6 +414,39 @@ fn (self: &var Checker) is_plain_data_type(tree: &ast::Ast, value: Type, seen: &
         }
         seen_index = seen_index + 1;
     }
+    return self.is_plain_data_aggregate(tree, value, name, seen);
+}
+
+/// Walks a declared struct / union for is_plain_data_type, remembering the
+/// answer once declarations are complete, the Go `isPlainDataAggregate`. A
+/// type reached twice through different fields is walked once, not once per
+/// path. A true answer met no cut on seen, and a false one from the root of a
+/// walk had no path above it, so both hold anywhere; a false one inside a
+/// walk may come from that walk's path and is not kept.
+fn (self: &var Checker) is_plain_data_aggregate(tree: &ast::Ast, value: Type, name: []u8, seen: &var array::Array<Type>) -> !bool {
+    if value.node |handle| {
+        let entry = self.types.entries.at(handle);
+        let bytes = entry.spelling.as_bytes();
+        if self.plain_data.get(bytes) |known| {
+            return known;
+        }
+    }
+    let root = seen.len() == 0;
+    let plain = try self.walk_plain_data_aggregate(tree, value, name, seen);
+    if self.plain_data_ready and (plain or root) {
+        if value.node |handle| {
+            let entry = self.types.entries.at(handle);
+            let bytes = entry.spelling.as_bytes();
+            try self.plain_data.insert(self.allocator, bytes, plain);
+        }
+    }
+    return plain;
+}
+
+/// Checks the fields or payloads of a declared struct / union, the Go
+/// `walkPlainDataAggregate`. A declared deinit keeps the type move-only
+/// regardless of its fields.
+fn (self: &var Checker) walk_plain_data_aggregate(tree: &ast::Ast, value: Type, name: []u8, seen: &var array::Array<Type>) -> !bool {
     if self.metadata.impls.at(name) |methods| {
         if methods.contains(typ::cleanup_method()) {
             return false;
