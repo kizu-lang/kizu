@@ -172,6 +172,24 @@ spec-unsafecap:
             echo "$mutant: no counterexample"; exit 1; fi; done
     go run ./scripts/unsafecap-mbt
 
+# Test the C header import model, search it for an unsound acceptance, require
+# the importer as it is and each mutant (one rule broken) to fail the search, and
+# resample the programs internal/cimport replays against the importer and the
+# checker (spec/cimport/README.md).
+spec-cimport:
+    cd spec/cimport && quint test cimport_test.qnt --main cimport_test --backend typescript
+    cd spec/cimport && for init in initGuided initOneMistake initFree initReadonly; do \
+        quint run cimport.qnt --main spec --init $init --backend typescript --seed 0x1 --max-samples 3000 \
+            --max-steps 1 --invariant soundness --witnesses reachedAccept reachedAcceptCall \
+            reachedAcceptPtrRet reachedAcceptInnerConst reachedVolatile reachedDiverge reachedCheck \
+            reachedUse reachedConstLaundering || exit 1; done
+    cd spec/cimport && for mutant in asImplemented mutantConstCollapse mutantDropVolatile mutantRetNonNull \
+        mutantUnmarked mutantSign; do \
+        if quint run cimport.qnt --main $mutant --init initFree --backend typescript --seed 0x2 \
+            --max-samples 3000 --max-steps 1 --invariant soundness > /dev/null; then \
+            echo "$mutant: no counterexample"; exit 1; fi; done
+    go run ./scripts/cimport-mbt
+
 # Regenerate the traces from the Lean specifications (spec/README.md).
 spec-trace:
     cd spec && lean --run Ledger.lean > ../examples/fixtures/ledger_trace.json
