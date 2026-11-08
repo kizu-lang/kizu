@@ -2324,7 +2324,6 @@ func (c *Checker) checkReturnValue(
 		return true, nil
 	}
 	if _, ok := optionalElem(want); ok {
-		// A plain value returned as `?T` wraps implicitly, like `!T` success.
 		wrapped, err := c.wrapsIntoOptional(expr, want, got)
 		if err != nil {
 			return false, err
@@ -2505,7 +2504,6 @@ func (c *Checker) identBorrowSources(name string, env *scope) map[string]bool {
 		}
 		for _, n := range binding.borrowSources {
 			if n == source {
-				// A name whose recorded provenance includes itself is a root.
 				roots[source] = true
 				continue
 			}
@@ -4150,8 +4148,6 @@ func (c *Checker) checkContextualExpr(
 		return want, nil
 	}
 	if _, ok := optionalElem(want); ok {
-		// A plain value in an optional context wraps implicitly, the same way a
-		// success value wraps into `!T`.
 		wrapped, err := c.wrapsIntoOptional(expr, want, got)
 		if err != nil {
 			return "", err
@@ -7247,8 +7243,6 @@ func (c *Checker) checkUserCall(
 	unsafe unsafeMark,
 ) (Type, error) {
 	if bound, ok := c.functionArgs[name]; ok {
-		// A call written against a `Function` static parameter is a call to
-		// what this instantiation bound it to.
 		name = bound
 	}
 	fn, ok := c.functions[name]
