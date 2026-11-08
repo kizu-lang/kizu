@@ -215,14 +215,14 @@ just wasi-smoke      # wasm の例を wasmtime で走らせる
 - `kizu check <file-or-package>` は type / ownership / move / borrow / arena check を実行します。
 - `kizu run <file-or-package>` は native 実行ファイルを作って実行します。
 - `kizu test <file-or-package>` は check 済みの top-level test block を、`main` を呼ばずに実行します。
-- `kizu fmt [--write|-w] <file>` は canonical token formatter output を出力、または書き込みます。source-preserving formatter ではありません。line comment は落としませんが、canonical form では 1 つ 1 行になるので、code に続く trailing comment は次の行へ移ります。
+- `kizu fmt [--write|-w] <file>` は formatter の出力を表示、または書き込みます。決めるのは空白、indent、複数行宣言の末尾 comma です。改行は書いた人が置いた場所に残るので、1 行で書いた block は 1 行のまま、文の間の空行は 1 行まで保たれ、comment は自分の行と column を保ちます。
 - `kizu init [path]` は package の雛形を作ります。
 - `kizu ir [--opt] <file>` は typed SSA IR を表示します。
 - `kizu build --emit-llvm [--opt] <file>` は LLVM IR text を出力します。
-- `kizu build --target wasm32-wasi [--opt] [--emit wat] [-o <out>] <file>` は WASI-compatible WAT を stdout、または指定した `-o` へ出力します。
-- `kizu build --target wasm32-wasi [--opt] --emit wasm -o <out> <file>` は binary `.wasm` を書きます。binary を暗黙に terminal へ出力することはありません。
-- `kizu build --target wasm32-browser [--opt] [--emit wat] [-o <out>] <file>` は inspection 用の browser-hosted WAT を出力します。
-- `kizu build --target wasm32-browser [--opt] --emit wasm -o <out> <file>` は browser 用 `.wasm` を書きます。host adapter と capability 境界は [`docs/wasm-browser.md`](docs/wasm-browser.md) にあります。
+- `kizu build --target wasm32-wasi [--opt] [--emit wat] [-o <out>] <file|package>` は WASI-compatible WAT を stdout、または指定した `-o` へ出力します。
+- `kizu build --target wasm32-wasi [--opt] --emit wasm -o <out> <file|package>` は binary `.wasm` を書きます。binary を暗黙に terminal へ出力することはありません。
+- `kizu build --target wasm32-browser [--opt] [--emit wat] [-o <out>] <file|package>` は inspection 用の browser-hosted WAT を出力します。
+- `kizu build --target wasm32-browser [--opt] --emit wasm -o <out> <file|package>` は browser 用 `.wasm` を書きます。host adapter と capability 境界は [`docs/wasm-browser.md`](docs/wasm-browser.md) にあります。
 - `kizu build --target native [--opt] [--triple <triple>] [--cpu <cpu>] [--abi <abi>] [--libc on|off] [--runtime hosted|freestanding] [--emit exe|obj|llvm] [--linker clang] [-o <out>] <file>` は native executable を link します。
 - `kizu cache status` / `kizu cache prune` はローカルビルドキャッシュの表示と削除です。
 - `kizu import-c-header <file>` は対応する C prototype を Kizu extern に変換します。
