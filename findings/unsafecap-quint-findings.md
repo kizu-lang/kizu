@@ -10,6 +10,7 @@ checker のコードは変えていません。どちらが正しいかは仕様
 * **安全側の重大所見が 1 件あります(F1)。** `unsafe struct` の field を `&var` で
   貸すと、`unsafe` 無しで、しかも宣言 file の外からでも書き換えられます。SPEC §12 が
   閉じると書いている穴そのものです。Go 実装と `compiler/` の両方に同じ穴があります。
+  #1925 で両実装とも修正済みです(F1 の冒頭)。
 * 安全側(拒否はする)の診断の食い違いが 2 件あります(F2, F3)。
 * それ以外の生成プログラムでは、受理 / 拒否と診断クラスがすべてモデルと一致しました
   (規模は README の「規模と結果」)。
@@ -21,7 +22,13 @@ checker のコードは変えていません。どちらが正しいかは仕様
 
 ---
 
-## ⚠️ F1. 【重大・実装が許可してしまう】`&var` で貸した `unsafe struct` の field は、marker 無しで、別 file からも書き換えられる
+## ✅ F1. 【重大・解決済み(#1925)】`&var` で貸した `unsafe struct` の field は、marker 無しで、別 file からも書き換えられる
+
+> **解決済み(#1925)。** field の `&var` 貸し出し(引数、`let r = &var b.n;`、field に
+> 対する `&var self` method の呼び出し)を field への書き込みとして扱い、marker と
+> file 境界を課すことにしました。Go(`requireUnsafeFieldLend`)と `compiler/`
+> (`require_unsafe_field_lend`)の両方に入っています。`&` での貸し出しは読みのまま
+> です。下の 3 形は `mbtKnownShapes` に移り、以下の記述は修正前の状態です。
 
 ### 最小再現(同じ file、marker 無し)
 
@@ -109,7 +116,7 @@ invariantAudited` が数百ミリ秒で反例を出します。SPEC どおりの
 (同 file 無印、別 file 無印、同 file 有印)を固定しており、直ると test が落ちて
 既知形へ移すよう促します。
 
-### 判断を要すること(決めていません)
+### 判断を要すること(#1925 で前者に決定)
 
 * `&var` で unsafe struct の field path を貸すこと(method の receiver としての暗黙の
   `&var` を含む)を field write とみなし、marker と file 境界を課すか。

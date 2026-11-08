@@ -122,6 +122,11 @@ var mbtKnownShapes = []mbtCase{
 	mbtShape("fieldSetAway", mbtAway("$ field_set ! lit"), "Boundary"),
 	mbtShape("buildAway", mbtAway("$ print !build"), "Boundary"),
 	mbtShape("fieldReadAway", mbtAway("print field")),
+	mbtShape("fieldBorrowUnmarked", mbtHome("field_borrow -"), "Missing:struct_invariant"),
+	mbtShape("fieldBorrowMarked", mbtHome("$ field_borrow !")),
+	mbtShape("fieldBorrowAway", mbtAway("$ field_borrow !"), "Boundary"),
+	mbtShape("fieldBorrowAwayUnmarked", mbtAway("field_borrow -"),
+		"Boundary", "Missing:struct_invariant"),
 	{Bucket: "callUnsafeG", G: mbtUnsafe("$ print !read"), F: mbtHome("print g"),
 		Expect: []string{"Missing:unsafe_call"}},
 	{Bucket: "callUnsafeGMarked", G: mbtUnsafe("$ print !read"), F: mbtHome("$ print !g")},
@@ -142,12 +147,6 @@ var mbtKnownDivergences = []struct {
 	c       mbtCase
 	checker string
 }{
-	// Lending a field of an unsafe struct to a writer changes it with no marker.
-	{mbtShape("fieldBorrowUnmarked", mbtHome("field_borrow -"), "Missing:struct_invariant"), ""},
-	// ... and from another file of the module.
-	{mbtShape("fieldBorrowAway", mbtAway("field_borrow -"), "Boundary", "Missing:struct_invariant"), ""},
-	// The marker SPEC asks for is "unused" to the checker.
-	{mbtShape("fieldBorrowMarked", mbtHome("$ field_borrow !")), "Unused"},
 	// Two markers on a form the checker reads with one are a form error, not an
 	// unused marker. Both reject; the diagnostic differs.
 	{mbtShape("doubleMarkedView", mbtHome("$ view !!"), "Unused"), "?"},
