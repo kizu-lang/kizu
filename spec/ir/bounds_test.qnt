@@ -92,4 +92,15 @@ module bounds_test {
       assert(same(outcome(p, 2, -1), STOPPED)),
     }
   }
+
+  // `i + 1` is not below the length because `i` is: the last turn of a
+  // loop over the length reads one past the end.
+  run nextIndexTest = {
+    val p = List(ForLen(0), Read(I1), End)
+    all {
+      assert(skippable(Forget, p) == Set()),
+      assert(same(outcome(p, 3, 0), STOPPED)),
+      assert(same(outcome(p, 0, 0), printed(0, 0))),
+    }
+  }
 }
