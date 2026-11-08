@@ -62,15 +62,11 @@ type error: duplicate field `User.age`
 
 - `internal/types/checker.go` rejects the repeated name in
   `checkStructLiteralExpr` instead of overwriting the earlier initializer.
-- The selfhost backend refusal in
-  `selfhost/src/backend/compiled_mir_lower_struct.kizu` is correct as written
-  and stays. It is now unreachable through a well-formed frontend, which is what
-  a backend refusal of a shape the language forbids should be.
-- `examples/negative/duplicate_struct_field.kizu` carries the case in the
-  reusable conformance manifest (`negative_duplicate_struct_field`), so neither
-  implementation can drift back to accepting it without a failing test.
-- The selfhost type checker
-  (`selfhost/src/types/struct_literal.kizu`) reports the same diagnostic, so
+- `examples/negative/duplicate_struct_field.kizu` declares the case at the end
+  of the file, so neither implementation can drift back to accepting it without
+  a failing test.
+- The Kizu compiler's type checker
+  (`compiler/src/internal/types/body_expression_access.kizu`) reports the same diagnostic, so
   `kizu check` gives one answer whichever checker runs it.
 - Should a later ADR want field update syntax (`Type { ..base, field: value }`),
   it introduces a new form with its own rule. It does not reinterpret a repeated
