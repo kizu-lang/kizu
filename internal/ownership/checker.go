@@ -8545,7 +8545,6 @@ func (c *Checker) directFieldReceiver(
 func (c *Checker) bindingForDirectFieldReceiver(receiver *directFieldReceiver) *binding {
 	value := &binding{
 		name: receiver.path, typeName: receiver.typeName,
-		// A field of a mutable place is itself a mutable place.
 		mutable:       mutablePlace(receiver.owner),
 		borrowedParam: receiver.owner.borrowedParam,
 		mutBorrow:     receiver.owner.mutBorrow,
