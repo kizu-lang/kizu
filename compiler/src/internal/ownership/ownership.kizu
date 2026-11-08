@@ -48,6 +48,11 @@ pub struct Result {
     // only the checked receiver type says which method that is: two types may
     // declare the same method name with `&var` at different positions.
     pub method_callees: array::Array<MethodCallee>,
+    // method_callee_buckets indexes method_callees by method_call_key, the
+    // lookup the Go map keyed by `*ast.FieldExpr` makes: a handle is not a
+    // map key, so a bucket holds the entry indexes whose callee spans hash
+    // alike, in recording order, and the callee node decides within it.
+    pub method_callee_buckets: map::Map<i64, array::Array<i64>>,
 }
 
 /// Is one declaration a method call resolved to: the call's callee
@@ -55,6 +60,7 @@ pub struct Result {
 /// registered name.
 pub struct MethodCallee {
     pub callee: ast::Expression,
+    pub key: i64,
     pub name: Name,
 }
 
@@ -69,7 +75,8 @@ fn new_result(allocator: Allocator) -> Result {
         return_retired_err_defers: array::new<RetiredErrDefers>(allocator),
         try_retired_err_defers: array::new<RetiredTry>(allocator),
         function_pointer_mut_borrows: array::new<ast::Expression>(allocator),
-        method_callees: array::new<MethodCallee>(allocator)
+        method_callees: array::new<MethodCallee>(allocator),
+        method_callee_buckets: map::new<i64, array::Array<i64>>(allocator)
     };
 }
 
@@ -78,6 +85,7 @@ fn (self: Result) deinit(allocator: Allocator) -> void {
     self.try_retired_err_defers.deinit(allocator);
     self.function_pointer_mut_borrows.deinit(allocator);
     self.method_callees.deinit(allocator);
+    self.method_callee_buckets.deinit(allocator);
     return;
 }
 
@@ -597,6 +605,8 @@ pub struct Checker {
     // duration, so a call nested in the receiver or the arguments never
     // resolves the outer one.
     method_call: ?ast::Expression,
+    // method_call_key is method_call's method_call_key.
+    method_call_key: i64,
     // lazy_default names the `orelse` or `catch` whose default is being
     // read, or is empty. A default runs only when the payload is absent, so
     // a named owner consumed inside it would be consumed on one path and
@@ -681,6 +691,7 @@ pub fn new_checker_for_target(
         view_capture_call: null,
         borrow_return: false,
         method_call: null,
+        method_call_key: 0,
         lazy_default: empty_name(),
         returned_views: array::new<ast::Expression>(allocator),
         result: new_result(allocator)
@@ -846,6 +857,38 @@ pub fn (self: &Checker) method_callee_at(index: i64) -> ?ast::Expression {
         return entry.callee;
     }
     return null;
+}
+
+/// Returns the method_call_key of the resolved method call at index.
+pub fn (self: &Checker) method_callee_key_at(index: i64) -> i64 {
+    if self.result.method_callees.get(index) |entry| {
+        return entry.key;
+    }
+    return 0;
+}
+
+/// Hashes where a method call's callee was read from, the bucket key of
+/// Result.method_callee_buckets and the IR's copy of it. The key is read from
+/// the callee node, so every reader of one call computes the same key. Calls
+/// the compiler made share the zero span, and a chain `a.f().g()` shares a
+/// start, so the key only narrows the search: the callee node is what
+/// identifies the call.
+pub fn method_call_key(tree: &ast::Ast, callee: ast::Expression) -> i64 {
+    let field = field_expr(tree, callee) orelse return 0;
+    var key = 1;
+    if field.span.source |id| {
+        key = id.index + 2;
+    }
+    key = mix_span_key(key, field.span.start.line);
+    key = mix_span_key(key, field.span.start.column);
+    key = mix_span_key(key, field.span.end.line);
+    return mix_span_key(key, field.span.end.column);
+}
+
+/// Folds one span coordinate into a key kept below 2^31, so the product
+/// cannot overflow whatever the coordinate.
+fn mix_span_key(key: i64, value: i64) -> i64 {
+    return (key * 1000003 + value % 2147483647) % 2147483647;
 }
 
 /// Appends the declaration name of the resolved method call at index.
