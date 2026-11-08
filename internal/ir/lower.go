@@ -1484,8 +1484,6 @@ func (l *lowerer) assignTargetType(target ast.Expression) string {
 	case *ast.UnsafeExpr:
 		return l.assignTargetType(t.Value)
 	case *ast.IndexExpr:
-		// An element write lands in the element type of the view or the
-		// array the target names.
 		container := l.assignTargetType(t.Target)
 		if !t.Slice && strings.HasPrefix(container, "[]") {
 			return container[2:]
