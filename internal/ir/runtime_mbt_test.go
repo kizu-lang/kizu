@@ -89,17 +89,7 @@ var knownDivergences = []struct {
 	id      string
 	pattern *regexp.Regexp
 	sources [][]string
-}{
-	// The second EliminateBoundsChecks of the wasm pipeline names the
-	// accesses it answers %bce1., %bce2., .. again, over the names the first
-	// one gave. Where the reused name lands decides which complaint Verify
-	// makes.
-	{"F1", regexp.MustCompile(`ir verify error: .* reads %bce\d+\.at(, which is defined in| before it is defined)`),
-		[][]string{
-			{"write C2", "read C2", "read K", "read K"},
-			{"while 0", "write I", "write I", "end", "read C0", "read C0"},
-		}},
-}
+}{}
 
 // knownDivergence names the known divergence err shows, or "".
 func knownDivergence(err error) string {
