@@ -43,7 +43,8 @@ baseline として `examples/user_registry.kizu` を使います。
 | run/test 実行ファイル | 全 unit の LLVM IR の hash を unit 順に並べたもの + runtime C source の hash + toolchain | `run` / `test` の link |
 
 debug build は LLVM IR を module ごとの unit と program unit(package の `main`、test
-runner、error 名の表)に割り、unit ごとに object を作って link します。1 module の
+runner、error 名の表)に割り、unit ごとに object を作って link します。cache に無い
+unit は processor の数だけ並行に compile し、link は完了順でなく unit 順に並べます。1 module の
 編集で clang が compile し直すのはその unit だけで、署名や型を変えたときはそれを
 参照する unit も変わります。`--opt` は 1 unit のまま clang に -O3 で丸ごと渡します。
 実行ファイルの鍵に clang の版は入らないので、cache にある実行ファイルを走らせる

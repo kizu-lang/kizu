@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/kizu-lang/kizu/internal/buildcache"
 	"github.com/kizu-lang/kizu/internal/stdtarget"
@@ -148,7 +149,8 @@ func link(runtimePath string, output string, options Options, version string) ([
 // optimized build hands clang its one module as text, to compile and link in
 // one step. A debug build compiles each unit to an object, which the cache
 // keeps: the next build that emits the same text for a unit links the object
-// it already has. The objects are read from the cache by `build` as well,
+// it already has, and the units it has no object for compile in parallel, as
+// Go compiles packages. The objects are read from the cache by `build` as well,
 // since what that command writes where the user asked is the executable, not
 // the objects it is linked from.
 func unitInputs(tmp string, options Options, version string) ([]string, error) {
@@ -169,20 +171,33 @@ func unitInputs(tmp string, options Options, version string) ([]string, error) {
 		return nil, err
 	}
 	digests := unitDigests(options.Units)
-	inputs := make([]string, 0, len(options.Units))
+	inputs := make([]string, len(options.Units))
+	failures := make([]error, len(options.Units))
+	// The units compile at once, as many as the machine has processors. Each
+	// result lands at its unit's index, so the link reads the objects in unit
+	// order whichever finished first.
+	slots := make(chan struct{}, runtime.NumCPU())
+	var group sync.WaitGroup
 	for index, unit := range options.Units {
-		object, err := cache.GetOrBuildArtifact(
-			"native-obj",
-			objectCacheTarget(options, version),
-			[]byte(digests[index]),
-			func(output string) error {
-				return compileUnit(tmp, index, moduleForLinker(options, unit, version), output, options)
-			},
-		)
+		group.Add(1)
+		slots <- struct{}{}
+		go func() {
+			defer func() { <-slots; group.Done() }()
+			inputs[index], failures[index] = cache.GetOrBuildArtifact(
+				"native-obj",
+				objectCacheTarget(options, version),
+				[]byte(digests[index]),
+				func(output string) error {
+					return compileUnit(tmp, index, moduleForLinker(options, unit, version), output, options)
+				},
+			)
+		}()
+	}
+	group.Wait()
+	for _, err := range failures {
 		if err != nil {
 			return nil, err
 		}
-		inputs = append(inputs, object)
 	}
 	return inputs, nil
 }

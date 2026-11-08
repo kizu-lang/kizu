@@ -51,3 +51,15 @@ module ごとの IR 量(関数本体の行数、symbol 名からの集計。gene
 cold build は遅くなった(4.4s → 7.6s)。unit ごとに clang を 1 回ずつ順に起動するのと、
 generic instance を使う unit の数だけ compile するため。A2(unit の並行 compile)が
 これを縮める対象。
+
+## A2: unit の並行 compile 後
+
+| 項目 | A0 | A1 | A2 |
+| --- | --- | --- | --- |
+| cold `run compiler`(`just perf-cache`) | 4.36s | 7.55s | 3.44s |
+| 1 module 編集の `run compiler`(`just perf-cache`、1 回) | 4.38s | 3.01s | 3.21s |
+| Go 製 compiler が compiler を空 cache で build | ― | 5.1s | 2.7s |
+| selfhost が自分を空 cache で build(bootstrap 第 2 段) | ― | 17.5s | 14.7s |
+
+cold は A0 より速くなった。1 module 編集は clang 1 本なので並行化の影響はなく、
+差は測定のばらつき(A1 の 3 回測定は 2.77〜2.83s)。
