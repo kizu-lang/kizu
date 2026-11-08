@@ -156,6 +156,22 @@ spec-ownership:
             reachedBorrowed reachedLoopConsume reachedDoubleDefer || exit 1; done
     go run ./scripts/ownership-mbt
 
+# Test the unsafe marker model, search it for an unsound acceptance, require each
+# mutant (one rule broken) to fail the search, and resample the programs
+# internal/unsafecap replays against the checker (spec/unsafecap/README.md).
+spec-unsafecap:
+    cd spec/unsafecap && quint test unsafecap_test.qnt
+    cd spec/unsafecap && for init in initGuided initOneMistake initFree; do \
+        quint run unsafecap.qnt --main spec --init $init --backend rust --seed 0x1 --max-samples 2000 \
+            --max-steps 12 --invariant soundness --witnesses reachedAccept reachedAcceptUnsafeFn \
+            reachedAcceptBlock reachedAcceptAway reachedUnused reachedBoundary reachedMismatch \
+            reachedNoSafety || exit 1; done
+    cd spec/unsafecap && for mutant in mutantInherit mutantUnsafeFnBody mutantLooseFnTypes asImplemented; do \
+        if quint run unsafecap.qnt --main $mutant --init initFree --backend rust --seed 0x2 \
+            --max-samples 3000 --max-steps 12 --invariant soundness > /dev/null; then \
+            echo "$mutant: no counterexample"; exit 1; fi; done
+    go run ./scripts/unsafecap-mbt
+
 # Regenerate the traces from the Lean specifications (spec/README.md).
 spec-trace:
     cd spec && lean --run Ledger.lean > ../examples/fixtures/ledger_trace.json
