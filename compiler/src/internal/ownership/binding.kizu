@@ -88,6 +88,13 @@ fn (self: Binding) deinit(allocator: Allocator) -> void {
 struct Scope {
     parent: ?ScopeHandle,
     values: map::Map<[]u8, BindingHandle>,
+    // borrowers lists the bindings defined here that held borrow targets
+    // when they were defined, the Go `scope.borrowers`, so the per-statement
+    // last-use release visits them instead of every value in scope. Every
+    // site that ties a borrow does it before the define, and targets are
+    // only cleared afterwards. The release pass drops released and shadowed
+    // entries.
+    borrowers: array::Array<BindingHandle>,
     // owners holds the bound values whose type carries a deinit contract:
     // the only ones an exit can leak. An exit check, run at every `try`,
     // reads these instead of every binding in the chain.
@@ -190,6 +197,7 @@ fn (self: &var ScopeStore) new_scope(parent: ?ScopeHandle) -> !ScopeHandle {
         node: try self.scopes.add(self.allocator, Scope {
             parent: parent,
             values: map::new<[]u8, BindingHandle>(self.allocator),
+            borrowers: array::new<BindingHandle>(self.allocator),
             owners: array::new<BindingHandle>(self.allocator)
         })
     };
@@ -211,7 +219,9 @@ fn (self: &var ScopeStore) define(scope: ScopeHandle, name: []u8, value: Binding
 /// Binds an already retained binding in the current scope. A name already
 /// bound there is replaced, and so leaves the scope's owners.
 fn (self: &var ScopeStore) define_handle(allocator: Allocator, scope: ScopeHandle, name: []u8, handle: BindingHandle) -> !void {
-    let owner_type = self.at(handle).owner_type;
+    let record = self.at(handle);
+    let borrows = record.borrow_targets.len() > 0;
+    let owner_type = record.owner_type;
     var previous = none_binding();
     let target = self.scopes.at(scope.node);
     if target.values.get(name) |found| {
@@ -230,6 +240,9 @@ fn (self: &var ScopeStore) define_handle(allocator: Allocator, scope: ScopeHandl
                 index = index + 1;
             }
         }
+        if borrows {
+            try current.borrowers.append(allocator, handle);
+        }
         if owner_type {
             try current.owners.append(allocator, handle);
         }
@@ -238,6 +251,32 @@ fn (self: &var ScopeStore) define_handle(allocator: Allocator, scope: ScopeHandl
             return;
         }
         return current.values.insert(allocator, name, handle);
+    }
+    return;
+}
+
+/// Returns the binding at position in the scope's borrower list, the Go
+/// `scope.borrowers`; null past the last.
+fn (self: &ScopeStore) scope_borrower_at(scope: ScopeHandle, index: i64) -> ?BindingHandle {
+    let retained = self.scopes.at(scope.node);
+    return retained.borrowers.get(index);
+}
+
+/// Keeps only the borrowers whose keep flag is set, in order.
+fn (self: &var ScopeStore) retain_scope_borrowers(scope: ScopeHandle, keep: &array::Array<bool>) -> !void {
+    if self.scopes.at_mut(scope.node) |current| {
+        var kept = 0;
+        var index = 0;
+        while current.borrowers.get(index) |value| {
+            if keep.get(index) orelse false {
+                try current.borrowers.set(kept, value);
+                kept = kept + 1;
+            }
+            index = index + 1;
+        }
+        while current.borrowers.len() > kept {
+            let _ = current.borrowers.pop();
+        }
     }
     return;
 }
