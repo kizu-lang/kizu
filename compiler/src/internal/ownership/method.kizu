@@ -106,13 +106,27 @@ fn (self: &var Checker) dispatch_method_call(
     if handled {
         return null;
     }
-    if try self.check_box_receiver_expr(tree, env, field, args, &var handled, out) |failed| {
+    // The receiver is read once and its type handed to both receiver forms
+    // below. Reading it per form re-checked the whole receiver chain at every
+    // level of `a.f(x).g(y)...`, which grew as 2^depth, and the second read
+    // saw the first one's moves.
+    var receiver_type = empty_name();
+    if try self.read_expr(tree, env, field.receiver, &var receiver_type) |failed| {
+        // Only a copy temporary reports its read error; any other receiver
+        // form says what is wrong with it as a receiver.
+        if call_expr(tree, field.receiver) |_call| {
+            return move failed;
+        }
+        failed.deinit(self.allocator);
+        return self.check_local_receiver_method(tree, env, field, args, out);
+    }
+    if try self.check_box_receiver_expr(tree, env, field, receiver_type, args, &var handled, out) |failed| {
         return move failed;
     }
     if handled {
         return null;
     }
-    if try self.check_copy_temporary_receiver_method(tree, env, field, args, &var handled, out) |failed| {
+    if try self.check_copy_temporary_receiver_method(tree, env, field, receiver_type, args, &var handled, out) |failed| {
         return move failed;
     }
     if handled {
@@ -130,17 +144,13 @@ fn (self: &var Checker) check_copy_temporary_receiver_method(
     tree: &var ast::Ast,
     env: ScopeHandle,
     field: ast::FieldExpr,
+    receiver_type: Name,
     args: ast::ExpressionList,
     handled: &var bool,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
     handled.* = false;
     if call_expr(tree, field.receiver) |_call| {
-        var receiver_type = empty_name();
-        if try self.read_expr(tree, env, field.receiver, &var receiver_type) |failed| {
-            handled.* = true;
-            return move failed;
-        }
         let copy = try self.is_copy_type(receiver_type);
         if !copy {
             return null;
@@ -407,16 +417,12 @@ fn (self: &var Checker) check_box_receiver_expr(
     tree: &var ast::Ast,
     env: ScopeHandle,
     field: ast::FieldExpr,
+    type_name: Name,
     args: ast::ExpressionList,
     handled: &var bool,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
     handled.* = false;
-    var type_name = empty_name();
-    if try self.read_expr(tree, env, field.receiver, &var type_name) |failed| {
-        failed.deinit(self.allocator);
-        return null;
-    }
     if !self.names.generic_base_is(type_name, "std::mem::Box") {
         return null;
     }
