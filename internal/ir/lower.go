@@ -183,11 +183,6 @@ type loopPhi struct {
 	phi  *Instr
 }
 
-// newLowerer prepares lookup tables for the host target.
-func newLowerer(program *ast.Program, ownershipResult ownership.Result) *lowerer {
-	return newLowererForTarget(program, ownershipResult, stdtarget.MustHost())
-}
-
 // newLowererForTarget prepares lookup tables for one selected build target.
 func newLowererForTarget(
 	program *ast.Program,
