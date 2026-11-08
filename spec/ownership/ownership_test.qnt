@@ -128,6 +128,15 @@ module ownership_test {
     assert(errorsOf(p).contains(LoopConsume) and faultsOf(p).contains(DoubleFree)),
   }
 
+  // The shortest programs: one statement that releases `s` is the whole of a
+  // correct body, and a lone `try` leaks on its error exit.
+  run shortestProgramsTest = all {
+    assert(List(List(Deinit), List(MoveOut), List(DeferDeinit))
+      .foldl(true, (ok, p) => ok and errorsOf(p) == Set() and faultsOf(p) == Set())),
+    val lone = List(Mutate)
+    assert(errorsOf(lone) == Set(Leak) and faultsOf(lone).contains(LeakOnError)),
+  }
+
   run sharedViewAndBorrowCoexistTest = all {
     val p = List(View(0), Borrow(1), UseView(0), UseBorrow(1), Deinit)
     assert(errorsOf(p) == Set() and faultsOf(p) == Set()),
