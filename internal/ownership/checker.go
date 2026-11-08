@@ -241,6 +241,13 @@ type borrowSource struct {
 type scope struct {
 	parent *scope
 	values map[string]*binding
+	// borrowers lists the bindings defined here that held borrow targets
+	// when they were defined, so the per-statement last-use release visits
+	// them instead of every value in scope. Every site that ties a borrow
+	// does it before define, and targets are only cleared afterwards, so a
+	// binding defined without targets never needs a visit. Entries that were
+	// released or shadowed are dropped by the release pass.
+	borrowers []*binding
 }
 
 type directFieldReceiver struct {
@@ -9793,6 +9800,9 @@ func (s *scope) child() *scope {
 // define binds a local name in the current scope.
 func (s *scope) define(value *binding) {
 	s.values[value.name] = value
+	if len(value.borrowTargets) > 0 {
+		s.borrowers = append(s.borrowers, value)
+	}
 }
 
 // lookup resolves a local name by walking parent scopes.
@@ -9837,10 +9847,24 @@ func (s *scope) lookupArenaID(arenaID int) (*binding, bool) {
 // A binding that is itself still borrowed keeps its own sources active: the
 // chain buffer <- view <- allocator <- owner releases from the leaf inward,
 // each release re-examining only the bindings it just unblocked.
+//
+// Only the bindings in s.borrowers can have targets to release. A release
+// only lowers borrow counts, so the bindings it unblocks end up released
+// whatever order they are visited in.
 func (s *scope) releaseLastUseBorrows(stmtIndex int, lastUses map[string]int) {
-	for name, value := range s.values {
-		s.releaseIfUnused(name, value, stmtIndex, lastUses)
+	for _, value := range s.borrowers {
+		if s.values[value.name] == value {
+			s.releaseIfUnused(value.name, value, stmtIndex, lastUses)
+		}
 	}
+	kept := s.borrowers[:0]
+	for _, value := range s.borrowers {
+		if len(value.borrowTargets) > 0 && s.values[value.name] == value {
+			kept = append(kept, value)
+		}
+	}
+	clear(s.borrowers[len(kept):])
+	s.borrowers = kept
 }
 
 // releaseIfUnused releases one binding's borrow targets once it is past its
@@ -10204,6 +10228,12 @@ func (s *scope) clone() *scope {
 		copyValue.fieldArenaIDs = copyIntMap(value.fieldArenaIDs)
 		copyValue.borrowTargets = append([]borrowSource(nil), value.borrowTargets...)
 		cloned.values[name] = &copyValue
+	}
+	for _, value := range s.borrowers {
+		if copyValue := cloned.values[value.name]; s.values[value.name] == value &&
+			len(copyValue.borrowTargets) > 0 {
+			cloned.borrowers = append(cloned.borrowers, copyValue)
+		}
 	}
 	return cloned
 }
