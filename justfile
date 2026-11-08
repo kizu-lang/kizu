@@ -150,10 +150,11 @@ spec-ir:
 # programs internal/ownership replays against the checker (spec/ownership/README.md).
 spec-ownership:
     cd spec/ownership && quint test ownership_test.qnt
-    cd spec/ownership && for init in initGuided initOneMistake initFree; do \
+    cd spec/ownership && for init in initGuided initOneMistake initFree initTargeted; do \
         quint run ownership.qnt --init $init --backend rust --seed 0x1 --max-samples 3000 \
             --max-steps 25 --invariant soundness --witnesses reachedAccept reachedAcceptNested \
-            reachedBorrowed reachedLoopConsume reachedDoubleDefer || exit 1; done
+            reachedBorrowed reachedLoopConsume reachedDoubleDefer reachedOnlyBorrowed \
+            reachedOnlyDoubleDefer reachedOnlyLoopConsume || exit 1; done
     go run ./scripts/ownership-mbt
 
 # Test the unsafe marker model, search it for an unsound acceptance, require each
