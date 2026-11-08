@@ -104,7 +104,7 @@ func (c *Checker) checkComptimeForRange(stmt *ast.ComptimeForStmt, env *scope) e
 	for value := start; value < end; value++ {
 		c.comptimeValues[stmt.Name] = strconv.FormatInt(value, 10)
 		child := env.child()
-		child.define(c.newBinding(stmt.Name, "i64"))
+		c.define(child, c.newBinding(stmt.Name, "i64"))
 		if err := c.checkBlock(stmt.Body, child); err != nil {
 			return err
 		}
