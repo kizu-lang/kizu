@@ -586,6 +586,41 @@ fn (self: &var std::net::Child) read_stderr_ready(
     return read_pipe_ready(io, allocator, fd, out, max);
 }
 
+// read_stdout_into is `TcpStream.read_into` for the child's standard output:
+// one read appended to `out`, and zero is the end. It waits for the child to
+// write, which on an evented Io parks only the calling worker -- the shape a
+// worker-per-connection server reads with. There is no deadline: a child is
+// stopped with `kill`.
+fn (self: &var std::net::Child) read_stdout_into(
+    io: Io,
+    allocator: Allocator,
+    out: &var std::string::String,
+    max: i64
+) -> std::net::Error!i64 {
+    let fd = std::internal::builtin::net_child_fd(self.handle, 1);
+    let count = try std::internal::builtin::net_read(io, allocator, fd, out, max, -1);
+    return count;
+}
+
+fn (self: &var std::net::Child) read_stderr_into(
+    io: Io,
+    allocator: Allocator,
+    out: &var std::string::String,
+    max: i64
+) -> std::net::Error!i64 {
+    let fd = std::internal::builtin::net_child_fd(self.handle, 2);
+    let count = try std::internal::builtin::net_read(io, allocator, fd, out, max, -1);
+    return count;
+}
+
+// write_stdin_all is `TcpStream.write_all` for the child's standard input: it
+// writes every byte or reports why not, waiting while the pipe is full.
+fn (self: &var std::net::Child) write_stdin_all(io: Io, bytes: []u8) -> std::net::Error!void {
+    let fd = std::internal::builtin::net_child_fd(self.handle, 0);
+    try std::internal::builtin::net_write_all(io, fd, bytes, -1);
+    return;
+}
+
 // write_stdin_some is `TcpStream.write_some` for the child's standard input:
 // zero is "not right now", and a poller watching it for Write says when.
 fn (self: &var std::net::Child) write_stdin_some(io: Io, bytes: []u8) -> std::net::Error!i64 {
@@ -624,6 +659,10 @@ fn (self: &var std::net::Child) try_wait(io: Io) -> std::net::Error!?i64 {
 
 // wait blocks until the child ends. A child still writing to a pipe nobody
 // reads can block on that write first, so read to the end before waiting.
+//
+// It is waitpid, so it holds the thread even on an evented Io: the other
+// workers do not run until it returns. A worker that has read the child's
+// output to its end usually waits only for the exit that follows.
 fn (self: &var std::net::Child) wait(io: Io) -> std::net::Error!i64 {
     let status = try std::internal::builtin::net_child_wait(io, self.handle, 1);
     return status;

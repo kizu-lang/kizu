@@ -79,6 +79,13 @@ fn (self: &var Child) read_stdout_ready(
 fn (self: &var Child) read_stderr_ready(
     io: Io, allocator: Allocator, out: &var std::string::String, max: i64,
 ) -> std::net::Error!?i64
+fn (self: &var Child) read_stdout_into(
+    io: Io, allocator: Allocator, out: &var std::string::String, max: i64,
+) -> std::net::Error!i64
+fn (self: &var Child) read_stderr_into(
+    io: Io, allocator: Allocator, out: &var std::string::String, max: i64,
+) -> std::net::Error!i64
+fn (self: &var Child) write_stdin_all(io: Io, bytes: []u8) -> std::net::Error!void
 fn (self: &var Child) write_stdin_some(io: Io, bytes: []u8) -> std::net::Error!i64
 fn (self: &var Child) close_stdin() -> void
 fn (self: &var Child) close_stdout() -> void
@@ -295,12 +302,17 @@ if try child.read_stdout_ready(handle, allocator, &var out, 4096) |got| {
   watch したままだと毎回の `wait` が即座に返ります。`close_*` はこのプロセスの
   端を閉じ、poller からも外れます。`close_stdin` は子に入力の終わりを見せます。
 - `write_stdin_some` は `write_some` と同じく、0 が「今は書けない」です。
+- 待つ形は `read_stdout_into` / `read_stderr_into` / `write_stdin_all` です。
+  `TcpStream.read_into` / `write_all` と同じ契約で、evented な `Io` では呼んだ
+  worker だけが park します。接続ごとの worker が子の出力を中継する server は
+  この形で書きます。deadline はありません —— 止めるのは `kill` です。
 - 起動できない program は error ではなく、子が 127 で終わります
   (`spawn_wait8` と同じ)。exec が成功したかは子の中でしか分からないためです。
 - `try_wait` は待たずに終了 status か null を、`wait` は終わるまで待って
   status を返します。status は終了 code、signal で終わった場合は 128 + signal です。
   読まれない pipe に書いている子は先にそこで止まるので、終端まで読んでから
-  `wait` します。
+  `wait` します。`wait` は waitpid なので、evented な `Io` でも thread ごと
+  待ちます。出力を終端まで読んだ後なら、待つのは直後の終了だけです。
 - `kill` は SIGKILL を送ります。回収は caller の `wait` です。
 - `deinit` は pipe を閉じ、まだ回収していない子は kill して回収します。
   owner を落としても、走り続ける子も zombie も残りません。

@@ -3753,7 +3753,8 @@ state と stack を解放します。確保と解放の allocator は source に
 * `std::net::command(allocator, program)` が組む `Command` の `spawn(io)` は
   `!std::net::Child` を返す。`Stdio::Pipe` にした stream は
   `read_stdout_ready` / `read_stderr_ready`(null は「まだ無い」、0 は終端)と
-  `write_stdin_some` で読み書きし、`watch_child_stdout` / `watch_child_stderr` /
+  `write_stdin_some` で読み書きし(待つ形は `read_stdout_into` /
+  `read_stderr_into` / `write_stdin_all`)、`watch_child_stdout` / `watch_child_stderr` /
   `watch_child_stdin` で `Poller` に登録する。起動できない program は子の
   終了 code 127 になる。`wait` / `try_wait` は終了 code、signal なら 128 + signal
 * `TcpListener` / `TcpStream` / `Poller` / `Child` は非 copy の owner で、`deinit` は
