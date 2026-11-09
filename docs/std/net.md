@@ -1,8 +1,14 @@
 # std::net
 
-`std::net` は TCP だけを持ちます。listener は接続を受け、stream は byte を運び、
-どちらも owner なので、その descriptor は値が持つ `deinit` が解放します。
+`std::net` は `Poller` が待てる descriptor を持ちます —— TCP と、子プロセスの
+pipe です。listener は接続を受け、stream は byte を運び、child は書いたものを
+渡し、どれも owner なので、その descriptor は値が持つ `deinit` が解放します。
 protocol の framing はこの上の層(`std::http`)が Kizu source で書きます。
+
+子プロセスが `std::process` でなくここにあるのは、poller がその pipe に届く
+必要があり、private field は自分の module からしか読めないためです。
+`std::process` はこのプロセス自身について答え、接続と並べて出力を待つ child は
+この module のものです。
 
 `wasm32-browser` は socket capability を提供しません。`std::net` の socket operation と
 `std::http` の network 経路に到達する program は build 時に target 非対応として
@@ -13,8 +19,8 @@ WebSocket や Fetch を TCP に見せる暗黙 adapter はありません。
 poller capability はありません。socket descriptor を暗黙に渡したことにはせず、
 これらの network operation に到達する program を同じく build 時に拒否します。
 
-safe Kizu から descriptor は見えません。`TcpListener` と `TcpStream` は private
-field に持つので、socket に届く唯一の道はこの module が返した値です。
+safe Kizu から descriptor は見えません。`TcpListener` / `TcpStream` / `Child` は
+private field に持つので、socket や pipe に届く唯一の道はこの module が返した値です。
 
 ```kizu
 pub fn tcp_listen(io: Io, address: []u8) -> std::net::Error!std::net::TcpListener
@@ -57,6 +63,34 @@ fn (self: &var Poller) forget_listener(io: Io, listener: &TcpListener) -> std::n
 fn (self: &var Poller) wait(io: Io, at: i64) -> std::net::Error!i64
 fn (self: &Poller) ready(index: i64) -> ?std::net::Ready
 fn (self: Poller) deinit() -> void
+
+pub enum Stdio { Inherit, Null, Pipe }
+pub fn command(allocator: Allocator, program: []u8) -> std::net::Error!std::net::Command
+fn (self: &var Command) arg(allocator: Allocator, value: []u8) -> std::net::Error!void
+fn (self: &var Command) set_stdin(stdio: std::net::Stdio) -> void
+fn (self: &var Command) set_stdout(stdio: std::net::Stdio) -> void
+fn (self: &var Command) set_stderr(stdio: std::net::Stdio) -> void
+fn (self: &Command) spawn(io: Io) -> std::net::Error!std::net::Child
+fn (self: Command) deinit(allocator: Allocator) -> void
+
+fn (self: &var Child) read_stdout_ready(
+    io: Io, allocator: Allocator, out: &var std::string::String, max: i64,
+) -> std::net::Error!?i64
+fn (self: &var Child) read_stderr_ready(
+    io: Io, allocator: Allocator, out: &var std::string::String, max: i64,
+) -> std::net::Error!?i64
+fn (self: &var Child) write_stdin_some(io: Io, bytes: []u8) -> std::net::Error!i64
+fn (self: &var Child) close_stdin() -> void
+fn (self: &var Child) close_stdout() -> void
+fn (self: &var Child) close_stderr() -> void
+fn (self: &var Child) try_wait(io: Io) -> std::net::Error!?i64
+fn (self: &var Child) wait(io: Io) -> std::net::Error!i64
+fn (self: &var Child) kill(io: Io) -> std::net::Error!void
+fn (self: Child) deinit() -> void
+
+fn (self: &var Poller) watch_child_stdout(io: Io, child: &Child, token: i64) -> std::net::Error!void
+fn (self: &var Poller) watch_child_stderr(io: Io, child: &Child, token: i64) -> std::net::Error!void
+fn (self: &var Poller) watch_child_stdin(io: Io, child: &Child, token: i64) -> std::net::Error!void
 ```
 
 ## address
@@ -231,6 +265,48 @@ try poller.watch_stream(handle, stream, index, net::Interest::Read);
 collection の element cleanup は「解放が allocator を名指すか」を comptime で
 聞いてから呼びます(ADR-0142)。socket は descriptor を解放するので名指しません。
 
+## 子プロセス —— 走っている間に出力を読む
+
+`std::process::spawn_output8` は子が終わってから全部を返します。長い build の
+出力を出た順に browser へ流すような program は、届いた分ずつ、しかも接続と
+同じ `wait` で知る必要があります。`Child` はそのための型です。
+
+```kizu
+var command = try net::command(allocator, "make");
+defer command.deinit(allocator);
+try command.arg(allocator, "test");
+command.set_stdout(net::Stdio::Pipe);
+var child = try command.spawn(handle);
+defer child.deinit();
+try poller.watch_child_stdout(handle, &child, child_token);
+// ready.token == child_token のとき
+if try child.read_stdout_ready(handle, allocator, &var out, 4096) |got| {
+    if got == 0 {
+        child.close_stdout();
+    }
+}
+```
+
+- 3 つの stream はどれも `Inherit` で始まり、`Null` は捨て、`Pipe` はこの
+  プロセスがもう一端を持ちます。pipe でない stream を読むと `Closed` です。
+- `read_stdout_ready` / `read_stderr_ready` は `TcpStream.read_ready` と同じ
+  契約です。null は「まだ無い」、0 は「子が閉じた」。
+- **0 を読んだら閉じます。** 終端に達した pipe は readable のままなので、
+  watch したままだと毎回の `wait` が即座に返ります。`close_*` はこのプロセスの
+  端を閉じ、poller からも外れます。`close_stdin` は子に入力の終わりを見せます。
+- `write_stdin_some` は `write_some` と同じく、0 が「今は書けない」です。
+- 起動できない program は error ではなく、子が 127 で終わります
+  (`spawn_wait8` と同じ)。exec が成功したかは子の中でしか分からないためです。
+- `try_wait` は待たずに終了 status か null を、`wait` は終わるまで待って
+  status を返します。status は終了 code、signal で終わった場合は 128 + signal です。
+  読まれない pipe に書いている子は先にそこで止まるので、終端まで読んでから
+  `wait` します。
+- `kill` は SIGKILL を送ります。回収は caller の `wait` です。
+- `deinit` は pipe を閉じ、まだ回収していない子は kill して回収します。
+  owner を落としても、走り続ける子も zombie も残りません。
+- Windows では `spawn` が `OperationFailed` を返します。`WSAPoll` は socket しか
+  待てず、pipe を接続と同じ `wait` で待つというこの型の目的が果たせないためです。
+
 ## 並行性
 
 現在の Kizu に thread はありません(SPEC §15)。Poller と evented worker は
@@ -249,14 +325,14 @@ ConnectionReset     接続が切れた
 PermissionDenied    その port / address を開く権限が無い
 TooManyOpenFiles    descriptor が尽きた
 TimedOut            deadline を過ぎた、または接続が時間内に確立しなかった
-InvalidLength       read の上限が 0 以下
+InvalidLength       read の上限が 0 以下、command の program が空、引数に NUL がある
 ReadFailed          read が失敗した
 WriteFailed         write が失敗した
 OutOfMemory         buffer を伸ばせなかった
 LimitExceeded       上限を超えた
 IoFailing           `std::testing::failing_io()` が渡された
 OperationFailed     上のどれにも当たらない host の失敗
-Closed              解放済みの descriptor が使われた
+Closed              解放済みの descriptor、または pipe でない child の stream が使われた
 ```
 
 `std::testing::failing_io()` を渡すと、host に触れずにすべての呼び出しが

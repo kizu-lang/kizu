@@ -1,0 +1,164 @@
+import std::io;
+import std::mem;
+import std::net;
+import std::string;
+import std::testing;
+
+// docs/std/net.md 子プロセス: a Child's status is its exit code or 128 plus
+// the signal, a program that cannot start exits 127, an argument the host's
+// argv cannot carry is InvalidLength, a stream that was not piped is Closed,
+// and try_wait does not wait. The children are `sh`, so these run where the
+// pipes do; Windows spawns nothing (OperationFailed) and is skipped.
+
+error Failure = net::Error or mem::Error;
+
+fn shell(allocator: Allocator, script: []u8) -> Failure!net::Command {
+    var command = try net::command(allocator, "sh");
+    errdefer command.deinit(allocator);
+    try command.arg(allocator, "-c");
+    try command.arg(allocator, script);
+    return move command;
+}
+
+test "try_wait answers null while the child runs and the status after" {
+    comptime if std::target::is_windows() {
+        return;
+    }
+    let allocator = mem::page_allocator();
+    let handle = io::blocking();
+    var command = try shell(allocator, "cat > /dev/null; exit 4");
+    defer command.deinit(allocator);
+    command.set_stdin(net::Stdio::Pipe);
+    var child = try command.spawn(handle);
+    defer child.deinit();
+    // The child is blocked reading a pipe this process has not closed.
+    let early = try child.try_wait(handle) orelse -1;
+    testing::expect_equal<i64>(-1, early);
+    child.close_stdin();
+    let status = try child.wait(handle);
+    testing::expect_equal<i64>(4, status);
+    let again = try child.try_wait(handle) orelse -1;
+    testing::expect_equal<i64>(4, again);
+}
+
+test "kill ends the child and wait reports the signal" {
+    comptime if std::target::is_windows() {
+        return;
+    }
+    let allocator = mem::page_allocator();
+    let handle = io::blocking();
+    var command = try shell(allocator, "cat > /dev/null");
+    defer command.deinit(allocator);
+    command.set_stdin(net::Stdio::Pipe);
+    var child = try command.spawn(handle);
+    defer child.deinit();
+    try child.kill(handle);
+    let status = try child.wait(handle);
+    testing::expect_equal<i64>(128 + 9, status);
+}
+
+test "a program that cannot start exits 127" {
+    comptime if std::target::is_windows() {
+        return;
+    }
+    let allocator = mem::page_allocator();
+    let handle = io::blocking();
+    var command = try net::command(allocator, "kizu-no-such-program");
+    defer command.deinit(allocator);
+    var child = try command.spawn(handle);
+    defer child.deinit();
+    let status = try child.wait(handle);
+    testing::expect_equal<i64>(127, status);
+}
+
+test "an empty program or an argument with a NUL is InvalidLength" {
+    let allocator = mem::page_allocator();
+    if net::command(allocator, "") |command| {
+        command.deinit(allocator);
+        testing::fail("an empty program was accepted");
+    } else |failed| {
+        testing::expect(failed == net::Error::InvalidLength);
+    }
+    var command = try net::command(allocator, "sh");
+    defer command.deinit(allocator);
+    var bytes = [3]u8{};
+    bytes[0] = cast<u8>(97);
+    bytes[2] = cast<u8>(98);
+    let view = bytes.as_bytes();
+    if command.arg(allocator, view) {
+        testing::fail("an argument with a NUL was accepted");
+    } else |failed| {
+        testing::expect(failed == net::Error::InvalidLength);
+    }
+}
+
+test "a stream that was not piped is Closed" {
+    comptime if std::target::is_windows() {
+        return;
+    }
+    let allocator = mem::page_allocator();
+    let handle = io::blocking();
+    var command = try shell(allocator, "exit 0");
+    defer command.deinit(allocator);
+    command.set_stdout(net::Stdio::Null);
+    var child = try command.spawn(handle);
+    defer child.deinit();
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    if child.read_stdout_ready(handle, allocator, &var out, 64) |_| {
+        testing::fail("a stream that was not piped was read");
+    } else |failed| {
+        testing::expect(failed == net::Error::Closed);
+    }
+    let status = try child.wait(handle);
+    testing::expect_equal<i64>(0, status);
+}
+
+test "standard error is read on its own pipe" {
+    comptime if std::target::is_windows() {
+        return;
+    }
+    let allocator = mem::page_allocator();
+    let handle = io::blocking();
+    var command = try shell(allocator, "printf out; printf err 1>&2; exit 5");
+    defer command.deinit(allocator);
+    command.set_stdout(net::Stdio::Null);
+    command.set_stderr(net::Stdio::Pipe);
+    var child = try command.spawn(handle);
+    defer child.deinit();
+    var poller = try net::poller_new(handle, 2);
+    defer poller.deinit();
+    try poller.watch_child_stderr(handle, &child, 0);
+    var err = string::new(allocator);
+    defer err.deinit(allocator);
+    var open = true;
+    while open {
+        let count = try poller.wait(handle, net::deadline_in_millis(5000));
+        testing::expect(count > 0);
+        if try child.read_stderr_ready(handle, allocator, &var err, 64) |got| {
+            if got == 0 {
+                child.close_stderr();
+                open = false;
+            }
+        }
+    }
+    let said = err.as_bytes();
+    testing::expect(mem::equal_bytes(said, "err"));
+    let status = try child.wait(handle);
+    testing::expect_equal<i64>(5, status);
+}
+
+test "deinit reaps a child that was never waited for" {
+    comptime if std::target::is_windows() {
+        return;
+    }
+    let allocator = mem::page_allocator();
+    let handle = io::blocking();
+    var command = try shell(allocator, "cat > /dev/null");
+    defer command.deinit(allocator);
+    command.set_stdin(net::Stdio::Pipe);
+    let child = try command.spawn(handle);
+    // Without the kill in deinit this would wait on a child that is still
+    // waiting on its input.
+    child.deinit();
+}
