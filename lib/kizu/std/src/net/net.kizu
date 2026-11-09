@@ -1,11 +1,18 @@
-// std::net is TCP, and nothing more than TCP. A listener accepts, a stream
-// reads and writes bytes, and both are owners that release their descriptor
-// when their frame ends. Everything a protocol needs on top of that -- framing,
-// headers, status lines -- is Kizu source elsewhere (std::http).
+// std::net is the descriptors a Poller can wait on: TCP, and the pipes of a
+// child process. A listener accepts, a stream reads and writes bytes, a child
+// hands out what it writes, and each is an owner that releases its
+// descriptors when its frame ends. Everything a protocol needs on top of that
+// -- framing, headers, status lines -- is Kizu source elsewhere (std::http).
 //
-// Safe Kizu never sees a descriptor. The two owners keep theirs in a private
-// field, so the only way to reach a socket is through a value this module
-// handed out, and the only way to release one is the deinit that value carries.
+// The child lives here rather than in std::process because the poller has to
+// reach its pipes, and a private field is only reachable from its own module.
+// std::process answers about this process; a child whose output is waited on
+// next to the connections is this module's.
+//
+// Safe Kizu never sees a descriptor. The owners keep theirs in a private
+// field, so the only way to reach a socket or a pipe is through a value this
+// module handed out, and the only way to release one is the deinit that value
+// carries.
 
 pub error Error {
     InvalidAddress,
@@ -467,4 +474,246 @@ fn last_index_of_byte(bytes: []u8, needle: u8) -> ?i64 {
         }
     }
     return null;
+}
+
+// Stdio is where one of a child's standard streams goes: this process's own,
+// nowhere, or a pipe this process holds the other end of.
+pub enum Stdio {
+    Inherit,
+    Null,
+    Pipe,
+}
+
+// A Command is the program and arguments a child will run, and where its
+// three streams go. Every stream starts as Inherit, the way a shell runs a
+// command. It is built by appending, because the number of arguments is the
+// caller's and a fixed shape would have to guess it.
+pub struct Command {
+    // Each argument followed by a NUL, which is the form the host's argv
+    // takes and the reason an argument cannot hold one.
+    argv: std::string::String,
+    stdin: std::net::Stdio,
+    stdout: std::net::Stdio,
+    stderr: std::net::Stdio,
+}
+
+// A Child is a running process this one started. Reading what it wrote never
+// waits: `read_stdout_ready` takes what has arrived, and a Poller says when
+// more has. That is what lets one thread relay a long command's output while
+// it serves its connections.
+pub struct Child {
+    handle: i64,
+}
+
+// command starts a Command that runs `program`, looked up on PATH when it
+// names no directory. An empty program, or an argument with a NUL byte in it
+// (where the host's argv would cut it short), is InvalidLength.
+pub fn command(allocator: Allocator, program: []u8) -> std::net::Error!std::net::Command {
+    if std::mem::len(program) == 0 {
+        return std::net::Error::InvalidLength;
+    }
+    var argv = std::string::new(allocator);
+    errdefer argv.deinit(allocator);
+    try append_arg(allocator, &var argv, program);
+    return Command {
+        argv: move argv,
+        stdin: Stdio::Inherit,
+        stdout: Stdio::Inherit,
+        stderr: Stdio::Inherit,
+    };
+}
+
+fn (self: &var std::net::Command) arg(allocator: Allocator, value: []u8) -> std::net::Error!void {
+    try append_arg(allocator, &var self.argv, value);
+    return;
+}
+
+fn (self: &var std::net::Command) set_stdin(stdio: std::net::Stdio) -> void {
+    self.stdin = stdio;
+    return;
+}
+
+fn (self: &var std::net::Command) set_stdout(stdio: std::net::Stdio) -> void {
+    self.stdout = stdio;
+    return;
+}
+
+fn (self: &var std::net::Command) set_stderr(stdio: std::net::Stdio) -> void {
+    self.stderr = stdio;
+    return;
+}
+
+// spawn starts the child and returns without waiting for it. A program that
+// cannot be run is not an error here: the child exits 127, as it does for
+// `std::process::spawn_wait8`, because whether exec worked is only known in
+// the child.
+fn (self: &std::net::Command) spawn(io: Io) -> std::net::Error!std::net::Child {
+    let modes = stdio_bits(self.stdin) + stdio_bits(self.stdout) * 4 +
+        stdio_bits(self.stderr) * 16;
+    let argv = self.argv.as_bytes();
+    let handle = try std::internal::builtin::net_child_spawn(io, argv, modes);
+    return Child { handle: handle };
+}
+
+fn (self: std::net::Command) deinit(allocator: Allocator) -> void {
+    self.argv.deinit(allocator);
+    return;
+}
+
+// read_stdout_ready is `TcpStream.read_ready` for the child's standard
+// output: null is "nothing yet", zero is "the child closed it". A stream that
+// was not piped is Closed.
+//
+// After zero, close it with `close_stdout`. A pipe at its end stays readable,
+// so a poller still watching it would answer at once on every wait.
+fn (self: &var std::net::Child) read_stdout_ready(
+    io: Io,
+    allocator: Allocator,
+    out: &var std::string::String,
+    max: i64
+) -> std::net::Error!?i64 {
+    let fd = std::internal::builtin::net_child_fd(self.handle, 1);
+    return read_pipe_ready(io, allocator, fd, out, max);
+}
+
+fn (self: &var std::net::Child) read_stderr_ready(
+    io: Io,
+    allocator: Allocator,
+    out: &var std::string::String,
+    max: i64
+) -> std::net::Error!?i64 {
+    let fd = std::internal::builtin::net_child_fd(self.handle, 2);
+    return read_pipe_ready(io, allocator, fd, out, max);
+}
+
+// write_stdin_some is `TcpStream.write_some` for the child's standard input:
+// zero is "not right now", and a poller watching it for Write says when.
+fn (self: &var std::net::Child) write_stdin_some(io: Io, bytes: []u8) -> std::net::Error!i64 {
+    let fd = std::internal::builtin::net_child_fd(self.handle, 0);
+    let count = try std::internal::builtin::net_write_some(io, fd, bytes);
+    return count;
+}
+
+// close_stdin is how the child reads end of input. The other two close this
+// process's end, which also takes it out of any poller watching it.
+fn (self: &var std::net::Child) close_stdin() -> void {
+    std::internal::builtin::net_child_close_fd(self.handle, 0);
+    return;
+}
+
+fn (self: &var std::net::Child) close_stdout() -> void {
+    std::internal::builtin::net_child_close_fd(self.handle, 1);
+    return;
+}
+
+fn (self: &var std::net::Child) close_stderr() -> void {
+    std::internal::builtin::net_child_close_fd(self.handle, 2);
+    return;
+}
+
+// try_wait answers the exit status if the child has ended and null if it is
+// still running. It never waits. The status is the code the child exited
+// with, or 128 plus the signal that ended it.
+fn (self: &var std::net::Child) try_wait(io: Io) -> std::net::Error!?i64 {
+    let status = try std::internal::builtin::net_child_wait(io, self.handle, 0);
+    if status < 0 {
+        return null;
+    }
+    return status;
+}
+
+// wait blocks until the child ends. A child still writing to a pipe nobody
+// reads can block on that write first, so read to the end before waiting.
+fn (self: &var std::net::Child) wait(io: Io) -> std::net::Error!i64 {
+    let status = try std::internal::builtin::net_child_wait(io, self.handle, 1);
+    return status;
+}
+
+// kill ends the child at once (SIGKILL). It is still the caller's to wait
+// for; `wait` then answers 128 plus the signal.
+fn (self: &var std::net::Child) kill(io: Io) -> std::net::Error!void {
+    try std::internal::builtin::net_child_kill(io, self.handle);
+    return;
+}
+
+// deinit closes the pipes and releases the child. One that was never waited
+// for is killed and reaped here, so dropping a Child leaves neither a running
+// process nor a zombie behind -- a child meant to outlive its owner is not
+// something this type makes.
+fn (self: std::net::Child) deinit() -> void {
+    std::internal::builtin::net_child_close(self.handle);
+    return;
+}
+
+// watch_child_stdout is how a child's output wakes the same wait its
+// connections do.
+fn (self: &var std::net::Poller) watch_child_stdout(
+    io: Io,
+    child: &std::net::Child,
+    token: i64
+) -> std::net::Error!void {
+    let fd = std::internal::builtin::net_child_fd(child.handle, 1);
+    try std::internal::builtin::net_poller_add(
+        io, self.handle, fd, token, interest_bits(Interest::Read));
+    return;
+}
+
+fn (self: &var std::net::Poller) watch_child_stderr(
+    io: Io,
+    child: &std::net::Child,
+    token: i64
+) -> std::net::Error!void {
+    let fd = std::internal::builtin::net_child_fd(child.handle, 2);
+    try std::internal::builtin::net_poller_add(
+        io, self.handle, fd, token, interest_bits(Interest::Read));
+    return;
+}
+
+fn (self: &var std::net::Poller) watch_child_stdin(
+    io: Io,
+    child: &std::net::Child,
+    token: i64
+) -> std::net::Error!void {
+    let fd = std::internal::builtin::net_child_fd(child.handle, 0);
+    try std::internal::builtin::net_poller_add(
+        io, self.handle, fd, token, interest_bits(Interest::Write));
+    return;
+}
+
+fn stdio_bits(stdio: std::net::Stdio) -> i64 {
+    return match stdio {
+        Inherit => 0,
+        Null => 1,
+        Pipe => 2,
+    };
+}
+
+fn append_arg(
+    allocator: Allocator,
+    argv: &var std::string::String,
+    value: []u8
+) -> std::net::Error!void {
+    if index_of_byte(value, cast<u8>(0), 0) |_| {
+        return std::net::Error::InvalidLength;
+    }
+    argv.append_bytes(allocator, value) catch return std::net::Error::OutOfMemory;
+    argv.append_byte(allocator, cast<u8>(0)) catch return std::net::Error::OutOfMemory;
+    return;
+}
+
+fn read_pipe_ready(
+    io: Io,
+    allocator: Allocator,
+    fd: i64,
+    out: &var std::string::String,
+    max: i64
+) -> std::net::Error!?i64 {
+    if std::internal::builtin::net_read(io, allocator, fd, out, max, 0) |count| {
+        return count;
+    } else |failure| {
+        if failure == std::net::Error::TimedOut {
+            return null;
+        }
+        return failure;
+    }
 }
