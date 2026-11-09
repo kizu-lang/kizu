@@ -162,3 +162,112 @@ test "deinit reaps a child that was never waited for" {
     // waiting on its input.
     child.deinit();
 }
+
+test "read_stdout_into reads to the end and write_stdin_all waits on a full pipe" {
+    comptime if std::target::is_windows() {
+        return;
+    }
+    let allocator = mem::page_allocator();
+    let handle = io::blocking();
+    var command = try shell(allocator, "wc -c");
+    defer command.deinit(allocator);
+    command.set_stdin(net::Stdio::Pipe);
+    command.set_stdout(net::Stdio::Pipe);
+    var child = try command.spawn(handle);
+    defer child.deinit();
+    // More than a pipe holds, so the write has to wait for the child to read.
+    var payload = string::new(allocator);
+    defer payload.deinit(allocator);
+    var filled = 0;
+    while filled < 200000 {
+        try payload.append_byte(allocator, cast<u8>(120));
+        filled = filled + 1;
+    }
+    let bytes = payload.as_bytes();
+    try child.write_stdin_all(handle, bytes);
+    child.close_stdin();
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    while try child.read_stdout_into(handle, allocator, &var out, 64) > 0 {}
+    let text = out.as_bytes();
+    let count = trim(text);
+    testing::expect(mem::equal_bytes(count, "200000"));
+    let status = try child.wait(handle);
+    testing::expect_equal<i64>(0, status);
+}
+
+struct Slow {
+    child: net::Child,
+    got: string::String,
+}
+
+fn (self: Slow) deinit(allocator: Allocator) -> void {
+    self.got.deinit(allocator);
+    self.child.deinit();
+    return;
+}
+
+fn read_all(handle: Io, allocator: Allocator, job: &var Slow) -> void {
+    while true {
+        let got = job.child.read_stdout_into(handle, allocator, &var job.got, 64) catch return;
+        if got == 0 {
+            return;
+        }
+    }
+    return;
+}
+
+// On an evented Io a read waiting on a child parks only its worker: the
+// caller starts a second child and reads it to the end while the first worker
+// is still waiting.
+test "read_stdout_into parks its worker on an evented Io" {
+    comptime if std::target::is_windows() {
+        return;
+    }
+    let allocator = mem::page_allocator();
+    var loop = try io::loop_new();
+    defer loop.deinit();
+    let handle = io::evented(&var loop);
+
+    var slow_command = try shell(allocator, "sleep 0.5; echo slow");
+    defer slow_command.deinit(allocator);
+    slow_command.set_stdout(net::Stdio::Pipe);
+    let slow_child = try slow_command.spawn(handle);
+    var slow = Slow { child: move slow_child, got: string::new(allocator) };
+    defer slow.deinit(allocator);
+
+    var fast_command = try shell(allocator, "echo fast");
+    defer fast_command.deinit(allocator);
+    fast_command.set_stdout(net::Stdio::Pipe);
+    var fast_got = string::new(allocator);
+    defer fast_got.deinit(allocator);
+
+    var running = try io::async<Slow>(handle, allocator, read_all, &var slow);
+    errdefer running.deinit(allocator);
+    var fast = try fast_command.spawn(handle);
+    defer fast.deinit();
+    while try fast.read_stdout_into(handle, allocator, &var fast_got, 64) > 0 {}
+    testing::expect(!running.finished());
+    running.await();
+    running.deinit(allocator);
+
+    let fast_text = fast_got.as_bytes();
+    let fast_line = trim(fast_text);
+    testing::expect(mem::equal_bytes(fast_line, "fast"));
+    let slow_text = slow.got.as_bytes();
+    let slow_line = trim(slow_text);
+    testing::expect(mem::equal_bytes(slow_line, "slow"));
+}
+
+// trim drops the spaces `wc` pads with and the newline that ends a line.
+fn trim(bytes: []u8) -> []u8 {
+    var start = 0;
+    var end = mem::len(bytes);
+    while start < end and (bytes[start] == cast<u8>(32) or bytes[start] == cast<u8>(10)) {
+        start = start + 1;
+    }
+    while end > start and (bytes[end - 1] == cast<u8>(32) or bytes[end - 1] == cast<u8>(10)) {
+        end = end - 1;
+    }
+    return bytes[start..end];
+}
