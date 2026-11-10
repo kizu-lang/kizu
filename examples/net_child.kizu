@@ -1,0 +1,104 @@
+// A child's output, read while it runs, on the same poller a server's
+// connections are on.
+//
+// `std::process::spawn_output8` hands back everything at the end. A command
+// whose output must be relayed as it is produced -- a long build streamed to a
+// browser -- needs each piece when it arrives, and needs to hear about it
+// in the same wait that hears about the connections. That is what a Child
+// with piped streams and `Poller.watch_child_stdout` are.
+//
+// The child is this program again, started with an argument, so the example
+// needs no other program on the machine. It copies what it reads to its
+// standard output, says so on its standard error, and exits 3.
+
+import std::io;
+import std::mem;
+import std::net;
+import std::process;
+import std::string;
+
+error Failure = net::Error or mem::Error or io::Error or process::Error;
+
+fn main() -> Failure!process::ExitStatus {
+    let handle = io::blocking();
+    let allocator = mem::page_allocator();
+    if process::arg_count() > 0 {
+        let input = try io::read_stdin(handle, allocator, mem::Limit::Bytes(1024));
+        defer input.deinit(allocator);
+        let view = input.as_bytes();
+        try io::write_stdout(handle, &view);
+        let note = "copied";
+        try io::write_stderr(handle, &note);
+        return process::ExitStatus::Specific(3);
+    }
+
+    let program = try process::executable_path(allocator);
+    defer program.deinit(allocator);
+    let path = program.as_bytes();
+    var command = try net::command(allocator, path);
+    defer command.deinit(allocator);
+    try command.arg(allocator, "child");
+    command.set_stdin(net::Stdio::Pipe);
+    command.set_stdout(net::Stdio::Pipe);
+    command.set_stderr(net::Stdio::Pipe);
+    var child = try command.spawn(handle);
+    defer child.deinit();
+
+    // A pipe takes this much without waiting, so one write_some is enough
+    // here. Closing stdin is how the child reads the end of its input.
+    let wrote = try child.write_stdin_some(handle, "ping");
+    print(wrote);
+    child.close_stdin();
+
+    var poller = try net::poller_new(handle, 4);
+    defer poller.deinit();
+    try poller.watch_child_stdout(handle, &child, 1);
+    try poller.watch_child_stderr(handle, &child, 2);
+
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    var err = string::new(allocator);
+    defer err.deinit(allocator);
+    var open = 2;
+    while open > 0 {
+        let count = try poller.wait(handle, 0);
+        var index = 0;
+        while index < count {
+            if poller.ready(index) |ready| {
+                if ready.token == 1 {
+                    if try child.read_stdout_ready(handle, allocator, &var out, 4096) |got| {
+                        // Zero is the end. A pipe at its end stays readable,
+                        // so it is closed rather than waited on again.
+                        if got == 0 {
+                            child.close_stdout();
+                            open = open - 1;
+                        }
+                    }
+                } else {
+                    if try child.read_stderr_ready(handle, allocator, &var err, 4096) |got| {
+                        if got == 0 {
+                            child.close_stderr();
+                            open = open - 1;
+                        }
+                    }
+                }
+            }
+            index = index + 1;
+        }
+    }
+    let copied = out.as_bytes();
+    print(copied);
+    let said = err.as_bytes();
+    print(said);
+    let status = try child.wait(handle);
+    print(status);
+    return process::ExitStatus::Success;
+}
+
+// run
+// features: net io std-process union error-union
+// output:
+// 4
+// ping
+// copied
+// 3

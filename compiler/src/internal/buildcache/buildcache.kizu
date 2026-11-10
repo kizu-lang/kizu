@@ -48,6 +48,10 @@ pub struct Entry {
     pub output: string::String,
     pub size_bytes: i64,
     pub created_at: string::String,
+    /// When a build last read or stored the artifact, the Go `UsedAt`: what
+    /// eviction orders by. An entry written before the field existed has
+    /// none and is ordered by created_at.
+    pub used_at: ?string::String,
 }
 
 /// Summarizes cache state, the Go `Status`.
@@ -56,6 +60,15 @@ pub struct Status {
     pub max_bytes: i64,
     pub size_bytes: i64,
     pub entries: i64,
+    /// The entries and bytes of each artifact kind, sorted by kind.
+    pub kinds: array::Array<KindStatus>,
+}
+
+/// The share of the cache one artifact kind holds, the Go `KindStatus`.
+pub struct KindStatus {
+    pub kind: string::String,
+    pub entries: i64,
+    pub size_bytes: i64,
 }
 
 /// What the Go `Prune` reports: the entries removed and the bytes freed.
@@ -173,6 +186,7 @@ pub fn (self: &var Cache) get_or_build_artifact(
     errdefer output.deinit(allocator);
     let hit = try self.artifact_hit(io, allocator, &input.key);
     if hit {
+        try self.mark_used(io, allocator, &input.key);
         try out_path.append_string(allocator, &output);
         input.deinit(allocator);
         stored.deinit(allocator);
@@ -223,6 +237,23 @@ fn (self: &Cache) install_artifact(
     try fs::rename(io, scratch_bytes, output_bytes);
     let stored_bytes = pending.stored.as_bytes();
     return self.write_meta(io, allocator, &pending.input, stored_bytes, info.size);
+}
+
+/// Records that a build read the entry's artifact, the Go `markUsed`, so
+/// eviction takes what no build has asked for longest rather than what was
+/// made first.
+fn (self: &Cache) mark_used(io: Io, allocator: Allocator, key: &string::String) -> !void {
+    let key_bytes = key.as_bytes();
+    if try self.read_entry(io, allocator, key_bytes) |entry| {
+        defer entry.deinit(allocator);
+        var stamp = string::new(allocator);
+        defer stamp.deinit(allocator);
+        try append_now(allocator, &var stamp);
+        let created = entry.created_at.as_bytes();
+        let stamp_bytes = stamp.as_bytes();
+        return self.write_entry(io, allocator, &entry, created, stamp_bytes);
+    }
+    return;
 }
 
 /// Abandons a miss whose builder failed, the Go `defer os.Remove` of the
@@ -289,32 +320,94 @@ fn (self: &Cache) write_meta(
     stored: []u8,
     size: i64
 ) -> !void {
+    var stamp = string::new(allocator);
+    defer stamp.deinit(allocator);
+    try append_now(allocator, &var stamp);
+    var output = string::new(allocator);
+    defer output.deinit(allocator);
+    try output.append_bytes(allocator, stored);
+    var version_text = string::new(allocator);
+    defer version_text.deinit(allocator);
+    try version_text.append_bytes(allocator, version());
+    let stamp_bytes = stamp.as_bytes();
+    return self.write_fields(
+        io,
+        allocator,
+        &input.key,
+        &input.target,
+        &input.source_hash,
+        &version_text,
+        &output,
+        size,
+        stamp_bytes,
+        stamp_bytes
+    );
+}
+
+/// Writes one metadata entry with its created_at and used_at stamps, the Go
+/// `writeEntry`.
+fn (self: &Cache) write_entry(
+    io: Io,
+    allocator: Allocator,
+    entry: &Entry,
+    created: []u8,
+    used: []u8
+) -> !void {
+    return self.write_fields(
+        io,
+        allocator,
+        &entry.key,
+        &entry.target,
+        &entry.source_hash,
+        &entry.version,
+        &entry.output,
+        entry.size_bytes,
+        created,
+        used
+    );
+}
+
+/// Encodes the fields of one entry and writes them under its key.
+fn (self: &Cache) write_fields(
+    io: Io,
+    allocator: Allocator,
+    key: &string::String,
+    target: &string::String,
+    source_hash: &string::String,
+    entry_version: &string::String,
+    output: &string::String,
+    size: i64,
+    created: []u8,
+    used: []u8
+) -> !void {
     var encoder = json::encoder_with_spaces(allocator, 2);
     defer encoder.deinit(allocator);
     try encoder.begin_object();
-    try write_field(&var encoder, "key", &input.key);
-    try write_field(&var encoder, "target", &input.target);
-    try write_field(&var encoder, "source_hash", &input.source_hash);
-    try encoder.write_bytes_field("version", version());
-    try encoder.write_bytes_field("output", stored);
+    try write_field(&var encoder, "key", key);
+    try write_field(&var encoder, "target", target);
+    try write_field(&var encoder, "source_hash", source_hash);
+    try write_field(&var encoder, "version", entry_version);
+    try write_field(&var encoder, "output", output);
     try encoder.write_i64_field("size_bytes", size);
-    var stamp = string::new(allocator);
-    defer stamp.deinit(allocator);
-    let now = date::from_unix(time::unix(process::unix_millis()));
-    try now.append_iso(allocator, &var stamp);
-    let stamp_bytes = stamp.as_bytes();
-    try encoder.write_bytes_field("created_at", stamp_bytes);
+    try encoder.write_bytes_field("created_at", created);
+    try encoder.write_bytes_field("used_at", used);
     try encoder.end_object();
     var out = string::new(allocator);
     defer out.deinit(allocator);
     try encoder.finish_into(allocator, &var out);
-    let key_bytes = input.key.as_bytes();
+    let key_bytes = key.as_bytes();
     let meta = try self.meta_path(allocator, key_bytes);
     defer meta.deinit(allocator);
     let meta_bytes = meta.as_bytes();
     let text = out.as_bytes();
     try fs::write_file(io, meta_bytes, text);
     return;
+}
+
+/// Appends the present moment as an RFC 3339 stamp.
+fn append_now(allocator: Allocator, out: &var string::String) -> !void {
+    let now = date::from_unix(time::unix(process::unix_millis()));
+    return now.append_iso(allocator, out);
 }
 
 /// Writes one owned value as an entry field.
@@ -413,10 +506,13 @@ pub fn (self: &Cache) status(io: Io, allocator: Allocator) -> !Status {
     defer all.deinit(allocator);
     try self.entries(io, allocator, &var all);
     var size = 0;
+    var kinds = array::new<KindStatus>(allocator);
+    errdefer kinds.deinit(allocator);
     var index = 0;
     while all.at(index) |entry| {
         index = index + 1;
         size = size + entry.size_bytes;
+        try count_kind(allocator, &var kinds, entry);
     }
     let count = all.len();
     var dir = string::new(allocator);
@@ -426,8 +522,65 @@ pub fn (self: &Cache) status(io: Io, allocator: Allocator) -> !Status {
         dir: move dir,
         max_bytes: self.max_bytes,
         size_bytes: size,
-        entries: count
+        entries: count,
+        kinds: move kinds
     };
+}
+
+/// The kind of artifact an entry holds, the Go `Entry.Kind`: the first
+/// segment of its target.
+pub fn entry_kind(entry: &Entry) -> []u8 {
+    let target = entry.target.as_bytes();
+    var end = 0;
+    let length = mem::len(target);
+    while end < length {
+        if target[end] == cast<u8>(47) {
+            return target[0..end];
+        }
+        end = end + 1;
+    }
+    return target;
+}
+
+/// Adds one entry to the share of its kind, keeping the kinds sorted: a
+/// kind seen first is appended and moved down past every kind it sorts
+/// before.
+fn count_kind(allocator: Allocator, kinds: &var array::Array<KindStatus>, entry: &Entry) -> !void {
+    let kind = entry_kind(entry);
+    var at = 0;
+    while kinds.at_mut(at) |share| {
+        let name = share.kind.as_bytes();
+        if mem::equal_bytes(name, kind) {
+            share.entries = share.entries + 1;
+            share.size_bytes = share.size_bytes + entry.size_bytes;
+            return;
+        }
+        at = at + 1;
+    }
+    let spelled = try string::from_bytes(allocator, kind);
+    try kinds.append(allocator, KindStatus {
+        kind: move spelled,
+        entries: 1,
+        size_bytes: entry.size_bytes
+    });
+    var placed = kinds.len() - 1;
+    while placed > 0 and kind_before(kinds, placed, placed - 1) {
+        try kinds.swap(placed, placed - 1);
+        placed = placed - 1;
+    }
+    return;
+}
+
+/// Orders two kinds by name.
+fn kind_before(kinds: &array::Array<KindStatus>, left: i64, right: i64) -> bool {
+    if kinds.at(left) |a| {
+        if kinds.at(right) |b| {
+            let a_name = a.kind.as_bytes();
+            let b_name = b.kind.as_bytes();
+            return mem::compare(a_name, b_name) < 0;
+        }
+    }
+    return false;
 }
 
 /// Removes every cache entry, the Go `Prune`.
@@ -446,9 +599,14 @@ pub fn (self: &Cache) prune(io: Io, allocator: Allocator) -> !PruneResult {
     return PruneResult { entries: count, bytes: bytes };
 }
 
-/// Removes oldest entries until the cache fits max_bytes, the Go
-/// `enforceLimit`.
+/// Removes the entries used longest ago until the cache fits max_bytes, the
+/// Go `enforceLimit`: what the stored files measure is asked first, and the
+/// entries are read and ordered only when that is over the limit.
 pub fn (self: &Cache) enforce_limit(io: Io, allocator: Allocator) -> !void {
+    let stored = try self.stored_bytes(io, allocator);
+    if stored <= self.max_bytes {
+        return;
+    }
     var all = array::new<Entry>(allocator);
     defer all.deinit(allocator);
     try self.entries(io, allocator, &var all);
@@ -486,6 +644,39 @@ pub fn (self: &Cache) enforce_limit(io: Io, allocator: Allocator) -> !void {
     return;
 }
 
+/// Sums the sizes of the stored artifacts, the Go `storedBytes`. An
+/// artifact whose entry is gone still counts: it takes the room all the
+/// same.
+fn (self: &Cache) stored_bytes(io: Io, allocator: Allocator) -> !i64 {
+    let dir_bytes = self.dir.as_bytes();
+    var listed = try fs::read_dir(io, allocator, dir_bytes);
+    defer listed.deinit(allocator);
+    var size = 0;
+    var index = 0;
+    while listed.at(index) |item| {
+        index = index + 1;
+        if item.is_dir {
+            continue;
+        }
+        let item_name = item.name.as_bytes();
+        if !fsutil::has_suffix(item_name, ".out") {
+            continue;
+        }
+        let item_path = item.path.as_bytes();
+        // A concurrent process may evict an artifact between the listing
+        // and the stat; gone takes no room.
+        if fs::metadata(io, item_path) |info| {
+            size = size + info.size;
+        } else |err| {
+            match err {
+                NotFound => {},
+                _ => return err,
+            }
+        }
+    }
+    return size;
+}
+
 /// Removes the metadata and artifact files of one entry when they are
 /// there, the Go removes that ignore `os.IsNotExist`.
 fn (self: &Cache) remove_entry_files(io: Io, allocator: Allocator, entry: &Entry) -> !void {
@@ -508,8 +699,24 @@ fn (self: &Cache) remove_entry_files(io: Io, allocator: Allocator, entry: &Entry
     return;
 }
 
+/// The moment the entry was last used: used_at when the entry has one,
+/// else created_at, the Go `lastUsed`.
+fn used_moment(entry: &Entry) -> ?date::DateTime {
+    if entry.used_at |used| {
+        let stamp = used.as_bytes();
+        if date::parse_datetime(stamp) |moment| {
+            return moment;
+        } else |err| {
+            match err {
+                _ => return null,
+            }
+        }
+    }
+    return created_moment(entry);
+}
+
 /// The moment `created_at` spells, null when it is not an RFC 3339 stamp:
-/// what Go's time.Time decodes, and what `enforceLimit` sorts by.
+/// what Go's time.Time decodes.
 fn created_moment(entry: &Entry) -> ?date::DateTime {
     let stamp = entry.created_at.as_bytes();
     if date::parse_datetime(stamp) |moment| {
@@ -521,14 +728,19 @@ fn created_moment(entry: &Entry) -> ?date::DateTime {
     }
 }
 
-/// Orders two entries by the moment they were created, the ascending sort
-/// key of the Go `enforceLimit`.
+/// Orders two entries by the moment they were last used and then by key,
+/// the ascending sort of the Go `enforceLimit`.
 fn entry_before(all: &array::Array<Entry>, left: i64, right: i64) -> bool {
     if all.at(left) |a| {
         if all.at(right) |b| {
-            if created_moment(a) |a_moment| {
-                if created_moment(b) |b_moment| {
-                    return a_moment.before(b_moment);
+            if used_moment(a) |a_moment| {
+                if used_moment(b) |b_moment| {
+                    if !a_moment.equals(b_moment) {
+                        return a_moment.before(b_moment);
+                    }
+                    let a_key = a.key.as_bytes();
+                    let b_key = b.key.as_bytes();
+                    return mem::compare(a_key, b_key) < 0;
                 }
             }
         }

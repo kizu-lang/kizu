@@ -55,17 +55,28 @@ type sampler struct {
 	samples int
 	seen    map[string]bool
 	buckets map[string][]Case
+	// finished and fresh count, per mode, the runs that finished a program
+	// and the programs no earlier run had found.
+	finished map[string]int
+	fresh    map[string]int
 }
+
+// modes are the generator's initial actions (README.md says what each gives).
+var modes = []string{"initGuided", "initOneMistake", "initFree", "initTargeted"}
 
 // run samples every generator mode over several seeds and writes the fixture.
 func run() error {
 	model := flag.String("model", "spec/ownership/ownership.qnt", "the Quint model")
 	out := flag.String("out", "internal/ownership/testdata/ownership_mbt.json",
 		"the fixture to write")
-	samples := flag.Int("samples", 1000, "runs per seed and mode")
+	// quint keeps a run's traces in memory until it writes them: 10,000 ran
+	// out of the 4 GB node heap, so a wider sweep takes more seeds.
+	samples := flag.Int("samples", 3000, "runs per seed and mode")
 	seeds := flag.Int("seeds", 3, "seeds per mode")
 	per := flag.Int("per", 1, "programs kept per bucket")
+	only := flag.String("modes", strings.Join(modes, ","), "the generator modes to run")
 	flag.Parse()
+	modes = strings.Split(*only, ",")
 
 	dir, err := os.MkdirTemp("", "ownership-mbt-")
 	if err != nil {
@@ -74,9 +85,14 @@ func run() error {
 	defer os.RemoveAll(dir)
 
 	s := &sampler{model: *model, dir: dir, samples: *samples,
-		seen: map[string]bool{}, buckets: map[string][]Case{}}
-	for _, init := range []string{"initGuided", "initOneMistake", "initFree"} {
-		for seed := 1; seed <= *seeds; seed++ {
+		seen: map[string]bool{}, buckets: map[string][]Case{},
+		finished: map[string]int{}, fresh: map[string]int{}}
+	for _, init := range modes {
+		for k := 1; k <= *seeds; k++ {
+			// Neighboring seeds can fall into the same sequence of runs after a
+			// few dozen of them (seen with 0x1 and 0x2 on the rust backend), so
+			// the seeds are spread over 32 bits.
+			seed := uint32(k) * 0x9e3779b9
 			if err := s.sample(init, seed); err != nil {
 				return err
 			}
@@ -90,26 +106,63 @@ func run() error {
 	if err := os.WriteFile(*out, append(text, '\n'), 0o644); err != nil {
 		return err
 	}
+	s.report(fixture)
+	return nil
+}
+
+// report prints how many programs each mode found and how they spread over the
+// verdicts, so that a change to the generator shows which strata it thinned.
+func (s *sampler) report(fixture Fixture) {
+	for _, init := range modes {
+		fmt.Printf("%-15s %6d finished %6d new\n", init, s.finished[init], s.fresh[init])
+	}
+	type stratum struct{ programs, buckets, kept int }
+	verdicts := map[string]*stratum{}
+	at := func(name string) *stratum {
+		verdict, _, _ := strings.Cut(name, "/")
+		if verdicts[verdict] == nil {
+			verdicts[verdict] = &stratum{}
+		}
+		return verdicts[verdict]
+	}
+	for name, cases := range s.buckets {
+		at(name).programs += len(cases)
+		at(name).buckets++
+	}
+	for _, c := range fixture.Cases {
+		at(c.Bucket).kept++
+	}
+	names := make([]string, 0, len(verdicts))
+	for name := range verdicts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	fmt.Printf("%-50s %8s %8s %6s\n", "verdict", "programs", "buckets", "kept")
+	for _, name := range names {
+		v := verdicts[name]
+		fmt.Printf("%-50s %8d %8d %6d\n", name, v.programs, v.buckets, v.kept)
+	}
 	fmt.Printf("%d distinct programs, %d buckets, %d kept\n",
 		len(s.seen), len(s.buckets), len(fixture.Cases))
-	return nil
 }
 
 // sample runs quint once from one initial action and seed and files each new
 // finished program in its bucket. The run checks the soundness invariant too:
-// a model that breaks it has no business predicting the checker.
-func (s *sampler) sample(init string, seed int) error {
+// a model that breaks it has no business predicting the checker. The traces
+// are removed once read: a wide sweep writes gigabytes of them.
+func (s *sampler) sample(init string, seed uint32) error {
 	traces := filepath.Join(s.dir, fmt.Sprintf("%s_%d", init, seed))
 	if err := os.MkdirAll(traces, 0o755); err != nil {
 		return err
 	}
+	defer os.RemoveAll(traces)
 	cmd := exec.Command("quint", "run", s.model,
 		"--init", init, "--backend", "rust", "--seed", fmt.Sprintf("0x%x", seed),
 		"--max-samples", fmt.Sprint(s.samples), "--n-traces", fmt.Sprint(s.samples),
 		"--max-steps", "25", "--invariant", "soundness",
 		"--out-itf", filepath.Join(traces, "t_{seq}.itf.json"))
 	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("quint run --init %s --seed %d: %v\n%s", init, seed, err, output)
+		return fmt.Errorf("quint run --init %s --seed 0x%x: %v\n%s", init, seed, err, output)
 	}
 	files, err := filepath.Glob(filepath.Join(traces, "*.itf.json"))
 	if err != nil {
@@ -120,11 +173,16 @@ func (s *sampler) sample(init string, seed int) error {
 		if err != nil {
 			return fmt.Errorf("%s: %w", file, err)
 		}
+		if !ok {
+			continue
+		}
+		s.finished[init]++
 		key := strings.Join(c.Prog, ";")
-		if !ok || s.seen[key] {
+		if s.seen[key] {
 			continue
 		}
 		s.seen[key] = true
+		s.fresh[init]++
 		s.buckets[c.Bucket] = append(s.buckets[c.Bucket], c)
 	}
 	return nil
@@ -247,6 +305,12 @@ func stmtToken(stmt itfValue) (string, error) {
 	return token, nil
 }
 
+// shortest is the length up to which a program is its own stratum: the
+// smallest programs (one statement and the closing deinit, or a lone read) are
+// the boundary of the generator, and in a bucket with longer ones the hash
+// seldom keeps them.
+const shortest = 2
+
 // bucket names the stratum of a case: the predicted classes and the constructs
 // whose interaction the model is about.
 func bucket(c Case) string {
@@ -278,9 +342,10 @@ func bucket(c Case) string {
 		}
 		has[fields[0]] = true
 	}
+	has["short"] = len(c.Prog) <= shortest
 	var features []string
 	for _, feature := range []string{
-		"loop", "while", "nested", "carried", "defer", "unrelated", "mutate",
+		"loop", "while", "nested", "carried", "defer", "unrelated", "mutate", "short",
 	} {
 		if has[feature] {
 			features = append(features, feature)
