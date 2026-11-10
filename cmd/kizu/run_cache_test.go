@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 )
 
@@ -44,6 +45,32 @@ func TestRunRebuildsWhenTheProgramChanges(t *testing.T) {
 	}
 	if out := runCached(t, cacheDir, source, path); out != "goodbye, kizu\n" {
 		t.Fatalf("edited run printed %q", out)
+	}
+}
+
+// TestRunRebuildsWhenAnEmbeddedFileChanges checks a file `@embed_file` reads
+// is part of what the cached executable stands for: the source is untouched,
+// and an edit to the embedded file alone runs the edit.
+func TestRunRebuildsWhenAnEmbeddedFileChanges(t *testing.T) {
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang is required for native build smoke")
+	}
+	cacheDir := t.TempDir()
+	path := os.Getenv("PATH")
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "kizu.toml"),
+		[]byte("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[modules]\npaths = [\"src\"]\n"))
+	writeTestFile(t, filepath.Join(root, "src", "main.kizu"),
+		[]byte("fn main() {\n    print(@embed_file(\"greeting.txt\"));\n}\n"))
+	greeting := filepath.Join(root, "greeting.txt")
+	writeTestFile(t, greeting, []byte("hello, kizu"))
+
+	if out := runCached(t, cacheDir, root, path); out != "hello, kizu\n" {
+		t.Fatalf("first run printed %q", out)
+	}
+	writeTestFile(t, greeting, []byte("goodbye, kizu"))
+	if out := runCached(t, cacheDir, root, path); out != "goodbye, kizu\n" {
+		t.Fatalf("run after editing the embedded file printed %q", out)
 	}
 }
 
