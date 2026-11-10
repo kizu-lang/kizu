@@ -31,16 +31,34 @@ func Verify(module *Module) error {
 
 // verifyWithTypes verifies module using the type table that produced it.
 func verifyWithTypes(module *Module, types *typ.Table) error {
-	v := &verifier{module: module, types: types, params: map[string][]Param{}}
-	for _, fn := range module.Functions {
-		v.params[fn.Name] = fn.Params
-	}
+	v := newVerifier(module, types)
 	for _, fn := range module.Functions {
 		if err := v.function(fn); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// VerifyAppended verifies fn, which the caller has just appended to a module
+// whose other functions already passed Verify. A rule reads another function
+// only through the parameters a call is checked against, and a function that
+// was not there before is one no earlier call could have been checked
+// against, so the other functions' verdict is unchanged and checking fn alone
+// reports what verifying the whole module again would.
+func VerifyAppended(module *Module, fn *Function) error {
+	return newVerifier(module, typ.NewTable()).function(fn)
+}
+
+// newVerifier indexes every function's parameters by name, which is what a
+// call is checked against.
+func newVerifier(module *Module, types *typ.Table) *verifier {
+	params := make(map[string][]Param, len(module.Functions))
+	v := &verifier{module: module, types: types, params: params}
+	for _, fn := range module.Functions {
+		v.params[fn.Name] = fn.Params
+	}
+	return v
 }
 
 // verifier holds the module a rule needs and the position it is reading, so a
@@ -79,10 +97,17 @@ func (v *verifier) function(fn *Function) error {
 	if err := v.phiIncomingMatchesPredecessors(preds); err != nil {
 		return err
 	}
-	if err := v.phiIncomingDominates(preds); err != nil {
+	if len(fn.Blocks) == 0 {
+		return nil
+	}
+	// Both dominance rules read the same definitions and the same tree, so
+	// they are built once here rather than once per rule.
+	definedIn := valueDefiningBlocks(fn)
+	tree := buildDominatorTree(fn, preds)
+	if err := v.phiIncomingDominates(tree, definedIn); err != nil {
 		return err
 	}
-	return v.valuesDominateUses(preds)
+	return v.valuesDominateUses(tree, definedIn)
 }
 
 // instr checks the declared slot an instruction fills, if it fills one.
@@ -337,12 +362,7 @@ func (v *verifier) phiEdges(
 // phi's incoming value must be defined in a block that dominates the
 // predecessor it arrives from. A value that is not yet defined on that edge is
 // read as whatever the register held.
-func (v *verifier) phiIncomingDominates(preds [][]int) error {
-	if len(v.fn.Blocks) == 0 {
-		return nil
-	}
-	definedIn := valueDefiningBlocks(v.fn)
-	tree := buildDominatorTree(v.fn, preds)
+func (v *verifier) phiIncomingDominates(tree dominatorTree, definedIn map[string]definition) error {
 	for _, block := range v.fn.Blocks {
 		for _, instr := range block.Instrs {
 			if instr.Op != "phi" {
@@ -377,12 +397,7 @@ func (v *verifier) phiIncomingDominates(preds [][]int) error {
 // A phi is the exception this rule leaves alone. Its operands arrive on edges
 // rather than where it stands, so a value defined in the block a back edge
 // leaves from is correct there and would look backwards here.
-func (v *verifier) valuesDominateUses(preds [][]int) error {
-	if len(v.fn.Blocks) == 0 {
-		return nil
-	}
-	definedIn := valueDefiningBlocks(v.fn)
-	tree := buildDominatorTree(v.fn, preds)
+func (v *verifier) valuesDominateUses(tree dominatorTree, definedIn map[string]definition) error {
 	for position, block := range v.fn.Blocks {
 		for step, instr := range block.Instrs {
 			if instr.Op == "phi" {
@@ -491,8 +506,10 @@ func valueDefiningBlocks(fn *Function) map[string]definition {
 }
 
 // dominatorTree answers which blocks dominate which. It stores one immediate
-// dominator per block rather than a set per block, so the whole tree is two
-// slices and a question is a walk up the chain.
+// dominator per block rather than a set per block, and numbers the tree so a
+// question compares two intervals instead of walking up the chain: a walk is
+// as long as the tree is deep, and a run of ifs or a match with k arms is a
+// tree as deep as it is long.
 type dominatorTree struct {
 	// place[position] is where the block at position stands in reverse
 	// postorder, which is the numbering the walk compares against, or -1 when
@@ -501,6 +518,11 @@ type dominatorTree struct {
 	// idom[i] is the reverse-postorder position of the block standing at i's
 	// immediate dominator. The entry is its own.
 	idom []int
+	// enter[i] and exit[i] bound the preorder numbers of the subtree under the
+	// block standing at i: a block is in it exactly when its own enter is in
+	// [enter[i], exit[i]).
+	enter []int
+	exit  []int
 }
 
 // buildDominatorTree computes immediate dominators by the Cooper-Harvey-Kennedy
@@ -544,7 +566,37 @@ func buildDominatorTree(fn *Function, preds [][]int) dominatorTree {
 			}
 		}
 	}
+	tree.number()
 	return tree
+}
+
+// number gives each block its preorder interval. A block's immediate
+// dominator stands earlier in reverse postorder, so one backward pass sums
+// every subtree's size and one forward pass hands each child the next free
+// stretch of its parent's interval, with no recursion and no child lists.
+func (d *dominatorTree) number() {
+	count := len(d.idom)
+	d.enter = make([]int, count)
+	d.exit = make([]int, count)
+	size := d.exit
+	for at := range size {
+		size[at] = 1
+	}
+	for at := count - 1; at > 0; at-- {
+		size[d.idom[at]] += size[at]
+	}
+	// next[i] is the first preorder number not yet handed to a child of i.
+	next := make([]int, count)
+	next[0] = 1
+	for at := 1; at < count; at++ {
+		parent := d.idom[at]
+		d.enter[at] = next[parent]
+		next[parent] += size[at]
+		next[at] = d.enter[at] + 1
+	}
+	for at := range d.exit {
+		d.exit[at] += d.enter[at]
+	}
 }
 
 // meet walks two blocks up the tree until they arrive at the same one, which is
@@ -574,14 +626,7 @@ func (d dominatorTree) dominates(dominator int, block int) bool {
 	if target < 0 {
 		return false
 	}
-	for at != target {
-		next := d.idom[at]
-		if next == at {
-			return false
-		}
-		at = next
-	}
-	return true
+	return d.enter[target] <= d.enter[at] && d.enter[at] < d.exit[target]
 }
 
 // reversePostorder lists the blocks reachable from the entry, each after every
