@@ -20,6 +20,9 @@ type Module struct {
 type Graph struct {
 	PackageName string
 	Modules     []Module
+	// Root is the directory the manifest is in, what an `@embed_file` path is
+	// relative to. A program outside any package has none.
+	Root string
 }
 
 // ResolveModules maps configured source files to Kizu module paths.
@@ -38,7 +41,11 @@ func ResolveModules(baseDir string, manifest manifest.Manifest) (Graph, error) {
 			return Graph{}, err
 		}
 	}
-	return Graph{PackageName: manifest.PackageName, Modules: sortedModules(modules)}, nil
+	return Graph{
+		PackageName: manifest.PackageName,
+		Modules:     sortedModules(modules),
+		Root:        baseDir,
+	}, nil
 }
 
 // collectSourceRoot walks one source root and groups Kizu files by directory.

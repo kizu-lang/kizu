@@ -1002,16 +1002,32 @@ func (e *FloatExpr) String() string {
 	return e.Value
 }
 
-// StringExpr represents a string literal.
+// StringExpr represents a string literal. An `@embed_file("path")` is one
+// too, with Embed set: its value is a constant `[]u8` like a literal's, so
+// every phase after the loader reads it as the literal it is. The parser
+// leaves Value empty and the loader fills it with the file's bytes.
 type StringExpr struct {
 	Value string
+	Embed *EmbedFile
+}
+
+// EmbedFile is the file an `@embed_file` call names: Path as written,
+// relative to the kizu.toml of the package the call is in, and Span where the
+// call is, for a file that cannot be read.
+type EmbedFile struct {
+	Path string
+	Span Span
 }
 
 // expressionNode marks StringExpr as an expression node.
 func (*StringExpr) expressionNode() {}
 
-// String returns the quoted literal spelling.
+// String returns the quoted literal spelling, or the call an embedded one was
+// written as.
 func (e *StringExpr) String() string {
+	if e.Embed != nil {
+		return "@embed_file(" + quote.Bytes(e.Embed.Path) + ")"
+	}
 	return quote.Bytes(e.Value)
 }
 

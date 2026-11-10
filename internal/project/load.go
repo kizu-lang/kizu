@@ -10,6 +10,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/parser"
+	"github.com/kizu-lang/kizu/internal/quote"
 	"github.com/kizu-lang/kizu/internal/source"
 	"github.com/kizu-lang/kizu/internal/stdlib"
 	"github.com/kizu-lang/kizu/internal/typ"
@@ -194,7 +195,7 @@ func (c *graphChecker) loadPackage(graph Graph, includeTests bool) error {
 			imports: map[string]string{},
 		}
 		for _, file := range files {
-			program, err := c.parseModuleFile(file)
+			program, err := c.parseModuleFile(file, graph.Root)
 			if err != nil {
 				return err
 			}
@@ -228,7 +229,7 @@ func (c *graphChecker) loadStd() error {
 	c.addSourceOverrides(sources)
 	before := c.order
 	c.order = nil
-	std := Graph{PackageName: graph.PackageName, Modules: modules}
+	std := Graph{PackageName: graph.PackageName, Modules: modules, Root: graph.Root}
 	if err := c.loadPackage(std, false); err != nil {
 		return err
 	}
@@ -262,26 +263,59 @@ func (c *graphChecker) stdImportPaths() []string {
 }
 
 // parseModuleFile parses one module source file from an override or disk.
-func (c *graphChecker) parseModuleFile(file string) (*ast.Program, error) {
+// root is the directory of the manifest the file's package has, empty for a
+// file outside any package.
+func (c *graphChecker) parseModuleFile(file string, root string) (*ast.Program, error) {
 	if source, ok := c.sourceOverrides[filepath.Clean(file)]; ok {
-		return c.parseModuleSource(file, source)
+		return c.parseModuleSource(file, source, root)
 	}
 	source, err := os.ReadFile(file)
 	if err != nil {
 		return nil, err
 	}
-	return c.parseModuleSource(file, string(source))
+	return c.parseModuleSource(file, string(source), root)
 }
 
-// parseModuleSource parses one graph module source string.
-func (c *graphChecker) parseModuleSource(file string, text string) (*ast.Program, error) {
+// parseModuleSource parses one graph module source string and fills in the
+// files its `@embed_file` calls name.
+func (c *graphChecker) parseModuleSource(file string, text string, root string) (*ast.Program, error) {
 	input := c.sources.Add(file, text)
 	p := parser.New(lexer.NewSource(input))
 	program := p.ParseProgram()
 	if diagnostics := p.Diagnostics(); len(diagnostics) > 0 {
 		return nil, &diagnostics[0]
 	}
+	for _, embed := range p.Embeds() {
+		if err := embedFile(embed, root); err != nil {
+			return nil, err
+		}
+	}
 	return program, nil
+}
+
+// embedFile reads the file an `@embed_file` call names into the literal the
+// call stands for. The path is relative to the package's kizu.toml, so the
+// bytes do not depend on the directory the compiler is run from, and a file
+// outside any package has nothing to resolve it against. The text is read
+// on every load: what the program holds is what the file holds now, and the
+// build cache, keyed by the code the literal ends up in, follows it.
+func embedFile(expr *ast.StringExpr, root string) error {
+	path := expr.Embed.Path
+	if root == "" {
+		return locate(fmt.Errorf("module error: @embed_file(%s) needs a package: "+
+			"the path is relative to its kizu.toml", quote.Bytes(path)), expr.Embed.Span)
+	}
+	if strings.HasPrefix(path, "/") {
+		return locate(fmt.Errorf("module error: @embed_file path %s is absolute; "+
+			"write it relative to kizu.toml", quote.Bytes(path)), expr.Embed.Span)
+	}
+	data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
+	if err != nil {
+		return locate(fmt.Errorf("module error: @embed_file cannot read %s",
+			quote.Bytes(path)), expr.Embed.Span)
+	}
+	expr.Value = string(data)
+	return nil
 }
 
 // addSourceOverrides records source text a caller already read, keyed the way
