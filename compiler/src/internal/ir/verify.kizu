@@ -687,7 +687,10 @@ fn set_flags(out: &var array::Array<bool>, list: &array::Array<i64>, value: bool
 /// `phiEdges`. Counting after the two membership passes is what makes it
 /// edges rather than names: a branch whose arms share a target reaches the
 /// block twice and needs two incoming, and a phi naming one block twice
-/// covers one edge, not two.
+/// covers one edge, not two. Every incoming value has to be of the phi's own
+/// type as well: a backend writes the phi's type over each incoming, so a
+/// value of another type -- an array where the phi carries its address -- is
+/// text LLVM rejects.
 fn (self: &Verifier) phi_edges(
     module: &Module,
     block_name: Name,
@@ -739,6 +742,19 @@ fn (self: &Verifier) phi_edges(
         if blocks.position_of(module, incoming.block) |from| {
             try named.set(from, false);
         }
+    }
+    index = 0;
+    while instr_node.incoming.get(index) |incoming| {
+        index = index + 1;
+        if same_name(incoming.value.type_name, instr_node.result.type_name) {
+            continue;
+        }
+        return try self.failure(
+            module, "phi %s in block %s is %s, but takes %s %s from %s",
+            VerifyArg::Str(instr_node.result.name), VerifyArg::Str(block_name),
+            VerifyArg::Str(instr_node.result.type_name), VerifyArg::Str(incoming.value.type_name),
+            VerifyArg::Str(incoming.value.name), VerifyArg::Str(incoming.block), VerifyArg::None
+        );
     }
     return null;
 }
