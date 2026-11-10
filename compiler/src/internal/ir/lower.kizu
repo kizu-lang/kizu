@@ -145,6 +145,13 @@ pub struct StaticValue {
     pub text: Name,
 }
 
+/// Is the slot an array a local holds by value was written into when the
+/// local was bound, the Go `readStorage` entry for value.
+pub struct ReadStorage {
+    pub value: Name,
+    pub slot: Value,
+}
+
 /// Is one type parameter bound to a type argument.
 pub struct TypeBinding {
     pub name: Name,
@@ -351,6 +358,11 @@ pub struct Lowerer {
     // array, or a struct holding one, is given a slot when it is bound; one
     // holding a view writes through the view and keeps its SSA form.
     index_written: array::Array<Name>,
+    // index_read names the locals an element read `x[i]` starts from, the
+    // Go `indexRead`. One that holds an array by value has it written into
+    // a slot once, where it is bound, and read_storage keeps that slot.
+    index_read: array::Array<Name>,
+    read_storage: array::Array<ReadStorage>,
     // place_slots names the slots bound for index_written locals, the Go
     // `placeSlots`: the storage is decided per binding, from the value's
     // type, so it is recorded on the value rather than on the name.
@@ -569,6 +581,8 @@ pub fn new_lowerer_for_target(
         pending_next: 0,
         slots: array::new<Name>(allocator),
         index_written: array::new<Name>(allocator),
+        index_read: array::new<Name>(allocator),
+        read_storage: array::new<ReadStorage>(allocator),
         place_slots: array::new<Name>(allocator),
         lent_places: array::new<Name>(allocator),
         for_indexes: array::new<Name>(allocator),
@@ -1743,6 +1757,29 @@ fn (self: &Lowerer) callee_params(name: Name) -> ParamsView {
     return no_params();
 }
 
+/// Gives each parameter that holds an array by value and whose elements are
+/// read the slot bind_read_storage gives a local, the Go
+/// `bindParamReadStorage`. A parameter is made before the entry block, so
+/// the slot is there wherever it is read.
+fn (self: &var Lowerer) bind_param_read_storage(decl: FactsHandle, signature: SignatureHandle) -> !void {
+    let count = self.signature_param_count(signature);
+    var index = 0;
+    while index < count {
+        let facts = self.decl_param(decl, index);
+        if self.signature_param(signature, index) |param| {
+            let value = param.value();
+            if !self.has_slot(facts.name) and self.is_index_read(facts.name) and
+                self.module.names.is_buffer_type(value.type_name) {
+                let slot_type = try self.module.names.prefixed("&var ", value.type_name);
+                let slot = try self.emit1(Op::LocalSlot, slot_type, value);
+                try self.read_storage.append(self.allocator, ReadStorage { value: value.name, slot: slot });
+            }
+        }
+        index = index + 1;
+    }
+    return;
+}
+
 /// Lowers one function into SSA blocks under an explicit IR symbol name, the
 /// Go `lowerFunctionNamed`. The function it builds wears the signature
 /// callers were given, rather than a second reading of the same declaration.
@@ -1833,6 +1870,7 @@ fn (self: &var Lowerer) lower_function_named(
             try self.envs.bind(self.allocator, self.env, slot_name, slot);
         }
     }
+    try self.bind_param_read_storage(decl, signature);
     if !is_empty(self.test_name) {
         try self.emit_test_begin();
     }

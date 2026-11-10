@@ -416,6 +416,7 @@ func (l *lowerer) bindLocal(name string, value Value) {
 	}
 	if !l.slots[name] {
 		l.env.set(name, value)
+		l.bindReadStorage(name, value)
 		return
 	}
 	l.env.set(name, l.emit("local.slot", "&var "+value.Type, []Value{value}, ""))
@@ -433,6 +434,7 @@ func (l *lowerer) bindCapture(name string, value Value) {
 	}
 	if !l.slots[name] || isReferenceType(value.Type) {
 		l.env.set(name, value)
+		l.bindReadStorage(name, value)
 		return
 	}
 	l.env.set(name, l.emit("local.slot", "&var "+value.Type, []Value{value}, ""))
@@ -502,32 +504,108 @@ func holdsArrayPlace(typ string) bool {
 	return !strings.HasPrefix(typ, "[]") && !isReferenceType(typ)
 }
 
-// indexWrittenLocals returns the names element writes in fn start from.
-func indexWrittenLocals(fn *ast.FunctionDecl) map[string]bool {
-	found := map[string]bool{}
-	collectIndexWrites(fn.Body, found)
-	return found
+// indexedLocals returns the names element writes in fn start from, and the
+// names element reads start from.
+func indexedLocals(fn *ast.FunctionDecl) (map[string]bool, map[string]bool) {
+	roots := indexRoots{written: map[string]bool{}, read: map[string]bool{}}
+	roots.collectStmt(fn.Body)
+	return roots.written, roots.read
 }
 
-// collectIndexWrites walks one statement for element writes. The walk only
+// indexRoots is what the index walk finds: the names an element write
+// `x[i] = v` or `x.f[i] = v` starts from, and the names an element read `x[i]`
+// starts from, which bindReadStorage gives a slot.
+type indexRoots struct {
+	written map[string]bool
+	read    map[string]bool
+}
+
+// collectStmt walks one statement for element writes and reads. The walk only
 // reads names, so a node it does not know costs a local its slot, never its
 // meaning.
-func collectIndexWrites(stmt ast.Statement, found map[string]bool) {
+func (r indexRoots) collectStmt(stmt ast.Statement) {
 	if stmt == nil {
 		return
 	}
 	if assign, ok := stmt.(*ast.AssignStmt); ok {
 		if index, isIndex := elementWriteTarget(assign.Target); isIndex && !index.Slice {
-			markIfName(indexChainRoot(index), found)
+			markIfName(indexChainRoot(index), r.written)
 		}
 	}
 	exprs, stmts, _ := statementChildren(stmt)
 	for _, expr := range exprs {
-		collectIndexWritesExpr(expr, found)
+		r.collectExpr(expr)
 	}
 	for _, inner := range stmts {
-		collectIndexWrites(inner, found)
+		r.collectStmt(inner)
 	}
+}
+
+// collectExpr walks an expression for the element reads it holds, and the
+// statements an `if` or `match` in value position holds.
+func (r indexRoots) collectExpr(expr ast.Expression) {
+	if expr == nil {
+		return
+	}
+	switch e := expr.(type) {
+	case *ast.IfStmt, *ast.MatchStmt:
+		r.collectStmt(expr.(ast.Statement))
+		return
+	case *ast.IndexExpr:
+		if ident, ok := indexChainRoot(e).(*ast.IdentExpr); ok && !e.Slice {
+			r.read[ident.Name] = true
+		}
+	}
+	children, _ := expressionChildren(expr)
+	for _, child := range children {
+		r.collectExpr(child)
+	}
+}
+
+// bindReadStorage writes an array a local holds by value into a slot of its
+// own when the local is bound and something reads its elements, so every read
+// takes the element out of that one slot instead of writing the whole array
+// into a fresh one first -- which in a loop is the array stored once per
+// iteration. The name keeps meaning the value: a read of the whole array, or
+// the array handed on, is the value as before, and nothing writes the slot.
+//
+// The slot is made in the block the value is made in, right after it, so it
+// is there wherever the value is: a value made earlier, bound again to a
+// second name inside some branch, keeps reading through slots of its own.
+func (l *lowerer) bindReadStorage(name string, value Value) {
+	if !l.indexRead[name] || !isBufferIRType(value.Type) {
+		return
+	}
+	if _, bound := l.readStorage[value.Name]; bound || !l.madeInBlock(value) {
+		return
+	}
+	l.readStorage[value.Name] = l.emit("local.slot", "&var "+value.Type, []Value{value}, "")
+}
+
+// madeInBlock reports whether value is the result of an instruction of the
+// block being lowered.
+func (l *lowerer) madeInBlock(value Value) bool {
+	for _, instr := range l.block.Instrs {
+		if instr.Result.Name == value.Name {
+			return true
+		}
+	}
+	return false
+}
+
+// boundReadStorage returns the slot bindReadStorage gave the array the name
+// expr holds, when it gave it one.
+func (l *lowerer) boundReadStorage(expr ast.Expression) (Value, bool) {
+	ident, ok := expr.(*ast.IdentExpr)
+	if !ok {
+		return Value{}, false
+	}
+	value, bound := l.env.get(ident.Name)
+	if !bound {
+		return Value{}, false
+	}
+	storage, ok := l.readStorage[value.Name]
+	return storage, ok
 }
 
 // elementWriteTarget returns the element an assignment writes into: the
@@ -556,23 +634,6 @@ func indexChainRoot(expr *ast.IndexExpr) ast.Expression {
 			return root
 		}
 		root = inner.Target
-	}
-}
-
-// collectIndexWritesExpr walks an expression for the statements an `if` or
-// `match` in value position holds.
-func collectIndexWritesExpr(expr ast.Expression, found map[string]bool) {
-	if expr == nil {
-		return
-	}
-	switch expr.(type) {
-	case *ast.IfStmt, *ast.MatchStmt:
-		collectIndexWrites(expr.(ast.Statement), found)
-		return
-	}
-	children, _ := expressionChildren(expr)
-	for _, child := range children {
-		collectIndexWritesExpr(child, found)
 	}
 }
 

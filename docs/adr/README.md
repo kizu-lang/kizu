@@ -68,7 +68,7 @@ ADR には積みません。残す価値が無くなったら消します。番�
 - [ADR 0056: allocator-backed byte storage boundary](0056-allocator-backed-byte-storage.md)
 - [ADR 0057: Kizu String over Array storage](0057-kizu-string-array-storage.md)
 - [ADR-0060: borrowed-return provenance without named lifetimes](0060-borrowed-return-provenance.md) (節構文は 0099 で置換)
-- [ADR-0061: defer explicit cleanup statement](0061-defer-explicit-cleanup.md)
+- [ADR-0061: defer は void call を 1 つ登録する](0061-defer-explicit-cleanup.md)
 - [ADR-0063: page_allocator capability stability](0063-page-allocator-capability.md)
 - [ADR-0064: comma list delimiters](0064-comma-list-delimiters.md)
 - [ADR-0065: contextual integer literals](0065-contextual-integer-literals.md)

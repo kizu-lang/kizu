@@ -1,4 +1,4 @@
-# ADR 0130: selfhost は機械移植で作り、Go は seed として残す
+# ADR-0130: selfhost は機械移植で作り、Go は seed として残す
 
 ## Status
 

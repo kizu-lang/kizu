@@ -62,9 +62,9 @@ type error: duplicate field `User.age`
 
 - `internal/types/checker.go` rejects the repeated name in
   `checkStructLiteralExpr` instead of overwriting the earlier initializer.
-- `examples/negative/duplicate_struct_field.kizu` carries the case in the
-  reusable conformance manifest (`negative_duplicate_struct_field`), so neither
-  implementation can drift back to accepting it without a failing test.
+- `examples/negative/duplicate_struct_field.kizu` declares the case at the end
+  of the file, so neither implementation can drift back to accepting it without
+  a failing test.
 - The Kizu compiler's type checker (`check_struct_literal_expr` in
   `compiler/src/internal/types/body_expression_access.kizu`) reports the same
   diagnostic, so `kizu check` gives one answer whichever checker runs it.

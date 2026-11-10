@@ -32,6 +32,8 @@ fn (self: &var Lowerer) mutably_borrowed_locals(tree: &var ast::Ast, decl: Facts
     while self.slots.pop() |_| {}
     while self.caller_storage_params.pop() |_| {}
     while self.index_written.pop() |_| {}
+    while self.index_read.pop() |_| {}
+    while self.read_storage.pop() |_| {}
     while self.place_slots.pop() |_| {}
     while self.lent_places.pop() |_| {}
     while self.for_indexes.pop() |_| {}
@@ -44,9 +46,9 @@ fn (self: &var Lowerer) mutably_borrowed_locals(tree: &var ast::Ast, decl: Facts
     return null;
 }
 
-/// Records the names element writes start from, the Go
-/// `collectIndexWrites`. The walk only reads names, so a node it does not
-/// know costs a local its slot, never its meaning.
+/// Records the names element writes and element reads start from, the Go
+/// `indexRoots.collectStmt`. The walk only reads names, so a node it does
+/// not know costs a local its slot, never its meaning.
 fn (self: &var Lowerer) collect_index_writes(tree: &var ast::Ast, statement: ast::Statement) -> !void {
     if ownership::assign_stmt(tree, statement) |assign| {
         // `a[i].f = x` writes the element a[i], so it starts from a as well.
@@ -96,9 +98,24 @@ fn (self: &var Lowerer) collect_index_writes(tree: &var ast::Ast, statement: ast
     return;
 }
 
-/// Walks an expression for the statements an `if` or `match` in value
-/// position holds, the Go `collectIndexWritesExpr`.
+/// Walks an expression for the element reads it holds, and the statements
+/// an `if` or `match` in value position holds, the Go
+/// `indexRoots.collectExpr`.
 fn (self: &var Lowerer) collect_index_writes_expr(tree: &var ast::Ast, expression: ast::Expression) -> !void {
+    if ownership::index_expr(tree, expression) |index| {
+        if !index.slice {
+            var root = expression;
+            while ownership::index_expr(tree, root) |inner| {
+                root = inner.target;
+            }
+            if ownership::ident_expr(tree, root) |ident| {
+                let name = try self.text_name(tree, ident.name);
+                if !self.is_index_read(name) {
+                    try self.index_read.append(self.allocator, name);
+                }
+            }
+        }
+    }
     var exprs = array::new<ast::Expression>(self.allocator);
     defer exprs.deinit(self.allocator);
     var stmts = array::new<ast::Statement>(self.allocator);
@@ -121,6 +138,80 @@ fn (self: &var Lowerer) collect_index_writes_expr(tree: &var ast::Ast, expressio
         try self.collect_index_writes(tree, inner);
     }
     return;
+}
+
+/// Reports whether an element read starts from name.
+fn (self: &Lowerer) is_index_read(name: Name) -> bool {
+    var index = 0;
+    while self.index_read.get(index) |read| {
+        index = index + 1;
+        if same_name(read, name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Writes an array a local holds by value into a slot of its own when the
+/// local is bound and something reads its elements, the Go
+/// `bindReadStorage`, so every read takes the element out of that one slot
+/// instead of writing the whole array into a fresh one first -- which in a
+/// loop is the array stored once per iteration. The name keeps meaning the
+/// value: a read of the whole array, or the array handed on, is the value
+/// as before, and nothing writes the slot.
+///
+/// The slot is made in the block the value is made in, right after it, so
+/// it is there wherever the value is: a value made earlier, bound again to
+/// a second name inside some branch, keeps reading through slots of its own.
+fn (self: &var Lowerer) bind_read_storage(name: Name, value: Value) -> !void {
+    if !self.is_index_read(name) or !self.module.names.is_buffer_type(value.type_name) {
+        return;
+    }
+    if self.read_storage_of(value.name) |_| {
+        return;
+    }
+    if !self.made_in_block(value) {
+        return;
+    }
+    let slot_type = try self.module.names.prefixed("&var ", value.type_name);
+    let slot = try self.emit1(Op::LocalSlot, slot_type, value);
+    try self.read_storage.append(self.allocator, ReadStorage { value: value.name, slot: slot });
+    return;
+}
+
+/// Reports whether value is the result of an instruction of the block being
+/// lowered, the Go `madeInBlock`.
+fn (self: &Lowerer) made_in_block(value: Value) -> bool {
+    let node = self.module.blocks.at(self.block.node);
+    var index = 0;
+    while node.instrs.get(index) |instr| {
+        index = index + 1;
+        if same_name(self.module.instrs.at(instr.node).result.name, value.name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Returns the slot bind_read_storage gave value, if it gave it one.
+fn (self: &Lowerer) read_storage_of(value: Name) -> ?Value {
+    var index = 0;
+    while self.read_storage.get(index) |entry| {
+        index = index + 1;
+        if same_name(entry.value, value) {
+            return entry.slot;
+        }
+    }
+    return null;
+}
+
+/// Returns the slot bind_read_storage gave the array the name expression
+/// holds, the Go `boundReadStorage`.
+fn (self: &var Lowerer) bound_read_storage(tree: &ast::Ast, expression: ast::Expression) -> !?Value {
+    let ident = ownership::ident_expr(tree, expression) orelse return null;
+    let name = try self.text_name(tree, ident.name);
+    let value = self.envs.get(self.env, name) orelse return null;
+    return self.read_storage_of(value.name);
 }
 
 /// Reports whether an element write starts from name.
@@ -812,7 +903,8 @@ fn (self: &var Lowerer) bind_local(name: Name, value: Value) -> !void {
         return self.envs.bind(self.allocator, self.env, name, value);
     }
     if !self.has_slot(name) {
-        return self.envs.bind(self.allocator, self.env, name, value);
+        try self.envs.bind(self.allocator, self.env, name, value);
+        return self.bind_read_storage(name, value);
     }
     let slot_type = try self.module.names.prefixed("&var ", value.type_name);
     let slot = try self.emit1(Op::LocalSlot, slot_type, value);
@@ -829,7 +921,8 @@ fn (self: &var Lowerer) bind_capture(name: Name, value: Value) -> !void {
         return self.bind_local(name, value);
     }
     if !self.has_slot(name) or self.is_reference_type(value.type_name) {
-        return self.envs.bind(self.allocator, self.env, name, value);
+        try self.envs.bind(self.allocator, self.env, name, value);
+        return self.bind_read_storage(name, value);
     }
     let slot_type = try self.module.names.prefixed("&var ", value.type_name);
     let slot = try self.emit1(Op::LocalSlot, slot_type, value);
