@@ -944,7 +944,11 @@ fn (self: &Lowerer) find_loop(tree: &ast::Ast, label: ast::Text) -> ?i64 {
 }
 
 /// Creates header phi nodes for assigned loop variables, the Go
-/// `createLoopPhis`.
+/// `createLoopPhis`. A name bound to storage gets none: an assignment to it
+/// stores into the storage, so it holds the same address on every edge, and a
+/// phi over that address is a new value the lowering would no longer know as
+/// storage -- an assignment inside the loop would rebind the name to the
+/// stored value instead.
 fn (self: &var Lowerer) create_loop_phis(
     block: Block,
     assigned: &array::Array<Name>,
@@ -955,6 +959,9 @@ fn (self: &var Lowerer) create_loop_phis(
     while assigned.get(index) |name| {
         index = index + 1;
         let value = self.envs.get(self.env, name) orelse continue;
+        if self.named_storage(name) |_| {
+            continue;
+        }
         let phi = try self.add_open_phi(block, value.type_name, current, value);
         let result = self.module.instr_result(phi);
         try self.envs.bind(self.allocator, self.env, name, result);

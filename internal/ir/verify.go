@@ -318,6 +318,10 @@ func (v *verifier) phiIncomingMatchesPredecessors(preds [][]int) error {
 // after the two membership passes is what makes it edges rather than names: a
 // branch whose arms share a target reaches the block twice and needs two
 // incoming, and a phi naming one block twice covers one edge, not two.
+//
+// Every incoming value has to be of the phi's own type as well: a backend
+// writes the phi's type over each incoming, so a value of another type -- an
+// array where the phi carries its address -- is text LLVM rejects.
 func (v *verifier) phiEdges(
 	block *Block,
 	instr *Instr,
@@ -354,6 +358,14 @@ func (v *verifier) phiEdges(
 	}
 	for _, incoming := range instr.Incoming {
 		named[v.at[incoming.Block]] = false
+	}
+	for _, incoming := range instr.Incoming {
+		if incoming.Value.Type != instr.Result.Type {
+			return fmt.Errorf(
+				"%w: %s: phi %s in block %s is %s, but takes %s %s from %s",
+				ErrVerify, v.fn.Name, instr.Result.Name, block.Name, instr.Result.Type,
+				incoming.Value.Type, incoming.Value.Name, incoming.Block)
+		}
 	}
 	return nil
 }

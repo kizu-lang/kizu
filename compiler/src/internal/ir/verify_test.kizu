@@ -133,3 +133,38 @@ test "verify rejects a read above its definition" {
     module.set_terminator(entry, return_terminator(void_value));
     testing::expect(try rejects_with(allocator, &module, "caller: block entry reads %x before it is defined"));
 }
+
+test "verify rejects a phi that takes a value of another type" {
+    let allocator = mem::page_allocator();
+    var module = try caller_module(allocator, "i64");
+    defer module.deinit(allocator);
+    let function = module.functions.get_or_panic(0);
+    let i64_type = try module.names.intern("i64");
+    let x = Value { name: try module.names.intern("%x"), type_name: i64_type };
+    let r = Value { name: try module.names.intern("%r"), type_name: try module.names.intern("&var i64") };
+    let p = Value { name: try module.names.intern("%p"), type_name: i64_type };
+    let cond = Value { name: try module.names.intern("%c"), type_name: try module.names.intern("bool") };
+    let a_name = try module.names.intern("a");
+    let b_name = try module.names.intern("b");
+    let merge_name = try module.names.intern("merge");
+    // entry -> {a, b} -> merge, and the phi in merge carries an i64 but
+    // takes an address from b.
+    let entry = entry_block(&module);
+    let define = module.blank_instr(x, Op::Const, empty_name(), try module.names.intern("1"));
+    let _ = try module.add_instr(allocator, entry, move define);
+    module.set_terminator(entry, branch_terminator(cond, a_name, b_name));
+    let a = try module.add_block(function, a_name);
+    module.set_terminator(a, jump_terminator(merge_name));
+    let b = try module.add_block(function, b_name);
+    module.set_terminator(b, jump_terminator(merge_name));
+    let merge = try module.add_block(function, merge_name);
+    var phi = module.blank_instr(p, Op::Phi, empty_name(), empty_name());
+    errdefer phi.deinit(allocator);
+    try phi.incoming.append(allocator, Incoming { block: a_name, value: x });
+    try phi.incoming.append(allocator, Incoming { block: b_name, value: r });
+    let _ = try module.add_instr(allocator, merge, move phi);
+    module.set_terminator(merge, return_terminator(p));
+    testing::expect(try rejects_with(
+        allocator, &module, "caller: phi %p in block merge is i64, but takes &var i64 %r from b"
+    ));
+}

@@ -698,12 +698,19 @@ func (l *lowerer) findLoop(label string) (*loopContext, bool) {
 	return nil, false
 }
 
-// createLoopPhis creates header phi nodes for assigned loop variables.
+// createLoopPhis creates header phi nodes for assigned loop variables. A name
+// bound to storage gets none: an assignment to it stores into the storage, so
+// it holds the same address on every edge, and a phi over that address is a
+// new value the lowering would no longer know as storage -- an assignment
+// inside the loop would rebind the name to the stored value instead.
 func (l *lowerer) createLoopPhis(block *Block, assigned []string) []loopPhi {
 	phis := []loopPhi{}
 	for _, name := range assigned {
 		value, ok := l.env.get(name)
 		if !ok {
+			continue
+		}
+		if _, storage := l.namedStorage(name); storage {
 			continue
 		}
 		phi := &Instr{

@@ -487,11 +487,18 @@ func (l *lowerer) slotPointer(expr ast.Expression) (Value, bool) {
 	if !ok {
 		return Value{}, false
 	}
-	value, bound := l.env.get(ident.Name)
+	return l.namedStorage(ident.Name)
+}
+
+// namedStorage returns the storage name is bound to, when it is bound to
+// storage: an assignment to such a name stores into it, so the binding itself
+// never changes while the name is in scope.
+func (l *lowerer) namedStorage(name string) (Value, bool) {
+	value, bound := l.env.get(name)
 	if !bound || l.forIndexes[value.Name] {
 		return Value{}, false
 	}
-	if !l.slots[ident.Name] && !l.placeSlots[value.Name] && !l.lentPlaces[value.Name] {
+	if !l.slots[name] && !l.placeSlots[value.Name] && !l.lentPlaces[value.Name] {
 		return Value{}, false
 	}
 	return value, true

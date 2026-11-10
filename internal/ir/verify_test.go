@@ -99,6 +99,10 @@ func ssaRejections() []rejection {
 			want: "has 3 incoming for 2 edges into merge",
 		},
 		{
+			name: "phi of another type", module: phiOfAnotherType(),
+			want: "phi %p in block merge is i64, but takes &var i64 %r from b",
+		},
+		{
 			name: "use without dominance", module: useWithoutDominance(),
 			want: "block merge reads %x, which is defined in a, and a does not dominate merge",
 		},
@@ -306,6 +310,16 @@ func phiWithSpareIncoming() *Module {
 		{Block: "a", Value: defined},
 		{Block: "a", Value: defined},
 		{Block: "b", Value: defined},
+	})
+}
+
+// phiOfAnotherType hands a phi that carries a value an address on one edge. A
+// loop made the converse while a name bound to storage got a header phi: the
+// phi was the address, and an assignment inside the loop handed it the array.
+func phiOfAnotherType() *Module {
+	return diamond([]Incoming{
+		{Block: "a", Value: Value{Name: "%x", Type: "i64"}},
+		{Block: "b", Value: Value{Name: "%r", Type: "&var i64"}},
 	})
 }
 
