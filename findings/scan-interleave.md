@@ -49,3 +49,20 @@ clang は IR 入力にも `-target-cpu apple-m1` を渡しているので、targ
 
 3 案目を採る。落ちた tuning のうち、この差を生んでいた上限 interleave だけを
 Apple の値に戻す。
+
+## 計測(`bench/rust/run.sh 11`、変更前後を交互に 2 セットずつ)
+
+Apple M4 Max、Apple clang 17.0.0、rustc 1.91.1。compiler は main `7a06a6c` と
+この変更をそれぞれ `seed build --target native --opt` で build した self-host。
+チェックサムは全ベンチ・全セットで両言語一致。生成 binary が変わったのは
+sum_max と matmul だけで、他の 4 つは byte 単位で同一。
+
+| フェーズ | 変更前 Kizu ms(比) | 変更後 Kizu ms(比) |
+| --- | --- | --- |
+| sum_max scan | 36 (1.03) / 41 (2.56) | 21 (1.05) / 19 (1.06) |
+| matmul × 10 | 54 (1.00) / 55 (1.04) | 56 (0.93) / 55 (1.02) |
+| sum_max fill | 169 (0.99) / 184 (1.10) | 168 (1.00) / 168 (1.01) |
+
+scan はメモリ律速で両言語ともぶれが大きい(変更前 1 セット目は Rust 側が
+23〜46 ms と荒れて比が 1.03 になった)。同じ時間帯に 3 案を並べた上の表では
+1.92 → 1.08。
