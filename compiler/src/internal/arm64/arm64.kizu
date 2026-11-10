@@ -1,0 +1,1144 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::array;
+import std::fmt;
+import std::mem;
+import std::string;
+
+// The arm64 backend: a lowered module straight to Darwin AArch64 assembly
+// text, which the system assembler and linker turn into the executable.
+// Every function is selected into machine IR, given registers, and printed;
+// an op or a type the backend does not lower stops the build with a
+// diagnostic naming it rather than being handed to another backend.
+
+/// Emits a lowered module as assembly text.
+pub fn emit(allocator: Allocator, module: &ir::Module, out: &var string::String) -> !?diagnostic::Diagnostic {
+    var selector = try new_selector(allocator);
+    defer selector.deinit(allocator);
+    if module.error_sets.at("std::mem::Error") |declared| {
+        selector.oom = declared.tags.get("OutOfMemory") orelse 0 - 1;
+    }
+    if module.error_sets.at("std::array::Error") |declared| {
+        selector.oob = declared.tags.get("OutOfBounds") orelse 0 - 1;
+    }
+    var main_ret = ir::empty_name();
+    if module.function_named("main") |main_function| {
+        let ret = module.function_return(main_function);
+        if !module.names.is(ret, "void") {
+            selector.main_wraps = true;
+            main_ret = ret;
+        }
+    }
+    try out.append_bytes(allocator, "    .section __TEXT,__text,regular,pure_instructions");
+    try newline(allocator, out);
+    // Select every function first, so a call can take a copy of its
+    // callee's body; then allocate and print each.
+    var functions = array::new<MFunction>(allocator);
+    defer functions.deinit(allocator);
+    var symbols = array::new<ir::Name>(allocator);
+    defer symbols.deinit(allocator);
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let name = module.function_nodes.at(function.node).name;
+        let symbol = try selector.function_symbol(module, name);
+        if try selector.select_function(module, function) |failed| {
+            return move failed;
+        }
+        selector.mark_cold_blocks();
+        try functions.append(allocator, try clone_function(allocator, &selector.func));
+        try symbols.append(allocator, symbol);
+    }
+    if selector.main_wraps {
+        if try selector.select_main_wrapper(module, main_ret) |failed| {
+            return move failed;
+        }
+        selector.mark_cold_blocks();
+        try functions.append(allocator, try clone_function(allocator, &selector.func));
+        try symbols.append(allocator, try selector.syms.intern("_main"));
+    }
+    try inline_calls(allocator, &var functions, &symbols);
+    var ordinal = 0;
+    while functions.at_mut(ordinal) |func| {
+        let symbol = symbols.get_or_panic(ordinal);
+        let allocation = try allocate(allocator, func);
+        defer allocation.deinit(allocator);
+        let symbol_text = ir::name_text(&selector.syms, symbol);
+        let symbol_bytes = symbol_text.as_bytes();
+        try print_function(allocator, out, func, &allocation, symbol_bytes, ordinal, &selector.syms);
+        ordinal = ordinal + 1;
+    }
+    if selector.main_wraps {
+        try write_error_names(allocator, module, &var selector, out);
+    }
+    if selector.literals.len() > 0 {
+        try out.append_bytes(allocator, "    .section __TEXT,__cstring,cstring_literals");
+        try newline(allocator, out);
+        var literal_index = 0;
+        while selector.literals.get(literal_index) |literal| {
+            try out.append_bytes(allocator, "Lkz_str.");
+            try fmt::append_i64(allocator, out, literal_index);
+            try out.append_bytes(allocator, ":");
+            try newline(allocator, out);
+            literal_index = literal_index + 1;
+            let text = ir::name_text(&selector.syms, literal);
+            let bytes = text.as_bytes();
+            var at = 0;
+            while at < mem::len(bytes) {
+                if at % 16 == 0 {
+                    if at > 0 {
+                        try newline(allocator, out);
+                    }
+                    try out.append_bytes(allocator, "    .byte ");
+                } else {
+                    try out.append_bytes(allocator, ",");
+                }
+                try fmt::append_i64(allocator, out, cast<i64>(bytes[at]));
+                at = at + 1;
+            }
+            if mem::len(bytes) > 0 {
+                try newline(allocator, out);
+            }
+            try out.append_bytes(allocator, "    .byte 0");
+            try newline(allocator, out);
+        }
+    }
+    try out.append_bytes(allocator, ".subsections_via_symbols");
+    try newline(allocator, out);
+    return null;
+}
+
+fn newline(allocator: Allocator, out: &var string::String) -> !void {
+    return out.append_byte(allocator, cast<u8>(10));
+}
+
+/// Is where a function's frame puts things, from the stack pointer after
+/// the prologue: the outgoing arguments and slots from 0, then the
+/// callee-saved registers, then the frame record (x29, x30) at the top.
+struct Frame {
+    needed: bool,
+    total: i64,
+    saved_at: i64,
+}
+
+fn plan_frame(func: &var MFunction, allocation: &Allocation) -> Frame {
+    var uses_inarg = false;
+    var block_index = 0;
+    while func.blocks.at(block_index) |block| {
+        block_index = block_index + 1;
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            if inst.rn == reg_inarg() {
+                uses_inarg = true;
+            }
+        }
+    }
+    var offset = func.out_words * 8;
+    var slot_index = 0;
+    while func.slots.at_mut(slot_index) |slot| {
+        slot_index = slot_index + 1;
+        offset = round_up(offset, slot.align);
+        slot.offset = offset;
+        offset = offset + slot.size;
+    }
+    offset = round_up(offset, 8);
+    let saved_at = offset;
+    offset = offset + allocation.saved.len() * 8;
+    let total = round_up(offset + 16, 16);
+    let needed = func.calls or uses_inarg or offset > 0;
+    return Frame { needed: needed, total: total, saved_at: saved_at };
+}
+
+/// Writes `op xa, xb, [base, #offset]` for a register pair, or two single
+/// accesses when the offset does not fit the pair form.
+fn print_pair(allocator: Allocator, out: &var string::String, load: bool, a: i64, b: i64, base: i64, offset: i64) -> !void {
+    if offset >= 0 and offset <= 504 and offset % 8 == 0 {
+        if load {
+            try head(allocator, out, "ldp");
+        } else {
+            try head(allocator, out, "stp");
+        }
+        try reg_name(allocator, out, a, true);
+        try comma(allocator, out);
+        try reg_name(allocator, out, b, true);
+        try out.append_bytes(allocator, ", [");
+        try reg_name(allocator, out, base, true);
+        if offset != 0 {
+            try comma(allocator, out);
+            try imm_text(allocator, out, offset);
+        }
+        try out.append_bytes(allocator, "]");
+        return newline(allocator, out);
+    }
+    try print_mem(allocator, out, load, a, base, offset, 8, false);
+    return print_mem(allocator, out, load, b, base, offset + 8, 8, false);
+}
+
+/// Saves or restores the callee-saved registers, two at a time.
+fn print_saved(allocator: Allocator, out: &var string::String, load: bool, saved: &array::Array<i64>, at: i64) -> !void {
+    var index = 0;
+    while index < saved.len() {
+        let first = saved.get_or_panic(index);
+        if index + 1 < saved.len() {
+            let second = saved.get_or_panic(index + 1);
+            try print_pair(allocator, out, load, first, second, reg_sp(), at + index * 8);
+            index = index + 2;
+            continue;
+        }
+        try print_mem(allocator, out, load, first, reg_sp(), at + index * 8, 8, false);
+        index = index + 1;
+    }
+    return;
+}
+
+fn print_prologue(allocator: Allocator, out: &var string::String, frame: Frame, saved: &array::Array<i64>) -> !void {
+    if frame.total < 4096 {
+        try rri(allocator, out, "sub", reg_sp(), reg_sp(), frame.total);
+    } else {
+        try materialize(allocator, out, scratch_addr(), frame.total);
+        try rrr(allocator, out, "sub", reg_sp(), reg_sp(), scratch_addr());
+    }
+    let record = frame.total - 16;
+    if record <= 504 {
+        try print_pair(allocator, out, false, 29, 30, reg_sp(), record);
+        try add_imm(allocator, out, 29, reg_sp(), record);
+    } else {
+        try add_imm(allocator, out, scratch_addr(), reg_sp(), record);
+        try print_pair(allocator, out, false, 29, 30, scratch_addr(), 0);
+        try rr(allocator, out, "mov", 29, scratch_addr());
+    }
+    return print_saved(allocator, out, false, saved, frame.saved_at);
+}
+
+fn print_epilogue(allocator: Allocator, out: &var string::String, frame: Frame, saved: &array::Array<i64>) -> !void {
+    try print_saved(allocator, out, true, saved, frame.saved_at);
+    let record = frame.total - 16;
+    if record <= 504 {
+        try print_pair(allocator, out, true, 29, 30, reg_sp(), record);
+    } else {
+        try add_imm(allocator, out, scratch_addr(), reg_sp(), record);
+        try print_pair(allocator, out, true, 29, 30, scratch_addr(), 0);
+    }
+    if frame.total < 4096 {
+        return rri(allocator, out, "add", reg_sp(), reg_sp(), frame.total);
+    }
+    try materialize(allocator, out, scratch_addr(), frame.total);
+    return rrr(allocator, out, "add", reg_sp(), reg_sp(), scratch_addr());
+}
+
+/// Is the printer's state for one function.
+struct Printer {
+    allocator: Allocator,
+    ordinal: i64,
+}
+
+fn reg_name(allocator: Allocator, out: &var string::String, reg: i64, wide: bool) -> !void {
+    if reg == reg_sp() {
+        if wide {
+            return out.append_bytes(allocator, "sp");
+        }
+        return out.append_bytes(allocator, "wsp");
+    }
+    if reg == reg_zr() or reg < 0 {
+        if wide {
+            return out.append_bytes(allocator, "xzr");
+        }
+        return out.append_bytes(allocator, "wzr");
+    }
+    if wide {
+        try out.append_byte(allocator, cast<u8>(120));
+    } else {
+        try out.append_byte(allocator, cast<u8>(119));
+    }
+    return fmt::append_i64(allocator, out, reg);
+}
+
+/// Writes an indented mnemonic and a space; the caller adds the operands.
+fn head(allocator: Allocator, out: &var string::String, op: []u8) -> !void {
+    try out.append_bytes(allocator, "    ");
+    try out.append_bytes(allocator, op);
+    return out.append_byte(allocator, cast<u8>(32));
+}
+
+fn comma(allocator: Allocator, out: &var string::String) -> !void {
+    return out.append_bytes(allocator, ", ");
+}
+
+fn imm_text(allocator: Allocator, out: &var string::String, value: i64) -> !void {
+    try out.append_bytes(allocator, "#");
+    return fmt::append_i64(allocator, out, value);
+}
+
+/// Writes `op xd, xn, xm`.
+fn rrr(allocator: Allocator, out: &var string::String, op: []u8, rd: i64, rn: i64, rm: i64) -> !void {
+    try head(allocator, out, op);
+    try reg_name(allocator, out, rd, true);
+    try comma(allocator, out);
+    try reg_name(allocator, out, rn, true);
+    try comma(allocator, out);
+    try reg_name(allocator, out, rm, true);
+    return newline(allocator, out);
+}
+
+/// Writes `op xd, xn, #imm`.
+fn rri(allocator: Allocator, out: &var string::String, op: []u8, rd: i64, rn: i64, imm: i64) -> !void {
+    try head(allocator, out, op);
+    try reg_name(allocator, out, rd, true);
+    try comma(allocator, out);
+    try reg_name(allocator, out, rn, true);
+    try comma(allocator, out);
+    try imm_text(allocator, out, imm);
+    return newline(allocator, out);
+}
+
+/// Writes `op xd, xn`.
+fn rr(allocator: Allocator, out: &var string::String, op: []u8, rd: i64, rn: i64) -> !void {
+    try head(allocator, out, op);
+    try reg_name(allocator, out, rd, true);
+    try comma(allocator, out);
+    try reg_name(allocator, out, rn, true);
+    return newline(allocator, out);
+}
+
+/// Puts a 64-bit constant in a register with the fewest moves.
+fn materialize(allocator: Allocator, out: &var string::String, rd: i64, imm: i64) -> !void {
+    if imm >= 0 and imm < 65536 {
+        try head(allocator, out, "mov");
+        try reg_name(allocator, out, rd, true);
+        try comma(allocator, out);
+        try imm_text(allocator, out, imm);
+        return newline(allocator, out);
+    }
+    if imm < 0 and imm >= 0 - 65536 {
+        try head(allocator, out, "mov");
+        try reg_name(allocator, out, rd, true);
+        try comma(allocator, out);
+        try imm_text(allocator, out, imm);
+        return newline(allocator, out);
+    }
+    // Count the chunks that are all ones: with three or more, start from
+    // movn and patch the others.
+    var ones = 0;
+    var zeros = 0;
+    for 0..4 |chunk| {
+        let part = (imm >> (chunk * 16)) & 65535;
+        if part == 65535 {
+            ones = ones + 1;
+        }
+        if part == 0 {
+            zeros = zeros + 1;
+        }
+    }
+    let inverted = ones > zeros;
+    var first = true;
+    for 0..4 |chunk| {
+        let part = (imm >> (chunk * 16)) & 65535;
+        if inverted and part == 65535 {
+            continue;
+        }
+        if !inverted and part == 0 {
+            continue;
+        }
+        if first {
+            first = false;
+            if inverted {
+                try head(allocator, out, "movn");
+                try reg_name(allocator, out, rd, true);
+                try comma(allocator, out);
+                try imm_text(allocator, out, (~part) & 65535);
+            } else {
+                try head(allocator, out, "movz");
+                try reg_name(allocator, out, rd, true);
+                try comma(allocator, out);
+                try imm_text(allocator, out, part);
+            }
+        } else {
+            try head(allocator, out, "movk");
+            try reg_name(allocator, out, rd, true);
+            try comma(allocator, out);
+            try imm_text(allocator, out, part);
+        }
+        if chunk > 0 {
+            try out.append_bytes(allocator, ", lsl ");
+            try imm_text(allocator, out, chunk * 16);
+        }
+        try newline(allocator, out);
+    }
+    if first {
+        // Every chunk was the skipped value: all ones.
+        try head(allocator, out, "movn");
+        try reg_name(allocator, out, rd, true);
+        try comma(allocator, out);
+        return imm_text(allocator, out, 0);
+    }
+    return;
+}
+
+/// Returns the memory mnemonic for a load or store of width bytes.
+fn mem_op(load: bool, width: i64, signed: bool, unscaled: bool) -> []u8 {
+    if load {
+        if width == 8 {
+            if unscaled {
+                return "ldur";
+            }
+            return "ldr";
+        }
+        if width == 4 {
+            if signed {
+                if unscaled {
+                    return "ldursw";
+                }
+                return "ldrsw";
+            }
+            if unscaled {
+                return "ldur";
+            }
+            return "ldr";
+        }
+        if width == 2 {
+            if signed {
+                if unscaled {
+                    return "ldursh";
+                }
+                return "ldrsh";
+            }
+            if unscaled {
+                return "ldurh";
+            }
+            return "ldrh";
+        }
+        if signed {
+            if unscaled {
+                return "ldursb";
+            }
+            return "ldrsb";
+        }
+        if unscaled {
+            return "ldurb";
+        }
+        return "ldrb";
+    }
+    if width == 8 or width == 4 {
+        if unscaled {
+            return "stur";
+        }
+        return "str";
+    }
+    if width == 2 {
+        if unscaled {
+            return "sturh";
+        }
+        return "strh";
+    }
+    if unscaled {
+        return "sturb";
+    }
+    return "strb";
+}
+
+/// Reports whether the data register of a load or store is spelled as an
+/// x register.
+fn data_wide(load: bool, width: i64, signed: bool) -> bool {
+    if width == 8 {
+        return true;
+    }
+    return load and signed;
+}
+
+/// Writes one load or store of width bytes at base + offset, forming an
+/// address that does not fit the instruction in x15 first.
+fn print_mem(allocator: Allocator, out: &var string::String, load: bool, data: i64, base: i64, offset: i64, width: i64, signed: bool) -> !void {
+    var at_base = base;
+    var at_offset = offset;
+    let scaled = offset >= 0 and offset % width == 0 and offset / width < 4096;
+    let unscaled = offset >= 0 - 256 and offset < 256;
+    if !scaled and !unscaled {
+        try materialize(allocator, out, scratch_addr(), offset);
+        try rrr(allocator, out, "add", scratch_addr(), base, scratch_addr());
+        at_base = scratch_addr();
+        at_offset = 0;
+    }
+    let use_unscaled = !(at_offset >= 0 and at_offset % width == 0 and at_offset / width < 4096);
+    try head(allocator, out, mem_op(load, width, signed, use_unscaled));
+    try reg_name(allocator, out, data, data_wide(load, width, signed));
+    try out.append_bytes(allocator, ", [");
+    try reg_name(allocator, out, at_base, true);
+    if at_offset != 0 {
+        try comma(allocator, out);
+        try imm_text(allocator, out, at_offset);
+    }
+    try out.append_bytes(allocator, "]");
+    return newline(allocator, out);
+}
+
+fn block_label(allocator: Allocator, out: &var string::String, ordinal: i64, block: i64) -> !void {
+    try out.append_bytes(allocator, "LBB");
+    try fmt::append_i64(allocator, out, ordinal);
+    try out.append_bytes(allocator, "_");
+    return fmt::append_i64(allocator, out, block);
+}
+
+fn branch(allocator: Allocator, out: &var string::String, op: []u8, ordinal: i64, block: i64) -> !void {
+    try head(allocator, out, op);
+    try block_label(allocator, out, ordinal, block);
+    return newline(allocator, out);
+}
+
+/// Adds or subtracts an immediate from a register into another, through x15
+/// when it does not fit one instruction.
+fn add_imm(allocator: Allocator, out: &var string::String, rd: i64, rn: i64, imm: i64) -> !void {
+    if imm >= 0 and imm < 4096 {
+        return rri(allocator, out, "add", rd, rn, imm);
+    }
+    if imm < 0 and imm > 0 - 4096 {
+        return rri(allocator, out, "sub", rd, rn, 0 - imm);
+    }
+    try materialize(allocator, out, scratch_addr(), imm);
+    return rrr(allocator, out, "add", rd, rn, scratch_addr());
+}
+
+fn print_function(
+    allocator: Allocator,
+    out: &var string::String,
+    func: &var MFunction,
+    allocation: &Allocation,
+    symbol: []u8,
+    ordinal: i64,
+    syms: &ir::NameTable
+) -> !void {
+    let frame = plan_frame(func, allocation);
+    if func.is_main {
+        try out.append_bytes(allocator, "    .globl ");
+        try out.append_bytes(allocator, symbol);
+        try newline(allocator, out);
+    }
+    try out.append_bytes(allocator, "    .p2align 4");
+    try newline(allocator, out);
+    try out.append_bytes(allocator, symbol);
+    try out.append_bytes(allocator, ":");
+    try newline(allocator, out);
+    if frame.needed {
+        try print_prologue(allocator, out, frame, &allocation.saved);
+    }
+    var order_index = 0;
+    while allocation.order.get(order_index) |block_id| {
+        order_index = order_index + 1;
+        var following = 0 - 1;
+        if allocation.order.get(order_index) |next| {
+            following = next;
+        }
+        try block_label(allocator, out, ordinal, block_id);
+        try out.append_bytes(allocator, ":");
+        try newline(allocator, out);
+        if func.blocks.at(block_id) |block| {
+            var inst_index = 0;
+            while block.insts.at(inst_index) |inst| {
+                inst_index = inst_index + 1;
+                try print_inst(allocator, out, func, inst, syms);
+            }
+            match block.term {
+                Open => {
+                    try out.append_bytes(allocator, "    brk #1");
+                    try newline(allocator, out);
+                },
+                Jump => {
+                    if block.succ0 != following {
+                        try branch(allocator, out, "b", ordinal, block.succ0);
+                    }
+                },
+                Flags => {
+                    if block.succ0 == following {
+                        var op = string::new(allocator);
+                        defer op.deinit(allocator);
+                        try op.append_bytes(allocator, "b.");
+                        try op.append_bytes(allocator, cond_spelling(invert(block.cond)));
+                        let op_bytes = op.as_bytes();
+                        try branch(allocator, out, op_bytes, ordinal, block.succ1);
+                    } else {
+                        var op = string::new(allocator);
+                        defer op.deinit(allocator);
+                        try op.append_bytes(allocator, "b.");
+                        try op.append_bytes(allocator, cond_spelling(block.cond));
+                        let op_bytes = op.as_bytes();
+                        try branch(allocator, out, op_bytes, ordinal, block.succ0);
+                        if block.succ1 != following {
+                            try branch(allocator, out, "b", ordinal, block.succ1);
+                        }
+                    }
+                },
+                Zero => try print_test_branch(allocator, out, "cbz", "cbnz", block.treg, ordinal, block.succ0, block.succ1, following),
+                NonZero => try print_test_branch(allocator, out, "cbnz", "cbz", block.treg, ordinal, block.succ0, block.succ1, following),
+                Return => {
+                    if frame.needed {
+                        try print_epilogue(allocator, out, frame, &allocation.saved);
+                    }
+                    try out.append_bytes(allocator, "    ret");
+                    try newline(allocator, out);
+                },
+                Stop => {},
+            }
+        }
+    }
+    return;
+}
+
+fn print_test_branch(
+    allocator: Allocator,
+    out: &var string::String,
+    op: []u8,
+    inverse: []u8,
+    reg: i64,
+    ordinal: i64,
+    taken: i64,
+    other: i64,
+    following: i64
+) -> !void {
+    if taken == following {
+        try head(allocator, out, inverse);
+        try reg_name(allocator, out, reg, true);
+        try comma(allocator, out);
+        try block_label(allocator, out, ordinal, other);
+        return newline(allocator, out);
+    }
+    try head(allocator, out, op);
+    try reg_name(allocator, out, reg, true);
+    try comma(allocator, out);
+    try block_label(allocator, out, ordinal, taken);
+    try newline(allocator, out);
+    if other != following {
+        try branch(allocator, out, "b", ordinal, other);
+    }
+    return;
+}
+
+/// Resolves a memory base and offset: a frame slot to the stack pointer and
+/// the slot's offset, an incoming argument to the frame pointer.
+fn resolve_base(func: &MFunction, inst: &MInst) -> Frame {
+    if inst.rn == reg_frame() {
+        let slot = func.slots.get_or_panic(inst.slot);
+        return Frame { needed: true, total: reg_sp(), saved_at: slot.offset + inst.imm };
+    }
+    if inst.rn == reg_inarg() {
+        return Frame { needed: true, total: 29, saved_at: 16 + inst.imm };
+    }
+    return Frame { needed: true, total: inst.rn, saved_at: inst.imm };
+}
+
+fn print_inst(allocator: Allocator, out: &var string::String, func: &MFunction, inst: &MInst, syms: &ir::NameTable) -> !void {
+    match inst.op {
+        Mov => {
+            if inst.rd == inst.rn {
+                return;
+            }
+            return rr(allocator, out, "mov", inst.rd, inst.rn);
+        },
+        MovImm => return materialize(allocator, out, inst.rd, inst.imm),
+        Add => return rrr(allocator, out, "add", inst.rd, inst.rn, inst.rm),
+        Sub => return rrr(allocator, out, "sub", inst.rd, inst.rn, inst.rm),
+        Mul => return rrr(allocator, out, "mul", inst.rd, inst.rn, inst.rm),
+        SDiv => return rrr(allocator, out, "sdiv", inst.rd, inst.rn, inst.rm),
+        UDiv => return rrr(allocator, out, "udiv", inst.rd, inst.rn, inst.rm),
+        And => return rrr(allocator, out, "and", inst.rd, inst.rn, inst.rm),
+        Orr => return rrr(allocator, out, "orr", inst.rd, inst.rn, inst.rm),
+        Eor => return rrr(allocator, out, "eor", inst.rd, inst.rn, inst.rm),
+        Lsl => return rrr(allocator, out, "lsl", inst.rd, inst.rn, inst.rm),
+        Lsr => return rrr(allocator, out, "lsr", inst.rd, inst.rn, inst.rm),
+        Asr => return rrr(allocator, out, "asr", inst.rd, inst.rn, inst.rm),
+        AddImm => return add_imm(allocator, out, inst.rd, inst.rn, inst.imm),
+        SubImm => return add_imm(allocator, out, inst.rd, inst.rn, 0 - inst.imm),
+        LslImm => return rri(allocator, out, "lsl", inst.rd, inst.rn, inst.imm),
+        LsrImm => return rri(allocator, out, "lsr", inst.rd, inst.rn, inst.imm),
+        AsrImm => return rri(allocator, out, "asr", inst.rd, inst.rn, inst.imm),
+        MSub => {
+            try head(allocator, out, "msub");
+            try reg_name(allocator, out, inst.rd, true);
+            try comma(allocator, out);
+            try reg_name(allocator, out, inst.rn, true);
+            try comma(allocator, out);
+            try reg_name(allocator, out, inst.rm, true);
+            try comma(allocator, out);
+            try reg_name(allocator, out, inst.ra, true);
+            return newline(allocator, out);
+        },
+        MAdd => {
+            try head(allocator, out, "madd");
+            try reg_name(allocator, out, inst.rd, true);
+            try comma(allocator, out);
+            try reg_name(allocator, out, inst.rn, true);
+            try comma(allocator, out);
+            try reg_name(allocator, out, inst.rm, true);
+            try comma(allocator, out);
+            try reg_name(allocator, out, inst.ra, true);
+            return newline(allocator, out);
+        },
+        AddShift => {
+            try head(allocator, out, "add");
+            try reg_name(allocator, out, inst.rd, true);
+            try comma(allocator, out);
+            try reg_name(allocator, out, inst.rn, true);
+            try comma(allocator, out);
+            try reg_name(allocator, out, inst.rm, true);
+            try out.append_bytes(allocator, ", lsl ");
+            try imm_text(allocator, out, inst.imm);
+            return newline(allocator, out);
+        },
+        AddLsr => {
+            try head(allocator, out, "add");
+            try reg_name(allocator, out, inst.rd, true);
+            try comma(allocator, out);
+            try reg_name(allocator, out, inst.rn, true);
+            try comma(allocator, out);
+            try reg_name(allocator, out, inst.rm, true);
+            try out.append_bytes(allocator, ", lsr ");
+            try imm_text(allocator, out, inst.imm);
+            return newline(allocator, out);
+        },
+        SMulH => return rrr(allocator, out, "smulh", inst.rd, inst.rn, inst.rm),
+        UMulH => return rrr(allocator, out, "umulh", inst.rd, inst.rn, inst.rm),
+        AndImm => return rri(allocator, out, "and", inst.rd, inst.rn, inst.imm),
+        TstImm => {
+            try head(allocator, out, "tst");
+            try reg_name(allocator, out, inst.rn, true);
+            try comma(allocator, out);
+            try imm_text(allocator, out, inst.imm);
+            return newline(allocator, out);
+        },
+        Neg => return rr(allocator, out, "neg", inst.rd, inst.rn),
+        Mvn => return rr(allocator, out, "mvn", inst.rd, inst.rn),
+        Extend => {
+            var op = "sxtw";
+            var wide_dst = true;
+            if inst.width == 1 {
+                op = "sxtb";
+                if !inst.signed {
+                    op = "uxtb";
+                    wide_dst = false;
+                }
+            } else if inst.width == 2 {
+                op = "sxth";
+                if !inst.signed {
+                    op = "uxth";
+                    wide_dst = false;
+                }
+            } else if !inst.signed {
+                op = "mov";
+                wide_dst = false;
+            }
+            try head(allocator, out, op);
+            try reg_name(allocator, out, inst.rd, wide_dst);
+            try comma(allocator, out);
+            try reg_name(allocator, out, inst.rn, false);
+            return newline(allocator, out);
+        },
+        Cmp => {
+            try head(allocator, out, "cmp");
+            try reg_name(allocator, out, inst.rn, true);
+            try comma(allocator, out);
+            try reg_name(allocator, out, inst.rm, true);
+            return newline(allocator, out);
+        },
+        CmpImm => {
+            try head(allocator, out, "cmp");
+            try reg_name(allocator, out, inst.rn, true);
+            try comma(allocator, out);
+            try imm_text(allocator, out, inst.imm);
+            return newline(allocator, out);
+        },
+        CmnImm => {
+            try head(allocator, out, "cmn");
+            try reg_name(allocator, out, inst.rn, true);
+            try comma(allocator, out);
+            try imm_text(allocator, out, inst.imm);
+            return newline(allocator, out);
+        },
+        CSet => {
+            try head(allocator, out, "cset");
+            try reg_name(allocator, out, inst.rd, true);
+            try comma(allocator, out);
+            try out.append_bytes(allocator, cond_spelling(inst.cond));
+            return newline(allocator, out);
+        },
+        CSInc => {
+            try head(allocator, out, "csinc");
+            try reg_name(allocator, out, inst.rd, true);
+            try comma(allocator, out);
+            try reg_name(allocator, out, inst.rn, true);
+            try comma(allocator, out);
+            try reg_name(allocator, out, inst.rm, true);
+            try comma(allocator, out);
+            try out.append_bytes(allocator, cond_spelling(inst.cond));
+            return newline(allocator, out);
+        },
+        CSel => {
+            try head(allocator, out, "csel");
+            try reg_name(allocator, out, inst.rd, true);
+            try comma(allocator, out);
+            try reg_name(allocator, out, inst.rn, true);
+            try comma(allocator, out);
+            try reg_name(allocator, out, inst.rm, true);
+            try comma(allocator, out);
+            try out.append_bytes(allocator, cond_spelling(inst.cond));
+            return newline(allocator, out);
+        },
+        Load => {
+            let place = resolve_base(func, inst);
+            return print_mem(allocator, out, true, inst.rd, place.total, place.saved_at, inst.width, inst.signed);
+        },
+        Store => {
+            let place = resolve_base(func, inst);
+            return print_mem(allocator, out, false, inst.rd, place.total, place.saved_at, inst.width, false);
+        },
+        LoadIdx => return print_indexed(allocator, out, true, inst),
+        StoreIdx => return print_indexed(allocator, out, false, inst),
+        FrameAddr => {
+            let slot = func.slots.get_or_panic(inst.slot);
+            return add_imm(allocator, out, inst.rd, reg_sp(), slot.offset + inst.imm);
+        },
+        SymAddr => {
+            let text = ir::name_text(syms, inst.sym);
+            let bytes = text.as_bytes();
+            try head(allocator, out, "adrp");
+            try reg_name(allocator, out, inst.rd, true);
+            try comma(allocator, out);
+            try out.append_bytes(allocator, bytes);
+            try out.append_bytes(allocator, "@PAGE");
+            try newline(allocator, out);
+            try head(allocator, out, "add");
+            try reg_name(allocator, out, inst.rd, true);
+            try comma(allocator, out);
+            try reg_name(allocator, out, inst.rd, true);
+            try comma(allocator, out);
+            try out.append_bytes(allocator, bytes);
+            try out.append_bytes(allocator, "@PAGEOFF");
+            return newline(allocator, out);
+        },
+        Call => {
+            let text = ir::name_text(syms, inst.sym);
+            let bytes = text.as_bytes();
+            try head(allocator, out, "bl");
+            try out.append_bytes(allocator, bytes);
+            return newline(allocator, out);
+        },
+        CallReg => {
+            try head(allocator, out, "blr");
+            try reg_name(allocator, out, inst.rn, true);
+            return newline(allocator, out);
+        },
+        Trap => {
+            try out.append_bytes(allocator, "    brk #1");
+            return newline(allocator, out);
+        },
+        ParCopy => return,
+        _ => return print_vector(allocator, out, inst),
+    }
+}
+
+/// Returns the arrangement suffix of lanes of width bytes in a q register.
+fn arrangement(width: i64) -> []u8 {
+    if width == 1 {
+        return ".16b";
+    }
+    if width == 2 {
+        return ".8h";
+    }
+    if width == 4 {
+        return ".4s";
+    }
+    return ".2d";
+}
+
+/// Returns the arrangement of the low 8 bytes in lanes of width bytes.
+fn half_arrangement(width: i64) -> []u8 {
+    if width == 1 {
+        return ".8b";
+    }
+    if width == 2 {
+        return ".4h";
+    }
+    return ".2s";
+}
+
+fn lane_suffix(width: i64) -> []u8 {
+    if width == 1 {
+        return ".b";
+    }
+    if width == 2 {
+        return ".h";
+    }
+    if width == 4 {
+        return ".s";
+    }
+    return ".d";
+}
+
+fn vreg_name(allocator: Allocator, out: &var string::String, v: i64, suffix: []u8) -> !void {
+    try out.append_bytes(allocator, "v");
+    try fmt::append_i64(allocator, out, v);
+    return out.append_bytes(allocator, suffix);
+}
+
+/// Writes `op vd.T, vn.T, vm.T`, or with two registers when vm is negative.
+fn vvv(allocator: Allocator, out: &var string::String, op: []u8, inst: &MInst, suffix: []u8, three: bool) -> !void {
+    try head(allocator, out, op);
+    try vreg_name(allocator, out, inst.vec % 256, suffix);
+    try comma(allocator, out);
+    try vreg_name(allocator, out, (inst.vec / 256) % 256, suffix);
+    if three {
+        try comma(allocator, out);
+        try vreg_name(allocator, out, inst.vec / 65536, suffix);
+    }
+    return newline(allocator, out);
+}
+
+fn print_vector(allocator: Allocator, out: &var string::String, inst: &MInst) -> !void {
+    let vd = inst.vec % 256;
+    let vn = (inst.vec / 256) % 256;
+    let lanes = arrangement(inst.width);
+    match inst.op {
+        VZero => {
+            try head(allocator, out, "movi");
+            try vreg_name(allocator, out, vd, ".2d");
+            try out.append_bytes(allocator, ", #0");
+            return newline(allocator, out);
+        },
+        VOnes => {
+            try head(allocator, out, "movi");
+            try vreg_name(allocator, out, vd, ".2d");
+            try out.append_bytes(allocator, ", #0xffffffffffffffff");
+            return newline(allocator, out);
+        },
+        VDup => {
+            try head(allocator, out, "dup");
+            try vreg_name(allocator, out, vd, lanes);
+            try comma(allocator, out);
+            try reg_name(allocator, out, inst.rn, inst.width == 8);
+            return newline(allocator, out);
+        },
+        VIns => {
+            try head(allocator, out, "mov");
+            try vreg_name(allocator, out, vd, lane_suffix(inst.width));
+            try out.append_bytes(allocator, "[");
+            try fmt::append_i64(allocator, out, inst.imm);
+            try out.append_bytes(allocator, "], ");
+            try reg_name(allocator, out, inst.rn, inst.width == 8);
+            return newline(allocator, out);
+        },
+        VLdp => {
+            try head(allocator, out, "ldp");
+            try out.append_bytes(allocator, "q");
+            try fmt::append_i64(allocator, out, vd);
+            try out.append_bytes(allocator, ", q");
+            try fmt::append_i64(allocator, out, vn);
+            try out.append_bytes(allocator, ", [");
+            try reg_name(allocator, out, inst.rn, true);
+            if inst.imm != 0 {
+                try comma(allocator, out);
+                try imm_text(allocator, out, inst.imm);
+            }
+            try out.append_bytes(allocator, "]");
+            return newline(allocator, out);
+        },
+        VAdd => return vvv(allocator, out, "add", inst, lanes, true),
+        VSub => return vvv(allocator, out, "sub", inst, lanes, true),
+        VAnd => return vvv(allocator, out, "and", inst, ".16b", true),
+        VOrr => return vvv(allocator, out, "orr", inst, ".16b", true),
+        VEor => return vvv(allocator, out, "eor", inst, ".16b", true),
+        VSMax => return vvv(allocator, out, "smax", inst, lanes, true),
+        VSMin => return vvv(allocator, out, "smin", inst, lanes, true),
+        VUMax => return vvv(allocator, out, "umax", inst, lanes, true),
+        VUMin => return vvv(allocator, out, "umin", inst, lanes, true),
+        VCmGt => return vvv(allocator, out, "cmgt", inst, lanes, true),
+        VCmHi => return vvv(allocator, out, "cmhi", inst, lanes, true),
+        VCmEq => return vvv(allocator, out, "cmeq", inst, lanes, true),
+        VCmGe => return vvv(allocator, out, "cmge", inst, lanes, true),
+        VCmHs => return vvv(allocator, out, "cmhs", inst, lanes, true),
+        VBic => return vvv(allocator, out, "bic", inst, ".16b", true),
+        VLdr => {
+            try head(allocator, out, "ldr");
+            if inst.imm == 8 {
+                try out.append_bytes(allocator, "d");
+            } else {
+                try out.append_bytes(allocator, "q");
+            }
+            try fmt::append_i64(allocator, out, vd);
+            try out.append_bytes(allocator, ", [");
+            try reg_name(allocator, out, inst.rn, true);
+            try out.append_bytes(allocator, "]");
+            return newline(allocator, out);
+        },
+        VXtl => {
+            if inst.signed {
+                try head(allocator, out, "sshll");
+            } else {
+                try head(allocator, out, "ushll");
+            }
+            try vreg_name(allocator, out, vd, arrangement(inst.width * 2));
+            try comma(allocator, out);
+            try vreg_name(allocator, out, vn, half_arrangement(inst.width));
+            try out.append_bytes(allocator, ", #0");
+            return newline(allocator, out);
+        },
+        VXtl2 => {
+            if inst.signed {
+                try head(allocator, out, "sshll2");
+            } else {
+                try head(allocator, out, "ushll2");
+            }
+            try vreg_name(allocator, out, vd, arrangement(inst.width * 2));
+            try comma(allocator, out);
+            try vreg_name(allocator, out, vn, arrangement(inst.width));
+            try out.append_bytes(allocator, ", #0");
+            return newline(allocator, out);
+        },
+        VBit => return vvv(allocator, out, "bit", inst, ".16b", true),
+        VShl => {
+            try head(allocator, out, "shl");
+            try vreg_name(allocator, out, vd, lanes);
+            try comma(allocator, out);
+            try vreg_name(allocator, out, vn, lanes);
+            try comma(allocator, out);
+            try imm_text(allocator, out, inst.imm);
+            return newline(allocator, out);
+        },
+        VSShr => {
+            try head(allocator, out, "sshr");
+            try vreg_name(allocator, out, vd, lanes);
+            try comma(allocator, out);
+            try vreg_name(allocator, out, vn, lanes);
+            try comma(allocator, out);
+            try imm_text(allocator, out, inst.imm);
+            return newline(allocator, out);
+        },
+        VUShr => {
+            try head(allocator, out, "ushr");
+            try vreg_name(allocator, out, vd, lanes);
+            try comma(allocator, out);
+            try vreg_name(allocator, out, vn, lanes);
+            try comma(allocator, out);
+            try imm_text(allocator, out, inst.imm);
+            return newline(allocator, out);
+        },
+        VExt => {
+            try head(allocator, out, "ext");
+            try vreg_name(allocator, out, vd, ".16b");
+            try comma(allocator, out);
+            try vreg_name(allocator, out, vn, ".16b");
+            try comma(allocator, out);
+            try vreg_name(allocator, out, vn, ".16b");
+            try comma(allocator, out);
+            try imm_text(allocator, out, inst.imm);
+            return newline(allocator, out);
+        },
+        VToGpr => {
+            if inst.width == 8 {
+                try head(allocator, out, "fmov");
+                try reg_name(allocator, out, inst.rd, true);
+                try out.append_bytes(allocator, ", d");
+                try fmt::append_i64(allocator, out, vn);
+                return newline(allocator, out);
+            }
+            if inst.signed {
+                try head(allocator, out, "smov");
+                try reg_name(allocator, out, inst.rd, true);
+            } else {
+                try head(allocator, out, "umov");
+                try reg_name(allocator, out, inst.rd, false);
+            }
+            try comma(allocator, out);
+            try vreg_name(allocator, out, vn, lane_suffix(inst.width));
+            try out.append_bytes(allocator, "[0]");
+            return newline(allocator, out);
+        },
+        _ => return,
+    }
+}
+
+fn print_indexed(allocator: Allocator, out: &var string::String, load: bool, inst: &MInst) -> !void {
+    var signed = inst.signed;
+    if !load {
+        signed = false;
+    }
+    try head(allocator, out, mem_op(load, inst.width, signed, false));
+    try reg_name(allocator, out, inst.rd, data_wide(load, inst.width, signed));
+    try out.append_bytes(allocator, ", [");
+    try reg_name(allocator, out, inst.rn, true);
+    try comma(allocator, out);
+    try reg_name(allocator, out, inst.rm, true);
+    if inst.imm > 0 {
+        try out.append_bytes(allocator, ", lsl ");
+        try imm_text(allocator, out, inst.imm);
+    }
+    try out.append_bytes(allocator, "]");
+    return newline(allocator, out);
+}
+
+/// Writes the table the entry point reads a failure's name from: one
+/// (pointer, length) row per error code, row 0 and codes no set declares
+/// empty, each name a string literal.
+fn write_error_names(allocator: Allocator, module: &ir::Module, selector: &var Selector, out: &var string::String) -> !void {
+    var rows = 1;
+    var set_index = 0;
+    while module.error_sets.key_at(set_index) |set_name| {
+        set_index = set_index + 1;
+        if module.error_sets.at(set_name) |declared| {
+            var tag_index = 0;
+            while declared.tags.key_at(tag_index) |member| {
+                tag_index = tag_index + 1;
+                let code = declared.tags.get(member) orelse 0;
+                if code + 1 > rows {
+                    rows = code + 1;
+                }
+            }
+        }
+    }
+    var labels = array::new<i64>(allocator);
+    defer labels.deinit(allocator);
+    var lengths = array::new<i64>(allocator);
+    defer lengths.deinit(allocator);
+    for 0..rows |_row| {
+        try labels.append(allocator, 0 - 1);
+        try lengths.append(allocator, 0);
+    }
+    set_index = 0;
+    while module.error_sets.key_at(set_index) |set_name| {
+        set_index = set_index + 1;
+        if module.error_sets.at(set_name) |declared| {
+            var tag_index = 0;
+            while declared.tags.key_at(tag_index) |member| {
+                tag_index = tag_index + 1;
+                let code = declared.tags.get(member) orelse continue;
+                var spelled = try string::from_bytes(allocator, set_name);
+                defer spelled.deinit(allocator);
+                try spelled.append_bytes(allocator, "::");
+                try spelled.append_bytes(allocator, member);
+                let spelled_bytes = spelled.as_bytes();
+                let held = try selector.syms.intern(spelled_bytes);
+                try labels.set(code, selector.literals.len());
+                try lengths.set(code, mem::len(spelled_bytes));
+                try selector.literals.append(allocator, held);
+            }
+        }
+    }
+    try out.append_bytes(allocator, "    .section __DATA,__const");
+    try newline(allocator, out);
+    try out.append_bytes(allocator, "    .p2align 3");
+    try newline(allocator, out);
+    try out.append_bytes(allocator, "Lkz_error_names:");
+    try newline(allocator, out);
+    for 0..rows |row| {
+        let label = labels.get_or_panic(row);
+        if label < 0 {
+            try out.append_bytes(allocator, "    .quad 0");
+            try newline(allocator, out);
+        } else {
+            try out.append_bytes(allocator, "    .quad Lkz_str.");
+            try fmt::append_i64(allocator, out, label);
+            try newline(allocator, out);
+        }
+        try out.append_bytes(allocator, "    .quad ");
+        try fmt::append_i64(allocator, out, lengths.get_or_panic(row));
+        try newline(allocator, out);
+    }
+    return;
+}
