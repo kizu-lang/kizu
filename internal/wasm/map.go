@@ -20,20 +20,15 @@ import (
 // the entry its slot names, followed by index_cap 32-bit entry numbers: a
 // lookup that misses reads control bytes and nothing else.
 const (
-	mapWasmPrefix          = "std::map::Map<"
-	mapHeaderSize          = 40
-	mapEntriesOffset       = 0
-	mapLenOffset           = 8
-	mapCapacityOffset      = 16
-	mapIndexOffset         = 24
-	mapIndexCapacityOffset = 32
-	mapEntryHeaderSize     = 24
-	mapEntryHashOffset     = 0
-	mapEntryKeyLenOffset   = 8
-	mapEntryKeyOffset      = 16
-	mapEntryValueOffset    = 24
-	mapTempSize            = 16
-	mapTempValueOffset     = 8
+	mapWasmPrefix        = "std::map::Map<"
+	mapHeaderSize        = 40
+	mapLenOffset         = 8
+	mapEntryHeaderSize   = 24
+	mapEntryKeyLenOffset = 8
+	mapEntryKeyOffset    = 16
+	mapEntryValueOffset  = 24
+	mapTempSize          = 16
+	mapTempValueOffset   = 8
 )
 
 // mapEntrySize is the width of one entry of a map whose values are
