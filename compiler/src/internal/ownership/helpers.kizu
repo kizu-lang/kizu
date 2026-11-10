@@ -16,11 +16,6 @@ pub fn none_binding() -> ?BindingHandle {
     return null;
 }
 
-/// Returns no name; `var x = none_name()` declares an optional local.
-pub fn none_name() -> ?Name {
-    return null;
-}
-
 /// Is the field path used as a method receiver, the Go
 /// `directFieldReceiver`: the root binding, the dotted path of the field the
 /// method runs on, that field's type, and `root.path` for diagnostics.
@@ -674,10 +669,38 @@ fn (self: &Checker) mark_seen(allocator: Allocator, seen: &var map::Map<[]u8, bo
     return seen.insert(allocator, bytes, flag);
 }
 
-/// Walks a declared struct / union for is_plain_data, the Go
-/// `isPlainDataAggregate`. A declared deinit keeps the type move-only
-/// regardless of its fields.
+/// Walks a declared struct / union for is_plain_data, remembering the answer
+/// once declarations are complete, the Go `isPlainDataAggregate`. A type
+/// reached twice through different fields is walked once, not once per path.
+/// A true answer met no cut on seen, and a false one from the root of a walk
+/// had no path above it, so both hold anywhere; a false one inside a walk may
+/// come from that walk's path and is not kept.
 fn (self: &var Checker) is_plain_data_aggregate(type_name: Name, seen: &var map::Map<[]u8, bool>) -> !bool {
+    if self.known_plain_data(type_name) |known| {
+        return known;
+    }
+    let root = self.plain_data_depth == 0;
+    self.plain_data_depth = self.plain_data_depth + 1;
+    let plain = try self.walk_plain_data_aggregate(type_name, seen);
+    self.plain_data_depth = self.plain_data_depth - 1;
+    if self.plain_data_ready and (plain or root) {
+        let retained = name_text(&self.names, type_name);
+        let bytes = retained.as_bytes();
+        try self.plain_data.insert(self.allocator, bytes, plain);
+    }
+    return plain;
+}
+
+fn (self: &Checker) known_plain_data(type_name: Name) -> ?bool {
+    let retained = name_text(&self.names, type_name);
+    let bytes = retained.as_bytes();
+    return self.plain_data.get(bytes);
+}
+
+/// Checks the fields or payloads of a declared struct / union, the Go
+/// `walkPlainDataAggregate`. A declared deinit keeps the type move-only
+/// regardless of its fields.
+fn (self: &var Checker) walk_plain_data_aggregate(type_name: Name, seen: &var map::Map<[]u8, bool>) -> !bool {
     let is_struct = self.is_struct(type_name);
     let is_union = self.is_union(type_name);
     if !is_struct and !is_union {
@@ -880,9 +903,4 @@ fn (self: &var Checker) instantiate_type_arg_text(type_arg: Name) -> !Name {
 fn (self: &var Checker) instantiate_one_type_arg(arg: Name) -> !Name {
     let substituted = try self.substitute_ownership_type(arg);
     return self.resolve_meta_type_text(substituted);
-}
-
-/// Reads one retained static parameter text as a Name.
-fn (self: &var Checker) type_arg_name(tree: &ast::Ast, text: ast::Text) -> !Name {
-    return self.names.intern_text(tree, text);
 }

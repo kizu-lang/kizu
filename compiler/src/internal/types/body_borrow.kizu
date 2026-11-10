@@ -35,10 +35,49 @@ fn (self: &var Checker) check_borrow_prefix(
         ) |problem| {
             return move problem;
         }
+        if try self.require_unsafe_field_lend(tree, scope, expression.right) |problem| {
+            return move problem;
+        }
     }
     out.* = value_type;
     mutable_out.* = mutable;
     return null;
+}
+
+// Holds a `&var` lend of a field path to the rule for a write to that field,
+// the Go `requireUnsafeFieldLend`. Whatever the borrower stores lands in the
+// field, and no rule can follow the borrow into a callee that takes a plain
+// `&var i64`, so the lend itself is where an `unsafe struct` invariant is put
+// at risk. Every struct along the path counts. A place that is not a field
+// path lends no field.
+fn (self: &var Checker) require_unsafe_field_lend(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    place: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    match tree.expressions.at(place.node) {
+        Field(value) => {
+            if value.namespace {
+                return null;
+            }
+            let copied = ast::FieldExpr {
+                receiver: value.receiver,
+                name: value.name,
+                namespace: value.namespace,
+                span: value.span
+            };
+            if try self.check_field_invariant(
+                tree,
+                scope,
+                &copied,
+                "mutable borrow of field"
+            ) |problem| {
+                return move problem;
+            }
+            return self.require_unsafe_field_lend(tree, scope, copied.receiver);
+        },
+        _ => return null,
+    }
 }
 
 fn borrow_prefix(tree: &ast::Ast, expression: ast::Expression) -> BorrowPrefixResult {

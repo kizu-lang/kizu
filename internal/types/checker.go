@@ -107,6 +107,9 @@ type Checker struct {
 	// The borrow-optional accessors (`at` / `at_mut`) return their `?&T` /
 	// `?&var T` only in this context and refuse everywhere else.
 	captureCondition bool
+	// plainData memoizes isPlainDataAggregate by type name once every type
+	// and method declaration is collected; nil while they are still coming.
+	plainData map[string]bool
 }
 
 // New creates an empty type checker for the host target.
@@ -133,9 +136,11 @@ func (c *Checker) Check(program *ast.Program) error {
 	c.deinitOwners = ast.DeinitOwners(program)
 	c.releaseAllocators = ast.ReleaseNamesAllocator(program)
 	c.declaredDeinits = ast.DeclaredDeinits(program)
+	c.plainData = nil
 	if err := c.collectFunctions(program); err != nil {
 		return err
 	}
+	c.plainData = map[string]bool{}
 	if err := c.checkInlineRecursion(program); err != nil {
 		return err
 	}
@@ -171,9 +176,11 @@ func (c *Checker) CheckAll(program *ast.Program) []error {
 	c.deinitOwners = ast.DeinitOwners(program)
 	c.releaseAllocators = ast.ReleaseNamesAllocator(program)
 	c.declaredDeinits = ast.DeclaredDeinits(program)
+	c.plainData = nil
 	if err := c.collectFunctions(program); err != nil {
 		return []error{err}
 	}
+	c.plainData = map[string]bool{}
 	if err := c.checkInlineRecursion(program); err != nil {
 		return []error{err}
 	}
@@ -2317,7 +2324,6 @@ func (c *Checker) checkReturnValue(
 		return true, nil
 	}
 	if _, ok := optionalElem(want); ok {
-		// A plain value returned as `?T` wraps implicitly, like `!T` success.
 		wrapped, err := c.wrapsIntoOptional(expr, want, got)
 		if err != nil {
 			return false, err
@@ -2498,7 +2504,6 @@ func (c *Checker) identBorrowSources(name string, env *scope) map[string]bool {
 		}
 		for _, n := range binding.borrowSources {
 			if n == source {
-				// A name whose recorded provenance includes itself is a root.
 				roots[source] = true
 				continue
 			}
@@ -4143,8 +4148,6 @@ func (c *Checker) checkContextualExpr(
 		return want, nil
 	}
 	if _, ok := optionalElem(want); ok {
-		// A plain value in an optional context wraps implicitly, the same way a
-		// success value wraps into `!T`.
 		wrapped, err := c.wrapsIntoOptional(expr, want, got)
 		if err != nil {
 			return "", err
@@ -4419,6 +4422,9 @@ func (c *Checker) checkBorrowPrefix(
 	}
 	if mutable {
 		if err := requireMutableBorrowArg(expr.Right, typ, env); err != nil {
+			return "", false, err
+		}
+		if err := c.requireUnsafeFieldLend(expr.Right, env, unsafe); err != nil {
 			return "", false, err
 		}
 	}
@@ -4964,7 +4970,7 @@ func (c *Checker) checkFuncPointerCall(
 				return "", err
 			}
 		}
-		got, err := c.checkContextualExpr(checkedArg, want, env, unsafe)
+		got, err := c.checkLentArg(checkedArg, want, wantMutable, env, unsafe)
 		if err != nil {
 			return "", err
 		}
@@ -7212,7 +7218,7 @@ func (c *Checker) checkGenericUserArg(
 			return err
 		}
 	}
-	got, err := c.checkContextualExpr(checkedArg, want, env, unsafe)
+	got, err := c.checkLentArg(checkedArg, want, fn.mutBorrowParams[idx], env, unsafe)
 	if err != nil {
 		return err
 	}
@@ -7237,8 +7243,6 @@ func (c *Checker) checkUserCall(
 	unsafe unsafeMark,
 ) (Type, error) {
 	if bound, ok := c.functionArgs[name]; ok {
-		// A call written against a `Function` static parameter is a call to
-		// what this instantiation bound it to.
 		name = bound
 	}
 	fn, ok := c.functions[name]
@@ -7338,6 +7342,9 @@ func (c *Checker) checkCVariadicBorrowArg(
 		return err
 	}
 	if c.isExternStruct(got) {
+		if prefix.Operator == "&var" {
+			return c.requireUnsafeFieldLend(target, env, unsafe)
+		}
 		return nil
 	}
 	return errorf("type error: arg %d of `%s` borrows %s, which a C variadic argument"+
@@ -7391,7 +7398,7 @@ func (c *Checker) checkUserCallArg(
 			return err
 		}
 	}
-	got, err := c.checkContextualExpr(checkedArg, fn.params[idx], env, unsafe)
+	got, err := c.checkLentArg(checkedArg, fn.params[idx], fn.mutBorrowParams[idx], env, unsafe)
 	if err != nil {
 		return err
 	}
@@ -8882,6 +8889,9 @@ func (c *Checker) checkMethodArgs(
 		if err := requireMutableSelfReceiver(method, receiverExpr, env); err != nil {
 			return "", err
 		}
+		if err := c.requireUnsafeFieldLend(receiverExpr, env, unsafe); err != nil {
+			return "", err
+		}
 	}
 	return c.checkCallableArgs(method, 1, span, args, env, unsafe)
 }
@@ -8955,7 +8965,7 @@ func (c *Checker) checkCallableArgs(
 				return "", err
 			}
 		}
-		got, err := c.checkContextualExpr(checkedArg, want, env, unsafe)
+		got, err := c.checkLentArg(checkedArg, want, method.mutBorrowParams[idx+offset], env, unsafe)
 		if err != nil {
 			return "", err
 		}
@@ -9614,9 +9624,27 @@ func (c *Checker) isPlainDataType(name string, seen map[string]bool) bool {
 	return c.isPlainDataAggregate(name, seen)
 }
 
-// isPlainDataAggregate walks a declared struct / union for isPlainDataType.
-// A declared deinit keeps the type move-only regardless of its fields.
+// isPlainDataAggregate walks a declared struct / union for isPlainDataType,
+// remembering the answer once declarations are complete. A type reached
+// twice through different fields -- `struct D { a: E, b: E }` -- is walked
+// once, not once per path. A true answer met no cut on seen, and a false one
+// from the root of a walk had no path above it, so both hold anywhere; a
+// false one inside a walk may come from that walk's path and is not kept.
 func (c *Checker) isPlainDataAggregate(name string, seen map[string]bool) bool {
+	if plain, ok := c.plainData[name]; ok {
+		return plain
+	}
+	root := len(seen) == 0
+	plain := c.walkPlainDataAggregate(name, seen)
+	if c.plainData != nil && (plain || root) {
+		c.plainData[name] = plain
+	}
+	return plain
+}
+
+// walkPlainDataAggregate checks the fields or payloads of a declared struct /
+// union. A declared deinit keeps the type move-only regardless of its fields.
+func (c *Checker) walkPlainDataAggregate(name string, seen map[string]bool) bool {
 	st, isStruct := c.structs[name]
 	union, isUnion := c.unions[name]
 	if (!isStruct && !isUnion) || c.implMethod(name, "deinit") != nil {

@@ -94,10 +94,11 @@ func (e *emitter) threadRoundInvokes() []threadInvoke {
 func (e *emitter) writeThreadEachInvokeThunks() {
 	for _, invoke := range e.threadRoundInvokes() {
 		unionType := e.llvmType(invoke.set + "!void")
+		linkage, comdat := e.thunkLinkage(threadInvokeThunkName(invoke))
 		fmt.Fprintf(&e.out,
-			"define internal i64 @%s(ptr %%kizu.worker, ptr %%kizu.state,"+
-				" ptr %%kizu.part, i64 %%kizu.index) #0 {\n",
-			threadInvokeThunkName(invoke))
+			"define %si64 @%s(ptr %%kizu.worker, ptr %%kizu.state,"+
+				" ptr %%kizu.part, i64 %%kizu.index) #0%s {\n",
+			linkage, threadInvokeThunkName(invoke), comdat)
 		e.out.WriteString("entry:\n")
 		e.out.WriteString("  %kizu.part.value = load %kizu.slice.u8, ptr %kizu.part\n")
 		state := ""

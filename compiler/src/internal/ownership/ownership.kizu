@@ -530,6 +530,13 @@ pub struct Checker {
     error_order: map::Map<[]u8, array::Array<ErrorMember>>,
     unions: map::Map<[]u8, UnionInfo>,
     consume_needs: map::Map<[]u8, bool>,
+    // plain_data memoizes is_plain_data_aggregate by type name once
+    // plain_data_ready says every declaration and method is collected.
+    plain_data: map::Map<[]u8, bool>,
+    plain_data_ready: bool,
+    // plain_data_depth counts the aggregates open in the current walk, so
+    // the walk's root is the one entered at zero.
+    plain_data_depth: i64,
     deinit_owners: map::Map<[]u8, bool>,
     release_allocators: map::Map<[]u8, bool>,
     // declared_deinits names the types whose cleanup an author wrote. Those
@@ -608,6 +615,9 @@ pub struct Checker {
     // fields of a struct literal it builds. The escape refusals let these
     // through; everything else the return evaluates is refused as usual.
     returned_views: array::Array<ast::Expression>,
+    // ident_uses keeps each block's identifier reads for the last-use
+    // analysis, collected once per block.
+    ident_uses: IdentUses,
     result: Result,
 }
 
@@ -656,6 +666,9 @@ pub fn new_checker_for_target(
         error_order: map::new<[]u8, array::Array<ErrorMember>>(allocator),
         unions: map::new<[]u8, UnionInfo>(allocator),
         consume_needs: map::new<[]u8, bool>(allocator),
+        plain_data: map::new<[]u8, bool>(allocator),
+        plain_data_ready: false,
+        plain_data_depth: 0,
         deinit_owners: move deinit_owners,
         release_allocators: move release_allocators,
         declared_deinits: move declared_deinits,
@@ -683,6 +696,7 @@ pub fn new_checker_for_target(
         method_call: null,
         lazy_default: empty_name(),
         returned_views: array::new<ast::Expression>(allocator),
+        ident_uses: new_ident_uses(allocator),
         result: new_result(allocator)
     };
 }
@@ -700,6 +714,7 @@ fn (self: Checker) deinit(allocator: Allocator) -> void {
     self.error_order.deinit(allocator);
     self.unions.deinit(allocator);
     self.consume_needs.deinit(allocator);
+    self.plain_data.deinit(allocator);
     self.deinit_owners.deinit(allocator);
     self.release_allocators.deinit(allocator);
     self.declared_deinits.deinit(allocator);
@@ -715,6 +730,7 @@ fn (self: Checker) deinit(allocator: Allocator) -> void {
     self.pending_moved_places.deinit(allocator);
     self.pending_alloc_taints.deinit(allocator);
     self.returned_views.deinit(allocator);
+    self.ident_uses.deinit(allocator);
     self.result.deinit(allocator);
     return;
 }
@@ -884,7 +900,11 @@ fn (self: &var Checker) check_setup(tree: &ast::Ast, program: &ast::Program) -> 
     if try self.check_union_payloads(tree, program) |failed| {
         return move failed;
     }
-    return self.collect_functions(tree, program);
+    if try self.collect_functions(tree, program) |failed| {
+        return move failed;
+    }
+    self.plain_data_ready = true;
+    return null;
 }
 
 // Checks the body one top-level declaration carries: every non-generic

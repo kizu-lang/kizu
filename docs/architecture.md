@@ -12,13 +12,14 @@ oracle でもあります。以前の selfhost は独立した第二実装とし
 偽装して緑を保ったため削除しました。今回は Go の構造と挙動を保った機械移植にし、
 両者の差分を corpus で突き合わせています(ADR-0130)。
 
-規模感(2026-08 時点): Kizu 製 compiler 約 94k 行、Go 実装 約 52k 行 + テスト
-約 21k 行、Kizu 製 std 約 9k 行、examples 約 15k 行。
+規模感(2026-11 時点): Kizu 製 compiler 約 131k 行(`compiler/src`、`*_test.kizu` を
+除く)、Go 実装 約 83k 行 + テスト 約 29k 行、Kizu 製 std 約 28k 行、examples 約 25k 行。
 
 ## 2. リポジトリ地図
 
 ```
 cmd/kizu/            CLI 本体と、パッケージ横断の統合テスト・conformance
+cmd/kizu-lsp/        LSP server(実体は internal/lsp)
 internal/            Go 実装(1 パッケージ = 1 責務)
   source, token, lexer, parser, ast   入力 text・字句・構文・AST
   typ                           型の綴りを 1 度だけ parse した形(文字列手術の代わり)
@@ -27,6 +28,8 @@ internal/            Go 実装(1 パッケージ = 1 責務)
   project, stdlib, manifest     パッケージ/モジュール解決(std も含む)、std の在処、kizu.toml
   stdmethod, stdprim, stdmeta, stdtarget
                                 std の method / primitive と compiler-defined form
+  staticexpr, stdmath           static 引数の整数式と、comptime の sin / cos(std::math と同じ bit)
+  machinelean, machinequint     std::machine の表を Lean / Quint へ書き出す
   unsafecap                     unsafe が覆う操作の種類と診断文言
   conformance                   example が末尾に宣言する case の読み取り
   version, selfhost             binary の名乗りと、移植先が読めない生成 source
@@ -72,17 +75,34 @@ source.kizu
 言って落ち、後者はループがスタックを 1 回転ごとに食って guard page で死にます。
 命令の形は固定しません。
 
-その実行ファイルは build cache に残ります。鍵は LLVM IR・runtime の source・
-toolchain、つまり実行ファイルが**何でできているか**だけで、ファイル名も時刻も
-入りません。front end は数 ms なので毎回通り、そこから先の link を飛ばします。
-runtime object の鍵にはさらに `clang --version` の 1 行目が入ります。clang を
-替えても path と flag は同じなので、そこだけが古い object と新しい clang が作る
-object を区別します。この問い合わせは link するときだけで、cache にある実行
-ファイルを走らせるだけの `run` は toolchain に触れません。
+debug build の LLVM IR は module ごとの unit と、全体から決まるもの(package の
+`main`、test runner、error 名の表)を持つ program unit に割ります(`llvm.EmitUnits`)。
+unit の順は依存が先の module 順、最後に program unit で、関数の所属は lowerer が
+宣言の module から写した `ir.Function.Module` だけで決めます。unit を跨いで呼ばれうる
+関数は `hidden` で、symbol は `kz-` で始まります。`-` は C の識別子にも Kizu の
+symbol 名にも現れないので、unit 外へ出しても runtime の libc 呼び出しを横取りしません。
+generic instance は使う側の unit がそれぞれ `linkonce_odr` で持ち、linker が 1 つ残します
+(ELF / COFF は comdat、Mach-O は weak 定義の合併)。`--opt` は 1 unit のままです。
+`--opt --thinlto` は同じ割り方で(`llvm.PerModuleLTO`)、他の unit が名指す関数・
+address を取られる関数・C export だけを `hidden` にし、残りを `internal` にします。
+最適化が inline し尽くした本体を消し、呼び出し規約を変えられるようにするためで、
+そのぶん unit の text は他の unit がどの関数を呼ぶかにも依存します。各 unit は
+`source_filename` に module 名を書きます。ThinLTO は internal な関数を source file 名と
+名前で区別するためです。
+
+unit の object と実行ファイルは build cache に残ります。鍵は LLVM IR・runtime の
+source・toolchain、つまり**何でできているか**だけで、ファイル名も時刻も入りません。
+front end は毎回通り、text が変わらない unit の compile と、全 unit が変わらなければ
+link を飛ばします。object と runtime object の鍵にはさらに `clang --version` の 1 行目が
+入ります。clang を替えても path と flag は同じなので、そこだけが古い object と新しい
+clang が作る object を区別します。この問い合わせは link するときだけで、cache にある
+実行ファイルを走らせるだけの `run` は toolchain に触れません。
 桁の目安は `kizu run examples/hello.kizu` で初回 ~0.5s(うち大半が clang の
 link)、2 回目以降 ~10ms —— 絶対値は host と clang によります。
-`build --target native` は逆に、利用者が名前を指定した成果物とその build 記録を
-書くコマンドなので cache から読まず、毎回 link します。
+`build --target native` は利用者が名前を指定した成果物とその build 記録を書くコマンド
+なので実行ファイルは cache から読まず毎回 link しますが、unit の object は cache から
+読みます。selfhost の bootstrap 検査は第 2 段を空の cache で build し、object を
+compile し直した結果が第 1 段と一致することを見ます。
 
 `internal/wasm` は typed SSA IR を 1 度だけ WebAssembly module へ lower し、その同じ
 module を inspection 用 WAT と deterministic な binary `.wasm` に描画します。Go seed と
@@ -136,13 +156,14 @@ CLI のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 | 層 | 実行方法 | 内容 |
 | --- | --- | --- |
 | conformance | `go test ./cmd/kizu` | `examples/`、`tests/behavior/`、`docs/tutorial/` を全件実行。case を書いていない例があれば落ちる |
-| ユニット | `go test ./...`(pre-push hook) | 各 internal パッケージ + CLI smoke + std lexer/parser parity(native 実行)|
+| ユニット | `go test ./...`(pre-push hook) | 各 internal パッケージ + CLI smoke |
 | 両実装の突き合わせ | `go test ./cmd/kizu`(`TestSelfhostFrontend` / `TestSelfhostBehavior`) | Kizu compiler と Go seed の出力差分。`compiler/tests/` の corpus は `-update` で両方を同時に更新する |
 | bootstrap | `go test ./cmd/kizu -run TestSelfhostBootstrap` | Kizu compiler が自分自身を build し、byte 単位で同じ実行ファイルになること |
 | Kizu 側 unit test | `go test ./internal/selfhost`(= `kizu test compiler`、`just selfhost` でも) | `compiler/src/**/*_test.kizu`。seed が compiler とその test を 1 つの実行ファイルにして走らせる。`cmd/kizu` と並んで走るよう別 package |
 | commit hooks | `pre-commit run --all-files` | gofmt / golangci-lint / コメント検査 + `kizu check compiler`。数秒で終わるものだけ |
 
-CI は push/PR ごとに 1 job(`go test ./...` + gofmt)を macOS / Linux の両方で回します。
+CI は push/PR ごとに 1 job(`go test ./...` + gofmt)を macOS / Linux の両方で回します
+(`internal/selfhost` は host に依らないので macOS だけ)。
 定時実行は置きません。
 言語機能を足したら `examples/` に実例を足し、その末尾に case を書きます。
 書式は `internal/conformance` の package doc にあります。
