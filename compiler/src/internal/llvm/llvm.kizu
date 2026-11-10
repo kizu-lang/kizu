@@ -2563,55 +2563,6 @@ fn (self: &var Emitter) size_of_llvm_type(llvm_type: ir::Name) -> !ir::Name {
     return self.text1("ptrtoint (ptr getelementptr (%s, ptr null, i64 1) to i64)", Arg::Str(llvm_type));
 }
 
-/// Names the hosted container a constructor builds, the result shape the
-/// Go `writeContainerNew` is handed as a predicate.
-enum ContainerKind {
-    Array,
-    Map,
-    Arena,
-}
-
-/// Reports whether a lowered IR type is the container a kind names.
-fn is_container_type(kind: ContainerKind, typ_name: []u8) -> bool {
-    return match kind {
-        Array => is_array_llvm_type(typ_name),
-        Map => is_map_llvm_type(typ_name),
-        Arena => is_arena_llvm_type(typ_name),
-    };
-}
-
-/// Lowers one container constructor to its runtime call, the Go
-/// `writeContainerNew`: the allocator handle and the element size are the
-/// whole ABI.
-fn (self: &var Emitter) write_container_new(
-    module: &ir::Module,
-    node: &ir::InstrNode,
-    runtime: []u8,
-    kind: ContainerKind,
-    shape: []u8
-) -> !?diagnostic::Diagnostic {
-    let result_text = ir::name_text(&module.names, node.result.type_name);
-    let result_type = result_text.as_bytes();
-    if node.args.len() != 1 or !is_container_type(kind, result_type) {
-        return try self.fail1("llvm error: %s", Arg::Lit(shape));
-    }
-    var elem = string::new(self.allocator);
-    defer elem.deinit(self.allocator);
-    if !try self.instr_element_type(module, node, &var elem) {
-        return try self.fail1("llvm error: %s", Arg::Lit(shape));
-    }
-    let elem_bytes = elem.as_bytes();
-    let result_name = try self.local_name(module, node.result.name);
-    let allocator = try self.operand(module, node.args.get_or_panic(0));
-    let size = try self.element_size_operand_bytes(module, elem_bytes);
-    try self.line4(
-        "  %s = call ptr @%s(ptr %s, i64 %s)",
-        Arg::Str(result_name), Arg::Lit(runtime), Arg::Str(allocator.operand), Arg::Str(size)
-    );
-    try self.set_value(module, node.result, result_name);
-    return null;
-}
-
 /// Returns an empty operand list, for the failures that report no value.
 fn (self: &Emitter) no_names() -> array::Array<ir::Name> {
     return array::new<ir::Name>(self.allocator);
