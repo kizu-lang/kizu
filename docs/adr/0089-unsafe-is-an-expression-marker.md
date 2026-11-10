@@ -64,7 +64,7 @@ Kizu がコンパイラ予約名を書く場所のうち、他はすべて strin
 
 ### `@` は `unsafe` に対して仕事をしていない
 
-`unsafe` は既に予約語である(`internal/token/token.go:92`)。`@unsafe` は
+`unsafe` は既に予約語である(`internal/token/token.go` の `Unsafe`)。`@unsafe` は
 `token.At` + `token.Unsafe` の 2 トークンで、`@` を外しても構文は一意に決まる。
 
 一方 `requires_unsafe` / `repr` / `link_name` / `link_library` は予約語ではない。
@@ -136,8 +136,8 @@ RFC 2585 でその実装を捨てた。
 `unsafe` が要る。
 
 `requires_unsafe` を予約語にする必要がなくなるので、keyword は 30 語のまま。
-宣言位置の `unsafe` は parser が既に捕まえている(`internal/parser/parser.go:70`,
-`136`)ので、error を実装に差し替える。
+宣言位置の `unsafe` は parser が既に捕まえている(`internal/parser/parser.go`)ので、
+error を実装に差し替える。
 
 ### 3. raw pointer field を持つ struct は `unsafe struct` を必須にする
 
@@ -324,7 +324,7 @@ token に載せる(`internal/lexer` の `readSafetyComment`、`token.Token.Safet
 
 ## 影響
 
-- `@unsafe(...)` 文は消える。`token.At` の文位置受け口(`internal/parser/parser.go:708`)
+- `@unsafe(...)` 文は消える。`token.At` の文位置受け口(`internal/parser/parser.go`)
   ごと削除する。`@` が付く語は `@repr` / `@link_name` / `@link_library` だけになり、
   **`@` = 宣言に付く attribute、引数は string literal** という 1 本の規則に揃う
 - `unsafe` は 3 箇所に現れ、意味は 1 つ(コンパイラが証明しない。人間が持つ)

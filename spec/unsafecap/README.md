@@ -44,7 +44,8 @@ internal/unsafecap/mbt_test.go      fixture を 2 file の Kizu module にして
   marker の状態は関数本体の検査に入るたびに空から始まる(`checkBlock(.., nil)`)ので
   本体の種類で変わらず、関数 `g` / `f` の 2 つで代表させました。
 * **`unsafe` の中でも残る型 / move / borrow の検査**(§12 末尾)。ownership 側のモデルの
-  範囲で、既存の `o_unsafe_does_not_disable_*` が押さえています。
+  範囲で、`internal/ownership` の `TestCheckUnsafeDoesNotDisableMoveAndBorrowRules` が
+  押さえています。
 
 ## モデルの形
 
