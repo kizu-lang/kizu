@@ -26,12 +26,14 @@ examples/*_conformance.kizu       trace を実装に流して食い違う手を�
 からの resume だけ)、`terminate_needs_agreement`(terminate が効くのは active か
 suspended だけ)です。
 
-`Tls.lean` は RFC 8446 §A.1 の client の状態機械です。表に無い message は
+`Tls.lean` は RFC 8446 §A.1 の client と §A.2 の server の状態機械です。client では、
+表に無い message は
 `unexpected_message` で接続を閉じ(`refusal_closes`)、閉じた接続には何も起きず
 (`closed_absorbing`)、connected になるのは待っていた `Finished` によってだけ
 (`connected_only_by_finished`)、application data は connected でだけ受け取り
 (`data_needs_connection`)、`CertificateVerify` は `Certificate` の後にだけ来ます
-(`verify_needs_certificate`、`certificate_first`)。
+(`verify_needs_certificate`、`certificate_first`)。server は同じ形の性質を
+`server_` で始まる名前で持ちます。
 
 `Tls.lean` の表は手で書きません。`-- BEGIN GENERATED` と `-- END GENERATED` の間は
 `std::tls` の `advance` と `advance_server` の全組から作るので、証明は実際に動く表に
@@ -58,6 +60,7 @@ just spec-table     # std::tls を読んで spec/Tls.lean の block と Quint �
 just spec-verify    # 到達できる全部の状態で Quint の性質を TLC で確かめる(Java が要る)
 just spec-quint     # Quint のランダムな実行で性質を探す(Java は要らない)
 just spec-trace     # lean --run spec/<Name>.lean > examples/fixtures/<name>_trace.json
+just spec-ir        # internal/ir モデルの quint test と性質の探索、internal/ir の fixture の再生成
 just spec-ownership # ownership モデルの quint test と健全性の探索、internal/ownership の fixture の再生成
 just spec-unsafecap # unsafe マーカーモデルの quint test、健全性と mutant の探索、internal/unsafecap の fixture の再生成
 just spec-cimport   # C header import モデルの quint test、健全性と mutant の探索、internal/cimport の fixture の再生成

@@ -38,14 +38,14 @@ not in any one execution path.
 
 | Feature | Examples | check | run | llvm | wasm | wasm-opt | wasm-bin | browser |
 | --- | ---: | :--: | :--: | :--: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 55 | ✅ | ✅ | ✅ | 54/55 | 54/55 | 54/55 | 53/55 |
+| fn / let / struct / literals | 56 | ✅ | ✅ | ✅ | 55/56 | 55/56 | 55/56 | 54/56 |
 | arithmetic / bitwise / float | 11 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | while / break / continue / for / label | 11 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | if / match | 21 | ✅ | ✅ | ✅ | 20/21 | 20/21 | 20/21 | 18/21 |
-| enum / union | 20 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 17/20 |
-| error union `!T` / try / errdefer | 61 | ✅ | ✅ | ✅ | 39/61 | 39/61 | 39/61 | 36/61 |
+| enum / union | 21 | ✅ | ✅ | ✅ | 20/21 | 20/21 | 20/21 | 17/21 |
+| error union `!T` / try / errdefer | 62 | ✅ | ✅ | ✅ | 39/62 | 39/62 | 39/62 | 36/62 |
 | optional `?T` / orelse / capture | 30 | ✅ | ✅ | ✅ | 29/30 | 29/30 | 29/30 | 27/30 |
-| move / borrow | 74 | ✅ | ✅ | ✅ | 70/74 | 70/74 | 70/74 | 70/74 |
+| move / borrow | 75 | ✅ | ✅ | ✅ | 71/75 | 71/75 | 71/75 | 71/75 |
 | deinit / defer | 25 | ✅ | ✅ | ✅ | 24/25 | 24/25 | 24/25 | 24/25 |
 | arena / handle | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | comptime / reflection | 20 | ✅ | ✅ | ✅ | 18/20 | 18/20 | 18/20 | 18/20 |
@@ -67,8 +67,8 @@ not in any one execution path.
 | std::date | 2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::fmt | 7 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::testing | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::fs / path / io / process | 34 | ✅ | ✅ | ✅ | 14/34 | 14/34 | 14/34 | 4/34 |
-| std::net / http | 23 | ✅ | ✅ | ✅ | 4/23 | 4/23 | 4/23 | 4/23 |
+| std::fs / path / io / process | 35 | ✅ | ✅ | ✅ | 14/35 | 14/35 | 14/35 | 4/35 |
+| std::net / http | 24 | ✅ | ✅ | ✅ | 4/24 | 4/24 | 4/24 | 4/24 |
 | async / coro | 2 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | std::thread | 3 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 
@@ -139,7 +139,7 @@ deliberately excluded, so the two are not confused.
 | raw pointer runtime operations | **check-only.** `pointer_policy.kizu` and `raw_pointer_deref.kizu` are checked but not executed |
 | type alias | **not started** |
 | `kizu lint` | **not started** |
-| TLS / HTTPS, middleware | **not started.** `std::http` is HTTP/1 over plaintext TCP; middleware waits on closures |
+| HTTP middleware | **not started.** Middleware waits on closures. `std::http` serves and fetches HTTP/1 over plaintext TCP or TLS 1.3 (`std::tls`) |
 | full generics | **not planned as such.** Explicit static arguments only, no inference, no bounds, no HKT (ADR-0066) |
 | `async fn` / `await` syntax | **not adopted.** Function coloring is the cost this language does not pay (ADR-0025) |
 | Rust `Send` / `Sync` traits | **not adopted.** Whatever replaces them must be one rule users can read, not a hand-written whitelist (ADR-0025) |
@@ -203,7 +203,7 @@ go run ./cmd/kizu run examples/hello.kizu
 ## Development Environment
 
 The recommended development environment is the Nix flake. The shell includes
-Go, golangci-lint, pre-commit, just, wasmtime, and Node.js.
+Go, golangci-lint, pre-commit, just, wasmtime, Node.js, and clang from LLVM 21.
 
 ```sh
 nix develop
