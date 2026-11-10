@@ -1,3 +1,4 @@
+import compiler::internal::arm64;
 import compiler::internal::ast;
 import compiler::internal::buildcache;
 import compiler::internal::cimport;
@@ -1902,6 +1903,7 @@ fn default_native_options(allocator: Allocator) -> !native::Options {
         linker: move linker,
         opt: false,
         thinlto: false,
+        asm: false,
         libraries: array::new<string::String>(allocator),
         frameworks: array::new<string::String>(allocator),
         library_search: array::new<string::String>(allocator),
@@ -2150,6 +2152,27 @@ fn parse_native_build_args(
             options.thinlto = true;
             continue;
         }
+        if mem::equal_bytes(arg, "--backend") {
+            var backend = string::new(allocator);
+            defer backend.deinit(allocator);
+            index = try take_flag_value(io, allocator, index, count, "--backend", &var backend);
+            if index < 0 {
+                return 1;
+            }
+            let backend_bytes = backend.as_bytes();
+            if !mem::equal_bytes(backend_bytes, "arm64-asm") {
+                try usage(io);
+                var message = try string::from_bytes(allocator, "error: unknown backend `");
+                defer message.deinit(allocator);
+                try message.append_bytes(allocator, backend_bytes);
+                try message.append_bytes(allocator, "`");
+                let message_bytes = message.as_bytes();
+                try io::write_stderr_line(io, message_bytes);
+                return 1;
+            }
+            options.asm = true;
+            continue;
+        }
         if mem::equal_bytes(arg, "-o") {
             index = try take_flag_value(io, allocator, index, count, "-o", &var options.output);
             if index < 0 {
@@ -2266,6 +2289,9 @@ fn default_native_output(allocator: Allocator, path: []u8, emit: []u8, out: &var
     }
     if mem::equal_bytes(emit, "llvm") {
         try out.append_bytes(allocator, ".ll");
+    }
+    if mem::equal_bytes(emit, "asm") {
+        try out.append_bytes(allocator, ".s");
     }
     return;
 }
@@ -2417,7 +2443,38 @@ fn native_target(
                     }
                     var units = array::new<string::String>(allocator);
                     defer units.deinit(allocator);
-                    if try emit_unit_texts(allocator, &var lowerer.module, darwin, arch, split, &var units) |failed| {
+                    if options.asm {
+                        // The experimental arm64 backend: the module as
+                        // assembly text, one unit, assembled by clang.
+                        if !darwin or arch != llvm::Arch::Arm64 {
+                            try io::write_stderr_line(io, "error: --backend arm64-asm needs a Darwin arm64 target");
+                            return 1;
+                        }
+                        try units.append(allocator, string::new(allocator));
+                        var failure = false;
+                        if units.at_mut(0) |text| {
+                            if try arm64::emit(allocator, &lowerer.module, text) |failed| {
+                                defer failed.deinit(allocator);
+                                try report(io, allocator, &loader.sources, &failed);
+                                failure = true;
+                            }
+                        }
+                        if failure {
+                            return 1;
+                        }
+                        let emit_kind = options.emit.as_bytes();
+                        if mem::equal_bytes(emit_kind, "asm") {
+                            let output = options.output.as_bytes();
+                            let parent = path::dirname(output);
+                            try fsutil::create_dir_all(io, parent);
+                            if units.at(0) |text| {
+                                let text_bytes = text.as_bytes();
+                                try fs::write_file(io, output, text_bytes);
+                            }
+                            try io::write_stdout_line(io, output);
+                            return 0;
+                        }
+                    } else if try emit_unit_texts(allocator, &var lowerer.module, darwin, arch, split, &var units) |failed| {
                         defer failed.deinit(allocator);
                         try report(io, allocator, &loader.sources, &failed);
                         return 1;

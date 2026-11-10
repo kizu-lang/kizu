@@ -50,6 +50,9 @@ pub struct Options {
     /// each compiled to bitcode the cache keeps, and optimizes across them
     /// when they are linked.
     pub thinlto: bool,
+    /// asm marks units that are assembly text from the arm64 backend rather
+    /// than LLVM IR: each is written as `.s`, which clang assembles.
+    pub asm: bool,
     /// libraries and frameworks are what the program's reached extern
     /// declarations named with `@link_library` / `@link_framework`; the search
     /// paths are what its manifest's `[native]` section says about where
@@ -711,7 +714,7 @@ fn unit_inputs(
     var index = 0;
     if options.opt and !options.thinlto {
         while units.at(index) |unit| {
-            let unit_path = try unit_text_path(io, allocator, dir, index);
+            let unit_path = try unit_text_path(io, allocator, dir, index, options);
             defer unit_path.deinit(allocator);
             index = index + 1;
             var module = string::new(allocator);
@@ -861,12 +864,21 @@ fn unit_file(allocator: Allocator, dir: []u8, index: i64, extension: []u8) -> !s
 
 /// Creates the index-th unit's directory and returns where its text is
 /// written, the Go `unitPath`.
-fn unit_text_path(io: Io, allocator: Allocator, dir: []u8, index: i64) -> !string::String {
+fn unit_text_path(io: Io, allocator: Allocator, dir: []u8, index: i64, options: &Options) -> !string::String {
     let unit = try unit_dir(allocator, dir, index);
     defer unit.deinit(allocator);
     let unit_bytes = unit.as_bytes();
     try fs::create_dir(io, unit_bytes);
-    return unit_file(allocator, dir, index, ".ll");
+    return unit_file(allocator, dir, index, unit_extension(options));
+}
+
+/// Returns the extension a unit's text is written with, which is what tells
+/// clang how to read it.
+fn unit_extension(options: &Options) -> []u8 {
+    if options.asm {
+        return ".s";
+    }
+    return ".ll";
 }
 
 /// Removes the unit texts a link wrote, the part of the Go `defer
@@ -875,6 +887,7 @@ fn remove_unit_files(io: Io, allocator: Allocator, dir: []u8, count: i64) -> !vo
     var index = 0;
     while index < count {
         try remove_temp_unit_file(io, allocator, dir, index, ".ll");
+        try remove_temp_unit_file(io, allocator, dir, index, ".s");
         try remove_temp_unit_file(io, allocator, dir, index, ".args");
         let unit = try unit_dir(allocator, dir, index);
         defer unit.deinit(allocator);
@@ -912,7 +925,7 @@ fn prepare_unit(
     options: &Options,
     arm64: bool
 ) -> !UnitJob {
-    let unit_path = try unit_text_path(io, allocator, dir, index);
+    let unit_path = try unit_text_path(io, allocator, dir, index, options);
     defer unit_path.deinit(allocator);
     let path_bytes = unit_path.as_bytes();
     let text_bytes = text.as_bytes();
