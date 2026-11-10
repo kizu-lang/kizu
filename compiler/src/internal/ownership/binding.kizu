@@ -381,6 +381,23 @@ fn (self: &ScopeStore) find_by_id(scope: ScopeHandle, id: i64) -> ?BindingHandle
     return null;
 }
 
+/// Indexes a scope chain's bindings by stable id once, the Go
+/// `collectBindings`, so a merge reads each id back in constant time rather
+/// than walking the chain per binding. The innermost binding of an id is
+/// kept, which is the one find_by_id returns.
+fn (self: &ScopeStore) bindings_by_id(scope: ScopeHandle) -> !map::Map<i64, BindingHandle> {
+    var out = map::new<i64, BindingHandle>(self.allocator);
+    errdefer out.deinit(self.allocator);
+    var walker = self.walk(scope);
+    while walker.next(self) |handle| {
+        let id = self.at(handle).id;
+        if !out.contains(id) {
+            try out.insert(self.allocator, id, handle);
+        }
+    }
+    return move out;
+}
+
 /// Resolves the binding whose field holds the arena with this provenance id,
 /// the Go `scope.fieldArenaOwner`.
 fn (self: &ScopeStore) field_arena_owner(scope: ScopeHandle, arena_id: i64) -> ?BindingHandle {
@@ -732,10 +749,12 @@ fn copy_bool_map(allocator: Allocator, source: &map::Map<[]u8, bool>) -> !map::M
 /// Go `scope.mergeMovedFrom`: that it moved it, that it released it, and
 /// which of its fields it cleaned.
 fn (self: &var ScopeStore) merge_moved_from(scope: ScopeHandle, other: ScopeHandle) -> !void {
+    var targets = try self.bindings_by_id(scope);
+    defer targets.deinit(self.allocator);
     var walker = self.walk(other);
     while walker.next(self) |value| {
         let id = self.at(value).id;
-        if self.find_by_id(scope, id) |target| {
+        if targets.get(id) |target| {
             try self.merge_binding(target, value);
         }
     }

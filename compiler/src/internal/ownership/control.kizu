@@ -3,6 +3,7 @@ import compiler::internal::diagnostic;
 import compiler::internal::stdmeta;
 import std::arena;
 import std::array;
+import std::map;
 
 // Port of the assignment, expression statement, if / while / for / match
 // statement, and branch agreement checks of internal/ownership/checker.go,
@@ -417,14 +418,18 @@ fn (self: &var Checker) check_branch_consume_agreement(
         return null;
     }
     var split = none_binding();
+    var left_by_id = try self.store.bindings_by_id(left);
+    defer left_by_id.deinit(self.allocator);
+    var right_by_id = try self.store.bindings_by_id(right);
+    defer right_by_id.deinit(self.allocator);
     var walker = self.store.walk(env);
     while walker.next(&self.store) |value| {
         if !try self.binding_needs_consume(value) {
             continue;
         }
         let id = self.binding(value).id;
-        let in_left = self.store.find_by_id(left, id) orelse continue;
-        let in_right = self.store.find_by_id(right, id) orelse continue;
+        let in_left = left_by_id.get(id) orelse continue;
+        let in_right = right_by_id.get(id) orelse continue;
         if self.binding_consumed(in_left) == self.binding_consumed(in_right) {
             continue;
         }
@@ -460,6 +465,10 @@ fn (self: &var Checker) check_branch_field_consume_agreement(
 ) -> !?diagnostic::Diagnostic {
     var split_value = none_binding();
     var split_field = empty_name();
+    var left_by_id = try self.store.bindings_by_id(left);
+    defer left_by_id.deinit(self.allocator);
+    var right_by_id = try self.store.bindings_by_id(right);
+    defer right_by_id.deinit(self.allocator);
     var walker = self.store.walk(env);
     while walker.next(&self.store) |value| {
         let type_name = self.binding(value).type_name;
@@ -467,8 +476,8 @@ fn (self: &var Checker) check_branch_field_consume_agreement(
             continue;
         }
         let id = self.binding(value).id;
-        let in_left = self.store.find_by_id(left, id) orelse continue;
-        let in_right = self.store.find_by_id(right, id) orelse continue;
+        let in_left = left_by_id.get(id) orelse continue;
+        let in_right = right_by_id.get(id) orelse continue;
         var index = 0;
         while self.struct_field_at(type_name, index) |field| {
             index = index + 1;
@@ -627,12 +636,14 @@ fn (self: &var Checker) check_loop_consumes_nothing_outside(
     body: ScopeHandle
 ) -> !?diagnostic::Diagnostic {
     var consumed = none_binding();
+    var body_by_id = try self.store.bindings_by_id(body);
+    defer body_by_id.deinit(self.allocator);
     var walker = self.store.walk(env);
     while walker.next(&self.store) |value| {
         if !try self.binding_needs_consume(value) {
             continue;
         }
-        let inside = self.store.find_by_id(body, self.binding(value).id) orelse continue;
+        let inside = body_by_id.get(self.binding(value).id) orelse continue;
         if !self.binding_consumed(inside) {
             continue;
         }
@@ -655,13 +666,15 @@ fn (self: &var Checker) check_loop_cleans_no_outer_field(
 ) -> !?diagnostic::Diagnostic {
     var cleaned_value = none_binding();
     var cleaned_field = empty_name();
+    var body_by_id = try self.store.bindings_by_id(body);
+    defer body_by_id.deinit(self.allocator);
     var walker = self.store.walk(env);
     while walker.next(&self.store) |value| {
         let type_name = self.binding(value).type_name;
         if !self.is_struct(type_name) {
             continue;
         }
-        let inside = self.store.find_by_id(body, self.binding(value).id) orelse continue;
+        let inside = body_by_id.get(self.binding(value).id) orelse continue;
         var index = 0;
         while self.struct_field_at(type_name, index) |field| {
             index = index + 1;
@@ -1283,6 +1296,15 @@ fn (self: &var Checker) check_arm_field_consume_agreement(
     if live.len() < 2 {
         return null;
     }
+    var arms_by_id = array::new<map::Map<i64, BindingHandle>>(self.allocator);
+    defer arms_by_id.deinit(self.allocator);
+    var arm = 0;
+    while live.get(arm) |arm_env| {
+        arm = arm + 1;
+        var by_id = try self.store.bindings_by_id(arm_env);
+        errdefer by_id.deinit(self.allocator);
+        try arms_by_id.append(self.allocator, move by_id);
+    }
     var split_value = none_binding();
     var split_field = empty_name();
     var walker = self.store.walk(env);
@@ -1298,7 +1320,7 @@ fn (self: &var Checker) check_arm_field_consume_agreement(
             if !try self.field_type_needs_consume(field_type) {
                 continue;
             }
-            if self.field_cleanup_agrees(live, self.binding(value).id, field) {
+            if self.field_cleanup_agrees(&arms_by_id, self.binding(value).id, field) {
                 continue;
             }
             let later = self.later_binding(split_value, value) orelse continue;
@@ -1321,13 +1343,18 @@ fn (self: &var Checker) check_arm_field_consume_agreement(
 
 /// Reports whether every arm that carries this binding made the same
 /// decision about one of its fields, the Go `fieldCleanupAgrees`.
-fn (self: &Checker) field_cleanup_agrees(live: &array::Array<ScopeHandle>, id: i64, field: Name) -> bool {
+/// arms holds each surviving arm's bindings_by_id, in arm order.
+fn (self: &Checker) field_cleanup_agrees(
+    arms: &array::Array<map::Map<i64, BindingHandle>>,
+    id: i64,
+    field: Name
+) -> bool {
     var seen = false;
     var cleaned = false;
     var index = 0;
-    while live.get(index) |arm_env| {
+    while arms.at(index) |by_id| {
         index = index + 1;
-        let value = self.store.find_by_id(arm_env, id) orelse continue;
+        let value = by_id.get(id) orelse continue;
         let flag = self.field_deinit_name(value, field);
         if !seen {
             seen = true;
