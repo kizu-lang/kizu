@@ -8,18 +8,17 @@ const (
 	diagnosticSeverityError   = 1
 	diagnosticSeverityWarning = 2
 
-	completionItemKindMethod        = 2
-	completionItemKindFunction      = 3
-	completionItemKindField         = 5
-	completionItemKindVariable      = 6
-	completionItemKindModule        = 9
-	completionItemKindValue         = 12
-	completionItemKindEnum          = 13
-	completionItemKindKeyword       = 14
-	completionItemKindSnippet       = 15
-	completionItemKindEnumMember    = 20
-	completionItemKindStruct        = 22
-	completionItemKindTypeParameter = 25
+	completionItemKindMethod     = 2
+	completionItemKindFunction   = 3
+	completionItemKindField      = 5
+	completionItemKindVariable   = 6
+	completionItemKindModule     = 9
+	completionItemKindValue      = 12
+	completionItemKindEnum       = 13
+	completionItemKindKeyword    = 14
+	completionItemKindSnippet    = 15
+	completionItemKindEnumMember = 20
+	completionItemKindStruct     = 22
 
 	insertTextFormatSnippet = 2
 
