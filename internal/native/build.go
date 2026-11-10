@@ -157,7 +157,10 @@ func unitInputs(tmp string, options Options, version string) ([]string, error) {
 	if options.Opt {
 		inputs := make([]string, 0, len(options.Units))
 		for index, unit := range options.Units {
-			path := filepath.Join(tmp, fmt.Sprintf("unit%d.ll", index))
+			path, err := unitPath(tmp, index)
+			if err != nil {
+				return nil, err
+			}
 			text := moduleForLinker(options, unit, version)
 			if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
 				return nil, err
@@ -214,9 +217,27 @@ func unitDigests(units []string) []string {
 	return digests
 }
 
+// unitPath returns where the index-th unit's text is written for clang to
+// read, creating its directory. Each unit has a directory of its own and the
+// same file name in it: an ELF object records the base name of the file it
+// was compiled from, so a name that held the index would make the object of
+// one text differ by the unit's place in whichever build compiled it, and an
+// executable linked from cached objects would not be the one an empty cache
+// builds.
+func unitPath(tmp string, index int) (string, error) {
+	dir := filepath.Join(tmp, fmt.Sprintf("unit%d", index))
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "unit.ll"), nil
+}
+
 // compileUnit compiles one unit's text into an object.
 func compileUnit(tmp string, index int, text string, output string, options Options) error {
-	path := filepath.Join(tmp, fmt.Sprintf("unit%d.ll", index))
+	path, err := unitPath(tmp, index)
+	if err != nil {
+		return err
+	}
 	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
 		return err
 	}

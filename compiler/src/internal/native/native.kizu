@@ -670,7 +670,7 @@ fn unit_inputs(
     var index = 0;
     if options.opt {
         while units.at(index) |unit| {
-            let unit_path = try unit_file(allocator, dir, index, ".ll");
+            let unit_path = try unit_text_path(io, allocator, dir, index);
             defer unit_path.deinit(allocator);
             index = index + 1;
             var module = string::new(allocator);
@@ -791,15 +791,41 @@ fn append_unit_digests(
     return;
 }
 
-/// Returns where the index-th unit's text (`.ll`) or the arguments that
-/// compile it (`.args`) are written for clang to read.
-fn unit_file(allocator: Allocator, dir: []u8, index: i64, extension: []u8) -> !string::String {
+/// Returns the directory the index-th unit's files are written in.
+fn unit_dir(allocator: Allocator, dir: []u8, index: i64) -> !string::String {
     var name = try string::from_bytes(allocator, "unit");
     defer name.deinit(allocator);
     try fmt::append_i64(allocator, &var name, index);
-    try name.append_bytes(allocator, extension);
     let name_bytes = name.as_bytes();
     return path::join(allocator, dir, name_bytes);
+}
+
+/// Returns where the index-th unit's text (`.ll`) or the arguments that
+/// compile it (`.args`) are written for clang to read. Each unit has a
+/// directory of its own and the same file names in it: an ELF object records
+/// the base name of the file it was compiled from, so a name that held the
+/// index would make the object of one text differ by the unit's place in
+/// whichever build compiled it, and an executable linked from cached objects
+/// would not be the one an empty cache builds.
+fn unit_file(allocator: Allocator, dir: []u8, index: i64, extension: []u8) -> !string::String {
+    let unit = try unit_dir(allocator, dir, index);
+    defer unit.deinit(allocator);
+    var name = try string::from_bytes(allocator, "unit");
+    defer name.deinit(allocator);
+    try name.append_bytes(allocator, extension);
+    let unit_bytes = unit.as_bytes();
+    let name_bytes = name.as_bytes();
+    return path::join(allocator, unit_bytes, name_bytes);
+}
+
+/// Creates the index-th unit's directory and returns where its text is
+/// written, the Go `unitPath`.
+fn unit_text_path(io: Io, allocator: Allocator, dir: []u8, index: i64) -> !string::String {
+    let unit = try unit_dir(allocator, dir, index);
+    defer unit.deinit(allocator);
+    let unit_bytes = unit.as_bytes();
+    try fs::create_dir(io, unit_bytes);
+    return unit_file(allocator, dir, index, ".ll");
 }
 
 /// Removes the unit texts a link wrote, the part of the Go `defer
@@ -809,6 +835,13 @@ fn remove_unit_files(io: Io, allocator: Allocator, dir: []u8, count: i64) -> !vo
     while index < count {
         try remove_temp_unit_file(io, allocator, dir, index, ".ll");
         try remove_temp_unit_file(io, allocator, dir, index, ".args");
+        let unit = try unit_dir(allocator, dir, index);
+        defer unit.deinit(allocator);
+        let unit_bytes = unit.as_bytes();
+        let found = try fs::exists(io, unit_bytes);
+        if found {
+            try fs::remove_dir(io, unit_bytes);
+        }
         index = index + 1;
     }
     return;
@@ -838,7 +871,7 @@ fn prepare_unit(
     options: &Options,
     arm64: bool
 ) -> !UnitJob {
-    let unit_path = try unit_file(allocator, dir, index, ".ll");
+    let unit_path = try unit_text_path(io, allocator, dir, index);
     defer unit_path.deinit(allocator);
     let path_bytes = unit_path.as_bytes();
     let text_bytes = text.as_bytes();
