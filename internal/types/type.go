@@ -269,16 +269,6 @@ func (t *typeTable) bufferElem(value Type) (Type, bool) {
 	return Type(typ.Text(buffer.Elem)), true
 }
 
-// isBufferType reports whether value is a fixed-length stack buffer (`[N]T`).
-func (t *typeTable) isBufferType(value Type) bool {
-	parsed, ok := t.lookup(value)
-	if !ok {
-		return false
-	}
-	_, ok = parsed.(*typ.Buffer)
-	return ok
-}
-
 // containsBorrowOptional reports whether a type contains `?&T`. A borrow
 // optional is positional-only: it appears as an at/at_mut capture condition
 // and never crosses a user signature.

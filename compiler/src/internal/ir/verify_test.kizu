@@ -40,12 +40,28 @@ fn entry_block(module: &Module) -> Block {
 }
 
 /// Reports whether the verifier rejects module with a message carrying
-/// want.
+/// want, and verifying its functions one at a time in module order rejects
+/// the first that fails with the same message.
 fn rejects_with(allocator: Allocator, module: &Module, want: []u8) -> !bool {
     if try verify(allocator, module) |failed| {
         defer failed.deinit(allocator);
         let message = failed.message.as_bytes();
-        return contains_bytes(message, want);
+        return contains_bytes(message, want) and try appended_rejects_with(allocator, module, message);
+    }
+    return false;
+}
+
+/// Reports whether verify_appended, run on each function in module order,
+/// first fails with exactly message.
+fn appended_rejects_with(allocator: Allocator, module: &Module, message: []u8) -> !bool {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        if try verify_appended(allocator, module, function) |failed| {
+            defer failed.deinit(allocator);
+            let got = failed.message.as_bytes();
+            return mem::equal_bytes(got, message);
+        }
     }
     return false;
 }

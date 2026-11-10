@@ -192,7 +192,8 @@ func lowerPackageModeForTarget(
 
 // addPackageMain exposes the root module main as the native entrypoint, so a
 // package uses the same entry rule as a single file: `fn main`. It writes IR by
-// hand, so like addTestMain it verifies what it produced.
+// hand, so like addTestMain it verifies what it produced: the one function it
+// added, since lowering already verified the rest.
 func addPackageMain(module *ir.Module, entry string) error {
 	if moduleFunction(module, "main") != nil {
 		return nil
@@ -215,7 +216,7 @@ func addPackageMain(module *ir.Module, entry string) error {
 		}},
 	}
 	module.Functions = append(module.Functions, mainFn)
-	return ir.Verify(module)
+	return ir.VerifyAppended(module, mainFn)
 }
 
 // moduleFunction returns the lowered function with the requested symbol.

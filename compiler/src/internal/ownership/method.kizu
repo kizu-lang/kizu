@@ -1,6 +1,7 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::typ;
+import std::array;
 
 // Port of the value receiver method dispatch of internal/ownership/checker.go
 // (checkMethodCallExpr through checkStringByteArg): arena, direct field, Box,
@@ -48,12 +49,16 @@ fn (self: &var Checker) check_method_call_expr(
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
     let outer = self.method_call;
+    let outer_key = self.method_call_key;
     self.method_call = callee;
+    self.method_call_key = method_call_key(tree, callee);
     if try self.dispatch_method_call(tree, env, field, args, out) |failed| {
         self.method_call = outer;
+        self.method_call_key = outer_key;
         return move failed;
     }
     self.method_call = outer;
+    self.method_call_key = outer_key;
     return null;
 }
 
@@ -63,23 +68,33 @@ fn (self: &var Checker) check_method_call_expr(
 fn (self: &var Checker) claim_method_callee(callee: Name) -> !void {
     let call = self.method_call orelse return;
     self.method_call = null;
-    return self.record_method_callee(call, callee);
+    return self.record_method_callee(call, self.method_call_key, callee);
 }
 
 /// Adds callee to the declarations the method call resolved to, the Go
 /// `recordMethodCallee`. A body checked twice -- a loop to its fixed point,
 /// a generic for one type twice -- resolves the same call to the same
-/// declaration, which is recorded once.
-fn (self: &var Checker) record_method_callee(call: ast::Expression, callee: Name) -> !void {
-    var index = 0;
-    while self.result.method_callees.get(index) |known| {
-        index = index + 1;
-        if known.callee.node == call.node and same_name(known.name, callee) {
-            return;
+/// declaration, which is recorded once. key is the call's method_call_key.
+fn (self: &var Checker) record_method_callee(call: ast::Expression, key: i64, callee: Name) -> !void {
+    let next = self.result.method_callees.len();
+    if self.result.method_callee_buckets.at_mut(key) |bucket| {
+        var position = 0;
+        while bucket.get(position) |index| {
+            position = position + 1;
+            let known = self.result.method_callees.get(index) orelse continue;
+            if known.callee.node == call.node and same_name(known.name, callee) {
+                return;
+            }
         }
+        try bucket.append(self.allocator, next);
+    } else {
+        var bucket = array::new<i64>(self.allocator);
+        errdefer bucket.deinit(self.allocator);
+        try bucket.append(self.allocator, next);
+        try self.result.method_callee_buckets.insert(self.allocator, key, move bucket);
     }
     return self.result.method_callees.append(self.allocator, MethodCallee {
-        callee: call, name: callee
+        callee: call, key: key, name: callee
     });
 }
 
