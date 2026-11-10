@@ -93,6 +93,11 @@ type lowerer struct {
 	// rather than rebuilding the value; one holding a view writes through
 	// the view and keeps its SSA form.
 	indexWritten map[string]bool
+	// indexRead names the locals an element read `x[i]` starts from. One
+	// that holds an array by value has it written into a slot once, where it
+	// is bound, and readStorage maps the value to that slot.
+	indexRead   map[string]bool
+	readStorage map[string]Value
 	// placeSlots names the slots bound for indexWritten locals. The storage
 	// is decided per binding, from the value's type, so it is recorded on
 	// the value rather than on the name.
@@ -1079,6 +1084,18 @@ func (l *lowerer) lowerFunction(fn *ast.FunctionDecl) (*Function, error) {
 	return l.lowerFunctionNamed(fn, fn.Name)
 }
 
+// bindParamReadStorage gives each parameter that holds an array by value and
+// whose elements are read the slot bindReadStorage gives a local. A parameter
+// is made before the entry block, so the slot is there wherever it is read.
+func (l *lowerer) bindParamReadStorage(decls []ast.Param, params []Param) {
+	for index, decl := range decls {
+		value := params[index].Value()
+		if !l.slots[decl.Name] && l.indexRead[decl.Name] && isBufferIRType(value.Type) {
+			l.readStorage[value.Name] = l.emit("local.slot", "&var "+value.Type, []Value{value}, "")
+		}
+	}
+}
+
 // lowerFunctionNamed lowers one function using an explicit IR symbol name. The
 // function it builds wears the signature callers were given, rather than a
 // second reading of the same declaration: a body and its callers disagreeing
@@ -1099,8 +1116,9 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 		return nil, err
 	}
 	l.slots = slots
-	l.indexWritten = indexWrittenLocals(fn)
+	l.indexWritten, l.indexRead = indexedLocals(fn)
 	l.placeSlots = map[string]bool{}
+	l.readStorage = map[string]Value{}
 	l.lentPlaces = map[string]bool{}
 	l.forIndexes = map[string]bool{}
 	l.callerStorageParams = map[string]bool{}
@@ -1138,6 +1156,7 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 		}
 		l.env.set(name, l.emit("local.slot", "&var "+value.Type, []Value{value}, ""))
 	}
+	l.bindParamReadStorage(fn.Params, signature.Params)
 	if l.testName != "" {
 		l.emitTestBegin()
 	}
@@ -4009,6 +4028,8 @@ func (l *lowerer) lowerArrayElementAddress(expr *ast.IndexExpr) (Value, error) {
 	inner, nested := expr.Target.(*ast.IndexExpr)
 	if nested && isBufferIRType(l.assignTargetType(inner.Target)) {
 		storage, err = l.lowerArrayElementAddress(inner)
+	} else if bound, ok := l.boundReadStorage(expr.Target); ok {
+		storage = bound
 	} else {
 		storage, err = l.lowerArrayStorage(expr.Target)
 	}
