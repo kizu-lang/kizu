@@ -233,11 +233,6 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 	"std::internal::builtin::panic":     {Args: []ArgKind{ArgBytes}, Return: "void"},
 }
 
-// TypedCoreBuiltins lists typed primitives that require explicit type application.
-var TypedCoreBuiltins = map[string]string{
-	"std::internal::builtin::test_fail_equal": "std::testing::expect_equal",
-}
-
 // primitives is every `std::internal::builtin::` name the Go implementation
 // provides. It is the list of what exists, not a table of what to use instead:
 // a program outside std cannot name the module at all, so nothing here has to

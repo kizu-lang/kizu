@@ -107,7 +107,7 @@ func addTestMain(module *ir.Module, seed *int64) error {
 	}
 	ok := ir.Value{Name: "%test.ok", Type: "!void"}
 	instrs = append(instrs, &ir.Instr{Result: ok, Op: "error.ok"})
-	module.Functions = append(module.Functions, &ir.Function{
+	mainFn := &ir.Function{
 		Name:   "main",
 		Return: "!void",
 		Blocks: []*ir.Block{{
@@ -115,6 +115,10 @@ func addTestMain(module *ir.Module, seed *int64) error {
 			Instrs:     instrs,
 			Terminator: ir.Terminator{Op: "return", Value: ok},
 		}},
-	})
-	return ir.Verify(module)
+	}
+	module.Functions = append(module.Functions, mainFn)
+	// Lowering verified the rest, and dropping a main it had takes away only
+	// a declaration calls were checked against, so the new main is all that
+	// is left to check.
+	return ir.VerifyAppended(module, mainFn)
 }
