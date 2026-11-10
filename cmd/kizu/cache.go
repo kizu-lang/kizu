@@ -37,6 +37,9 @@ func printCacheStatus(cache *buildcache.Cache) error {
 	_, _ = fmt.Printf("entries: %d\n", status.Entries)
 	_, _ = fmt.Printf("size bytes: %d\n", status.SizeBytes)
 	_, _ = fmt.Printf("max bytes: %d\n", status.MaxBytes)
+	for _, kind := range status.Kinds {
+		_, _ = fmt.Printf("%s: %d entries, %d bytes\n", kind.Kind, kind.Entries, kind.SizeBytes)
+	}
 	return nil
 }
 

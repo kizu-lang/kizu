@@ -32,6 +32,9 @@ const (
 // link invocation rather than compiler output, and every other byte still has
 // to agree.
 //
+// The second stage is built with an empty build cache, so its every object is
+// compiled rather than read from the first stage's build.
+//
 // Both stages are written under the same file name in separate directories:
 // the linker records the output file's name inside the executable, so two
 // builds that differ only in where they were asked to write would differ by
@@ -44,6 +47,10 @@ func TestSelfhostBootstrap(t *testing.T) {
 	stage1 := bootstrapStage1(t, root)
 	stage2 := selfhostStagePath(t, root, "stage2")
 	rebuild := exec.Command(stage1, "build", "--target", "native", "-o", stage2, "../../compiler")
+	// The second stage compiles every unit itself. A shared cache would hand
+	// it the objects the first stage's build left there, and a clang that
+	// compiled the same text differently twice would go unseen.
+	rebuild.Env = append(os.Environ(), "KIZU_CACHE_DIR="+filepath.Join(root, "stage2-cache"))
 	if out, err := rebuild.CombinedOutput(); err != nil {
 		t.Fatalf("selfhost compiler building itself: %v\n%s", err, out)
 	}

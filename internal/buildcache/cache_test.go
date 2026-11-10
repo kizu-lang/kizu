@@ -86,3 +86,42 @@ func TestStatusAndPrune(t *testing.T) {
 		t.Fatalf("removed=%d freed=%d", removed, freed)
 	}
 }
+
+// TestEvictionKeepsWhatWasUsed checks the cache evicts the entry no build has
+// asked for longest, not the one made first: an artifact every build reads
+// survives the ones made after it.
+func TestEvictionKeepsWhatWasUsed(t *testing.T) {
+	cache := &Cache{Dir: t.TempDir(), MaxBytes: 12}
+	builds := map[string]int{}
+	get := func(content string) string {
+		t.Helper()
+		path, err := cache.GetOrBuildArtifact("obj", "native-obj", []byte(content),
+			func(output string) error {
+				builds[content]++
+				return os.WriteFile(output, []byte("object"), 0o644)
+			})
+		if err != nil {
+			t.Fatalf("build %s: %v", content, err)
+		}
+		return path
+	}
+	get("first")
+	get("second")
+	get("first")
+	get("third")
+	if _, err := os.Stat(get("first")); err != nil || builds["first"] != 1 {
+		t.Fatalf("the entry read last was evicted: builds=%v", builds)
+	}
+	get("second")
+	if builds["second"] != 2 {
+		t.Fatalf("the entry read longest ago was kept: builds=%v", builds)
+	}
+	status, err := cache.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.SizeBytes > cache.MaxBytes || len(status.Kinds) != 1 ||
+		status.Kinds[0].Kind != "native-obj" || status.Kinds[0].Entries != status.Entries {
+		t.Fatalf("bad status: %+v", status)
+	}
+}

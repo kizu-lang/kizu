@@ -68,6 +68,10 @@ var mbtKnownShapes = []mbtCase{
 	mbtShape("outerBodyViewEndsAfterInnerLoop",
 		"defer;loop 0;view 1;loop 2;use_view 1;end;mutate;end"),
 	mbtShape("nestedConsume", "loop 0;loop 1;deinit;end;end", "LoopConsume", "UseAfterMove"),
+	mbtShape("shortest/deinit", "deinit"),
+	mbtShape("shortest/move", "move"),
+	mbtShape("shortest/defer", "defer"),
+	mbtShape("shortest/try", "mutate", "Leak"),
 	mbtShape("sharedViewAndBorrowCoexist", "view 0;borrow 1;use_view 0;use_borrow 1;deinit"),
 }
 
