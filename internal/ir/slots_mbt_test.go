@@ -218,26 +218,9 @@ func slotRender(c slotCase) (string, error) {
 		fmt.Fprintf(&b, "struct %s {\n    n: i64,\n}\n\n", name)
 	}
 	for _, decl := range c.Decls {
-		fields := strings.Fields(decl)
-		if len(fields) != 3 {
-			return "", fmt.Errorf("bad declaration %q", decl)
+		if err := slotRenderDecl(&b, decl); err != nil {
+			return "", err
 		}
-		typeName, method, _ := strings.Cut(fields[0], ".")
-		recv := map[string]string{"RShared": "&", "RLent": "&var ", "RValue": ""}[fields[1]]
-		arg := map[string]string{"AVal": "i64", "ALent": "&var i64"}[fields[2]]
-		fmt.Fprintf(&b, "fn (self: %s%s) %s(total: %s) -> void {\n", recv, typeName, method, arg)
-		lentRecv, lentArg := fields[1] == "RLent", fields[2] == "ALent"
-		switch {
-		case lentRecv && lentArg:
-			b.WriteString("    self.n = self.n + 1;\n    total.* = total.* + self.n;\n")
-		case lentRecv:
-			b.WriteString("    self.n = self.n + total;\n")
-		case lentArg:
-			b.WriteString("    total.* = total.* + self.n;\n")
-		default:
-			b.WriteString("    print(self.n + total);\n")
-		}
-		b.WriteString("}\n\n")
 	}
 	b.WriteString("fn bump(total: &var i64) -> void {\n    total.* = total.* + 1;\n}\n\n")
 	b.WriteString("fn main() -> void {\n")
@@ -249,32 +232,8 @@ func slotRender(c slotCase) (string, error) {
 	}
 	indent := "    "
 	for _, stmt := range c.Prog {
-		f := strings.Fields(stmt)
-		switch f[0] {
-		case "call", "defer":
-			prefix := ""
-			if f[0] == "defer" {
-				prefix = "defer "
-			}
-			fmt.Fprintf(&b, "%s%sx%s.%s(n%s);\n", indent, prefix, f[1], f[2], f[3])
-		case "bump":
-			fmt.Fprintf(&b, "%sbump(n%s);\n", indent, f[1])
-		case "bump_explicit":
-			fmt.Fprintf(&b, "%sbump(&var n%s);\n", indent, f[1])
-		case "if":
-			fmt.Fprintf(&b, "%sif n0 > 0 {\n", indent)
-			indent += "    "
-		case "loop":
-			fmt.Fprintf(&b, "%sfor 0..2 |i%s| {\n", indent, f[1])
-			indent += "    "
-		case "end":
-			if len(indent) <= 4 {
-				return "", fmt.Errorf("unbalanced block end")
-			}
-			indent = indent[:len(indent)-4]
-			fmt.Fprintf(&b, "%s}\n", indent)
-		default:
-			return "", fmt.Errorf("unknown statement %q", stmt)
+		if err := slotRenderStmt(&b, &indent, stmt); err != nil {
+			return "", err
 		}
 	}
 	for i := range c.Types {
@@ -285,6 +244,65 @@ func slotRender(c slotCase) (string, error) {
 	}
 	b.WriteString("}\n")
 	return b.String(), nil
+}
+
+// slotRenderDecl writes one declared method: its receiver and argument shape,
+// and a body that uses each the way its shape allows.
+func slotRenderDecl(b *strings.Builder, decl string) error {
+	fields := strings.Fields(decl)
+	if len(fields) != 3 {
+		return fmt.Errorf("bad declaration %q", decl)
+	}
+	typeName, method, _ := strings.Cut(fields[0], ".")
+	recv := map[string]string{"RShared": "&", "RLent": "&var ", "RValue": ""}[fields[1]]
+	arg := map[string]string{"AVal": "i64", "ALent": "&var i64"}[fields[2]]
+	fmt.Fprintf(b, "fn (self: %s%s) %s(total: %s) -> void {\n", recv, typeName, method, arg)
+	lentRecv, lentArg := fields[1] == "RLent", fields[2] == "ALent"
+	switch {
+	case lentRecv && lentArg:
+		b.WriteString("    self.n = self.n + 1;\n    total.* = total.* + self.n;\n")
+	case lentRecv:
+		b.WriteString("    self.n = self.n + total;\n")
+	case lentArg:
+		b.WriteString("    total.* = total.* + self.n;\n")
+	default:
+		b.WriteString("    print(self.n + total);\n")
+	}
+	b.WriteString("}\n\n")
+	return nil
+}
+
+// slotRenderStmt writes one statement of main at the current indent, which a
+// block opens and its end closes.
+func slotRenderStmt(b *strings.Builder, indent *string, stmt string) error {
+	f := strings.Fields(stmt)
+	switch f[0] {
+	case "call", "defer":
+		prefix := ""
+		if f[0] == "defer" {
+			prefix = "defer "
+		}
+		fmt.Fprintf(b, "%s%sx%s.%s(n%s);\n", *indent, prefix, f[1], f[2], f[3])
+	case "bump":
+		fmt.Fprintf(b, "%sbump(n%s);\n", *indent, f[1])
+	case "bump_explicit":
+		fmt.Fprintf(b, "%sbump(&var n%s);\n", *indent, f[1])
+	case "if":
+		fmt.Fprintf(b, "%sif n0 > 0 {\n", *indent)
+		*indent += "    "
+	case "loop":
+		fmt.Fprintf(b, "%sfor 0..2 |i%s| {\n", *indent, f[1])
+		*indent += "    "
+	case "end":
+		if len(*indent) <= 4 {
+			return fmt.Errorf("unbalanced block end")
+		}
+		*indent = (*indent)[:len(*indent)-4]
+		fmt.Fprintf(b, "%s}\n", *indent)
+	default:
+		return fmt.Errorf("unknown statement %q", stmt)
+	}
+	return nil
 }
 
 // slotLowerer returns how a case is lowered to a dump: in process, the type

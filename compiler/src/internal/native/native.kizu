@@ -256,12 +256,15 @@ pub fn executable(
     }
 }
 
+extern "c" fn uname(name: ptr<u8>) -> i32
+
 /// Spells the host the way the Go toolchain key spells `runtime.GOOS` and
 /// `runtime.GOARCH`, so the cache keys match the Go CLI's byte for byte. The
-/// machine is what `uname -sm` answers, or on Windows, which has no uname,
-/// what PROCESSOR_ARCHITECTURE names for this process: `AMD64` for an x64
-/// process even on an Arm machine, as GOARCH would. A host the map does not
-/// name is an error rather than a guessed key.
+/// machine is what uname(2) answers, the `uname -sm` spelling, read in this
+/// process so a cached run starts no child for it; or on Windows, which has
+/// no uname, what PROCESSOR_ARCHITECTURE names for this process: `AMD64` for
+/// an x64 process even on an Arm machine, as GOARCH would. A host the map
+/// does not name is an error rather than a guessed key.
 pub fn host_key(allocator: Allocator, out: &var string::String) -> !?diagnostic::Diagnostic {
     var answer = string::new(allocator);
     defer answer.deinit(allocator);
@@ -271,16 +274,23 @@ pub fn host_key(allocator: Allocator, out: &var string::String) -> !?diagnostic:
             try answer.append_bytes(allocator, machine);
         }
     } else {
-        // Named by its path rather than looked up on PATH, which a build
-        // that reuses its cached executable need not have.
-        var uname = "/bin/uname";
+        // struct utsname is five 256-byte fields on Darwin and six 65-byte
+        // ones on Linux; sysname is the first and machine the fifth, each
+        // NUL-terminated within its field. The buffer covers both.
+        var width = 65;
         comptime if std::target::is_darwin() {
-            uname = "/usr/bin/uname";
+            width = 256;
         }
-        let code = try process::spawn_output8(allocator, &var answer, 2, uname, "-sm", "", "", "", "", "", "");
-        if code != 0 {
+        var buffer = [1536]u8{};
+        let fields = buffer.as_mut_bytes();
+        // SAFETY: fields holds 1536 bytes, more than either struct utsname, and uname(2) keeps no pointer to it
+        let code = unsafe uname(mut_ptr_of(fields));
+        if code != cast<i32>(0) {
             return try fail_parts(allocator, "native error: host probe failed", "", "");
         }
+        try append_c_field(allocator, fields[0..width], &var answer);
+        try answer.append_byte(allocator, cast<u8>(32));
+        try append_c_field(allocator, fields[4 * width..5 * width], &var answer);
     }
     let text = answer.as_bytes();
     var end = mem::len(text);
@@ -293,6 +303,18 @@ pub fn host_key(allocator: Allocator, out: &var string::String) -> !?diagnostic:
         return try fail_parts(allocator, "native error: unsupported host `", trimmed, "`");
     }
     return null;
+}
+
+/// Appends a NUL-terminated C string held in field, up to the NUL or the
+/// field's end.
+fn append_c_field(allocator: Allocator, field: []u8, out: &var string::String) -> !void {
+    for 0..mem::len(field) |index| {
+        if field[index] == cast<u8>(0) {
+            return;
+        }
+        try out.append_byte(allocator, field[index]);
+    }
+    return;
 }
 
 /// Returns where needle first occurs in haystack, or null, the Go
@@ -1587,7 +1609,9 @@ fn clang_flags(
 ///
 /// And on arm64 it has float constants loaded from a literal pool rather
 /// than built by a mov and three movk, which a loop calling a kernel
-/// rebuilds on every call.
+/// rebuilds on every call. Turning that feature off turns off Apple's tuning
+/// bundle that implies it, and with it the loop vectorizer's interleave cap
+/// falls from 4 to 2, so the cap is put back at 4.
 fn clang_optimization_flags(
     allocator: Allocator,
     opt: bool,
@@ -1608,6 +1632,10 @@ fn clang_optimization_flags(
         try append_copy(allocator, out, "-target-feature");
         try append_copy(allocator, out, "-Xclang");
         try append_copy(allocator, out, "-fuse-literals");
+        try append_copy(allocator, out, "-Xclang");
+        try append_copy(allocator, out, "-mllvm");
+        try append_copy(allocator, out, "-Xclang");
+        try append_copy(allocator, out, "-force-target-max-vector-interleave=4");
     }
     return;
 }

@@ -715,6 +715,13 @@ func TargetIsX86_64(triple string) bool {
 // because the call clobbers the registers they sat in; loaded, each is one
 // instruction. The eighteen macro benchmarks are unmoved by it; the
 // numeric ones gain up to 12%.
+//
+// Turning that feature off turns off what implies it too, and on Apple's
+// cores that is the whole tuning bundle, which is where the loop vectorizer
+// reads its interleave cap from: without it the cap falls from Apple's 4 to
+// the default 2. A sum and max over 10^8 i64s then loads 4 elements a turn
+// where it loaded 8, and runs 1.9x as long as Rust's; the cap is put back at
+// 4, which brings it to 1.08x and leaves the float constants where they are.
 func clangOptimizationFlags(opt bool, arm64 bool) []string {
 	if !opt {
 		return []string{"-O0"}
@@ -723,7 +730,8 @@ func clangOptimizationFlags(opt bool, arm64 bool) []string {
 		"-O3", "-falign-loops=32", "-Xclang", "-mllvm", "-Xclang", "-enable-tail-merge=false",
 	}
 	if arm64 {
-		flags = append(flags, "-Xclang", "-target-feature", "-Xclang", "-fuse-literals")
+		flags = append(flags, "-Xclang", "-target-feature", "-Xclang", "-fuse-literals",
+			"-Xclang", "-mllvm", "-Xclang", "-force-target-max-vector-interleave=4")
 	}
 	return flags
 }

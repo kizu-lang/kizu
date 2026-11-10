@@ -76,7 +76,10 @@ type emitter struct {
 	niches         map[string]ir.Value
 	// tbaaUsed records that a load or store named a type-based alias tag,
 	// so the module ends with the tag table (tbaa.go).
-	tbaaUsed        bool
+	tbaaUsed bool
+	// boolRangeUsed records that a bool was read as its byte, so the module
+	// ends with the range that load names (writeValueLoad).
+	boolRangeUsed   bool
 	entryParamLoads []string
 	wroteParamLoads bool
 	frameRecords    bool
@@ -144,6 +147,7 @@ func (e *emitter) emit() error {
 	}
 	e.writeMemoryDecls()
 	e.writeTBAATable()
+	e.writeBoolRange()
 	return nil
 }
 
@@ -3040,9 +3044,8 @@ func (e *emitter) writeRefLoad(instr *ir.Instr) error {
 	}
 	resultName := localName(instr.Result.Name)
 	resultType := e.llvmType(instr.Result.Type)
-	fmt.Fprintf(&e.out, "  %s = load %s%s, ptr %s%s\n",
-		resultName, volatileKeyword(instr.Op), resultType,
-		e.value(receiver).operand, e.referenceTag(instr.Op, receiver.Type, resultType))
+	e.writeValueLoad(resultName, volatileKeyword(instr.Op), resultType,
+		e.value(receiver).operand, 0, e.referenceTag(instr.Op, receiver.Type, resultType))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
@@ -3178,7 +3181,7 @@ func (e *emitter) writeSliceIndex(instr *ir.Instr) error {
 	if e.copiedIntoMemory(instr.Result, elemPtrName) {
 		return nil
 	}
-	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", resultName, elemType, elemPtrName)
+	e.writeValueLoad(resultName, "", elemType, elemPtrName, 0, "")
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }

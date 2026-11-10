@@ -206,4 +206,10 @@ var netBuiltins = []string{
 	"std::internal::builtin::net_poller_token",
 	"std::internal::builtin::net_poller_flags",
 	"std::internal::builtin::net_poller_close",
+	"std::internal::builtin::net_child_spawn",
+	"std::internal::builtin::net_child_fd",
+	"std::internal::builtin::net_child_close_fd",
+	"std::internal::builtin::net_child_wait",
+	"std::internal::builtin::net_child_kill",
+	"std::internal::builtin::net_child_close",
 }
