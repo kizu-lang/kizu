@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/kizu-lang/kizu/internal/buildcache"
 	"github.com/kizu-lang/kizu/internal/stdtarget"
@@ -20,7 +21,12 @@ import (
 
 // Options describes one native link request.
 type Options struct {
-	LLVMIR string
+	// Units are the LLVM modules the program was emitted as, in the order
+	// they are linked (llvm.EmitUnits). A debug build has one per module
+	// and compiles each to an object the cache keeps, so an edit to one
+	// module recompiles that unit alone; an optimized build has one, which
+	// clang optimizes whole, unless it is linked with ThinLTO.
+	Units []string
 	// ErrorSets maps each declared error set to the number its members lower to.
 	// The runtime returns those numbers, and generating the constants from the
 	// declarations is what keeps the two from drifting: the order a set is
@@ -39,6 +45,10 @@ type Options struct {
 	Emit    string
 	Linker  string
 	Opt     bool
+	// ThinLTO, with Opt, has one unit per module as a debug build does,
+	// each compiled to bitcode the cache keeps, and optimizes across them
+	// when they are linked.
+	ThinLTO bool
 	// Libraries and Frameworks are what the program's reached extern
 	// declarations named with `@link_library` / `@link_framework`; the search
 	// paths are what its manifest's `[native]` section says about where the
@@ -107,7 +117,7 @@ func Executable(options Options) (string, error) {
 	return cache.GetOrBuildArtifact(
 		"native-exe",
 		executableCacheTarget(options, source),
-		[]byte(options.LLVMIR),
+		[]byte(strings.Join(unitDigests(options.Units), "\n")),
 		func(output string) error {
 			version, err := linkerVersion(options)
 			if err != nil {
@@ -123,21 +133,138 @@ func Executable(options Options) (string, error) {
 	)
 }
 
-// link writes the IR where the toolchain can read it and links it with the
-// runtime into output. The IR is transient because the executable is what is
-// worth keeping: it is the thing that is expensive to make and cheap to name.
+// link compiles the units and links them with the runtime into output. The
+// IR is transient because the executable is what is worth keeping: it is the
+// thing that is expensive to make and cheap to name.
 func link(runtimePath string, output string, options Options, version string) ([]string, error) {
 	tmp, err := os.MkdirTemp("", "kizu-native-*")
 	if err != nil {
 		return nil, err
 	}
 	defer os.RemoveAll(tmp)
-	llvmIR := moduleForLinker(options, version)
-	irPath := filepath.Join(tmp, "main.ll")
-	if err := os.WriteFile(irPath, []byte(llvmIR), 0o644); err != nil {
+	inputs, err := unitInputs(tmp, options, version)
+	if err != nil {
 		return nil, err
 	}
-	return runClang(irPath, runtimePath, output, options)
+	return runClang(inputs, runtimePath, output, options)
+}
+
+// unitInputs returns what the link reads the program from, in unit order. An
+// optimized build hands clang its one module as text, to compile and link in
+// one step. A debug build compiles each unit to an object, which the cache
+// keeps: the next build that emits the same text for a unit links the object
+// it already has, and the units it has no object for compile in parallel, as
+// Go compiles packages. The objects are read from the cache by `build` as well,
+// since what that command writes where the user asked is the executable, not
+// the objects it is linked from.
+//
+// A ThinLTO build compiles its units the way a debug build does, but to
+// bitcode, and keyed apart from the objects: the code is made when the units
+// are linked.
+func unitInputs(tmp string, options Options, version string) ([]string, error) {
+	if options.Opt && !options.ThinLTO {
+		inputs := make([]string, 0, len(options.Units))
+		for index, unit := range options.Units {
+			path, err := unitPath(tmp, index)
+			if err != nil {
+				return nil, err
+			}
+			text := moduleForLinker(options, unit, version)
+			if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+				return nil, err
+			}
+			inputs = append(inputs, path)
+		}
+		return inputs, nil
+	}
+	cache, err := buildcache.New()
+	if err != nil {
+		return nil, err
+	}
+	digests := unitDigests(options.Units)
+	inputs := make([]string, len(options.Units))
+	failures := make([]error, len(options.Units))
+	// The units compile at once, as many as the machine has processors. Each
+	// result lands at its unit's index, so the link reads the objects in unit
+	// order whichever finished first.
+	slots := make(chan struct{}, runtime.NumCPU())
+	var group sync.WaitGroup
+	for index, unit := range options.Units {
+		group.Add(1)
+		slots <- struct{}{}
+		go func() {
+			defer func() { <-slots; group.Done() }()
+			inputs[index], failures[index] = cache.GetOrBuildArtifact(
+				unitArtifactName(options),
+				objectCacheTarget(options, version),
+				[]byte(digests[index]),
+				func(output string) error {
+					return compileUnit(tmp, index, moduleForLinker(options, unit, version), output, options)
+				},
+			)
+		}()
+	}
+	group.Wait()
+	for _, err := range failures {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return inputs, nil
+}
+
+// unitArtifactName is the kind a compiled unit is cached as: an object, or
+// for a ThinLTO build the bitcode the link makes the code from.
+func unitArtifactName(options Options) string {
+	if options.ThinLTO {
+		return "native-bc"
+	}
+	return "native-obj"
+}
+
+// unitDigests returns the SHA-256 of each unit's text, in unit order. An
+// object is keyed by its unit's digest and the executable by all of them, so
+// each text is hashed once however many keys name it.
+func unitDigests(units []string) []string {
+	digests := make([]string, 0, len(units))
+	for _, unit := range units {
+		sum := sha256.Sum256([]byte(unit))
+		digests = append(digests, hex.EncodeToString(sum[:]))
+	}
+	return digests
+}
+
+// unitPath returns where the index-th unit's text is written for clang to
+// read, creating its directory. Each unit has a directory of its own and the
+// same file name in it: an ELF object records the base name of the file it
+// was compiled from, so a name that held the index would make the object of
+// one text differ by the unit's place in whichever build compiled it, and an
+// executable linked from cached objects would not be the one an empty cache
+// builds.
+func unitPath(tmp string, index int) (string, error) {
+	dir := filepath.Join(tmp, fmt.Sprintf("unit%d", index))
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "unit.ll"), nil
+}
+
+// compileUnit compiles one unit's text into an object.
+func compileUnit(tmp string, index int, text string, output string, options Options) error {
+	path, err := unitPath(tmp, index)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		return err
+	}
+	args := append(clangFlags(options), thinLTOCompileFlags(options)...)
+	args = append(args, "-Wno-override-module", "-c", path, "-o", output)
+	out, err := exec.Command(driver(options), args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("native error: %s failed: %w\n%s", driver(options), err, out)
+	}
+	return nil
 }
 
 // The stack probe a module asks for, as the emitter writes it and as Apple's
@@ -159,16 +286,16 @@ const (
 // frame wider than a page itself, through __chkstk, because that is how its
 // own thread stacks grow; there LLVM reads the probe attribute as the name of
 // a function to call instead, and no function is named `inline-asm`. The
-// choice waits until the link so that the module, and the executable cache
-// keyed by it, is the same whichever clang links it.
-func moduleForLinker(options Options, version string) string {
+// choice waits until the link so that the module, and the cache entries
+// keyed by it, are the same whichever clang links it.
+func moduleForLinker(options Options, module string, version string) string {
 	if options.Target == stdtarget.NativeWindows {
-		return strings.Replace(options.LLVMIR, inlineStackProbe+" ", "", 1)
+		return strings.Replace(module, inlineStackProbe+" ", "", 1)
 	}
 	if options.Target != stdtarget.NativeDarwin || !strings.Contains(version, "Apple clang") {
-		return options.LLVMIR
+		return module
 	}
-	return strings.Replace(options.LLVMIR, inlineStackProbe, appleStackProbe, 1)
+	return strings.Replace(module, inlineStackProbe, appleStackProbe, 1)
 }
 
 // linkerVersion returns the line the linker names itself with, the first of
@@ -283,6 +410,15 @@ func runtimeCacheTarget(options Options, version string) string {
 	return strings.Join(append(key, version), "/")
 }
 
+// objectCacheTarget spells what a unit's object is made of besides the
+// unit's text: the toolchain, and which clang it is. An object is linked with
+// objects other builds made, perhaps by another clang, so the version keys it
+// as it keys the runtime object.
+func objectCacheTarget(options Options, version string) string {
+	key := append([]string{unitArtifactName(options)}, toolchainKey(options)...)
+	return strings.Join(append(key, version), "/")
+}
+
 // executableCacheTarget spells what the executable is made of besides the IR:
 // the same driver and flags the runtime is keyed by, and the runtime source
 // it is linked with, by hash, so a program built against an older runtime is
@@ -303,6 +439,8 @@ func executableCacheTarget(options Options, runtimeSource string) string {
 func toolchainKey(options Options) []string {
 	key := []string{driver(options), runtime.GOOS + "-" + runtime.GOARCH}
 	key = append(key, clangFlags(options)...)
+	key = append(key, thinLTOCompileFlags(options)...)
+	key = append(key, thinLTOCodegenFlags(options)...)
 	key = append(key, linkFlags(options)...)
 	if sdk := os.Getenv("SDKROOT"); sdk != "" {
 		key = append(key, "SDKROOT="+sdk)
@@ -419,14 +557,22 @@ func camelToSnake(name string) string {
 // Darwin compiles for), and a triple guessed without asking turns the filled
 // in one into a real override. The flag stays out of clangFlags, which key
 // the runtime object: it is about the IR input, which the runtime is not.
-func runClang(irPath string, runtimePath string, output string, options Options) ([]string, error) {
+func runClang(
+	inputs []string, runtimePath string, output string, options Options,
+) ([]string, error) {
 	args := clangFlags(options)
 	if options.Emit == "obj" {
 		args = append(args, "-r", "-nostdlib")
 	}
 	args = append(args, "-Wno-override-module")
+	thinLTO, err := thinLTOLinkFlags(options)
+	if err != nil {
+		return nil, err
+	}
+	args = append(args, thinLTO...)
 	linked := linkedOutput(output, options)
-	args = append(args, irPath, runtimePath, "-o", linked)
+	args = append(args, inputs...)
+	args = append(args, runtimePath, "-o", linked)
 	if options.Emit != "obj" {
 		args = append(args, linkFlags(options)...)
 	}
@@ -594,6 +740,13 @@ func TargetIsX86_64(triple string) bool {
 // because the call clobbers the registers they sat in; loaded, each is one
 // instruction. The eighteen macro benchmarks are unmoved by it; the
 // numeric ones gain up to 12%.
+//
+// Turning that feature off turns off what implies it too, and on Apple's
+// cores that is the whole tuning bundle, which is where the loop vectorizer
+// reads its interleave cap from: without it the cap falls from Apple's 4 to
+// the default 2. A sum and max over 10^8 i64s then loads 4 elements a turn
+// where it loaded 8, and runs 1.9x as long as Rust's; the cap is put back at
+// 4, which brings it to 1.08x and leaves the float constants where they are.
 func clangOptimizationFlags(opt bool, arm64 bool) []string {
 	if !opt {
 		return []string{"-O0"}
@@ -602,7 +755,8 @@ func clangOptimizationFlags(opt bool, arm64 bool) []string {
 		"-O3", "-falign-loops=32", "-Xclang", "-mllvm", "-Xclang", "-enable-tail-merge=false",
 	}
 	if arm64 {
-		flags = append(flags, "-Xclang", "-target-feature", "-Xclang", "-fuse-literals")
+		flags = append(flags, "-Xclang", "-target-feature", "-Xclang", "-fuse-literals",
+			"-Xclang", "-mllvm", "-Xclang", "-force-target-max-vector-interleave=4")
 	}
 	return flags
 }
@@ -634,7 +788,7 @@ func writeMetadata(options Options, command []string) error {
 	metadata := Metadata{
 		Target: "native", Triple: options.Triple, CPU: options.CPU, ABI: options.ABI,
 		LibC: options.LibC, Runtime: options.Runtime, Emit: options.Emit,
-		Linker: options.Linker, OptMode: optimizationModeName(options.Opt),
+		Linker: options.Linker, OptMode: optimizationModeName(options),
 		Output: options.Output, Command: command,
 		Libraries: options.Libraries, Frameworks: options.Frameworks,
 		LibrarySearch: options.LibrarySearch, FrameworkSearch: options.FrameworkSearch,
@@ -647,11 +801,15 @@ func writeMetadata(options Options, command []string) error {
 }
 
 // optimizationModeName records the native optimization mode in artifact metadata.
-func optimizationModeName(opt bool) string {
-	if opt {
+func optimizationModeName(options Options) string {
+	switch {
+	case options.ThinLTO:
+		return "opt-thinlto"
+	case options.Opt:
 		return "opt"
+	default:
+		return "debug"
 	}
-	return "debug"
 }
 
 // runtimeSource is the C runtime every native build links with, embedded from

@@ -42,6 +42,10 @@ pub struct Ast {
 /// Is the root of one parsed Kizu source file.
 pub struct Program {
     pub declarations: array::Array<Declaration>,
+    /// The module paths the declarations came from, each before the modules
+    /// that import it, the Go `Modules`: the order a native build compiles
+    /// them in, one unit each.
+    pub modules: array::Array<Text>,
 }
 
 /// Identifies one declaration retained by an Ast, and where the parser read
@@ -144,6 +148,10 @@ pub struct FunctionDecl {
     pub doc: Text,
     pub derived: bool,
     pub body: ?Block,
+    /// The module path the function was declared in, empty for a loose file,
+    /// the Go `Module`. A native debug build compiles each module as a unit
+    /// of its own, and this is what files the function under one.
+    pub module: Text,
 }
 
 /// Is one entry of a static argument declaration list.
@@ -175,6 +183,9 @@ pub struct StructDecl {
     /// spelled `extern "c" struct`. Its fields are what that ABI can name and
     /// are public: the foreign side already decides them (SPEC §12.2).
     pub extern_abi: Text,
+    /// The module path the struct was declared in, which its derived cleanup
+    /// is filed under.
+    pub module: Text,
 }
 
 /// Represents a top-level tag enum declaration.
@@ -205,6 +216,9 @@ pub struct UnionDecl {
     pub type_params: array::Array<Text>,
     pub variants: array::Array<UnionVariant>,
     pub public: bool,
+    /// The module path the union was declared in, which its derived cleanup
+    /// is filed under.
+    pub module: Text,
 }
 
 /// Represents one tagged union variant.
@@ -728,7 +742,8 @@ pub fn new(allocator: Allocator) -> Ast {
 /// Creates an empty root declaration list.
 pub fn new_program(allocator: Allocator) -> Program {
     return Program {
-        declarations: array::new<Declaration>(allocator)
+        declarations: array::new<Declaration>(allocator),
+        modules: array::new<Text>(allocator)
     };
 }
 
@@ -2569,6 +2584,7 @@ fn derive_struct_deinit(
     return try derive_decl(allocator,
         ast,
         declaration.name,
+        declaration.module,
         &declaration.type_params,
         names,
         move statements
@@ -2666,16 +2682,20 @@ fn derive_union_deinit(
     return try derive_decl(allocator,
         ast,
         declaration.name,
+        declaration.module,
         &declaration.type_params,
         names,
         move statements
     );
 }
 
+/// Wraps a derived body in the method declaration that carries it. The
+/// method is filed under the module that declared the type.
 fn derive_decl(
     allocator: Allocator,
     ast: &var Ast,
     owner: Text,
+    module: Text,
     type_params: &array::Array<Text>,
     names: &DerivedNames,
     statements: array::Array<Statement>
@@ -2751,7 +2771,8 @@ fn derive_decl(
         },
         doc: names.empty,
         derived: true,
-        body: body_block
+        body: body_block,
+        module: module
     };
 }
 

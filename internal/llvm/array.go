@@ -30,6 +30,12 @@ const (
 )
 
 // writeArrayRuntimeDecls writes declarations for the hosted Array runtime.
+//
+// The header a call names is marked nocapture: the runtime reads and writes it
+// during the call and keeps no copy of its address. Without that, one reserve
+// before a loop of appends would leave the header escaped, every grow call in
+// the loop might write it, and its len, cap and data would be loaded and
+// stored around each append instead of living in registers.
 func (e *emitter) writeArrayRuntimeDecls() {
 	if !e.usesArrayHeader() {
 		return
@@ -40,9 +46,9 @@ func (e *emitter) writeArrayRuntimeDecls() {
 		return
 	}
 	e.out.WriteString("declare void @kizu_array_grow(ptr, ptr, ptr, i64, i64, i64)\n")
-	e.out.WriteString("declare i1 @kizu_array_append_bytes(ptr, ptr, ptr, i64)\n")
+	e.out.WriteString("declare i1 @kizu_array_append_bytes(ptr, ptr nocapture, ptr, i64)\n")
 	e.out.WriteString("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n")
-	e.out.WriteString("declare i1 @kizu_array_reserve(ptr, ptr, i64, i64)\n")
+	e.out.WriteString("declare i1 @kizu_array_reserve(ptr, ptr nocapture, i64, i64)\n")
 	e.out.WriteString("declare void @kizu_array_deinit(ptr, ptr, i64)\n\n")
 }
 
@@ -571,8 +577,7 @@ func (e *emitter) writeArrayPopOrPanic(instr *ir.Instr) error {
 	}
 	resultName := localName(instr.Result.Name)
 	resultType := e.llvmType(instr.Result.Type)
-	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s%s\n",
-		resultName, resultType, ptrName, e.valueTag(resultType))
+	e.writeValueLoad(resultName, "", resultType, ptrName, 0, e.valueTag(resultType))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
@@ -615,8 +620,7 @@ func (e *emitter) writeArrayGetOrPanic(instr *ir.Instr) error {
 	}
 	resultName := localName(instr.Result.Name)
 	resultType := e.llvmType(instr.Result.Type)
-	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s%s\n",
-		resultName, resultType, elemAddr, e.valueTag(resultType))
+	e.writeValueLoad(resultName, "", resultType, elemAddr, 0, e.valueTag(resultType))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
@@ -828,8 +832,7 @@ func (e *emitter) writeArrayOptionalLoadResult(
 	fmt.Fprintf(&e.out, "%s:\n", okLabel)
 	valueName := resultName + ".value"
 	elemType := e.llvmType(elem)
-	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s%s%s\n",
-		valueName, elemType, ptrName, alignSuffix(loadAlign), e.valueTag(elemType))
+	e.writeValueLoad(valueName, "", elemType, ptrName, loadAlign, e.valueTag(elemType))
 	// A niche element is already the optional, so the element the ok path
 	// loaded is what the join hands back and the null path spells absence
 	// with the zero the niche reserves (ADR-0133).

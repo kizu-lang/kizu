@@ -85,7 +85,7 @@ func TestModuleForLinkerFollowsTheClang(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got := moduleForLinker(Options{LLVMIR: module, Target: target, Linker: "clang"}, tt.version)
+		got := moduleForLinker(Options{Target: target, Linker: "clang"}, module, tt.version)
 		if got != tt.want {
 			t.Errorf("%q for %s: got %q, want %q", tt.version, tt.triple, got, tt.want)
 		}

@@ -39,8 +39,8 @@ lowering は 1 本しかないため、同じプログラムが `run` と `build
 | arithmetic / bitwise / float | 11 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | while / break / continue / for / label | 11 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | if / match | 21 | ✅ | ✅ | ✅ | 20/21 | 20/21 | 20/21 | 18/21 |
-| enum / union | 20 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 17/20 |
-| error union `!T` / try / errdefer | 61 | ✅ | ✅ | ✅ | 39/61 | 39/61 | 39/61 | 36/61 |
+| enum / union | 21 | ✅ | ✅ | ✅ | 20/21 | 20/21 | 20/21 | 17/21 |
+| error union `!T` / try / errdefer | 62 | ✅ | ✅ | ✅ | 39/62 | 39/62 | 39/62 | 36/62 |
 | optional `?T` / orelse / capture | 30 | ✅ | ✅ | ✅ | 29/30 | 29/30 | 29/30 | 27/30 |
 | move / borrow | 75 | ✅ | ✅ | ✅ | 71/75 | 71/75 | 71/75 | 71/75 |
 | deinit / defer | 25 | ✅ | ✅ | ✅ | 24/25 | 24/25 | 24/25 | 24/25 |
@@ -64,8 +64,8 @@ lowering は 1 本しかないため、同じプログラムが `run` と `build
 | std::date | 2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::fmt | 7 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::testing | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::fs / path / io / process | 34 | ✅ | ✅ | ✅ | 14/34 | 14/34 | 14/34 | 4/34 |
-| std::net / http | 23 | ✅ | ✅ | ✅ | 4/23 | 4/23 | 4/23 | 4/23 |
+| std::fs / path / io / process | 35 | ✅ | ✅ | ✅ | 14/35 | 14/35 | 14/35 | 4/35 |
+| std::net / http | 24 | ✅ | ✅ | ✅ | 4/24 | 4/24 | 4/24 | 4/24 |
 | async / coro | 2 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | std::thread | 3 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 
@@ -215,7 +215,7 @@ just wasi-smoke      # wasm の例を wasmtime で走らせる
 - `kizu check <file-or-package>` は type / ownership / move / borrow / arena check を実行します。
 - `kizu run <file-or-package>` は native 実行ファイルを作って実行します。
 - `kizu test <file-or-package>` は check 済みの top-level test block を、`main` を呼ばずに実行します。
-- `kizu fmt [--write|-w] <file>` は formatter の出力を表示、または書き込みます。決めるのは空白、indent、複数行の宣言の末尾 comma です。改行は書き手が置いた位置のままなので、1 行に書いた block は 1 行のまま、文の間の空行 1 つは残り、comment は行と column を保ちます。
+- `kizu fmt [--write|-w] <file>` は formatter の出力を表示、または書き込みます。決めるのは空白、indent、複数行宣言の末尾 comma です。改行は書いた人が置いた場所に残るので、1 行で書いた block は 1 行のまま、文の間の空行は 1 行まで保たれ、comment は自分の行と column を保ちます。
 - `kizu init [path]` は package の雛形を作ります。
 - `kizu ir [--opt] <file>` は typed SSA IR を表示します。
 - `kizu build --emit-llvm [--opt] <file>` は LLVM IR text を出力します。

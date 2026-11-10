@@ -56,4 +56,14 @@ module defer_test {
       assert(not(exitsSound(runOn(ErrDeferAlways, errd, 0)))),
     }
   }
+
+  // A block that ends normally runs its defers in reverse order of
+  // registration before the code after it.
+  run blockExitOrderTest = {
+    val p = List(IfBegin(0), Defer(1), Defer(2), Note(100), End, Note(101))
+    all {
+      assert(out(p, 1) == List(100, 2, 1, 101, 0)),
+      assert(out(p, 0) == List(101, 0)),
+    }
+  }
 }

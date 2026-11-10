@@ -44,6 +44,10 @@ pub struct Module {
     // foreign call, each cleanup naming its own contiguous run: the Go
     // `Cleanup.CallParams` slice, pooled the way cleanup_args is.
     pub cleanup_params: array::Array<Param>,
+    // modules lists the program's module paths, each before the modules
+    // that import it (ast::Program.modules), the Go `Modules`: the order of
+    // the units a native debug build compiles separately.
+    pub modules: array::Array<Name>,
 }
 
 /// Is what one `extern` declaration tells the linker: the ABI it is called
@@ -68,7 +72,8 @@ pub fn new_module(allocator: Allocator) -> !Module {
         instrs: arena::new<InstrNode>(allocator),
         externs: array::new<Extern>(allocator),
         cleanup_args: array::new<Value>(allocator),
-        cleanup_params: array::new<Param>(allocator)
+        cleanup_params: array::new<Param>(allocator),
+        modules: array::new<Name>(allocator)
     };
 }
 
@@ -90,15 +95,6 @@ pub fn (self: &Module) cleanup_arg(cleanup: Cleanup, index: i64) -> ?Value {
         return null;
     }
     return self.cleanup_args.get(cleanup.args_start + index);
-}
-
-/// Replaces one argument of a cleanup in place.
-pub fn (self: &var Module) set_cleanup_arg(cleanup: Cleanup, index: i64, value: Value) -> !void {
-    if index < 0 or index >= cleanup.args_len {
-        return;
-    }
-    try self.cleanup_args.set(cleanup.args_start + index, value);
-    return;
 }
 
 /// Appends one cleanup's declared parameters to the module's pool and
@@ -280,6 +276,14 @@ pub struct FunctionNode {
     pub blocks: array::Array<Block>,
     pub export_abi: Name,
     pub export_name: Name,
+    /// The module path the function was declared in, the Go `Module`. A
+    /// function the compiler writes for the whole program -- the package
+    /// entry point, the test runner -- has none.
+    pub module: Name,
+    /// Marks a generic instance, the Go `Instance`. Its code depends on the
+    /// static arguments the caller chose, so it belongs to no one module:
+    /// every unit that reaches it carries a copy (llvm::emit_units).
+    pub instance: bool,
 }
 
 /// Identifies one basic block retained by a Module.

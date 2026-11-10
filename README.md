@@ -42,8 +42,8 @@ not in any one execution path.
 | arithmetic / bitwise / float | 11 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | while / break / continue / for / label | 11 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | if / match | 21 | ✅ | ✅ | ✅ | 20/21 | 20/21 | 20/21 | 18/21 |
-| enum / union | 20 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 17/20 |
-| error union `!T` / try / errdefer | 61 | ✅ | ✅ | ✅ | 39/61 | 39/61 | 39/61 | 36/61 |
+| enum / union | 21 | ✅ | ✅ | ✅ | 20/21 | 20/21 | 20/21 | 17/21 |
+| error union `!T` / try / errdefer | 62 | ✅ | ✅ | ✅ | 39/62 | 39/62 | 39/62 | 36/62 |
 | optional `?T` / orelse / capture | 30 | ✅ | ✅ | ✅ | 29/30 | 29/30 | 29/30 | 27/30 |
 | move / borrow | 75 | ✅ | ✅ | ✅ | 71/75 | 71/75 | 71/75 | 71/75 |
 | deinit / defer | 25 | ✅ | ✅ | ✅ | 24/25 | 24/25 | 24/25 | 24/25 |
@@ -67,8 +67,8 @@ not in any one execution path.
 | std::date | 2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::fmt | 7 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::testing | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::fs / path / io / process | 34 | ✅ | ✅ | ✅ | 14/34 | 14/34 | 14/34 | 4/34 |
-| std::net / http | 23 | ✅ | ✅ | ✅ | 4/23 | 4/23 | 4/23 | 4/23 |
+| std::fs / path / io / process | 35 | ✅ | ✅ | ✅ | 14/35 | 14/35 | 14/35 | 4/35 |
+| std::net / http | 24 | ✅ | ✅ | ✅ | 4/24 | 4/24 | 4/24 | 4/24 |
 | async / coro | 2 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | std::thread | 3 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 
@@ -235,7 +235,7 @@ just wasi-smoke      # run the wasm examples under wasmtime
 - `kizu build --target wasm32-wasi [--opt] --emit wasm -o <out> <file|package>` writes a binary `.wasm`; binary output never goes to the terminal implicitly.
 - `kizu build --target wasm32-browser [--opt] [--emit wat] [-o <out>] <file|package>` emits browser-hosted WAT for inspection.
 - `kizu build --target wasm32-browser [--opt] --emit wasm -o <out> <file|package>` writes the browser `.wasm`; [`docs/wasm-browser.md`](docs/wasm-browser.md) defines its host adapter and capability boundary.
-- `kizu build --target native [--opt] [--triple <triple>] [--cpu <cpu>] [--abi <abi>] [--libc on|off] [--runtime hosted|freestanding] [--emit exe|obj|llvm] [--linker clang] [-o <out>] <file>` links a native executable.
+- `kizu build --target native [--opt [--thinlto]] [--triple <triple>] [--cpu <cpu>] [--abi <abi>] [--libc on|off] [--runtime hosted|freestanding] [--emit exe|obj|llvm] [--linker clang] [-o <out>] <file>` links a native executable. `--thinlto` builds an `--opt` executable one unit per module, each cached as bitcode, and optimizes across them in the link with ThinLTO; it needs Apple's linker on macOS or lld on Linux, and is refused for `--emit obj` and Windows.
 - `kizu cache status` / `kizu cache prune` show and clear the local build cache.
 - `kizu import-c-header <file>` converts supported C prototypes to Kizu externs.
 - `kizu version` prints what the binary is.
