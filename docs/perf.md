@@ -40,6 +40,7 @@ baseline として `examples/user_registry.kizu` を使います。
 | --- | --- | --- |
 | runtime object | runtime C source + toolchain + `clang --version` の 1 行目 | native link のたび(`build --target native` も含む。初回だけ compile) |
 | unit object(`native-obj`) | unit の LLVM IR + toolchain + `clang --version` の 1 行目 | debug の native link で miss した unit(`build --target native` も含む) |
+| unit bitcode(`native-bc`) | 同上(toolchain に `-flto=thin` と link 側の codegen flag が入る) | `build --target native --opt --thinlto` で miss した unit |
 | run/test 実行ファイル | 全 unit の LLVM IR の hash を unit 順に並べたもの + runtime C source の hash + toolchain | `run` / `test` の link |
 
 debug build は LLVM IR を module ごとの unit と program unit(package の `main`、test
@@ -47,6 +48,11 @@ runner、error 名の表)に割り、unit ごとに object を作って link し
 unit は processor の数だけ並行に compile し、link は完了順でなく unit 順に並べます。1 module の
 編集で clang が compile し直すのはその unit だけで、署名や型を変えたときはそれを
 参照する unit も変わります。`--opt` は 1 unit のまま clang に -O3 で丸ごと渡します。
+`--opt --thinlto` は debug と同じく module ごとに割り、unit ごとに `-O3 -flto=thin` の
+bitcode を作って cache し、link で ThinLTO が unit を跨いで最適化します。linker が
+ThinLTO で作った code は cache directory の下の `thinlto/` に linker 自身が置き、
+prune も linker の既定に任せます(空の cache で build すればここも空から始まる)。
+`--opt` の IR inliner は分割の前にかかるので、小さい関数の編集は呼ぶ側の unit も変えます。
 実行ファイルの鍵に clang の版は入らないので、cache にある実行ファイルを走らせる
 `run` は toolchain に触れません。
 

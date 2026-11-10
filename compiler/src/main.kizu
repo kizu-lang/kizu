@@ -1900,6 +1900,7 @@ fn default_native_options(allocator: Allocator) -> !native::Options {
         emit: move emit,
         linker: move linker,
         opt: false,
+        thinlto: false,
         libraries: array::new<string::String>(allocator),
         frameworks: array::new<string::String>(allocator),
         library_search: array::new<string::String>(allocator),
@@ -2144,6 +2145,10 @@ fn parse_native_build_args(
             options.opt = true;
             continue;
         }
+        if mem::equal_bytes(arg, "--thinlto") {
+            options.thinlto = true;
+            continue;
+        }
         if mem::equal_bytes(arg, "-o") {
             index = try take_flag_value(io, allocator, index, count, "-o", &var options.output);
             if index < 0 {
@@ -2295,6 +2300,11 @@ fn native_target(
         return 1;
     }
     options.target = build_target;
+    if try native::validate_thinlto(allocator, options) |failed| {
+        defer failed.deinit(allocator);
+        try report(io, allocator, &loader.sources, &failed);
+        return 1;
+    }
     let include_tests = command == NativeCommand::Test;
     let loaded = try load_target(io, allocator, &var loader, &var tree, target, &var package_name, include_tests);
     match loaded {
@@ -2395,10 +2405,18 @@ fn native_target(
                     }
                     // A debug build is one unit per module, so the objects of
                     // the modules an edit did not touch are reused; an
-                    // optimized build is one, which clang optimizes whole.
+                    // optimized build is one, which clang optimizes whole,
+                    // unless it is linked with ThinLTO, which optimizes
+                    // across one unit per module in the link.
+                    var split = llvm::Split::PerModule;
+                    if options.thinlto {
+                        split = llvm::Split::PerModuleLTO;
+                    } else if options.opt {
+                        split = llvm::Split::Whole;
+                    }
                     var units = array::new<string::String>(allocator);
                     defer units.deinit(allocator);
-                    if try emit_unit_texts(allocator, &var lowerer.module, darwin, arch, !options.opt, &var units) |failed| {
+                    if try emit_unit_texts(allocator, &var lowerer.module, darwin, arch, split, &var units) |failed| {
                         defer failed.deinit(allocator);
                         try report(io, allocator, &loader.sources, &failed);
                         return 1;
@@ -2445,7 +2463,7 @@ fn emit_unit_texts(
     module: &var ir::Module,
     darwin: bool,
     arch: llvm::Arch,
-    split: bool,
+    split: llvm::Split,
     texts: &var array::Array<string::String>
 ) -> !?diagnostic::Diagnostic {
     var units = array::new<llvm::Unit>(allocator);

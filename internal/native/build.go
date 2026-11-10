@@ -25,7 +25,7 @@ type Options struct {
 	// they are linked (llvm.EmitUnits). A debug build has one per module
 	// and compiles each to an object the cache keeps, so an edit to one
 	// module recompiles that unit alone; an optimized build has one, which
-	// clang optimizes whole.
+	// clang optimizes whole, unless it is linked with ThinLTO.
 	Units []string
 	// ErrorSets maps each declared error set to the number its members lower to.
 	// The runtime returns those numbers, and generating the constants from the
@@ -45,6 +45,10 @@ type Options struct {
 	Emit    string
 	Linker  string
 	Opt     bool
+	// ThinLTO, with Opt, has one unit per module as a debug build does,
+	// each compiled to bitcode the cache keeps, and optimizes across them
+	// when they are linked.
+	ThinLTO bool
 	// Libraries and Frameworks are what the program's reached extern
 	// declarations named with `@link_library` / `@link_framework`; the search
 	// paths are what its manifest's `[native]` section says about where the
@@ -153,8 +157,12 @@ func link(runtimePath string, output string, options Options, version string) ([
 // Go compiles packages. The objects are read from the cache by `build` as well,
 // since what that command writes where the user asked is the executable, not
 // the objects it is linked from.
+//
+// A ThinLTO build compiles its units the way a debug build does, but to
+// bitcode, and keyed apart from the objects: the code is made when the units
+// are linked.
 func unitInputs(tmp string, options Options, version string) ([]string, error) {
-	if options.Opt {
+	if options.Opt && !options.ThinLTO {
 		inputs := make([]string, 0, len(options.Units))
 		for index, unit := range options.Units {
 			path, err := unitPath(tmp, index)
@@ -187,7 +195,7 @@ func unitInputs(tmp string, options Options, version string) ([]string, error) {
 		go func() {
 			defer func() { <-slots; group.Done() }()
 			inputs[index], failures[index] = cache.GetOrBuildArtifact(
-				"native-obj",
+				unitArtifactName(options),
 				objectCacheTarget(options, version),
 				[]byte(digests[index]),
 				func(output string) error {
@@ -203,6 +211,15 @@ func unitInputs(tmp string, options Options, version string) ([]string, error) {
 		}
 	}
 	return inputs, nil
+}
+
+// unitArtifactName is the kind a compiled unit is cached as: an object, or
+// for a ThinLTO build the bitcode the link makes the code from.
+func unitArtifactName(options Options) string {
+	if options.ThinLTO {
+		return "native-bc"
+	}
+	return "native-obj"
 }
 
 // unitDigests returns the SHA-256 of each unit's text, in unit order. An
@@ -241,7 +258,8 @@ func compileUnit(tmp string, index int, text string, output string, options Opti
 	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
 		return err
 	}
-	args := append(clangFlags(options), "-Wno-override-module", "-c", path, "-o", output)
+	args := append(clangFlags(options), thinLTOCompileFlags(options)...)
+	args = append(args, "-Wno-override-module", "-c", path, "-o", output)
 	out, err := exec.Command(driver(options), args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("native error: %s failed: %w\n%s", driver(options), err, out)
@@ -397,7 +415,7 @@ func runtimeCacheTarget(options Options, version string) string {
 // objects other builds made, perhaps by another clang, so the version keys it
 // as it keys the runtime object.
 func objectCacheTarget(options Options, version string) string {
-	key := append([]string{"native-obj"}, toolchainKey(options)...)
+	key := append([]string{unitArtifactName(options)}, toolchainKey(options)...)
 	return strings.Join(append(key, version), "/")
 }
 
@@ -421,6 +439,8 @@ func executableCacheTarget(options Options, runtimeSource string) string {
 func toolchainKey(options Options) []string {
 	key := []string{driver(options), runtime.GOOS + "-" + runtime.GOARCH}
 	key = append(key, clangFlags(options)...)
+	key = append(key, thinLTOCompileFlags(options)...)
+	key = append(key, thinLTOCodegenFlags(options)...)
 	key = append(key, linkFlags(options)...)
 	if sdk := os.Getenv("SDKROOT"); sdk != "" {
 		key = append(key, "SDKROOT="+sdk)
@@ -545,6 +565,11 @@ func runClang(
 		args = append(args, "-r", "-nostdlib")
 	}
 	args = append(args, "-Wno-override-module")
+	thinLTO, err := thinLTOLinkFlags(options)
+	if err != nil {
+		return nil, err
+	}
+	args = append(args, thinLTO...)
 	linked := linkedOutput(output, options)
 	args = append(args, inputs...)
 	args = append(args, runtimePath, "-o", linked)
@@ -763,7 +788,7 @@ func writeMetadata(options Options, command []string) error {
 	metadata := Metadata{
 		Target: "native", Triple: options.Triple, CPU: options.CPU, ABI: options.ABI,
 		LibC: options.LibC, Runtime: options.Runtime, Emit: options.Emit,
-		Linker: options.Linker, OptMode: optimizationModeName(options.Opt),
+		Linker: options.Linker, OptMode: optimizationModeName(options),
 		Output: options.Output, Command: command,
 		Libraries: options.Libraries, Frameworks: options.Frameworks,
 		LibrarySearch: options.LibrarySearch, FrameworkSearch: options.FrameworkSearch,
@@ -776,11 +801,15 @@ func writeMetadata(options Options, command []string) error {
 }
 
 // optimizationModeName records the native optimization mode in artifact metadata.
-func optimizationModeName(opt bool) string {
-	if opt {
+func optimizationModeName(options Options) string {
+	switch {
+	case options.ThinLTO:
+		return "opt-thinlto"
+	case options.Opt:
 		return "opt"
+	default:
+		return "debug"
 	}
-	return "debug"
 }
 
 // runtimeSource is the C runtime every native build links with, embedded from

@@ -29,12 +29,31 @@ struct UnitPlan {
     functions: array::Array<ir::Function>,
 }
 
+/// Is how emit_units divides a program among the units it writes, the Go
+/// `Split`.
+pub enum Split {
+    /// One unit with the text emit_for_native_target writes, which clang
+    /// optimizes whole.
+    Whole,
+    /// One unit per module and the program unit last, compiled one by one
+    /// into objects (a debug build).
+    PerModule,
+    /// Splits the program as PerModule does, for a link that optimizes
+    /// across the units (ThinLTO). A function no other unit names and
+    /// nothing takes the address of is internal to its unit, so the
+    /// optimizer may drop it once inlined and change how it is called, and
+    /// each unit names its module as its source file, which is what ThinLTO
+    /// tells the internal functions of two units apart by.
+    PerModuleLTO,
+}
+
 /// Formats a module as the units a native build compiles, the Go
-/// `EmitUnits`. Unsplit, it is one unit with the text emit_for_native_target writes.
-/// Split, it is one unit per module and the program unit last, each a module
-/// LLVM compiles alone: a unit's text depends only on its own functions, so
-/// an edit to one module changes the text of that unit alone, and what the
-/// toolchain made of the others can be reused.
+/// `EmitUnits`. Whole, it is one unit with the text emit_for_native_target
+/// writes. Split, it is one unit per module and the program unit last, each
+/// a module LLVM compiles alone: a unit's text depends only on its own
+/// functions -- and, split for LTO, on which of them the other units name --
+/// so an edit to one module changes the text of that unit alone, and what
+/// the toolchain made of the others can be reused.
 ///
 /// A unit is decided by data alone -- each function's module, the order of
 /// ir::Module.modules, the order of the module's functions -- never by a
@@ -45,10 +64,10 @@ pub fn emit_units(
     module: &var ir::Module,
     darwin: bool,
     arch: Arch,
-    split: bool,
+    split: Split,
     units: &var array::Array<Unit>
 ) -> !?diagnostic::Diagnostic {
-    if !split {
+    if split == Split::Whole {
         var text = string::new(allocator);
         errdefer text.deinit(allocator);
         if try emit_for_native_target(allocator, module, &var text, darwin, arch) |failed| {
@@ -71,6 +90,12 @@ pub fn emit_units(
     defer program.deinit(allocator);
     var plans = try partition_units(allocator, module);
     defer plans.deinit(allocator);
+    let lto = split == Split::PerModuleLTO;
+    var shared = map::new<i64, bool>(allocator);
+    defer shared.deinit(allocator);
+    if lto {
+        try shared_functions(allocator, module, &plans, &var shared);
+    }
     var plan_index = 0;
     while plans.at(plan_index) |plan| {
         plan_index = plan_index + 1;
@@ -82,6 +107,12 @@ pub fn emit_units(
         emitter.split = true;
         emitter.program_unit = ir::is_empty(plan.module);
         emitter.program_error_names = error_names;
+        emitter.lto = lto;
+        var shared_index = 0;
+        while shared.key_at(shared_index) |name| {
+            shared_index = shared_index + 1;
+            try emitter.shared.insert(allocator, name, true);
+        }
         var function_index = 0;
         while program.get(function_index) |function| {
             function_index = function_index + 1;
@@ -96,11 +127,108 @@ pub fn emit_units(
         let path_bytes = path.as_bytes();
         var copied = string::new(allocator);
         errdefer copied.deinit(allocator);
+        if lto {
+            try append_unit_source_file(allocator, path_bytes, &var copied);
+        }
         try copied.append_string(allocator, &text);
         try append_unit(allocator, units, path_bytes, move copied);
     }
     try replace_functions(allocator, module, &program);
     return null;
+}
+
+/// Appends the line a unit split for LTO starts with, naming the unit's
+/// module as its source file, the Go `unitSourceFile`. ThinLTO identifies
+/// an internal function by its source file and its name, and string
+/// constants share names across units; without the line clang names the
+/// file it read the unit from, a temporary path that would make the bitcode
+/// of one text differ from one build to the next.
+fn append_unit_source_file(allocator: Allocator, path: []u8, out: &var string::String) -> !void {
+    try out.append_bytes(allocator,
+        \\source_filename = "kizu-unit:
+    );
+    try out.append_bytes(allocator, path);
+    try out.append_bytes(allocator,
+        \\"
+    );
+    return out.append_byte(allocator, cast<u8>(10));
+}
+
+/// Records the functions a program split for LTO keeps visible to the other
+/// units, the Go `sharedFunctions`: each a unit names but does not define,
+/// which is every name its declarations hold (unit_external_functions), each
+/// whose address a function takes, and each the host may enter, a C export.
+/// What takes an address or is entered from outside is kept visible
+/// whichever unit holds it: a pointer may be handed anywhere, and an
+/// internal function could not be the target of the alias a qualified C
+/// export is entered by.
+fn shared_functions(
+    allocator: Allocator,
+    module: &ir::Module,
+    plans: &array::Array<UnitPlan>,
+    shared: &var map::Map<i64, bool>
+) -> !void {
+    var program = map::new<i64, bool>(allocator);
+    defer program.deinit(allocator);
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        try program.insert(allocator, ir::name_id(module.function_name(function)), true);
+    }
+    var plan_index = 0;
+    while plans.at(plan_index) |plan| {
+        plan_index = plan_index + 1;
+        var defined = map::new<i64, bool>(allocator);
+        defer defined.deinit(allocator);
+        index = 0;
+        while plan.functions.get(index) |function| {
+            index = index + 1;
+            try defined.insert(allocator, ir::name_id(module.function_name(function)), true);
+        }
+        index = 0;
+        while plan.functions.get(index) |function| {
+            index = index + 1;
+            let node = module.function_nodes.at(function.node);
+            if !ir::is_empty(node.export_abi) {
+                try shared.insert(allocator, ir::name_id(node.name), true);
+            }
+            var callees = try ir::direct_callees(allocator, module, function);
+            defer callees.deinit(allocator);
+            var callee_index = 0;
+            while callees.get(callee_index) |name| {
+                callee_index = callee_index + 1;
+                if !defined.contains(ir::name_id(name)) and program.contains(ir::name_id(name)) {
+                    try shared.insert(allocator, ir::name_id(name), true);
+                }
+            }
+            try insert_address_taken(allocator, module, node, shared);
+        }
+    }
+    return;
+}
+
+/// Records the Kizu functions a function takes the address of, the Go
+/// `addressTaken`.
+fn insert_address_taken(
+    allocator: Allocator,
+    module: &ir::Module,
+    node: &ir::FunctionNode,
+    shared: &var map::Map<i64, bool>
+) -> !void {
+    var index = 0;
+    while node.blocks.get(index) |block| {
+        index = index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if instr_node.op == ir::Op::FuncAddr and ir::is_empty(instr_node.extern_abi) {
+                try shared.insert(allocator, ir::name_id(instr_node.operand), true);
+            }
+        }
+    }
+    return;
 }
 
 /// Appends one written unit.
@@ -270,18 +398,24 @@ fn (self: &var Emitter) exports_in_place(module: &ir::Module, node: &ir::Functio
 }
 
 /// Is the linkage a function of a split unit is defined with, the Go
-/// `splitLinkage`. Every function another unit may call is visible to the
-/// other units and hidden from everything outside the program. Which
-/// functions another unit calls is not asked: the answer would come from the
-/// other units, and an edit to one of them would change this unit's text. A
-/// generic instance is one copy among those every unit that reaches it
-/// carries, and the linker keeps one.
-fn split_linkage(owns_symbol: bool, instance: bool) -> []u8 {
+/// `splitProgram.linkage`. Every function another unit may call is visible
+/// to the other units and hidden from everything outside the program. Split
+/// for a debug build, which functions another unit calls is not asked: the
+/// answer would come from the other units, and an edit to one of them would
+/// change this unit's text, which costs nothing at -O0. Split for LTO, the
+/// optimizer needs a function only its own unit calls to be internal, so a
+/// unit's text does depend on which of its functions the others name
+/// (shared_functions). A generic instance is one copy among those every unit
+/// that reaches it carries, and the linker keeps one.
+fn (self: &Emitter) split_linkage(name: ir::Name, owns_symbol: bool, instance: bool) -> []u8 {
     if owns_symbol {
         return "";
     }
     if instance {
         return "linkonce_odr hidden ";
+    }
+    if self.lto and !self.shared.contains(ir::name_id(name)) {
+        return "internal ";
     }
     return "hidden ";
 }

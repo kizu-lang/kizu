@@ -66,23 +66,30 @@ func TestUnitsCorpus(t *testing.T) {
 // renderUnitsCase loads input as the package `app`, lowers it, and renders
 // the units a debug build splits it into: `// unit <module>` before each, the
 // program unit's path being empty, then one `// ` line per line of its text.
-// The std functions are dropped first, as in the LLVM corpus, so std has no
-// unit and a user unit declares the std functions it calls. A failure yields
-// its message as the block's only line.
+// The units the same program is split into for a ThinLTO link follow, each
+// after `// lto unit <module>`. The std functions are dropped first, as in
+// the LLVM corpus, so std has no unit and a user unit declares the std
+// functions it calls. A failure yields its message as the block's only line.
 func renderUnitsCase(input string) string {
 	var out bytes.Buffer
-	units, err := splitUnitsCase(input)
-	if err != nil {
-		out.WriteString("// ")
-		writeFoldedLine(&out, err.Error())
-		return out.String()
-	}
-	for _, unit := range units {
-		fmt.Fprintf(&out, "// unit %s\n", unit.Module)
-		for _, line := range strings.Split(unit.Text, "\n") {
+	for _, split := range []struct {
+		mode   Split
+		header string
+	}{{PerModule, "// unit "}, {PerModuleLTO, "// lto unit "}} {
+		units, err := splitUnitsCase(input, split.mode)
+		if err != nil {
+			out.Reset()
 			out.WriteString("// ")
-			out.WriteString(line)
-			out.WriteByte('\n')
+			writeFoldedLine(&out, err.Error())
+			return out.String()
+		}
+		for _, unit := range units {
+			out.WriteString(split.header + unit.Module + "\n")
+			for _, line := range strings.Split(unit.Text, "\n") {
+				out.WriteString("// ")
+				out.WriteString(line)
+				out.WriteByte('\n')
+			}
 		}
 	}
 	return out.String()
@@ -90,7 +97,7 @@ func renderUnitsCase(input string) string {
 
 // splitUnitsCase runs the front end over the package a case holds and splits
 // its user functions into units.
-func splitUnitsCase(input string) ([]Unit, error) {
+func splitUnitsCase(input string, split Split) ([]Unit, error) {
 	graph, sources := unitsCaseGraph(input)
 	program, err := project.LoadProgramWithSources(graph, sources)
 	if err != nil {
@@ -109,7 +116,7 @@ func splitUnitsCase(input string) ([]Unit, error) {
 	}
 	user := userModule(module)
 	user.Modules = module.Modules
-	return EmitUnits(user, false, ArchArm64, true)
+	return EmitUnits(user, false, ArchArm64, split)
 }
 
 // unitsCaseGraph reads the modules of a case: each starts at a `// module`
