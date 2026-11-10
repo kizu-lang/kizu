@@ -334,7 +334,11 @@ const returnJoinLabel = "kizu.return.join"
 // reads of them fold into the arms they came from.
 func (e *emitter) unifyAggregateReturns(body string, name string, returnType string) string {
 	fields, ok := e.aggregateFields(returnType)
-	if !ok || (e.references[name] != 1 && strings.Count(body, "\n") > inlinableBodyLines) {
+	// A split unit cannot count the places the program names a function
+	// without reading the other units, and is compiled for a debug build,
+	// which inlines nothing; it treats every function as named twice.
+	shared := e.split != nil || e.references[name] != 1
+	if !ok || (shared && strings.Count(body, "\n") > inlinableBodyLines) {
 		return body
 	}
 	prefix := "  ret " + returnType + " "

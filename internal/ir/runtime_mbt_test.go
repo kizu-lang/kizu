@@ -62,6 +62,8 @@ var boundsKnownShapes = []runtimeCase{
 		Expect: []string{"1 1: -7 1", "1 0: 0 1"}},
 	{Bucket: "below-is-not-enough", Prog: []string{"lt K", "read K", "end"},
 		Expect: []string{"2 -1: panic"}},
+	{Bucket: "next-index", Prog: []string{"for 0", "read I1", "end"},
+		Expect: []string{"3 0: panic", "0 0: 0 0"}},
 }
 
 // deferKnownShapes mirrors spec/ir/defer_test.qnt.
@@ -77,6 +79,9 @@ var deferKnownShapes = []runtimeCase{
 	{Bucket: "nested-error-unwind",
 		Prog:   []string{"defer 1", "if 0", "errdefer 2", "loop 3", "defer 4", "fail 1", "end", "end"},
 		Expect: []string{"03: 4 2 1 -1", "01: 4 4 1 0", "00: 1 0"}},
+	{Bucket: "block-exit-order",
+		Prog:   []string{"if 0", "defer 1", "defer 2", "note 100", "end", "note 101"},
+		Expect: []string{"01: 100 2 1 101 0", "00: 101 0"}},
 }
 
 // knownDivergences are the divergences findings/ir-safety-quint-findings.md
@@ -507,89 +512,119 @@ var boundsModel = runtimeModel{
 
 // renderBoundsCase writes one bounds program as case<n>.
 func renderBoundsCase(n int, prog []string) (string, error) {
-	var b strings.Builder
-	fmt.Fprintf(&b, "fn case%d(a: &var array::Array<i64>, k: i64, allocator: Allocator) -> !i64 {\n    var s = 0;\n", n)
-	indent := "    "
-	type block struct {
-		while bool
-		id    string
-	}
-	var open []block
-	loop := ""
-	index := func(x string) (string, error) {
-		switch x {
-		case "K":
-			return "k", nil
-		case "C0":
-			return "0", nil
-		case "C2":
-			return "2", nil
-		case "I", "I1":
-			if loop == "" {
-				return "", fmt.Errorf("%s outside a loop", x)
-			}
-			if x == "I1" {
-				return "i" + loop + " + 1", nil
-			}
-			return "i" + loop, nil
-		}
-		return "", fmt.Errorf("unknown index %q", x)
-	}
+	r := boundsRenderer{indent: "    "}
+	fmt.Fprintf(&r.b, "fn case%d(a: &var array::Array<i64>, k: i64, allocator: Allocator) -> !i64 {\n    var s = 0;\n", n)
 	for _, stmt := range prog {
-		f := strings.Fields(stmt)
-		var x string
-		if len(f) == 2 && f[0] != "for" && f[0] != "while" {
-			var err error
-			if x, err = index(f[1]); err != nil {
-				return "", err
-			}
-		}
-		switch f[0] {
-		case "read":
-			fmt.Fprintf(&b, "%ss = s + a.get_or_panic(%s);\n", indent, x)
-		case "write":
-			fmt.Fprintf(&b, "%sa.set(%s, s) catch return -7;\n", indent, x)
-		case "pop":
-			fmt.Fprintf(&b, "%slet _ = a.pop();\n", indent)
-		case "push":
-			fmt.Fprintf(&b, "%stry a.append(allocator, s);\n", indent)
-		case "lt", "ge":
-			op := map[string]string{"lt": "< a.len()", "ge": ">= 0"}[f[0]]
-			fmt.Fprintf(&b, "%sif %s %s {\n", indent, x, op)
-			open = append(open, block{})
-			indent += "    "
-		case "exit":
-			fmt.Fprintf(&b, "%sif %s >= a.len() {\n%s    return s;\n%s}\n", indent, x, indent, indent)
-		case "for":
-			fmt.Fprintf(&b, "%slet n%s = a.len();\n%sfor 0..n%s |i%s| {\n", indent, f[1], indent, f[1], f[1])
-			open = append(open, block{id: f[1]})
-			loop = f[1]
-			indent += "    "
-		case "while":
-			fmt.Fprintf(&b, "%svar i%s = 0;\n%swhile i%s < a.len() {\n", indent, f[1], indent, f[1])
-			open = append(open, block{while: true, id: f[1]})
-			loop = f[1]
-			indent += "    "
-		case "end":
-			if len(open) == 0 {
-				return "", fmt.Errorf("unbalanced block end")
-			}
-			top := open[len(open)-1]
-			open = open[:len(open)-1]
-			if top.while {
-				fmt.Fprintf(&b, "%si%s = i%s + 1;\n", indent, top.id, top.id)
-			}
-			if top.id != "" {
-				loop = ""
-			}
-			indent = indent[:len(indent)-4]
-			fmt.Fprintf(&b, "%s}\n", indent)
-		default:
-			return "", fmt.Errorf("unknown statement %q", stmt)
+		if err := r.stmt(stmt); err != nil {
+			return "", err
 		}
 	}
-	b.WriteString("    return s;\n}\n\n")
-	return b.String(), nil
+	r.b.WriteString("    return s;\n}\n\n")
+	return r.b.String(), nil
+}
+
+// boundsBlock is an open block: whether it is a while, whose counter its end
+// steps, and the loop id it binds ("" for an if).
+type boundsBlock struct {
+	while bool
+	id    string
+}
+
+// boundsRenderer is the state one bounds program is written with: the text so
+// far, the indent, the blocks still open and the innermost loop's id.
+type boundsRenderer struct {
+	b      strings.Builder
+	indent string
+	open   []boundsBlock
+	loop   string
+}
+
+// index spells an index token as a Kizu expression.
+func (r *boundsRenderer) index(x string) (string, error) {
+	switch x {
+	case "K":
+		return "k", nil
+	case "C0":
+		return "0", nil
+	case "C2":
+		return "2", nil
+	case "I", "I1":
+		if r.loop == "" {
+			return "", fmt.Errorf("%s outside a loop", x)
+		}
+		if x == "I1" {
+			return "i" + r.loop + " + 1", nil
+		}
+		return "i" + r.loop, nil
+	}
+	return "", fmt.Errorf("unknown index %q", x)
+}
+
+// stmt writes one statement.
+func (r *boundsRenderer) stmt(stmt string) error {
+	f := strings.Fields(stmt)
+	var x string
+	if len(f) == 2 && f[0] != "for" && f[0] != "while" {
+		var err error
+		if x, err = r.index(f[1]); err != nil {
+			return err
+		}
+	}
+	indent := r.indent
+	switch f[0] {
+	case "read":
+		fmt.Fprintf(&r.b, "%ss = s + a.get_or_panic(%s);\n", indent, x)
+	case "write":
+		fmt.Fprintf(&r.b, "%sa.set(%s, s) catch return -7;\n", indent, x)
+	case "pop":
+		fmt.Fprintf(&r.b, "%slet _ = a.pop();\n", indent)
+	case "push":
+		fmt.Fprintf(&r.b, "%stry a.append(allocator, s);\n", indent)
+	case "lt", "ge":
+		op := map[string]string{"lt": "< a.len()", "ge": ">= 0"}[f[0]]
+		fmt.Fprintf(&r.b, "%sif %s %s {\n", indent, x, op)
+		r.push(boundsBlock{})
+	case "exit":
+		fmt.Fprintf(&r.b, "%sif %s >= a.len() {\n%s    return s;\n%s}\n", indent, x, indent, indent)
+	case "for":
+		fmt.Fprintf(&r.b, "%slet n%s = a.len();\n%sfor 0..n%s |i%s| {\n", indent, f[1], indent, f[1], f[1])
+		r.push(boundsBlock{id: f[1]})
+	case "while":
+		fmt.Fprintf(&r.b, "%svar i%s = 0;\n%swhile i%s < a.len() {\n", indent, f[1], indent, f[1])
+		r.push(boundsBlock{while: true, id: f[1]})
+	case "end":
+		return r.end()
+	default:
+		return fmt.Errorf("unknown statement %q", stmt)
+	}
+	return nil
+}
+
+// push opens a block; a loop's id becomes the innermost loop.
+func (r *boundsRenderer) push(block boundsBlock) {
+	r.open = append(r.open, block)
+	if block.id != "" {
+		r.loop = block.id
+	}
+	r.indent += "    "
+}
+
+// end closes the innermost block, stepping a while's counter first.
+func (r *boundsRenderer) end() error {
+	if len(r.open) == 0 {
+		return fmt.Errorf("unbalanced block end")
+	}
+	top := r.open[len(r.open)-1]
+	r.open = r.open[:len(r.open)-1]
+	if top.while {
+		fmt.Fprintf(&r.b, "%si%s = i%s + 1;\n", r.indent, top.id, top.id)
+	}
+	if top.id != "" {
+		r.loop = ""
+	}
+	r.indent = r.indent[:len(r.indent)-4]
+	fmt.Fprintf(&r.b, "%s}\n", r.indent)
+	return nil
 }
 
 // ---------------------------------------------------------------- defer

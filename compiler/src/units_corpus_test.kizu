@@ -1,0 +1,276 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import compiler::internal::llvm;
+import compiler::internal::ownership;
+import compiler::internal::project;
+import compiler::internal::types;
+import std::array;
+import std::fs;
+import std::io;
+import std::mem;
+import std::string;
+import std::testing;
+
+// The units corpus in compiler/tests/units is shared with the Go emitter,
+// which generates each case's expectation block: the units a debug build
+// splits the package `app` into, one `// unit <module>` line before the text
+// of each, then those it is split into for a ThinLTO link, each after a
+// `// lto unit <module>` line. A case holds every module of the package,
+// each starting at a `// module <path>` line. This runner loads the package
+// through this loader, checks and lowers it, drops the std functions as the
+// LLVM corpus does, splits it both ways with this emitter, and requires the
+// same bytes.
+
+/// The blank line plus `// units` line that ends a case input.
+fn units_marker() -> []u8 {
+    return
+        \\
+        \\
+        \\// units
+        \\
+    ;
+}
+
+/// The start of the line that opens one module of a case.
+fn module_marker() -> []u8 {
+    return "// module ";
+}
+
+/// Returns where the expectation block of one case starts.
+fn split_units_case(data: []u8) -> ?i64 {
+    let marker = units_marker();
+    let marker_len = mem::len(marker);
+    var index = mem::len(data) - marker_len;
+    while index >= 0 {
+        if mem::slice(data, index, index + marker_len) |candidate| {
+            if mem::equal_bytes(candidate, marker) {
+                return index;
+            }
+        }
+        index = index - 1;
+    }
+    return null;
+}
+
+/// Appends the file a module of a case is read from: its path with each
+/// `::` a `/`, then `.kizu`, the Go `unitsCaseGraph`.
+fn append_module_file(allocator: Allocator, out: &var string::String, path: []u8) -> !void {
+    var index = 0;
+    while index < mem::len(path) {
+        if index + 1 < mem::len(path) and path[index] == cast<u8>(58) and path[index + 1] == cast<u8>(58) {
+            try out.append_byte(allocator, cast<u8>(47));
+            index = index + 2;
+            continue;
+        }
+        try out.append_byte(allocator, path[index]);
+        index = index + 1;
+    }
+    return out.append_bytes(allocator, ".kizu");
+}
+
+/// Reads the modules of a case into graph, and their texts into the loader:
+/// each module starts at a `// module` line, which stays in its text.
+fn read_units_case(
+    allocator: Allocator,
+    loader: &var project::Loader,
+    input: []u8,
+    graph: &var project::Graph
+) -> !void {
+    var text = string::new(allocator);
+    defer text.deinit(allocator);
+    var file = string::new(allocator);
+    defer file.deinit(allocator);
+    var start = 0;
+    while start < mem::len(input) {
+        var end = start;
+        while end < mem::len(input) and input[end] != cast<u8>(10) {
+            end = end + 1;
+        }
+        if end < mem::len(input) {
+            end = end + 1;
+        }
+        let line = input[start..end];
+        start = end;
+        if mem::starts_with(line, module_marker()) {
+            if file.len() > 0 {
+                let file_bytes = file.as_bytes();
+                let text_bytes = text.as_bytes();
+                try loader.override_source(file_bytes, text_bytes);
+            }
+            var path_end = mem::len(line);
+            while path_end > mem::len(module_marker()) and line[path_end - 1] == cast<u8>(10) {
+                path_end = path_end - 1;
+            }
+            let path = line[mem::len(module_marker())..path_end];
+            file.clear();
+            try append_module_file(allocator, &var file, path);
+            text.clear();
+            var files = array::new<string::String>(allocator);
+            errdefer files.deinit(allocator);
+            let file_bytes = file.as_bytes();
+            try files.append(allocator, try string::from_bytes(allocator, file_bytes));
+            try graph.modules.append(allocator, project::Module {
+                path: try string::from_bytes(allocator, path),
+                files: move files,
+                test_files: array::new<string::String>(allocator)
+            });
+        }
+        if file.len() > 0 {
+            try text.append_bytes(allocator, line);
+        }
+    }
+    if file.len() > 0 {
+        let file_bytes = file.as_bytes();
+        let text_bytes = text.as_bytes();
+        try loader.override_source(file_bytes, text_bytes);
+    }
+    return;
+}
+
+/// Renders the expectation block of one case, the Go `renderUnitsCase`.
+fn render_units_case(
+    io: Io,
+    allocator: Allocator,
+    std_errors: &project::StdErrorCodes,
+    input: []u8
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    var tree = ast::new(allocator);
+    defer tree.deinit(allocator);
+    var loader = try project::new_loader(io, allocator, "lib/kizu");
+    defer loader.deinit(allocator);
+    var graph = project::Graph {
+        package_name: try string::from_bytes(allocator, "app"),
+        modules: array::new<project::Module>(allocator)
+    };
+    defer graph.deinit(allocator);
+    try read_units_case(allocator, &var loader, input, &var graph);
+    let loaded = try loader.load_program(&var tree, &graph);
+    match loaded {
+        Error(failed) => {
+            defer failed.deinit(allocator);
+            try append_llvm_failure(allocator, &loader.sources, &failed, "// check failed: ", &var out);
+            return move out;
+        },
+        Program(program) => {
+            defer program.deinit(allocator);
+            if try types::check(allocator, &var tree, &program) |failed| {
+                defer failed.deinit(allocator);
+                try append_llvm_failure(allocator, &loader.sources, &failed, "// check failed: ", &var out);
+                return move out;
+            }
+            var checker = try ownership::new_checker(allocator, &tree, &program);
+            defer checker.deinit(allocator);
+            if try checker.check_program(&var tree, &program) |failed| {
+                defer failed.deinit(allocator);
+                try append_llvm_failure(allocator, &loader.sources, &failed, "// check failed: ", &var out);
+                return move out;
+            }
+            var lowerer = try ir::new_lowerer(allocator, &tree, &program, &checker);
+            defer lowerer.deinit(allocator);
+            if try lowerer.lower(&var tree, &program, std_errors, &loader.sources) |failed| {
+                defer failed.deinit(allocator);
+                try append_llvm_failure(allocator, &loader.sources, &failed, "// ", &var out);
+                return move out;
+            }
+            let dropped = try keep_user_functions(allocator, &var lowerer.module);
+            defer dropped.deinit(allocator);
+            if try append_units(allocator, &var lowerer.module, llvm::Split::PerModule, "// unit ", &var out) |failed| {
+                defer failed.deinit(allocator);
+                out.clear();
+                try append_llvm_failure(allocator, &loader.sources, &failed, "// ", &var out);
+                return move out;
+            }
+            if try append_units(allocator, &var lowerer.module, llvm::Split::PerModuleLTO, "// lto unit ", &var out) |failed| {
+                defer failed.deinit(allocator);
+                out.clear();
+                try append_llvm_failure(allocator, &loader.sources, &failed, "// ", &var out);
+                return move out;
+            }
+            return move out;
+        },
+    }
+}
+
+/// Splits a lowered module the way split asks and appends each unit: the
+/// header, its module path, then one `// ` line per line of its text.
+fn append_units(
+    allocator: Allocator,
+    module: &var ir::Module,
+    split: llvm::Split,
+    header: []u8,
+    out: &var string::String
+) -> !?diagnostic::Diagnostic {
+    var units = array::new<llvm::Unit>(allocator);
+    defer units.deinit(allocator);
+    if try llvm::emit_units(allocator, module, false, llvm::Arch::Arm64, split, &var units) |failed| {
+        return move failed;
+    }
+    var index = 0;
+    while units.at(index) |unit| {
+        index = index + 1;
+        try out.append_bytes(allocator, header);
+        try out.append_string(allocator, &unit.module);
+        try out.append_byte(allocator, cast<u8>(10));
+        let text = unit.text.as_bytes();
+        try append_emitted(allocator, out, text);
+    }
+    return null;
+}
+
+test "units corpus splits like the shipping compiler" {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    var std_loader = try project::new_loader(io, allocator, "lib/kizu");
+    defer std_loader.deinit(allocator);
+    let codes = try std_loader.std_error_codes();
+    match codes {
+        Error(failed) => {
+            defer failed.deinit(allocator);
+            try io::write_stderr_line(io, "std error codes could not be read");
+            testing::expect(false);
+        },
+        Codes(std_errors) => {
+            defer std_errors.deinit(allocator);
+            var entries = try fs::read_dir(io, allocator, "compiler/tests/units");
+            defer entries.deinit(allocator);
+            var cases = 0;
+            var failures = 0;
+            var index = 0;
+            while entries.at(index) |entry| {
+                index = index + 1;
+                if entry.is_dir {
+                    continue;
+                }
+                cases = cases + 1;
+                let entry_path = entry.path.as_bytes();
+                let data = try fs::read_file(io, allocator, entry_path, mem::Limit::Unlimited);
+                defer data.deinit(allocator);
+                let bytes = data.as_bytes();
+                if split_units_case(bytes) |cut| {
+                    let input = bytes[0..cut];
+                    let want = bytes[cut + mem::len(units_marker())..mem::len(bytes)];
+                    let got = try render_units_case(io, allocator, &std_errors, input);
+                    defer got.deinit(allocator);
+                    let got_bytes = got.as_bytes();
+                    if !mem::equal_bytes(want, got_bytes) {
+                        failures = failures + 1;
+                        try io::write_stderr_line(io, entry_path);
+                        try io::write_stderr_line(io, "--- want");
+                        try io::write_stderr(io, want);
+                        try io::write_stderr_line(io, "--- got");
+                        try io::write_stderr(io, got_bytes);
+                    }
+                } else {
+                    failures = failures + 1;
+                    try io::write_stderr(io, "no `// units` marker: ");
+                    try io::write_stderr_line(io, entry_path);
+                }
+            }
+            testing::expect(cases > 0);
+            testing::expect_equal<i64>(0, failures);
+        },
+    }
+}

@@ -660,6 +660,20 @@ fn cache_command(io: Io, allocator: Allocator, action: []u8, next: i64, count: i
         try write_count_line(io, allocator, "entries: ", current.entries);
         try write_count_line(io, allocator, "size bytes: ", current.size_bytes);
         try write_count_line(io, allocator, "max bytes: ", current.max_bytes);
+        var index = 0;
+        while current.kinds.at(index) |share| {
+            index = index + 1;
+            var line = string::new(allocator);
+            defer line.deinit(allocator);
+            try line.append_string(allocator, &share.kind);
+            try line.append_bytes(allocator, ": ");
+            try stdfmt::append_i64(allocator, &var line, share.entries);
+            try line.append_bytes(allocator, " entries, ");
+            try stdfmt::append_i64(allocator, &var line, share.size_bytes);
+            try line.append_bytes(allocator, " bytes");
+            let line_bytes = line.as_bytes();
+            try io::write_stdout_line(io, line_bytes);
+        }
         return 0;
     }
     if mem::equal_bytes(action, "prune") {
@@ -1717,7 +1731,9 @@ fn add_package_main(allocator: Allocator, module: &var ir::Module, entry: []u8) 
             return_type: return_type,
             blocks: array::new<ir::Block>(allocator),
             export_abi: ir::empty_name(),
-            export_name: ir::empty_name()
+            export_name: ir::empty_name(),
+            module: ir::empty_name(),
+            instance: false
         })
     };
     try module.functions.append(allocator, main_function);
@@ -1885,6 +1901,7 @@ fn default_native_options(allocator: Allocator) -> !native::Options {
         emit: move emit,
         linker: move linker,
         opt: false,
+        thinlto: false,
         libraries: array::new<string::String>(allocator),
         frameworks: array::new<string::String>(allocator),
         library_search: array::new<string::String>(allocator),
@@ -2129,6 +2146,10 @@ fn parse_native_build_args(
             options.opt = true;
             continue;
         }
+        if mem::equal_bytes(arg, "--thinlto") {
+            options.thinlto = true;
+            continue;
+        }
         if mem::equal_bytes(arg, "-o") {
             index = try take_flag_value(io, allocator, index, count, "-o", &var options.output);
             if index < 0 {
@@ -2280,6 +2301,11 @@ fn native_target(
         return 1;
     }
     options.target = build_target;
+    if try native::validate_thinlto(allocator, options) |failed| {
+        defer failed.deinit(allocator);
+        try report(io, allocator, &loader.sources, &failed);
+        return 1;
+    }
     let include_tests = command == NativeCommand::Test;
     let loaded = try load_target(io, allocator, &var loader, &var tree, target, &var package_name, include_tests);
     match loaded {
@@ -2365,8 +2391,6 @@ fn native_target(
                         return 1;
                     }
                     let darwin = build_target == stdtarget::Target::NativeDarwin;
-                    var text = string::new(allocator);
-                    defer text.deinit(allocator);
                     // The C calling convention is the machine's, and on
                     // x86-64 the OS's too, since Windows passes a struct by
                     // value its own way.
@@ -2380,7 +2404,20 @@ fn native_target(
                     } else if native::target_is_x86_64(options, &host) {
                         arch = llvm::Arch::X86_64;
                     }
-                    if try llvm::emit_native(allocator, &var lowerer.module, &var text, darwin, arch) |failed| {
+                    // A debug build is one unit per module, so the objects of
+                    // the modules an edit did not touch are reused; an
+                    // optimized build is one, which clang optimizes whole,
+                    // unless it is linked with ThinLTO, which optimizes
+                    // across one unit per module in the link.
+                    var split = llvm::Split::PerModule;
+                    if options.thinlto {
+                        split = llvm::Split::PerModuleLTO;
+                    } else if options.opt {
+                        split = llvm::Split::Whole;
+                    }
+                    var units = array::new<string::String>(allocator);
+                    defer units.deinit(allocator);
+                    if try emit_unit_texts(allocator, &var lowerer.module, darwin, arch, split, &var units) |failed| {
                         defer failed.deinit(allocator);
                         try report(io, allocator, &loader.sources, &failed);
                         return 1;
@@ -2388,7 +2425,7 @@ fn native_target(
                     // Build, and a test built with -o, write the
                     // executable where they were asked instead of running it.
                     if options.output.len() > 0 {
-                        if try native::build(io, allocator, &var temps, options, &host, &text, &std_errors.sets) |failed| {
+                        if try native::build(io, allocator, &var temps, options, &host, &units, &std_errors.sets) |failed| {
                             defer failed.deinit(allocator);
                             try report(io, allocator, &loader.sources, &failed);
                             return 1;
@@ -2399,7 +2436,7 @@ fn native_target(
                     }
                     var exe = string::new(allocator);
                     defer exe.deinit(allocator);
-                    if try native::executable(io, allocator, &var temps, options, &host, &text, &std_errors.sets, &var exe) |failed| {
+                    if try native::executable(io, allocator, &var temps, options, &host, &units, &std_errors.sets, &var exe) |failed| {
                         defer failed.deinit(allocator);
                         try report(io, allocator, &loader.sources, &failed);
                         return 1;
@@ -2417,6 +2454,33 @@ fn native_target(
             }
         },
     }
+}
+
+/// Emits a lowered module as the texts of the units the native link
+/// compiles, the Go `emitUnits`: one per module when split, and one
+/// otherwise.
+fn emit_unit_texts(
+    allocator: Allocator,
+    module: &var ir::Module,
+    darwin: bool,
+    arch: llvm::Arch,
+    split: llvm::Split,
+    texts: &var array::Array<string::String>
+) -> !?diagnostic::Diagnostic {
+    var units = array::new<llvm::Unit>(allocator);
+    defer units.deinit(allocator);
+    if try llvm::emit_units(allocator, module, darwin, arch, split, &var units) |failed| {
+        return move failed;
+    }
+    var index = 0;
+    while units.at(index) |unit| {
+        index = index + 1;
+        var text = string::new(allocator);
+        errdefer text.deinit(allocator);
+        try text.append_string(allocator, &unit.text);
+        try texts.append(allocator, move text);
+    }
+    return null;
 }
 
 /// Builds an entry that runs every lowered test block in order, the Go
@@ -2463,7 +2527,9 @@ fn add_test_main(allocator: Allocator, module: &var ir::Module, seed: ?i64) -> !
             return_type: bang_void,
             blocks: array::new<ir::Block>(allocator),
             export_abi: ir::empty_name(),
-            export_name: ir::empty_name()
+            export_name: ir::empty_name(),
+            module: ir::empty_name(),
+            instance: false
         })
     };
     try module.functions.append(allocator, main_function);

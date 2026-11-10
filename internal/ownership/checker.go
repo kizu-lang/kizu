@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	diag "github.com/kizu-lang/kizu/internal/diagnostic"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -119,7 +120,10 @@ type Checker struct {
 	// fields of a struct literal it builds. The escape refusals let these
 	// through; everything else the return evaluates is refused as usual.
 	returnedViews map[ast.Expression]bool
-	result        Result
+	// identUses keeps each block's identifier reads for the last-use
+	// analysis, collected once per block.
+	identUses identUses
+	result    Result
 }
 
 // allocTaint is one tied allocator a call consumed while its result has not
@@ -202,6 +206,10 @@ type binding struct {
 	// borrow lands where argument borrows of the same place land.
 	fieldOwner     *binding
 	fieldOwnerName string
+	// ownerType records that typeName carries a deinit contract. The type
+	// never changes once the binding is defined, so the scope can keep its
+	// owners apart and an exit check reads only those.
+	ownerType bool
 }
 
 // allocTied reports an owner allocated from a frame-tied allocator: it keeps
@@ -244,6 +252,17 @@ type borrowSource struct {
 type scope struct {
 	parent *scope
 	values map[string]*binding
+	// borrowers lists the bindings defined here that held borrow targets
+	// when they were defined, so the per-statement last-use release visits
+	// them instead of every value in scope. Every site that ties a borrow
+	// does it before define, and targets are only cleared afterwards, so a
+	// binding defined without targets never needs a visit. Entries that were
+	// released or shadowed are dropped by the release pass.
+	borrowers []*binding
+	// owners holds the bound values whose type carries a deinit contract:
+	// the only ones an exit can leak. An exit check, run at every `try`,
+	// reads these instead of every binding in the chain.
+	owners []*binding
 }
 
 type directFieldReceiver struct {
@@ -724,7 +743,7 @@ func (c *Checker) defineParams(fn *functionInfo, env *scope, subst map[string]st
 		if param.IsType() {
 			continue
 		}
-		env.define(c.newBinding(param.Name, typ.Text(param.Type)))
+		c.define(env, c.newBinding(param.Name, typ.Text(param.Type)))
 	}
 	for idx, param := range fn.sig.Params {
 		typeName := fn.params[idx].typeName
@@ -755,7 +774,7 @@ func (c *Checker) defineParams(fn *functionInfo, env *scope, subst map[string]st
 		// locals), and a consume primitive keeps its value by design
 		// (ADR-0091): neither carries a consume obligation.
 		value.consumeExempt = receiver || isConsumePrimitive(fn.name)
-		env.define(value)
+		c.define(env, value)
 	}
 	return nil
 }
@@ -802,7 +821,7 @@ func (c *Checker) checkTestDecl(decl *ast.TestDecl) error {
 
 // checkBlock validates statements in a lexical block.
 func (c *Checker) checkBlock(block *ast.BlockStmt, env *scope) error {
-	lastUses := blockLastUses(block)
+	lastUses := c.identUses.blockLastUses(block)
 	defers := []*ast.DeferStmt{}
 	errDeferMark := len(c.liveErrDefers)
 	defer c.restoreErrDefers(errDeferMark)
@@ -1156,7 +1175,7 @@ func (c *Checker) validateErrDeferReceivers(env *scope) ([]ast.Expression, error
 		if entry.id == 0 {
 			continue
 		}
-		value, exists := env.lookupID(entry.id)
+		value, exists := env.lookupNamedID(entry.name, entry.id)
 		if !exists {
 			continue
 		}
@@ -1304,7 +1323,8 @@ type loopStart struct {
 func (c *Checker) checkOwnersConsumed(env *scope, sinceID int, exit leakExit) error {
 	errorPath := exit.kind == exitTry || exit.kind == exitErrorReturn
 	var leaked *binding
-	env.walkBindings(func(value *binding) {
+	// Only a value whose type carries a deinit contract can need consuming.
+	env.walkOwners(func(value *binding) {
 		if value.id <= sinceID || !c.bindingNeedsConsume(value) {
 			return
 		}
@@ -1775,7 +1795,7 @@ func (c *Checker) checkLetStmtForm(stmt *ast.LetStmt, env *scope) error {
 	if err := c.attachAllocProvenance(value); err != nil {
 		return err
 	}
-	env.define(value)
+	c.define(env, value)
 	return nil
 }
 
@@ -2058,7 +2078,7 @@ func (c *Checker) checkReturnedBorrowLetStmt(
 	if err := c.attachAllocProvenance(value); err != nil {
 		return err
 	}
-	env.define(value)
+	c.define(env, value)
 	return nil
 }
 
@@ -2081,7 +2101,7 @@ func (c *Checker) checkExplicitReturnedBorrowLetStmt(
 	if err := c.bindBorrowSources(value, sources, mutable); err != nil {
 		return err
 	}
-	env.define(value)
+	c.define(env, value)
 	return nil
 }
 
@@ -2424,7 +2444,7 @@ func (c *Checker) checkStringViewLetStmt(
 	value.localBorrow = true
 	value.borrowTargets = []borrowSource{{target: target, field: path}}
 	value.mutBorrow = mutable
-	env.define(value)
+	c.define(env, value)
 	return nil
 }
 
@@ -2768,7 +2788,7 @@ func (c *Checker) checkBoxBorrowLetStmt(
 	value.localBorrow = true
 	value.borrowTargets = []borrowSource{{target: target, field: field}}
 	value.mutBorrow = mutable
-	env.define(value)
+	c.define(env, value)
 	return nil
 }
 
@@ -2849,7 +2869,7 @@ func (c *Checker) checkBorrowLetStmt(
 	value.localBorrow = true
 	value.borrowTargets = []borrowSource{{target: target, field: field}}
 	value.mutBorrow = mutable
-	env.define(value)
+	c.define(env, value)
 	return nil
 }
 
@@ -3408,7 +3428,7 @@ func (c *Checker) defineIfErrCapture(stmt *ast.IfStmt, condType string, rightSco
 	errName, _, _ := c.errorUnionParts(condType)
 	errBinding := c.newBinding(stmt.ErrCapture, errName)
 	errBinding.declSpan = expressionSpan(stmt.Condition)
-	rightScope.define(errBinding)
+	c.define(rightScope, errBinding)
 }
 
 // checkLoopConsumesNothingOutside rejects a loop body that consumes a binding
@@ -3623,7 +3643,7 @@ func (c *Checker) defineCapture(
 		if err != nil {
 			return false, err
 		}
-		body.define(capture)
+		c.define(body, capture)
 		return false, nil
 	}
 	capture := c.newCaptureBinding(name, condType, cond)
@@ -3637,7 +3657,7 @@ func (c *Checker) defineCapture(
 			return false, err
 		}
 	}
-	body.define(capture)
+	c.define(body, capture)
 	return consumes, nil
 }
 
@@ -3800,7 +3820,7 @@ func (c *Checker) checkForStmt(stmt *ast.ForStmt, env *scope) error {
 		return err
 	}
 	enter := func(_, child *scope) error {
-		child.define(c.newBinding(stmt.Name, "i64"))
+		c.define(child, c.newBinding(stmt.Name, "i64"))
 		return nil
 	}
 	leave := func(*scope) error { return nil }
@@ -4143,7 +4163,7 @@ func (c *Checker) defineMatchArmPayload(
 			return err
 		}
 		if tied {
-			child.define(value)
+			c.define(child, value)
 			return nil
 		}
 	}
@@ -4154,7 +4174,7 @@ func (c *Checker) defineMatchArmPayload(
 	if !owned {
 		value.borrowedParam = true
 	}
-	child.define(value)
+	c.define(child, value)
 	return nil
 }
 
@@ -5039,7 +5059,7 @@ func (c *Checker) checkBlockValue(block *ast.BlockStmt, env *scope, moveTail boo
 	if block == nil || len(block.Statements) == 0 {
 		return "", errorf("move error: expression block must end with a value")
 	}
-	lastUses := blockLastUses(block)
+	lastUses := c.identUses.blockLastUses(block)
 	defers := []*ast.DeferStmt{}
 	errDeferMark := len(c.liveErrDefers)
 	defer c.restoreErrDefers(errDeferMark)
@@ -7762,7 +7782,7 @@ func (c *Checker) checkRawPointerBorrowLetStmt(stmt *ast.LetStmt, env *scope) (b
 	value.borrowedParam = true
 	value.localBorrow = true
 	value.mutBorrow = prefix.Operator == "&var"
-	env.define(value)
+	c.define(env, value)
 	return true, nil
 }
 
@@ -7795,7 +7815,7 @@ func (c *Checker) checkRawViewLetStmt(stmt *ast.LetStmt, env *scope) (bool, erro
 	value.borrowedParam = true
 	value.localBorrow = true
 	value.mutBorrow = ident.Name == "mut_view_from_ptr"
-	env.define(value)
+	c.define(env, value)
 	return true, nil
 }
 
@@ -8536,7 +8556,6 @@ func (c *Checker) directFieldReceiver(
 func (c *Checker) bindingForDirectFieldReceiver(receiver *directFieldReceiver) *binding {
 	value := &binding{
 		name: receiver.path, typeName: receiver.typeName,
-		// A field of a mutable place is itself a mutable place.
 		mutable:       mutablePlace(receiver.owner),
 		borrowedParam: receiver.owner.borrowedParam,
 		mutBorrow:     receiver.owner.mutBorrow,
@@ -9823,9 +9842,52 @@ func (s *scope) child() *scope {
 	return newScope(s)
 }
 
-// define binds a local name in the current scope.
+// define binds a local name in the current scope. A name already bound here
+// is replaced, and so leaves the scope's owners.
 func (s *scope) define(value *binding) {
+	if prev, ok := s.values[value.name]; ok && prev.ownerType {
+		for index, owner := range s.owners {
+			if owner == prev {
+				s.owners = append(s.owners[:index], s.owners[index+1:]...)
+				break
+			}
+		}
+	}
 	s.values[value.name] = value
+	if len(value.borrowTargets) > 0 {
+		s.borrowers = append(s.borrowers, value)
+	}
+	if value.ownerType {
+		s.owners = append(s.owners, value)
+	}
+}
+
+// define binds value in env, recording first whether its type owes cleanup.
+func (c *Checker) define(env *scope, value *binding) {
+	value.ownerType = c.valueTypeNeedsConsume(value.typeName)
+	env.define(value)
+}
+
+// walkOwners visits the bindings of this scope chain whose type carries a
+// deinit contract.
+func (s *scope) walkOwners(visit func(*binding)) {
+	for cur := s; cur != nil; cur = cur.parent {
+		for _, value := range cur.owners {
+			visit(value)
+		}
+	}
+}
+
+// lookupNamedID resolves the binding bound to name with this id. A binding is
+// bound under its own name, so this answers what lookupID does while reading
+// one map entry per scope.
+func (s *scope) lookupNamedID(name string, id int) (*binding, bool) {
+	for cur := s; cur != nil; cur = cur.parent {
+		if value, ok := cur.values[name]; ok && value.id == id {
+			return value, true
+		}
+	}
+	return nil, false
 }
 
 // lookup resolves a local name by walking parent scopes.
@@ -9870,10 +9932,24 @@ func (s *scope) lookupArenaID(arenaID int) (*binding, bool) {
 // A binding that is itself still borrowed keeps its own sources active: the
 // chain buffer <- view <- allocator <- owner releases from the leaf inward,
 // each release re-examining only the bindings it just unblocked.
+//
+// Only the bindings in s.borrowers can have targets to release. A release
+// only lowers borrow counts, so the bindings it unblocks end up released
+// whatever order they are visited in.
 func (s *scope) releaseLastUseBorrows(stmtIndex int, lastUses map[string]int) {
-	for name, value := range s.values {
-		s.releaseIfUnused(name, value, stmtIndex, lastUses)
+	for _, value := range s.borrowers {
+		if s.values[value.name] == value {
+			s.releaseIfUnused(value.name, value, stmtIndex, lastUses)
+		}
 	}
+	kept := s.borrowers[:0]
+	for _, value := range s.borrowers {
+		if len(value.borrowTargets) > 0 && s.values[value.name] == value {
+			kept = append(kept, value)
+		}
+	}
+	clear(s.borrowers[len(kept):])
+	s.borrowers = kept
 }
 
 // releaseIfUnused releases one binding's borrow targets once it is past its
@@ -10001,21 +10077,34 @@ func (c *Checker) fieldPathType(typeName string, path string) (string, bool) {
 	return current, true
 }
 
+// identUses collects the identifier reads the last-use analysis works from.
+// Every block checkBlock enters asks for its own last uses, and each one
+// reads its nested blocks' names; collecting a nested block once and keeping
+// its deduplicated names keeps that linear. Walking each subtree again at
+// every depth made deep nesting -- and a long else-if chain, which parses as
+// nested blocks -- cubic. The names depend only on the syntax, which no check
+// rewrites, so one entry serves every instantiation and expansion of a body.
+type identUses struct {
+	blocks map[*ast.BlockStmt][]string
+}
+
 // blockLastUses returns the last statement index where each identifier
 // appears. A loop counts as one statement: every turn it runs is over once
 // the statement is, and the body is checked against its own scope, which
 // this block's releases never reach. A name a registered cleanup reads is
 // read when the block exits, so it is kept until the end whatever else
 // follows.
-func blockLastUses(block *ast.BlockStmt) map[string]int {
+func (u *identUses) blockLastUses(block *ast.BlockStmt) map[string]int {
 	lastUses := map[string]int{}
 	end := len(block.Statements)
+	var names []string
 	for idx, stmt := range block.Statements {
 		at := idx
 		if cleanupStmt(stmt) {
 			at = end
 		}
-		for _, name := range stmtIdentUses(stmt) {
+		names = u.stmt(stmt, names[:0])
+		for _, name := range names {
 			if lastUses[name] >= end {
 				continue
 			}
@@ -10035,47 +10124,45 @@ func cleanupStmt(stmt ast.Statement) bool {
 	return false
 }
 
-// stmtIdentUses collects identifier reads from one statement.
-func stmtIdentUses(stmt ast.Statement) []string {
+// stmt appends the identifier reads of one statement to out.
+func (u *identUses) stmt(stmt ast.Statement, out []string) []string {
 	switch s := stmt.(type) {
 	case *ast.LetStmt:
-		return exprIdentUses(s.Value)
+		return u.expr(s.Value, out)
 	case *ast.AssignStmt:
-		uses := exprIdentUses(s.Value)
-		return append(uses, exprIdentUses(s.Target)...)
+		out = u.expr(s.Value, out)
+		return u.expr(s.Target, out)
 	case *ast.ReturnStmt:
-		return exprIdentUses(s.Value)
+		return u.expr(s.Value, out)
 	case *ast.DeferStmt:
-		return exprIdentUses(s.Expr)
+		return u.expr(s.Expr, out)
 	case *ast.ErrDeferStmt:
-		return exprIdentUses(s.Expr)
+		return u.expr(s.Expr, out)
 	case *ast.ExprStmt:
-		return exprIdentUses(s.Expr)
+		return u.expr(s.Expr, out)
 	case *ast.IfStmt:
-		uses := exprIdentUses(s.Condition)
-		uses = append(uses, blockIdentUses(s.Consequence)...)
-		uses = append(uses, blockIdentUses(s.Alternative)...)
-		return uses
+		out = u.expr(s.Condition, out)
+		out = append(out, u.block(s.Consequence)...)
+		return append(out, u.block(s.Alternative)...)
 	case *ast.WhileStmt:
-		uses := exprIdentUses(s.Condition)
-		return append(uses, blockIdentUses(s.Body)...)
+		out = u.expr(s.Condition, out)
+		return append(out, u.block(s.Body)...)
 	case *ast.ForStmt:
-		uses := exprIdentUses(s.Start)
-		uses = append(uses, exprIdentUses(s.End)...)
-		return append(uses, blockIdentUses(s.Body)...)
+		out = u.expr(s.Start, out)
+		out = u.expr(s.End, out)
+		return append(out, u.block(s.Body)...)
 	case *ast.MatchStmt:
-		uses := exprIdentUses(s.Value)
+		out = u.expr(s.Value, out)
 		for _, arm := range s.Arms {
-			uses = append(uses, stmtIdentUses(arm.Body)...)
+			out = u.stmt(arm.Body, out)
 		}
-		return uses
+		return out
 	case *ast.ComptimeIfStmt:
-		uses := exprIdentUses(s.Condition)
-		uses = append(uses, blockIdentUses(s.Consequence)...)
-		uses = append(uses, blockIdentUses(s.Alternative)...)
-		return uses
+		out = u.expr(s.Condition, out)
+		out = append(out, u.block(s.Consequence)...)
+		return append(out, u.block(s.Alternative)...)
 	default:
-		return nil
+		return out
 	}
 }
 
@@ -10093,63 +10180,73 @@ func wrappedExprValue(expr ast.Expression) ast.Expression {
 	}
 }
 
-// blockIdentUses collects identifier reads inside a nested block.
-func blockIdentUses(block *ast.BlockStmt) []string {
+// block returns the distinct identifier reads inside a nested block,
+// collected on the first request and kept for the rest.
+func (u *identUses) block(block *ast.BlockStmt) []string {
 	if block == nil {
 		return nil
 	}
-	uses := []string{}
-	for _, stmt := range block.Statements {
-		uses = append(uses, stmtIdentUses(stmt)...)
+	if names, ok := u.blocks[block]; ok {
+		return names
 	}
-	return uses
+	var names []string
+	for _, stmt := range block.Statements {
+		names = u.stmt(stmt, names)
+	}
+	slices.Sort(names)
+	names = slices.Clip(slices.Compact(names))
+	if u.blocks == nil {
+		u.blocks = map[*ast.BlockStmt][]string{}
+	}
+	u.blocks[block] = names
+	return names
 }
 
-// exprIdentUses collects identifier reads from an expression.
-func exprIdentUses(expr ast.Expression) []string {
+// expr appends the identifier reads of an expression to out.
+func (u *identUses) expr(expr ast.Expression, out []string) []string {
 	if inner, ok := transparentExprValue(expr); ok {
-		return exprIdentUses(inner)
+		return u.expr(inner, out)
 	}
 	switch e := expr.(type) {
 	case nil:
-		return nil
+		return out
 	case *ast.IdentExpr:
-		return []string{e.Name}
+		return append(out, e.Name)
 	case *ast.BinaryExpr:
-		return append(exprIdentUses(e.Left), exprIdentUses(e.Right)...)
+		out = u.expr(e.Left, out)
+		return u.expr(e.Right, out)
 	case *ast.CallExpr:
-		uses := exprIdentUses(e.Callee)
+		out = u.expr(e.Callee, out)
 		for _, arg := range e.Args {
-			uses = append(uses, exprIdentUses(arg)...)
+			out = u.expr(arg, out)
 		}
-		return uses
+		return out
 	case *ast.CastExpr, *ast.TryExpr, *ast.MoveExpr:
 		// One-operand wrappers read whatever they wrap. A `move` is among
 		// them: missing it would end the value's live range at its previous
 		// statement, and everything a last use releases -- the borrows it
 		// holds, the allocator it is tied to -- would go one statement early.
-		return exprIdentUses(wrappedExprValue(e))
+		return u.expr(wrappedExprValue(e), out)
 	case *ast.StructLiteralExpr:
-		uses := []string{}
 		for _, field := range e.Fields {
-			uses = append(uses, exprIdentUses(field.Value)...)
+			out = u.expr(field.Value, out)
 		}
-		return uses
+		return out
 	case *ast.FieldExpr:
-		return exprIdentUses(e.Receiver)
+		return u.expr(e.Receiver, out)
 	case *ast.DerefExpr:
-		return exprIdentUses(e.Receiver)
+		return u.expr(e.Receiver, out)
 	case *ast.VectorLiteralExpr, *ast.BufferLiteralExpr:
-		return valuesIdentUses(listedValues(e))
+		return u.values(listedValues(e), out)
 	case *ast.IndexExpr:
-		uses := exprIdentUses(e.Target)
-		uses = append(uses, exprIdentUses(e.Index)...)
-		uses = append(uses, exprIdentUses(e.Start)...)
-		return append(uses, exprIdentUses(e.End)...)
+		out = u.expr(e.Target, out)
+		out = u.expr(e.Index, out)
+		out = u.expr(e.Start, out)
+		return u.expr(e.End, out)
 	case *ast.ComptimeExpr:
-		return exprIdentUses(e.Expr)
+		return u.expr(e.Expr, out)
 	default:
-		return valueStmtIdentUses(expr)
+		return u.valueStmt(expr, out)
 	}
 }
 
@@ -10161,31 +10258,32 @@ func listedValues(expr ast.Expression) []ast.Expression {
 	return expr.(*ast.BufferLiteralExpr).Elements
 }
 
-// valuesIdentUses collects the identifier reads of the values a vector or
-// array literal lists.
-func valuesIdentUses(values []ast.Expression) []string {
-	uses := []string{}
+// values appends the identifier reads of the values a vector or array
+// literal lists to out.
+func (u *identUses) values(values []ast.Expression, out []string) []string {
 	for _, value := range values {
-		uses = append(uses, exprIdentUses(value)...)
+		out = u.expr(value, out)
 	}
-	return uses
+	return out
 }
 
-// valueStmtIdentUses collects identifier reads from the expressions that
-// carry statements: an `if` or `match` standing as a value reads whatever its
+// valueStmt appends the identifier reads of the expressions that carry
+// statements: an `if` or `match` standing as a value reads whatever its
 // branches read, and a guard's exit reads whatever it returns.
-func valueStmtIdentUses(expr ast.Expression) []string {
+func (u *identUses) valueStmt(expr ast.Expression, out []string) []string {
 	switch e := expr.(type) {
 	case *ast.IfStmt:
-		return stmtIdentUses(e)
+		return u.stmt(e, out)
 	case *ast.MatchStmt:
-		return stmtIdentUses(e)
+		return u.stmt(e, out)
 	case *ast.OrelseGuardExpr:
-		return append(exprIdentUses(e.Cond), stmtIdentUses(e.Exit)...)
+		out = u.expr(e.Cond, out)
+		return u.stmt(e.Exit, out)
 	case *ast.CatchGuardExpr:
-		return append(exprIdentUses(e.Cond), stmtIdentUses(e.Exit)...)
+		out = u.expr(e.Cond, out)
+		return u.stmt(e.Exit, out)
 	default:
-		return nil
+		return out
 	}
 }
 
@@ -10237,6 +10335,15 @@ func (s *scope) clone() *scope {
 		copyValue.fieldArenaIDs = copyIntMap(value.fieldArenaIDs)
 		copyValue.borrowTargets = append([]borrowSource(nil), value.borrowTargets...)
 		cloned.values[name] = &copyValue
+	}
+	for _, value := range s.borrowers {
+		if copyValue := cloned.values[value.name]; s.values[value.name] == value &&
+			len(copyValue.borrowTargets) > 0 {
+			cloned.borrowers = append(cloned.borrowers, copyValue)
+		}
+	}
+	for _, owner := range s.owners {
+		cloned.owners = append(cloned.owners, cloned.values[owner.name])
 	}
 	return cloned
 }
@@ -10300,20 +10407,6 @@ func (s *scope) collectBindings(out map[int]*binding) {
 	s.walkBindings(func(value *binding) {
 		out[value.id] = value
 	})
-}
-
-// lookupID finds the binding with this id, innermost scope first. A clone
-// keeps the id of the binding it copied, so this reaches the current state of
-// a value even where a later `let` of the same name hides it from lookup.
-func (s *scope) lookupID(id int) (*binding, bool) {
-	for cur := s; cur != nil; cur = cur.parent {
-		for _, value := range cur.values {
-			if value.id == id {
-				return value, true
-			}
-		}
-	}
-	return nil, false
 }
 
 // walkBindings visits all bindings in this scope chain.

@@ -35,11 +35,17 @@ pub struct Ast {
     /// Where the parser read each statement and declaration, kept once here
     /// so a handle carries 8 bytes for it rather than the span itself.
     pub spans: arena::Arena<Span>,
+    /// How many blocks add_block has retained: the next block's `id`.
+    block_count: i64,
 }
 
 /// Is the root of one parsed Kizu source file.
 pub struct Program {
     pub declarations: array::Array<Declaration>,
+    /// The module paths the declarations came from, each before the modules
+    /// that import it, the Go `Modules`: the order a native build compiles
+    /// them in, one unit each.
+    pub modules: array::Array<Text>,
 }
 
 /// Identifies one declaration retained by an Ast, and where the parser read
@@ -142,6 +148,10 @@ pub struct FunctionDecl {
     pub doc: Text,
     pub derived: bool,
     pub body: ?Block,
+    /// The module path the function was declared in, empty for a loose file,
+    /// the Go `Module`. A native debug build compiles each module as a unit
+    /// of its own, and this is what files the function under one.
+    pub module: Text,
 }
 
 /// Is one entry of a static argument declaration list.
@@ -173,6 +183,9 @@ pub struct StructDecl {
     /// spelled `extern "c" struct`. Its fields are what that ABI can name and
     /// are public: the foreign side already decides them (SPEC §12.2).
     pub extern_abi: Text,
+    /// The module path the struct was declared in, which its derived cleanup
+    /// is filed under.
+    pub module: Text,
 }
 
 /// Represents a top-level tag enum declaration.
@@ -203,6 +216,9 @@ pub struct UnionDecl {
     pub type_params: array::Array<Text>,
     pub variants: array::Array<UnionVariant>,
     pub public: bool,
+    /// The module path the union was declared in, which its derived cleanup
+    /// is filed under.
+    pub module: Text,
 }
 
 /// Represents one tagged union variant.
@@ -354,9 +370,12 @@ pub union ExpressionNode {
     Recovered(RecoveredNode),
 }
 
-/// Represents a sequence of statements.
+/// Represents a sequence of statements. `id` numbers the block among the
+/// ones its Ast holds, so a pass can key a map by block, which a handle
+/// cannot be; the Go side keys by the node pointer.
 pub struct BlockStmt {
     pub statements: array::Array<Statement>,
+    pub id: i64,
 }
 
 /// Represents a let or var declaration. `type_name` is the type the binding
@@ -715,14 +734,16 @@ pub fn new(allocator: Allocator) -> Ast {
         declarations: arena::new<DeclarationNode>(allocator),
         expressions: arena::new<ExpressionNode>(allocator),
         statements: arena::new<StatementNode>(allocator),
-        spans: arena::new<Span>(allocator)
+        spans: arena::new<Span>(allocator),
+        block_count: 0
     };
 }
 
 /// Creates an empty root declaration list.
 pub fn new_program(allocator: Allocator) -> Program {
     return Program {
-        declarations: array::new<Declaration>(allocator)
+        declarations: array::new<Declaration>(allocator),
+        modules: array::new<Text>(allocator)
     };
 }
 
@@ -830,11 +851,12 @@ fn (self: &Ast) span_at(handle: ?arena::Handle<Span>) -> Span {
     return zero_span();
 }
 
-/// Retains one block and returns its typed handle.
-fn (self: &var Ast) add_block(block: BlockStmt) -> !Block {
-    return Block {
-        node: try self.statements.add(self.allocator, StatementNode::Block(move block))
-    };
+/// Retains one block of statements and returns its typed handle.
+fn (self: &var Ast) add_block(statements: array::Array<Statement>) -> !Block {
+    let block = BlockStmt { statements: move statements, id: self.block_count };
+    let node = try self.statements.add(self.allocator, StatementNode::Block(move block));
+    self.block_count = self.block_count + 1;
+    return Block { node: node };
 }
 
 /// Retains the recovery declaration for a parse that gave up at `span`.
@@ -860,9 +882,7 @@ fn (self: &var Ast) add_recovered_expression(span: Span) -> !Expression {
 
 /// Retains an empty block using the syntax graph's allocator.
 fn (self: &var Ast) add_empty_block() -> !Block {
-    return try self.add_block(BlockStmt {
-        statements: array::new<Statement>(self.allocator)
-    });
+    return try self.add_block(array::new<Statement>(self.allocator));
 }
 
 /// Views a retained block as the statement node with the same identity.
@@ -2564,6 +2584,7 @@ fn derive_struct_deinit(
     return try derive_decl(allocator,
         ast,
         declaration.name,
+        declaration.module,
         &declaration.type_params,
         names,
         move statements
@@ -2661,16 +2682,20 @@ fn derive_union_deinit(
     return try derive_decl(allocator,
         ast,
         declaration.name,
+        declaration.module,
         &declaration.type_params,
         names,
         move statements
     );
 }
 
+/// Wraps a derived body in the method declaration that carries it. The
+/// method is filed under the module that declared the type.
 fn derive_decl(
     allocator: Allocator,
     ast: &var Ast,
     owner: Text,
+    module: Text,
     type_params: &array::Array<Text>,
     names: &DerivedNames,
     statements: array::Array<Statement>
@@ -2726,7 +2751,7 @@ fn derive_decl(
         typ::cleanup_method()
     );
     let return_type = try ast.types.parse("void");
-    let body_block = try ast.add_block(BlockStmt { statements: move body });
+    let body_block = try ast.add_block(move body);
     return FunctionDecl {
         signature: FunctionSignature {
             receiver: true,
@@ -2746,7 +2771,8 @@ fn derive_decl(
         },
         doc: names.empty,
         derived: true,
-        body: body_block
+        body: body_block,
+        module: module
     };
 }
 
@@ -2854,16 +2880,14 @@ fn add_derived_block(
     var statements = array::new<Statement>(allocator);
     errdefer statements.deinit(allocator);
     try statements.append(allocator, statement);
-    return try ast.add_block(BlockStmt { statements: move statements });
+    return try ast.add_block(move statements);
 }
 
 fn add_derived_empty_block(
     allocator: Allocator,
     ast: &var Ast
 ) -> !Block {
-    return try ast.add_block(BlockStmt {
-        statements: array::new<Statement>(allocator)
-    });
+    return try ast.add_block(array::new<Statement>(allocator));
 }
 
 fn joined_text(

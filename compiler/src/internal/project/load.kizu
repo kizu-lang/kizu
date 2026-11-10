@@ -50,6 +50,12 @@ fn (self: &Loader) module_path_copy(file: arena::Handle<ModuleFile>) -> !string:
     return copy_string(self.allocator, &group.path);
 }
 
+/// Retains the module path a file belongs to as text of the tree, the Go
+/// `module.path` a qualified declaration is filed under.
+fn (self: &Loader) module_path_text(tree: &var ast::Ast, file: arena::Handle<ModuleFile>) -> !ast::Text {
+    return tree.add_text(try self.module_path_copy(file));
+}
+
 /// Copies the package a file belongs to.
 fn (self: &Loader) module_pkg_copy(file: arena::Handle<ModuleFile>) -> !string::String {
     let entry = self.files.at(file);
@@ -295,6 +301,13 @@ fn (self: &var Loader) program(tree: &var ast::Ast) -> !LoadResult {
                     return LoadResult::Error(move failed);
                 }
             }
+            var group_index = 0;
+            while ordered.at(group_index) |group_handle| {
+                group_index = group_index + 1;
+                let group = self.groups.at(group_handle.*);
+                let path = try tree.add_text(try copy_string(self.allocator, &group.path));
+                try merged.modules.append(self.allocator, path);
+            }
             try ast::add_derived_deinits(self.allocator, tree, &var merged);
             return LoadResult::Program(move merged);
         },
@@ -458,7 +471,6 @@ fn (self: &var Loader) resolve_imports(
     let pkg_text = try self.module_pkg_copy(file);
     defer pkg_text.deinit(self.allocator);
     let group = self.files.at(file).group;
-    // The group's import union drives dependency ordering.
     if self.groups.at_mut(group) |entry| {
         var bound_index = 0;
         while bound.at(bound_index) |import_entry| {

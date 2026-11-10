@@ -438,22 +438,44 @@ var callsG = regexp.MustCompile(`(^|[ !(+;{$])g([)+;}]|$)`)
 // operation kind; with several, a missing marker is one class whatever its kind,
 // so the buckets stay few enough to replay in a few seconds.
 func bucket(c Case) string {
-	verdict := "accept"
-	if len(c.Expect) == 1 {
-		verdict = c.Expect[0]
-	} else if len(c.Expect) > 1 {
-		classes := map[string]bool{}
-		for _, kind := range c.Expect {
-			name, _, _ := strings.Cut(kind, ":")
-			classes[name] = true
+	verdict := bucketVerdict(c.Expect)
+	has := bucketConstructs(c)
+	// The rarest construct a program uses names its stratum; a subset of
+	// constructs per bucket would make more buckets than are worth replaying.
+	feature := "plain"
+	for _, name := range []string{"calls-g", "fnptr", "block", "away", "unsafe-fn", "covering-op", "sum"} {
+		if has[name] {
+			feature = name
+			break
 		}
-		var names []string
-		for name := range classes {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		verdict = strings.Join(names, "+")
 	}
+	return verdict + "/" + feature
+}
+
+// bucketVerdict is the predicted part of a bucket: the one predicted kind, or
+// the sorted classes when there are several.
+func bucketVerdict(expect []string) string {
+	if len(expect) == 0 {
+		return "accept"
+	}
+	if len(expect) == 1 {
+		return expect[0]
+	}
+	classes := map[string]bool{}
+	for _, kind := range expect {
+		name, _, _ := strings.Cut(kind, ":")
+		classes[name] = true
+	}
+	var names []string
+	for name := range classes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, "+")
+}
+
+// bucketConstructs is the set of constructs a case uses.
+func bucketConstructs(c Case) map[string]bool {
 	has := map[string]bool{}
 	for _, fn := range []Func{c.G, c.F} {
 		if fn.Kind == "unsafe" && len(fn.Body) > 0 {
@@ -483,14 +505,5 @@ func bucket(c Case) string {
 			has["calls-g"] = true
 		}
 	}
-	// The rarest construct a program uses names its stratum; a subset of
-	// constructs per bucket would make more buckets than are worth replaying.
-	feature := "plain"
-	for _, name := range []string{"calls-g", "fnptr", "block", "away", "unsafe-fn", "covering-op", "sum"} {
-		if has[name] {
-			feature = name
-			break
-		}
-	}
-	return verdict + "/" + feature
+	return has
 }

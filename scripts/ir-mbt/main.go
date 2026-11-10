@@ -309,81 +309,129 @@ var slotMethods = []string{"poke", "note"}
 // gives storage.
 func readSlotsCase(last map[string]json.RawMessage) (Case, error) {
 	c := Case{Types: []string{}, Decls: []string{}, Prog: []string{}, Expect: []string{}}
-	var types []json.RawMessage
-	if err := json.Unmarshal(last["xtype"], &types); err != nil {
+	var err error
+	if c.Types, err = readSlotsTypes(last["xtype"]); err != nil {
 		return c, err
 	}
-	for _, raw := range types {
-		n, err := integer(raw)
-		if err != nil {
-			return c, err
-		}
-		c.Types = append(c.Types, slotTypes[atoi(n)])
-	}
-	decls, err := decode(last["decls"])
-	if err != nil {
+	if c.Decls, err = readSlotsDecls(last["decls"]); err != nil {
 		return c, err
 	}
-	for _, entry := range decls.Map {
-		key, err := decode(entry[0])
-		if err != nil {
-			return c, err
-		}
-		t, err := integer(key.Tup[0])
-		if err != nil {
-			return c, err
-		}
-		m, err := integer(key.Tup[1])
-		if err != nil {
-			return c, err
-		}
-		var d struct {
-			Declared bool     `json:"declared"`
-			Recv     itfValue `json:"recv"`
-			Arg      itfValue `json:"arg"`
-		}
-		if err := json.Unmarshal(entry[1], &d); err != nil {
-			return c, err
-		}
-		if d.Declared {
-			c.Decls = append(c.Decls, fmt.Sprintf("%s.%s %s %s",
-				slotTypes[atoi(t)], slotMethods[atoi(m)], d.Recv.Tag, d.Arg.Tag))
-		}
-	}
-	sort.Strings(c.Decls)
-	var stmts []itfValue
-	if err := json.Unmarshal(last["prog"], &stmts); err != nil {
+	if c.Prog, err = readSlotsProg(last["prog"]); err != nil {
 		return c, err
 	}
-	for _, stmt := range stmts {
-		token, err := slotToken(stmt)
-		if err != nil {
-			return c, err
-		}
-		c.Prog = append(c.Prog, token)
-	}
-	expected, err := decode(last["expected"])
-	if err != nil {
+	if c.Expect, err = readSlotsExpect(last["expected"]); err != nil {
 		return c, err
 	}
-	for _, raw := range expected.Set {
-		local, err := decode(raw)
-		if err != nil {
-			return c, err
-		}
-		n, err := integer(local.Value)
-		if err != nil {
-			return c, err
-		}
-		c.Expect = append(c.Expect, strings.ToLower(local.Tag)+n)
-	}
-	sort.Strings(c.Expect)
 	var differs bool
 	if err := json.Unmarshal(last["nameDiffers"], &differs); err != nil {
 		return c, err
 	}
 	c.Bucket = slotsBucket(c, differs)
 	return c, nil
+}
+
+// readSlotsTypes reads the type of each struct local.
+func readSlotsTypes(raw json.RawMessage) ([]string, error) {
+	out := []string{}
+	var types []json.RawMessage
+	if err := json.Unmarshal(raw, &types); err != nil {
+		return out, err
+	}
+	for _, entry := range types {
+		n, err := integer(entry)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, slotTypes[atoi(n)])
+	}
+	return out, nil
+}
+
+// readSlotsDecls reads each declared method as `<Type>.<method> <recv> <arg>`,
+// sorted.
+func readSlotsDecls(raw json.RawMessage) ([]string, error) {
+	out := []string{}
+	decls, err := decode(raw)
+	if err != nil {
+		return out, err
+	}
+	for _, entry := range decls.Map {
+		decl, declared, err := readSlotsDecl(entry)
+		if err != nil {
+			return out, err
+		}
+		if declared {
+			out = append(out, decl)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// readSlotsDecl reads one entry of the decls map, and whether the model
+// declared it.
+func readSlotsDecl(entry [2]json.RawMessage) (string, bool, error) {
+	key, err := decode(entry[0])
+	if err != nil {
+		return "", false, err
+	}
+	t, err := integer(key.Tup[0])
+	if err != nil {
+		return "", false, err
+	}
+	m, err := integer(key.Tup[1])
+	if err != nil {
+		return "", false, err
+	}
+	var d struct {
+		Declared bool     `json:"declared"`
+		Recv     itfValue `json:"recv"`
+		Arg      itfValue `json:"arg"`
+	}
+	if err := json.Unmarshal(entry[1], &d); err != nil {
+		return "", false, err
+	}
+	return fmt.Sprintf("%s.%s %s %s",
+		slotTypes[atoi(t)], slotMethods[atoi(m)], d.Recv.Tag, d.Arg.Tag), d.Declared, nil
+}
+
+// readSlotsProg reads the statements as tokens.
+func readSlotsProg(raw json.RawMessage) ([]string, error) {
+	out := []string{}
+	var stmts []itfValue
+	if err := json.Unmarshal(raw, &stmts); err != nil {
+		return out, err
+	}
+	for _, stmt := range stmts {
+		token, err := slotToken(stmt)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, token)
+	}
+	return out, nil
+}
+
+// readSlotsExpect reads the locals the model gives storage, sorted.
+func readSlotsExpect(raw json.RawMessage) ([]string, error) {
+	out := []string{}
+	expected, err := decode(raw)
+	if err != nil {
+		return out, err
+	}
+	for _, entry := range expected.Set {
+		local, err := decode(entry)
+		if err != nil {
+			return out, err
+		}
+		n, err := integer(local.Value)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, strings.ToLower(local.Tag)+n)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // slotToken writes one statement of the slot model as its token.

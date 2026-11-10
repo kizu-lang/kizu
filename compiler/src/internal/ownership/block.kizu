@@ -37,7 +37,7 @@ fn (self: &var Checker) check_block_statements(
     env: ScopeHandle,
     block: ast::Block
 ) -> !?diagnostic::Diagnostic {
-    var last_uses = try block_last_uses(self.allocator, tree, block);
+    var last_uses = try self.ident_uses.block_last_uses(self.allocator, tree, block);
     defer last_uses.deinit(self.allocator);
     var defers = array::new<ast::Statement>(self.allocator);
     defer defers.deinit(self.allocator);
@@ -470,7 +470,9 @@ fn (self: &var Checker) validate_err_defer_receivers(
         if entry.id == 0 {
             continue;
         }
-        let value = self.store.find_by_id(env, entry.id) orelse continue;
+        let entry_name = name_text(&self.names, entry.name);
+        let entry_bytes = entry_name.as_bytes();
+        let value = self.store.find_named_id(env, entry_bytes, entry.id) orelse continue;
         if self.binding_consumed(value) {
             try retired.append(self.allocator, entry.receiver);
             continue;
@@ -621,7 +623,8 @@ fn (self: &var Checker) check_owners_consumed(
 ) -> !?diagnostic::Diagnostic {
     let error_path = exit.kind == LeakExitKind::Try or exit.kind == LeakExitKind::ErrorReturn;
     var leaked = none_binding();
-    var walker = self.store.walk(env);
+    // Only a value whose type carries a deinit contract can need consuming.
+    var walker = self.store.walk_owners(env);
     while walker.next(&self.store) |value| {
         if self.binding(value).id <= since_id or !try self.binding_needs_consume(value) {
             continue;
