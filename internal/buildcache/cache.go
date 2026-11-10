@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -33,6 +34,27 @@ type Entry struct {
 	Output     string    `json:"output"`
 	SizeBytes  int64     `json:"size_bytes"`
 	CreatedAt  time.Time `json:"created_at"`
+	// UsedAt is when a build last read or stored the artifact, which is
+	// what eviction orders by: an artifact every build reads stays however
+	// long ago it was made. An entry written before the field existed has
+	// none and is ordered by CreatedAt.
+	UsedAt *time.Time `json:"used_at,omitempty"`
+}
+
+// Kind is what sort of artifact an entry holds: the first segment of its
+// target, which every caller starts with the artifact's kind
+// (`native-exe/...`, `native-obj/...`, `native-runtime/...`).
+func (entry Entry) Kind() string {
+	kind, _, _ := strings.Cut(entry.Target, "/")
+	return kind
+}
+
+// lastUsed is when the entry was last read or stored.
+func (entry Entry) lastUsed() time.Time {
+	if entry.UsedAt != nil {
+		return *entry.UsedAt
+	}
+	return entry.CreatedAt
 }
 
 // Status summarizes cache state.
@@ -41,6 +63,16 @@ type Status struct {
 	MaxBytes  int64
 	SizeBytes int64
 	Entries   int
+	// Kinds counts the entries and bytes of each artifact kind, sorted by
+	// kind.
+	Kinds []KindStatus
+}
+
+// KindStatus is the share of the cache one artifact kind holds.
+type KindStatus struct {
+	Kind      string
+	Entries   int
+	SizeBytes int64
 }
 
 // New returns the default local cache.
@@ -71,8 +103,8 @@ func (c *Cache) GetOrBuildArtifact(
 	input := newInput(name, target, content)
 	stored := outputName(input.key)
 	output := c.outputPath(stored)
-	if _, ok := c.hasArtifact(input.key); ok {
-		return output, nil
+	if entry, ok := c.hasArtifact(input.key); ok {
+		return output, c.markUsed(entry)
 	}
 	if err := os.MkdirAll(c.Dir, 0o755); err != nil {
 		return "", err
@@ -131,10 +163,25 @@ func (c *Cache) Status() (Status, error) {
 		return Status{}, err
 	}
 	var size int64
+	kinds := map[string]*KindStatus{}
 	for _, entry := range entries {
 		size += entry.SizeBytes
+		kind := kinds[entry.Kind()]
+		if kind == nil {
+			kind = &KindStatus{Kind: entry.Kind()}
+			kinds[entry.Kind()] = kind
+		}
+		kind.Entries++
+		kind.SizeBytes += entry.SizeBytes
 	}
-	return Status{Dir: c.Dir, MaxBytes: c.MaxBytes, SizeBytes: size, Entries: len(entries)}, nil
+	status := Status{Dir: c.Dir, MaxBytes: c.MaxBytes, SizeBytes: size, Entries: len(entries)}
+	for _, kind := range kinds {
+		status.Kinds = append(status.Kinds, *kind)
+	}
+	sort.Slice(status.Kinds, func(i int, j int) bool {
+		return status.Kinds[i].Kind < status.Kinds[j].Kind
+	})
+	return status, nil
 }
 
 // Prune removes every cache entry.
@@ -176,16 +223,29 @@ func newInput(name string, target string, content []byte) cacheInput {
 // is written after the artifact it describes, so an entry never promises a file
 // that is not there yet.
 func (c *Cache) writeMeta(input cacheInput, outputName string, size int64) error {
-	entry := Entry{
+	now := time.Now().UTC()
+	return c.writeEntry(Entry{
 		Key: input.key, Target: input.target, SourceHash: input.sourceHash,
 		Version: Version, Output: outputName,
-		SizeBytes: size, CreatedAt: time.Now().UTC(),
-	}
+		SizeBytes: size, CreatedAt: now, UsedAt: &now,
+	})
+}
+
+// markUsed records that a build read the entry's artifact, so eviction takes
+// what no build has asked for longest rather than what was made first.
+func (c *Cache) markUsed(entry Entry) error {
+	now := time.Now().UTC()
+	entry.UsedAt = &now
+	return c.writeEntry(entry)
+}
+
+// writeEntry writes one metadata entry.
+func (c *Cache) writeEntry(entry Entry) error {
 	data, err := json.MarshalIndent(entry, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(c.metaPath(input.key), data, 0o644)
+	return os.WriteFile(c.metaPath(entry.Key), data, 0o644)
 }
 
 // readEntry reads one metadata entry.
@@ -227,14 +287,25 @@ func (c *Cache) entries() ([]Entry, error) {
 	return entries, nil
 }
 
-// enforceLimit removes oldest entries until the cache fits MaxBytes.
+// enforceLimit removes the entries used longest ago until the cache fits
+// MaxBytes. It runs after every store, so it first asks only what the stored
+// files measure, which the directory listing answers; the entries are read
+// and ordered only when that is over the limit.
 func (c *Cache) enforceLimit() error {
+	stored, err := c.storedBytes()
+	if err != nil || stored <= c.MaxBytes {
+		return err
+	}
 	entries, err := c.entries()
 	if err != nil {
 		return err
 	}
 	sort.Slice(entries, func(i int, j int) bool {
-		return entries[i].CreatedAt.Before(entries[j].CreatedAt)
+		left, right := entries[i].lastUsed(), entries[j].lastUsed()
+		if !left.Equal(right) {
+			return left.Before(right)
+		}
+		return entries[i].Key < entries[j].Key
 	})
 	var size int64
 	for _, entry := range entries {
@@ -253,6 +324,33 @@ func (c *Cache) enforceLimit() error {
 		}
 	}
 	return nil
+}
+
+// storedBytes sums the sizes of the stored artifacts. An artifact whose entry
+// is gone still counts: it takes the room all the same, and counting it can
+// only make the entries be read sooner.
+func (c *Cache) storedBytes() (int64, error) {
+	items, err := os.ReadDir(c.Dir)
+	if err != nil {
+		return 0, err
+	}
+	var size int64
+	for _, item := range items {
+		if item.IsDir() || !strings.HasSuffix(item.Name(), ".out") {
+			continue
+		}
+		info, err := item.Info()
+		if err != nil {
+			// A concurrent process may evict an artifact between the
+			// listing and the stat; gone takes no room.
+			if os.IsNotExist(err) {
+				continue
+			}
+			return 0, err
+		}
+		size += info.Size()
+	}
+	return size, nil
 }
 
 // metaPath returns the metadata path for key.

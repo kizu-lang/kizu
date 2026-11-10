@@ -38,12 +38,32 @@ baseline として `examples/user_registry.kizu` を使います。
 
 | artifact | cache key | 保存条件 |
 | --- | --- | --- |
-| LLVM IR text | source path + source hash + optimization mode | `build --emit-llvm` |
-| wasm text | source path + source hash + optimization mode | `build --target wasm32-wasi` |
-| runtime object | runtime C source + toolchain | native link のたび(初回だけ compile) |
-| run/test 実行ファイル | LLVM IR + runtime object + toolchain | `run` / `test` の link |
+| runtime object | runtime C source + toolchain + `clang --version` の 1 行目 | native link のたび(`build --target native` も含む。初回だけ compile) |
+| unit object(`native-obj`) | unit の LLVM IR + toolchain + `clang --version` の 1 行目 | debug の native link で miss した unit(`build --target native` も含む) |
+| unit bitcode(`native-bc`) | 同上(toolchain に `-flto=thin` と link 側の codegen flag が入る) | `build --target native --opt --thinlto` で miss した unit |
+| run/test 実行ファイル | 全 unit の LLVM IR の hash を unit 順に並べたもの + runtime C source の hash + toolchain | `run` / `test` の link |
 
-`cache prune` が全消し、上限超過分は古い順に落ちます。
+debug build は LLVM IR を module ごとの unit と program unit(package の `main`、test
+runner、error 名の表)に割り、unit ごとに object を作って link します。cache に無い
+unit は processor の数だけ並行に compile し、link は完了順でなく unit 順に並べます。1 module の
+編集で clang が compile し直すのはその unit だけで、署名や型を変えたときはそれを
+参照する unit も変わります。`--opt` は 1 unit のまま clang に -O3 で丸ごと渡します。
+`--opt --thinlto` は debug と同じく module ごとに割り、unit ごとに `-O3 -flto=thin` の
+bitcode を作って cache し、link で ThinLTO が unit を跨いで最適化します。linker が
+ThinLTO で作った code は cache directory の下の `thinlto/` に linker 自身が置き、
+prune も linker の既定に任せます(空の cache で build すればここも空から始まる)。
+`--opt` の IR inliner は分割の前にかかるので、小さい関数の編集は呼ぶ側の unit も変えます。
+実行ファイルの鍵に clang の版は入らないので、cache にある実行ファイルを走らせる
+`run` は toolchain に触れません。
+
+toolchain は driver・target・flag・SDK です。`build --emit-llvm` の LLVM IR と
+`build --target wasm32-wasi` の出力は cache せず、毎回 lower します(ADR-0126)。
+Go seed と Kizu 製 compiler は同じ directory と同じ key を共有します。
+
+`cache prune` が全消し、既定の上限(256 MiB)を超えた分は最後に使われたのが古い順
+(LRU)に落ちます。hit のたびに entry の `used_at` を更新します。保存のたびに見るのは
+artifact の file サイズの合計だけで、entry を全部読んで並べるのは上限を超えたときだけです。
+`cache status` は artifact の種別(key の先頭: `native-exe` など)ごとの件数とサイズも出します。
 
 CI は `KIZU_CACHE_DIR` を runner の一時 directory に固定し、commit ごとの key で
 content-addressed artifact を復元・保存します。新しい commit は直近 cache を prefix
@@ -55,9 +75,9 @@ build するため、fixed point の検査は cache hit で省略しません。
 ## cache 設計の制約
 
 - 既定の上限を持ち、`cache status` で見え、`cache prune` で消せる
-- module-aware cache key は compiler version、manifest hash、module graph hash、
-  source hash、public interface hash、target、backend、optimization mode、
-  stdlib hash を含む
+- cache key は artifact が何でできているか(LLVM IR・runtime source・toolchain)
+  だけから作り、source path や時刻を入れない。compiler が変われば IR が変わるので
+  key も変わる(ADR-0126)
 - debug artifact は明示 opt-in
 - build script と proc macro による隠れた依存を作らない
 - CI の必須 path に巨大 artifact 生成や無制限 cache population を入れない

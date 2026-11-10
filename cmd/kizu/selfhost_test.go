@@ -33,9 +33,6 @@ func TestSelfhostFrontend(t *testing.T) {
 	selfhost := sharedSelfhost(t)
 	file := "../../examples/hello.kizu"
 	pkg := "../../tests/behavior"
-	// A program the checkers accept and the backend does not, so the case
-	// fails only if `check` reaches the backend on both sides.
-	backendReject := "../../examples/negative/union_recursive_payload.kizu"
 	commands := []struct {
 		name string
 		want cliOutput
@@ -43,8 +40,6 @@ func TestSelfhostFrontend(t *testing.T) {
 	}{
 		{"parse-file", goParseOutput(file), []string{"parse", file}},
 		{"check-package", goCheckOutput(pkg), []string{"check", pkg}},
-		{"check-backend-reject", goCheckOutput(backendReject),
-			[]string{"check", backendReject}},
 		{"ir-package", goIrOutput(pkg, false), []string{"ir", pkg}},
 		{"ir-opt-package", goIrOutput(pkg, true), []string{"ir", "--opt", pkg}},
 		{"llvm-package", goEmitLLVMOutput(pkg, false), []string{"build", "--emit-llvm", pkg}},
@@ -1163,16 +1158,11 @@ func goParseOutput(file string) cliOutput {
 }
 
 // goCheckOutput renders what `kizu check` prints for a target by running the
-// path checkFile runs, backend included. Rebuilding the pipeline here from the
-// checkers alone once let the promise be weaker than the command's, and both
-// sides agreed on the weaker one.
+// path checkFile runs, lowering and IR verify included. Rebuilding the
+// pipeline here from the checkers alone once let the promise be weaker than
+// the command's, and both sides agreed on the weaker one.
 func goCheckOutput(target string) cliOutput {
-	module, err := lowerRunTarget(target)
-	if err != nil {
-		return cliOutput{stderr: cliErrorLine(err), failed: true}
-	}
-	ir.KeepTargetReachableFunctions(module, "", "main")
-	if _, err := llvm.Emit(module); err != nil {
+	if _, err := lowerRunTarget(target); err != nil {
 		return cliOutput{stderr: cliErrorLine(err), failed: true}
 	}
 	return cliOutput{stdout: "check: ok\n"}

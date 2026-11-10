@@ -135,15 +135,61 @@ spec-verify:
 spec-quint:
     scripts/spec-quint.sh
 
+# Test the internal/ir models, search them for a broken property, and resample the
+# programs internal/ir replays against the lowerer and the optimizer (spec/ir/README.md).
+spec-ir:
+    cd spec/ir && quint test slots_test.qnt && quint test bounds_test.qnt && quint test defer_test.qnt
+    cd spec/ir && quint run slots.qnt --backend rust --seed 0x1 --max-samples 2000 --max-steps 20 \
+        --invariant soundness
+    cd spec/ir && quint run bounds.qnt --backend rust --seed 0x1 --max-samples 1000 --max-steps 20 \
+        --invariant soundness
+    cd spec/ir && quint run defer.qnt --backend rust --seed 0x1 --max-samples 1000 --max-steps 20 \
+        --invariant soundness
+    go run ./scripts/ir-mbt
 # Test the ownership model, search it for an unsound acceptance, and resample the
 # programs internal/ownership replays against the checker (spec/ownership/README.md).
 spec-ownership:
     cd spec/ownership && quint test ownership_test.qnt
-    cd spec/ownership && for init in initGuided initOneMistake initFree; do \
+    cd spec/ownership && for init in initGuided initOneMistake initFree initTargeted; do \
         quint run ownership.qnt --init $init --backend rust --seed 0x1 --max-samples 3000 \
             --max-steps 25 --invariant soundness --witnesses reachedAccept reachedAcceptNested \
-            reachedBorrowed reachedLoopConsume reachedDoubleDefer || exit 1; done
+            reachedBorrowed reachedLoopConsume reachedDoubleDefer reachedOnlyBorrowed \
+            reachedOnlyDoubleDefer reachedOnlyLoopConsume || exit 1; done
     go run ./scripts/ownership-mbt
+
+# Test the unsafe marker model, search it for an unsound acceptance, require each
+# mutant (one rule broken) to fail the search, and resample the programs
+# internal/unsafecap replays against the checker (spec/unsafecap/README.md).
+spec-unsafecap:
+    cd spec/unsafecap && quint test unsafecap_test.qnt
+    cd spec/unsafecap && for init in initGuided initOneMistake initFree; do \
+        quint run unsafecap.qnt --main spec --init $init --backend rust --seed 0x1 --max-samples 2000 \
+            --max-steps 12 --invariant soundness --witnesses reachedAccept reachedAcceptUnsafeFn \
+            reachedAcceptBlock reachedAcceptAway reachedUnused reachedBoundary reachedMismatch \
+            reachedNoSafety || exit 1; done
+    cd spec/unsafecap && for mutant in mutantInherit mutantUnsafeFnBody mutantLooseFnTypes asImplemented; do \
+        if quint run unsafecap.qnt --main $mutant --init initFree --backend rust --seed 0x2 \
+            --max-samples 3000 --max-steps 12 --invariant soundness > /dev/null; then \
+            echo "$mutant: no counterexample"; exit 1; fi; done
+    go run ./scripts/unsafecap-mbt
+
+# Test the C header import model, search it for an unsound acceptance, require
+# the importer as it is and each mutant (one rule broken) to fail the search, and
+# resample the programs internal/cimport replays against the importer and the
+# checker (spec/cimport/README.md).
+spec-cimport:
+    cd spec/cimport && quint test cimport_test.qnt --main cimport_test --backend typescript
+    cd spec/cimport && for init in initGuided initOneMistake initFree initReadonly; do \
+        quint run cimport.qnt --main spec --init $init --backend typescript --seed 0x1 --max-samples 3000 \
+            --max-steps 1 --invariant soundness --witnesses reachedAccept reachedAcceptCall \
+            reachedAcceptPtrRet reachedAcceptInnerConst reachedVolatile reachedDiverge reachedCheck \
+            reachedUse reachedConstLaundering || exit 1; done
+    cd spec/cimport && for mutant in asImplemented mutantConstCollapse mutantDropVolatile mutantRetNonNull \
+        mutantUnmarked mutantSign; do \
+        if quint run cimport.qnt --main $mutant --init initFree --backend typescript --seed 0x2 \
+            --max-samples 3000 --max-steps 1 --invariant soundness > /dev/null; then \
+            echo "$mutant: no counterexample"; exit 1; fi; done
+    go run ./scripts/cimport-mbt
 
 # Regenerate the traces from the Lean specifications (spec/README.md).
 spec-trace:

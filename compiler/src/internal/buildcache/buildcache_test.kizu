@@ -1,5 +1,4 @@
 import compiler::internal::fsutil;
-import compiler::internal::sha256;
 import std::fmt;
 import std::fs;
 import std::io;
@@ -25,11 +24,9 @@ fn test_cache(allocator: Allocator) -> !Cache {
     try fmt::append_i64(allocator, &var dir, process::unix_millis());
     try dir.append_bytes(allocator, "-");
     try fmt::append_i64(allocator, &var dir, process::monotonic_millis());
-    let hasher = try sha256::new(allocator);
     return Cache {
         dir: move dir,
         max_bytes: default_max_bytes(),
-        hasher: move hasher,
         scratch_sequence: 0
     };
 }
@@ -128,6 +125,7 @@ fn plant_entry(
     cache: &Cache,
     key: []u8,
     stamp: []u8,
+    used: []u8,
     content: []u8
 ) -> !void {
     var stored_spelling = string::new(allocator);
@@ -149,6 +147,9 @@ fn plant_entry(
     try meta.append_byte(allocator, cast<u8>(58));
     try fmt::append_i64(allocator, &var meta, mem::len(content));
     try meta.append_byte(allocator, cast<u8>(44));
+    if mem::len(used) > 0 {
+        try append_planted_field(allocator, &var meta, "used_at", used);
+    }
     try meta.append_byte(allocator, cast<u8>(34));
     try meta.append_bytes(allocator, "created_at");
     try meta.append_byte(allocator, cast<u8>(34));
@@ -198,8 +199,8 @@ fn eviction_keeps_newest(io: Io, allocator: Allocator) -> !void {
     defer cache.deinit(allocator);
     let dir_bytes = cache.dir.as_bytes();
     try fsutil::create_dir_all(io, dir_bytes);
-    try plant_entry(io, allocator, &cache, "older", "2020-01-01T00:00:00Z", "old bytes!");
-    try plant_entry(io, allocator, &cache, "newer", "2021-01-01T00:00:00.5Z", "new bytes!");
+    try plant_entry(io, allocator, &cache, "older", "2020-01-01T00:00:00Z", "", "old bytes!");
+    try plant_entry(io, allocator, &cache, "newer", "2021-01-01T00:00:00.5Z", "", "new bytes!");
     cache.max_bytes = 10;
     try cache.enforce_limit(io, allocator);
     let old_kept = try entry_files_exist(io, allocator, &cache, "older");
@@ -213,4 +214,44 @@ test "enforce_limit evicts the oldest entry first" {
     let allocator = mem::page_allocator();
     let stdio = io::blocking();
     try eviction_keeps_newest(stdio, allocator);
+}
+
+/// Plants an entry made first but used last beside one made later and never
+/// used since, and requires the unused one to be evicted.
+fn eviction_keeps_used(io: Io, allocator: Allocator) -> !void {
+    var cache = try test_cache(allocator);
+    defer cache.deinit(allocator);
+    let dir_bytes = cache.dir.as_bytes();
+    try fsutil::create_dir_all(io, dir_bytes);
+    try plant_entry(
+        io,
+        allocator,
+        &cache,
+        "made-first",
+        "2020-01-01T00:00:00Z",
+        "2022-01-01T00:00:00Z",
+        "old bytes!"
+    );
+    try plant_entry(
+        io,
+        allocator,
+        &cache,
+        "made-later",
+        "2021-01-01T00:00:00Z",
+        "2021-01-01T00:00:00Z",
+        "new bytes!"
+    );
+    cache.max_bytes = 10;
+    try cache.enforce_limit(io, allocator);
+    let used_kept = try entry_files_exist(io, allocator, &cache, "made-first");
+    testing::expect(used_kept);
+    let unused_kept = try entry_files_exist(io, allocator, &cache, "made-later");
+    testing::expect(!unused_kept);
+    return drop_test_cache(io, allocator, &cache);
+}
+
+test "enforce_limit evicts the entry used longest ago" {
+    let allocator = mem::page_allocator();
+    let stdio = io::blocking();
+    try eviction_keeps_used(stdio, allocator);
 }

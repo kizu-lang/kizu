@@ -21,6 +21,10 @@ type Module struct {
 	// ExternName; which of these a program links is read off the calls that
 	// survive reachability, not off the declarations (LinkInputs).
 	Externs map[string]Extern
+	// Modules lists the program's module paths, each before the modules that
+	// import it (ast.Program.Modules): the order of the units a native debug
+	// build compiles separately.
+	Modules []string
 }
 
 // Extern is what one `extern` declaration tells the linker: the ABI it is
@@ -119,6 +123,14 @@ type Function struct {
 	Blocks     []*Block
 	ExportABI  string
 	ExportName string
+	// Module is the module path the function was declared in. A function
+	// the compiler writes for the whole program -- the package entry point,
+	// the test runner -- has none.
+	Module string
+	// Instance marks a generic instance. Its code depends on the static
+	// arguments the caller chose, so it belongs to no one module: every unit
+	// that reaches it carries a copy (llvm.EmitUnits).
+	Instance bool
 }
 
 // Block is a basic block with instructions and one terminator. Its predecessors

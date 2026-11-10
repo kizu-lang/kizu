@@ -2310,6 +2310,10 @@ fileの中だけに閉じます。別fileでは `unsafe` を付けても拒否�
 不変条件を作る操作 —— 構築と field への書き込み —— には `unsafe` が要ります。
 field の読みには要りません。読み出した raw pointer は、それを使う操作の側が
 `unsafe` を要求します。
+field を `&var` で貸すこと —— `set(&var b.len)`、`let r = &var b.len;`、field に
+対する `&var self` method の呼び出し —— は field への書き込みに含みます。借り手が
+何を書くかは呼び先を跨いで追えないので、貸した時点を書き込みとします。`&` での
+貸し出しは読みです。
 
 ```kizu
 fn size(b: &Bytes) -> usize {
@@ -2496,7 +2500,7 @@ fn update(node: ptr<Node>) -> void {
 | `ptr_view` | `view_from_ptr(p, count)` / `mut_view_from_ptr(p, count)` |
 | `extern_call` | `extern "..." fn` call / C 関数 pointer を通した call |
 | `unsafe_call` | `unsafe fn` call |
-| `struct_invariant` | `unsafe struct` の構築 / field write |
+| `struct_invariant` | `unsafe struct` の構築 / field write(`&var` での field の貸し出しを含む) |
 | `volatile` | volatile read/write primitive |
 
 この表の名前はソースには書きません。マーカーは `unsafe` の 1 語で、種類は
@@ -3746,8 +3750,16 @@ state と stack を解放します。確保と解放の allocator は source に
   caller のもので、std は読まない。`at` は deadline と同じ時点
 * 1 つの descriptor が同じ `wait` で 2 回報告されることがある。kqueue は filter
   ごと、epoll は bit をまとめるので、host が言った通りを渡す
-* `TcpListener` / `TcpStream` / `Poller` は非 copy の owner で、`deinit` は
-  `self` を値で取る。close 後の使用は型 error であり、runtime の報告ではない
+* `std::net::command(allocator, program)` が組む `Command` の `spawn(io)` は
+  `!std::net::Child` を返す。`Stdio::Pipe` にした stream は
+  `read_stdout_ready` / `read_stderr_ready`(null は「まだ無い」、0 は終端)と
+  `write_stdin_some` で読み書きし(待つ形は `read_stdout_into` /
+  `read_stderr_into` / `write_stdin_all`)、`watch_child_stdout` / `watch_child_stderr` /
+  `watch_child_stdin` で `Poller` に登録する。起動できない program は子の
+  終了 code 127 になる。`wait` / `try_wait` は終了 code、signal なら 128 + signal
+* `TcpListener` / `TcpStream` / `Poller` / `Child` は非 copy の owner で、`deinit` は
+  `self` を値で取る。close 後の使用は型 error であり、runtime の報告ではない。
+  `Child` の `deinit` は回収していない子を kill して回収する
 * `std::net::Address` は `host: []u8` と `port: i64` だけを持つ
 * safe Kizu に file descriptor や socket pointer は出さない
 * I/O failure は `!T` error として返す

@@ -1,16 +1,15 @@
 package project
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 
-	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/manifest"
-	"github.com/kizu-lang/kizu/internal/source"
 	"github.com/kizu-lang/kizu/internal/stdlib"
 	"github.com/kizu-lang/kizu/internal/token"
 )
@@ -239,7 +238,7 @@ var stdErrors struct {
 	err  error
 }
 
-// readStdErrorSets parses std once for the numbers its error set members lower
+// readStdErrorSets reads std once for the numbers its error set members lower
 // to. Modules are read in module-path order and files in path order, so the
 // numbers a build assigns depend on what std declares and on nothing else.
 func readStdErrorSets() (map[string]map[string]int, int, error) {
@@ -247,20 +246,19 @@ func readStdErrorSets() (map[string]map[string]int, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	parser := &graphChecker{sources: source.NewMap()}
 	sets := map[string]map[string]int{}
 	code := 1
 	for _, module := range graph.Modules {
 		for _, file := range module.Files {
-			program, err := parser.parseModuleFile(file)
+			text, err := os.ReadFile(file)
 			if err != nil {
 				return nil, 0, err
 			}
-			for _, decl := range program.Decls {
-				set, ok := decl.(*ast.ErrorSetDecl)
-				if !ok {
-					continue
-				}
+			declared, err := scanErrorSets(string(text))
+			if err != nil {
+				return nil, 0, fmt.Errorf("%s: %w", file, err)
+			}
+			for _, set := range declared {
 				members := map[string]int{}
 				for _, member := range set.Members {
 					members[member] = code
@@ -271,4 +269,86 @@ func readStdErrorSets() (map[string]map[string]int, int, error) {
 		}
 	}
 	return sets, code, nil
+}
+
+// errorSetNames is one error set declaration: its name and its members in
+// the order they are written. A `= A or B;` set has no members of its own.
+type errorSetNames struct {
+	Name    string
+	Members []string
+}
+
+// scanErrorSets returns the error sets one source declares, in the order it
+// declares them. Only the names and their order decide the numbers, so the
+// source is read as tokens rather than parsed: an error set is declared at
+// the top level only, which is where the brackets around a token are all
+// closed, and `error` followed by a name begins one nowhere else. Most std
+// files never spell `error` at all, and those are not lexed.
+func scanErrorSets(source string) ([]errorSetNames, error) {
+	sets := []errorSetNames{}
+	if !strings.Contains(source, "error") {
+		return sets, nil
+	}
+	lex := lexer.New(source)
+	depth := 0
+	for {
+		tok := lex.NextToken()
+		switch tok.Type {
+		case token.EOF:
+			return sets, nil
+		case token.LBrace, token.LParen, token.LBracket:
+			depth++
+			continue
+		case token.RBrace, token.RParen, token.RBracket:
+			depth--
+			continue
+		}
+		if depth != 0 || tok.Type != token.Ident || tok.Literal != "error" {
+			continue
+		}
+		name := lex.NextToken()
+		if name.Type != token.Ident {
+			continue
+		}
+		members, ok := scanErrorSetMembers(lex)
+		if !ok {
+			return nil, fmt.Errorf("malformed error set %s", name.Literal)
+		}
+		sets = append(sets, errorSetNames{Name: name.Literal, Members: members})
+	}
+}
+
+// scanErrorSetMembers reads what follows `error Name`: the member names of
+// a `{ A, B }` set, or none for a `= A or B;` set, which keeps no codes of its
+// own. It stops after the `{ }` list, or on the `=`, so the caller's bracket
+// depth stays right, and reports false for anything else.
+func scanErrorSetMembers(lex *lexer.Lexer) ([]string, bool) {
+	open := lex.NextToken()
+	switch open.Type {
+	case token.Assign:
+		return nil, true
+	case token.LBrace:
+	default:
+		return nil, false
+	}
+	members := []string{}
+	for {
+		tok := lex.NextToken()
+		switch tok.Type {
+		case token.RBrace:
+			return members, true
+		case token.Ident:
+			members = append(members, tok.Literal)
+		default:
+			return nil, false
+		}
+		sep := lex.NextToken()
+		switch sep.Type {
+		case token.RBrace:
+			return members, true
+		case token.Comma:
+		default:
+			return nil, false
+		}
+	}
 }

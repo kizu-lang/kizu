@@ -140,7 +140,9 @@ pub fn array_header_size() -> i64 {
 }
 
 /// Writes declarations for the hosted Array runtime, the Go
-/// `writeArrayRuntimeDecls`.
+/// `writeArrayRuntimeDecls`. The header a call names is nocapture: the
+/// runtime keeps no copy of its address, so a reserve before a loop of
+/// appends leaves the header a local whose fields can live in registers.
 fn (self: &var Emitter) write_array_runtime_decls(module: &ir::Module) -> !void {
     if !self.uses_array_header(module) {
         return;
@@ -150,9 +152,9 @@ fn (self: &var Emitter) write_array_runtime_decls(module: &ir::Module) -> !void 
         return self.line("");
     }
     try self.line("declare void @kizu_array_grow(ptr, ptr, ptr, i64, i64, i64)");
-    try self.line("declare i1 @kizu_array_append_bytes(ptr, ptr, ptr, i64)");
+    try self.line("declare i1 @kizu_array_append_bytes(ptr, ptr nocapture, ptr, i64)");
     try self.line("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)");
-    try self.line("declare i1 @kizu_array_reserve(ptr, ptr, i64, i64)");
+    try self.line("declare i1 @kizu_array_reserve(ptr, ptr nocapture, i64, i64)");
     try self.line("declare void @kizu_array_deinit(ptr, ptr, i64)");
     return self.line("");
 }
@@ -301,7 +303,7 @@ fn (self: &Emitter) uses_array_header(module: &ir::Module) -> bool {
     if self.uses_array_runtime(module) {
         return true;
     }
-    return module_has_runtime_header_type(module, "std::array::Array<");
+    return self.module_has_runtime_header_type(module, "std::array::Array<");
 }
 
 /// Reports whether this module calls the hosted Array runtime, the Go
@@ -799,7 +801,7 @@ fn (self: &var Emitter) write_array_pop_or_panic(module: &ir::Module, node: &ir:
     }
     let result_type = try self.llvm_type_of(module, node.result.type_name);
     let tag = self.value_tag(result_type);
-    try self.line4("  %s = load %s, ptr %s%s", Arg::Str(result_name), Arg::Str(result_type), Arg::Str(ptr_name), Arg::Lit(tag));
+    try self.write_value_load(result_name, "", result_type, ptr_name, 0, tag);
     try self.set_value(module, node.result, result_name);
     return null;
 }
@@ -854,7 +856,7 @@ fn (self: &var Emitter) write_array_get_or_panic(module: &ir::Module, node: &ir:
     let result_name = try self.local_name(module, node.result.name);
     let result_type = try self.llvm_type_of(module, node.result.type_name);
     let tag = self.value_tag(result_type);
-    try self.line4("  %s = load %s, ptr %s%s", Arg::Str(result_name), Arg::Str(result_type), Arg::Str(elem_addr), Arg::Lit(tag));
+    try self.write_value_load(result_name, "", result_type, elem_addr, 0, tag);
     try self.set_value(module, node.result, result_name);
     return null;
 }
