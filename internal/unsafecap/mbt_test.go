@@ -512,7 +512,27 @@ func (r *mbtStmtRenderer) stmt(text string) error {
 	if err != nil {
 		return err
 	}
-	prefix := markers(m)
+	return r.markedStmt(fields, markers(m), comment)
+}
+
+// mbtWriteTarget spells a write of e by its form, without the markers.
+func mbtWriteTarget(form, e string) string {
+	switch form {
+	case "ptr_write":
+		return "ptr_write(p, " + e + ");"
+	case "vol_write":
+		return "volatile_write(p, " + e + ");"
+	case "deref_set":
+		return "p.* = " + e + ";"
+	default:
+		return "b.n = " + e + ";"
+	}
+}
+
+// markedStmt writes a statement that carries markers: `prefix` is them, put
+// where the statement's operation is, and `comment` writes the SAFETY line
+// when the statement asked for one.
+func (r *mbtStmtRenderer) markedStmt(fields []string, prefix string, comment func()) error {
 	switch fields[0] {
 	case "ptr_write", "vol_write", "deref_set", "field_set":
 		e, err := r.expr(fields[2])
@@ -520,16 +540,7 @@ func (r *mbtStmtRenderer) stmt(text string) error {
 			return err
 		}
 		comment()
-		switch fields[0] {
-		case "ptr_write":
-			r.line(prefix + "ptr_write(p, " + e + ");")
-		case "vol_write":
-			r.line(prefix + "volatile_write(p, " + e + ");")
-		case "deref_set":
-			r.line(prefix + "p.* = " + e + ";")
-		default:
-			r.line(prefix + "b.n = " + e + ";")
-		}
+		r.line(prefix + mbtWriteTarget(fields[0], e))
 	case "view":
 		comment()
 		r.line("let v" + r.id + " = " + prefix + "view_from_ptr(p, 1);")
