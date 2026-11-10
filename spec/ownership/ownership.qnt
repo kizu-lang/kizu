@@ -304,30 +304,50 @@ module ownership {
   var bodyNames: List[Set[int]]  // per open loop, innermost last: the ids its body declared
   var unused: Set[int]           // ids declared but not yet read (the type checker refuses those)
   var budget: int                // how many statements may break a rule the program kept so far
+  var allowed: Set[Kind]         // the rules a statement may break at all
+  var exact: bool                // the finished program must break exactly the allowed rules
   var mistakes: int              // how many did
+  var broken: Set[Kind]          // the rules prog breaks so far: checkPrefix(prog).errs, kept to save its cost
   var done: bool
   var expected: Set[Kind]
   var faults: Set[Fault]
 
-  // Whether a program that extends p and has the diagnostics qErrs breaks a
-  // rule p did not.
-  pure def breaksNewRule(p: List[Stmt], qErrs: Set[Kind]): bool =
-    not(qErrs.subseteq(checkPrefix(p).errs))
+  // Whether a program that extends prog and has the diagnostics qErrs breaks a
+  // rule prog did not.
+  def breaksNewRule(qErrs: Set[Kind]): bool = not(qErrs.subseteq(broken))
 
   // Each mode has a budget of rule breaks: none gives accepted programs, one
   // gives programs with a single mistake, which say the most about which rule
-  // the checker applied, and a large one gives anything.
-  def mistake(s: Stmt): bool = breaksNewRule(prog, checkPrefix(prog.append(s)).errs)
+  // the checker applied, and a large one gives anything. A targeted mode also
+  // narrows which rules may break, and finishes only on exactly those.
+  pure val ALL_KINDS: Set[Kind] = Set(Borrowed, UseAfterMove, DoubleDefer, Leak, LoopConsume)
+
+  // The verdicts the targeted mode aims at, since a run that may break any rule
+  // mostly breaks the common ones (Leak, UseAfterMove) and seldom stops at one
+  // Borrowed, one DoubleDefer, or a pair of the rare ones. Every set of classes
+  // is a verdict some program has, except that a loop body's consume always
+  // comes with UseAfterMove (the next turn meets `s` consumed).
+  pure val TARGETS: Set[Set[Kind]] = ALL_KINDS.powerset().filter(k =>
+    k != Set() and (k.contains(LoopConsume) implies k.contains(UseAfterMove)))
+
+  // The single-class verdicts among them, which say the most about which rule
+  // the checker applied (it reports one diagnostic, and with several the
+  // report may be any of them).
+  pure val SINGLE_TARGETS: Set[Set[Kind]] =
+    TARGETS.filter(k => k.size() == 1 or k == Set(LoopConsume, UseAfterMove))
 
   def room: bool = length(prog) < MAX_LEN
   def depth: int = length(bodyNames)
 
   action take(s: Stmt): bool = all {
     not(done),
-    val m = mistake(s)
+    val errs = checkPrefix(prog.append(s)).errs
+    val m = breaksNewRule(errs)
     all {
+      errs.subseteq(allowed),
       not(m) or mistakes < budget,
       mistakes' = if (m) mistakes + 1 else mistakes,
+      broken' = errs,
     },
     prog' = prog.append(s),
   }
@@ -336,7 +356,9 @@ module ownership {
     nextId' = nextId, views' = views, borrows' = borrows, bodyNames' = bodyNames, unused' = unused,
   }
 
-  action keepResult: bool = all { budget' = budget, done' = done, expected' = expected, faults' = faults }
+  action keepResult: bool = all {
+    budget' = budget, allowed' = allowed, exact' = exact, done' = done, expected' = expected, faults' = faults,
+  }
 
   action declare(s: Stmt, isView: bool): bool = all {
     room,
@@ -397,26 +419,29 @@ module ownership {
     depth == 0,
     unused == Set(),
     val p = prog.concat(closing)
-    val m = breaksNewRule(prog, errorsOf(p))
+    val errs = errorsOf(p)
+    val m = breaksNewRule(errs)
     all {
       p.foldl(false, (named, s) => named or usesOwner(s)),
+      if (exact) errs == allowed else errs.subseteq(allowed),
       not(m) or mistakes < budget,
       mistakes' = if (m) mistakes + 1 else mistakes,
       prog' = p,
+      broken' = errs,
       done' = true,
-      expected' = errorsOf(p),
+      expected' = errs,
       faults' = faultsOf(p),
     },
     keepNames,
-    budget' = budget,
+    budget' = budget, allowed' = allowed, exact' = exact,
   }
 
   action stutter: bool = all {
     done,
-    prog' = prog, mistakes' = mistakes, keepNames, keepResult,
+    prog' = prog, mistakes' = mistakes, broken' = broken, keepNames, keepResult,
   }
 
-  action start(rules: int): bool = all {
+  action start(rules: int, kinds: Set[Kind], exactly: bool): bool = all {
     prog' = List(),
     nextId' = 0,
     views' = Set(),
@@ -424,36 +449,103 @@ module ownership {
     bodyNames' = List(),
     unused' = Set(),
     budget' = rules,
+    allowed' = kinds,
+    exact' = exactly,
     mistakes' = 0,
+    broken' = Set(),
     done' = false,
     expected' = Set(),
     faults' = Set(),
   }
 
-  action init = nondet b = Set(0, 1, MAX_LEN).oneOf() start(b)
-  action initGuided = start(0)
-  action initOneMistake = start(1)
-  action initFree = start(MAX_LEN)
+  action init = nondet b = Set(0, 1, MAX_LEN).oneOf() start(b, ALL_KINDS, false)
+  action initGuided = start(0, Set(), false)
+  action initOneMistake = start(1, ALL_KINDS, false)
+  action initFree = start(MAX_LEN, ALL_KINDS, false)
+  // Half the runs aim at a single class, half at any verdict: oneOf picks
+  // alike among the elements of a set, so the roll is the weighting.
+  action initTargeted = {
+    nondet roll = Set(0, 1).oneOf()
+    nondet single = SINGLE_TARGETS.oneOf()
+    nondet some = TARGETS.oneOf()
+    start(MAX_LEN, if (roll == 0) single else some, true)
+  }
 
+  // The statements that name an existing binding or `s` alone.
+  def readable: Set[Stmt] =
+    Set(ReadOwner, Mutate, Deinit, MoveOut, DeferDeinit)
+      .union(views.map(id => UseView(id)))
+      .union(borrows.map(id => UseBorrow(id)))
+
+  // Whether appending s breaks a rule of the goal the program has not broken yet.
+  def advances(s: Stmt): bool = {
+    val errs = checkPrefix(prog.append(s)).errs
+    errs.subseteq(allowed) and breaksNewRule(errs)
+  }
+
+  // A targeted run picks among all statements alike, so a goal that needs one
+  // particular statement at one particular point (a second `defer`, a read that
+  // makes an earlier `mutate` borrowed) is seldom finished within MAX_LEN. This
+  // branch picks a statement that moves the program toward its goal.
+  // `TurnBegin` is the "none" choice (oneOf needs a value).
+  action aim: bool = all {
+    exact,
+    nondet s = readable.filter(advances).union(Set(TurnBegin)).oneOf()
+    all {
+      s != TurnBegin,
+      match s {
+        | UseView(id) => read(s, id)
+        | UseBorrow(id) => read(s, id)
+        | _ => plain(s)
+      },
+    },
+  }
+
+  // What a goal's rule needs before it can break at all: a registered `defer`
+  // for DoubleDefer, a view or borrow for Borrowed, a loop for LoopConsume, an
+  // unprotected `try` for Leak (which aim already offers), a consume for
+  // UseAfterMove. Without it a targeted run spends its MAX_LEN statements on
+  // others and ends with no way to finish.
+  action prepare: bool = all {
+    exact,
+    any {
+      all { allowed.contains(DoubleDefer), plain(DeferDeinit) },
+      all { allowed.contains(Borrowed), declare(View(nextId), true) },
+      all { allowed.contains(Borrowed), declare(Borrow(nextId), false) },
+      all { allowed.contains(LoopConsume), openLoop(false) },
+      all { allowed.contains(LoopConsume), openLoop(true) },
+      all { allowed.contains(UseAfterMove), plain(Deinit) },
+      all { allowed.contains(UseAfterMove), plain(MoveOut) },
+    },
+  }
+
+  // The simulator picks among the enabled branches of `any` alike, so the
+  // nesting is the weighting: in a targeted run aim and prepare are taken about
+  // as often as all the other statements together; in the other modes they are
+  // disabled and the step is the inner `any` alone.
   action step = any {
-    declare(View(nextId), true),
-    declare(Borrow(nextId), false),
-    nondet id = views.union(Set(-1)).oneOf()
-      all { id >= 0, read(UseView(id), id) },
-    nondet id = borrows.union(Set(-1)).oneOf()
-      all { id >= 0, read(UseBorrow(id), id) },
-    plain(ReadOwner),
-    plain(Mutate),
-    plain(Deinit),
-    plain(MoveOut),
-    plain(DeferDeinit),
-    unrelated,
-    openLoop(false),
-    openLoop(true),
-    closeLoop,
-    finish(List()),
-    finish(List(Deinit)),
-    stutter,
+    aim,
+    prepare,
+    any {
+      declare(View(nextId), true),
+      declare(Borrow(nextId), false),
+      nondet id = views.union(Set(-1)).oneOf()
+        all { id >= 0, read(UseView(id), id) },
+      nondet id = borrows.union(Set(-1)).oneOf()
+        all { id >= 0, read(UseBorrow(id), id) },
+      plain(ReadOwner),
+      plain(Mutate),
+      plain(Deinit),
+      plain(MoveOut),
+      plain(DeferDeinit),
+      unrelated,
+      openLoop(false),
+      openLoop(true),
+      closeLoop,
+      finish(List()),
+      finish(List(Deinit)),
+      stutter,
+    },
   }
 
   // ----------------------------------------------------------- properties
@@ -494,4 +586,9 @@ module ownership {
   val reachedLeak: bool = done and expected.contains(Leak)
   val reachedLoopConsume: bool = done and expected.contains(LoopConsume)
   val reachedDoubleDefer: bool = done and expected.contains(DoubleDefer)
+  // A program whose only diagnostic is one class: the shapes that say the most
+  // about which rule the checker applied, and the rarest under random runs.
+  val reachedOnlyBorrowed: bool = done and expected == Set(Borrowed)
+  val reachedOnlyDoubleDefer: bool = done and expected == Set(DoubleDefer)
+  val reachedOnlyLoopConsume: bool = done and expected == Set(LoopConsume, UseAfterMove)
 }

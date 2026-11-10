@@ -60,10 +60,7 @@ func ConstructExpansion(
 		})
 		// A value with no cleanup contract has nothing to release, and the
 		// fields already built are what an `errdefer` protects: a later worker
-		// that fails leaves them owned by nobody else. The release names the
-		// allocator the worker built the field from, which is the construct's
-		// own first argument (ADR-0132); the checker requires one there as
-		// soon as any field owns something.
+		// that fails leaves them owned by nobody else.
 		value := Expression(&IdentExpr{Name: binding})
 		if OwnerType(owners, field.Type) {
 			statements = append(statements, &ErrDeferStmt{Expr: &CallExpr{

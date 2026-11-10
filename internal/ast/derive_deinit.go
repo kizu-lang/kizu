@@ -115,7 +115,7 @@ func deriveStructDeinit(owners map[string]bool, decl *StructDecl) *FunctionDecl 
 	if len(statements) == 0 {
 		return nil
 	}
-	return deriveDecl(decl.Name, decl.TypeParams, statements)
+	return deriveDecl(decl.Name, decl.Module, decl.TypeParams, statements)
 }
 
 // deriveUnionDeinit consumes the payload of the active variant. Every variant
@@ -141,11 +141,12 @@ func deriveUnionDeinit(owners map[string]bool, decl *UnionDecl) *FunctionDecl {
 		return nil
 	}
 	match := &MatchStmt{Value: &IdentExpr{Name: deriveReceiver}, Arms: arms}
-	return deriveDecl(decl.Name, decl.TypeParams, []Statement{match})
+	return deriveDecl(decl.Name, decl.Module, decl.TypeParams, []Statement{match})
 }
 
 // deriveDecl wraps a derived body in the method declaration that carries it.
-func deriveDecl(owner string, typeParams []string, body []Statement) *FunctionDecl {
+// The method is filed under the module that declared the type.
+func deriveDecl(owner string, module string, typeParams []string, body []Statement) *FunctionDecl {
 	params := make([]StaticParam, 0, len(typeParams))
 	args := make([]typ.Type, 0, len(typeParams))
 	for _, name := range typeParams {
@@ -171,7 +172,8 @@ func deriveDecl(owner string, typeParams []string, body []Statement) *FunctionDe
 			// is read from the method name, and std is read from the path.
 			Std: strings.HasPrefix(owner, "std::"),
 		},
-		Body: &BlockStmt{Statements: body},
+		Body:   &BlockStmt{Statements: body},
+		Module: module,
 	}
 }
 

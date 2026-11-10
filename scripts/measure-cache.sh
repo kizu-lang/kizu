@@ -67,5 +67,34 @@ run "warm run" "$warm" "$kizu" run "$tmp/hello.kizu"
 edit "edited, kizu"
 run "single-file edit llvm" "$cold" "$kizu" build --emit-llvm "$tmp/hello.kizu"
 run "single-file edit run" "$cold" "$kizu" run "$tmp/hello.kizu"
+
+# The compiler is the largest package there is to build, and the edit that
+# matters in it is one module's: whatever a build can reuse when one module
+# changes shows up here first. The copy keeps the edit out of the checkout,
+# and the generated version module is written into the checkout before it is
+# copied, since a build without it does not resolve.
+go run ./scripts/gen-selfhost-version >/dev/null
+cp -R compiler "$tmp/compiler"
+compiler_edit_file="$tmp/compiler/src/internal/types/body_expression_core.kizu"
+compiler_edit_from='is not an operator; logical and is written'
+compiler_edit() {
+  sed "s/$compiler_edit_from/$1/" \
+    compiler/src/internal/types/body_expression_core.kizu > "$compiler_edit_file"
+  # An edit the source no longer offers would measure a no-op rebuild under
+  # the name of an edit.
+  if [ "$1" != "$compiler_edit_from" ] &&
+    cmp -s compiler/src/internal/types/body_expression_core.kizu "$compiler_edit_file"; then
+    echo "measure-cache: the compiler edit no longer applies" >&2
+    exit 1
+  fi
+}
+compiler_edit "$compiler_edit_from"
+run "cold compiler llvm" "$cold" "$kizu" build --emit-llvm "$tmp/compiler"
+run "cold compiler run" "$cold" "$kizu" run "$tmp/compiler" -- version
+run "warm compiler run" "$cold" "$kizu" run "$tmp/compiler" -- version
+compiler_edit "is not an operator; and is written"
+run "single-module edit compiler llvm" "$cold" "$kizu" build --emit-llvm "$tmp/compiler"
+run "single-module edit compiler run" "$cold" "$kizu" run "$tmp/compiler" -- version
+
 run "cache status" "$warm" "$kizu" cache status
 printf 'cache size\t%s\n' "$(du -sh "$KIZU_CACHE_DIR" | awk '{ print $1 }')"

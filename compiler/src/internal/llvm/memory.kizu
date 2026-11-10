@@ -1056,3 +1056,58 @@ fn (self: &var Emitter) write_memory_decls(module: &ir::Module) -> !void {
     }
     return;
 }
+
+/// Reads one value of llvm_type from addr into name, the Go `writeValueLoad`.
+/// keyword is "volatile " or empty, align is the alignment the address is
+/// known to have or 0 for the type's own, and tag is the alias tag suffix.
+///
+/// A bool is the byte 0 or 1 in memory, and is read as that byte with its
+/// range, then narrowed. An i1 load says nothing about the byte's other seven
+/// bits, so a loop over []bool cannot be widened into vector loads: each
+/// element is read alone and masked. The byte and its range let it be. The
+/// range is metadata !7, the Go `boolRangeMetadata`, after the tags
+/// write_tbaa_table writes.
+fn (self: &var Emitter) write_value_load(
+    name: ir::Name,
+    keyword: []u8,
+    llvm_type: ir::Name,
+    addr: ir::Name,
+    align: i64,
+    tag: []u8
+) -> !void {
+    if !self.names.is(llvm_type, "i1") {
+        if align > 0 {
+            return self.line6(
+                "  %s = load %s%s, ptr %s, align %d%s",
+                Arg::Str(name), Arg::Lit(keyword), Arg::Str(llvm_type), Arg::Str(addr), Arg::Int(align), Arg::Lit(tag)
+            );
+        }
+        return self.line5(
+            "  %s = load %s%s, ptr %s%s",
+            Arg::Str(name), Arg::Lit(keyword), Arg::Str(llvm_type), Arg::Str(addr), Arg::Lit(tag)
+        );
+    }
+    self.bool_range_used = true;
+    let byte = try self.suffixed(name, ".byte");
+    if align > 0 {
+        try self.line5(
+            "  %s = load %si8, ptr %s, align %d%s, !range !7",
+            Arg::Str(byte), Arg::Lit(keyword), Arg::Str(addr), Arg::Int(align), Arg::Lit(tag)
+        );
+    } else {
+        try self.line4(
+            "  %s = load %si8, ptr %s%s, !range !7",
+            Arg::Str(byte), Arg::Lit(keyword), Arg::Str(addr), Arg::Lit(tag)
+        );
+    }
+    return self.line2("  %s = trunc i8 %s to i1", Arg::Str(name), Arg::Str(byte));
+}
+
+/// Writes the range write_value_load names, when a bool was read, the Go
+/// `writeBoolRange`.
+fn (self: &var Emitter) write_bool_range() -> !void {
+    if !self.bool_range_used {
+        return;
+    }
+    return self.line("!7 = !{i8 0, i8 2}");
+}

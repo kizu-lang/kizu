@@ -154,6 +154,32 @@ var mbtKnownDivergences = []struct {
 	{mbtShape("doubleMarkedDefer", mbtHome("$ defer !! ev"), "Unused"), "?"},
 }
 
+// mbtRawBorrowFormMessage is the checker's answer to `let r = &var p.*;`
+// with no marker. SPEC §12 counts that initializer as a `ptr_deref` and says
+// a missing marker's diagnostic names the kind; the checker names the form
+// instead, and mbtClassify maps it to Missing:ptr_deref
+// (findings/unsafecap-quint-findings.md, F2).
+const mbtRawBorrowFormMessage = "a raw pointer's value is borrowed by an `unsafe` binding"
+
+// TestUnsafeModelKnownRawBorrowDiagnostic pins F2, which mbtClassify hides
+// from the other tests: once the checker reports a missing marker here, the
+// mapping in mbtClassify is no longer needed.
+func TestUnsafeModelKnownRawBorrowDiagnostic(t *testing.T) {
+	check := mbtChecker(t)
+	source, err := mbtRender(mbtShape("unmarkedRawBorrow", mbtHome("deref_borrow -")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := check(source)
+	if got == nil {
+		t.Fatal("the checker accepted an unmarked raw borrow")
+	}
+	if !strings.Contains(got.Error(), mbtRawBorrowFormMessage) || strings.Contains(got.Error(), "requires `unsafe`") {
+		t.Errorf("the checker now reports %q; drop the F2 case of mbtClassify and this test, "+
+			"and update findings/unsafecap-quint-findings.md", got.Error())
+	}
+}
+
 // TestUnsafeModelKnownShapes checks the harness on shapes with a known
 // verdict, and then puts each to the checker again with the opposite verdict,
 // which must diverge: a renderer whose programs all fail the same way, or a
@@ -296,7 +322,7 @@ func mbtClassify(err error) string {
 			}
 		}
 		return "?"
-	case strings.Contains(message, "a raw pointer's value is borrowed by an `unsafe` binding"):
+	case strings.Contains(message, mbtRawBorrowFormMessage):
 		// `let r = &var p.*;` with no marker: the checker reads the form
 		// `unsafe &var p.*` as one, so it names the form instead of the
 		// missing marker (findings/unsafecap-quint-findings.md, F2).
@@ -486,7 +512,27 @@ func (r *mbtStmtRenderer) stmt(text string) error {
 	if err != nil {
 		return err
 	}
-	prefix := markers(m)
+	return r.markedStmt(fields, markers(m), comment)
+}
+
+// mbtWriteTarget spells a write of e by its form, without the markers.
+func mbtWriteTarget(form, e string) string {
+	switch form {
+	case "ptr_write":
+		return "ptr_write(p, " + e + ");"
+	case "vol_write":
+		return "volatile_write(p, " + e + ");"
+	case "deref_set":
+		return "p.* = " + e + ";"
+	default:
+		return "b.n = " + e + ";"
+	}
+}
+
+// markedStmt writes a statement that carries markers: `prefix` is them, put
+// where the statement's operation is, and `comment` writes the SAFETY line
+// when the statement asked for one.
+func (r *mbtStmtRenderer) markedStmt(fields []string, prefix string, comment func()) error {
 	switch fields[0] {
 	case "ptr_write", "vol_write", "deref_set", "field_set":
 		e, err := r.expr(fields[2])
@@ -494,16 +540,7 @@ func (r *mbtStmtRenderer) stmt(text string) error {
 			return err
 		}
 		comment()
-		switch fields[0] {
-		case "ptr_write":
-			r.line(prefix + "ptr_write(p, " + e + ");")
-		case "vol_write":
-			r.line(prefix + "volatile_write(p, " + e + ");")
-		case "deref_set":
-			r.line(prefix + "p.* = " + e + ";")
-		default:
-			r.line(prefix + "b.n = " + e + ";")
-		}
+		r.line(prefix + mbtWriteTarget(fields[0], e))
 	case "view":
 		comment()
 		r.line("let v" + r.id + " = " + prefix + "view_from_ptr(p, 1);")

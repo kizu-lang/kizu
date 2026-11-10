@@ -2675,12 +2675,23 @@ pub fn runtime_source() -> []u8 {
         \\    return accept(fd, NULL, NULL);
         \\}
         \\
+        \\/* A child's pipe goes through the same read and write as a socket, so the
+        \\ * deadline and poller paths are one. recv and send refuse a descriptor that is
+        \\ * not a socket, and read and write on a non-blocking pipe mean the same thing. */
         \\static int64_t kizu_net_recv(int fd, void *buffer, size_t length) {
-        \\    return (int64_t)recv(fd, buffer, length, 0);
+        \\    ssize_t got = recv(fd, buffer, length, 0);
+        \\    if (got < 0 && errno == ENOTSOCK) {
+        \\        got = read(fd, buffer, length);
+        \\    }
+        \\    return (int64_t)got;
         \\}
         \\
         \\static int64_t kizu_net_send(int fd, const void *buffer, size_t length) {
-        \\    return (int64_t)send(fd, buffer, length, MSG_DONTWAIT);
+        \\    ssize_t wrote = send(fd, buffer, length, MSG_DONTWAIT);
+        \\    if (wrote < 0 && errno == ENOTSOCK) {
+        \\        wrote = write(fd, buffer, length);
+        \\    }
+        \\    return (int64_t)wrote;
         \\}
         \\
         \\static int kizu_net_poll(struct pollfd *fds, size_t count, int timeout_ms) {
@@ -3636,6 +3647,286 @@ pub fn runtime_source() -> []u8 {
         \\    free(poller->events);
         \\#endif
         \\    free(poller);
+        \\}
+        \\
+        \\/* A child whose standard streams this process may hold the other end of. The
+        \\ * pipes are the reason it lives beside the poller: the parent's ends are
+        \\ * non-blocking descriptors that net_read, net_write_some and net_poller_add
+        \\ * take the way they take a socket. Like a poller, the handle is a pointer the
+        \\ * Kizu owner keeps private, and its consuming deinit is net_child_close.
+        \\ *
+        \\ * Windows is not reached: WSAPoll waits on sockets only, so a pipe there
+        \\ * could be read but not waited on together with the connections, which is the
+        \\ * one thing this is for. Spawning reports OperationFailed rather than handing
+        \\ * out half of the contract. */
+        \\
+        \\#define KIZU_CHILD_INHERIT INT64_C(0)
+        \\#define KIZU_CHILD_NULL INT64_C(1)
+        \\#define KIZU_CHILD_PIPE INT64_C(2)
+        \\
+        \\typedef struct {
+        \\    int64_t pid;
+        \\    /* This process's end of stdin, stdout and stderr, or -1 when that stream
+        \\       is not piped or has been closed. */
+        \\    int fds[3];
+        \\    int64_t status;
+        \\    int reaped;
+        \\} KizuChild;
+        \\
+        \\static KizuChild *kizu_child_from(int64_t handle) {
+        \\    if (handle == 0) {
+        \\        return NULL;
+        \\    }
+        \\    return (KizuChild *)(intptr_t)handle;
+        \\}
+        \\
+        \\#if !defined(_WIN32)
+        \\static void kizu_child_close_ends(int ends[3][2]) {
+        \\    for (int i = 0; i < 3; i++) {
+        \\        for (int side = 0; side < 2; side++) {
+        \\            if (ends[i][side] >= 0) {
+        \\                close(ends[i][side]);
+        \\                ends[i][side] = -1;
+        \\            }
+        \\        }
+        \\    }
+        \\}
+        \\
+        \\/* The exit status the way spawn_wait8 reports it: the code a child exited
+        \\ * with, or 128 plus the signal that ended it. */
+        \\static int64_t kizu_child_status(int status) {
+        \\    if (WIFEXITED(status)) {
+        \\        return (int64_t)WEXITSTATUS(status);
+        \\    }
+        \\    if (WIFSIGNALED(status)) {
+        \\        return 128 + (int64_t)WTERMSIG(status);
+        \\    }
+        \\    return 127;
+        \\}
+        \\#endif
+        \\
+        \\/* argv is every argument followed by a NUL, which the Kizu side builds and
+        \\ * checks. modes packs how stdin, stdout and stderr are set up, two bits each. */
+        \\static KizuErrorI64 kizu_std_builtin_net_child_spawn_result(
+        \\    void *io, KizuSliceU8 argv_bytes, int64_t modes) {
+        \\    if (kizu_io_is_failing(io)) {
+        \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_IO_FAILING);
+        \\    }
+        \\#if defined(_WIN32)
+        \\    (void)argv_bytes;
+        \\    (void)modes;
+        \\    return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_OPERATION_FAILED);
+        \\#else
+        \\    if (argv_bytes.len < 2 || argv_bytes.ptr[0] == 0 || argv_bytes.ptr[argv_bytes.len - 1] != 0) {
+        \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_INVALID_LENGTH);
+        \\    }
+        \\    int64_t argc = 0;
+        \\    for (int64_t i = 0; i < argv_bytes.len; i++) {
+        \\        if (argv_bytes.ptr[i] == 0) {
+        \\            argc++;
+        \\        }
+        \\    }
+        \\    char *text = (char *)malloc((size_t)argv_bytes.len);
+        \\    char **argv = (char **)calloc((size_t)argc + 1, sizeof *argv);
+        \\    KizuChild *child = (KizuChild *)calloc(1, sizeof *child);
+        \\    if (!text || !argv || !child) {
+        \\        free(text);
+        \\        free(argv);
+        \\        free(child);
+        \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_OUT_OF_MEMORY);
+        \\    }
+        \\    memcpy(text, argv_bytes.ptr, (size_t)argv_bytes.len);
+        \\    int64_t at = 0;
+        \\    for (int64_t i = 0; i < argc; i++) {
+        \\        argv[i] = text + at;
+        \\        at += (int64_t)strlen(text + at) + 1;
+        \\    }
+        \\    /* ends[i][0] is the child's end of stream i and ends[i][1] this
+        \\       process's. Every one is close-on-exec: another child started meanwhile
+        \\       holding a write end would keep this one's pipe from ever ending. */
+        \\    int ends[3][2] = {{-1, -1}, {-1, -1}, {-1, -1}};
+        \\    int64_t failure = 0;
+        \\    for (int i = 0; i < 3 && failure == 0; i++) {
+        \\        int64_t mode = (modes >> (2 * i)) & 3;
+        \\        if (mode == KIZU_CHILD_NULL) {
+        \\            ends[i][0] = open("/dev/null", (i == 0 ? O_RDONLY : O_WRONLY) | O_CLOEXEC);
+        \\            if (ends[i][0] < 0) {
+        \\                failure = kizu_net_errno_failure(errno);
+        \\            }
+        \\        } else if (mode == KIZU_CHILD_PIPE) {
+        \\            int fds[2];
+        \\            if (pipe(fds) != 0) {
+        \\                failure = kizu_net_errno_failure(errno);
+        \\                break;
+        \\            }
+        \\            fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+        \\            fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+        \\            /* stdin is written by this process, the other two are read. */
+        \\            ends[i][0] = i == 0 ? fds[0] : fds[1];
+        \\            ends[i][1] = i == 0 ? fds[1] : fds[0];
+        \\            kizu_net_set_nonblocking(ends[i][1]);
+        \\        }
+        \\    }
+        \\    pid_t pid = -1;
+        \\    if (failure == 0) {
+        \\        fflush(stdout);
+        \\        fflush(stderr);
+        \\        pid = fork();
+        \\        if (pid < 0) {
+        \\            failure = kizu_net_errno_failure(errno);
+        \\        }
+        \\    }
+        \\    if (pid == 0) {
+        \\        signal(SIGPIPE, SIG_DFL);
+        \\        for (int i = 0; i < 3; i++) {
+        \\            if (ends[i][0] >= 0) {
+        \\                dup2(ends[i][0], i);
+        \\            }
+        \\        }
+        \\        execvp(argv[0], argv);
+        \\        _exit(127);
+        \\    }
+        \\    free(argv);
+        \\    free(text);
+        \\    if (failure != 0) {
+        \\        kizu_child_close_ends(ends);
+        \\        free(child);
+        \\        return kizu_err_i64(failure);
+        \\    }
+        \\    child->pid = (int64_t)pid;
+        \\    for (int i = 0; i < 3; i++) {
+        \\        child->fds[i] = ends[i][1];
+        \\        ends[i][1] = -1;
+        \\    }
+        \\    kizu_child_close_ends(ends);
+        \\    return kizu_ok_i64((int64_t)(intptr_t)child);
+        \\#endif
+        \\}
+        \\
+        \\void std__internal__builtin__net_child_spawn(
+        \\    KizuErrorI64 *out,
+        \\    void *io,
+        \\    const KizuSliceU8 *argv,
+        \\    int64_t modes
+        \\) {
+        \\    *out = kizu_std_builtin_net_child_spawn_result(io, *argv, modes);
+        \\}
+        \\
+        \\/* The descriptor this process holds for one of the child's streams, or -1. */
+        \\int64_t std__internal__builtin__net_child_fd(int64_t handle, int64_t stream) {
+        \\    KizuChild *child = kizu_child_from(handle);
+        \\    if (!child || stream < 0 || stream > 2) {
+        \\        return -1;
+        \\    }
+        \\    return (int64_t)child->fds[stream];
+        \\}
+        \\
+        \\/* Closing a pipe also takes it out of any poller watching it. */
+        \\void std__internal__builtin__net_child_close_fd(int64_t handle, int64_t stream) {
+        \\    KizuChild *child = kizu_child_from(handle);
+        \\    if (!child || stream < 0 || stream > 2 || child->fds[stream] < 0) {
+        \\        return;
+        \\    }
+        \\    close(child->fds[stream]);
+        \\    child->fds[stream] = -1;
+        \\}
+        \\
+        \\/* The exit status once the child has ended, waiting for that when block is
+        \\ * set. A child still running when block is not set is -1, which no status
+        \\ * is. */
+        \\static KizuErrorI64 kizu_std_builtin_net_child_wait_result(
+        \\    void *io, int64_t handle, int64_t block) {
+        \\    if (kizu_io_is_failing(io)) {
+        \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_IO_FAILING);
+        \\    }
+        \\    KizuChild *child = kizu_child_from(handle);
+        \\    if (!child) {
+        \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_CLOSED);
+        \\    }
+        \\    if (child->reaped) {
+        \\        return kizu_ok_i64(child->status);
+        \\    }
+        \\#if defined(_WIN32)
+        \\    (void)block;
+        \\    return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_OPERATION_FAILED);
+        \\#else
+        \\    for (;;) {
+        \\        int status = 0;
+        \\        pid_t got = waitpid((pid_t)child->pid, &status, block ? 0 : WNOHANG);
+        \\        if (got == 0) {
+        \\            return kizu_ok_i64(-1);
+        \\        }
+        \\        if (got < 0) {
+        \\            if (errno == EINTR) {
+        \\                continue;
+        \\            }
+        \\            return kizu_err_i64(kizu_net_errno_failure(errno));
+        \\        }
+        \\        child->status = kizu_child_status(status);
+        \\        child->reaped = 1;
+        \\        return kizu_ok_i64(child->status);
+        \\    }
+        \\#endif
+        \\}
+        \\
+        \\void std__internal__builtin__net_child_wait(
+        \\    KizuErrorI64 *out,
+        \\    void *io,
+        \\    int64_t handle,
+        \\    int64_t block
+        \\) {
+        \\    *out = kizu_std_builtin_net_child_wait_result(io, handle, block);
+        \\}
+        \\
+        \\/* SIGKILL, which the child cannot catch. A child already reaped has nothing
+        \\ * to send to, and its pid may belong to someone else by now. */
+        \\static KizuErrorVoid kizu_std_builtin_net_child_kill_result(void *io, int64_t handle) {
+        \\    if (kizu_io_is_failing(io)) {
+        \\        return kizu_err_void(KIZU_ERR_STD_NET_ERROR_IO_FAILING);
+        \\    }
+        \\    KizuChild *child = kizu_child_from(handle);
+        \\    if (!child) {
+        \\        return kizu_err_void(KIZU_ERR_STD_NET_ERROR_CLOSED);
+        \\    }
+        \\    if (child->reaped) {
+        \\        return kizu_ok_void();
+        \\    }
+        \\#if defined(_WIN32)
+        \\    return kizu_err_void(KIZU_ERR_STD_NET_ERROR_OPERATION_FAILED);
+        \\#else
+        \\    if (kill((pid_t)child->pid, SIGKILL) != 0 && errno != ESRCH) {
+        \\        return kizu_err_void(kizu_net_errno_failure(errno));
+        \\    }
+        \\    return kizu_ok_void();
+        \\#endif
+        \\}
+        \\
+        \\void std__internal__builtin__net_child_kill(KizuErrorVoid *out, void *io, int64_t handle) {
+        \\    *out = kizu_std_builtin_net_child_kill_result(io, handle);
+        \\}
+        \\
+        \\/* Releases the pipes and the child. One that was never waited for is killed
+        \\ * and reaped here, so dropping a Child leaves neither a running process nor a
+        \\ * zombie behind. */
+        \\void std__internal__builtin__net_child_close(int64_t handle) {
+        \\    KizuChild *child = kizu_child_from(handle);
+        \\    if (!child) {
+        \\        return;
+        \\    }
+        \\#if !defined(_WIN32)
+        \\    for (int i = 0; i < 3; i++) {
+        \\        if (child->fds[i] >= 0) {
+        \\            close(child->fds[i]);
+        \\        }
+        \\    }
+        \\    if (!child->reaped) {
+        \\        kill((pid_t)child->pid, SIGKILL);
+        \\        int status = 0;
+        \\        while (waitpid((pid_t)child->pid, &status, 0) < 0 && errno == EINTR) {
+        \\        }
+        \\    }
+        \\#endif
+        \\    free(child);
         \\}
         \\
         \\/* ---------------------------------------------------------------------------

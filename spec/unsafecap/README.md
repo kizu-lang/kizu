@@ -123,6 +123,9 @@ ownership check を in-process で走らせます。missing marker は help 行
   renderer や、何にでも一致する分類器はここで落ちます。
 * `TestUnsafeModelKnownDivergences`: findings の F3 の形を、checker の今の答え
   ごと固定します。checker が直ってモデルと一致すると落ち、既知形へ移すよう促します。
+* `TestUnsafeModelKnownRawBorrowDiagnostic`: findings の F2 を固定します。F2 の文面は
+  `mbtClassify` が `Missing:ptr_deref` に読み替えているので、他の test では見えません。
+  checker が missing marker を報告するようになると落ち、読み替えを消すよう促します。
 * `TestUnsafeModelTraces`: fixture の再生。
 
 `KIZU_MBT_BIN=<kizu>` で外部の binary(`compiler/` から build したもの)に、
@@ -130,7 +133,7 @@ ownership check を in-process で走らせます。missing marker は help 行
 
 ### 規模と結果(2026-11-08)
 
-* `quint test`: 19 本が通る。
+* `quint test`: 20 本が通る。
 * 健全性の探索: `spec` の 3 モード × 2000 trace(seed 0x1、12 step)で `soundness` の
   違反なし。witness は `initGuided` で受理が 100%、違反を許すモードで `Unused` /
   `Boundary` / `FnTypeMismatch` / `NoSafety` のそれぞれに届く。
@@ -163,9 +166,10 @@ Quint を動かさず、checked-in の fixture だけを読みます。モデル
 * **F1 の fixture**。checker は #1925 で直り、F1 の 3 形は既知形へ移しました。
   checked-in の fixture はまだ `spec`(`&var b.n` を生成しない)から作ったもので、
   `specBorrow` で作り直すのが残りです。
-* **selfhost compiler への適用**。この環境には clang が無く、`compiler/` の native binary
-  を build できませんでした。F1 / F2 の `compiler/` 側はソースを読んでの確認です。
-  `KIZU_MBT_BIN` の経路は seed の Go binary で動作を確かめてあります。
+* **selfhost compiler への適用**。`compiler/` から build した native binary に
+  `KIZU_MBT_BIN` で当てると、`TestUnsafeModel*`(fixture 328 本を含む)がすべて Go と同じ答えで
+  通ります(2026-11-08、F2 / F3 の調査時)。F1 の修正前の `compiler/` 側はソースを
+  読んでの確認でした。
 * **1 本あたり約 13ms**。大半は std の読み込みで、fixture を増やすと線形に伸びます。
 * **入れていない入力**(範囲の節)、特に method としての `unsafe fn` と generic の
   instantiation は、本体の marker 状態が空から始まることをコードで確かめただけです。

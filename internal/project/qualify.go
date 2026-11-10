@@ -126,6 +126,7 @@ func (c *graphChecker) qualifyStruct(
 ) (*ast.StructDecl, error) {
 	cp := *decl
 	cp.Name = module.qualify(decl.Name)
+	cp.Module = module.path
 	cp.Fields = append([]ast.Field(nil), decl.Fields...)
 	for idx := range cp.Fields {
 		resolved, err := c.resolveTypeNode(module, cp.Fields[idx].TypeName)
@@ -144,6 +145,7 @@ func (c *graphChecker) qualifyUnion(
 ) (*ast.UnionDecl, error) {
 	cp := *decl
 	cp.Name = module.qualify(decl.Name)
+	cp.Module = module.path
 	cp.Variants = append([]ast.UnionVariant(nil), decl.Variants...)
 	for idx := range cp.Variants {
 		if cp.Variants[idx].Payload == nil {
@@ -205,6 +207,7 @@ func (c *graphChecker) qualifyFunction(
 	cp := *decl
 	cp.Name = name
 	cp.Std = module.pkg == stdlib.Root
+	cp.Module = module.path
 	cp.Params = append([]ast.Param(nil), decl.Params...)
 	for idx := range cp.Params {
 		resolved, err := c.resolveTypeNode(module, cp.Params[idx].TypeName)

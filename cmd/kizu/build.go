@@ -37,7 +37,7 @@ func linkModule(module *ir.Module, path string) (string, error) {
 		return "", err
 	}
 	ir.KeepTargetReachableFunctions(module, "c", "main")
-	llvmIR, err := llvm.EmitNative(module, host == stdtarget.NativeDarwin, nativeArch("", host))
+	units, err := emitUnits(module, host, nativeArch("", host), llvm.PerModule)
 	if err != nil {
 		return "", err
 	}
@@ -46,13 +46,28 @@ func linkModule(module *ir.Module, path string) (string, error) {
 		return "", err
 	}
 	options := native.Options{
-		LLVMIR: llvmIR, ErrorSets: errorSets, Target: host,
+		Units: units, ErrorSets: errorSets, Target: host,
 		LibC: "on", Runtime: "hosted", Emit: "exe", Linker: "clang",
 	}
 	if err := setLinkInputs(&options, module, path); err != nil {
 		return "", err
 	}
 	return native.Executable(options)
+}
+
+// emitUnits emits a lowered module as the units the native link compiles.
+func emitUnits(
+	module *ir.Module, target stdtarget.Target, arch llvm.Arch, split llvm.Split,
+) ([]string, error) {
+	units, err := llvm.EmitUnits(module, target == stdtarget.NativeDarwin, arch, split)
+	if err != nil {
+		return nil, err
+	}
+	texts := make([]string, 0, len(units))
+	for _, unit := range units {
+		texts = append(texts, unit.Text)
+	}
+	return texts, nil
 }
 
 // setLinkInputs fills what the linker resolves foreign symbols from: the
@@ -385,6 +400,9 @@ func emitNativeFile(args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := native.ValidateThinLTO(options.linkOptions(target, nil)); err != nil {
+		return err
+	}
 	// Native --opt runs the typed-SSA optimizer before clang's: a body the IR
 	// inliner has already copied into its caller reaches clang as the loop it
 	// is part of, which older toolchains do not always reconstruct from a call.
@@ -401,21 +419,14 @@ func linkNativeModule(module *ir.Module, options nativeBuildArgs, target stdtarg
 	if err := keepNativeRoots(module, options.Emit); err != nil {
 		return err
 	}
-	llvmIR, err := llvm.EmitNative(module, target == stdtarget.NativeDarwin,
-		nativeArch(options.Triple, target))
+	units, err := emitUnits(module, target, nativeArch(options.Triple, target), options.split())
 	if err != nil {
 		return err
 	}
-	errorSets, err := stdErrorSets()
+	buildOptions := options.linkOptions(target, units)
+	buildOptions.ErrorSets, err = stdErrorSets()
 	if err != nil {
 		return err
-	}
-	buildOptions := native.Options{
-		LLVMIR: llvmIR, Output: options.Output, ErrorSets: errorSets,
-		Target: target, Triple: options.Triple,
-		CPU: options.CPU, ABI: options.ABI, LibC: options.LibC,
-		Runtime: options.Runtime, Emit: options.Emit, Linker: options.Linker,
-		Opt: options.Opt,
 	}
 	if err := setLinkInputs(&buildOptions, module, options.Path); err != nil {
 		return err
@@ -425,6 +436,33 @@ func linkNativeModule(module *ir.Module, options nativeBuildArgs, target stdtarg
 	}
 	_, _ = fmt.Println(options.Output)
 	return nil
+}
+
+// split is how a native build divides the program among the units it
+// compiles: one per module for a debug build, so the objects of the modules
+// an edit did not touch are reused; one for an optimized build, which clang
+// optimizes whole; and one per module again for an optimized build linked
+// with ThinLTO, which optimizes across them in the link.
+func (options nativeBuildArgs) split() llvm.Split {
+	switch {
+	case options.ThinLTO:
+		return llvm.PerModuleLTO
+	case options.Opt:
+		return llvm.Whole
+	default:
+		return llvm.PerModule
+	}
+}
+
+// linkOptions returns the link request the options make for target.
+func (options nativeBuildArgs) linkOptions(target stdtarget.Target, units []string) native.Options {
+	return native.Options{
+		Units: units, Output: options.Output,
+		Target: target, Triple: options.Triple,
+		CPU: options.CPU, ABI: options.ABI, LibC: options.LibC,
+		Runtime: options.Runtime, Emit: options.Emit, Linker: options.Linker,
+		Opt: options.Opt, ThinLTO: options.ThinLTO,
+	}
 }
 
 // keepNativeRoots keeps what the artifact is entered by. An executable is
@@ -479,16 +517,21 @@ type nativeBuildArgs struct {
 	Emit    string
 	Linker  string
 	Opt     bool
+	// ThinLTO links an optimized build from one unit per module and
+	// optimizes across them in the link.
+	ThinLTO bool
 }
 
 // parseNativeBuildArgs parses native build flags and derives defaults.
 func parseNativeBuildArgs(args []string) (nativeBuildArgs, error) {
 	options := nativeBuildArgs{LibC: "on", Runtime: "hosted", Emit: "exe", Linker: "clang"}
 	for i := 0; i < len(args); i++ {
+		if on := options.nativeSwitch(args[i]); on != nil {
+			*on = true
+			continue
+		}
 		var err error
 		switch args[i] {
-		case "--opt":
-			options.Opt = true
 		case "-o":
 			i, options.Output, err = nextNativeArg(args, i, "-o")
 		case "--triple":
@@ -525,6 +568,19 @@ func parseNativeBuildArgs(args []string) (nativeBuildArgs, error) {
 		options.Output = defaultNativeOutput(options.Path, options.Emit)
 	}
 	return options, nil
+}
+
+// nativeSwitch returns the option a flag without a value turns on, or nil
+// when the flag is not one.
+func (options *nativeBuildArgs) nativeSwitch(flag string) *bool {
+	switch flag {
+	case "--opt":
+		return &options.Opt
+	case "--thinlto":
+		return &options.ThinLTO
+	default:
+		return nil
+	}
 }
 
 // nextNativeArg returns the value following a flag.

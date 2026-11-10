@@ -3750,8 +3750,16 @@ state と stack を解放します。確保と解放の allocator は source に
   caller のもので、std は読まない。`at` は deadline と同じ時点
 * 1 つの descriptor が同じ `wait` で 2 回報告されることがある。kqueue は filter
   ごと、epoll は bit をまとめるので、host が言った通りを渡す
-* `TcpListener` / `TcpStream` / `Poller` は非 copy の owner で、`deinit` は
-  `self` を値で取る。close 後の使用は型 error であり、runtime の報告ではない
+* `std::net::command(allocator, program)` が組む `Command` の `spawn(io)` は
+  `!std::net::Child` を返す。`Stdio::Pipe` にした stream は
+  `read_stdout_ready` / `read_stderr_ready`(null は「まだ無い」、0 は終端)と
+  `write_stdin_some` で読み書きし(待つ形は `read_stdout_into` /
+  `read_stderr_into` / `write_stdin_all`)、`watch_child_stdout` / `watch_child_stderr` /
+  `watch_child_stdin` で `Poller` に登録する。起動できない program は子の
+  終了 code 127 になる。`wait` / `try_wait` は終了 code、signal なら 128 + signal
+* `TcpListener` / `TcpStream` / `Poller` / `Child` は非 copy の owner で、`deinit` は
+  `self` を値で取る。close 後の使用は型 error であり、runtime の報告ではない。
+  `Child` の `deinit` は回収していない子を kill して回収する
 * `std::net::Address` は `host: []u8` と `port: i64` だけを持つ
 * safe Kizu に file descriptor や socket pointer は出さない
 * I/O failure は `!T` error として返す

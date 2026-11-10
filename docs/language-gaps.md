@@ -10,7 +10,6 @@ language / std の不足と、その場で使った局所解です。証拠の�
 
 | gap | 証拠 | 局所解 |
 | --- | --- | --- |
-| sequence literal(`[N]T{a, b}` / table / table-driven test)が無い | parser の precedence table(if 連鎖 23 行)、Go の table test 7 本が展開されている | 展開のまま |
 | 文字列組立の std API が `append_*` だけ | parser の message helper 155 行、checker の `errorf` 315 箇所 | parser は `error_*` method に融合(parser.kizu) |
 | struct field からの take / replace が無い | parser が cur/peek を持てず全 token を arena に保持。fmt の Builder から完成した `out` だけを取り出せない | parser は `Arena<Token>` + handle stream。fmt は完成時に出力を 1 回 copy し、Builder 全体を deinit |
 | `orelse` の右辺に block を書けない | parser の early return | `if opt \|v\| {} else {}` に展開 |
@@ -32,7 +31,6 @@ language / std の不足と、その場で使った局所解です。証拠の�
 | `?Owner` を値で渡せず `&?Owner` 引数も不可 | loader の qualify(`copy_docs`) | capture した `&Map` を渡す。literal を 2 箇所に複製 |
 | expression の match arm で `return` できない | loader / checker body | statement の match に包む |
 | closure が無いので callback 型 API(`typ::map_names`)に Loader を渡せない(struct に借用を持てない) | loader の resolve_type_node | 2 pass(名前を集めて解決し、rename 表で map_names) |
-| `std::process` は `argv[0]` すなわち実行ファイルの path を出さない | CLI の lib dir 探索(Go は binary 隣の `lib/kizu`) | `--lib-dir` / `KIZU_LIB_DIR` のみ。既定は `lib/kizu` |
 | method の `&T` 戻り値は ownership checker が borrow として追跡しない(`calledFunction` が free function と namespace 修飾名しか解決せず、`let s = self.text(n); s.as_bytes()` が view 初期化子と認識されない) | ownership の `NameTable`: intern した綴りの bytes を読む accessor | free function `name_text(names: &NameTable, name) -> &string::String` にし、call site で `let retained = ...; let bytes = retained.as_bytes();` と束縛する |
 | IR lowering が `&var` 引数の slot 判定を method 名だけで program 全体に union する(`internal/ir/slots.go` `markLentMethodArgs`)ため、別 module に同名で `&var` 位置が違う method があると capture / payload binding の lowering が壊れる(`clone`、`is_plain_data_type` で project / types の関数が clang error になった) | ownership module の `ScopeStore.clone` / `Checker.is_plain_data_type` ほか | 衝突した method だけ名前を変えた(`clone_scope`、`binding_mut`、`check_call`、`check_value_block`、`is_plain_data` など)。同名 method の `&var` 位置差を列挙する確認を module 完了時に行う |
 | `test` block の本体は同 module の private field を読めない | ownership の `binding_test.kizu`(`BindingHandle.node` の比較) | 比較を同 module の `fn` に出す |
@@ -60,11 +58,11 @@ language / std の不足と、その場で使った局所解です。証拠の�
 | `std::json` は `<` `>` `&` を `\u003c` 形に escape しない(encoding/json の HTML escape 差) | native の build metadata(`write_metadata`) | metadata の値にこれらが入るのは path だけで、`TestSelfhostFrontend` は絶対 path を正規化して比較する |
 | generic 関数の呼び出しは static 引数の明示が必須(推論されない) | native の `sorted_keys<V>` | call site で `sorted_keys<i64>(...)` と書く |
 | `runtime.GOARCH` 相当が無い(OS は `std::target::is_darwin()` で答えが出る) | native の toolchainKey(cache key の host 部)と arm64 判定 | `spawn_output8` で `uname -sm` を読む。uname の無い Windows では `PROCESSOR_ARCHITECTURE` を読む。未知の host は guess せず error で止める。target の選択は `stdtarget::host()` が comptime 述語で決め、machine 名は cache key にだけ使う |
-| `os.CreateTemp` 相当が無い(乱数源も無い) | buildcache の scratch file(半端な artifact を key の名で見せないための build 先) | `fsutil::append_scratch_name`: `artifact-<key 先頭 16 桁>-<unix_millis>-<連番>`。並列プロセス間の distinctness は build 中の key が持ち、同じ key を同じ ms に 2 プロセスが build した場合だけ衝突して負けた側は明示的に失敗する。rename 前に fs error で止まると scratch が残る(Go は defer Remove が拾う) |
-| `strings` の走査 API が無い(`Fields` / `Split` / `Join` / `Contains` / `HasPrefix` / `Index` / `Count` / `ReplaceAll` / `TrimSpace`)と、`unicode.IsSpace` に当たる述語も無い | cimport は Go 196 行に対し 179 行をこの代替に使う。fmt は `strings.Split` / `ContainsAny` / `TrimSpace`、llvm は `strings.Contains` 系を、それぞれ module 内に別々に持っている | module 内に局所実装。空白判定は `space_width` が White_Space の 25 scalar を byte 幅で読む(UTF-8 の continuation byte は lead byte になれないので byte 走査で誤検出しない) |
+| `os.CreateTemp` 相当が無い | buildcache の scratch file(半端な artifact を key の名で見せないための build 先) | `fsutil::append_scratch_name`: `artifact-<key 先頭 16 桁>-<unix_millis>-<連番>`。並列プロセス間の distinctness は build 中の key が持ち、同じ key を同じ ms に 2 プロセスが build した場合だけ衝突して負けた側は明示的に失敗する。rename 前に fs error で止まると scratch が残る(Go は defer Remove が拾う) |
+| `strings` の走査 API が無い(`Fields` / `Split` / `Contains` / `Index` / `Count` / `ReplaceAll`。`Join` / `HasPrefix` / `TrimSpace` は後から `string::join` / `mem::starts_with` / `string::trim_space_in_place` が入った)と、`unicode.IsSpace` に当たる述語も無い | cimport は Go 196 行に対し 179 行をこの代替に使う。fmt は `strings.Split` / `ContainsAny` / `TrimSpace`、llvm は `strings.Contains` 系を、それぞれ module 内に別々に持っている | module 内に局所実装。空白判定は `space_width` が White_Space の 25 scalar を byte 幅で読む(UTF-8 の continuation byte は lead byte になれないので byte 走査で誤検出しない) |
 | `std::fs` の error は失敗した path も read 段階の errno も運ばない | CLI の全 command が target を読む。Go は `open <path>: no such file or directory` / `read <path>: is a directory` を出す | std は変えずに CLI 側で解いた。path は caller が持っているので `read_source_file` が `fs::Error` を捕まえて message を組む。runtime が read 段階の errno を `ReadFailed` に畳むので、directory かどうかは `fs::metadata` に聞き直す |
 | `strconv.Unquote` / `strconv.Atoi` に当たる std API が無い | wasm は quoted IR literal を読むのに llvm と同じ `append_unquoted` を、`strconv.Atoi` の受理条件(符号 + 数字 1 つ以上 + int64 に収まる)を `is_decimal` を、module 内にそれぞれ持つ | module 内に局所実装。llvm / fmt / cimport が持つ同種の helper と一緒に module 完了時に判断する |
-| `[]u8 == []u8` / `!=` は型検査を通るが LLVM に降りない(`icmp requires integer operands` で clang が落ちる) | examples/http_client を書いていて `host != ""` で踏んだ | `mem::equal_bytes` / `mem::len` を使う。診断が compiler から出るべきで、clang から出るのは傷 |
+| `[]u8 == []u8` / `!=` は無く、型検査が拒否する | examples/http_client を書いていて `host != ""` で踏んだ | `mem::equal_bytes` / `mem::len` を使う |
 | `[]u8` を返す関数の結果は式のまま次の呼び出しに渡せない(`print(path_of(target))` が borrow escape) | std::http の `path_of` / `query_of` を使う全ての例 | `let path = path_of(target);` に束縛してから渡す |
 | struct field への borrow を返す method が書けない(`&var self.field` も暗黙 borrow も型 error) | `std::http` の `Exchange` が接続を貸す口(`stream() -> &var net::TcpStream`)を書けない | 接続を field で公開せず、`write_all` / `read_into` / `set_*_deadline` の pass-through method を Exchange に置く。結果的に head 読みの残り byte を飛ばせなくなり、こちらの方が正しかった |
 | expression の match arm で `?T` を作れない(`null` が arm に置けない) | `std::http` の `Response.framed_length(framing) -> ?i64` | `declares_length(framing) -> bool` と `length_of(framing) -> i64` の 2 つに割る。後者は到達しない arm を 0 で埋める |

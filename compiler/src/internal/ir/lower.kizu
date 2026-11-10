@@ -53,6 +53,9 @@ pub struct FunctionFacts {
     pub requires_unsafe: bool,
     pub variadic: bool,
     pub body: ?ast::Block,
+    /// The module path the function was declared in, which the function it
+    /// lowers to is filed under.
+    pub module: Name,
 }
 
 /// Is one static parameter: its name, whether it is a type parameter, and
@@ -476,7 +479,9 @@ pub fn new_lowerer_for_target(
             return_type: empty_name(),
             blocks: array::new<Block>(allocator),
             export_abi: empty_name(),
-            export_name: empty_name()
+            export_name: empty_name(),
+            module: empty_name(),
+            instance: false
         })
     };
     let scratch_block = try module.add_block(scratch_function, empty_name());
@@ -494,7 +499,8 @@ pub fn new_lowerer_for_target(
             link_framework: empty_name(),
             requires_unsafe: false,
             variadic: false,
-            body: null
+            body: null,
+            module: empty_name()
         })
     };
     var generic_args = arena::new<GenericArgs>(allocator);
@@ -606,6 +612,11 @@ fn intern_common(names: &var NameTable) -> !CommonNames {
 /// function declarations in order, the test blocks, and the indexes of the
 /// generic, struct, enum and union declarations.
 fn (self: &var Lowerer) collect_facts(tree: &ast::Ast, program: &ast::Program) -> !void {
+    var module_index = 0;
+    while program.modules.get(module_index) |path| {
+        module_index = module_index + 1;
+        try self.module.modules.append(self.allocator, try self.module.names.intern_text(tree, path));
+    }
     var index = 0;
     while program.declarations.get(index) |declaration| {
         index = index + 1;
@@ -700,7 +711,8 @@ fn (self: &var Lowerer) function_facts(tree: &ast::Ast, function: &ast::Function
         link_framework: try self.module.names.intern_text(tree, function.signature.link_framework),
         requires_unsafe: function.signature.requires_unsafe,
         variadic: function.signature.variadic,
-        body: function.body
+        body: function.body,
+        module: try self.module.names.intern_text(tree, function.module)
     };
     return FactsHandle { node: try self.decl_facts.add(self.allocator, move facts) };
 }
@@ -907,7 +919,8 @@ fn (self: &var Lowerer) lower_tests(
             link_framework: empty_name(),
             requires_unsafe: false,
             variadic: false,
-            body: test.body
+            body: test.body,
+            module: test.module
         };
         self.current_test_module = test.module;
         let handle = FactsHandle { node: try self.decl_facts.add(self.allocator, move facts) };
@@ -1747,7 +1760,9 @@ fn (self: &var Lowerer) lower_function_named(
             return_type: self.signature_return(signature),
             blocks: array::new<Block>(self.allocator),
             export_abi: export_abi,
-            export_name: export_name
+            export_name: export_name,
+            module: self.decl_facts.at(decl.node).module,
+            instance: false
         })
     };
     try self.module.functions.append(self.allocator, self.current);

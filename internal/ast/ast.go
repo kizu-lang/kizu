@@ -72,6 +72,10 @@ type Expression interface {
 // Program is the root AST node for a Kizu source file.
 type Program struct {
 	Decls []Decl
+	// Modules lists the module paths the declarations came from, each before
+	// the modules that import it: the order a native build compiles them in,
+	// one unit each.
+	Modules []string
 }
 
 // ImportDecl represents one explicit top-level module import.
@@ -177,6 +181,10 @@ type FunctionDecl struct {
 	// have to be told apart after the derived ones are added (DeriveDeinit).
 	Derived bool
 	Body    *BlockStmt
+	// Module is the module path the function was declared in, empty for a
+	// loose file. A native debug build compiles each module as a unit of its
+	// own, and this is what files the function under one.
+	Module string
 }
 
 // StaticParam is one entry of a `<...>` static argument list.
@@ -323,6 +331,9 @@ type StructDecl struct {
 	TypeParams []string
 	Fields     []Field
 	Public     bool
+	// Module is the module path the struct was declared in, which its derived
+	// cleanup is filed under.
+	Module string
 	// Span points at the declaration name so unsafe invariant writes can stay
 	// confined to the file that owns their contract.
 	Span Span
@@ -429,6 +440,9 @@ type UnionDecl struct {
 	TypeParams []string
 	Variants   []UnionVariant
 	Public     bool
+	// Module is the module path the union was declared in, which its derived
+	// cleanup is filed under.
+	Module string
 }
 
 // declNode marks UnionDecl as a declaration node.

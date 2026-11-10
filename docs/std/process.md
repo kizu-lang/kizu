@@ -70,6 +70,10 @@ exit status を返します。標準エラー出力はこのプロセスのも�
 `OutOfMemory` を返し、子が書いたものを一部だけ残すことはしません。子が書いた
 量に関わらず、子は最後まで読まれて終了を待たれます。
 
+走っている子の出力を届いた順に読む、標準エラー出力も取る、引数の数を固定しない
+—— のいずれかが要るときは [`std::net::Command`](net.md#子プロセス--走っている間に出力を読む)
+を使います。pipe を接続と同じ `Poller` で待つため、そちらは `std::net` にあります。
+
 `wasm32-wasi` の WASI preview1 host boundary は子プロセスを提供しません。
 `spawn_wait8` / `spawn_output8` に到達する program は build 時に target 非対応として拒否します。
 到達しない helper は module から除かれるため、それだけで host capability を要求しません。
