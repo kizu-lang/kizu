@@ -407,6 +407,10 @@ pub struct Lowerer {
     // analysis reads only the methods a call reaches, not every method that
     // shares its name.
     method_callees: array::Array<ResolvedMethodCall>,
+    // method_call_buckets indexes method_callees by ownership's
+    // method_call_key, in recording order; the callee node decides within a
+    // bucket.
+    method_call_buckets: map::Map<i64, array::Array<i64>>,
 }
 
 /// Is one declaration a method call resolved to: the call's callee
@@ -583,7 +587,8 @@ pub fn new_lowerer_for_target(
         release_allocators: move release_allocators,
         retired: array::new<RetiredReceiver>(allocator),
         function_pointer_mut_borrows: array::new<ast::Expression>(allocator),
-        method_callees: array::new<ResolvedMethodCall>(allocator)
+        method_callees: array::new<ResolvedMethodCall>(allocator),
+        method_call_buckets: map::new<i64, array::Array<i64>>(allocator)
     };
     errdefer lowerer.deinit(allocator);
     try lowerer.collect_facts(tree, program);
@@ -760,9 +765,19 @@ fn (self: &var Lowerer) copy_retired(checker: &ownership::Checker) -> !void {
     while checker.method_callee_at(index) |callee| {
         callee_name.clear();
         try checker.append_method_callee_name(index, &var callee_name);
+        let key = checker.method_callee_key_at(index);
         index = index + 1;
         let bytes = callee_name.as_bytes();
         let name = try self.module.names.intern(bytes);
+        let next = self.method_callees.len();
+        if self.method_call_buckets.at_mut(key) |bucket| {
+            try bucket.append(self.allocator, next);
+        } else {
+            var bucket = array::new<i64>(self.allocator);
+            errdefer bucket.deinit(self.allocator);
+            try bucket.append(self.allocator, next);
+            try self.method_call_buckets.insert(self.allocator, key, move bucket);
+        }
         try self.method_callees.append(self.allocator, ResolvedMethodCall {
             callee: callee, name: name
         });

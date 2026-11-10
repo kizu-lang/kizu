@@ -24,6 +24,36 @@ pub fn verify(allocator: Allocator, module: &Module) -> !?diagnostic::Diagnostic
 /// Verifies module using the type table that produced it, the Go
 /// `verifyWithTypes`.
 fn verify_with_types(allocator: Allocator, module: &Module, types: &var typ::Table) -> !?diagnostic::Diagnostic {
+    var verifier = try new_verifier(allocator, module);
+    defer verifier.deinit(allocator);
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        if try verifier.verify_function(module, types, function) |failed| {
+            return move failed;
+        }
+    }
+    return null;
+}
+
+/// Verifies function, which the caller has just appended to a module whose
+/// other functions already passed verify, the Go `VerifyAppended`. A rule
+/// reads another function only through the parameters a call is checked
+/// against, and a function that was not there before is one no earlier call
+/// could have been checked against, so the other functions' verdict is
+/// unchanged and checking function alone reports what verifying the whole
+/// module again would.
+pub fn verify_appended(allocator: Allocator, module: &Module, function: Function) -> !?diagnostic::Diagnostic {
+    var types = typ::new(allocator);
+    defer types.deinit(allocator);
+    var verifier = try new_verifier(allocator, module);
+    defer verifier.deinit(allocator);
+    return verifier.verify_function(module, &var types, function);
+}
+
+/// Indexes every function by name, which is what a call is checked against,
+/// the Go `newVerifier`.
+fn new_verifier(allocator: Allocator, module: &Module) -> !Verifier {
     var verifier = Verifier {
         allocator: allocator,
         params: map::new<[]u8, Function>(allocator),
@@ -31,7 +61,7 @@ fn verify_with_types(allocator: Allocator, module: &Module, types: &var typ::Tab
         fn_return: empty_name(),
         block_name: empty_name()
     };
-    defer verifier.deinit(allocator);
+    errdefer verifier.deinit(allocator);
     var index = 0;
     while module.functions.get(index) |function| {
         index = index + 1;
@@ -40,14 +70,7 @@ fn verify_with_types(allocator: Allocator, module: &Module, types: &var typ::Tab
         let bytes = retained.as_bytes();
         try verifier.params.insert(allocator, bytes, function);
     }
-    index = 0;
-    while module.functions.get(index) |function| {
-        index = index + 1;
-        if try verifier.verify_function(module, types, function) |failed| {
-            return move failed;
-        }
-    }
-    return null;
+    return move verifier;
 }
 
 /// Holds what a rule needs and the position it is reading, the Go
@@ -100,10 +123,19 @@ fn (self: &var Verifier) verify_function(module: &Module, types: &var typ::Table
     if try self.phi_incoming_matches_predecessors(module, function, &blocks, &preds) |failed| {
         return move failed;
     }
-    if try self.phi_incoming_dominates(module, function, &blocks, &preds) |failed| {
+    if node.blocks.len() == 0 {
+        return null;
+    }
+    // Both dominance rules read the same definitions and the same tree, so
+    // they are built once here rather than once per rule.
+    var defined_in = try value_defining_blocks(self.allocator, module, function);
+    defer defined_in.deinit(self.allocator);
+    var tree = try build_dominator_tree(self.allocator, module, function, &blocks, &preds);
+    defer tree.deinit(self.allocator);
+    if try self.phi_incoming_dominates(module, function, &tree, &defined_in, &blocks) |failed| {
         return move failed;
     }
-    return self.values_dominate_uses(module, function, &blocks, &preds);
+    return self.values_dominate_uses(module, function, &tree, &defined_in, &blocks);
 }
 
 /// Numbers a function's blocks by their position, the Go `verifier.at`. Every
@@ -733,17 +765,11 @@ fn incoming_arrives(
 fn (self: &Verifier) phi_incoming_dominates(
     module: &Module,
     function: Function,
-    blocks: &BlockIndex,
-    preds: &array::Array<array::Array<i64>>
+    tree: &DominatorTree,
+    defined_in: &map::Map<[]u8, Definition>,
+    blocks: &BlockIndex
 ) -> !?diagnostic::Diagnostic {
     let node = module.function_nodes.at(function.node);
-    if node.blocks.len() == 0 {
-        return null;
-    }
-    var defined_in = try value_defining_blocks(self.allocator, module, function);
-    defer defined_in.deinit(self.allocator);
-    var tree = try build_dominator_tree(self.allocator, module, function, blocks, preds);
-    defer tree.deinit(self.allocator);
     var index = 0;
     while node.blocks.get(index) |block| {
         index = index + 1;
@@ -788,17 +814,11 @@ fn (self: &Verifier) phi_incoming_dominates(
 fn (self: &Verifier) values_dominate_uses(
     module: &Module,
     function: Function,
-    blocks: &BlockIndex,
-    preds: &array::Array<array::Array<i64>>
+    tree: &DominatorTree,
+    defined_in: &map::Map<[]u8, Definition>,
+    blocks: &BlockIndex
 ) -> !?diagnostic::Diagnostic {
     let node = module.function_nodes.at(function.node);
-    if node.blocks.len() == 0 {
-        return null;
-    }
-    var defined_in = try value_defining_blocks(self.allocator, module, function);
-    defer defined_in.deinit(self.allocator);
-    var tree = try build_dominator_tree(self.allocator, module, function, blocks, preds);
-    defer tree.deinit(self.allocator);
     var index = 0;
     while node.blocks.get(index) |block| {
         let block_node = module.blocks.at(block.node);
@@ -806,17 +826,17 @@ fn (self: &Verifier) values_dominate_uses(
         while block_node.instrs.get(step) |instr| {
             let instr_node = module.instrs.at(instr.node);
             if instr_node.op != Op::Phi {
-                if try self.check_operands(module, &tree, &defined_in, blocks, index, step, instr_node) |failed| {
+                if try self.check_operands(module, tree, defined_in, blocks, index, step, instr_node) |failed| {
                     return move failed;
                 }
             }
             step = step + 1;
         }
         let end = block_node.instrs.len();
-        if try self.dominates_use(module, &tree, &defined_in, blocks, index, end, block_node.terminator.cond) |failed| {
+        if try self.dominates_use(module, tree, defined_in, blocks, index, end, block_node.terminator.cond) |failed| {
             return move failed;
         }
-        if try self.dominates_use(module, &tree, &defined_in, blocks, index, end, block_node.terminator.value) |failed| {
+        if try self.dominates_use(module, tree, defined_in, blocks, index, end, block_node.terminator.value) |failed| {
             return move failed;
         }
         index = index + 1;
@@ -939,8 +959,10 @@ fn value_defining_blocks(allocator: Allocator, module: &Module, function: Functi
 }
 
 /// Answers which blocks dominate which, the Go `dominatorTree`. It stores one
-/// immediate dominator per block rather than a set per block, so the whole
-/// tree is a map and a list and a question is a walk up the chain.
+/// immediate dominator per block rather than a set per block, and numbers the
+/// tree so a question compares two intervals instead of walking up the chain:
+/// a walk is as long as the tree is deep, and a run of ifs or a match with k
+/// arms is a tree as deep as it is long.
 struct DominatorTree {
     // place[position] is where the block at position stands in reverse
     // postorder, which is the numbering the walk compares against, or -1 when
@@ -949,6 +971,11 @@ struct DominatorTree {
     // idom[i] is the reverse-postorder position of the block standing at i's
     // immediate dominator. The entry is its own.
     idom: array::Array<i64>,
+    // enter[i] and exit[i] bound the preorder numbers of the subtree under the
+    // block standing at i: a block is in it exactly when its own enter is in
+    // [enter[i], exit[i]).
+    enter: array::Array<i64>,
+    exit: array::Array<i64>,
 }
 
 /// Computes immediate dominators by the Cooper-Harvey-Kennedy iteration, the
@@ -968,7 +995,9 @@ fn build_dominator_tree(
     defer order.deinit(allocator);
     var tree = DominatorTree {
         place: array::new<i64>(allocator),
-        idom: array::new<i64>(allocator)
+        idom: array::new<i64>(allocator),
+        enter: array::new<i64>(allocator),
+        exit: array::new<i64>(allocator)
     };
     errdefer tree.deinit(allocator);
     var position = 0;
@@ -1014,7 +1043,51 @@ fn build_dominator_tree(
             position = position + 1;
         }
     }
+    try tree.number(allocator);
     return move tree;
+}
+
+/// Gives each block its preorder interval, the Go `number`. A block's
+/// immediate dominator stands earlier in reverse postorder, so one backward
+/// pass sums every subtree's size and one forward pass hands each child the
+/// next free stretch of its parent's interval, with no recursion and no child
+/// lists.
+fn (self: &var DominatorTree) number(allocator: Allocator) -> !void {
+    let count = self.idom.len();
+    var size = array::new<i64>(allocator);
+    defer size.deinit(allocator);
+    // next[i] is the first preorder number not yet handed to a child of i.
+    var next = array::new<i64>(allocator);
+    defer next.deinit(allocator);
+    var at = 0;
+    while at < count {
+        try size.append(allocator, 1);
+        try next.append(allocator, 0);
+        try self.enter.append(allocator, 0);
+        at = at + 1;
+    }
+    at = count - 1;
+    while at > 0 {
+        let parent = self.idom.get_or_panic(at);
+        try size.set(parent, size.get_or_panic(parent) + size.get_or_panic(at));
+        at = at - 1;
+    }
+    try next.set(0, 1);
+    at = 1;
+    while at < count {
+        let parent = self.idom.get_or_panic(at);
+        let first = next.get_or_panic(parent);
+        try self.enter.set(at, first);
+        try next.set(parent, first + size.get_or_panic(at));
+        try next.set(at, first + 1);
+        at = at + 1;
+    }
+    at = 0;
+    while at < count {
+        try self.exit.append(allocator, self.enter.get_or_panic(at) + size.get_or_panic(at));
+        at = at + 1;
+    }
+    return;
 }
 
 /// Walks two blocks up the tree until they arrive at the same one, which is
@@ -1039,7 +1112,7 @@ fn (self: &DominatorTree) meet(left: i64, right: i64) -> i64 {
 /// Go `dominates`. An unreachable block is reached by no path, so nothing is
 /// claimed about it.
 fn (self: &DominatorTree) dominates(dominator: i64, block: i64) -> bool {
-    var at = self.place.get_or_panic(block);
+    let at = self.place.get_or_panic(block);
     if at < 0 {
         return true;
     }
@@ -1047,14 +1120,8 @@ fn (self: &DominatorTree) dominates(dominator: i64, block: i64) -> bool {
     if target < 0 {
         return false;
     }
-    while at != target {
-        let next = self.idom.get_or_panic(at);
-        if next == at {
-            return false;
-        }
-        at = next;
-    }
-    return true;
+    let first = self.enter.get_or_panic(at);
+    return self.enter.get_or_panic(target) <= first and first < self.exit.get_or_panic(target);
 }
 
 /// Lists the blocks reachable from the entry, each after every block it can

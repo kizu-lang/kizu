@@ -627,9 +627,10 @@ fn (self: &var Lowerer) mark_lent_method_args(
     field: ast::FieldExpr,
     args: ast::ExpressionList
 ) -> !void {
-    if self.resolved_method_call(callee) {
+    let key = ownership::method_call_key(tree, callee);
+    if self.resolved_method_call(callee, key) {
         var position = 0;
-        while self.resolved_method_signature_at(callee, position) |signature| {
+        while self.resolved_method_signature_at(callee, key, position) |signature| {
             position = position + 1;
             try self.mark_lent_method_signature(tree, signature, field, args);
         }
@@ -673,13 +674,17 @@ fn (self: &var Lowerer) mark_lent_method_signature(
 }
 
 /// Reports whether the ownership checker resolved the method call whose
-/// callee is callee, the `resolved` half of the Go `MethodCallees`.
-fn (self: &Lowerer) resolved_method_call(callee: ast::Expression) -> bool {
-    var index = 0;
-    while self.method_callees.get(index) |known| {
-        index = index + 1;
-        if known.callee.node == callee.node {
-            return true;
+/// callee is callee, the `resolved` half of the Go `MethodCallees`. key is
+/// the call's ownership::method_call_key.
+fn (self: &Lowerer) resolved_method_call(callee: ast::Expression, key: i64) -> bool {
+    if self.method_call_buckets.at(key) |bucket| {
+        var position = 0;
+        while bucket.get(position) |index| {
+            position = position + 1;
+            let known = self.method_callees.get(index) orelse continue;
+            if known.callee.node == callee.node {
+                return true;
+            }
         }
     }
     return false;
@@ -689,19 +694,26 @@ fn (self: &Lowerer) resolved_method_call(callee: ast::Expression) -> bool {
 /// resolved to, read the way index_method_signatures reads them, the Go
 /// `calleeSignatures`; null past the last. A generic method whose receiver is
 /// not handed over as storage has nothing to read and is skipped.
-fn (self: &Lowerer) resolved_method_signature_at(callee: ast::Expression, position: i64) -> ?SignatureHandle {
-    var seen = 0;
-    var index = 0;
-    while self.method_callees.get(index) |known| {
-        index = index + 1;
-        if known.callee.node != callee.node {
-            continue;
+fn (self: &Lowerer) resolved_method_signature_at(
+    callee: ast::Expression,
+    key: i64,
+    position: i64
+) -> ?SignatureHandle {
+    if self.method_call_buckets.at(key) |bucket| {
+        var seen = 0;
+        var cursor = 0;
+        while bucket.get(cursor) |index| {
+            cursor = cursor + 1;
+            let known = self.method_callees.get(index) orelse continue;
+            if known.callee.node != callee.node {
+                continue;
+            }
+            let signature = self.callee_signature(known.name) orelse continue;
+            if seen == position {
+                return signature;
+            }
+            seen = seen + 1;
         }
-        let signature = self.callee_signature(known.name) orelse continue;
-        if seen == position {
-            return signature;
-        }
-        seen = seen + 1;
     }
     return null;
 }
