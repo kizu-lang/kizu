@@ -19,10 +19,30 @@ type Unit struct {
 	Text   string
 }
 
-// EmitUnits formats a module as the units a native build compiles. Unsplit,
-// it is one unit with the text emit writes for the target. Split, it is one unit per
-// module and the program unit last, each a module LLVM compiles alone: a
-// unit's text depends only on its own functions, so an edit to one module
+// Split is how EmitUnits divides a program among the units it writes.
+type Split int
+
+const (
+	// Whole is one unit with the text emit writes for the target, which
+	// clang optimizes whole.
+	Whole Split = iota
+	// PerModule is one unit per module and the program unit last, compiled
+	// one by one into objects (a debug build).
+	PerModule
+	// PerModuleLTO splits the program as PerModule does, for a link that
+	// optimizes across the units (ThinLTO). A function no other unit names
+	// and nothing takes the address of is internal to its unit, so the
+	// optimizer may drop it once inlined and change how it is called, and
+	// each unit names its module as its source file, which is what ThinLTO
+	// tells the internal functions of two units apart by.
+	PerModuleLTO
+)
+
+// EmitUnits formats a module as the units a native build compiles. Whole,
+// it is one unit with the text emit writes for the target. Split, it is one
+// unit per module and the program unit last, each a module LLVM compiles
+// alone: a unit's text depends only on its own functions -- and, split for
+// LTO, on which of them the other units name -- so an edit to one module
 // changes the text of that unit alone, and what the toolchain made of the
 // others can be reused.
 //
@@ -30,8 +50,8 @@ type Unit struct {
 // ir.Module.Modules, the order of the module's functions -- never by a map's
 // iteration order, so the compiler and the compiler it builds split a
 // program the same way and link the same executable.
-func EmitUnits(module *ir.Module, darwin bool, arch Arch, split bool) ([]Unit, error) {
-	if !split {
+func EmitUnits(module *ir.Module, darwin bool, arch Arch, split Split) ([]Unit, error) {
+	if split == Whole {
 		text, err := emit(module, darwin, arch)
 		if err != nil {
 			return nil, err
@@ -54,6 +74,9 @@ func EmitUnits(module *ir.Module, darwin bool, arch Arch, split bool) ([]Unit, e
 		program.byName[fn.Name] = fn
 	}
 	plans := partitionUnits(module, program.byName)
+	if split == PerModuleLTO {
+		program.shared = sharedFunctions(plans, program.byName)
+	}
 	units := make([]Unit, 0, len(plans))
 	for _, plan := range plans {
 		view := *module
@@ -64,9 +87,22 @@ func EmitUnits(module *ir.Module, darwin bool, arch Arch, split bool) ([]Unit, e
 		if err != nil {
 			return nil, err
 		}
+		if split == PerModuleLTO {
+			text = unitSourceFile(plan.module) + text
+		}
 		units = append(units, Unit{Module: plan.module, Text: text})
 	}
 	return units, nil
+}
+
+// unitSourceFile is the line a unit split for LTO starts with, naming the
+// unit's module as its source file. ThinLTO identifies an internal function
+// by its source file and its name, and string constants share names across
+// units; without the line clang names the file it read the unit from, a
+// temporary path that would make the bitcode of one text differ from one
+// build to the next.
+func unitSourceFile(path string) string {
+	return "source_filename = \"kizu-unit:" + path + "\"\n"
 }
 
 // splitProgram is what every unit of a split program shares: the whole
@@ -76,6 +112,10 @@ type splitProgram struct {
 	functions  []*ir.Function
 	byName     map[string]*ir.Function
 	errorNames bool
+	// shared, set when the program is split for LTO, names the functions a
+	// unit other than their own names, or whose address is taken. Unset,
+	// every function another unit may call is shared.
+	shared map[string]bool
 }
 
 // splitUnit is how an emitter writing one unit of a split program differs
@@ -197,20 +237,69 @@ func ownsSymbol(fn *ir.Function) bool {
 
 // splitLinkage is the linkage a function of a split unit is defined with.
 // Every function another unit may call is visible to the other units and
-// hidden from everything outside the program. Which functions another unit
-// calls is not asked: the answer would come from the other units, and an
-// edit to one of them would change this unit's text. A generic instance is
-// one copy among those every unit that reaches it carries, and the linker
-// keeps one.
-func splitLinkage(fn *ir.Function) string {
+// hidden from everything outside the program. Split for a debug build, which
+// functions another unit calls is not asked: the answer would come from the
+// other units, and an edit to one of them would change this unit's text,
+// which costs nothing at -O0. Split for LTO, the optimizer needs a function
+// only its own unit calls to be internal, so a unit's text does depend on
+// which of its functions the others name (sharedFunctions). A generic
+// instance is one copy among those every unit that reaches it carries, and
+// the linker keeps one.
+func (p *splitProgram) linkage(fn *ir.Function) string {
 	switch {
 	case ownsSymbol(fn):
 		return ""
 	case fn.Instance:
 		return "linkonce_odr hidden "
+	case p.shared != nil && !p.shared[fn.Name]:
+		return "internal "
 	default:
 		return "hidden "
 	}
+}
+
+// sharedFunctions names the functions a program split for LTO keeps
+// visible to the other units: each a unit names but does not define, which
+// is every name its declarations hold (unitExternalFunctions), each whose
+// address a function takes, and each the host may enter, a C export. What
+// takes an address or is entered from outside is kept visible whichever
+// unit holds it: a pointer may be handed anywhere, and an internal function
+// could not be the target of the alias a qualified C export is entered by.
+func sharedFunctions(plans []unitPlan, byName map[string]*ir.Function) map[string]bool {
+	shared := map[string]bool{}
+	for _, plan := range plans {
+		defined := map[string]bool{}
+		for _, fn := range plan.functions {
+			defined[fn.Name] = true
+		}
+		for _, fn := range plan.functions {
+			if fn.ExportABI != "" {
+				shared[fn.Name] = true
+			}
+			for _, name := range ir.DirectCallees(fn) {
+				if !defined[name] && byName[name] != nil {
+					shared[name] = true
+				}
+			}
+			for _, name := range addressTaken(fn) {
+				shared[name] = true
+			}
+		}
+	}
+	return shared
+}
+
+// addressTaken names the Kizu functions a function takes the address of.
+func addressTaken(fn *ir.Function) []string {
+	names := []string{}
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			if name, ok := strings.CutPrefix(instr.Op, "func.addr."); ok && instr.ExternABI == "" {
+				names = append(names, name)
+			}
+		}
+	}
+	return names
 }
 
 // writeComdat writes the comdat a copy the linker may find in several units

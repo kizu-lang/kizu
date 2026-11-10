@@ -235,7 +235,7 @@ just wasi-smoke      # run the wasm examples under wasmtime
 - `kizu build --target wasm32-wasi [--opt] --emit wasm -o <out> <file|package>` writes a binary `.wasm`; binary output never goes to the terminal implicitly.
 - `kizu build --target wasm32-browser [--opt] [--emit wat] [-o <out>] <file|package>` emits browser-hosted WAT for inspection.
 - `kizu build --target wasm32-browser [--opt] --emit wasm -o <out> <file|package>` writes the browser `.wasm`; [`docs/wasm-browser.md`](docs/wasm-browser.md) defines its host adapter and capability boundary.
-- `kizu build --target native [--opt] [--triple <triple>] [--cpu <cpu>] [--abi <abi>] [--libc on|off] [--runtime hosted|freestanding] [--emit exe|obj|llvm] [--linker clang] [-o <out>] <file>` links a native executable.
+- `kizu build --target native [--opt [--thinlto]] [--triple <triple>] [--cpu <cpu>] [--abi <abi>] [--libc on|off] [--runtime hosted|freestanding] [--emit exe|obj|llvm] [--linker clang] [-o <out>] <file>` links a native executable. `--thinlto` builds an `--opt` executable one unit per module, each cached as bitcode, and optimizes across them in the link with ThinLTO; it needs Apple's linker on macOS or lld on Linux, and is refused for `--emit obj` and Windows.
 - `kizu cache status` / `kizu cache prune` show and clear the local build cache.
 - `kizu import-c-header <file>` converts supported C prototypes to Kizu externs.
 - `kizu version` prints what the binary is.
