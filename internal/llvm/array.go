@@ -30,6 +30,12 @@ const (
 )
 
 // writeArrayRuntimeDecls writes declarations for the hosted Array runtime.
+//
+// The header a call names is marked nocapture: the runtime reads and writes it
+// during the call and keeps no copy of its address. Without that, one reserve
+// before a loop of appends would leave the header escaped, every grow call in
+// the loop might write it, and its len, cap and data would be loaded and
+// stored around each append instead of living in registers.
 func (e *emitter) writeArrayRuntimeDecls() {
 	if !e.usesArrayHeader() {
 		return
@@ -40,9 +46,9 @@ func (e *emitter) writeArrayRuntimeDecls() {
 		return
 	}
 	e.out.WriteString("declare void @kizu_array_grow(ptr, ptr, ptr, i64, i64, i64)\n")
-	e.out.WriteString("declare i1 @kizu_array_append_bytes(ptr, ptr, ptr, i64)\n")
+	e.out.WriteString("declare i1 @kizu_array_append_bytes(ptr, ptr nocapture, ptr, i64)\n")
 	e.out.WriteString("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n")
-	e.out.WriteString("declare i1 @kizu_array_reserve(ptr, ptr, i64, i64)\n")
+	e.out.WriteString("declare i1 @kizu_array_reserve(ptr, ptr nocapture, i64, i64)\n")
 	e.out.WriteString("declare void @kizu_array_deinit(ptr, ptr, i64)\n\n")
 }
 
