@@ -170,15 +170,6 @@ func VariantForm(form Form) bool {
 	}
 }
 
-// Names returns every form, so a test can enumerate them.
-func Names() []Form {
-	out := make([]Form, 0, len(forms))
-	for name := range forms {
-		out = append(out, name)
-	}
-	return out
-}
-
 // SplitApply reads a written form out of a spelling like
 // `std::meta::field_type<T, f>`, returning the form and its static arguments.
 // A spelling that is not a form comes back with ok false, which is how a

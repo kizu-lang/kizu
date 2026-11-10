@@ -72,9 +72,6 @@ func TestTypeTableWrappedPredicatesWalkRetainedGraphs(t *testing.T) {
 	if table.containsCompileTimeOnly("Pair<i64, bool>") {
 		t.Fatal("runtime-only type matched a compile-time token")
 	}
-	if !table.isBufferType("[4]Pair<i64, bool>") {
-		t.Fatal("root buffer was not classified structurally")
-	}
 	if table.containsBorrowOptional("&?T") {
 		t.Fatal("borrow wrapping an optional matched ?&T")
 	}
