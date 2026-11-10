@@ -30,7 +30,8 @@ import std::thread;
 /// modules the program was emitted as, in the order they are linked
 /// (llvm::emit_units): a debug build has one per module and compiles each to
 /// an object the cache keeps, so an edit to one module recompiles that unit
-/// alone; an optimized build has one, which clang optimizes whole.
+/// alone; an optimized build has one, which clang optimizes whole, unless
+/// it is linked with ThinLTO.
 pub struct Options {
     pub output: string::String,
     /// target is the native target the triple (or, without one, the host)
@@ -45,6 +46,10 @@ pub struct Options {
     pub emit: string::String,
     pub linker: string::String,
     pub opt: bool,
+    /// thinlto, with opt, has one unit per module as a debug build does,
+    /// each compiled to bitcode the cache keeps, and optimizes across them
+    /// when they are linked.
+    pub thinlto: bool,
     /// libraries and frameworks are what the program's reached extern
     /// declarations named with `@link_library` / `@link_framework`; the search
     /// paths are what its manifest's `[native]` section says about where
@@ -537,10 +542,19 @@ fn object_cache_target(allocator: Allocator,
     version: []u8,
     out: &var string::String
 ) -> !void {
-    try out.append_bytes(allocator, "native-obj");
+    try out.append_bytes(allocator, unit_artifact_name(options));
     try append_toolchain_key(allocator, options, host, out);
     try out.append_byte(allocator, cast<u8>(47));
     return out.append_bytes(allocator, version);
+}
+
+/// Is the kind a compiled unit is cached as, the Go `unitArtifactName`: an
+/// object, or for a ThinLTO build the bitcode the link makes the code from.
+fn unit_artifact_name(options: &Options) -> []u8 {
+    if options.thinlto {
+        return "native-bc";
+    }
+    return "native-obj";
 }
 
 /// Spells what the executable is made of besides the IR, the Go
@@ -584,6 +598,8 @@ fn append_toolchain_key(allocator: Allocator,
     var flags = array::new<string::String>(allocator);
     defer flags.deinit(allocator);
     try clang_optimization_flags(allocator, options.opt, target_is_arm64(options, host), &var flags);
+    try thinlto_compile_flags(allocator, options, &var flags);
+    try thinlto_codegen_flags(allocator, options, target_is_arm64(options, host), &var flags);
     try link_flags(allocator, options, &var flags);
     var index = 0;
     while flags.at(index) |flag| {
@@ -662,7 +678,8 @@ fn link(
         try remove_unit_files(io, allocator, dir, units.len());
         return move failed;
     }
-    if try run_clang(io, allocator, dir, options, arm64, &inputs, runtime_path, output, command) |failed| {
+    let cache_dir = cache.dir.as_bytes();
+    if try run_clang(io, allocator, dir, cache_dir, options, arm64, &inputs, runtime_path, output, command) |failed| {
         errdefer failed.deinit(allocator);
         try remove_unit_files(io, allocator, dir, units.len());
         return move failed;
@@ -677,7 +694,9 @@ fn link(
 /// object, which the cache keeps: the next build that emits the same text
 /// for a unit links the object it already has. The objects are read from the
 /// cache by `build` as well, since what that command writes where the user
-/// asked is the executable, not the objects it is linked from.
+/// asked is the executable, not the objects it is linked from. A ThinLTO
+/// build compiles its units the way a debug build does, but to bitcode, and
+/// keyed apart from the objects: the code is made when the units are linked.
 fn unit_inputs(
     io: Io,
     allocator: Allocator,
@@ -690,7 +709,7 @@ fn unit_inputs(
     inputs: &var array::Array<string::String>
 ) -> !?diagnostic::Diagnostic {
     var index = 0;
-    if options.opt {
+    if options.opt and !options.thinlto {
         while units.at(index) |unit| {
             let unit_path = try unit_text_path(io, allocator, dir, index);
             defer unit_path.deinit(allocator);
@@ -726,7 +745,7 @@ fn unit_inputs(
         let plan = try cache.get_or_build_artifact(
             io,
             allocator,
-            "native-obj",
+            unit_artifact_name(options),
             target_bytes,
             digest_bytes,
             &var object
@@ -903,6 +922,7 @@ fn prepare_unit(
     let name = try driver(allocator, options, arm64);
     try command.append(allocator, move name);
     try clang_flags(allocator, options, arm64, &var command);
+    try thinlto_compile_flags(allocator, options, &var command);
     try append_copy(allocator, &var command, "-Wno-override-module");
     try append_copy(allocator, &var command, "-c");
     try append_copy(allocator, &var command, path_bytes);
@@ -1044,6 +1064,128 @@ fn linker_version(
 /// off: a space, a tab or a carriage return.
 fn is_trimmed(byte: u8) -> bool {
     return byte == cast<u8>(32) or byte == cast<u8>(9) or byte == cast<u8>(13);
+}
+
+/// Rejects a ThinLTO build the toolchain cannot link before anything is
+/// compiled for it, the Go `ValidateThinLTO`. ThinLTO optimizes an optimized
+/// build across its units, so it needs --opt, and the code is made when an
+/// executable is linked, so it builds one. The linker reads the units as
+/// bitcode: Apple's ld64 does through the libLTO beside the clang that
+/// drives it, and on Linux lld does, where the system's GNU ld does not, so
+/// a Linux build asks for lld and refuses to start without it rather than
+/// fail in the link. A Windows build is refused: its llvm-mingw linker has
+/// not been tried.
+pub fn validate_thinlto(allocator: Allocator, options: &Options) -> !?diagnostic::Diagnostic {
+    if !options.thinlto {
+        return null;
+    }
+    if !options.opt {
+        return try fail_parts(allocator, "native error: --thinlto links an optimized build; add --opt", "", "");
+    }
+    let emit = options.emit.as_bytes();
+    if !mem::equal_bytes(emit, "exe") {
+        return try fail_parts(allocator,
+            "native error: --thinlto makes the code when an executable is linked; build --emit exe", "", "");
+    }
+    if options.target == stdtarget::Target::NativeDarwin {
+        return null;
+    }
+    if options.target == stdtarget::Target::NativeLinux {
+        let name = try driver(allocator, options, false);
+        defer name.deinit(allocator);
+        let linker = name.as_bytes();
+        var answer = string::new(allocator);
+        defer answer.deinit(allocator);
+        let code = try process::spawn_output8(allocator, &var answer, 3, linker, "-fuse-ld=lld", "-Wl,--version", "", "", "", "", "");
+        if code != 0 {
+            var message = try string::from_bytes(allocator, "native error: --thinlto links with lld on Linux, and ");
+            defer message.deinit(allocator);
+            try message.append_bytes(allocator, linker);
+            try message.append_bytes(allocator, " -fuse-ld=lld found none: exit status ");
+            try fmt::append_i64(allocator, &var message, code);
+            let message_bytes = message.as_bytes();
+            return try fail_parts(allocator, message_bytes, "", "");
+        }
+        return null;
+    }
+    let os = stdtarget::os_name(options.target);
+    return try fail_parts(allocator, "native error: --thinlto is not supported for ", os, " yet");
+}
+
+/// Appends what a ThinLTO build compiles each unit with on top of
+/// clang_flags, the Go `thinLTOCompileFlags`: bitcode carrying the summary
+/// the link optimizes the units together by.
+fn thinlto_compile_flags(
+    allocator: Allocator,
+    options: &Options,
+    out: &var array::Array<string::String>
+) -> !void {
+    if options.thinlto {
+        try append_copy(allocator, out, "-flto=thin");
+    }
+    return;
+}
+
+/// Appends what a ThinLTO link is asked for besides the optimization level,
+/// the Go `thinLTOCodegenFlags`: the linker on Linux, and the code generator
+/// options clang_optimization_flags gives a compile. ThinLTO makes the code
+/// in the link, where the flags a unit was compiled with no longer reach, so
+/// each is handed to the linker's LLVM by its own name. They change the
+/// executable, so they key it with the other toolchain flags. The arm64
+/// literal pool is not among them: ld64 makes the code for the
+/// architecture's baseline processor, which already loads float constants
+/// from the pool, while `-mattr` handed to the linker reaches nothing.
+fn thinlto_codegen_flags(
+    allocator: Allocator,
+    options: &Options,
+    arm64: bool,
+    out: &var array::Array<string::String>
+) -> !void {
+    if !options.thinlto {
+        return;
+    }
+    try append_copy(allocator, out, "-flto=thin");
+    if options.target == stdtarget::Target::NativeLinux {
+        try append_copy(allocator, out, "-fuse-ld=lld");
+    }
+    try append_copy(allocator, out, "-Wl,-mllvm,-enable-tail-merge=false");
+    try append_copy(allocator, out, "-Wl,-mllvm,-align-loops=32");
+    if arm64 {
+        try append_copy(allocator, out, "-Wl,-mllvm,-force-target-max-vector-interleave=4");
+    }
+    return;
+}
+
+/// Appends what a ThinLTO link adds to the command, the Go
+/// `thinLTOLinkFlags`: the code generator flags, then where the linker
+/// caches what it made of each unit, the `thinlto` directory under the
+/// cache. It is under the cache directory so that a build with an empty
+/// cache, the bootstrap's second stage say, also starts with no code the
+/// linker made before; it is not part of what the executable is keyed by
+/// because it does not change what is made.
+fn thinlto_link_flags(
+    allocator: Allocator,
+    options: &Options,
+    arm64: bool,
+    cache_dir: []u8,
+    out: &var array::Array<string::String>
+) -> !void {
+    if !options.thinlto {
+        return;
+    }
+    try thinlto_codegen_flags(allocator, options, arm64, out);
+    let dir = try path::join(allocator, cache_dir, "thinlto");
+    defer dir.deinit(allocator);
+    var flag = string::new(allocator);
+    defer flag.deinit(allocator);
+    if options.target == stdtarget::Target::NativeLinux {
+        try flag.append_bytes(allocator, "-Wl,--thinlto-cache-dir=");
+    } else {
+        try flag.append_bytes(allocator, "-Wl,-cache_path_lto,");
+    }
+    try flag.append_string(allocator, &dir);
+    let flag_bytes = flag.as_bytes();
+    return append_copy(allocator, out, flag_bytes);
 }
 
 /// Rejects native build modes that do not have a concrete backend yet, the
@@ -1443,6 +1585,7 @@ fn run_clang(
     io: Io,
     allocator: Allocator,
     dir: []u8,
+    cache_dir: []u8,
     options: &Options,
     arm64: bool,
     inputs: &array::Array<string::String>,
@@ -1460,6 +1603,7 @@ fn run_clang(
         try append_copy(allocator, command, "-nostdlib");
     }
     try append_copy(allocator, command, "-Wno-override-module");
+    try thinlto_link_flags(allocator, options, arm64, cache_dir, command);
     var input_index = 0;
     while inputs.at(input_index) |input| {
         input_index = input_index + 1;
@@ -1680,8 +1824,11 @@ fn fail_parts(allocator: Allocator, before: []u8, value: []u8, after: []u8) -> !
 
 /// Records the native optimization mode in artifact metadata, the Go
 /// `optimizationModeName`.
-fn optimization_mode_name(opt: bool) -> []u8 {
-    if opt {
+fn optimization_mode_name(options: &Options) -> []u8 {
+    if options.thinlto {
+        return "opt-thinlto";
+    }
+    if options.opt {
         return "opt";
     }
     return "debug";
@@ -1709,7 +1856,7 @@ fn write_metadata(
     try write_field(&var encoder, "runtime", &options.runtime);
     try write_field(&var encoder, "emit", &options.emit);
     try write_field(&var encoder, "linker", &options.linker);
-    let mode = optimization_mode_name(options.opt);
+    let mode = optimization_mode_name(options);
     try encoder.write_bytes_field("optimization_mode", mode);
     try write_field(&var encoder, "output", &options.output);
     try write_list_field(&var encoder, "command", command);
