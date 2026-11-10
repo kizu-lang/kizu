@@ -690,3 +690,35 @@ func (e *emitter) writeMemoryDecls() {
 		e.out.WriteString("declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n\n")
 	}
 }
+
+// boolRangeMetadata is the metadata number of the range a bool's byte is read
+// with; it follows the tags writeTBAATable writes.
+const boolRangeMetadata = 7
+
+// writeValueLoad reads one value of llvmType from addr into name. keyword is
+// "volatile " or empty, align is the alignment the address is known to have
+// or 0 for the type's own, and tag is the alias tag suffix.
+//
+// A bool is the byte 0 or 1 in memory, and is read as that byte with its
+// range, then narrowed. An i1 load says nothing about the byte's other seven
+// bits, so a loop over []bool cannot be widened into vector loads: each
+// element is read alone and masked. The byte and its range let it be.
+func (e *emitter) writeValueLoad(name, keyword, llvmType, addr string, align int, tag string) {
+	if llvmType != "i1" {
+		fmt.Fprintf(&e.out, "  %s = load %s%s, ptr %s%s%s\n",
+			name, keyword, llvmType, addr, alignSuffix(align), tag)
+		return
+	}
+	e.boolRangeUsed = true
+	fmt.Fprintf(&e.out, "  %s.byte = load %si8, ptr %s%s%s, !range !%d\n",
+		name, keyword, addr, alignSuffix(align), tag, boolRangeMetadata)
+	fmt.Fprintf(&e.out, "  %s = trunc i8 %s.byte to i1\n", name, name)
+}
+
+// writeBoolRange writes the range writeValueLoad names, when a bool was read.
+func (e *emitter) writeBoolRange() {
+	if !e.boolRangeUsed {
+		return
+	}
+	fmt.Fprintf(&e.out, "!%d = !{i8 0, i8 2}\n", boolRangeMetadata)
+}

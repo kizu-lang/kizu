@@ -84,6 +84,7 @@ fn emit_for_native_target(
         darwin: darwin,
         arch: arch,
         tbaa_used: false,
+        bool_range_used: false,
         memory_types: array::new<i64>(allocator),
         whole_values: array::new<i64>(allocator),
         whole_storage: array::new<i64>(allocator),
@@ -180,6 +181,9 @@ struct Emitter {
     // Records that a load or store named a type-based alias tag, so the
     // module ends with the tag table (tbaa.kizu), the Go `tbaaUsed`.
     tbaa_used: bool,
+    // Records that a bool was read as its byte, so the module ends with the
+    // range that load names (write_value_load), the Go `boolRangeUsed`.
+    bool_range_used: bool,
     // Each type's answer to is_memory_value_type_of by its module name id,
     // the values of the function being written that something reads whole
     // and the storage one of them is loaded from, for the address of a part
@@ -628,22 +632,6 @@ fn (self: &var Emitter) text3(format: []u8, a: Arg, b: Arg, c: Arg) -> !ir::Name
     return self.names.intern_owned(move out);
 }
 
-/// Builds and names one text with four arguments.
-fn (self: &var Emitter) text4(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg) -> !ir::Name {
-    var out = string::new(self.allocator);
-    errdefer out.deinit(self.allocator);
-    try format_args4(self.allocator, &var out, &self.names, format, move a, move b, move c, move d);
-    return self.names.intern_owned(move out);
-}
-
-/// Builds and names one text with five arguments.
-fn (self: &var Emitter) text5(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg, e: Arg) -> !ir::Name {
-    var out = string::new(self.allocator);
-    errdefer out.deinit(self.allocator);
-    try format_args5(self.allocator, &var out, &self.names, format, move a, move b, move c, move d, move e);
-    return self.names.intern_owned(move out);
-}
-
 /// Builds one failure, the Go `fmt.Errorf("llvm error: ...")`: the format
 /// with its arguments interpolated becomes a diagnostic without a span,
 /// which the CLI prints as `error: llvm error: ...`.
@@ -735,11 +723,6 @@ fn (self: &var Emitter) suffixed(name: ir::Name, suffix: []u8) -> !ir::Name {
     return self.names.wrapped("", name, suffix);
 }
 
-/// Names the decimal spelling of an integer.
-fn (self: &var Emitter) int_name(value: i64) -> !ir::Name {
-    return self.names.intern_i64(value);
-}
-
 /// Writes declarations and function definitions, the Go `emit`.
 fn (self: &var Emitter) emit_module(module: &ir::Module) -> !?diagnostic::Diagnostic {
     if try self.validate_foreign_boundary(module) |failed| {
@@ -764,6 +747,7 @@ fn (self: &var Emitter) emit_module(module: &ir::Module) -> !?diagnostic::Diagno
     }
     try self.write_memory_decls(module);
     try self.write_tbaa_table();
+    try self.write_bool_range();
     return null;
 }
 
@@ -2750,17 +2734,7 @@ fn (self: &var Emitter) write_optional_load_result(
         let value_name = try self.suffixed(result_name, ".value");
         let elem_type = try self.llvm_type(module, elem);
         let tag = self.value_tag(elem_type);
-        if load_align > 0 {
-            try self.line5(
-                "  %s = load %s, ptr %s, align %d%s",
-                Arg::Str(value_name), Arg::Str(elem_type), Arg::Str(ptr_name), Arg::Int(load_align), Arg::Lit(tag)
-            );
-        } else {
-            try self.line4(
-                "  %s = load %s, ptr %s%s",
-                Arg::Str(value_name), Arg::Str(elem_type), Arg::Str(ptr_name), Arg::Lit(tag)
-            );
-        }
+        try self.write_value_load(value_name, "", elem_type, ptr_name, load_align, tag);
         // A niche element is already the optional, so the element the ok path
         // loaded is what the join hands back and the null path spells absence
         // with the zero the niche reserves (ADR-0133).
