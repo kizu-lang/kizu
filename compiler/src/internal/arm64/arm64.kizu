@@ -37,11 +37,17 @@ pub fn emit(allocator: Allocator, module: &ir::Module, out: &var string::String)
     defer functions.deinit(allocator);
     var symbols = array::new<ir::Name>(allocator);
     defer symbols.deinit(allocator);
+    // The C symbol of each `export "c"` function, a second label on the
+    // same code, or the empty name.
+    var exports = array::new<ir::Name>(allocator);
+    defer exports.deinit(allocator);
     var index = 0;
     while module.functions.get(index) |function| {
         index = index + 1;
-        let name = module.function_nodes.at(function.node).name;
+        let function_node = module.function_nodes.at(function.node);
+        let name = function_node.name;
         let symbol = try selector.function_symbol(module, name);
+        try exports.append(allocator, try selector.export_symbol(module, function_node));
         if try selector.select_function(module, function) |failed| {
             return move failed;
         }
@@ -56,6 +62,17 @@ pub fn emit(allocator: Allocator, module: &ir::Module, out: &var string::String)
         selector.mark_cold_blocks();
         try functions.append(allocator, try clone_function(allocator, &selector.func));
         try symbols.append(allocator, try selector.syms.intern("_main"));
+        try exports.append(allocator, ir::empty_name());
+    }
+    for 0..2 |kind| {
+        let states = kind == 1;
+        if (states and selector.state_invokes) or (!states and selector.invokes) {
+            try selector.select_thread_invoke(states);
+            selector.mark_cold_blocks();
+            try functions.append(allocator, try clone_function(allocator, &selector.func));
+            try symbols.append(allocator, try selector.invoke_symbol(states));
+            try exports.append(allocator, ir::empty_name());
+        }
     }
     try inline_calls(allocator, &var functions, &symbols);
     var ordinal = 0;
@@ -65,6 +82,19 @@ pub fn emit(allocator: Allocator, module: &ir::Module, out: &var string::String)
         defer allocation.deinit(allocator);
         let symbol_text = ir::name_text(&selector.syms, symbol);
         let symbol_bytes = symbol_text.as_bytes();
+        let exported = exports.get_or_panic(ordinal);
+        if !ir::is_empty(exported) {
+            let exported_text = ir::name_text(&selector.syms, exported);
+            let exported_bytes = exported_text.as_bytes();
+            try out.append_bytes(allocator, "    .globl ");
+            try out.append_bytes(allocator, exported_bytes);
+            try newline(allocator, out);
+            try out.append_bytes(allocator, "    .p2align 4");
+            try newline(allocator, out);
+            try out.append_bytes(allocator, exported_bytes);
+            try out.append_bytes(allocator, ":");
+            try newline(allocator, out);
+        }
         try print_function(allocator, out, func, &allocation, symbol_bytes, ordinal, &selector.syms);
         ordinal = ordinal + 1;
     }
@@ -811,6 +841,24 @@ fn print_inst(allocator: Allocator, out: &var string::String, func: &MFunction, 
             try comma(allocator, out);
             try out.append_bytes(allocator, bytes);
             try out.append_bytes(allocator, "@PAGEOFF");
+            return newline(allocator, out);
+        },
+        GotAddr => {
+            let text = ir::name_text(syms, inst.sym);
+            let bytes = text.as_bytes();
+            try head(allocator, out, "adrp");
+            try reg_name(allocator, out, inst.rd, true);
+            try comma(allocator, out);
+            try out.append_bytes(allocator, bytes);
+            try out.append_bytes(allocator, "@GOTPAGE");
+            try newline(allocator, out);
+            try head(allocator, out, "ldr");
+            try reg_name(allocator, out, inst.rd, true);
+            try out.append_bytes(allocator, ", [");
+            try reg_name(allocator, out, inst.rd, true);
+            try out.append_bytes(allocator, ", ");
+            try out.append_bytes(allocator, bytes);
+            try out.append_bytes(allocator, "@GOTPAGEOFF]");
             return newline(allocator, out);
         },
         Call => {
