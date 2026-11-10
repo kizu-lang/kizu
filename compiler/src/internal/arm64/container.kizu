@@ -99,8 +99,17 @@ fn (self: &var Selector) select_array_append(module: &ir::Module, node: &ir::Ins
     let header = try self.header_addr(module, array_value) orelse return try self.fail_op(module, node);
     let allocator_reg = try self.reg(module, allocator_value) orelse return try self.fail_op(module, node);
     let length = self.func.new_vreg();
-    let capacity = self.func.new_vreg();
     try self.load(length, header, 8, 8, true);
+    let code = try self.append_at(module, header, length, allocator_reg, value, elem) orelse return try self.fail_op(module, node);
+    try self.set_val(node.result.name, reg_val(code));
+    return null;
+}
+
+/// Appends value at length, the length header holds, and returns the
+/// register of the code it leaves: 0, or the out-of-memory failure when the
+/// storage could not grow. An arena's add is this append too.
+fn (self: &var Selector) append_at(module: &ir::Module, header: i64, length: i64, allocator_reg: i64, value: ir::Value, elem: Shape) -> !?i64 {
+    let capacity = self.func.new_vreg();
     try self.load(capacity, header, 16, 8, true);
     let code = self.func.new_vreg();
     let fast = try self.new_join();
@@ -147,7 +156,7 @@ fn (self: &var Selector) select_array_append(module: &ir::Module, node: &ir::Ins
     let data = self.func.new_vreg();
     try self.load(data, header, 0, 8, false);
     if !try self.store_element(module, data, length, value, elem) {
-        return try self.fail_op(module, node);
+        return null;
     }
     let next_length = self.func.new_vreg();
     try self.op_imm(MOp::AddImm, next_length, length, 1);
@@ -155,8 +164,7 @@ fn (self: &var Selector) select_array_append(module: &ir::Module, node: &ir::Ins
     try self.mov_imm(code, 0);
     self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), join, 0 - 1);
     try self.start_block(join);
-    try self.set_val(node.result.name, reg_val(code));
-    return null;
+    return code;
 }
 
 /// Selects Array.set(index, value): out of range is the array's
