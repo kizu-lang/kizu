@@ -571,8 +571,7 @@ func (e *emitter) writeArrayPopOrPanic(instr *ir.Instr) error {
 	}
 	resultName := localName(instr.Result.Name)
 	resultType := e.llvmType(instr.Result.Type)
-	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s%s\n",
-		resultName, resultType, ptrName, e.valueTag(resultType))
+	e.writeValueLoad(resultName, "", resultType, ptrName, 0, e.valueTag(resultType))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
@@ -615,8 +614,7 @@ func (e *emitter) writeArrayGetOrPanic(instr *ir.Instr) error {
 	}
 	resultName := localName(instr.Result.Name)
 	resultType := e.llvmType(instr.Result.Type)
-	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s%s\n",
-		resultName, resultType, elemAddr, e.valueTag(resultType))
+	e.writeValueLoad(resultName, "", resultType, elemAddr, 0, e.valueTag(resultType))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
@@ -828,8 +826,7 @@ func (e *emitter) writeArrayOptionalLoadResult(
 	fmt.Fprintf(&e.out, "%s:\n", okLabel)
 	valueName := resultName + ".value"
 	elemType := e.llvmType(elem)
-	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s%s%s\n",
-		valueName, elemType, ptrName, alignSuffix(loadAlign), e.valueTag(elemType))
+	e.writeValueLoad(valueName, "", elemType, ptrName, loadAlign, e.valueTag(elemType))
 	// A niche element is already the optional, so the element the ok path
 	// loaded is what the join hands back and the null path spells absence
 	// with the zero the niche reserves (ADR-0133).
