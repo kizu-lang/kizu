@@ -2240,10 +2240,10 @@ func (e *emitter) writeCStructResult(name string, instr *ir.Instr) error {
 // way a program offers a name, and it is spelled where review finds it.
 //
 // A unit of a split program shares its functions with the other units under
-// symbols no C name can spell (splitLinkage).
+// symbols no C name can spell (splitProgram.linkage).
 func (e *emitter) functionLinkage(fn *ir.Function) string {
 	if e.split != nil {
-		return splitLinkage(fn)
+		return e.split.program.linkage(fn)
 	}
 	if ownsSymbol(fn) {
 		return ""

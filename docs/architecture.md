@@ -83,6 +83,12 @@ unit の順は依存が先の module 順、最後に program unit で、関数�
 symbol 名にも現れないので、unit 外へ出しても runtime の libc 呼び出しを横取りしません。
 generic instance は使う側の unit がそれぞれ `linkonce_odr` で持ち、linker が 1 つ残します
 (ELF / COFF は comdat、Mach-O は weak 定義の合併)。`--opt` は 1 unit のままです。
+`--opt --thinlto` は同じ割り方で(`llvm.PerModuleLTO`)、他の unit が名指す関数・
+address を取られる関数・C export だけを `hidden` にし、残りを `internal` にします。
+最適化が inline し尽くした本体を消し、呼び出し規約を変えられるようにするためで、
+そのぶん unit の text は他の unit がどの関数を呼ぶかにも依存します。各 unit は
+`source_filename` に module 名を書きます。ThinLTO は internal な関数を source file 名と
+名前で区別するためです。
 
 unit の object と実行ファイルは build cache に残ります。鍵は LLVM IR・runtime の
 source・toolchain、つまり**何でできているか**だけで、ファイル名も時刻も入りません。
