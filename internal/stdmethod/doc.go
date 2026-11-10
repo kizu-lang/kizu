@@ -1,4 +1,3 @@
-// Package stdmethod indexes the method signatures std declares for its
-// container types, so the checkers read one declaration instead of each
-// restating it.
+// Package stdmethod holds what std's container method signatures do not say,
+// and the one place a method's name is paired with its receiver type.
 package stdmethod
