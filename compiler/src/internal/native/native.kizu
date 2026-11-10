@@ -13,6 +13,7 @@ import std::path;
 import std::process;
 import std::sort;
 import std::string;
+import std::thread;
 
 // Mechanical port of internal/native/build.go: linking a lowered program
 // with the embedded C runtime into a host executable through the configured
@@ -20,12 +21,16 @@ import std::string;
 // shared build cache (compiler::internal::buildcache), keyed the same way
 // the Go CLI keys them, so a build made by one CLI is reused by the other.
 // Claimed temporary directories only hold the toolchain's transient inputs
-// now. The LLVM IR text and the error set numbering are passed alongside
-// Options rather than held in it, because a Kizu struct cannot borrow
-// them.
+// now. The units of LLVM IR text and the error set numbering are passed
+// alongside Options rather than held in it, because a Kizu struct cannot
+// borrow them.
 
 /// Describes one native link request, the Go `Options` without the fields a
-/// struct cannot borrow (`LLVMIR`, `ErrorSets`).
+/// struct cannot borrow (`Units`, `ErrorSets`). The units are the LLVM
+/// modules the program was emitted as, in the order they are linked
+/// (llvm::emit_units): a debug build has one per module and compiles each to
+/// an object the cache keeps, so an edit to one module recompiles that unit
+/// alone; an optimized build has one, which clang optimizes whole.
 pub struct Options {
     pub output: string::String,
     /// target is the native target the triple (or, without one, the host)
@@ -112,7 +117,7 @@ pub fn build(
     temps: &var TempDirs,
     options: &Options,
     host: &string::String,
-    llvm_ir: &string::String,
+    units: &array::Array<string::String>,
     sets: &map::Map<[]u8, map::Map<[]u8, i64>>
 ) -> !?diagnostic::Diagnostic {
     if options.output.len() == 0 {
@@ -152,7 +157,7 @@ pub fn build(
     var command = array::new<string::String>(allocator);
     defer command.deinit(allocator);
     let runtime_bytes = runtime_path.as_bytes();
-    if try link(io, allocator, dir_bytes, runtime_bytes, output, options, target_is_arm64(options, host), version_bytes, llvm_ir, &var command) |failed| {
+    if try link(io, allocator, &var cache, dir_bytes, runtime_bytes, output, options, host, version_bytes, units, &var command) |failed| {
         errdefer failed.deinit(allocator);
         try clean_build_dir(io, allocator, dir_bytes);
         return move failed;
@@ -174,7 +179,7 @@ pub fn executable(
     temps: &var TempDirs,
     options: &Options,
     host: &string::String,
-    llvm_ir: &string::String,
+    units: &array::Array<string::String>,
     sets: &map::Map<[]u8, map::Map<[]u8, i64>>,
     out_exe: &var string::String
 ) -> !?diagnostic::Diagnostic {
@@ -193,13 +198,16 @@ pub fn executable(
     let source_bytes = source.as_bytes();
     try executable_cache_target(allocator, &cache, options, host, source_bytes, &var target_spelling);
     let target_bytes = target_spelling.as_bytes();
-    let ir_bytes = llvm_ir.as_bytes();
+    var digests = string::new(allocator);
+    defer digests.deinit(allocator);
+    try append_unit_digests(allocator, &cache, units, &var digests);
+    let digest_bytes = digests.as_bytes();
     let plan = try cache.get_or_build_artifact(
         io,
         allocator,
         "native-exe",
         target_bytes,
-        ir_bytes,
+        digest_bytes,
         out_exe
     );
     match plan {
@@ -235,7 +243,7 @@ pub fn executable(
             let runtime_bytes = runtime_path.as_bytes();
             var command = array::new<string::String>(allocator);
             defer command.deinit(allocator);
-            if try link(io, allocator, dir_bytes, runtime_bytes, scratch_bytes, options, target_is_arm64(options, host), version_bytes, llvm_ir, &var command) |failed| {
+            if try link(io, allocator, &var cache, dir_bytes, runtime_bytes, scratch_bytes, options, host, version_bytes, units, &var command) |failed| {
                 errdefer failed.deinit(allocator);
                 try cache.discard_artifact(io, allocator, move pending);
                 try clean_build_dir(io, allocator, dir_bytes);
@@ -519,6 +527,22 @@ fn runtime_cache_target(allocator: Allocator,
     return out.append_bytes(allocator, version);
 }
 
+/// Spells what a unit's object is made of besides the unit's text, the Go
+/// `objectCacheTarget`: the toolchain, and which clang it is. An object is
+/// linked with objects other builds made, perhaps by another clang, so the
+/// version keys it as it keys the runtime object.
+fn object_cache_target(allocator: Allocator,
+    options: &Options,
+    host: &string::String,
+    version: []u8,
+    out: &var string::String
+) -> !void {
+    try out.append_bytes(allocator, "native-obj");
+    try append_toolchain_key(allocator, options, host, out);
+    try out.append_byte(allocator, cast<u8>(47));
+    return out.append_bytes(allocator, version);
+}
+
 /// Spells what the executable is made of besides the IR, the Go
 /// `executableCacheTarget`: the toolchain key and the hash of the runtime
 /// source it is linked with, so a program built against an older runtime is
@@ -582,7 +606,6 @@ fn append_toolchain_key(allocator: Allocator,
 /// build did not reach are skipped.
 pub fn clean_build_dir(io: Io, allocator: Allocator, dir: []u8) -> !void {
     try remove_temp_file(io, allocator, dir, "runtime.c");
-    try remove_temp_file(io, allocator, dir, "main.ll");
     try remove_temp_file(io, allocator, dir, "clang.args");
     let found = try fs::exists(io, dir);
     if found {
@@ -603,30 +626,335 @@ fn remove_temp_file(io: Io, allocator: Allocator, dir: []u8, name: []u8) -> !voi
     return;
 }
 
-/// Writes the IR where the toolchain can read it and links it with the
-/// runtime into output, the Go `link`. The IR is transient because the
-/// executable is what is worth keeping.
+/// Removes one file a unit's compile wrote, when it is there.
+fn remove_temp_unit_file(io: Io, allocator: Allocator, dir: []u8, index: i64, extension: []u8) -> !void {
+    let unit_path = try unit_file(allocator, dir, index, extension);
+    defer unit_path.deinit(allocator);
+    let path_bytes = unit_path.as_bytes();
+    let found = try fs::exists(io, path_bytes);
+    if found {
+        try fs::remove_file(io, path_bytes);
+    }
+    return;
+}
+
+/// Compiles the units and links them with the runtime into output, the Go
+/// `link`. The IR is transient because the executable is what is worth
+/// keeping: it is the thing that is expensive to make and cheap to name.
 fn link(
     io: Io,
     allocator: Allocator,
+    cache: &var buildcache::Cache,
     dir: []u8,
     runtime_path: []u8,
     output: []u8,
     options: &Options,
-    arm64: bool,
+    host: &string::String,
     version: []u8,
-    llvm_ir: &string::String,
+    units: &array::Array<string::String>,
     command: &var array::Array<string::String>
 ) -> !?diagnostic::Diagnostic {
-    var module = string::new(allocator);
-    defer module.deinit(allocator);
-    try module_for_linker(allocator, options.target, version, llvm_ir, &var module);
-    let ir_path = try path::join(allocator, dir, "main.ll");
-    defer ir_path.deinit(allocator);
-    let ir_bytes = ir_path.as_bytes();
-    let text = module.as_bytes();
-    try fs::write_file(io, ir_bytes, text);
-    return run_clang(io, allocator, dir, options, arm64, ir_bytes, runtime_path, output, command);
+    let arm64 = target_is_arm64(options, host);
+    var inputs = array::new<string::String>(allocator);
+    defer inputs.deinit(allocator);
+    if try unit_inputs(io, allocator, cache, dir, options, host, version, units, &var inputs) |failed| {
+        errdefer failed.deinit(allocator);
+        try remove_unit_files(io, allocator, dir, units.len());
+        return move failed;
+    }
+    if try run_clang(io, allocator, dir, options, arm64, &inputs, runtime_path, output, command) |failed| {
+        errdefer failed.deinit(allocator);
+        try remove_unit_files(io, allocator, dir, units.len());
+        return move failed;
+    }
+    try remove_unit_files(io, allocator, dir, units.len());
+    return null;
+}
+
+/// Writes what the link reads the program from, in unit order, the Go
+/// `unitInputs`. An optimized build hands clang its one module as text, to
+/// compile and link in one step. A debug build compiles each unit to an
+/// object, which the cache keeps: the next build that emits the same text
+/// for a unit links the object it already has. The objects are read from the
+/// cache by `build` as well, since what that command writes where the user
+/// asked is the executable, not the objects it is linked from.
+fn unit_inputs(
+    io: Io,
+    allocator: Allocator,
+    cache: &var buildcache::Cache,
+    dir: []u8,
+    options: &Options,
+    host: &string::String,
+    version: []u8,
+    units: &array::Array<string::String>,
+    inputs: &var array::Array<string::String>
+) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    if options.opt {
+        while units.at(index) |unit| {
+            let unit_path = try unit_text_path(io, allocator, dir, index);
+            defer unit_path.deinit(allocator);
+            index = index + 1;
+            var module = string::new(allocator);
+            defer module.deinit(allocator);
+            try module_for_linker(allocator, options.target, version, unit, &var module);
+            let path_bytes = unit_path.as_bytes();
+            let text = module.as_bytes();
+            try fs::write_file(io, path_bytes, text);
+            try inputs.append(allocator, try string::from_bytes(allocator, path_bytes));
+        }
+        return null;
+    }
+    var target_spelling = string::new(allocator);
+    defer target_spelling.deinit(allocator);
+    try object_cache_target(allocator, options, host, version, &var target_spelling);
+    let target_bytes = target_spelling.as_bytes();
+    var jobs = array::new<UnitJob>(allocator);
+    defer jobs.deinit(allocator);
+    var pending_objects = array::new<buildcache::PendingArtifact>(allocator);
+    defer pending_objects.deinit(allocator);
+    while units.at(index) |unit| {
+        let unit_index = index;
+        index = index + 1;
+        var digest = string::new(allocator);
+        defer digest.deinit(allocator);
+        let unit_bytes = unit.as_bytes();
+        try cache.append_content_hash(allocator, unit_bytes, &var digest);
+        let digest_bytes = digest.as_bytes();
+        var object = string::new(allocator);
+        errdefer object.deinit(allocator);
+        let plan = try cache.get_or_build_artifact(
+            io,
+            allocator,
+            "native-obj",
+            target_bytes,
+            digest_bytes,
+            &var object
+        );
+        match plan {
+            Hit => {},
+            Miss(pending) => {
+                errdefer pending.deinit(allocator);
+                var module = string::new(allocator);
+                defer module.deinit(allocator);
+                try module_for_linker(allocator, options.target, version, unit, &var module);
+                let job = try prepare_unit(io, allocator, dir, unit_index, &module, &pending.scratch, options, target_is_arm64(options, host));
+                try jobs.append(allocator, move job);
+                try pending_objects.append(allocator, move pending);
+            },
+        }
+        try inputs.append(allocator, move object);
+    }
+    if jobs.len() > 0 {
+        // The units compile at once, as many as the machine has processors.
+        // Each job keeps its unit's place, so the objects are stored, and the
+        // link reads them, in unit order whichever finished first.
+        var pool = try thread::init(io, allocator, thread::cpu_count(io));
+        defer pool.deinit(allocator);
+        var states = array::new<UnitJobs>(allocator);
+        defer states.deinit(allocator);
+        for 0..pool.threads() |_thread| {
+            try states.append(allocator, try clone_jobs(allocator, &jobs));
+        }
+        var codes = array::new<i64>(allocator);
+        defer codes.deinit(allocator);
+        for 0..jobs.len() |_job| {
+            try codes.append(allocator, 0);
+        }
+        let slots = codes.as_mut_slice();
+        try thread::each_with<i64, UnitJobs, CompileFailure>(&var pool, slots, 1, &var states, compile_units);
+        var code_index = 0;
+        while codes.get(code_index) |code| {
+            if jobs.at_mut(code_index) |job| {
+                job.code = code;
+            }
+            code_index = code_index + 1;
+        }
+    }
+    var job_index = 0;
+    while jobs.at(job_index) |job| {
+        job_index = job_index + 1;
+        let pending = try pending_objects.remove(0);
+        errdefer pending.deinit(allocator);
+        if job.code != 0 {
+            let toolchain = job.toolchain.as_bytes();
+            let failed = try fail_linker(allocator, toolchain, job.code);
+            errdefer failed.deinit(allocator);
+            try cache.discard_artifact(io, allocator, move pending);
+            while pending_objects.len() > 0 {
+                let rest = try pending_objects.remove(0);
+                try cache.discard_artifact(io, allocator, move rest);
+            }
+            return move failed;
+        }
+        try cache.finish_artifact(io, allocator, move pending);
+    }
+    return null;
+}
+
+/// Appends the SHA-256 of each unit's text, in unit order and a line each,
+/// the Go `unitDigests` joined: the content the executable is keyed by. An
+/// object is keyed by its own unit's digest.
+fn append_unit_digests(
+    allocator: Allocator,
+    cache: &buildcache::Cache,
+    units: &array::Array<string::String>,
+    out: &var string::String
+) -> !void {
+    var index = 0;
+    while units.at(index) |unit| {
+        if index > 0 {
+            try out.append_byte(allocator, cast<u8>(10));
+        }
+        index = index + 1;
+        let unit_bytes = unit.as_bytes();
+        try cache.append_content_hash(allocator, unit_bytes, out);
+    }
+    return;
+}
+
+/// Returns the directory the index-th unit's files are written in.
+fn unit_dir(allocator: Allocator, dir: []u8, index: i64) -> !string::String {
+    var name = try string::from_bytes(allocator, "unit");
+    defer name.deinit(allocator);
+    try fmt::append_i64(allocator, &var name, index);
+    let name_bytes = name.as_bytes();
+    return path::join(allocator, dir, name_bytes);
+}
+
+/// Returns where the index-th unit's text (`.ll`) or the arguments that
+/// compile it (`.args`) are written for clang to read. Each unit has a
+/// directory of its own and the same file names in it: an ELF object records
+/// the base name of the file it was compiled from, so a name that held the
+/// index would make the object of one text differ by the unit's place in
+/// whichever build compiled it, and an executable linked from cached objects
+/// would not be the one an empty cache builds.
+fn unit_file(allocator: Allocator, dir: []u8, index: i64, extension: []u8) -> !string::String {
+    let unit = try unit_dir(allocator, dir, index);
+    defer unit.deinit(allocator);
+    var name = try string::from_bytes(allocator, "unit");
+    defer name.deinit(allocator);
+    try name.append_bytes(allocator, extension);
+    let unit_bytes = unit.as_bytes();
+    let name_bytes = name.as_bytes();
+    return path::join(allocator, unit_bytes, name_bytes);
+}
+
+/// Creates the index-th unit's directory and returns where its text is
+/// written, the Go `unitPath`.
+fn unit_text_path(io: Io, allocator: Allocator, dir: []u8, index: i64) -> !string::String {
+    let unit = try unit_dir(allocator, dir, index);
+    defer unit.deinit(allocator);
+    let unit_bytes = unit.as_bytes();
+    try fs::create_dir(io, unit_bytes);
+    return unit_file(allocator, dir, index, ".ll");
+}
+
+/// Removes the unit texts a link wrote, the part of the Go `defer
+/// os.RemoveAll` clean_build_dir does not know the names of.
+fn remove_unit_files(io: Io, allocator: Allocator, dir: []u8, count: i64) -> !void {
+    var index = 0;
+    while index < count {
+        try remove_temp_unit_file(io, allocator, dir, index, ".ll");
+        try remove_temp_unit_file(io, allocator, dir, index, ".args");
+        let unit = try unit_dir(allocator, dir, index);
+        defer unit.deinit(allocator);
+        let unit_bytes = unit.as_bytes();
+        let found = try fs::exists(io, unit_bytes);
+        if found {
+            try fs::remove_dir(io, unit_bytes);
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+/// Is one unit clang compiles to an object, the Go `compileUnit`: the
+/// toolchain, the `@file` naming the arguments it reads, and the code it
+/// exited with once it has run.
+struct UnitJob {
+    toolchain: string::String,
+    response: string::String,
+    code: i64,
+}
+
+/// What compiling the units at once can fail with.
+error CompileFailure = thread::Error or process::Error;
+
+/// Writes one unit's text and the arguments that compile it into object,
+/// and returns the job that runs clang on them.
+fn prepare_unit(
+    io: Io,
+    allocator: Allocator,
+    dir: []u8,
+    index: i64,
+    text: &string::String,
+    object: &string::String,
+    options: &Options,
+    arm64: bool
+) -> !UnitJob {
+    let unit_path = try unit_text_path(io, allocator, dir, index);
+    defer unit_path.deinit(allocator);
+    let path_bytes = unit_path.as_bytes();
+    let text_bytes = text.as_bytes();
+    try fs::write_file(io, path_bytes, text_bytes);
+    var command = array::new<string::String>(allocator);
+    defer command.deinit(allocator);
+    let name = try driver(allocator, options, arm64);
+    try command.append(allocator, move name);
+    try clang_flags(allocator, options, arm64, &var command);
+    try append_copy(allocator, &var command, "-Wno-override-module");
+    try append_copy(allocator, &var command, "-c");
+    try append_copy(allocator, &var command, path_bytes);
+    try append_copy(allocator, &var command, "-o");
+    let object_bytes = object.as_bytes();
+    try append_copy(allocator, &var command, object_bytes);
+    let args_path = try unit_file(allocator, dir, index, ".args");
+    defer args_path.deinit(allocator);
+    let args_bytes = args_path.as_bytes();
+    let response = try write_response(io, allocator, args_bytes, &command);
+    errdefer response.deinit(allocator);
+    let toolchain = try driver(allocator, options, arm64);
+    return UnitJob { toolchain: move toolchain, response: move response, code: 0 };
+}
+
+/// Is what a thread of the parallel compile reads the jobs from: its own
+/// copy of them, since a pool hands the workers only plain data to share.
+struct UnitJobs {
+    jobs: array::Array<UnitJob>,
+}
+
+/// Copies the jobs for one thread of the parallel compile.
+fn clone_jobs(allocator: Allocator, jobs: &array::Array<UnitJob>) -> !UnitJobs {
+    var copies = array::new<UnitJob>(allocator);
+    errdefer copies.deinit(allocator);
+    var index = 0;
+    while jobs.at(index) |job| {
+        index = index + 1;
+        let toolchain = job.toolchain.as_bytes();
+        let response = job.response.as_bytes();
+        let toolchain_copy = try string::from_bytes(allocator, toolchain);
+        errdefer toolchain_copy.deinit(allocator);
+        let response_copy = try string::from_bytes(allocator, response);
+        errdefer response_copy.deinit(allocator);
+        try copies.append(allocator, UnitJob {
+            toolchain: move toolchain_copy,
+            response: move response_copy,
+            code: 0
+        });
+    }
+    return UnitJobs { jobs: move copies };
+}
+
+/// Runs clang for one job, the worker of the parallel compile: each part is
+/// one job's exit code, at the job's own index.
+fn compile_units(state: &var UnitJobs, part: &var []i64, index: i64) -> CompileFailure!void {
+    if state.jobs.at(index) |job| {
+        let toolchain = job.toolchain.as_bytes();
+        let response = job.response.as_bytes();
+        part[0] = try process::spawn_wait8(2, toolchain, response, "", "", "", "", "", "");
+    }
+    return;
 }
 
 /// Writes the module as the linker is to compile it, the Go
@@ -875,23 +1203,11 @@ fn spawn_clang(
     dir: []u8,
     command: &array::Array<string::String>
 ) -> !?diagnostic::Diagnostic {
-    var words = string::new(allocator);
-    defer words.deinit(allocator);
-    var index = 1;
-    while command.at(index) |part| {
-        index = index + 1;
-        let bytes = part.as_bytes();
-        try append_quoted_word(allocator, &var words, bytes);
-        try words.append_byte(allocator, cast<u8>(10));
-    }
     let args_path = try path::join(allocator, dir, "clang.args");
     defer args_path.deinit(allocator);
     let args_bytes = args_path.as_bytes();
-    let words_bytes = words.as_bytes();
-    try fs::write_file(io, args_bytes, words_bytes);
-    var response = try string::from_bytes(allocator, "@");
+    let response = try write_response(io, allocator, args_bytes, command);
     defer response.deinit(allocator);
-    try response.append_bytes(allocator, args_bytes);
     let response_bytes = response.as_bytes();
     if command.at(0) |toolchain| {
         let linker = toolchain.as_bytes();
@@ -901,6 +1217,31 @@ fn spawn_clang(
         }
     }
     return null;
+}
+
+/// Writes the arguments after the toolchain to a response file at path, one
+/// quoted word each, and returns the `@path` clang reads them from.
+fn write_response(
+    io: Io,
+    allocator: Allocator,
+    args_path: []u8,
+    command: &array::Array<string::String>
+) -> !string::String {
+    var words = string::new(allocator);
+    defer words.deinit(allocator);
+    var index = 1;
+    while command.at(index) |part| {
+        index = index + 1;
+        let bytes = part.as_bytes();
+        try append_quoted_word(allocator, &var words, bytes);
+        try words.append_byte(allocator, cast<u8>(10));
+    }
+    let words_bytes = words.as_bytes();
+    try fs::write_file(io, args_path, words_bytes);
+    var response = try string::from_bytes(allocator, "@");
+    errdefer response.deinit(allocator);
+    try response.append_bytes(allocator, args_path);
+    return move response;
 }
 
 /// Appends one argument as a single-quoted response-file word: a quote inside
@@ -1104,7 +1445,7 @@ fn run_clang(
     dir: []u8,
     options: &Options,
     arm64: bool,
-    ir_path: []u8,
+    inputs: &array::Array<string::String>,
     runtime_path: []u8,
     output: []u8,
     command: &var array::Array<string::String>
@@ -1119,7 +1460,12 @@ fn run_clang(
         try append_copy(allocator, command, "-nostdlib");
     }
     try append_copy(allocator, command, "-Wno-override-module");
-    try append_copy(allocator, command, ir_path);
+    var input_index = 0;
+    while inputs.at(input_index) |input| {
+        input_index = input_index + 1;
+        let input_bytes = input.as_bytes();
+        try append_copy(allocator, command, input_bytes);
+    }
     try append_copy(allocator, command, runtime_path);
     try append_copy(allocator, command, "-o");
     var linked = try string::from_bytes(allocator, output);

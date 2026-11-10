@@ -215,6 +215,7 @@ func newLowererForTarget(
 			Enums:     map[string]Enum{},
 			ErrorSets: map[string]Enum{},
 			Unions:    map[string]Union{},
+			Modules:   program.Modules,
 		},
 		signatures:        map[string]Signature{},
 		typeBindings:      map[string]string{},
@@ -397,6 +398,7 @@ func (l *lowerer) lowerPendingGenerics() error {
 		if err != nil {
 			return err
 		}
+		lowered.Instance = true
 		l.module.Functions = append(l.module.Functions, lowered)
 	}
 	return nil
@@ -625,7 +627,8 @@ func (l *lowerer) lowerTests() error {
 				Name:       TestFunctionName(ordinal, test.Name),
 				ReturnType: &typ.ErrorUnion{Ok: &typ.Name{Path: []string{"void"}}},
 			},
-			Body: test.Body,
+			Body:   test.Body,
+			Module: test.Module,
 		}
 		previousModule := l.currentModule
 		l.currentModule = test.Module
@@ -1088,7 +1091,7 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 	}
 	l.current = &Function{
 		Name: name, Params: signature.Params, Return: signature.Return,
-		ExportABI: fn.ExportABI, ExportName: exportName,
+		ExportABI: fn.ExportABI, ExportName: exportName, Module: fn.Module,
 	}
 	l.env = newEnv()
 	slots, err := l.mutablyBorrowedLocals(fn)

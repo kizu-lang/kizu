@@ -154,6 +154,12 @@ func enqueueReachableFunction(
 // directCallees returns direct call targets from a function body and its
 // deferred cleanup paths.
 func directCallees(fn *Function) []string {
+	return DirectCallees(fn)
+}
+
+// DirectCallees names the functions fn calls directly, takes the address of,
+// or has a cleanup call, in the order its instructions name them.
+func DirectCallees(fn *Function) []string {
 	callees := []string{}
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {

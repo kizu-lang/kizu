@@ -33,17 +33,7 @@ pub fn emit(allocator: Allocator, module: &var ir::Module, out: &var string::Str
 
 /// Formats a module for the native target, which on Darwin keeps a frame
 /// record in every function that calls, and passes a C struct by value the
-/// way arch's C calling convention does, the Go `EmitNative`.
-pub fn emit_native(
-    allocator: Allocator,
-    module: &var ir::Module,
-    out: &var string::String,
-    darwin: bool,
-    arch: Arch
-) -> !?diagnostic::Diagnostic {
-    return emit_for_native_target(allocator, module, out, darwin, arch);
-}
-
+/// way arch's C calling convention does.
 fn emit_for_native_target(
     allocator: Allocator,
     module: &var ir::Module,
@@ -51,9 +41,21 @@ fn emit_for_native_target(
     darwin: bool,
     arch: Arch
 ) -> !?diagnostic::Diagnostic {
+    var emitter = try new_emitter(allocator, module, darwin, arch);
+    defer emitter.deinit(allocator);
+    return emitter.finish(module, out);
+}
+
+/// Returns an emitter for module on a target, the Go `newEmitter`.
+fn new_emitter(
+    allocator: Allocator,
+    module: &var ir::Module,
+    darwin: bool,
+    arch: Arch
+) -> !Emitter {
     let void_name = try module.names.intern("void");
     let names = try ir::new_name_table(allocator);
-    var emitter = Emitter {
+    return Emitter {
         allocator: allocator,
         void_name: void_name,
         types: typ::new(allocator),
@@ -99,20 +101,28 @@ fn emit_for_native_target(
         aggregates: map::new<[]u8, ir::Name>(allocator),
         references: map::new<[]u8, i64>(allocator),
         wrote_aggregate_phi: false,
-        wrote_open_trap: false
+        wrote_open_trap: false,
+        split: false,
+        program_unit: false,
+        program_error_names: false,
+        program_functions: array::new<ir::Function>(allocator),
+        type_scope: map::new<[]u8, bool>(allocator)
     };
-    defer emitter.deinit(allocator);
-    if try emitter.emit_module(module) |failed| {
+}
+
+/// Writes the module and appends its verified text to out, the Go `finish`.
+fn (self: &var Emitter) finish(module: &ir::Module, out: &var string::String) -> !?diagnostic::Diagnostic {
+    if try self.emit_module(module) |failed| {
         return move failed;
     }
-    while emitter.out.len() > 0 and last_byte_is(&emitter.out, 10) {
-        try emitter.out.truncate(emitter.out.len() - 1);
+    while self.out.len() > 0 and last_byte_is(&self.out, 10) {
+        try self.out.truncate(self.out.len() - 1);
     }
-    let text = emitter.out.as_bytes();
-    if try verify_emitted_text(allocator, text) |failed| {
+    let text = self.out.as_bytes();
+    if try verify_emitted_text(self.allocator, text) |failed| {
         return move failed;
     }
-    try out.append_bytes(allocator, text);
+    try out.append_bytes(self.allocator, text);
     return null;
 }
 
@@ -223,6 +233,17 @@ struct Emitter {
     // which a label always follows -- so only such a body is searched for a
     // tail; Go searches every body.
     wrote_open_trap: bool,
+    // split is set when the module is one unit of a split program
+    // (units.kizu), the Go `split`: program_unit on the unit that defines the
+    // table of error names, program_error_names when the program carries
+    // one, program_functions the whole program's functions, which a unit
+    // calls by symbol whichever unit defines them, and type_scope the
+    // structs and unions the unit writes.
+    split: bool,
+    program_unit: bool,
+    program_error_names: bool,
+    program_functions: array::Array<ir::Function>,
+    type_scope: map::Map<[]u8, bool>,
 }
 
 /// Is what the emitter knows about one SSA value, the Go `valueInfo`: its
@@ -730,6 +751,7 @@ fn (self: &var Emitter) emit_module(module: &ir::Module) -> !?diagnostic::Diagno
     }
     try self.collect_function_names(module);
     try self.count_references(module);
+    try self.collect_type_scope(module);
     try self.collect_strings(module);
     try self.collect_tables(module);
     if try self.validate_module_types(module) |failed| {
@@ -806,8 +828,15 @@ fn (self: &var Emitter) validate_foreign_boundary(
 /// Records module-local functions before call emission, the Go
 /// `collectFunctionNames`; the handle stands for the name and its params.
 fn (self: &var Emitter) collect_function_names(module: &ir::Module) -> !void {
+    // A unit calls the functions the other units define the way it calls
+    // its own.
+    var count = module.functions.len();
+    if self.split {
+        count = self.program_functions.len();
+    }
     var index = 0;
-    while module.functions.get(index) |function| {
+    while index < count {
+        let function = self.program_function_at(module, index);
         index = index + 1;
         let name = module.function_name(function);
         let retained = ir::name_text(&module.names, name);
@@ -815,6 +844,15 @@ fn (self: &var Emitter) collect_function_names(module: &ir::Module) -> !void {
         try self.function_names.insert(self.allocator, bytes, function);
     }
     return;
+}
+
+/// Returns the index-th function of the program: of the whole program for a
+/// split unit, and otherwise of the module.
+fn (self: &Emitter) program_function_at(module: &ir::Module, index: i64) -> ir::Function {
+    if self.split {
+        return self.program_functions.get_or_panic(index);
+    }
+    return module.functions.get_or_panic(index);
 }
 
 /// Returns the module-local function named by a callee, or null.
@@ -1194,19 +1232,28 @@ fn (self: &var Emitter) write_function(module: &ir::Module, function: ir::Functi
     try self.register_forwarded_values(self.allocator, module, node);
     let name_text = ir::name_text(&module.names, node.name);
     let name_bytes = name_text.as_bytes();
-    let symbol = try self.llvm_function_name(name_bytes);
-    let export_text = ir::name_text(&module.names, node.export_name);
-    let export_bytes = export_text.as_bytes();
-    let exported_in_place = exports_c and self.names.is(symbol, export_bytes);
-    let linkage = function_linkage(module.names.is(node.name, "main") or exported_in_place);
+    let exported_in_place = try self.exports_in_place(module, node);
+    let symbol = try self.function_symbol(module, node.name);
+    let owns = try self.owns_symbol(module, node);
+    var linkage = function_linkage(owns);
+    var comdat = "";
+    if self.split {
+        // A unit of a split program shares its functions with the other
+        // units under symbols no C name can spell (split_linkage).
+        linkage = split_linkage(owns, node.instance);
+        if node.instance {
+            comdat = try self.write_comdat(symbol);
+        }
+    }
     let joined = try string::join(self.allocator, &params, ", ");
-    try self.line5(
-        "define %s%s%s @%s(%s) #0 {",
+    try self.line6(
+        "define %s%s%s @%s(%s) #0%s {",
         Arg::Lit(linkage),
         Arg::Lit(return_attrs),
         Arg::Str(return_type),
         Arg::Str(symbol),
-        Arg::Owned(move joined)
+        Arg::Owned(move joined),
+        Arg::Lit(comdat)
     );
     let body_start = self.out.len();
     var block_index = 0;

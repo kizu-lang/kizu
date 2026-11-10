@@ -11,7 +11,10 @@ import (
 // removes functions but deliberately retains declared structs, so both halves
 // must participate in deciding which named LLVM header types to declare.
 func (e *emitter) moduleHasRuntimeHeaderType(marker string) bool {
-	for _, st := range e.module.Structs {
+	for name, st := range e.module.Structs {
+		if !e.inTypeScope(name) {
+			continue
+		}
 		for _, field := range st.Fields {
 			if hasRuntimeHeaderType(field.Type, marker) {
 				return true

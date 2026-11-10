@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/kizu-lang/kizu/internal/buildcache"
 	"github.com/kizu-lang/kizu/internal/stdtarget"
@@ -20,7 +21,12 @@ import (
 
 // Options describes one native link request.
 type Options struct {
-	LLVMIR string
+	// Units are the LLVM modules the program was emitted as, in the order
+	// they are linked (llvm.EmitUnits). A debug build has one per module
+	// and compiles each to an object the cache keeps, so an edit to one
+	// module recompiles that unit alone; an optimized build has one, which
+	// clang optimizes whole.
+	Units []string
 	// ErrorSets maps each declared error set to the number its members lower to.
 	// The runtime returns those numbers, and generating the constants from the
 	// declarations is what keeps the two from drifting: the order a set is
@@ -107,7 +113,7 @@ func Executable(options Options) (string, error) {
 	return cache.GetOrBuildArtifact(
 		"native-exe",
 		executableCacheTarget(options, source),
-		[]byte(options.LLVMIR),
+		[]byte(strings.Join(unitDigests(options.Units), "\n")),
 		func(output string) error {
 			version, err := linkerVersion(options)
 			if err != nil {
@@ -123,21 +129,124 @@ func Executable(options Options) (string, error) {
 	)
 }
 
-// link writes the IR where the toolchain can read it and links it with the
-// runtime into output. The IR is transient because the executable is what is
-// worth keeping: it is the thing that is expensive to make and cheap to name.
+// link compiles the units and links them with the runtime into output. The
+// IR is transient because the executable is what is worth keeping: it is the
+// thing that is expensive to make and cheap to name.
 func link(runtimePath string, output string, options Options, version string) ([]string, error) {
 	tmp, err := os.MkdirTemp("", "kizu-native-*")
 	if err != nil {
 		return nil, err
 	}
 	defer os.RemoveAll(tmp)
-	llvmIR := moduleForLinker(options, version)
-	irPath := filepath.Join(tmp, "main.ll")
-	if err := os.WriteFile(irPath, []byte(llvmIR), 0o644); err != nil {
+	inputs, err := unitInputs(tmp, options, version)
+	if err != nil {
 		return nil, err
 	}
-	return runClang(irPath, runtimePath, output, options)
+	return runClang(inputs, runtimePath, output, options)
+}
+
+// unitInputs returns what the link reads the program from, in unit order. An
+// optimized build hands clang its one module as text, to compile and link in
+// one step. A debug build compiles each unit to an object, which the cache
+// keeps: the next build that emits the same text for a unit links the object
+// it already has, and the units it has no object for compile in parallel, as
+// Go compiles packages. The objects are read from the cache by `build` as well,
+// since what that command writes where the user asked is the executable, not
+// the objects it is linked from.
+func unitInputs(tmp string, options Options, version string) ([]string, error) {
+	if options.Opt {
+		inputs := make([]string, 0, len(options.Units))
+		for index, unit := range options.Units {
+			path, err := unitPath(tmp, index)
+			if err != nil {
+				return nil, err
+			}
+			text := moduleForLinker(options, unit, version)
+			if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+				return nil, err
+			}
+			inputs = append(inputs, path)
+		}
+		return inputs, nil
+	}
+	cache, err := buildcache.New()
+	if err != nil {
+		return nil, err
+	}
+	digests := unitDigests(options.Units)
+	inputs := make([]string, len(options.Units))
+	failures := make([]error, len(options.Units))
+	// The units compile at once, as many as the machine has processors. Each
+	// result lands at its unit's index, so the link reads the objects in unit
+	// order whichever finished first.
+	slots := make(chan struct{}, runtime.NumCPU())
+	var group sync.WaitGroup
+	for index, unit := range options.Units {
+		group.Add(1)
+		slots <- struct{}{}
+		go func() {
+			defer func() { <-slots; group.Done() }()
+			inputs[index], failures[index] = cache.GetOrBuildArtifact(
+				"native-obj",
+				objectCacheTarget(options, version),
+				[]byte(digests[index]),
+				func(output string) error {
+					return compileUnit(tmp, index, moduleForLinker(options, unit, version), output, options)
+				},
+			)
+		}()
+	}
+	group.Wait()
+	for _, err := range failures {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return inputs, nil
+}
+
+// unitDigests returns the SHA-256 of each unit's text, in unit order. An
+// object is keyed by its unit's digest and the executable by all of them, so
+// each text is hashed once however many keys name it.
+func unitDigests(units []string) []string {
+	digests := make([]string, 0, len(units))
+	for _, unit := range units {
+		sum := sha256.Sum256([]byte(unit))
+		digests = append(digests, hex.EncodeToString(sum[:]))
+	}
+	return digests
+}
+
+// unitPath returns where the index-th unit's text is written for clang to
+// read, creating its directory. Each unit has a directory of its own and the
+// same file name in it: an ELF object records the base name of the file it
+// was compiled from, so a name that held the index would make the object of
+// one text differ by the unit's place in whichever build compiled it, and an
+// executable linked from cached objects would not be the one an empty cache
+// builds.
+func unitPath(tmp string, index int) (string, error) {
+	dir := filepath.Join(tmp, fmt.Sprintf("unit%d", index))
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "unit.ll"), nil
+}
+
+// compileUnit compiles one unit's text into an object.
+func compileUnit(tmp string, index int, text string, output string, options Options) error {
+	path, err := unitPath(tmp, index)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		return err
+	}
+	args := append(clangFlags(options), "-Wno-override-module", "-c", path, "-o", output)
+	out, err := exec.Command(driver(options), args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("native error: %s failed: %w\n%s", driver(options), err, out)
+	}
+	return nil
 }
 
 // The stack probe a module asks for, as the emitter writes it and as Apple's
@@ -159,16 +268,16 @@ const (
 // frame wider than a page itself, through __chkstk, because that is how its
 // own thread stacks grow; there LLVM reads the probe attribute as the name of
 // a function to call instead, and no function is named `inline-asm`. The
-// choice waits until the link so that the module, and the executable cache
-// keyed by it, is the same whichever clang links it.
-func moduleForLinker(options Options, version string) string {
+// choice waits until the link so that the module, and the cache entries
+// keyed by it, are the same whichever clang links it.
+func moduleForLinker(options Options, module string, version string) string {
 	if options.Target == stdtarget.NativeWindows {
-		return strings.Replace(options.LLVMIR, inlineStackProbe+" ", "", 1)
+		return strings.Replace(module, inlineStackProbe+" ", "", 1)
 	}
 	if options.Target != stdtarget.NativeDarwin || !strings.Contains(version, "Apple clang") {
-		return options.LLVMIR
+		return module
 	}
-	return strings.Replace(options.LLVMIR, inlineStackProbe, appleStackProbe, 1)
+	return strings.Replace(module, inlineStackProbe, appleStackProbe, 1)
 }
 
 // linkerVersion returns the line the linker names itself with, the first of
@@ -280,6 +389,15 @@ func runtimeObject(source string, version string, options Options) (string, erro
 // the old clang made must not be linked into what the new one builds.
 func runtimeCacheTarget(options Options, version string) string {
 	key := append([]string{"native-runtime"}, toolchainKey(options)...)
+	return strings.Join(append(key, version), "/")
+}
+
+// objectCacheTarget spells what a unit's object is made of besides the
+// unit's text: the toolchain, and which clang it is. An object is linked with
+// objects other builds made, perhaps by another clang, so the version keys it
+// as it keys the runtime object.
+func objectCacheTarget(options Options, version string) string {
+	key := append([]string{"native-obj"}, toolchainKey(options)...)
 	return strings.Join(append(key, version), "/")
 }
 
@@ -419,14 +537,17 @@ func camelToSnake(name string) string {
 // Darwin compiles for), and a triple guessed without asking turns the filled
 // in one into a real override. The flag stays out of clangFlags, which key
 // the runtime object: it is about the IR input, which the runtime is not.
-func runClang(irPath string, runtimePath string, output string, options Options) ([]string, error) {
+func runClang(
+	inputs []string, runtimePath string, output string, options Options,
+) ([]string, error) {
 	args := clangFlags(options)
 	if options.Emit == "obj" {
 		args = append(args, "-r", "-nostdlib")
 	}
 	args = append(args, "-Wno-override-module")
 	linked := linkedOutput(output, options)
-	args = append(args, irPath, runtimePath, "-o", linked)
+	args = append(args, inputs...)
+	args = append(args, runtimePath, "-o", linked)
 	if options.Emit != "obj" {
 		args = append(args, linkFlags(options)...)
 	}

@@ -19,16 +19,14 @@ func Emit(module *ir.Module) (string, error) {
 	return emit(module, false, ArchArm64)
 }
 
-// EmitNative formats a module for the native target, which on Darwin keeps a
-// frame record in every function that calls, and passes a C struct by value
-// the way arch's C calling convention does.
-func EmitNative(module *ir.Module, darwin bool, arch Arch) (string, error) {
-	return emit(module, darwin, arch)
-}
-
 // emit formats a module for a target: darwin keeps frame records.
 func emit(module *ir.Module, darwin bool, arch Arch) (string, error) {
-	e := &emitter{
+	return newEmitter(module, darwin, arch).finish()
+}
+
+// newEmitter returns an emitter for module on a target.
+func newEmitter(module *ir.Module, darwin bool, arch Arch) *emitter {
+	return &emitter{
 		module:       module,
 		types:        typpkg.NewTable(),
 		strings:      map[string]string{},
@@ -39,6 +37,10 @@ func emit(module *ir.Module, darwin bool, arch Arch) (string, error) {
 		darwin:       darwin,
 		arch:         arch,
 	}
+}
+
+// finish writes the module and returns its verified text.
+func (e *emitter) finish() (string, error) {
 	if err := e.emit(); err != nil {
 		return "", err
 	}
@@ -51,6 +53,10 @@ func emit(module *ir.Module, darwin bool, arch Arch) (string, error) {
 
 type emitter struct {
 	module *ir.Module
+	// split is set when the module is one unit of a split program
+	// (units.go), and typeScope then names the structs and unions it writes.
+	split     *splitUnit
+	typeScope map[string]bool
 	// nextThreadEach numbers the slots pool rounds put their slice in.
 	nextThreadEach int
 	types          *typpkg.Table
@@ -125,6 +131,7 @@ func (e *emitter) emit() error {
 	}
 	e.collectFunctionNames()
 	e.countReferences()
+	e.collectTypeScope()
 	e.collectStrings()
 	e.collectTables()
 	if err := e.validateModuleTypes(); err != nil {
@@ -219,10 +226,11 @@ func taskInvokeThunkName(typeName string) string {
 func (e *emitter) writeTaskInvokeThunks() {
 	for _, typeName := range e.taskInvokeStateTypes() {
 		llvmType := e.llvmType(typeName)
+		linkage, comdat := e.thunkLinkage(taskInvokeThunkName(typeName))
 		fmt.Fprintf(&e.out,
-			"define internal void @%s("+
-				"ptr %%kizu.entry, ptr %%kizu.io, ptr %%kizu.allocator, ptr %%kizu.state) #0 {\n",
-			taskInvokeThunkName(typeName),
+			"define %svoid @%s("+
+				"ptr %%kizu.entry, ptr %%kizu.io, ptr %%kizu.allocator, ptr %%kizu.state) #0%s {\n",
+			linkage, taskInvokeThunkName(typeName), comdat,
 		)
 		e.out.WriteString("entry:\n")
 		fmt.Fprintf(&e.out, "  %%kizu.state.copy = alloca %s\n", llvmType)
@@ -242,7 +250,13 @@ func (e *emitter) writeTaskInvokeThunks() {
 func (e *emitter) collectFunctionNames() {
 	e.functionNames = map[string]bool{}
 	e.functionParams = map[string][]ir.Param{}
-	for _, fn := range e.module.Functions {
+	functions := e.module.Functions
+	if e.split != nil {
+		// A unit calls the functions the other units define the way it calls
+		// its own.
+		functions = e.split.program.functions
+	}
+	for _, fn := range functions {
 		e.functionNames[fn.Name] = true
 		e.functionParams[fn.Name] = fn.Params
 	}
@@ -344,6 +358,7 @@ func (e *emitter) writeHeader() {
 	e.writeBoxRuntimeDecls()
 	e.writeTestRuntimeDecls()
 	e.writeExternalCallDecls()
+	e.writeUnitFunctionDecls()
 	e.writePanicDecls()
 	e.writeFloatCastDecls()
 	e.writeFloatMathDecls()
@@ -475,7 +490,7 @@ func (e *emitter) errorNameTableRows() int {
 // carry, indexed by the code itself. Codes are global, so one table serves all
 // sets; row 0 is the reserved "no error" entry and stays empty.
 func (e *emitter) writeErrorNameTable() {
-	if !e.needsErrorNameTable() {
+	if !e.writesErrorNameTable() {
 		return
 	}
 	spellings := map[int]string{}
@@ -697,10 +712,9 @@ func (e *emitter) writeExternalCallDecls() {
 
 // externalCallDecls returns stable declarations for external call instructions.
 func (e *emitter) externalCallDecls() []string {
-	defined := map[string]bool{}
-	for _, fn := range e.module.Functions {
-		defined[fn.Name] = true
-	}
+	// A Kizu function is called by its own symbol, which a split unit that
+	// does not define it declares with the others (writeUnitFunctionDecls).
+	defined := e.functionNames
 	seen := map[string]string{}
 	for _, fn := range e.module.Functions {
 		for _, block := range fn.Blocks {
@@ -917,7 +931,9 @@ func (e *emitter) sortedStringLiterals() []string {
 func (e *emitter) sortedStructNames() []string {
 	names := make([]string, 0, len(e.module.Structs))
 	for name := range e.module.Structs {
-		names = append(names, name)
+		if e.inTypeScope(name) {
+			names = append(names, name)
+		}
 	}
 	sort.Strings(names)
 	return names
@@ -927,7 +943,9 @@ func (e *emitter) sortedStructNames() []string {
 func (e *emitter) sortedUnionNames() []string {
 	names := make([]string, 0, len(e.module.Unions))
 	for name := range e.module.Unions {
-		names = append(names, name)
+		if e.inTypeScope(name) {
+			names = append(names, name)
+		}
 	}
 	sort.Strings(names)
 	return names
@@ -940,7 +958,10 @@ func (e *emitter) usesSliceABI() bool {
 
 // moduleHasSliceType reports whether any non-error-union value uses []u8.
 func (e *emitter) moduleHasSliceType() bool {
-	for _, st := range e.module.Structs {
+	for name, st := range e.module.Structs {
+		if !e.inTypeScope(name) {
+			continue
+		}
 		for _, field := range st.Fields {
 			if isSliceType(field.Type) {
 				return true
@@ -1024,7 +1045,10 @@ func (e *emitter) sortedErrorUnionNames() []string {
 // named-type collector, so none of them can drop a position the others scan.
 func (e *emitter) collectModuleTypeNames(collect func(map[string]bool, string)) []string {
 	seen := map[string]bool{}
-	for _, st := range e.module.Structs {
+	for name, st := range e.module.Structs {
+		if !e.inTypeScope(name) {
+			continue
+		}
 		for _, field := range st.Fields {
 			collect(seen, field.Type)
 		}
@@ -1138,21 +1162,17 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 		returnType = "void"
 	}
 	params := e.definitionParams(fn)
-	returnAttrs := ""
-	if fn.ExportABI == "c" {
-		returnAttrs = strings.TrimPrefix(cIntegerExtension(fn.Return), " ")
-		if returnAttrs != "" {
-			returnAttrs += " "
-		}
-	}
+	returnAttrs := cReturnAttrs(fn)
 	e.registerForwardedValues(fn)
+	linkage, comdat := e.definitionLinkage(fn)
 	fmt.Fprintf(&e.out,
-		"define %s%s%s @%s(%s) #0 {\n",
-		e.functionLinkage(fn),
+		"define %s%s%s @%s(%s) #0%s {\n",
+		linkage,
 		returnAttrs,
 		returnType,
-		llvmFunctionName(fn.Name),
+		e.functionSymbol(fn.Name),
 		strings.Join(params, ", "),
+		comdat,
 	)
 	bodyStart := e.out.Len()
 	for _, block := range fn.Blocks {
@@ -2030,9 +2050,13 @@ func (e *emitter) writeFuncAddr(instr *ir.Instr) error {
 	} else if !e.functionNames[name] {
 		return fmt.Errorf("llvm error: `%s` is not a declared function", name)
 	}
+	symbol := llvmFunctionName(name)
+	if instr.ExternABI != "c" {
+		symbol = e.functionSymbol(name)
+	}
 	e.values[instr.Result.Name] = valueInfo{
 		typ:     instr.Result.Type,
-		operand: "@" + llvmFunctionName(name),
+		operand: "@" + symbol,
 	}
 	return nil
 }
@@ -2214,11 +2238,40 @@ func (e *emitter) writeCStructResult(name string, instr *ir.Instr) error {
 // stack ends. Internal linkage is what keeps a name a program chose for itself
 // from being an answer to somebody else's question. `export "c" fn` is the one
 // way a program offers a name, and it is spelled where review finds it.
+//
+// A unit of a split program shares its functions with the other units under
+// symbols no C name can spell (splitLinkage).
 func (e *emitter) functionLinkage(fn *ir.Function) string {
-	if fn.Name == "main" || fn.ExportABI == "c" && llvmFunctionName(fn.Name) == fn.ExportName {
+	if e.split != nil {
+		return splitLinkage(fn)
+	}
+	if ownsSymbol(fn) {
 		return ""
 	}
 	return "internal "
+}
+
+// cReturnAttrs spells the extension a C export's result is returned with,
+// ahead of its type, or nothing for any other function.
+func cReturnAttrs(fn *ir.Function) string {
+	if fn.ExportABI != "c" {
+		return ""
+	}
+	if attrs := strings.TrimPrefix(cIntegerExtension(fn.Return), " "); attrs != "" {
+		return attrs + " "
+	}
+	return ""
+}
+
+// definitionLinkage returns the linkage a function is defined with and the
+// comdat clause that follows its signature, writing the comdat first: a
+// generic instance of a split unit is one copy among several the linker
+// picks from.
+func (e *emitter) definitionLinkage(fn *ir.Function) (string, string) {
+	if e.split != nil && fn.Instance {
+		return e.functionLinkage(fn), e.writeComdat(e.functionSymbol(fn.Name))
+	}
+	return e.functionLinkage(fn), ""
 }
 
 // writeCExportAlias gives a C export whose module path qualifies its name
@@ -2233,7 +2286,7 @@ func (e *emitter) writeCExportAlias(fn *ir.Function, returnType string) {
 		paramTypes = append(paramTypes, e.llvmType(param.Type))
 	}
 	fmt.Fprintf(&e.out, "@%s = alias %s (%s), ptr @%s\n\n",
-		fn.ExportName, returnType, strings.Join(paramTypes, ", "), llvmFunctionName(fn.Name))
+		fn.ExportName, returnType, strings.Join(paramTypes, ", "), e.functionSymbol(fn.Name))
 }
 
 // validateCExportSymbols refuses a C export whose symbol another export or
@@ -2296,13 +2349,13 @@ func (e *emitter) writeInternalCall(name string, instr *ir.Instr) error {
 		args = append(args, callArg)
 	}
 	if e.returnsThroughSlot(instr.Result.Type) {
-		e.writeSlotCall(instr, "@"+llvmFunctionName(name), args)
+		e.writeSlotCall(instr, "@"+e.functionSymbol(name), args)
 		return nil
 	}
 	call := fmt.Sprintf(
 		"call %s @%s(%s)",
 		e.llvmType(instr.Result.Type),
-		llvmFunctionName(name),
+		e.functionSymbol(name),
 		strings.Join(args, ", "),
 	)
 	if instr.Result.Type == "void" {
