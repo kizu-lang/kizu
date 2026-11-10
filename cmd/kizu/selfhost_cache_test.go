@@ -31,6 +31,19 @@ func TestSelfhostCache(t *testing.T) {
 		t.Parallel()
 		requireSharedRun(t, target, selfhost, kizuBinaryPath)
 	})
+	t.Run("embedded-file-edit-rebuilds", func(t *testing.T) {
+		t.Parallel()
+		cacheDir := t.TempDir()
+		root, greeting := writeEmbeddedGreetingPackage(t, "hello, kizu")
+		first := runCacheCLI(t, cacheDir, "", selfhost, "run", root)
+		requireCacheRunOK(t, first, "first run")
+		writeTestFile(t, greeting, []byte("goodbye, kizu"))
+		edited := runCacheCLI(t, cacheDir, "", selfhost, "run", root)
+		requireCacheRunOK(t, edited, "run after editing the embedded file")
+		if first.output.stdout != "hello, kizu\n" || edited.output.stdout != "goodbye, kizu\n" {
+			t.Errorf("runs printed %q then %q", first.output.stdout, edited.output.stdout)
+		}
+	})
 	t.Run("status-and-prune-match", func(t *testing.T) {
 		t.Parallel()
 		cacheDir := t.TempDir()

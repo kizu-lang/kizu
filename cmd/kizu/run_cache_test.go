@@ -57,13 +57,7 @@ func TestRunRebuildsWhenAnEmbeddedFileChanges(t *testing.T) {
 	}
 	cacheDir := t.TempDir()
 	path := os.Getenv("PATH")
-	root := t.TempDir()
-	writeTestFile(t, filepath.Join(root, "kizu.toml"),
-		[]byte("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[modules]\npaths = [\"src\"]\n"))
-	writeTestFile(t, filepath.Join(root, "src", "main.kizu"),
-		[]byte("fn main() {\n    print(@embed_file(\"greeting.txt\"));\n}\n"))
-	greeting := filepath.Join(root, "greeting.txt")
-	writeTestFile(t, greeting, []byte("hello, kizu"))
+	root, greeting := writeEmbeddedGreetingPackage(t, "hello, kizu")
 
 	if out := runCached(t, cacheDir, root, path); out != "hello, kizu\n" {
 		t.Fatalf("first run printed %q", out)
@@ -72,6 +66,20 @@ func TestRunRebuildsWhenAnEmbeddedFileChanges(t *testing.T) {
 	if out := runCached(t, cacheDir, root, path); out != "goodbye, kizu\n" {
 		t.Fatalf("run after editing the embedded file printed %q", out)
 	}
+}
+
+// writeEmbeddedGreetingPackage writes a package whose program prints the
+// file it embeds, and returns the package root and the embedded file.
+func writeEmbeddedGreetingPackage(t *testing.T, greeting string) (string, string) {
+	t.Helper()
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "kizu.toml"),
+		[]byte("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[modules]\npaths = [\"src\"]\n"))
+	writeTestFile(t, filepath.Join(root, "src", "main.kizu"),
+		[]byte("fn main() {\n    print(@embed_file(\"greeting.txt\"));\n}\n"))
+	path := filepath.Join(root, "greeting.txt")
+	writeTestFile(t, path, []byte(greeting))
+	return root, path
 }
 
 // greetingSource writes the smallest program that prints one line.
