@@ -29,6 +29,8 @@ import (
 // rendered as one Kizu program, one function per case, lowered and optimized
 // for wasm32-wasi in process, and run under node's WASI on every input the
 // model predicts; what it prints is compared with the model.
+// compiler/src/ir_runtime_mbt_test.kizu replays the same fixtures against the
+// compiler built from compiler/, through the same node driver.
 //
 // node is required; without it the tests skip, as the wasmtime tests in
 // cmd/kizu do. KIZU_MBT_BIN=<kizu binary> builds with

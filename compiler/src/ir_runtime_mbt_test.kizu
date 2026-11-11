@@ -1,0 +1,1473 @@
+import compiler::internal::ast;
+import compiler::internal::ir;
+import compiler::internal::ownership;
+import compiler::internal::project;
+import compiler::internal::stdtarget;
+import compiler::internal::types;
+import compiler::internal::wasm;
+import std::array;
+import std::fmt;
+import std::fs;
+import std::io;
+import std::json;
+import std::map;
+import std::mem;
+import std::net;
+import std::process;
+import std::string;
+import std::testing;
+
+// The programs here come from the Quint models in spec/ir/bounds.qnt and
+// spec/ir/defer.qnt (spec/ir/README.md says what they cover);
+// scripts/ir-mbt samples them into compiler/tests/mbt/ir_{bounds,defer}.json.
+// Neither property is a shape of the IR: an index check is right when an
+// index out of range still stops the program, and a cleanup is right when it
+// runs on the exits SPEC §6.3.1 names. So each fixture is rendered as one
+// Kizu program, one function per case, lowered and optimized for wasm32-wasi
+// in process the way `kizu build --target wasm32-wasi --emit wasm --opt`
+// does, and run under node's WASI on every input the model predicts; what it
+// prints is compared with the model. internal/ir/runtime_mbt_test.go replays
+// the same fixtures against the Go implementation, through the same node
+// driver (internal/ir/testdata/wasi_runs.mjs).
+//
+// node is required; when PATH has none the replay says so on stderr and
+// checks nothing, as the Go replay skips. KIZU_MBT_FIXTURE=<file> replays
+// another fixture of the test's model.
+
+/// One case of a bounds or defer fixture: the statement tokens and, per
+/// input, `<input>: <what main prints>`.
+pub struct RuntimeMbtCase {
+    pub bucket: string::String,
+    pub prog: array::Array<string::String>,
+    pub expect: array::Array<string::String>,
+}
+
+pub struct RuntimeMbtFixture {
+    pub note: string::String,
+    pub cases: array::Array<RuntimeMbtCase>,
+}
+
+/// The model a fixture samples, which decides how a case is written as a
+/// function, how main calls it, and how a run's output is read.
+enum RuntimeMbtModel {
+    Bounds,
+    Defer,
+}
+
+/// One run of the module as the node driver reports it. code is spelled the
+/// way the driver's JSON has it: a number, or `"trap"` with its quotes.
+struct RuntimeMbtResult {
+    code: string::String,
+    stdout: string::String,
+    stderr: string::String,
+}
+
+/// One run: case case_index on one input, and what the model says it prints.
+struct RuntimeMbtRun {
+    case_index: i64,
+    input: string::String,
+    want: string::String,
+}
+
+/// Shapes with a known answer, one per line as `bucket|statements|expect`,
+/// the lists separated by `;`. They mirror spec/ir/bounds_test.qnt.
+fn runtime_mbt_bounds_known_shapes() -> []u8 {
+    return
+        \\for-over-length|for 0;read I;end|3 0: 33 3;0 0: 0 0
+        \\for-over-length-with-pop|for 0;read I;pop;end|3 0: panic
+        \\while-over-length-with-pop|while 0;read I;pop;end|3 0: 21 1
+        \\guard-then-pop|ge K;lt K;read K;pop;read K;end;end|2 1: panic;2 0: 20 1;2 -1: 0 2
+        \\exit-unless-below|ge K;exit K;read K;end|2 2: 0 2;2 1: 11 2
+        \\checked-once|read K;read K|1 0: 20 1;1 1: panic
+        \\write-out-of-range|write K;read K|1 1: -7 1;1 0: 0 1
+        \\below-is-not-enough|lt K;read K;end|2 -1: panic
+        \\next-index|for 0;read I1;end|3 0: panic;0 0: 0 0
+    ;
+}
+
+/// Shapes with a known answer, as for bounds. They mirror
+/// spec/ir/defer_test.qnt.
+fn runtime_mbt_defer_known_shapes() -> []u8 {
+    return
+        \\loop-and-exits|defer 1;errdefer 2;loop 5;defer 3;continue 0;break 1;note 100;end;return 2;fail 3;note 101|00: 100 3 100 3 101 1 0;01: 3 3 101 1 0;02: 3 101 1 0;04: 100 3 100 3 1 0;08: 100 3 100 3 2 1 -1
+        \\errdefer-of-finished-turn|loop 1;errdefer 2;note 103;end;fail 0|00: 103 103 0;01: 103 103 -1
+        \\nested-error-unwind|defer 1;if 0;errdefer 2;loop 3;defer 4;fail 1;end;end|03: 4 2 1 -1;01: 4 4 1 0;00: 1 0
+        \\block-exit-order|if 0;defer 1;defer 2;note 100;end;note 101|01: 100 2 1 101 0;00: 101 0
+    ;
+}
+
+// ---------------------------------------------------------------- reading
+
+fn runtime_mbt_new_case(allocator: Allocator) -> RuntimeMbtCase {
+    return RuntimeMbtCase {
+        bucket: string::new(allocator),
+        prog: array::new<string::String>(allocator),
+        expect: array::new<string::String>(allocator),
+    };
+}
+
+/// Appends each `;`-separated field of text to out.
+fn runtime_mbt_split(allocator: Allocator, out: &var array::Array<string::String>, text: []u8) -> !void {
+    var start = 0;
+    var index = 0;
+    while index <= mem::len(text) {
+        var at_end = true;
+        if mem::byte_at(text, index) |byte| {
+            at_end = byte == cast<u8>(59);
+        }
+        if at_end {
+            let field = try string::from_bytes(allocator, text[start..index]);
+            try out.append(allocator, move field);
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+/// Reads the known shapes, one `bucket|statements|expect` per line.
+fn runtime_mbt_known_cases(allocator: Allocator, shapes: []u8) -> !array::Array<RuntimeMbtCase> {
+    var cases = array::new<RuntimeMbtCase>(allocator);
+    errdefer cases.deinit(allocator);
+    var start = 0;
+    var index = 0;
+    while index <= mem::len(shapes) {
+        var at_end = true;
+        if mem::byte_at(shapes, index) |byte| {
+            at_end = byte == cast<u8>(10);
+        }
+        if at_end and index > start {
+            let line = shapes[start..index];
+            let first = runtime_mbt_byte_index(line, cast<u8>(124));
+            let rest = line[first + 1..mem::len(line)];
+            let second = runtime_mbt_byte_index(rest, cast<u8>(124));
+            var c = runtime_mbt_new_case(allocator);
+            errdefer c.deinit(allocator);
+            try c.bucket.append_bytes(allocator, line[0..first]);
+            try runtime_mbt_split(allocator, &var c.prog, rest[0..second]);
+            try runtime_mbt_split(allocator, &var c.expect, rest[second + 1..mem::len(rest)]);
+            try cases.append(allocator, move c);
+        }
+        if at_end {
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    return move cases;
+}
+
+/// Reads the cases of a fixture in compiler/tests/mbt, or the one
+/// KIZU_MBT_FIXTURE names.
+fn runtime_mbt_read_fixture(io: Io, allocator: Allocator, name: []u8) -> !RuntimeMbtFixture {
+    var path = string::new(allocator);
+    defer path.deinit(allocator);
+    if process::env("KIZU_MBT_FIXTURE") |other| {
+        try path.append_bytes(allocator, other);
+    } else {
+        try path.append_bytes(allocator, "compiler/tests/mbt/");
+        try path.append_bytes(allocator, name);
+    }
+    let path_bytes = path.as_bytes();
+    let data = try fs::read_file(io, allocator, path_bytes, mem::Limit::Unlimited);
+    defer data.deinit(allocator);
+    let bytes = data.as_bytes();
+    return json::decode<RuntimeMbtFixture>(allocator, bytes);
+}
+
+// ---------------------------------------------------------------- text
+
+/// The index of the first byte in text, or its length.
+fn runtime_mbt_byte_index(text: []u8, byte: u8) -> i64 {
+    var index = 0;
+    while mem::byte_at(text, index) |at| {
+        if at == byte {
+            return index;
+        }
+        index = index + 1;
+    }
+    return index;
+}
+
+fn runtime_mbt_is_space(byte: u8) -> bool {
+    return byte == cast<u8>(32) or byte == cast<u8>(10) or byte == cast<u8>(9) or
+        byte == cast<u8>(13);
+}
+
+/// How many space-separated words text has.
+fn runtime_mbt_word_count(text: []u8) -> i64 {
+    var count = 0;
+    var in_word = false;
+    var index = 0;
+    while mem::byte_at(text, index) |byte| {
+        index = index + 1;
+        if runtime_mbt_is_space(byte) {
+            in_word = false;
+        } else if !in_word {
+            in_word = true;
+            count = count + 1;
+        }
+    }
+    return count;
+}
+
+/// Word n of a whitespace-separated text, or an empty text.
+fn runtime_mbt_word(text: []u8, n: i64) -> []u8 {
+    var word = -1;
+    var start = 0;
+    var in_word = false;
+    var index = 0;
+    while index <= mem::len(text) {
+        var space = true;
+        if mem::byte_at(text, index) |byte| {
+            space = runtime_mbt_is_space(byte);
+        }
+        if space and in_word {
+            in_word = false;
+            if word == n {
+                return text[start..index];
+            }
+        } else if !space and !in_word {
+            in_word = true;
+            word = word + 1;
+            start = index;
+        }
+        index = index + 1;
+    }
+    return "";
+}
+
+/// Appends the words of text joined by one space, the Go
+/// `strings.Join(strings.Fields(text), " ")`.
+fn runtime_mbt_append_fields(allocator: Allocator, out: &var string::String, text: []u8) -> !void {
+    let count = runtime_mbt_word_count(text);
+    var n = 0;
+    while n < count {
+        if n > 0 {
+            try out.append_byte(allocator, cast<u8>(32));
+        }
+        try out.append_bytes(allocator, runtime_mbt_word(text, n));
+        n = n + 1;
+    }
+    return;
+}
+
+/// Appends text without the whitespace around it.
+fn runtime_mbt_append_trimmed(allocator: Allocator, out: &var string::String, text: []u8) -> !void {
+    var start = 0;
+    var end = mem::len(text);
+    while start < end and runtime_mbt_is_space(text[start]) {
+        start = start + 1;
+    }
+    while end > start and runtime_mbt_is_space(text[end - 1]) {
+        end = end - 1;
+    }
+    return out.append_bytes(allocator, text[start..end]);
+}
+
+fn runtime_mbt_contains(text: []u8, wanted: []u8) -> bool {
+    let length = mem::len(wanted);
+    var index = 0;
+    while index + length <= mem::len(text) {
+        if mem::equal_bytes(text[index..index + length], wanted) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+/// The value of a decimal text with an optional `-`, or null.
+fn runtime_mbt_integer(text: []u8) -> ?i64 {
+    var index = 0;
+    var negative = false;
+    if mem::byte_at(text, 0) |first| {
+        if first == cast<u8>(45) {
+            negative = true;
+            index = 1;
+        }
+    }
+    if index >= mem::len(text) {
+        return null;
+    }
+    var value = 0;
+    while mem::byte_at(text, index) |byte| {
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            return null;
+        }
+        value = value * 10 + cast<i64>(byte - cast<u8>(48));
+        index = index + 1;
+    }
+    if negative {
+        return -value;
+    }
+    return value;
+}
+
+fn runtime_mbt_line(allocator: Allocator, out: &var string::String, text: []u8) -> !void {
+    try out.append_bytes(allocator, text);
+    return out.append_byte(allocator, cast<u8>(10));
+}
+
+fn runtime_mbt_indent(allocator: Allocator, out: &var string::String, depth: i64) -> !void {
+    var level = 0;
+    while level < depth {
+        try out.append_bytes(allocator, "    ");
+        level = level + 1;
+    }
+    return;
+}
+
+fn runtime_mbt_write_list(io: Io, label: []u8, values: &array::Array<string::String>) -> !void {
+    try io::write_stderr(io, label);
+    var index = 0;
+    while values.at(index) |value| {
+        if index > 0 {
+            try io::write_stderr(io, " ");
+        }
+        index = index + 1;
+        let bytes = value.as_bytes();
+        try io::write_stderr(io, bytes);
+    }
+    return io::write_stderr_line(io, "]");
+}
+
+// ---------------------------------------------------------------- programs
+
+/// The program's decimal(text) reads a non-negative decimal argument: std has
+/// no parser, and an input read at run time is one the optimizer cannot see
+/// through.
+fn runtime_mbt_decimal_fn() -> []u8 {
+    return
+        \\fn decimal(text: []u8) -> i64 {
+        \\    var n = 0;
+        \\    for 0..mem::len(text) |i| {
+        \\        n = n * 10 + cast<i64>(text[i]) - 48;
+        \\    }
+        \\    return n;
+        \\}
+        \\
+        \\
+    ;
+}
+
+/// How many arguments one run of the model takes.
+fn runtime_mbt_width(model: RuntimeMbtModel) -> i64 {
+    match model {
+        Bounds => return 3,
+        Defer => return 2,
+    }
+}
+
+fn runtime_mbt_prelude(allocator: Allocator, model: RuntimeMbtModel, out: &var string::String) -> !void {
+    match model {
+        Bounds => {
+            try out.append_bytes(allocator,
+                \\import std::array;
+                \\import std::mem;
+                \\import std::process;
+                \\
+                \\
+            );
+        },
+        Defer => {
+            try out.append_bytes(allocator,
+                \\import std::mem;
+                \\import std::process;
+                \\
+                \\error Exit {
+                \\    Boom,
+                \\}
+                \\
+                \\fn note(id: i64) -> void {
+                \\    print(id);
+                \\}
+                \\
+                \\fn bit(x: i64, b: i64) -> bool {
+                \\    var v = x;
+                \\    for 0..b |i| {
+                \\        v = v / 2;
+                \\    }
+                \\    return v % 2 == 1;
+                \\}
+                \\
+                \\fn fail(yes: bool) -> Exit!void {
+                \\    if yes {
+                \\        return Exit::Boom;
+                \\    }
+                \\    return;
+                \\}
+                \\
+                \\
+            );
+        },
+    }
+    return out.append_bytes(allocator, runtime_mbt_decimal_fn());
+}
+
+/// Writes main's call of case n.
+fn runtime_mbt_dispatch(allocator: Allocator, model: RuntimeMbtModel, out: &var string::String, n: i64) -> !void {
+    try out.append_bytes(allocator, "    if which == ");
+    try fmt::append_i64(allocator, out, n);
+    try runtime_mbt_line(allocator, out, " {");
+    match model {
+        Bounds => {
+            try out.append_bytes(allocator, "        s = try case");
+            try fmt::append_i64(allocator, out, n);
+            try runtime_mbt_line(allocator, out, "(&var a, k, allocator);");
+        },
+        Defer => {
+            try out.append_bytes(allocator, "        if case");
+            try fmt::append_i64(allocator, out, n);
+            try runtime_mbt_line(allocator, out, "(x) |done| {");
+            try runtime_mbt_line(allocator, out, "            print(done);");
+            try runtime_mbt_line(allocator, out, "        } else |err| {");
+            try runtime_mbt_line(allocator, out, "            print(-1);");
+            try runtime_mbt_line(allocator, out, "        }");
+        },
+    }
+    return runtime_mbt_line(allocator, out, "    }");
+}
+
+/// Frames the dispatches as run_case(at), which runs the case whose
+/// arguments start at at.
+fn runtime_mbt_main_head(allocator: Allocator, model: RuntimeMbtModel, out: &var string::String) -> !void {
+    match model {
+        Bounds => return out.append_bytes(allocator,
+            \\fn run_case(at: i64) -> !void {
+            \\    let allocator = mem::page_allocator();
+            \\    let which = decimal(try process::arg(at));
+            \\    let length = decimal(try process::arg(at + 1));
+            \\    let k = decimal(try process::arg(at + 2)) - 1;
+            \\    var a = array::new<i64>(allocator);
+            \\    defer a.deinit(allocator);
+            \\    for 0..length |i| {
+            \\        try a.append(allocator, 10 + i);
+            \\    }
+            \\    var s = 0;
+            \\
+        ),
+        Defer => return out.append_bytes(allocator,
+            \\fn run_case(at: i64) -> !void {
+            \\    let which = decimal(try process::arg(at));
+            \\    let x = decimal(try process::arg(at + 1));
+            \\
+        ),
+    }
+}
+
+fn runtime_mbt_main_tail(allocator: Allocator, model: RuntimeMbtModel, out: &var string::String) -> !void {
+    match model {
+        Bounds => return out.append_bytes(allocator,
+            \\    print(s);
+            \\    print(a.len());
+            \\    return;
+            \\}
+            \\
+        ),
+        Defer => return out.append_bytes(allocator,
+            \\    return;
+            \\}
+            \\
+        ),
+    }
+}
+
+/// Writes case n as a function. Returns false for a case that is not well
+/// formed (an unknown statement or index, an unbalanced end).
+fn runtime_mbt_render(
+    allocator: Allocator,
+    model: RuntimeMbtModel,
+    out: &var string::String,
+    n: i64,
+    prog: &array::Array<string::String>
+) -> !bool {
+    match model {
+        Bounds => return runtime_mbt_render_bounds(allocator, out, n, prog),
+        Defer => return runtime_mbt_render_defer(allocator, out, n, prog),
+    }
+}
+
+/// Writes the chosen cases as one program whose main runs the cases its
+/// arguments name one after another, printing a line `=` after each.
+fn runtime_mbt_render_cases(
+    allocator: Allocator,
+    model: RuntimeMbtModel,
+    out: &var string::String,
+    cases: &array::Array<RuntimeMbtCase>,
+    chosen: &array::Array<i64>
+) -> !bool {
+    try runtime_mbt_prelude(allocator, model, out);
+    var index = 0;
+    while chosen.get(index) |n| {
+        index = index + 1;
+        if cases.at(n) |c| {
+            if !try runtime_mbt_render(allocator, model, out, n, &c.prog) {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+    try runtime_mbt_main_head(allocator, model, out);
+    index = 0;
+    while chosen.get(index) |n| {
+        index = index + 1;
+        try runtime_mbt_dispatch(allocator, model, out, n);
+    }
+    try runtime_mbt_main_tail(allocator, model, out);
+    try out.append_bytes(allocator,
+        \\
+        \\fn main() -> !void {
+        \\    var at = 0;
+        \\    while at < process::arg_count() {
+        \\        try run_case(at);
+        \\        print("=");
+        \\        at = at
+    );
+    try out.append_bytes(allocator, " + ");
+    try fmt::append_i64(allocator, out, runtime_mbt_width(model));
+    try out.append_bytes(allocator,
+        \\;
+        \\    }
+        \\    return;
+        \\}
+        \\
+    );
+    return true;
+}
+
+// ---------------------------------------------------------------- bounds
+
+/// Spells an index token as a Kizu expression; loop is the innermost loop's
+/// id, or empty outside a loop. Returns false for a token it does not know.
+fn runtime_mbt_bounds_index(allocator: Allocator, out: &var string::String, token: []u8, loop: []u8) -> !bool {
+    if mem::equal_bytes(token, "K") {
+        try out.append_bytes(allocator, "k");
+        return true;
+    }
+    if mem::equal_bytes(token, "C0") {
+        try out.append_bytes(allocator, "0");
+        return true;
+    }
+    if mem::equal_bytes(token, "C2") {
+        try out.append_bytes(allocator, "2");
+        return true;
+    }
+    if mem::equal_bytes(token, "I") or mem::equal_bytes(token, "I1") {
+        if mem::len(loop) == 0 {
+            return false;
+        }
+        try out.append_bytes(allocator, "i");
+        try out.append_bytes(allocator, loop);
+        if mem::equal_bytes(token, "I1") {
+            try out.append_bytes(allocator, " + 1");
+        }
+        return true;
+    }
+    return false;
+}
+
+/// Writes one bounds program as case<n>(a, k, allocator). An open block is
+/// kept as its kind and loop id: `i` for an if, `f<id>` for a for, `w<id>`
+/// for a while, whose end steps its counter.
+fn runtime_mbt_render_bounds(
+    allocator: Allocator,
+    out: &var string::String,
+    n: i64,
+    prog: &array::Array<string::String>
+) -> !bool {
+    try out.append_bytes(allocator, "fn case");
+    try fmt::append_i64(allocator, out, n);
+    try runtime_mbt_line(allocator, out, "(a: &var array::Array<i64>, k: i64, allocator: Allocator) -> !i64 {");
+    try runtime_mbt_line(allocator, out, "    var s = 0;");
+    var open = array::new<string::String>(allocator);
+    defer open.deinit(allocator);
+    var loop = string::new(allocator);
+    defer loop.deinit(allocator);
+    var depth = 1;
+    var index = 0;
+    while prog.at(index) |stmt_string| {
+        index = index + 1;
+        let stmt = stmt_string.as_bytes();
+        let words = runtime_mbt_word_count(stmt);
+        let head = runtime_mbt_word(stmt, 0);
+        let arg = runtime_mbt_word(stmt, 1);
+        let loop_bytes = loop.as_bytes();
+        var x = string::new(allocator);
+        defer x.deinit(allocator);
+        if words == 2 and !mem::equal_bytes(head, "for") and !mem::equal_bytes(head, "while") {
+            if !try runtime_mbt_bounds_index(allocator, &var x, arg, loop_bytes) {
+                return false;
+            }
+        }
+        let x_bytes = x.as_bytes();
+        if mem::equal_bytes(head, "read") {
+            try runtime_mbt_indent(allocator, out, depth);
+            try out.append_bytes(allocator, "s = s + a.get_or_panic(");
+            try out.append_bytes(allocator, x_bytes);
+            try runtime_mbt_line(allocator, out, ");");
+        } else if mem::equal_bytes(head, "write") {
+            try runtime_mbt_indent(allocator, out, depth);
+            try out.append_bytes(allocator, "a.set(");
+            try out.append_bytes(allocator, x_bytes);
+            try runtime_mbt_line(allocator, out, ", s) catch return -7;");
+        } else if mem::equal_bytes(head, "pop") {
+            try runtime_mbt_indent(allocator, out, depth);
+            try runtime_mbt_line(allocator, out, "let _ = a.pop();");
+        } else if mem::equal_bytes(head, "push") {
+            try runtime_mbt_indent(allocator, out, depth);
+            try runtime_mbt_line(allocator, out, "try a.append(allocator, s);");
+        } else if mem::equal_bytes(head, "lt") or mem::equal_bytes(head, "ge") {
+            try runtime_mbt_indent(allocator, out, depth);
+            try out.append_bytes(allocator, "if ");
+            try out.append_bytes(allocator, x_bytes);
+            if mem::equal_bytes(head, "lt") {
+                try runtime_mbt_line(allocator, out, " < a.len() {");
+            } else {
+                try runtime_mbt_line(allocator, out, " >= 0 {");
+            }
+            let block = try string::from_bytes(allocator, "i");
+            try open.append(allocator, move block);
+            depth = depth + 1;
+        } else if mem::equal_bytes(head, "exit") {
+            try runtime_mbt_indent(allocator, out, depth);
+            try out.append_bytes(allocator, "if ");
+            try out.append_bytes(allocator, x_bytes);
+            try runtime_mbt_line(allocator, out, " >= a.len() {");
+            try runtime_mbt_indent(allocator, out, depth + 1);
+            try runtime_mbt_line(allocator, out, "return s;");
+            try runtime_mbt_indent(allocator, out, depth);
+            try runtime_mbt_line(allocator, out, "}");
+        } else if mem::equal_bytes(head, "for") or mem::equal_bytes(head, "while") {
+            let is_for = mem::equal_bytes(head, "for");
+            try runtime_mbt_indent(allocator, out, depth);
+            if is_for {
+                try out.append_bytes(allocator, "let n");
+                try out.append_bytes(allocator, arg);
+                try runtime_mbt_line(allocator, out, " = a.len();");
+                try runtime_mbt_indent(allocator, out, depth);
+                try out.append_bytes(allocator, "for 0..n");
+                try out.append_bytes(allocator, arg);
+                try out.append_bytes(allocator, " |i");
+                try out.append_bytes(allocator, arg);
+                try runtime_mbt_line(allocator, out, "| {");
+            } else {
+                try out.append_bytes(allocator, "var i");
+                try out.append_bytes(allocator, arg);
+                try runtime_mbt_line(allocator, out, " = 0;");
+                try runtime_mbt_indent(allocator, out, depth);
+                try out.append_bytes(allocator, "while i");
+                try out.append_bytes(allocator, arg);
+                try runtime_mbt_line(allocator, out, " < a.len() {");
+            }
+            var block = string::new(allocator);
+            errdefer block.deinit(allocator);
+            if is_for {
+                try block.append_bytes(allocator, "f");
+            } else {
+                try block.append_bytes(allocator, "w");
+            }
+            try block.append_bytes(allocator, arg);
+            try open.append(allocator, move block);
+            loop.clear();
+            try loop.append_bytes(allocator, arg);
+            depth = depth + 1;
+        } else if mem::equal_bytes(head, "end") {
+            let top = open.pop() orelse return false;
+            defer top.deinit(allocator);
+            let top_bytes = top.as_bytes();
+            let id = top_bytes[1..mem::len(top_bytes)];
+            if top_bytes[0] == cast<u8>(119) {
+                try runtime_mbt_indent(allocator, out, depth);
+                try out.append_bytes(allocator, "i");
+                try out.append_bytes(allocator, id);
+                try out.append_bytes(allocator, " = i");
+                try out.append_bytes(allocator, id);
+                try runtime_mbt_line(allocator, out, " + 1;");
+            }
+            if top_bytes[0] != cast<u8>(105) {
+                loop.clear();
+            }
+            depth = depth - 1;
+            try runtime_mbt_indent(allocator, out, depth);
+            try runtime_mbt_line(allocator, out, "}");
+        } else {
+            return false;
+        }
+    }
+    try runtime_mbt_line(allocator, out, "    return s;");
+    try runtime_mbt_line(allocator, out, "}");
+    try runtime_mbt_line(allocator, out, "");
+    return true;
+}
+
+/// A bounds input `<len> <k>` as the program's arguments; k is passed as
+/// k + 1 so it is never negative.
+fn runtime_mbt_bounds_args(allocator: Allocator, out: &var array::Array<string::String>, input: []u8) -> !bool {
+    if runtime_mbt_word_count(input) != 2 {
+        return false;
+    }
+    let k = runtime_mbt_integer(runtime_mbt_word(input, 1)) orelse return false;
+    let length = try string::from_bytes(allocator, runtime_mbt_word(input, 0));
+    try out.append(allocator, move length);
+    var shifted = string::new(allocator);
+    errdefer shifted.deinit(allocator);
+    try fmt::append_i64(allocator, &var shifted, k + 1);
+    try out.append(allocator, move shifted);
+    return true;
+}
+
+// ---------------------------------------------------------------- defer
+
+/// Writes `if bit(x, <b>) {`, body, `}` at depth.
+fn runtime_mbt_defer_guarded(
+    allocator: Allocator,
+    out: &var string::String,
+    depth: i64,
+    b: []u8,
+    body: []u8
+) -> !void {
+    try runtime_mbt_indent(allocator, out, depth);
+    try out.append_bytes(allocator, "if bit(x, ");
+    try out.append_bytes(allocator, b);
+    try runtime_mbt_line(allocator, out, ") {");
+    try runtime_mbt_indent(allocator, out, depth + 1);
+    try runtime_mbt_line(allocator, out, body);
+    try runtime_mbt_indent(allocator, out, depth);
+    return runtime_mbt_line(allocator, out, "}");
+}
+
+/// Writes one defer program as case<n>(x): bit b of x decides each
+/// condition, a loop runs twice, and note(id) prints id.
+fn runtime_mbt_render_defer(
+    allocator: Allocator,
+    out: &var string::String,
+    n: i64,
+    prog: &array::Array<string::String>
+) -> !bool {
+    try out.append_bytes(allocator, "fn case");
+    try fmt::append_i64(allocator, out, n);
+    try runtime_mbt_line(allocator, out, "(x: i64) -> Exit!i64 {");
+    var depth = 1;
+    var index = 0;
+    while prog.at(index) |stmt_string| {
+        index = index + 1;
+        let stmt = stmt_string.as_bytes();
+        // A statement is a word and at most one argument.
+        if runtime_mbt_word_count(stmt) > 2 {
+            return false;
+        }
+        let head = runtime_mbt_word(stmt, 0);
+        let arg = runtime_mbt_word(stmt, 1);
+        if mem::equal_bytes(head, "defer") or mem::equal_bytes(head, "errdefer") {
+            try runtime_mbt_indent(allocator, out, depth);
+            try out.append_bytes(allocator, head);
+            try out.append_bytes(allocator, " note(");
+            try out.append_bytes(allocator, arg);
+            try runtime_mbt_line(allocator, out, ");");
+        } else if mem::equal_bytes(head, "note") {
+            try runtime_mbt_indent(allocator, out, depth);
+            try out.append_bytes(allocator, "note(");
+            try out.append_bytes(allocator, arg);
+            try runtime_mbt_line(allocator, out, ");");
+        } else if mem::equal_bytes(head, "if") {
+            try runtime_mbt_indent(allocator, out, depth);
+            try out.append_bytes(allocator, "if bit(x, ");
+            try out.append_bytes(allocator, arg);
+            try runtime_mbt_line(allocator, out, ") {");
+            depth = depth + 1;
+        } else if mem::equal_bytes(head, "loop") {
+            try runtime_mbt_indent(allocator, out, depth);
+            try out.append_bytes(allocator, "for 0..2 |i");
+            try out.append_bytes(allocator, arg);
+            try runtime_mbt_line(allocator, out, "| {");
+            depth = depth + 1;
+        } else if mem::equal_bytes(head, "end") {
+            if depth <= 1 {
+                return false;
+            }
+            depth = depth - 1;
+            try runtime_mbt_indent(allocator, out, depth);
+            try runtime_mbt_line(allocator, out, "}");
+        } else if mem::equal_bytes(head, "return") {
+            try runtime_mbt_defer_guarded(allocator, out, depth, arg, "return 0;");
+        } else if mem::equal_bytes(head, "fail") {
+            try runtime_mbt_indent(allocator, out, depth);
+            try out.append_bytes(allocator, "try fail(bit(x, ");
+            try out.append_bytes(allocator, arg);
+            try runtime_mbt_line(allocator, out, "));");
+        } else if mem::equal_bytes(head, "break") {
+            try runtime_mbt_defer_guarded(allocator, out, depth, arg, "break;");
+        } else if mem::equal_bytes(head, "continue") {
+            try runtime_mbt_defer_guarded(allocator, out, depth, arg, "continue;");
+        } else {
+            return false;
+        }
+    }
+    try runtime_mbt_line(allocator, out, "    return 0;");
+    try runtime_mbt_line(allocator, out, "}");
+    try runtime_mbt_line(allocator, out, "");
+    return true;
+}
+
+/// A defer input, the bits of x in decimal, as the program's argument.
+fn runtime_mbt_defer_args(allocator: Allocator, out: &var array::Array<string::String>, input: []u8) -> !bool {
+    let x = runtime_mbt_integer(input) orelse return false;
+    var text = string::new(allocator);
+    errdefer text.deinit(allocator);
+    try fmt::append_i64(allocator, &var text, x);
+    try out.append(allocator, move text);
+    return true;
+}
+
+// ---------------------------------------------------------------- runs
+
+/// Appends an input's arguments to out. Returns false for an input the
+/// model does not read.
+fn runtime_mbt_args(
+    allocator: Allocator,
+    model: RuntimeMbtModel,
+    out: &var array::Array<string::String>,
+    input: []u8
+) -> !bool {
+    match model {
+        Bounds => return runtime_mbt_bounds_args(allocator, out, input),
+        Defer => return runtime_mbt_defer_args(allocator, out, input),
+    }
+}
+
+/// Writes what one run printed in the model's terms: the lines joined, or
+/// how the run ended when it did not exit 0. For bounds, a stop with nothing
+/// printed and the bounds panic on stderr is `panic`.
+fn runtime_mbt_printed(
+    allocator: Allocator,
+    model: RuntimeMbtModel,
+    out: &var string::String,
+    r: &RuntimeMbtResult
+) -> !void {
+    let code = r.code.as_bytes();
+    let stdout = r.stdout.as_bytes();
+    let stderr = r.stderr.as_bytes();
+    let exited = mem::equal_bytes(code, "0");
+    if model == RuntimeMbtModel::Bounds and !exited and mem::len(stdout) == 0 and
+        runtime_mbt_contains(stderr, "index out of bounds") {
+        return out.append_bytes(allocator, "panic");
+    }
+    if !exited {
+        try out.append_bytes(allocator, "exit ");
+        try out.append_bytes(allocator, code);
+        try out.append_bytes(allocator, ": ");
+    }
+    try runtime_mbt_append_fields(allocator, out, stdout);
+    if !exited {
+        try out.append_byte(allocator, cast<u8>(32));
+        try runtime_mbt_append_trimmed(allocator, out, stderr);
+    }
+    return;
+}
+
+/// The path of a node on PATH, or an empty text.
+fn runtime_mbt_find_node(io: Io, allocator: Allocator) -> !string::String {
+    let path = process::env("PATH") orelse return string::new(allocator);
+    var start = 0;
+    var index = 0;
+    while index <= mem::len(path) {
+        var at_end = true;
+        if mem::byte_at(path, index) |byte| {
+            at_end = byte == cast<u8>(58);
+        }
+        if at_end and index > start {
+            var candidate = try string::from_bytes(allocator, path[start..index]);
+            errdefer candidate.deinit(allocator);
+            try candidate.append_bytes(allocator, "/node");
+            if try runtime_mbt_exists(io, &candidate) {
+                return move candidate;
+            }
+            candidate.deinit(allocator);
+        }
+        if at_end {
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    return string::new(allocator);
+}
+
+fn runtime_mbt_exists(io: Io, path: &string::String) -> !bool {
+    let bytes = path.as_bytes();
+    if fs::exists(io, bytes) |exists| {
+        return exists;
+    } else |_| {
+        return false;
+    }
+}
+
+/// Removes the module a replay wrote; one left behind is only litter.
+fn runtime_mbt_remove(io: Io, path: []u8) -> void {
+    if fs::remove_file(io, path) {} else |_| {}
+    return;
+}
+
+fn runtime_mbt_ends_with_slash(text: &string::String) -> bool {
+    let bytes = text.as_bytes();
+    let length = mem::len(bytes);
+    return length > 0 and bytes[length - 1] == cast<u8>(47);
+}
+
+/// A path of this run's own for the module under TMPDIR.
+fn runtime_mbt_module_path(allocator: Allocator, label: []u8) -> !string::String {
+    var path = string::new(allocator);
+    errdefer path.deinit(allocator);
+    if process::env("TMPDIR") |tmp| {
+        try path.append_bytes(allocator, tmp);
+    } else {
+        try path.append_bytes(allocator, "/tmp");
+    }
+    if !runtime_mbt_ends_with_slash(&path) {
+        try path.append_byte(allocator, cast<u8>(47));
+    }
+    try path.append_bytes(allocator, "kizu-ir-mbt-");
+    try path.append_bytes(allocator, label);
+    try path.append_byte(allocator, cast<u8>(45));
+    try fmt::append_i64(allocator, &var path, process::unix_millis());
+    try path.append_bytes(allocator, ".wasm");
+    return move path;
+}
+
+/// Lowers, optimizes and encodes a program the way
+/// `kizu build --target wasm32-wasi --emit wasm --opt` does, and writes the
+/// module to path when path is not empty; or, when a stage rejects the
+/// program, appends its message to problem.
+fn runtime_mbt_build(
+    io: Io,
+    allocator: Allocator,
+    source: []u8,
+    path: []u8,
+    problem: &var string::String
+) -> !void {
+    let target = stdtarget::Target::WasmWasi;
+    var tree = ast::new(allocator);
+    defer tree.deinit(allocator);
+    var loader = try project::new_loader(io, allocator, "lib/kizu");
+    defer loader.deinit(allocator);
+    let loaded = try loader.load_source(&var tree, "cases.kizu", source);
+    match loaded {
+        Error(failed) => {
+            defer failed.deinit(allocator);
+            let text = try failed.error(allocator, &loader.sources);
+            defer text.deinit(allocator);
+            return problem.append_string(allocator, &text);
+        },
+        Program(program) => {
+            defer program.deinit(allocator);
+            if try types::check_for_target(allocator, &var tree, &program, target) |failed| {
+                defer failed.deinit(allocator);
+                let text = try failed.error(allocator, &loader.sources);
+                defer text.deinit(allocator);
+                return problem.append_string(allocator, &text);
+            }
+            var checker = try ownership::new_checker_for_target(allocator, &tree, &program, target);
+            defer checker.deinit(allocator);
+            if try checker.check_program(&var tree, &program) |failed| {
+                defer failed.deinit(allocator);
+                let text = try failed.error(allocator, &loader.sources);
+                defer text.deinit(allocator);
+                return problem.append_string(allocator, &text);
+            }
+            let codes = try loader.std_error_codes();
+            match codes {
+                Error(failed) => {
+                    defer failed.deinit(allocator);
+                    let text = try failed.error(allocator, &loader.sources);
+                    defer text.deinit(allocator);
+                    return problem.append_string(allocator, &text);
+                },
+                Codes(std_errors) => {
+                    defer std_errors.deinit(allocator);
+                    var lowerer = try ir::new_lowerer_for_target(allocator, &tree, &program, &checker, target);
+                    defer lowerer.deinit(allocator);
+                    if try lowerer.lower(&var tree, &program, &std_errors, &loader.sources) |failed| {
+                        defer failed.deinit(allocator);
+                        let text = try failed.error(allocator, &loader.sources);
+                        defer text.deinit(allocator);
+                        return problem.append_string(allocator, &text);
+                    }
+                    if try ir::optimize(allocator, &var lowerer.module, target) |failed| {
+                        defer failed.deinit(allocator);
+                        let text = try failed.error(allocator, &loader.sources);
+                        defer text.deinit(allocator);
+                        return problem.append_string(allocator, &text);
+                    }
+                    var roots = array::new<string::String>(allocator);
+                    defer roots.deinit(allocator);
+                    let main_root = try string::from_bytes(allocator, "main");
+                    try roots.append(allocator, move main_root);
+                    try ir::keep_target_reachable_functions(allocator, &var lowerer.module, &roots, "");
+                    var encoded = string::new(allocator);
+                    defer encoded.deinit(allocator);
+                    if try wasm::emit_binary(allocator, &lowerer.module, &var encoded) |failed| {
+                        defer failed.deinit(allocator);
+                        let text = try failed.error(allocator, &loader.sources);
+                        defer text.deinit(allocator);
+                        return problem.append_string(allocator, &text);
+                    }
+                    if mem::len(path) > 0 {
+                        let bytes = encoded.as_bytes();
+                        try fs::write_file(io, path, bytes);
+                    }
+                    return;
+                },
+            }
+        },
+    }
+}
+
+/// Builds the chosen cases as one program, writing the module to path when
+/// it is not empty. Appends why it did not build to problem.
+fn runtime_mbt_build_chosen(
+    io: Io,
+    allocator: Allocator,
+    model: RuntimeMbtModel,
+    cases: &array::Array<RuntimeMbtCase>,
+    chosen: &array::Array<i64>,
+    path: []u8,
+    problem: &var string::String
+) -> !void {
+    var source = string::new(allocator);
+    defer source.deinit(allocator);
+    if !try runtime_mbt_render_cases(allocator, model, &var source, cases, chosen) {
+        return problem.append_bytes(allocator, "a case is not well formed");
+    }
+    let source_bytes = source.as_bytes();
+    return runtime_mbt_build(io, allocator, source_bytes, path, problem);
+}
+
+/// Writes case n's statements and its function to stderr.
+fn runtime_mbt_write_program(io: Io, allocator: Allocator, model: RuntimeMbtModel, n: i64, c: &RuntimeMbtCase) -> !void {
+    try runtime_mbt_write_list(io, "program [", &c.prog);
+    var function = string::new(allocator);
+    defer function.deinit(allocator);
+    if try runtime_mbt_render(allocator, model, &var function, n, &c.prog) {
+        let bytes = function.as_bytes();
+        try io::write_stderr(io, bytes);
+    } else {
+        try io::write_stderr_line(io, "(the case is not well formed)");
+    }
+    return;
+}
+
+/// Finds the cases among chosen that do not build on their own by halving
+/// the set, marks the others in built, and reports each that does not: the
+/// model predicts what each prints, so a program the compiler rejects
+/// diverges. Returns how many do not build.
+fn runtime_mbt_split_build(
+    io: Io,
+    allocator: Allocator,
+    model: RuntimeMbtModel,
+    cases: &array::Array<RuntimeMbtCase>,
+    chosen: &array::Array<i64>,
+    built: &var array::Array<bool>
+) -> !i64 {
+    var problem = string::new(allocator);
+    defer problem.deinit(allocator);
+    try runtime_mbt_build_chosen(io, allocator, model, cases, chosen, "", &var problem);
+    if problem.len() == 0 {
+        var index = 0;
+        while chosen.get(index) |n| {
+            index = index + 1;
+            try built.set(n, true);
+        }
+        return 0;
+    }
+    if chosen.len() == 1 {
+        let n = chosen.get(0) orelse return 1;
+        if cases.at(n) |c| {
+            let bucket = c.bucket.as_bytes();
+            try io::write_stderr(io, bucket);
+            try io::write_stderr(io, ": case");
+            var number = string::new(allocator);
+            defer number.deinit(allocator);
+            try fmt::append_i64(allocator, &var number, n);
+            let number_bytes = number.as_bytes();
+            try io::write_stderr(io, number_bytes);
+            try io::write_stderr(io, " does not build: ");
+            let problem_bytes = problem.as_bytes();
+            try io::write_stderr_line(io, problem_bytes);
+            try runtime_mbt_write_program(io, allocator, model, n, c);
+        }
+        return 1;
+    }
+    let half = chosen.len() / 2;
+    var first = array::new<i64>(allocator);
+    defer first.deinit(allocator);
+    var second = array::new<i64>(allocator);
+    defer second.deinit(allocator);
+    var index = 0;
+    while chosen.get(index) |n| {
+        if index < half {
+            try first.append(allocator, n);
+        } else {
+            try second.append(allocator, n);
+        }
+        index = index + 1;
+    }
+    let failed = try runtime_mbt_split_build(io, allocator, model, cases, &first, built);
+    return failed + try runtime_mbt_split_build(io, allocator, model, cases, &second, built);
+}
+
+/// Appends the text field name of an object to out; false when it has none.
+fn runtime_mbt_text_field(
+    allocator: Allocator,
+    fields: &map::Map<[]u8, json::Value>,
+    name: []u8,
+    out: &var string::String
+) -> !bool {
+    if fields.at(name) |value| {
+        match value {
+            Str(text) => {
+                try out.append_string(allocator, text);
+                return true;
+            },
+            _ => return false,
+        }
+    }
+    return false;
+}
+
+/// Reads one result of the node driver into r.
+fn runtime_mbt_read_result(allocator: Allocator, item: &json::Value, r: &var RuntimeMbtResult) -> !bool {
+    match item {
+        Obj(fields) => {
+            if fields.at("code") |code| {
+                match code {
+                    I64(value) => try fmt::append_i64(allocator, &var r.code, value),
+                    Str(value) => {
+                        try r.code.append_byte(allocator, cast<u8>(34));
+                        try r.code.append_string(allocator, value);
+                        try r.code.append_byte(allocator, cast<u8>(34));
+                    },
+                    _ => return false,
+                }
+            } else {
+                return false;
+            }
+            if !try runtime_mbt_text_field(allocator, fields, "stdout", &var r.stdout) {
+                return false;
+            }
+            return runtime_mbt_text_field(allocator, fields, "stderr", &var r.stderr);
+        },
+        _ => return false,
+    }
+}
+
+/// Reads the node driver's answer, one result per run.
+fn runtime_mbt_read_results(allocator: Allocator, document: &json::Value, out: &var array::Array<RuntimeMbtResult>) -> !bool {
+    match document {
+        Arr(items) => {
+            var index = 0;
+            while items.at(index) |item| {
+                index = index + 1;
+                var r = RuntimeMbtResult {
+                    code: string::new(allocator),
+                    stdout: string::new(allocator),
+                    stderr: string::new(allocator),
+                };
+                errdefer r.deinit(allocator);
+                if !try runtime_mbt_read_result(allocator, item, &var r) {
+                    r.deinit(allocator);
+                    return false;
+                }
+                try out.append(allocator, move r);
+            }
+            return true;
+        },
+        _ => return false,
+    }
+}
+
+/// Runs the module once per argument list in one node process through
+/// internal/ir/testdata/wasi_runs.mjs, the driver the Go replay uses.
+/// Appends why it could not to problem.
+fn runtime_mbt_run_wasi(
+    io: Io,
+    allocator: Allocator,
+    node: []u8,
+    module_path: []u8,
+    argv: &array::Array<array::Array<string::String>>,
+    results: &var array::Array<RuntimeMbtResult>,
+    problem: &var string::String
+) -> !void {
+    var encoder = json::encoder(allocator);
+    defer encoder.deinit(allocator);
+    try encoder.begin_object();
+    try encoder.write_bytes_field("wasm", module_path);
+    try encoder.begin_array_field("runs");
+    var index = 0;
+    while argv.at(index) |args| {
+        index = index + 1;
+        try encoder.begin_array();
+        var arg_index = 0;
+        while args.at(arg_index) |arg| {
+            arg_index = arg_index + 1;
+            let bytes = arg.as_bytes();
+            try encoder.write_bytes(bytes);
+        }
+        try encoder.end_array();
+    }
+    try encoder.end_array();
+    try encoder.end_object();
+    var request = string::new(allocator);
+    defer request.deinit(allocator);
+    try encoder.finish_into(allocator, &var request);
+
+    var command = try net::command(allocator, node);
+    defer command.deinit(allocator);
+    try command.arg(allocator, "--no-warnings");
+    try command.arg(allocator, "internal/ir/testdata/wasi_runs.mjs");
+    command.set_stdin(net::Stdio::Pipe);
+    command.set_stdout(net::Stdio::Pipe);
+    // The driver writes to stderr only when it fails; it goes to the test's.
+    command.set_stderr(net::Stdio::Inherit);
+    var child = try command.spawn(io);
+    defer child.deinit();
+    let request_bytes = request.as_bytes();
+    try child.write_stdin_all(io, request_bytes);
+    child.close_stdin();
+    var output = string::new(allocator);
+    defer output.deinit(allocator);
+    while try child.read_stdout_into(io, allocator, &var output, 65536) > 0 {}
+    let status = try child.wait(io);
+    if status != 0 {
+        try problem.append_bytes(allocator, "node exited ");
+        try fmt::append_i64(allocator, problem, status);
+        return;
+    }
+    let output_bytes = output.as_bytes();
+    var document = try json::decode<json::Value>(allocator, output_bytes);
+    defer document.deinit(allocator);
+    if !try runtime_mbt_read_results(allocator, &document, results) {
+        return problem.append_bytes(allocator, "node answered something other than one result per run");
+    }
+    if results.len() != argv.len() {
+        try problem.append_bytes(allocator, "node ran ");
+        try fmt::append_i64(allocator, problem, results.len());
+        try problem.append_bytes(allocator, " of ");
+        try fmt::append_i64(allocator, problem, argv.len());
+    }
+    return;
+}
+
+/// Builds every case into one program, runs it on each input the cases
+/// name, and reports on stderr each case that does not build and each run
+/// whose output differs from the model, the first of a case with its
+/// program. Returns how many cases diverged, or -1 when the replay itself
+/// could not run; without a node on PATH it reports that and returns 0.
+fn runtime_mbt_replay(
+    io: Io,
+    allocator: Allocator,
+    model: RuntimeMbtModel,
+    label: []u8,
+    cases: &array::Array<RuntimeMbtCase>
+) -> !i64 {
+    let node = try runtime_mbt_find_node(io, allocator);
+    defer node.deinit(allocator);
+    if node.len() == 0 {
+        try io::write_stderr(io, label);
+        try io::write_stderr_line(io, ": node is required to run the wasm32-wasi build; not replayed");
+        return 0;
+    }
+    var all = array::new<i64>(allocator);
+    defer all.deinit(allocator);
+    var built = array::new<bool>(allocator);
+    defer built.deinit(allocator);
+    var n = 0;
+    while n < cases.len() {
+        try all.append(allocator, n);
+        try built.append(allocator, false);
+        n = n + 1;
+    }
+    let module_path = try runtime_mbt_module_path(allocator, label);
+    defer module_path.deinit(allocator);
+    let module_bytes = module_path.as_bytes();
+    var failures = 0;
+    var problem = string::new(allocator);
+    defer problem.deinit(allocator);
+    try runtime_mbt_build_chosen(io, allocator, model, cases, &all, module_bytes, &var problem);
+    if problem.len() == 0 {
+        n = 0;
+        while n < cases.len() {
+            try built.set(n, true);
+            n = n + 1;
+        }
+    } else {
+        // Find the cases that do not build on their own and build the rest.
+        failures = try runtime_mbt_split_build(io, allocator, model, cases, &all, &var built);
+        var kept = array::new<i64>(allocator);
+        defer kept.deinit(allocator);
+        n = 0;
+        while built.get(n) |ok| {
+            if ok {
+                try kept.append(allocator, n);
+            }
+            n = n + 1;
+        }
+        problem.clear();
+        try runtime_mbt_build_chosen(io, allocator, model, cases, &kept, module_bytes, &var problem);
+        if problem.len() > 0 {
+            try io::write_stderr(io, label);
+            try io::write_stderr(io, ": the cases that build alone do not build together: ");
+            let problem_bytes = problem.as_bytes();
+            try io::write_stderr_line(io, problem_bytes);
+            return -1;
+        }
+    }
+    defer runtime_mbt_remove(io, module_bytes);
+
+    var runs = array::new<RuntimeMbtRun>(allocator);
+    defer runs.deinit(allocator);
+    var argv = array::new<array::Array<string::String>>(allocator);
+    defer argv.deinit(allocator);
+    n = 0;
+    while cases.at(n) |c| {
+        let ok = built.get(n) orelse false;
+        if ok {
+            var index = 0;
+            while c.expect.at(index) |expect_string| {
+                index = index + 1;
+                let expect = expect_string.as_bytes();
+                let colon = runtime_mbt_byte_index(expect, cast<u8>(58));
+                var args = array::new<string::String>(allocator);
+                errdefer args.deinit(allocator);
+                var well_formed = colon + 1 < mem::len(expect) and expect[colon + 1] == cast<u8>(32);
+                if well_formed {
+                    var number = string::new(allocator);
+                    errdefer number.deinit(allocator);
+                    try fmt::append_i64(allocator, &var number, n);
+                    try args.append(allocator, move number);
+                    well_formed = try runtime_mbt_args(allocator, model, &var args, expect[0..colon]);
+                }
+                if !well_formed {
+                    args.deinit(allocator);
+                    let bucket = c.bucket.as_bytes();
+                    try io::write_stderr(io, bucket);
+                    try io::write_stderr(io, ": bad expectation ");
+                    try io::write_stderr_line(io, expect);
+                    return -1;
+                }
+                try argv.append(allocator, move args);
+                var run = RuntimeMbtRun {
+                    case_index: n,
+                    input: try string::from_bytes(allocator, expect[0..colon]),
+                    want: string::new(allocator),
+                };
+                errdefer run.deinit(allocator);
+                try run.want.append_bytes(allocator, expect[colon + 2..mem::len(expect)]);
+                try runs.append(allocator, move run);
+            }
+        }
+        n = n + 1;
+    }
+    var results = array::new<RuntimeMbtResult>(allocator);
+    defer results.deinit(allocator);
+    problem.clear();
+    let node_bytes = node.as_bytes();
+    try runtime_mbt_run_wasi(io, allocator, node_bytes, module_bytes, &argv, &var results, &var problem);
+    if problem.len() > 0 {
+        try io::write_stderr(io, label);
+        try io::write_stderr(io, ": ");
+        let problem_bytes = problem.as_bytes();
+        try io::write_stderr_line(io, problem_bytes);
+        return -1;
+    }
+
+    // A case reports its first divergent run with its program; a case that
+    // did not build has reported already.
+    var reported = array::new<bool>(allocator);
+    defer reported.deinit(allocator);
+    n = 0;
+    while built.get(n) |ok| {
+        try reported.append(allocator, !ok);
+        n = n + 1;
+    }
+    var index = 0;
+    while runs.at(index) |run| {
+        var got = string::new(allocator);
+        defer got.deinit(allocator);
+        if results.at(index) |r| {
+            try runtime_mbt_printed(allocator, model, &var got, r);
+        }
+        index = index + 1;
+        let got_bytes = got.as_bytes();
+        let want_bytes = run.want.as_bytes();
+        if mem::equal_bytes(got_bytes, want_bytes) {
+            continue;
+        }
+        let c_index = run.case_index;
+        let was_reported = reported.get(c_index) orelse true;
+        var line = string::new(allocator);
+        defer line.deinit(allocator);
+        if cases.at(c_index) |c| {
+            try line.append_string(allocator, &c.bucket);
+        }
+        try line.append_bytes(allocator, ": case");
+        try fmt::append_i64(allocator, &var line, c_index);
+        try line.append_bytes(allocator, " on input ");
+        try line.append_string(allocator, &run.input);
+        try line.append_bytes(allocator, ": the model prints ");
+        try line.append_byte(allocator, cast<u8>(34));
+        try line.append_string(allocator, &run.want);
+        try line.append_byte(allocator, cast<u8>(34));
+        try line.append_bytes(allocator, ", the program printed ");
+        try line.append_byte(allocator, cast<u8>(34));
+        try line.append_string(allocator, &got);
+        try line.append_byte(allocator, cast<u8>(34));
+        let line_bytes = line.as_bytes();
+        try io::write_stderr_line(io, line_bytes);
+        if !was_reported {
+            if cases.at(c_index) |c| {
+                try runtime_mbt_write_program(io, allocator, model, c_index, c);
+            }
+            failures = failures + 1;
+            try reported.set(c_index, true);
+        }
+    }
+    return failures;
+}
+
+fn runtime_mbt_known(model: RuntimeMbtModel, label: []u8, shapes: []u8, count: i64) -> !void {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    let cases = try runtime_mbt_known_cases(allocator, shapes);
+    defer cases.deinit(allocator);
+    testing::expect_equal<i64>(count, cases.len());
+    let failures = try runtime_mbt_replay(io, allocator, model, label, &cases);
+    testing::expect_equal<i64>(0, failures);
+    return;
+}
+
+fn runtime_mbt_traces(model: RuntimeMbtModel, label: []u8, fixture_name: []u8) -> !void {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    let fixture = try runtime_mbt_read_fixture(io, allocator, fixture_name);
+    defer fixture.deinit(allocator);
+    testing::expect(fixture.cases.len() > 0);
+    let failures = try runtime_mbt_replay(io, allocator, model, label, &fixture.cases);
+    testing::expect_equal<i64>(0, failures);
+    return;
+}
+
+test "bounds model harness agrees on the known shapes" {
+    try runtime_mbt_known(RuntimeMbtModel::Bounds, "bounds-known", runtime_mbt_bounds_known_shapes(), 9);
+}
+
+test "an index out of range stops the sampled bounds model programs" {
+    try runtime_mbt_traces(RuntimeMbtModel::Bounds, "bounds", "ir_bounds.json");
+}
+
+test "defer model harness agrees on the known shapes" {
+    try runtime_mbt_known(RuntimeMbtModel::Defer, "defer-known", runtime_mbt_defer_known_shapes(), 4);
+}
+
+test "cleanups run where the sampled defer model programs say" {
+    try runtime_mbt_traces(RuntimeMbtModel::Defer, "defer", "ir_defer.json");
+}
