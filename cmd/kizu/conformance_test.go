@@ -1,9 +1,9 @@
 package main
 
 import (
-	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -30,59 +30,35 @@ func TestConformance(t *testing.T) {
 	runConformanceCases(t, cases, runShippingConformanceCommand)
 }
 
-// TestSelfhostBehavior runs the executable behavior that must cross the
-// selfhost CLI boundary: the consolidated behavior package, testing failures,
-// and the positive I/O/process examples. Frontend success and diagnostics use
-// the shared corpora and focused CLI parity cases; runtime failure spelling is
-// owned by the byte-identical runtime source and shipping conformance.
+// TestSelfhostBehavior runs the behavior suite of the Kizu test harness
+// (compiler/tests/harness) against the selfhost compiler: the cases whose
+// executable behavior must cross the selfhost CLI boundary, read from the
+// same case blocks TestConformance reads. The selfhost compiler under test
+// also builds and runs the harness, the way the harness is run without Go:
+//
+//	kizu run compiler/tests/harness -- behavior <kizu>
+//
+// This test only calls it, so `go test ./cmd/kizu` keeps the gate.
 func TestSelfhostBehavior(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and runs the selfhost compiler")
-	}
-	cases, err := conformance.Discover(repoRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	selected := make([]conformance.Case, 0, len(cases))
-	for _, tt := range cases {
-		if selfhostBehaviorCase(tt) {
-			selected = append(selected, tt)
-		}
 	}
 	root, err := filepath.Abs(repoRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
 	selfhost := sharedSelfhost(t)
-	runConformanceCases(t, selected, func(t *testing.T, tt conformance.Case) (string, error) {
-		result := runNativeCLIAtEnv(
-			t, root, tt.Env, selfhost, caseArgs(tt)...,
-		)
-		result.output.stderr = selfhostNativeStderr(result.output.stderr)
-		out := result.output.stdout + result.output.stderr
-		if result.output.failed {
-			return out, fmt.Errorf("exit status %d", result.code)
-		}
-		return out, nil
-	})
-}
-
-// selfhostBehaviorCase keeps cases whose behavior cannot be replaced by the
-// shared frontend corpora. The behavior package carries ordinary language
-// assertions in one link, while test failures exercise the runner boundary.
-func selfhostBehaviorCase(tt conformance.Case) bool {
-	if tt.Command == "test" {
-		return true
+	harness := exec.Command(
+		selfhost, "run", "compiler/tests/harness", "--", "behavior", selfhost,
+	)
+	harness.Dir = root
+	harness.Env = append(os.Environ(), "TMPDIR="+t.TempDir())
+	out, err := harness.CombinedOutput()
+	report := selfhostNativeStderr(string(out))
+	if err != nil {
+		t.Fatalf("behavior harness: %v\n%s", err, report)
 	}
-	if tt.Command != "run" || tt.MustFail {
-		return false
-	}
-	for _, feature := range tt.Features {
-		if feature == "std-io" || feature == "std-process" {
-			return true
-		}
-	}
-	return false
+	t.Log(report)
 }
 
 // runConformanceCases checks every discovered promise with one compiler.
