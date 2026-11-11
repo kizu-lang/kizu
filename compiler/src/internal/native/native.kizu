@@ -514,6 +514,11 @@ fn driver(allocator: Allocator, options: &Options, arm64: bool) -> !string::Stri
             try out.append_bytes(allocator, "x86_64-w64-mingw32-");
         }
     }
+    if direct_tools(options) {
+        // `--linker ld` still compiles the runtime with clang, the C compiler.
+        try out.append_bytes(allocator, "clang");
+        return move out;
+    }
     try out.append_string(allocator, &options.linker);
     return move out;
 }
@@ -598,6 +603,9 @@ fn append_toolchain_key(allocator: Allocator,
         try out.append_bytes(allocator, "/-target/");
         try out.append_string(allocator, &options.triple);
     }
+    if direct_tools(options) {
+        try out.append_bytes(allocator, "/as+ld");
+    }
     var flags = array::new<string::String>(allocator);
     defer flags.deinit(allocator);
     try clang_optimization_flags(allocator, options.opt, target_is_arm64(options, host), &var flags);
@@ -673,6 +681,15 @@ fn link(
     units: &array::Array<string::String>,
     command: &var array::Array<string::String>
 ) -> !?diagnostic::Diagnostic {
+    if direct_tools(options) {
+        if try link_with_tools(io, allocator, dir, runtime_path, output, options, units, command) |failed| {
+            errdefer failed.deinit(allocator);
+            try remove_unit_files(io, allocator, dir, units.len());
+            return move failed;
+        }
+        try remove_unit_files(io, allocator, dir, units.len());
+        return null;
+    }
     let arm64 = target_is_arm64(options, host);
     var inputs = array::new<string::String>(allocator);
     defer inputs.deinit(allocator);
@@ -889,6 +906,7 @@ fn remove_unit_files(io: Io, allocator: Allocator, dir: []u8, count: i64) -> !vo
         try remove_temp_unit_file(io, allocator, dir, index, ".ll");
         try remove_temp_unit_file(io, allocator, dir, index, ".s");
         try remove_temp_unit_file(io, allocator, dir, index, ".args");
+        try remove_temp_unit_file(io, allocator, dir, index, ".o");
         let unit = try unit_dir(allocator, dir, index);
         defer unit.deinit(allocator);
         let unit_bytes = unit.as_bytes();
@@ -1226,7 +1244,11 @@ fn validate_options(
         return try fail_parts(allocator, "native error: --abi is not implemented yet", "", "");
     }
     let linker = options.linker.as_bytes();
-    if !mem::equal_bytes(linker, "clang") {
+    if direct_tools(options) {
+        if try validate_tools(allocator, options) |failed| {
+            return move failed;
+        }
+    } else if !mem::equal_bytes(linker, "clang") {
         return try fail_parts(allocator, "native error: --linker ", linker, " is not implemented yet");
     }
     if options.frameworks.at(0) |framework| {
