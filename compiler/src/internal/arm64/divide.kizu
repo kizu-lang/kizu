@@ -257,12 +257,40 @@ fn (self: &var Selector) divide_by_constant(rd: i64, n: i64, d: i64, signed: boo
         try self.mov(rd, quotient);
         return true;
     }
+    try self.multiply_subtract(rd, n, quotient, d);
+    return true;
+}
+
+/// Selects rd = n - q * d. A d of 2^k + 1 or 2^k - 1 is a shifted add and a
+/// subtract, which keep off the multiplier.
+fn (self: &var Selector) multiply_subtract(rd: i64, n: i64, q: i64, d: i64) -> !void {
+    if d > 2 and power_of_two(d - 1) >= 1 {
+        // n - (q + (q << k))
+        let product = self.func.new_vreg();
+        var add = blank(MOp::AddShift);
+        add.rd = product;
+        add.rn = q;
+        add.rm = q;
+        add.imm = power_of_two(d - 1);
+        try self.inst(add);
+        return self.op3(MOp::Sub, rd, n, product);
+    }
+    if d > 2 and power_of_two(d + 1) >= 2 {
+        // (n + q) - (q << k)
+        let sum = self.func.new_vreg();
+        try self.op3(MOp::Add, sum, n, q);
+        var sub = blank(MOp::SubShift);
+        sub.rd = rd;
+        sub.rn = sum;
+        sub.rm = q;
+        sub.imm = power_of_two(d + 1);
+        return self.inst(sub);
+    }
     let d_reg = try self.imm_reg_nz(d);
     var inst = blank(MOp::MSub);
     inst.rd = rd;
-    inst.rn = quotient;
+    inst.rn = q;
     inst.rm = d_reg;
     inst.ra = n;
-    try self.inst(inst);
-    return true;
+    return self.inst(inst);
 }
