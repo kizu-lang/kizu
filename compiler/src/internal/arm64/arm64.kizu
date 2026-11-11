@@ -721,6 +721,14 @@ fn print_function(
                     continue;
                 }
                 cache = empty_cache();
+                if block.insts.at(inst_index) |second| {
+                    if load_pair(func, inst, second) {
+                        let place = resolve_base(func, inst);
+                        try print_pair(allocator, out, true, inst.rd, second.rd, place.total, place.saved_at);
+                        inst_index = inst_index + 1;
+                        continue;
+                    }
+                }
                 try print_inst(allocator, out, func, inst, syms, format);
             }
             match block.term {
@@ -810,6 +818,24 @@ fn resolve_base(func: &MFunction, inst: &MInst) -> Frame {
         return Frame { needed: true, total: 29, saved_at: 16 + inst.imm };
     }
     return Frame { needed: true, total: inst.rn, saved_at: inst.imm };
+}
+
+/// Reports whether two loads read one 8-byte word and the next from one
+/// base into two registers, the first not the base, so one ldp does both:
+/// it reads the base before writing either register.
+fn load_pair(func: &MFunction, first: &MInst, second: &MInst) -> bool {
+    if first.op != MOp::Load or second.op != MOp::Load or first.width != 8 or second.width != 8 {
+        return false;
+    }
+    if first.rd < 0 or first.rd >= 31 or second.rd < 0 or second.rd >= 31 or first.rd == second.rd {
+        return false;
+    }
+    let a = resolve_base(func, first);
+    let b = resolve_base(func, second);
+    if a.total != b.total or first.rd == a.total {
+        return false;
+    }
+    return b.saved_at == a.saved_at + 8 and a.saved_at >= 0 and a.saved_at <= 504 and a.saved_at % 8 == 0;
 }
 
 fn print_inst(allocator: Allocator, out: &var string::String, func: &MFunction, inst: &MInst, syms: &ir::NameTable, format: Format) -> !void {
