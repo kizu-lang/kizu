@@ -244,11 +244,19 @@ fn (self: &var Selector) select_array_at(module: &ir::Module, node: &ir::InstrNo
     }
     let header = try self.header_addr(module, array_value) orelse return try self.fail_op(module, node);
     let index_reg = try self.reg_nz(module, index) orelse return try self.fail_op(module, node);
+    let checked = try self.element_or_null(header, index_reg, elem.size);
+    try self.set_val(node.result.name, reg_val(checked));
+    return null;
+}
+
+/// Returns a register holding the address of element index, or null when
+/// the index is out of range.
+fn (self: &var Selector) element_or_null(header: i64, index_reg: i64, size: i64) -> !i64 {
     let length = self.func.new_vreg();
     let data = self.func.new_vreg();
     try self.load(length, header, 8, 8, true);
     try self.load(data, header, 0, 8, false);
-    let address = try self.scaled_addr(data, index_reg, elem.size);
+    let address = try self.scaled_addr(data, index_reg, size);
     try self.op3(MOp::Cmp, reg_none(), index_reg, length);
     let checked = self.func.new_vreg();
     var pick = blank(MOp::CSel);
@@ -257,22 +265,26 @@ fn (self: &var Selector) select_array_at(module: &ir::Module, node: &ir::InstrNo
     pick.rm = reg_zr();
     pick.cond = Cond::Lo;
     try self.inst(pick);
-    try self.set_val(node.result.name, reg_val(checked));
-    return null;
+    return checked;
 }
 
 /// Selects Array.get: `?T` holding a copy of the element when the index is
-/// in range.
+/// in range. A niche optional is bound from the element's address, null out
+/// of range, the way Map.get binds one.
 fn (self: &var Selector) select_array_get(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let array_value = node.args.get(0) orelse return try self.fail_op(module, node);
     let index = node.args.get(1) orelse return try self.fail_op(module, node);
     let elem = element_shape(module, array_value);
     let optional = optional_layout(module, node.result.type_name) orelse return try self.fail_op(module, node);
-    if optional.niche or elem.class == Class::Unsupported or elem.class == Class::Void {
+    if elem.class == Class::Unsupported or elem.class == Class::Void {
         return try self.fail_op(module, node);
     }
     let header = try self.header_addr(module, array_value) orelse return try self.fail_op(module, node);
     let index_reg = try self.reg_nz(module, index) orelse return try self.fail_op(module, node);
+    if optional.niche {
+        let checked = try self.element_or_null(header, index_reg, elem.size);
+        return self.optional_from_pointer(module, node, checked, elem);
+    }
     let result = try self.new_slot(optional.shape);
     try self.store(reg_zr(), result, 0, 1);
     let length = self.func.new_vreg();
@@ -624,8 +636,32 @@ fn (self: &var Selector) select_array_shrink(module: &ir::Module, node: &ir::Ins
         ArrayPop => {
             let optional = optional_layout(module, node.result.type_name) orelse return try self.fail_op(module, node);
             let elem = element_shape(module, array_value);
-            if optional.niche or elem.class == Class::Unsupported or elem.class == Class::Void {
+            if elem.class == Class::Unsupported or elem.class == Class::Void {
                 return try self.fail_op(module, node);
+            }
+            if optional.niche {
+                // The last element's address, null when the array is empty,
+                // binds the niche optional as Map.get does; the element is
+                // copied out before anything can reuse its place.
+                let pointer = self.func.new_vreg();
+                try self.mov_imm(pointer, 0);
+                let length = self.func.new_vreg();
+                try self.load(length, header, 8, 8, true);
+                let take = try self.new_join();
+                let join = try self.new_join();
+                try self.op_imm(MOp::CmpImm, reg_none(), length, 0);
+                self.func.end(self.current, Term::Flags, Cond::Gt, reg_none(), take, join);
+                try self.start_block(take);
+                let shorter = self.func.new_vreg();
+                try self.op_imm(MOp::SubImm, shorter, length, 1);
+                try self.store(shorter, header, 8, 8);
+                let data = self.func.new_vreg();
+                try self.load(data, header, 0, 8, false);
+                let source = try self.scaled_addr(data, shorter, elem.size);
+                try self.mov(pointer, source);
+                self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), join, 0 - 1);
+                try self.start_block(join);
+                return self.optional_from_pointer(module, node, pointer, elem);
             }
             let result = try self.new_slot(optional.shape);
             try self.store(reg_zr(), result, 0, 1);
