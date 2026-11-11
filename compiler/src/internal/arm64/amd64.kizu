@@ -1049,11 +1049,17 @@ fn (self: &var Amd) inst(out: &var string::String, func: &MFunction, inst: &MIns
         LsrImm => return self.shift_imm(out, inst, "shrq"),
         AsrImm => return self.shift_imm(out, inst, "sarq"),
         MSub => {
+            if inst.rn == 8 or inst.rm == 8 or inst.ra == 8 {
+                return self.multiply_add_aside(out, inst, true);
+            }
             try self.product(out, inst.rn, inst.rm);
             try self.r1(out, "negq", 8, 8);
             return self.add_rax(out, inst.ra, inst.rd);
         },
         MAdd => {
+            if inst.rn == 8 or inst.rm == 8 or inst.ra == 8 {
+                return self.multiply_add_aside(out, inst, false);
+            }
             try self.product(out, inst.rn, inst.rm);
             return self.add_rax(out, inst.ra, inst.rd);
         },
@@ -1208,6 +1214,9 @@ fn (self: &var Amd) inst(out: &var string::String, func: &MFunction, inst: &MIns
         StoreIdx => {
             var index = inst.rm;
             var shift = inst.imm;
+            if shift > 3 and (inst.rd == 8 or inst.rn == 8 or inst.rm == 8) {
+                return self.store_scaled_aside(out, inst);
+            }
             if shift > 3 {
                 try self.mov(out, inst.rm, 8);
                 try self.ir(out, "shlq", shift, 8, 8);
@@ -1326,6 +1335,81 @@ fn (self: &var Amd) commutative(out: &var string::String, mnemonic: []u8, inst: 
     }
     try self.mov(out, inst.rn, inst.rd);
     return self.rr(out, mnemonic, inst.rm, inst.rd, 8);
+}
+
+/// Returns a register to borrow that none of a, b, c and d is: r10, r11,
+/// rdx, rcx or rbx.
+fn (self: &Amd) spare(a: i64, b: i64, c: i64, d: i64) -> i64 {
+    for 0..5 |k| {
+        var reg = 19;
+        if k == 0 {
+            reg = 16;
+        } else if k == 1 {
+            reg = 17;
+        } else if k == 2 {
+            reg = self.rdx;
+        } else if k == 3 {
+            reg = self.rcx;
+        }
+        if reg != a and reg != b and reg != c and reg != d {
+            return reg;
+        }
+    }
+    return 19;
+}
+
+/// rd = ra + rn * rm, or ra - rn * rm, when an operand is x8: rewriting
+/// spilled operands loads the third one there, and rax is the product's
+/// scratch otherwise. The product goes in a register saved around it.
+fn (self: &var Amd) multiply_add_aside(out: &var string::String, inst: &MInst, subtract: bool) -> !void {
+    let t = self.spare(inst.rn, inst.rm, inst.ra, inst.rd);
+    try self.r1(out, "pushq", t, 8);
+    self.pushed = self.pushed + 8;
+    if is_zr(inst.rn) or is_zr(inst.rm) {
+        try self.mov_imm(out, 0, t);
+    } else {
+        try self.mov(out, inst.rn, t);
+        try self.rr(out, "imulq", inst.rm, t, 8);
+    }
+    if subtract {
+        try self.r1(out, "negq", t, 8);
+    }
+    if !is_zr(inst.ra) {
+        try self.rr(out, "addq", inst.ra, t, 8);
+    }
+    try self.mov(out, t, inst.rd);
+    self.pushed = self.pushed - 8;
+    return self.r1(out, "popq", t, 8);
+}
+
+/// Stores rd at rn + (rm << imm), the shift past what an address scales,
+/// when an operand is x8, which the shift would otherwise use as scratch:
+/// the address goes in a register saved around it.
+fn (self: &var Amd) store_scaled_aside(out: &var string::String, inst: &MInst) -> !void {
+    let t = self.spare(inst.rd, inst.rn, inst.rm, 0 - 1);
+    try self.r1(out, "pushq", t, 8);
+    self.pushed = self.pushed + 8;
+    if is_zr(inst.rm) {
+        try self.mov_imm(out, 0, t);
+    } else {
+        try self.mov(out, inst.rm, t);
+        try self.ir(out, "shlq", inst.imm, t, 8);
+    }
+    if !is_zr(inst.rn) {
+        try self.rr(out, "addq", inst.rn, t, 8);
+    }
+    try self.op_sized(out, "mov", inst.width);
+    if is_zr(inst.rd) {
+        try self.imm(out, 0);
+    } else {
+        try self.reg(out, inst.rd, inst.width);
+    }
+    try self.text(out, ", (");
+    try self.reg(out, t, 8);
+    try self.text(out, ")");
+    try self.nl(out);
+    self.pushed = self.pushed - 8;
+    return self.r1(out, "popq", t, 8);
 }
 
 /// rax = rn * rm.
