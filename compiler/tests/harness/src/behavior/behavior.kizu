@@ -1,4 +1,5 @@
 import harness::conformance;
+import harness::scratch;
 import std::array;
 import std::fmt;
 import std::fs;
@@ -15,7 +16,7 @@ import std::string;
 // spelled is held by the byte-identical runtime source and the Go
 // conformance run of every case.
 
-pub error Failure = conformance::Failure or io::Error or net::Error or process::Error;
+pub error Failure = conformance::Failure or scratch::Failure or io::Error or net::Error or process::Error;
 
 /// What one run of the compiler under test did.
 struct Outcome {
@@ -50,9 +51,9 @@ fn run_cases(
     var root = try fs::real_path(handle, allocator, ".");
     defer root.deinit(allocator);
     let root_path = root.as_bytes();
-    var scratch = try scratch_dir(allocator);
-    defer scratch.deinit(allocator);
-    let scratch_path = scratch.as_bytes();
+    var scratch_root = try scratch::dir(allocator, "kizu-behavior-");
+    defer scratch_root.deinit(allocator);
+    let scratch_path = scratch_root.as_bytes();
     try fs::create_dir(handle, scratch_path);
 
     var count = 0;
@@ -75,7 +76,7 @@ fn run_cases(
         var message = string::new(allocator);
         defer message.deinit(allocator);
         try check(handle, allocator, kizu, root_path, tmp_path, entry, &var message);
-        try remove_tree(handle, allocator, tmp_path);
+        try scratch::remove_tree(handle, allocator, tmp_path);
         let name = entry.path.as_bytes();
         if message.len() == 0 {
             try io::write_stdout(handle, "ok   ");
@@ -376,48 +377,4 @@ fn hex_digit(value: u8) -> u8 {
         return value + cast<u8>(48);
     }
     return value + cast<u8>(87);
-}
-
-/// The name of a directory of this run's own under TMPDIR.
-fn scratch_dir(allocator: Allocator) -> Failure!string::String {
-    var dir = string::new(allocator);
-    errdefer dir.deinit(allocator);
-    if process::env("TMPDIR") |tmp| {
-        try dir.append_bytes(allocator, tmp);
-    } else {
-        try dir.append_bytes(allocator, "/tmp");
-    }
-    if !ends_with_slash(&dir) {
-        try dir.append_byte(allocator, cast<u8>(47));
-    }
-    try dir.append_bytes(allocator, "kizu-behavior-");
-    try fmt::append_i64(allocator, &var dir, process::unix_millis());
-    return move dir;
-}
-
-fn ends_with_slash(text: &string::String) -> bool {
-    let bytes = text.as_bytes();
-    return conformance::ends_with(bytes, "/");
-}
-
-/// Removes a directory and everything under it.
-fn remove_tree(handle: Io, allocator: Allocator, dir: []u8) -> Failure!void {
-    var entries = try fs::read_dir(handle, allocator, dir);
-    defer entries.deinit(allocator);
-    var index = 0;
-    while entries.at(index) |entry| {
-        index = index + 1;
-        let path = entry.path.as_bytes();
-        // A link is removed, never followed: unlinking a real directory
-        // fails, and only then is it emptied first.
-        if entry.is_dir {
-            if fs::remove_file(handle, path) {} else |_| {
-                try remove_tree(handle, allocator, path);
-            }
-        } else {
-            try fs::remove_file(handle, path);
-        }
-    }
-    try fs::remove_dir(handle, dir);
-    return;
 }

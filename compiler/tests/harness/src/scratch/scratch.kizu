@@ -1,0 +1,64 @@
+import std::fmt;
+import std::fs;
+import std::mem;
+import std::process;
+import std::string;
+
+// The directories a suite writes into while it runs, under TMPDIR.
+
+pub error Failure = mem::Error or fs::Error;
+
+/// The name of a directory of this run's own under TMPDIR: `prefix`, then
+/// the time it was asked for. The caller creates it.
+pub fn dir(allocator: Allocator, prefix: []u8) -> mem::Error!string::String {
+    var dir = string::new(allocator);
+    errdefer dir.deinit(allocator);
+    if process::env("TMPDIR") |tmp| {
+        try dir.append_bytes(allocator, tmp);
+    } else {
+        try dir.append_bytes(allocator, "/tmp");
+    }
+    if !ends_with_slash(&dir) {
+        try dir.append_byte(allocator, cast<u8>(47));
+    }
+    try dir.append_bytes(allocator, prefix);
+    try fmt::append_i64(allocator, &var dir, process::unix_millis());
+    return move dir;
+}
+
+fn ends_with_slash(text: &string::String) -> bool {
+    let bytes = text.as_bytes();
+    let length = mem::len(bytes);
+    return length > 0 and bytes[length - 1] == cast<u8>(47);
+}
+
+/// `parent/name`.
+pub fn join(allocator: Allocator, parent: []u8, name: []u8) -> mem::Error!string::String {
+    var path = try string::from_bytes(allocator, parent);
+    errdefer path.deinit(allocator);
+    try path.append_byte(allocator, cast<u8>(47));
+    try path.append_bytes(allocator, name);
+    return move path;
+}
+
+/// Removes a directory and everything under it.
+pub fn remove_tree(handle: Io, allocator: Allocator, dir: []u8) -> Failure!void {
+    var entries = try fs::read_dir(handle, allocator, dir);
+    defer entries.deinit(allocator);
+    var index = 0;
+    while entries.at(index) |entry| {
+        index = index + 1;
+        let path = entry.path.as_bytes();
+        // A link is removed, never followed: unlinking a real directory
+        // fails, and only then is it emptied first.
+        if entry.is_dir {
+            if fs::remove_file(handle, path) {} else |_| {
+                try remove_tree(handle, allocator, path);
+            }
+        } else {
+            try fs::remove_file(handle, path);
+        }
+    }
+    try fs::remove_dir(handle, dir);
+    return;
+}
