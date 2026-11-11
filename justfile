@@ -159,7 +159,8 @@ spec-ownership:
 
 # Test the unsafe marker model, search it for an unsound acceptance, require each
 # mutant (one rule broken) to fail the search, and resample the programs
-# internal/unsafecap replays against the checker (spec/unsafecap/README.md).
+# compiler/ and internal/unsafecap replay against their checkers
+# (spec/unsafecap/README.md).
 spec-unsafecap:
     cd spec/unsafecap && quint test unsafecap_test.qnt
     cd spec/unsafecap && for init in initGuided initOneMistake initFree; do \
