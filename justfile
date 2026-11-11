@@ -145,7 +145,7 @@ spec-ir:
         --invariant soundness
     cd spec/ir && quint run defer.qnt --backend rust --seed 0x1 --max-samples 1000 --max-steps 20 \
         --invariant soundness
-    go run ./scripts/ir-mbt
+    go run ./cmd/kizu run scripts/ir-mbt/main.kizu
 # Test the ownership model, search it for an unsound acceptance, and resample the
 # programs compiler/ and internal/ownership replay against their checkers
 # (spec/ownership/README.md).

@@ -31,8 +31,8 @@ import (
 // compiler/ or to an older one. KIZU_MBT_FIXTURE=<file> replays another
 // fixture.
 
-// slotCase is one case of the fixture scripts/ir-mbt writes for the slot
-// model.
+// slotCase is one case of the fixture scripts/ir-mbt/main.kizu writes for the
+// slot model.
 type slotCase struct {
 	Bucket string   `json:"bucket"`
 	Types  []string `json:"types"`
@@ -95,7 +95,7 @@ func TestSlotModelKnownShapes(t *testing.T) {
 func TestSlotModelTraces(t *testing.T) {
 	path := os.Getenv("KIZU_MBT_FIXTURE")
 	if path == "" {
-		path = filepath.Join("testdata", "slots_mbt.json")
+		path = filepath.Join("..", "..", "compiler", "tests", "mbt", "ir_slots.json")
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

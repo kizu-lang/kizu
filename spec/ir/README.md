@@ -8,8 +8,8 @@ ownership checker の検証(`spec/ownership/`)に揃えています。
 spec/ir/slots.qnt, slots_test.qnt    local に storage を与える判定(slots.go)
 spec/ir/bounds.qnt, bounds_test.qnt  index check の挿入 / 省略(bounds.go)
 spec/ir/defer.qnt, defer_test.qnt    defer / errdefer の実行位置(defer.go, control.go)
-scripts/ir-mbt/                      quint run の trace を層化して fixture に書く
-internal/ir/testdata/*_mbt.json      その fixture(checked in)
+scripts/ir-mbt/main.kizu             quint run の trace を層化して fixture に書く(Kizu)
+compiler/tests/mbt/ir_*.json         その fixture(checked in。slots / bounds / defer)
 internal/ir/slots_mbt_test.go        slots: lowered IR の local.slot をモデルと比べる
 internal/ir/runtime_mbt_test.go      bounds / defer: wasm で実行し、出力をモデルと比べる
 internal/ir/testdata/wasi_runs.mjs   その実行に使う node の WASI driver
@@ -99,7 +99,7 @@ SPEC に書かれていないので、生成するプログラムは `let n = a.
 
 ## モデルベーステスト
 
-`scripts/ir-mbt` は各モデルを 3 seed × 1000 回走らせ(`--invariant soundness` 付き)、
+`scripts/ir-mbt/main.kizu` は各モデルを 3 seed × 1000 回走らせ(`--invariant soundness` 付き)、
 完成したプログラムを重複なく集め、「予測 × 使っている構文」の bucket ごとに
 slots / defer は 2 本、bounds は 1 本残します(bounds は 1 本あたり 20 入力で、停止する
 入力ごとに wasm instance を作り直すので重い)。
@@ -168,6 +168,9 @@ quint run defer.qnt  --init initErrDeferAlways  --backend rust --max-samples 200
 
 `quint`(0.33、rust backend)と、runtime の test には `node`(WASI preview1)が要ります。
 Java は要りません。`go test` は Quint を動かさず、checked-in の fixture だけを読みます。
+生成器は `go run ./cmd/kizu run scripts/ir-mbt/main.kizu -- -model bounds -samples 300`
+のように `--` の後に `-model`(`slots` / `bounds` / `defer` / `all`)/ `-out`(`-model` を
+1 つ選んだときだけ)/ `-samples` / `-seeds` / `-steps` / `-per` を取ります。
 
 ## 残課題
 
