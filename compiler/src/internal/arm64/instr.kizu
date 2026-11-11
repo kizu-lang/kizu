@@ -105,6 +105,17 @@ fn (self: &var Selector) select_instr(module: &ir::Module, node: &ir::InstrNode,
         ArrayReserve => return self.select_array_shrink(module, node),
         ArrayPopOrPanic => return self.select_array_shrink(module, node),
         ArrayPop => return self.select_array_shrink(module, node),
+        MapNew => return self.select_map(module, node),
+        MapLen => return self.select_map(module, node),
+        MapInsert => return self.select_map(module, node),
+        MapGet => return self.select_map(module, node),
+        MapAt => return self.select_map(module, node),
+        MapAtMut => return self.select_map(module, node),
+        MapContains => return self.select_map(module, node),
+        MapRemove => return self.select_map(module, node),
+        MapKeyAt => return self.select_map(module, node),
+        MapTakeValueAt => return self.select_map(module, node),
+        MapDeinit => return self.select_map(module, node),
         UnionNew => return self.select_union(module, node),
         UnionLoad => return self.select_union(module, node),
         UnionTag => return self.select_union(module, node),
@@ -1364,6 +1375,27 @@ fn (self: &var Selector) run_cleanups(module: &ir::Module, node: &ir::InstrNode)
                 allocator_reg = try self.imm_reg(allocator_val.imm);
             }
             try self.release_array(header.reg, allocator_reg, elem.size);
+            continue;
+        }
+        if cleanup.op == ir::Op::MapDeinit {
+            let header = vals.get(0) orelse return try self.fail(module, "cleanup", cleanup.operand);
+            let allocator_val = vals.get(1) orelse return try self.fail(module, "cleanup", cleanup.operand);
+            if header.kind != ValKind::Agg {
+                return try self.fail(module, "cleanup", cleanup.operand);
+            }
+            let type_name = types.get_or_panic(0);
+            let type_text = ir::name_text(&module.names, type_name);
+            let type_bytes = type_text.as_bytes();
+            let value_type = map_value_type(type_bytes);
+            let value = shape_of_bytes(module, value_type, 1);
+            if mem::len(value_type) == 0 or value.class == Class::Unsupported or value.class == Class::Void {
+                return try self.fail(module, "cleanup", cleanup.operand);
+            }
+            var allocator_reg = allocator_val.reg;
+            if allocator_val.kind == ValKind::Const {
+                allocator_reg = try self.imm_reg(allocator_val.imm);
+            }
+            try self.release_map(header.reg, allocator_reg, value.size);
             continue;
         }
         if cleanup.op != ir::Op::Call {
