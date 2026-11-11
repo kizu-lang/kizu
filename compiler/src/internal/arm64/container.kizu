@@ -8,8 +8,9 @@ import std::array;
 // reserved tail when there is room and asks the runtime to grow otherwise;
 // an indexed access tests the index against the length unsigned, so a
 // negative index is out of range without a second test. An optional whose
-// element has a niche (a reference, a Box, an arena handle) is that word,
-// zero when absent; any other is `{ i8, T }` in memory.
+// element has a niche (a reference, a Box, a function, an arena handle, or a
+// struct that holds one) is the element itself, zero when absent; any other
+// is `{ i8, T }` in memory.
 
 /// Returns the shape of the element of the container a value names.
 fn element_shape(module: &ir::Module, container: ir::Value) -> Shape {
@@ -296,25 +297,29 @@ fn (self: &var Selector) select_array_get(module: &ir::Module, node: &ir::InstrN
 
 // ---- optionals ----
 
-/// Is how one optional type is held: the element's word with absence as
-/// zero, or `{ i8, T }` with the payload at offset.
+/// Is how one optional type is held: the element itself with absence as
+/// zero in the word its niche sits in (at `word`), or `{ i8, T }` with the
+/// payload at offset.
 struct OptionalLayout {
     niche: bool,
     shape: Shape,
     offset: i64,
+    word: i64,
 }
 
 fn optional_layout(module: &ir::Module, type_name: ir::Name) -> ?OptionalLayout {
     let text = ir::name_text(&module.names, type_name);
     let bytes = text.as_bytes();
     if llvm::niche_optional_elem(module, bytes) |elem| {
-        // Only an element that is itself the address or the index carries
-        // its niche in the word the backend holds.
+        // A niche optional is its element, the address or index word itself
+        // or a struct that reaches one through a field; an absent one is the
+        // element's zero.
         let inner = shape_of_bytes(module, elem, 1);
-        if inner.class != Class::Scalar {
+        if inner.class != Class::Scalar and inner.class != Class::Aggregate {
             return null;
         }
-        return OptionalLayout { niche: true, shape: inner, offset: 0 };
+        let word = niche_word_offset(module, elem) orelse return null;
+        return OptionalLayout { niche: true, shape: inner, offset: 0, word: word };
     }
     let shape = shape_of(module, type_name);
     if shape.class != Class::Aggregate {
@@ -322,7 +327,41 @@ fn optional_layout(module: &ir::Module, type_name: ir::Name) -> ?OptionalLayout 
     }
     // The payload follows the tag byte at its own alignment.
     let payload_align = shape.align;
-    return OptionalLayout { niche: false, shape: shape, offset: round_up(1, payload_align) };
+    return OptionalLayout { niche: false, shape: shape, offset: round_up(1, payload_align), word: 0 };
+}
+
+/// Returns the byte offset of the word a niche sits in: the value itself
+/// for an address or an arena handle, and for a struct the first field that
+/// has a niche, followed down -- the path the LLVM backend's `niche_path`
+/// reads.
+fn niche_word_offset(module: &ir::Module, elem: []u8) -> ?i64 {
+    if module.structs.at(elem) |declared| {
+        var offset = 0;
+        var index = 0;
+        while declared.fields.get(index) |field| {
+            index = index + 1;
+            let field_text = ir::name_text(&module.names, field.type_name);
+            let field_bytes = field_text.as_bytes();
+            let inner = shape_of_bytes(module, field_bytes, 1);
+            if inner.class == Class::Unsupported {
+                return null;
+            }
+            if inner.class == Class::Void {
+                continue;
+            }
+            offset = round_up(offset, inner.align);
+            if llvm::has_niche(module, field_bytes) {
+                let within = niche_word_offset(module, field_bytes) orelse return null;
+                return offset + within;
+            }
+            offset = offset + inner.size;
+        }
+        return null;
+    }
+    if llvm::has_niche(module, elem) {
+        return 0;
+    }
+    return null;
 }
 
 fn (self: &var Selector) select_optional(module: &ir::Module, node: &ir::InstrNode, next: ir::Value, next_op: ir::Op) -> !?diagnostic::Diagnostic {
@@ -334,7 +373,7 @@ fn (self: &var Selector) select_optional(module: &ir::Module, node: &ir::InstrNo
     let layout = optional_layout(module, optional_type) orelse return try self.fail_op(module, node);
     match node.op {
         OptNull => {
-            if layout.niche {
+            if layout.niche and layout.shape.class == Class::Scalar {
                 try self.set_val(node.result.name, const_val(0));
                 return null;
             }
@@ -362,8 +401,12 @@ fn (self: &var Selector) select_optional(module: &ir::Module, node: &ir::InstrNo
         OptHas => {
             let source = node.args.get_or_panic(0);
             var tested = reg_none();
-            if layout.niche {
+            if layout.niche and layout.shape.class == Class::Scalar {
                 tested = try self.reg_nz(module, source) orelse return try self.fail_op(module, node);
+            } else if layout.niche {
+                let address = try self.addr(module, source) orelse return try self.fail_op(module, node);
+                tested = self.func.new_vreg();
+                try self.load(tested, address, layout.word, 8, false);
             } else {
                 let address = try self.addr(module, source) orelse return try self.fail_op(module, node);
                 tested = self.func.new_vreg();
