@@ -1,0 +1,1043 @@
+import compiler::internal::ir;
+import std::array;
+
+// Value ranges: the interval each integer value of a function lies in, for
+// the selector to pick a cheaper sequence where the value cannot reach part
+// of its type -- a signed division of a dividend that is never negative is
+// the unsigned one. The interval holds the mathematical value: a signed
+// type's as it is, an unsigned one's below 2^63; a u64 that may reach 2^63
+// has no interval. `+ - *` and `<<` wrap (SPEC §6.9.2), so an operation
+// whose interval leaves its type gives the whole type.
+//
+// A value's interval is the one at its definition, which holds wherever the
+// value is read: an SSA value does not change. At the definition, what the
+// branches on the way in say narrows the operands: a block with one
+// predecessor that branches to it on c knows c, and so does every block it
+// dominates. A phi joins its incoming values, each narrowed by what holds at
+// the end of its predecessor and on the edge from there.
+//
+// The walk repeats over the blocks in reverse postorder until nothing
+// changes. A phi only grows, and from the second walk on a bound of one that
+// grows goes to the end of its type, so a loop counter settles in three.
+// A walk that does not settle in its budget leaves every value unknown.
+
+/// Is the interval of one value: none known yet (a phi's incoming value the
+/// walk has not reached), [lo, hi], or nothing known (a u64 that may reach
+/// 2^63).
+struct Range {
+    gen: i64,
+    kind: RangeKind,
+    lo: i64,
+    hi: i64,
+}
+
+enum RangeKind {
+    Bottom,
+    Known,
+    Unknown,
+}
+
+/// Is the bit width and signedness of an integer type; bits is 0 for any
+/// other type.
+struct IntType {
+    bits: i64,
+    signed: bool,
+}
+
+/// Is what the range walk keeps for the function being selected.
+struct ValueRanges {
+    gen: i64,
+    // By name id: the value's interval, and for `/` and `%` the dividend's
+    // where the instruction is.
+    values: array::Array<Range>,
+    dividends: array::Array<Range>,
+    // By name id: the comparison instruction a bool value is, as an index
+    // into compares, stamped with gen.
+    compare_gen: array::Array<i64>,
+    compare_at: array::Array<i64>,
+    compares: array::Array<ir::Instr>,
+    // By block: its place in reverse postorder (-1 unreached), its
+    // immediate dominator, the first of the facts that hold in it (-1 none),
+    // and its predecessors, pred_list[pred_start[b] .. pred_start[b + 1]].
+    place: array::Array<i64>,
+    idom: array::Array<i64>,
+    facts_at: array::Array<i64>,
+    pred_start: array::Array<i64>,
+    pred_list: array::Array<i64>,
+    // One fact: the comparison cond is sense, then the fact after it.
+    fact_cond: array::Array<ir::Name>,
+    fact_sense: array::Array<bool>,
+    fact_next: array::Array<i64>,
+}
+
+fn new_ranges(allocator: Allocator) -> ValueRanges {
+    return ValueRanges {
+        gen: 0,
+        values: array::new<Range>(allocator),
+        dividends: array::new<Range>(allocator),
+        compare_gen: array::new<i64>(allocator),
+        compare_at: array::new<i64>(allocator),
+        compares: array::new<ir::Instr>(allocator),
+        place: array::new<i64>(allocator),
+        idom: array::new<i64>(allocator),
+        facts_at: array::new<i64>(allocator),
+        pred_start: array::new<i64>(allocator),
+        pred_list: array::new<i64>(allocator),
+        fact_cond: array::new<ir::Name>(allocator),
+        fact_sense: array::new<bool>(allocator),
+        fact_next: array::new<i64>(allocator)
+    };
+}
+
+// How many walks a function gets, and how many facts a lookup reads.
+fn range_walks() -> i64 {
+    return 16;
+}
+
+fn fact_reads() -> i64 {
+    return 16;
+}
+
+fn i64_min() -> i64 {
+    return 0 - 9223372036854775807 - 1;
+}
+
+fn i64_max() -> i64 {
+    return 9223372036854775807;
+}
+
+fn bottom() -> Range {
+    return Range { gen: 0, kind: RangeKind::Bottom, lo: 0, hi: 0 };
+}
+
+fn unknown() -> Range {
+    return Range { gen: 0, kind: RangeKind::Unknown, lo: 0, hi: 0 };
+}
+
+fn interval(lo: i64, hi: i64) -> Range {
+    return Range { gen: 0, kind: RangeKind::Known, lo: lo, hi: hi };
+}
+
+/// Returns the integer type a type name spells, bits 0 for any other.
+fn int_type(module: &ir::Module, name: ir::Name) -> IntType {
+    if module.names.is(name, "i64") or module.names.is(name, "isize") {
+        return IntType { bits: 64, signed: true };
+    }
+    if module.names.is(name, "u64") or module.names.is(name, "usize") {
+        return IntType { bits: 64, signed: false };
+    }
+    if module.names.is(name, "i32") {
+        return IntType { bits: 32, signed: true };
+    }
+    if module.names.is(name, "u32") {
+        return IntType { bits: 32, signed: false };
+    }
+    if module.names.is(name, "i16") {
+        return IntType { bits: 16, signed: true };
+    }
+    if module.names.is(name, "u16") {
+        return IntType { bits: 16, signed: false };
+    }
+    if module.names.is(name, "i8") {
+        return IntType { bits: 8, signed: true };
+    }
+    if module.names.is(name, "u8") {
+        return IntType { bits: 8, signed: false };
+    }
+    return IntType { bits: 0, signed: false };
+}
+
+/// Returns the whole of a type: every value it holds.
+fn whole(ty: IntType) -> Range {
+    if ty.bits == 64 {
+        if ty.signed {
+            return interval(i64_min(), i64_max());
+        }
+        return unknown();
+    }
+    let top = (1 << (ty.bits - 1)) - 1;
+    if ty.signed {
+        return interval(0 - top - 1, top);
+    }
+    return interval(0, top * 2 + 1);
+}
+
+/// Returns [lo, hi] when the type holds all of it, else the whole type: an
+/// operation that leaves the type wraps.
+fn fitted(ty: IntType, lo: i64, hi: i64) -> Range {
+    let all = whole(ty);
+    if all.kind == RangeKind::Unknown {
+        if lo >= 0 {
+            return interval(lo, hi);
+        }
+        return all;
+    }
+    if lo >= all.lo and hi <= all.hi {
+        return interval(lo, hi);
+    }
+    return all;
+}
+
+/// Returns the range of a constant of a type as a register holds it.
+fn constant_range(ty: IntType, imm: i64) -> Range {
+    if ty.bits == 64 and !ty.signed and imm < 0 {
+        return unknown();
+    }
+    return interval(imm, imm);
+}
+
+// Checked arithmetic on the mathematical values: null when the result
+// leaves i64.
+
+fn add_checked(a: i64, b: i64) -> ?i64 {
+    let sum = a + b;
+    if a >= 0 and b >= 0 and sum < 0 {
+        return null;
+    }
+    if a < 0 and b < 0 and sum >= 0 {
+        return null;
+    }
+    return sum;
+}
+
+fn sub_checked(a: i64, b: i64) -> ?i64 {
+    let difference = a - b;
+    if a >= 0 and b < 0 and difference < 0 {
+        return null;
+    }
+    if a < 0 and b >= 0 and difference >= 0 {
+        return null;
+    }
+    return difference;
+}
+
+fn mul_checked(a: i64, b: i64) -> ?i64 {
+    if a == 0 or b == 0 {
+        return 0;
+    }
+    if a == 0 - 1 {
+        if b == i64_min() {
+            return null;
+        }
+        return 0 - b;
+    }
+    if b == 0 - 1 {
+        if a == i64_min() {
+            return null;
+        }
+        return 0 - a;
+    }
+    let product = a * b;
+    if product / b != a {
+        return null;
+    }
+    return product;
+}
+
+fn min(a: i64, b: i64) -> i64 {
+    if a < b {
+        return a;
+    }
+    return b;
+}
+
+fn max(a: i64, b: i64) -> i64 {
+    if a > b {
+        return a;
+    }
+    return b;
+}
+
+/// Returns 2^n - 1 for the least n it is at least value at, value >= 0.
+fn ones_through(value: i64) -> i64 {
+    var mask = 0;
+    while mask < value {
+        mask = mask * 2 + 1;
+    }
+    return mask;
+}
+
+/// Returns the smallest range holding both.
+fn join(a: Range, b: Range) -> Range {
+    if a.kind == RangeKind::Bottom {
+        return b;
+    }
+    if b.kind == RangeKind::Bottom {
+        return a;
+    }
+    if a.kind == RangeKind::Unknown or b.kind == RangeKind::Unknown {
+        return unknown();
+    }
+    return interval(min(a.lo, b.lo), max(a.hi, b.hi));
+}
+
+fn same_range(a: Range, b: Range) -> bool {
+    if a.kind != b.kind {
+        return false;
+    }
+    if a.kind != RangeKind::Known {
+        return true;
+    }
+    return a.lo == b.lo and a.hi == b.hi;
+}
+
+// ---- tables keyed by name id ----
+
+fn (self: &ValueRanges) stored(table: &array::Array<Range>, name: ir::Name) -> ?Range {
+    let held = table.get(ir::name_id(name)) orelse return null;
+    if held.gen != self.gen {
+        return null;
+    }
+    return held;
+}
+
+fn (self: &ValueRanges) store(allocator: Allocator, table: &var array::Array<Range>, name: ir::Name, range: Range) -> !void {
+    let id = ir::name_id(name);
+    while table.len() <= id {
+        try table.append(allocator, bottom());
+    }
+    var stamped = range;
+    stamped.gen = self.gen;
+    return table.set(id, stamped);
+}
+
+/// Returns the dividend's range where the `/` or `%` naming result is, or
+/// null when none is known.
+fn (self: &ValueRanges) dividend(result: ir::Name) -> ?Range {
+    let held = self.stored(&self.dividends, result) orelse return null;
+    if held.kind != RangeKind::Known {
+        return null;
+    }
+    return held;
+}
+
+/// Reports whether the dividend of the `/` or `%` naming result is never
+/// negative where the instruction is.
+fn (self: &ValueRanges) dividend_non_negative(result: ir::Name) -> bool {
+    let held = self.dividend(result) orelse return false;
+    return held.lo >= 0;
+}
+
+/// Returns the comparison instruction a bool value is, or null.
+fn (self: &ValueRanges) compare_of(name: ir::Name) -> ?ir::Instr {
+    let id = ir::name_id(name);
+    let stamp = self.compare_gen.get(id) orelse return null;
+    if stamp != self.gen {
+        return null;
+    }
+    return self.compares.get(self.compare_at.get_or_panic(id));
+}
+
+// ---- the walk ----
+
+/// Works out the ranges of the function being selected; order is its blocks
+/// in reverse postorder.
+fn (self: &var Selector) find_ranges(module: &ir::Module, node: &ir::FunctionNode, order: &array::Array<i64>) -> !void {
+    try self.range_blocks(module, node, order);
+    // Mark every result the walk will reach, so a phi reads one it has not
+    // reached yet as nothing rather than as anything.
+    var order_index = 0;
+    while order.get(order_index) |mir| {
+        order_index = order_index + 1;
+        let block_node = module.blocks.at(node.blocks.get_or_panic(mir).node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if int_type(module, instr_node.result.type_name).bits > 0 {
+                try self.ranges.store(self.allocator, &var self.ranges.values, instr_node.result.name, bottom());
+            }
+            if instr_node.op == ir::Op::Binary and module.names.is(instr_node.result.type_name, "bool") {
+                if instr_node.args.get(0) |left| {
+                    if int_type(module, left.type_name).bits > 0 {
+                        try self.ranges.note_compare(self.allocator, instr_node.result.name, instr);
+                    }
+                }
+            }
+        }
+    }
+    var walks = 0;
+    var changed = true;
+    while changed {
+        if walks == range_walks() {
+            // Not settled: nothing is known.
+            self.ranges.gen = self.ranges.gen + 1;
+            return;
+        }
+        walks = walks + 1;
+        changed = false;
+        order_index = 0;
+        while order.get(order_index) |mir| {
+            order_index = order_index + 1;
+            let block_node = module.blocks.at(node.blocks.get_or_panic(mir).node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let instr_node = module.instrs.at(instr.node);
+                let ty = int_type(module, instr_node.result.type_name);
+                if ty.bits == 0 {
+                    continue;
+                }
+                let old = self.ranges.stored(&self.ranges.values, instr_node.result.name) orelse bottom();
+                var next = bottom();
+                if instr_node.op == ir::Op::Phi {
+                    next = join(old, self.phi_range(module, instr_node, mir, ty));
+                    if walks >= 2 {
+                        next = widened(ty, old, next);
+                    }
+                } else {
+                    next = try self.instr_range(module, instr_node, mir, ty);
+                }
+                if !same_range(old, next) {
+                    changed = true;
+                    try self.ranges.store(self.allocator, &var self.ranges.values, instr_node.result.name, next);
+                }
+            }
+        }
+    }
+    return;
+}
+
+/// Returns next with each bound that moved past old's taken to the end of
+/// the type, so a phi stops growing.
+fn widened(ty: IntType, old: Range, next: Range) -> Range {
+    if old.kind != RangeKind::Known or next.kind != RangeKind::Known {
+        return next;
+    }
+    let all = whole(ty);
+    if all.kind == RangeKind::Unknown {
+        if next.hi > old.hi {
+            return unknown();
+        }
+        return next;
+    }
+    var lo = next.lo;
+    var hi = next.hi;
+    if lo < old.lo {
+        lo = all.lo;
+    }
+    if hi > old.hi {
+        hi = all.hi;
+    }
+    return interval(lo, hi);
+}
+
+fn (self: &var ValueRanges) note_compare(allocator: Allocator, name: ir::Name, instr: ir::Instr) -> !void {
+    let id = ir::name_id(name);
+    while self.compare_gen.len() <= id {
+        try self.compare_gen.append(allocator, 0);
+        try self.compare_at.append(allocator, 0);
+    }
+    try self.compare_gen.set(id, self.gen);
+    try self.compare_at.set(id, self.compares.len());
+    return self.compares.append(allocator, instr);
+}
+
+/// Finds the predecessors, the dominator tree and the facts of each block.
+fn (self: &var Selector) range_blocks(module: &ir::Module, node: &ir::FunctionNode, order: &array::Array<i64>) -> !void {
+    let count = node.blocks.len();
+    let allocator = self.allocator;
+    self.ranges.place.clear(allocator);
+    self.ranges.idom.clear(allocator);
+    self.ranges.facts_at.clear(allocator);
+    self.ranges.pred_start.clear(allocator);
+    self.ranges.pred_list.clear(allocator);
+    self.ranges.fact_cond.clear(allocator);
+    self.ranges.fact_sense.clear(allocator);
+    self.ranges.fact_next.clear(allocator);
+    self.ranges.compares.clear(allocator);
+    for 0..count |_index| {
+        try self.ranges.place.append(allocator, 0 - 1);
+        try self.ranges.idom.append(allocator, 0 - 1);
+        try self.ranges.facts_at.append(allocator, 0 - 1);
+        try self.ranges.pred_start.append(allocator, 0);
+    }
+    try self.ranges.pred_start.append(allocator, 0);
+    var position = 0;
+    while order.get(position) |mir| {
+        try self.ranges.place.set(mir, position);
+        position = position + 1;
+    }
+    // Predecessors of the reached blocks, counted then filled.
+    position = 0;
+    while order.get(position) |mir| {
+        position = position + 1;
+        let term = module.blocks.at(node.blocks.get_or_panic(mir).node).terminator;
+        var succ_index = 0;
+        while term.successor(succ_index) |succ_name| {
+            succ_index = succ_index + 1;
+            let succ = self.block(succ_name);
+            if succ >= 0 {
+                try self.ranges.pred_start.set(succ + 1, self.ranges.pred_start.get_or_panic(succ + 1) + 1);
+            }
+        }
+    }
+    var fill = array::new<i64>(allocator);
+    defer fill.deinit(allocator);
+    for 0..count |block| {
+        let start = self.ranges.pred_start.get_or_panic(block);
+        try self.ranges.pred_start.set(block + 1, start + self.ranges.pred_start.get_or_panic(block + 1));
+        try fill.append(allocator, start);
+    }
+    for 0..self.ranges.pred_start.get_or_panic(count) |_index| {
+        try self.ranges.pred_list.append(allocator, 0);
+    }
+    position = 0;
+    while order.get(position) |mir| {
+        position = position + 1;
+        let term = module.blocks.at(node.blocks.get_or_panic(mir).node).terminator;
+        var succ_index = 0;
+        while term.successor(succ_index) |succ_name| {
+            succ_index = succ_index + 1;
+            let succ = self.block(succ_name);
+            if succ >= 0 {
+                let at = fill.get_or_panic(succ);
+                try self.ranges.pred_list.set(at, mir);
+                try fill.set(succ, at + 1);
+            }
+        }
+    }
+    // Immediate dominators by the Cooper-Harvey-Kennedy iteration over the
+    // reverse postorder; idom holds blocks.
+    let entry = order.get(0) orelse return;
+    try self.ranges.idom.set(entry, entry);
+    var changed = true;
+    while changed {
+        changed = false;
+        position = 1;
+        while order.get(position) |mir| {
+            position = position + 1;
+            var meet = 0 - 1;
+            var at = self.ranges.pred_start.get_or_panic(mir);
+            while at < self.ranges.pred_start.get_or_panic(mir + 1) {
+                let pred = self.ranges.pred_list.get_or_panic(at);
+                at = at + 1;
+                if self.ranges.idom.get_or_panic(pred) < 0 {
+                    continue;
+                }
+                if meet < 0 {
+                    meet = pred;
+                } else {
+                    meet = self.ranges.meet(meet, pred);
+                }
+            }
+            if meet >= 0 and self.ranges.idom.get_or_panic(mir) != meet {
+                try self.ranges.idom.set(mir, meet);
+                changed = true;
+            }
+        }
+    }
+    // A block entered only by one branch knows its condition; every block
+    // knows what its immediate dominator does.
+    position = 1;
+    while order.get(position) |mir| {
+        position = position + 1;
+        var head = self.ranges.facts_at.get_or_panic(self.ranges.idom.get_or_panic(mir));
+        let start = self.ranges.pred_start.get_or_panic(mir);
+        if self.ranges.pred_start.get_or_panic(mir + 1) - start == 1 {
+            let pred = self.ranges.pred_list.get_or_panic(start);
+            let term = module.blocks.at(node.blocks.get_or_panic(pred).node).terminator;
+            if edge_sense(self, term, mir) |sense| {
+                head = try self.ranges.add_fact(allocator, term.cond.name, sense, head);
+            }
+        }
+        try self.ranges.facts_at.set(mir, head);
+    }
+    return;
+}
+
+/// Returns what the branch term says on its edge to the block succ: its
+/// condition is true there, or false; null when it is not a branch or both
+/// of its edges go to succ.
+fn edge_sense(selector: &Selector, term: ir::Terminator, succ: i64) -> ?bool {
+    if term.op != ir::TermOp::Branch {
+        return null;
+    }
+    let target = selector.block(term.target);
+    let else_target = selector.block(term.else_target);
+    if target == else_target {
+        return null;
+    }
+    if target == succ {
+        return true;
+    }
+    if else_target == succ {
+        return false;
+    }
+    return null;
+}
+
+fn (self: &var ValueRanges) add_fact(allocator: Allocator, cond: ir::Name, sense: bool, next: i64) -> !i64 {
+    let at = self.fact_cond.len();
+    try self.fact_cond.append(allocator, cond);
+    try self.fact_sense.append(allocator, sense);
+    try self.fact_next.append(allocator, next);
+    return at;
+}
+
+fn (self: &ValueRanges) meet(left: i64, right: i64) -> i64 {
+    var a = left;
+    var b = right;
+    while a != b {
+        while self.place.get_or_panic(a) > self.place.get_or_panic(b) {
+            a = self.idom.get_or_panic(a);
+        }
+        while self.place.get_or_panic(b) > self.place.get_or_panic(a) {
+            b = self.idom.get_or_panic(b);
+        }
+    }
+    return a;
+}
+
+/// Returns a value's range as it is defined, with nothing narrowed.
+fn (self: &Selector) plain_range(value: ir::Value, ty: IntType) -> Range {
+    if self.ranges.stored(&self.ranges.values, value.name) |held| {
+        return held;
+    }
+    let held = self.val(value.name);
+    if held.kind == ValKind::Const {
+        return constant_range(ty, held.imm);
+    }
+    return whole(ty);
+}
+
+/// Returns a value's range where the facts from head on hold.
+fn (self: &Selector) range_under(module: &ir::Module, value: ir::Value, head: i64) -> Range {
+    let ty = int_type(module, value.type_name);
+    if ty.bits == 0 {
+        return unknown();
+    }
+    var range = self.plain_range(value, ty);
+    if range.kind == RangeKind::Bottom {
+        return range;
+    }
+    var fact = head;
+    var reads = 0;
+    while fact >= 0 and reads < fact_reads() {
+        reads = reads + 1;
+        let cond = self.ranges.fact_cond.get_or_panic(fact);
+        let sense = self.ranges.fact_sense.get_or_panic(fact);
+        fact = self.ranges.fact_next.get_or_panic(fact);
+        range = self.narrowed_by(module, value, ty, range, cond, sense);
+    }
+    return range;
+}
+
+/// Returns range, the range of value, less what the comparison cond being
+/// sense rules out.
+fn (self: &Selector) narrowed_by(module: &ir::Module, value: ir::Value, ty: IntType, range: Range, cond: ir::Name, sense: bool) -> Range {
+    if self.ranges.compare_of(cond) |instr| {
+        let compare = module.instrs.at(instr.node);
+        let left = compare.args.get_or_panic(0);
+        let right = compare.args.get_or_panic(1);
+        var relation = relation_of(module, compare.operand);
+        if !sense {
+            relation = negated(relation);
+        }
+        var other = left;
+        if ir::same_name(left.name, value.name) {
+            other = right;
+        } else if ir::same_name(right.name, value.name) {
+            relation = swapped(relation);
+        } else {
+            return range;
+        }
+        if relation == Relation::None or ir::same_name(other.name, value.name) {
+            return range;
+        }
+        return narrowed(range, relation, self.plain_range(other, ty));
+    }
+    return range;
+}
+
+/// Is a comparison `value <relation> other`.
+enum Relation {
+    None,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+    Equal,
+    NotEqual,
+}
+
+fn relation_of(module: &ir::Module, op: ir::Name) -> Relation {
+    if module.names.is(op, "<") {
+        return Relation::Less;
+    }
+    if module.names.is(op, "<=") {
+        return Relation::LessEqual;
+    }
+    if module.names.is(op, ">") {
+        return Relation::Greater;
+    }
+    if module.names.is(op, ">=") {
+        return Relation::GreaterEqual;
+    }
+    if module.names.is(op, "==") {
+        return Relation::Equal;
+    }
+    if module.names.is(op, "!=") {
+        return Relation::NotEqual;
+    }
+    return Relation::None;
+}
+
+fn negated(relation: Relation) -> Relation {
+    match relation {
+        Less => return Relation::GreaterEqual,
+        LessEqual => return Relation::Greater,
+        Greater => return Relation::LessEqual,
+        GreaterEqual => return Relation::Less,
+        Equal => return Relation::NotEqual,
+        NotEqual => return Relation::Equal,
+        None => return Relation::None,
+    }
+}
+
+fn swapped(relation: Relation) -> Relation {
+    match relation {
+        Less => return Relation::Greater,
+        LessEqual => return Relation::GreaterEqual,
+        Greater => return Relation::Less,
+        GreaterEqual => return Relation::LessEqual,
+        _ => return relation,
+    }
+}
+
+/// Returns range less what `value <relation> bound` rules out. Both sides
+/// are one type, so an unsigned comparison orders the mathematical values
+/// the same as a signed one.
+fn narrowed(range: Range, relation: Relation, bound: Range) -> Range {
+    if bound.kind != RangeKind::Known {
+        return range;
+    }
+    var lo = range.lo;
+    var hi = range.hi;
+    if range.kind == RangeKind::Unknown {
+        // Only an unsigned value has no range: it is at least 0, and an
+        // upper bound makes it one.
+        lo = 0;
+        hi = i64_max();
+    }
+    var upper = false;
+    match relation {
+        Less => {
+            if bound.hi == i64_min() {
+                return range;
+            }
+            hi = min(hi, bound.hi - 1);
+            upper = true;
+        },
+        LessEqual => {
+            hi = min(hi, bound.hi);
+            upper = true;
+        },
+        Greater => {
+            if bound.lo == i64_max() {
+                return range;
+            }
+            lo = max(lo, bound.lo + 1);
+        },
+        GreaterEqual => {
+            lo = max(lo, bound.lo);
+        },
+        Equal => {
+            lo = max(lo, bound.lo);
+            hi = min(hi, bound.hi);
+            upper = true;
+        },
+        NotEqual => {
+            if bound.lo == bound.hi and range.kind == RangeKind::Known {
+                if lo == bound.lo and lo < hi {
+                    lo = lo + 1;
+                } else if hi == bound.lo and lo < hi {
+                    hi = hi - 1;
+                }
+            }
+        },
+        None => {},
+    }
+    if range.kind == RangeKind::Unknown and !upper {
+        return range;
+    }
+    if lo > hi {
+        // The block cannot be reached; keep what was known.
+        return range;
+    }
+    return interval(lo, hi);
+}
+
+/// Returns a phi's range: its incoming values joined, each where its edge
+/// leaves the predecessor.
+fn (self: &Selector) phi_range(module: &ir::Module, node: &ir::InstrNode, mir: i64, ty: IntType) -> Range {
+    var range = bottom();
+    var index = 0;
+    while node.incoming.get(index) |incoming| {
+        index = index + 1;
+        let pred = self.block(incoming.block);
+        if pred < 0 or self.ranges.place.get_or_panic(pred) < 0 {
+            // An edge from a block the entry does not reach brings nothing.
+            continue;
+        }
+        let head = self.ranges.facts_at.get_or_panic(pred);
+        let term = module.blocks.at(self.ir_blocks.get_or_panic(pred).node).terminator;
+        if edge_sense(self, term, mir) |sense| {
+            range = join(range, self.range_on_edge(module, incoming.value, term.cond.name, sense, head));
+            continue;
+        }
+        range = join(range, self.range_under(module, incoming.value, head));
+    }
+    if range.kind == RangeKind::Known {
+        return fitted(ty, range.lo, range.hi);
+    }
+    return range;
+}
+
+/// Returns a value's range on an edge whose branch says cond is sense, past
+/// the facts from head on.
+fn (self: &Selector) range_on_edge(module: &ir::Module, value: ir::Value, cond: ir::Name, sense: bool, head: i64) -> Range {
+    let range = self.range_under(module, value, head);
+    if range.kind == RangeKind::Bottom {
+        return range;
+    }
+    return self.narrowed_by(module, value, int_type(module, value.type_name), range, cond, sense);
+}
+
+/// Returns the range of an instruction's integer result in the block mir.
+fn (self: &var Selector) instr_range(module: &ir::Module, node: &ir::InstrNode, mir: i64, ty: IntType) -> !Range {
+    let head = self.ranges.facts_at.get_or_panic(mir);
+    match node.op {
+        Const => {
+            let text = ir::name_text(&module.names, node.immediate);
+            let bytes = text.as_bytes();
+            let parsed = parse_integer(bytes) orelse return whole(ty);
+            let shape = shape_of(module, node.result.type_name);
+            return constant_range(ty, normalize_imm(parsed, shape));
+        },
+        Id => {
+            let source = node.args.get(0) orelse return whole(ty);
+            return self.range_under(module, source, head);
+        },
+        Cast => {
+            let source = node.args.get(0) orelse return whole(ty);
+            let from = self.range_under(module, source, head);
+            if from.kind == RangeKind::Bottom {
+                return from;
+            }
+            if from.kind != RangeKind::Known {
+                return whole(ty);
+            }
+            return fitted(ty, from.lo, from.hi);
+        },
+        Unary => {
+            let source = node.args.get(0) orelse return whole(ty);
+            let from = self.range_under(module, source, head);
+            if from.kind == RangeKind::Bottom {
+                return from;
+            }
+            if from.kind != RangeKind::Known or !ty.signed {
+                return whole(ty);
+            }
+            if module.names.is(node.operand, "-") and from.lo != i64_min() {
+                return fitted(ty, 0 - from.hi, 0 - from.lo);
+            }
+            if module.names.is(node.operand, "~") {
+                return fitted(ty, 0 - from.hi - 1, 0 - from.lo - 1);
+            }
+            return whole(ty);
+        },
+        Binary => {
+            let left_value = node.args.get(0) orelse return whole(ty);
+            let right_value = node.args.get(1) orelse return whole(ty);
+            let left = self.range_under(module, left_value, head);
+            let right = self.range_under(module, right_value, head);
+            if left.kind == RangeKind::Bottom or right.kind == RangeKind::Bottom {
+                return bottom();
+            }
+            let divides = module.names.is(node.operand, "/") or module.names.is(node.operand, "%");
+            if divides {
+                try self.ranges.store(self.allocator, &var self.ranges.dividends, node.result.name, left);
+            }
+            return binary_range(module, node.operand, ty, left, right);
+        },
+        _ => return whole(ty),
+    }
+}
+
+/// Returns the range of `left op right` of the type ty.
+fn binary_range(module: &ir::Module, op: ir::Name, ty: IntType, left: Range, right: Range) -> Range {
+    let known = left.kind == RangeKind::Known and right.kind == RangeKind::Known;
+    let constant = right.kind == RangeKind::Known and right.lo == right.hi;
+    if module.names.is(op, "+") {
+        if !known {
+            return whole(ty);
+        }
+        let lo = add_checked(left.lo, right.lo) orelse return whole(ty);
+        let hi = add_checked(left.hi, right.hi) orelse return whole(ty);
+        return fitted(ty, lo, hi);
+    }
+    if module.names.is(op, "-") {
+        if !known {
+            return whole(ty);
+        }
+        let lo = sub_checked(left.lo, right.hi) orelse return whole(ty);
+        let hi = sub_checked(left.hi, right.lo) orelse return whole(ty);
+        return fitted(ty, lo, hi);
+    }
+    if module.names.is(op, "*") {
+        if !known {
+            return whole(ty);
+        }
+        let a = mul_checked(left.lo, right.lo) orelse return whole(ty);
+        let b = mul_checked(left.lo, right.hi) orelse return whole(ty);
+        let c = mul_checked(left.hi, right.lo) orelse return whole(ty);
+        let d = mul_checked(left.hi, right.hi) orelse return whole(ty);
+        return fitted(ty, min(min(a, b), min(c, d)), max(max(a, b), max(c, d)));
+    }
+    if module.names.is(op, "/") {
+        return quotient_range(ty, left, right);
+    }
+    if module.names.is(op, "%") {
+        return remainder_range(ty, left, right);
+    }
+    if module.names.is(op, "&") {
+        // Anded with a value that is never negative, a value is at most it.
+        var hi = 0 - 1;
+        if left.kind == RangeKind::Known and left.lo >= 0 {
+            hi = left.hi;
+        }
+        if right.kind == RangeKind::Known and right.lo >= 0 and (hi < 0 or right.hi < hi) {
+            hi = right.hi;
+        }
+        if hi < 0 {
+            return whole(ty);
+        }
+        return interval(0, hi);
+    }
+    if module.names.is(op, "|") or module.names.is(op, "^") {
+        if !known or left.lo < 0 or right.lo < 0 {
+            return whole(ty);
+        }
+        return fitted(ty, 0, ones_through(max(left.hi, right.hi)));
+    }
+    if module.names.is(op, ">>") {
+        return shift_right_range(ty, left, right, constant);
+    }
+    if module.names.is(op, "<<") {
+        if !known or !constant or right.lo < 0 or right.lo >= ty.bits {
+            return whole(ty);
+        }
+        let factor = 1 << right.lo;
+        if right.lo >= 63 {
+            return whole(ty);
+        }
+        let lo = mul_checked(left.lo, factor) orelse return whole(ty);
+        let hi = mul_checked(left.hi, factor) orelse return whole(ty);
+        return fitted(ty, lo, hi);
+    }
+    return whole(ty);
+}
+
+/// Returns the range of `left / right`, rounding toward zero.
+fn quotient_range(ty: IntType, left: Range, right: Range) -> Range {
+    let constant = right.kind == RangeKind::Known and right.lo == right.hi;
+    if !ty.signed {
+        if constant and right.lo > 0 {
+            if left.kind == RangeKind::Known {
+                return interval(left.lo / right.lo, left.hi / right.lo);
+            }
+            if right.lo >= 2 {
+                let top = ~cast<u64>(0) / cast<u64>(right.lo);
+                return interval(0, cast<i64>(top));
+            }
+            return whole(ty);
+        }
+        if left.kind == RangeKind::Known {
+            return interval(0, left.hi);
+        }
+        return whole(ty);
+    }
+    if !constant or left.kind != RangeKind::Known or right.lo == 0 {
+        return whole(ty);
+    }
+    let d = right.lo;
+    if d == 0 - 1 {
+        if left.lo == i64_min() {
+            return whole(ty);
+        }
+        return fitted(ty, 0 - left.hi, 0 - left.lo);
+    }
+    if d > 0 {
+        return interval(left.lo / d, left.hi / d);
+    }
+    return interval(left.hi / d, left.lo / d);
+}
+
+/// Returns the range of `left % right`, which keeps the sign of left.
+fn remainder_range(ty: IntType, left: Range, right: Range) -> Range {
+    let constant = right.kind == RangeKind::Known and right.lo == right.hi;
+    if !ty.signed {
+        if constant and right.lo > 0 {
+            if left.kind == RangeKind::Known {
+                return interval(0, min(left.hi, right.lo - 1));
+            }
+            return interval(0, right.lo - 1);
+        }
+        if left.kind == RangeKind::Known {
+            return interval(0, left.hi);
+        }
+        return whole(ty);
+    }
+    if left.kind != RangeKind::Known {
+        return whole(ty);
+    }
+    if !constant or right.lo == 0 or right.lo == i64_min() {
+        if left.lo >= 0 {
+            return interval(0, left.hi);
+        }
+        return whole(ty);
+    }
+    var below = right.lo - 1;
+    if right.lo < 0 {
+        below = 0 - right.lo - 1;
+    }
+    var lo = max(left.lo, 0 - below);
+    var hi = min(left.hi, below);
+    if left.lo >= 0 {
+        lo = 0;
+    }
+    if left.hi <= 0 {
+        hi = 0;
+    }
+    if lo > hi {
+        return whole(ty);
+    }
+    return interval(lo, hi);
+}
+
+/// Returns the range of `left >> right`: arithmetic for a signed type,
+/// logical for an unsigned one, an amount at or past the width leaving the
+/// sign or 0.
+fn shift_right_range(ty: IntType, left: Range, right: Range, constant: bool) -> Range {
+    if constant and right.kind == RangeKind::Known {
+        var amount = right.lo;
+        if amount < 0 or amount > 63 {
+            amount = 63;
+        }
+        if left.kind == RangeKind::Known {
+            if !ty.signed and right.lo >= ty.bits {
+                return interval(0, 0);
+            }
+            return interval(left.lo >> amount, left.hi >> amount);
+        }
+        if !ty.signed and amount >= 1 {
+            return interval(0, i64_max() >> (amount - 1));
+        }
+        return whole(ty);
+    }
+    if left.kind != RangeKind::Known {
+        return whole(ty);
+    }
+    return interval(min(left.lo, 0), max(left.hi, 0));
+}

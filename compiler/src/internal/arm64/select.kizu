@@ -149,6 +149,10 @@ pub struct Selector {
     // the branch that leads there.
     fact_reg: array::Array<i64>,
     fact_mask: array::Array<i64>,
+    // The ranges of the function's integer values, worked out only when it
+    // divides: a division is what reads them.
+    ranges: ValueRanges,
+    divides: bool,
     ret_type: ir::Name,
     pub oom: i64,
     pub oob: i64,
@@ -198,6 +202,8 @@ pub fn new_selector(allocator: Allocator) -> !Selector {
         entry_reg: array::new<i64>(allocator),
         fact_reg: array::new<i64>(allocator),
         fact_mask: array::new<i64>(allocator),
+        ranges: new_ranges(allocator),
+        divides: false,
         ret_type: ir::empty_name(),
         oom: 0 - 1,
         oob: 0 - 1,
@@ -760,6 +766,8 @@ pub fn (self: &var Selector) select_function(module: &ir::Module, function: ir::
     self.entry_imm.clear(self.allocator);
     self.entry_reg.clear(self.allocator);
     self.sret = reg_none();
+    self.ranges.gen = self.ranges.gen + 1;
+    self.divides = false;
     let node = module.function_nodes.at(function.node);
     self.fn_name = node.name;
     self.ret_type = node.return_type;
@@ -831,6 +839,9 @@ pub fn (self: &var Selector) select_function(module: &ir::Module, function: ir::
                     try self.count_cleanup_use(arg);
                 }
             }
+            if instr_node.op == ir::Op::Binary and (module.names.is(instr_node.operand, "/") or module.names.is(instr_node.operand, "%")) {
+                self.divides = true;
+            }
             if instr_node.op == ir::Op::Phi {
                 if try self.bind_phi(module, instr_node, mir) |failed| {
                     return move failed;
@@ -852,6 +863,9 @@ pub fn (self: &var Selector) select_function(module: &ir::Module, function: ir::
     var order = array::new<i64>(self.allocator);
     defer order.deinit(self.allocator);
     try self.reverse_postorder(module, node, &var order);
+    if self.divides {
+        try self.find_ranges(module, node, &order);
+    }
     try self.start_block(0);
     if try self.select_params(module, &node.params) |failed| {
         return move failed;
