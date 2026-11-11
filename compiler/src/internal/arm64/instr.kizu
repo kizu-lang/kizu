@@ -71,6 +71,8 @@ fn (self: &var Selector) select_instr(module: &ir::Module, node: &ir::InstrNode,
         ErrorTry => return self.select_error_try(module, node),
         PrintLine => return self.select_print_line(module, node),
         PanicFail => return self.select_panic_fail(module, node),
+        TestFail => return self.select_test_fail(module, node),
+        TestExpectEqual => return self.select_test_expect_equal(module, node),
         ArrayNew => return self.select_array_new(module, node),
         ArrayLen => return self.select_array_len(module, node),
         ArrayAsBytes => return self.select_array_as_bytes(module, node),
@@ -784,6 +786,72 @@ fn (self: &var Selector) select_panic_fail(module: &ir::Module, node: &ir::Instr
     // its own that nothing jumps to.
     let rest = try self.new_cold_block();
     try self.start_block(rest);
+    try self.set_val(node.result.name, no_val());
+    return null;
+}
+
+/// Selects an explicit std::testing failure: the runtime reports the
+/// message at the position and stops.
+fn (self: &var Selector) select_test_fail(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let message = node.args.get(0) orelse return try self.fail_op(module, node);
+    if !module.names.is(message.type_name, "[]u8") {
+        return try self.fail_op(module, node);
+    }
+    var words = array::new<i64>(self.allocator);
+    defer words.deinit(self.allocator);
+    if !try self.push_words(module, message, &var words) {
+        return try self.fail_op(module, node);
+    }
+    try self.report_failure("kizu_panic_test_fail", &words, node.span.start.line, node.span.start.column);
+    let rest = try self.new_cold_block();
+    try self.start_block(rest);
+    try self.set_val(node.result.name, no_val());
+    return null;
+}
+
+/// Selects std::testing.expect_equal: when the two values differ, a cold
+/// block hands both to the runtime's report for their kind (bool, bytes, or
+/// an integer widened to i64 by its sign), which does not return. Scalars
+/// are held normalized, so a 64-bit compare is equality at their width.
+fn (self: &var Selector) select_test_expect_equal(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let left = node.args.get(0) orelse return try self.fail_op(module, node);
+    let right = node.args.get(1) orelse return try self.fail_op(module, node);
+    var words = array::new<i64>(self.allocator);
+    defer words.deinit(self.allocator);
+    var entry = "kizu_panic_expect_equal_int";
+    let fail_block = try self.new_cold_block();
+    let cont = try self.new_join();
+    if module.names.is(left.type_name, "[]u8") {
+        entry = "kizu_panic_expect_equal_bytes";
+        if !try self.push_words(module, left, &var words) or !try self.push_words(module, right, &var words) {
+            return try self.fail_op(module, node);
+        }
+        let count = try self.place_words(&words);
+        try self.call_c("kizu_bytes_equal", count);
+        let returned = self.func.new_vreg();
+        try self.mov(returned, 0);
+        // C leaves the bits above a _Bool result unspecified.
+        let equal = self.func.new_vreg();
+        try self.extend(equal, returned, 1, false);
+        self.func.end(self.current, Term::NonZero, Cond::Ne, equal, cont, fail_block);
+    } else {
+        let shape = shape_of(module, left.type_name);
+        if shape.class != Class::Scalar {
+            return try self.fail_op(module, node);
+        }
+        if module.names.is(left.type_name, "bool") {
+            entry = "kizu_panic_expect_equal_bool";
+        }
+        let lhs = try self.reg(module, left) orelse return try self.fail_op(module, node);
+        let rhs = try self.reg(module, right) orelse return try self.fail_op(module, node);
+        try words.append(self.allocator, lhs);
+        try words.append(self.allocator, rhs);
+        try self.op3(MOp::Cmp, reg_none(), lhs, rhs);
+        self.func.end(self.current, Term::Flags, Cond::Ne, reg_none(), fail_block, cont);
+    }
+    try self.start_block(fail_block);
+    try self.report_failure(entry, &words, node.span.start.line, node.span.start.column);
+    try self.start_block(cont);
     try self.set_val(node.result.name, no_val());
     return null;
 }
@@ -1748,7 +1816,7 @@ fn (self: &var Selector) select_return(module: &ir::Module, value: ir::Value) ->
         try self.mov(0, regs.reg);
         try self.mov(1, regs.reg2);
     } else if self.ret.class == Class::Aggregate {
-        if ir::same_name(value.type_name, self.ret_type) {
+        if ir::same_name(value.type_name, self.ret_type) or absorbs_return(module, value.type_name, self.ret_type) {
             let address = try self.addr(module, value) orelse return try self.fail(module, "return value", value.type_name);
             try self.copy_bytes(self.sret, address, self.ret.size);
         } else {
@@ -1772,6 +1840,25 @@ fn (self: &var Selector) select_return(module: &ir::Module, value: ir::Value) ->
     }
     self.func.end(self.current, Term::Return, Cond::Eq, reg_none(), 0 - 1, 0 - 1);
     return null;
+}
+
+/// Reports whether a returned `E!T` is absorbed into a declared `!T`, the
+/// return `try` would make. Every failure is one global code and both unions
+/// lay out as the code word and then T, so the bytes carry over unchanged.
+fn absorbs_return(module: &ir::Module, got: ir::Name, want: ir::Name) -> bool {
+    let want_text = ir::name_text(&module.names, want);
+    let want_bytes = want_text.as_bytes();
+    let got_text = ir::name_text(&module.names, got);
+    let got_bytes = got_text.as_bytes();
+    if !mem::starts_with(want_bytes, "!") or mem::starts_with(got_bytes, "!") {
+        return false;
+    }
+    if typ::error_union_success(want_bytes) |want_success| {
+        if typ::error_union_success(got_bytes) |got_success| {
+            return mem::equal_bytes(want_success, got_success);
+        }
+    }
+    return false;
 }
 
 // ---- small text helpers ----
