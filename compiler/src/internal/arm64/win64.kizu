@@ -1,0 +1,187 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::array;
+import std::string;
+
+// Calls into C by the x64 convention of Windows, for the amd64 printer,
+// which there names x0..x3 rcx, rdx, r8 and r9 and x8 rax.
+//
+// An argument goes by its position: the first four in rcx, rdx, r8 and r9,
+// or a float in xmm0..3 of the same position, and the rest in 8-byte stack
+// slots above the 32 bytes the caller leaves for the callee to spill the
+// four registers to. A float argument here also goes in the general
+// register of its position, which a variadic callee reads it from and any
+// other ignores. A C struct by value (laid out as C lays it out) of 1, 2, 4
+// or 8 bytes travels as an integer of its size, as an argument and as a
+// result (in rax); any other as the address of a copy the caller makes,
+// and a result in memory the caller provides, its address the hidden first
+// argument.
+//
+// A struct aligned to more than 8 bytes is refused: none C can name here
+// is.
+
+/// Reports whether a C struct of a size travels as an integer.
+fn win64_in_register(size: i64) -> bool {
+    return size == 1 or size == 2 or size == 4 or size == 8;
+}
+
+/// Returns the shape of a C struct type when the backend passes it, or null
+/// when it holds what C cannot name or nothing at all.
+fn win64_struct(module: &ir::Module, type_name: ir::Name, allocator: Allocator) -> !?Shape {
+    let shape = shape_of(module, type_name);
+    if shape.class != Class::Aggregate or shape.size == 0 or shape.align > 8 {
+        return null;
+    }
+    let text = ir::name_text(&module.names, type_name);
+    let bytes = text.as_bytes();
+    var leaves = array::new<CLeaf>(allocator);
+    defer leaves.deinit(allocator);
+    if !try c_leaves(module, bytes, 0, &var leaves, allocator, 0) {
+        return null;
+    }
+    return shape;
+}
+
+/// Adds the word of the next argument position: a general register or a
+/// stack slot.
+fn (self: &var Selector) win64_word(args: &var CCallArgs, reg: i64) -> !void {
+    if args.words.len() < arg_regs(self.arch) {
+        return args.words.append(self.allocator, reg);
+    }
+    return args.stacked.append(self.allocator, reg);
+}
+
+/// Adds a float argument of width bytes at the next position: its xmm
+/// register, recorded in positions, and its general one; or a stack slot.
+fn (self: &var Selector) win64_float(args: &var CCallArgs, positions: &var array::Array<i64>, reg: i64, width: i64) -> !void {
+    if args.words.len() < arg_regs(self.arch) {
+        try args.floats.append(self.allocator, reg);
+        try args.float_widths.append(self.allocator, width);
+        try positions.append(self.allocator, args.words.len());
+    }
+    return self.win64_word(args, reg);
+}
+
+/// Adds a C struct argument: an integer of its size, or the address of a
+/// copy. Returns false when it is not one this backend passes.
+fn (self: &var Selector) win64_struct_arg(module: &ir::Module, arg: ir::Value, args: &var CCallArgs) -> !bool {
+    let shape = try win64_struct(module, arg.type_name, self.allocator) orelse return false;
+    let src = try self.addr(module, arg) orelse return false;
+    if win64_in_register(shape.size) {
+        let reg = self.func.new_vreg();
+        try self.load(reg, src, 0, shape.size, false);
+        try self.win64_word(args, reg);
+        return true;
+    }
+    // The callee owns the copy and may write it; the convention aligns it
+    // to 16 bytes.
+    let copy = try self.c_slot(shape.size, 16);
+    try self.copy_bytes(copy, src, shape.size);
+    try self.win64_word(args, copy);
+    return true;
+}
+
+/// Selects a call to C by the Windows convention.
+fn (self: &var Selector) select_win64_call(module: &ir::Module, node: &ir::InstrNode, symbol_name: ir::Name) -> !?diagnostic::Diagnostic {
+    var args = CCallArgs {
+        words: array::new<i64>(self.allocator),
+        floats: array::new<i64>(self.allocator),
+        float_widths: array::new<i64>(self.allocator),
+        stacked: array::new<i64>(self.allocator),
+    };
+    defer args.deinit(self.allocator);
+    // The argument position of each float, which names its xmm register.
+    var positions = array::new<i64>(self.allocator);
+    defer positions.deinit(self.allocator);
+    let result = node.result;
+    var result_size = 0;
+    let struct_result = is_c_struct(module, result.type_name);
+    var sret = reg_none();
+    if struct_result {
+        let shape = try win64_struct(module, result.type_name, self.allocator) orelse
+            return try self.fail(module, "C result type", result.type_name);
+        result_size = shape.size;
+        if !win64_in_register(shape.size) {
+            sret = try self.c_slot(shape.size, shape.align);
+            try args.words.append(self.allocator, sret);
+        }
+    } else {
+        let shape = shape_of(module, result.type_name);
+        if !is_word(shape) and shape.class != Class::Void {
+            return try self.fail(module, "C result type", result.type_name);
+        }
+    }
+    var index = 0;
+    while node.args.get(index) |arg| {
+        let at = index;
+        index = index + 1;
+        let unnamed = node.variadic_fixed > 0 and at >= node.variadic_fixed;
+        var takes_address = false;
+        if node.call_params.get(at) |param| {
+            takes_address = takes_address_of(module, param, arg.type_name);
+        }
+        if takes_address {
+            let address = try self.c_copy_address(module, arg) orelse return try self.fail_op(module, node);
+            try self.win64_word(&var args, address);
+            continue;
+        }
+        let shape = shape_of(module, arg.type_name);
+        if !unnamed and is_c_struct(module, arg.type_name) {
+            if !try self.win64_struct_arg(module, arg, &var args) {
+                return try self.fail(module, "C argument type", arg.type_name);
+            }
+            continue;
+        }
+        if !is_word(shape) {
+            if unnamed {
+                return try self.fail(module, "C variadic argument type", arg.type_name);
+            }
+            return try self.fail(module, "C argument type", arg.type_name);
+        }
+        let reg = try self.reg(module, arg) orelse return try self.fail_op(module, node);
+        if shape.class == Class::Float {
+            try self.win64_float(&var args, &var positions, reg, shape.size);
+        } else {
+            try self.win64_word(&var args, reg);
+        }
+    }
+    index = 0;
+    while args.stacked.get(index) |reg| {
+        try self.store(reg, reg_sp(), index * 8, 8);
+        index = index + 1;
+    }
+    if args.stacked.len() > self.func.out_words {
+        self.func.out_words = args.stacked.len();
+    }
+    let count = try self.place_words(&args.words);
+    index = 0;
+    while args.floats.get(index) |reg| {
+        var inst = blank(MOp::FArg);
+        inst.rn = reg;
+        inst.imm = positions.get_or_panic(index);
+        inst.width = args.float_widths.get_or_panic(index);
+        try self.inst(inst);
+        index = index + 1;
+    }
+    var symbol = string::new(self.allocator);
+    defer symbol.deinit(self.allocator);
+    let name_text = ir::name_text(&module.names, symbol_name);
+    let name_bytes = name_text.as_bytes();
+    try append_c_symbol(self.allocator, &var symbol, name_bytes);
+    let symbol_bytes = symbol.as_bytes();
+    let sym = try self.syms.intern(symbol_bytes);
+    try self.call_sym(sym, count, reg_none());
+    if !struct_result {
+        try self.bind_result(module, result, reg_none(), true);
+        return null;
+    }
+    if sret == reg_none() {
+        // rax, which the printer moves to x0 after a call to C.
+        let word = self.func.new_vreg();
+        try self.mov(word, 0);
+        sret = try self.c_slot(8, 8);
+        try self.store(word, sret, 0, result_size);
+    }
+    try self.set_val(result.name, fresh_val(sret));
+    return null;
+}

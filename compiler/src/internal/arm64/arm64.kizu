@@ -7,7 +7,8 @@ import std::string;
 
 // The arm64 backend: a lowered module straight to AArch64 assembly text,
 // Mach-O for Darwin or ELF for Linux, which the system assembler and
-// linker turn into the executable.
+// linker turn into the executable (and, through the amd64 printer, x86-64
+// text, also COFF for Windows).
 // Every function is selected into machine IR, given registers, and printed;
 // an op or a type the backend does not lower stops the build with a
 // diagnostic naming it rather than being handed to another backend. The
@@ -15,14 +16,17 @@ import std::string;
 // printer.
 
 /// Is the object format the assembly text is written for. Selection names
-/// symbols the Mach-O way; printing for ELF spells them through symbol.
+/// symbols the Mach-O way; printing for ELF or COFF spells them through
+/// symbol.
 pub enum Format {
     MachO,
     Elf,
+    Coff,
 }
 
 /// Emits a lowered module as assembly text for arch, in format. The amd64
-/// printer writes ELF only; the caller rejects amd64 with Mach-O.
+/// printer writes ELF and COFF only, and arm64 Mach-O and ELF only; the
+/// caller rejects the other pairs.
 pub fn emit(allocator: Allocator, module: &ir::Module, arch: Arch, format: Format, out: &var string::String) -> !?diagnostic::Diagnostic {
     var selector = try new_selector(allocator, arch);
     defer selector.deinit(allocator);
@@ -41,7 +45,7 @@ pub fn emit(allocator: Allocator, module: &ir::Module, arch: Arch, format: Forma
             main_ret = ret;
         }
     }
-    if format == Format::Elf {
+    if format != Format::MachO {
         try out.append_bytes(allocator, "    .text");
     } else {
         try out.append_bytes(allocator, "    .section __TEXT,__text,regular,pure_instructions");
@@ -99,8 +103,8 @@ pub fn emit(allocator: Allocator, module: &ir::Module, arch: Arch, format: Forma
         let symbol_text = ir::name_text(&selector.syms, symbol);
         let symbol_bytes = symbol_text.as_bytes();
         let exported = exports.get_or_panic(ordinal);
-        if arch == Arch::Amd64 {
-            try amd64_print_function(allocator, out, func, &allocation, symbol_bytes, exported, ordinal, &selector.syms, format);
+        if is_x86(arch) {
+            try amd64_print_function(allocator, out, func, &allocation, symbol_bytes, exported, ordinal, &selector.syms, arch, format);
             ordinal = ordinal + 1;
             continue;
         }
@@ -128,6 +132,8 @@ pub fn emit(allocator: Allocator, module: &ir::Module, arch: Arch, format: Forma
     if selector.literals.len() > 0 {
         if format == Format::Elf {
             try elf_section(allocator, out, ".rodata.str1.1", "aMS", ",%progbits,1");
+        } else if format == Format::Coff {
+            try elf_section(allocator, out, ".rdata", "dr", "");
         } else {
             try out.append_bytes(allocator, "    .section __TEXT,__cstring,cstring_literals");
         }
@@ -164,18 +170,19 @@ pub fn emit(allocator: Allocator, module: &ir::Module, arch: Arch, format: Forma
     if format == Format::Elf {
         // The stack is not executable.
         try elf_section(allocator, out, ".note.GNU-stack", "", ",%progbits");
-    } else {
+        try newline(allocator, out);
+    } else if format == Format::MachO {
         try out.append_bytes(allocator, ".subsections_via_symbols");
+        try newline(allocator, out);
     }
-    try newline(allocator, out);
     return null;
 }
 
-/// Writes an assembler symbol the selector named the Mach-O way. ELF has
-/// no `_` in front of a C symbol, and keeps a local label out of the
-/// symbol table by a `.L` start rather than an `L` one.
+/// Writes an assembler symbol the selector named the Mach-O way. ELF and
+/// x86-64 COFF have no `_` in front of a C symbol, and keep a local label
+/// out of the symbol table by a `.L` start rather than an `L` one.
 fn symbol(allocator: Allocator, out: &var string::String, format: Format, bytes: []u8) -> !void {
-    if format == Format::Elf and mem::len(bytes) > 0 {
+    if format != Format::MachO and mem::len(bytes) > 0 {
         if bytes[0] == cast<u8>(95) {
             return out.append_bytes(allocator, bytes[1..mem::len(bytes)]);
         }
@@ -197,7 +204,8 @@ fn relocated(allocator: Allocator, out: &var string::String, format: Format, byt
     return out.append_bytes(allocator, mach_o);
 }
 
-/// Writes an ELF `.section name,"flags"rest` line, without the newline.
+/// Writes an ELF or COFF `.section name,"flags"rest` line, without the
+/// newline.
 fn elf_section(allocator: Allocator, out: &var string::String, name: []u8, flags: []u8, rest: []u8) -> !void {
     try out.append_bytes(allocator, "    .section ");
     try out.append_bytes(allocator, name);
@@ -212,6 +220,8 @@ fn elf_section(allocator: Allocator, out: &var string::String, name: []u8, flags
 fn write_tables(allocator: Allocator, selector: &Selector, format: Format, out: &var string::String) -> !void {
     if format == Format::Elf {
         try out.append_bytes(allocator, "    .section .rodata");
+    } else if format == Format::Coff {
+        try elf_section(allocator, out, ".rdata", "dr", "");
     } else {
         try out.append_bytes(allocator, "    .section __TEXT,__const");
     }
@@ -1273,6 +1283,9 @@ fn write_error_names(allocator: Allocator, module: &ir::Module, selector: &var S
         // The rows hold addresses, which a position-independent
         // executable relocates when it is loaded.
         try elf_section(allocator, out, ".data.rel.ro", "aw", ",%progbits");
+    } else if format == Format::Coff {
+        // The loader applies the image's base relocations to these too.
+        try elf_section(allocator, out, ".rdata", "dr", "");
     } else {
         try out.append_bytes(allocator, "    .section __DATA,__const");
     }
