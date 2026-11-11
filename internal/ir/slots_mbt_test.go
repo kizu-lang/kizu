@@ -24,7 +24,8 @@ import (
 // it, reads which locals of main got a `local.slot`, and compares. A
 // divergence is a lowerer bug or a model bug, and which one is a question for
 // SPEC.md: record it in findings/ir-safety-quint-findings.md rather than
-// adjusting either side to agree.
+// adjusting either side to agree. compiler/src/ir_slots_mbt_test.kizu replays
+// the same fixture against the lowerer of compiler/.
 //
 // KIZU_MBT_BIN=<kizu binary> reads `<binary> ir` instead of lowering in
 // process, so the same cases can be put to the compiler built from

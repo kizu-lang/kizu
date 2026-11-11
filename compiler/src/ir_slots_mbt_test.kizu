@@ -1,0 +1,834 @@
+import compiler::internal::ast;
+import compiler::internal::ir;
+import compiler::internal::ownership;
+import compiler::internal::project;
+import compiler::internal::types;
+import std::array;
+import std::fmt;
+import std::fs;
+import std::io;
+import std::json;
+import std::map;
+import std::mem;
+import std::process;
+import std::sort;
+import std::string;
+import std::testing;
+
+// The programs here come from the Quint model of the slot decision in
+// spec/ir/slots.qnt (spec/ir/README.md says what it covers);
+// scripts/ir-mbt samples them into compiler/tests/mbt/ir_slots.json. Each
+// case is a set of struct types with same-named methods, three struct locals
+// and three integer locals, and statements that call the methods; the model
+// says which locals the lowerer gives storage. This runner renders the case
+// to Kizu, type- and ownership-checks it, lowers it, reads which locals of
+// main got a `local.slot`, and compares. A divergence is a lowerer bug or a
+// model bug, and which one is a question for SPEC.md: record it in
+// findings/ir-safety-quint-findings.md rather than adjusting either side to
+// agree. internal/ir/slots_mbt_test.go replays the same fixture against the
+// Go lowerer.
+//
+// The bounds and defer fixtures of the same generator are run as wasm32-wasi
+// under node; that replay is still internal/ir/runtime_mbt_test.go alone.
+
+/// One program of the fixture, as the document has it: the fixture leaves
+/// out types and decls when they are empty.
+pub struct SlotMbtEntry {
+    pub bucket: string::String,
+    pub types: ?array::Array<string::String>,
+    pub decls: ?array::Array<string::String>,
+    pub prog: array::Array<string::String>,
+    pub expect: array::Array<string::String>,
+}
+
+pub struct SlotMbtFixture {
+    pub note: string::String,
+    pub cases: array::Array<SlotMbtEntry>,
+}
+
+/// One program to lower: the type of each struct local, each declared method
+/// as `<Type>.<method> <recv> <arg>`, the statements, and the locals the
+/// model gives storage.
+struct SlotMbtCase {
+    bucket: string::String,
+    types: array::Array<string::String>,
+    decls: array::Array<string::String>,
+    prog: array::Array<string::String>,
+    expect: array::Array<string::String>,
+}
+
+/// The initial values that name the locals in the dump: x<i> is built from
+/// 100+i, n<k> is 200+k. Nothing else in a rendered main is a constant this
+/// large.
+fn slot_mbt_struct_base() -> i64 {
+    return 100;
+}
+
+fn slot_mbt_int_base() -> i64 {
+    return 200;
+}
+
+/// Shapes whose answer is known from #1914 and
+/// tests/behavior/src/method_lend_scope, one per line as
+/// `name|types|statements|storage`, the lists separated by `;`, all with the
+/// declarations of method_lend_scope. A is Slot, B is Tally and C is
+/// Counter. They mirror spec/ir/slots_test.qnt, so a harness that renders or
+/// reads wrongly fails here before it disagrees with the model anywhere else.
+fn slot_mbt_known_shapes() -> []u8 {
+    return
+        \\issue1914/shared-methods-lend-nothing|A;B;C|call 0 poke 0;call 1 note 1|
+        \\issue1914/own-methods-still-lend|A;B;C|call 2 poke 0;call 2 note 1|n1;x2
+        \\deferred-receiver-is-storage|A;B;C|defer 0 poke 0|x0
+        \\lent-inside-block|A;B;C|if;loop 0;bump 2;end;end;bump_explicit 0|n0;n2
+    ;
+}
+
+/// The declarations of method_lend_scope in the model's terms.
+fn slot_mbt_lend_scope_decls() -> []u8 {
+    return "A.poke RShared AVal;B.note RShared AVal;C.note RShared ALent;C.poke RLent AVal";
+}
+
+fn slot_mbt_new_case(allocator: Allocator) -> SlotMbtCase {
+    return SlotMbtCase {
+        bucket: string::new(allocator),
+        types: array::new<string::String>(allocator),
+        decls: array::new<string::String>(allocator),
+        prog: array::new<string::String>(allocator),
+        expect: array::new<string::String>(allocator),
+    };
+}
+
+/// Appends each `;`-separated field of text to out; an empty text has none.
+fn slot_mbt_split(allocator: Allocator, out: &var array::Array<string::String>, text: []u8) -> !void {
+    if mem::len(text) == 0 {
+        return;
+    }
+    var start = 0;
+    var index = 0;
+    while index <= mem::len(text) {
+        var at_end = true;
+        if mem::byte_at(text, index) |byte| {
+            at_end = byte == cast<u8>(59);
+        }
+        if at_end {
+            let field = try string::from_bytes(allocator, text[start..index]);
+            try out.append(allocator, move field);
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+/// Reads one `name|types|statements|storage` line of the known shapes.
+fn slot_mbt_known_case(allocator: Allocator, line: []u8) -> !SlotMbtCase {
+    var c = slot_mbt_new_case(allocator);
+    errdefer c.deinit(allocator);
+    var rest = line;
+    var field = 0;
+    while field < 4 {
+        let end = slot_mbt_byte_index(rest, cast<u8>(124));
+        let part = rest[0..end];
+        if field == 0 {
+            try c.bucket.append_bytes(allocator, part);
+        } else if field == 1 {
+            try slot_mbt_split(allocator, &var c.types, part);
+        } else if field == 2 {
+            try slot_mbt_split(allocator, &var c.prog, part);
+        } else {
+            try slot_mbt_split(allocator, &var c.expect, part);
+        }
+        if end < mem::len(rest) {
+            rest = rest[end + 1..mem::len(rest)];
+        } else {
+            rest = "";
+        }
+        field = field + 1;
+    }
+    try slot_mbt_split(allocator, &var c.decls, slot_mbt_lend_scope_decls());
+    return move c;
+}
+
+/// Copies one fixture entry into a case.
+fn slot_mbt_from_entry(allocator: Allocator, entry: &SlotMbtEntry) -> !SlotMbtCase {
+    var c = slot_mbt_new_case(allocator);
+    errdefer c.deinit(allocator);
+    try c.bucket.append_string(allocator, &entry.bucket);
+    if entry.types |types| {
+        try slot_mbt_append_all(allocator, &var c.types, types);
+    }
+    if entry.decls |decls| {
+        try slot_mbt_append_all(allocator, &var c.decls, decls);
+    }
+    try slot_mbt_append_all(allocator, &var c.prog, &entry.prog);
+    try slot_mbt_append_all(allocator, &var c.expect, &entry.expect);
+    return move c;
+}
+
+fn slot_mbt_append_all(
+    allocator: Allocator,
+    out: &var array::Array<string::String>,
+    values: &array::Array<string::String>
+) -> !void {
+    var index = 0;
+    while values.at(index) |value| {
+        index = index + 1;
+        let bytes = value.as_bytes();
+        let copy = try string::from_bytes(allocator, bytes);
+        try out.append(allocator, move copy);
+    }
+    return;
+}
+
+/// The index of the first byte in text, or its length.
+fn slot_mbt_byte_index(text: []u8, byte: u8) -> i64 {
+    var index = 0;
+    while mem::byte_at(text, index) |at| {
+        if at == byte {
+            return index;
+        }
+        index = index + 1;
+    }
+    return index;
+}
+
+/// The value of a decimal text, or -1 for one that is not.
+fn slot_mbt_decimal(text: []u8) -> i64 {
+    if mem::len(text) == 0 {
+        return -1;
+    }
+    var value = 0;
+    var index = 0;
+    while mem::byte_at(text, index) |byte| {
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            return -1;
+        }
+        value = value * 10 + cast<i64>(byte - cast<u8>(48));
+        index = index + 1;
+    }
+    return value;
+}
+
+/// Writes a case as Kizu into out: the types, their declared methods, the
+/// free function that takes `&var i64`, and main. Returns false for a case
+/// that is not well formed (an unknown statement, an unbalanced end).
+fn slot_mbt_render(allocator: Allocator, out: &var string::String, c: &SlotMbtCase) -> !bool {
+    try out.append_bytes(allocator,
+        \\struct A {
+        \\    n: i64,
+        \\}
+        \\
+        \\struct B {
+        \\    n: i64,
+        \\}
+        \\
+        \\struct C {
+        \\    n: i64,
+        \\}
+        \\
+        \\
+    );
+    var index = 0;
+    while c.decls.at(index) |decl| {
+        index = index + 1;
+        let bytes = decl.as_bytes();
+        if !try slot_mbt_render_decl(allocator, out, bytes) {
+            return false;
+        }
+    }
+    try out.append_bytes(allocator,
+        \\fn bump(total: &var i64) -> void {
+        \\    total.* = total.* + 1;
+        \\}
+        \\
+        \\fn main() -> void {
+        \\
+    );
+    index = 0;
+    while c.types.at(index) |type_name| {
+        try out.append_bytes(allocator, "    var x");
+        try fmt::append_i64(allocator, out, index);
+        try out.append_bytes(allocator, " = ");
+        try out.append_string(allocator, type_name);
+        try out.append_bytes(allocator, " { n: ");
+        try fmt::append_i64(allocator, out, slot_mbt_struct_base() + index);
+        try slot_mbt_line(allocator, out, " };");
+        index = index + 1;
+    }
+    var k = 0;
+    while k < 3 {
+        try out.append_bytes(allocator, "    var n");
+        try fmt::append_i64(allocator, out, k);
+        try out.append_bytes(allocator, " = ");
+        try fmt::append_i64(allocator, out, slot_mbt_int_base() + k);
+        try slot_mbt_line(allocator, out, ";");
+        k = k + 1;
+    }
+    var depth = 1;
+    index = 0;
+    while c.prog.at(index) |stmt| {
+        index = index + 1;
+        let bytes = stmt.as_bytes();
+        depth = try slot_mbt_render_stmt(allocator, out, depth, bytes);
+        if depth < 1 {
+            return false;
+        }
+    }
+    index = 0;
+    while index < c.types.len() {
+        try out.append_bytes(allocator, "    print(x");
+        try fmt::append_i64(allocator, out, index);
+        try slot_mbt_line(allocator, out, ".n);");
+        index = index + 1;
+    }
+    k = 0;
+    while k < 3 {
+        try out.append_bytes(allocator, "    print(n");
+        try fmt::append_i64(allocator, out, k);
+        try slot_mbt_line(allocator, out, ");");
+        k = k + 1;
+    }
+    try slot_mbt_line(allocator, out, "}");
+    return true;
+}
+
+/// How many space-separated words text has.
+fn slot_mbt_word_count(text: []u8) -> i64 {
+    var count = 1;
+    var index = 0;
+    while mem::byte_at(text, index) |byte| {
+        if byte == cast<u8>(32) {
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+/// Where word n of a space-separated text starts.
+fn slot_mbt_word_start(text: []u8, n: i64) -> i64 {
+    var word = 0;
+    var index = 0;
+    while word < n {
+        index = index + slot_mbt_byte_index(text[index..mem::len(text)], cast<u8>(32)) + 1;
+        word = word + 1;
+    }
+    return index;
+}
+
+/// Where word n of a space-separated text ends.
+fn slot_mbt_word_end(text: []u8, n: i64) -> i64 {
+    let start = slot_mbt_word_start(text, n);
+    return start + slot_mbt_byte_index(text[start..mem::len(text)], cast<u8>(32));
+}
+
+/// Writes one declared method: its receiver and argument shape, and a body
+/// that uses each the way its shape allows.
+fn slot_mbt_render_decl(allocator: Allocator, out: &var string::String, decl: []u8) -> !bool {
+    if slot_mbt_word_count(decl) != 3 {
+        return false;
+    }
+    let target = decl[0..slot_mbt_word_end(decl, 0)];
+    let recv = decl[slot_mbt_word_start(decl, 1)..slot_mbt_word_end(decl, 1)];
+    let arg = decl[slot_mbt_word_start(decl, 2)..slot_mbt_word_end(decl, 2)];
+    let dot = slot_mbt_byte_index(target, cast<u8>(46));
+    if dot >= mem::len(target) {
+        return false;
+    }
+    let lent_recv = mem::equal_bytes(recv, "RLent");
+    let lent_arg = mem::equal_bytes(arg, "ALent");
+    try out.append_bytes(allocator, "fn (self: ");
+    if mem::equal_bytes(recv, "RShared") {
+        try out.append_bytes(allocator, "&");
+    } else if lent_recv {
+        try out.append_bytes(allocator, "&var ");
+    } else if !mem::equal_bytes(recv, "RValue") {
+        return false;
+    }
+    try out.append_bytes(allocator, target[0..dot]);
+    try out.append_bytes(allocator, ") ");
+    try out.append_bytes(allocator, target[dot + 1..mem::len(target)]);
+    try out.append_bytes(allocator, "(total: ");
+    if lent_arg {
+        try out.append_bytes(allocator, "&var i64");
+    } else if mem::equal_bytes(arg, "AVal") {
+        try out.append_bytes(allocator, "i64");
+    } else {
+        return false;
+    }
+    try slot_mbt_line(allocator, out, ") -> void {");
+    if lent_recv and lent_arg {
+        try slot_mbt_line(allocator, out, "    self.n = self.n + 1;");
+        try slot_mbt_line(allocator, out, "    total.* = total.* + self.n;");
+    } else if lent_recv {
+        try slot_mbt_line(allocator, out, "    self.n = self.n + total;");
+    } else if lent_arg {
+        try slot_mbt_line(allocator, out, "    total.* = total.* + self.n;");
+    } else {
+        try slot_mbt_line(allocator, out, "    print(self.n + total);");
+    }
+    try slot_mbt_line(allocator, out, "}");
+    try slot_mbt_line(allocator, out, "");
+    return true;
+}
+
+/// Appends text and a newline.
+fn slot_mbt_line(allocator: Allocator, out: &var string::String, text: []u8) -> !void {
+    try out.append_bytes(allocator, text);
+    return out.append_byte(allocator, cast<u8>(10));
+}
+
+fn slot_mbt_indent(allocator: Allocator, out: &var string::String, depth: i64) -> !void {
+    var level = 0;
+    while level < depth {
+        try out.append_bytes(allocator, "    ");
+        level = level + 1;
+    }
+    return;
+}
+
+/// Writes one statement of main at depth, which a block opens and its end
+/// closes. Returns the depth after it, or 0 for a statement that is not well
+/// formed.
+fn slot_mbt_render_stmt(allocator: Allocator, out: &var string::String, depth: i64, stmt: []u8) -> !i64 {
+    let words = slot_mbt_word_count(stmt);
+    let head = stmt[0..slot_mbt_word_end(stmt, 0)];
+    if mem::equal_bytes(head, "call") or mem::equal_bytes(head, "defer") {
+        if words != 4 {
+            return 0;
+        }
+        try slot_mbt_indent(allocator, out, depth);
+        if mem::equal_bytes(head, "defer") {
+            try out.append_bytes(allocator, "defer ");
+        }
+        try out.append_bytes(allocator, "x");
+        try out.append_bytes(allocator, stmt[slot_mbt_word_start(stmt, 1)..slot_mbt_word_end(stmt, 1)]);
+        try out.append_bytes(allocator, ".");
+        try out.append_bytes(allocator, stmt[slot_mbt_word_start(stmt, 2)..slot_mbt_word_end(stmt, 2)]);
+        try out.append_bytes(allocator, "(n");
+        try out.append_bytes(allocator, stmt[slot_mbt_word_start(stmt, 3)..slot_mbt_word_end(stmt, 3)]);
+        try slot_mbt_line(allocator, out, ");");
+        return depth;
+    }
+    if mem::equal_bytes(head, "bump") or mem::equal_bytes(head, "bump_explicit") {
+        if words != 2 {
+            return 0;
+        }
+        try slot_mbt_indent(allocator, out, depth);
+        try out.append_bytes(allocator, "bump(");
+        if mem::equal_bytes(head, "bump_explicit") {
+            try out.append_bytes(allocator, "&var ");
+        }
+        try out.append_bytes(allocator, "n");
+        try out.append_bytes(allocator, stmt[slot_mbt_word_start(stmt, 1)..slot_mbt_word_end(stmt, 1)]);
+        try slot_mbt_line(allocator, out, ");");
+        return depth;
+    }
+    if mem::equal_bytes(head, "if") {
+        try slot_mbt_indent(allocator, out, depth);
+        try slot_mbt_line(allocator, out, "if n0 > 0 {");
+        return depth + 1;
+    }
+    if mem::equal_bytes(head, "loop") {
+        if words != 2 {
+            return 0;
+        }
+        try slot_mbt_indent(allocator, out, depth);
+        try out.append_bytes(allocator, "for 0..2 |i");
+        try out.append_bytes(allocator, stmt[slot_mbt_word_start(stmt, 1)..slot_mbt_word_end(stmt, 1)]);
+        try slot_mbt_line(allocator, out, "| {");
+        return depth + 1;
+    }
+    if mem::equal_bytes(head, "end") {
+        if depth <= 1 {
+            return 0;
+        }
+        try slot_mbt_indent(allocator, out, depth - 1);
+        try slot_mbt_line(allocator, out, "}");
+        return depth - 1;
+    }
+    return 0;
+}
+
+/// Type- and ownership-checks and lowers one program the way `kizu ir`
+/// does, and appends main as the IR dump writes it to out; or, when a stage
+/// rejects the program, appends its message to problem.
+fn slot_mbt_lower(
+    io: Io,
+    allocator: Allocator,
+    std_errors: &project::StdErrorCodes,
+    source: []u8,
+    out: &var string::String,
+    problem: &var string::String
+) -> !void {
+    var tree = ast::new(allocator);
+    defer tree.deinit(allocator);
+    var loader = try project::new_loader(io, allocator, "lib/kizu");
+    defer loader.deinit(allocator);
+    let loaded = try loader.load_source(&var tree, "mbt.kizu", source);
+    match loaded {
+        Error(failed) => {
+            defer failed.deinit(allocator);
+            let text = try failed.error(allocator, &loader.sources);
+            defer text.deinit(allocator);
+            return problem.append_string(allocator, &text);
+        },
+        Program(program) => {
+            defer program.deinit(allocator);
+            if try types::check(allocator, &var tree, &program) |failed| {
+                defer failed.deinit(allocator);
+                let text = try failed.error(allocator, &loader.sources);
+                defer text.deinit(allocator);
+                return problem.append_string(allocator, &text);
+            }
+            var checker = try ownership::new_checker(allocator, &tree, &program);
+            defer checker.deinit(allocator);
+            if try checker.check_program(&var tree, &program) |failed| {
+                defer failed.deinit(allocator);
+                let text = try failed.error(allocator, &loader.sources);
+                defer text.deinit(allocator);
+                return problem.append_string(allocator, &text);
+            }
+            var lowerer = try ir::new_lowerer(allocator, &tree, &program, &checker);
+            defer lowerer.deinit(allocator);
+            if try lowerer.lower(&var tree, &program, std_errors, &loader.sources) |failed| {
+                defer failed.deinit(allocator);
+                let text = try failed.error(allocator, &loader.sources);
+                defer text.deinit(allocator);
+                return problem.append_string(allocator, &text);
+            }
+            if lowerer.module.function_named("main") |main_function| {
+                return ir::append_function(allocator, out, &lowerer.module, main_function);
+            }
+            return problem.append_bytes(allocator, "no main in the lowered module");
+        },
+    }
+}
+
+/// The value id at the start of text (`%12`), as its length, or 0.
+fn slot_mbt_value_len(text: []u8) -> i64 {
+    if mem::byte_at(text, 0) |first| {
+        if first != cast<u8>(37) {
+            return 0;
+        }
+    } else {
+        return 0;
+    }
+    var index = 1;
+    while mem::byte_at(text, index) |byte| {
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            break;
+        }
+        index = index + 1;
+    }
+    if index == 1 {
+        return 0;
+    }
+    return index;
+}
+
+/// The name of local code (0..2 are x0..x2, 3..5 are n0..n2).
+fn slot_mbt_local_name(allocator: Allocator, code: i64) -> !string::String {
+    var name = string::new(allocator);
+    errdefer name.deinit(allocator);
+    if code < 3 {
+        try name.append_bytes(allocator, "x");
+        try fmt::append_i64(allocator, &var name, code);
+    } else {
+        try name.append_bytes(allocator, "n");
+        try fmt::append_i64(allocator, &var name, code - 3);
+    }
+    return move name;
+}
+
+/// Reads which locals of main a lowered dump gives storage into slotted, once
+/// each: the value each local is declared with is a constant, or a
+/// struct built from one, that names it, and a `local.slot` of that value is
+/// its storage. Appends to problem a `local.slot` of a value that names no
+/// local.
+fn slot_mbt_slotted(
+    allocator: Allocator,
+    dump: []u8,
+    slotted: &var array::Array<string::String>,
+    problem: &var string::String
+) -> !void {
+    // The local each value names, by the value's id.
+    var names = map::new<[]u8, i64>(allocator);
+    defer names.deinit(allocator);
+    var start = 0;
+    var index = 0;
+    while index <= mem::len(dump) {
+        var at_end = true;
+        if mem::byte_at(dump, index) |byte| {
+            at_end = byte == cast<u8>(10);
+        }
+        if !at_end {
+            index = index + 1;
+            continue;
+        }
+        var line = dump[start..index];
+        start = index + 1;
+        index = index + 1;
+        var spaces = 0;
+        while mem::byte_at(line, spaces) |byte| {
+            if byte != cast<u8>(32) {
+                break;
+            }
+            spaces = spaces + 1;
+        }
+        if spaces == 0 {
+            continue;
+        }
+        line = line[spaces..mem::len(line)];
+        let id_len = slot_mbt_value_len(line);
+        if id_len == 0 {
+            continue;
+        }
+        let id = line[0..id_len];
+        let rest = line[id_len..mem::len(line)];
+        // `%1: i64 = const 100`
+        if mem::len(rest) > 14 and mem::equal_bytes(rest[0..14], ": i64 = const ") {
+            let n = slot_mbt_decimal(rest[14..mem::len(rest)]);
+            if n >= slot_mbt_struct_base() and n < slot_mbt_struct_base() + 3 {
+                try names.insert(allocator, id, n - slot_mbt_struct_base());
+            } else if n >= slot_mbt_int_base() and n < slot_mbt_int_base() + 3 {
+                try names.insert(allocator, id, n - slot_mbt_int_base() + 3);
+            }
+            continue;
+        }
+        // `%2: A = struct.new {n: %1: i64}`
+        if mem::len(rest) > 21 and mem::equal_bytes(rest[0..2], ": ") and
+            mem::equal_bytes(rest[3..21], " = struct.new {n: ") and
+            slot_mbt_byte_index("ABC", rest[2]) < 3 {
+            let field = rest[21..mem::len(rest)];
+            let field_len = slot_mbt_value_len(field);
+            if field_len > 0 and mem::equal_bytes(field[field_len..mem::len(field)], ": i64}") {
+                if names.get(field[0..field_len]) |code| {
+                    if code < 3 {
+                        try names.insert(allocator, id, code);
+                    }
+                }
+            }
+            continue;
+        }
+        // `%7: &var C = local.slot %6: C`
+        if mem::len(rest) > 7 and mem::equal_bytes(rest[0..7], ": &var ") {
+            let after = rest[7..mem::len(rest)];
+            let type_end = slot_mbt_byte_index(after, cast<u8>(32));
+            let tail = after[type_end..mem::len(after)];
+            if mem::len(tail) > 15 and mem::equal_bytes(tail[0..15], " = local.slot %") {
+                let slot = tail[14..mem::len(tail)];
+                let slot_len = slot_mbt_value_len(slot);
+                if slot_len > 0 {
+                    if names.get(slot[0..slot_len]) |code| {
+                        var name = try slot_mbt_local_name(allocator, code);
+                        if slot_mbt_holds_string(slotted, &name) {
+                            name.deinit(allocator);
+                        } else {
+                            try slotted.append(allocator, move name);
+                        }
+                    } else {
+                        try problem.append_bytes(allocator, "a local.slot of ");
+                        try problem.append_bytes(allocator, slot[0..slot_len]);
+                        try problem.append_bytes(allocator, ", which names no local");
+                    }
+                }
+            }
+        }
+    }
+    return;
+}
+
+/// Lowers one case and reports on stderr how the slots of main differ from
+/// the model's. Returns whether they differ.
+fn slot_mbt_diverges(
+    io: Io,
+    allocator: Allocator,
+    std_errors: &project::StdErrorCodes,
+    c: &SlotMbtCase
+) -> !bool {
+    var source = string::new(allocator);
+    defer source.deinit(allocator);
+    var problem = string::new(allocator);
+    defer problem.deinit(allocator);
+    var dump = string::new(allocator);
+    defer dump.deinit(allocator);
+    var got = string::new(allocator);
+    defer got.deinit(allocator);
+    if !try slot_mbt_render(allocator, &var source, c) {
+        try problem.append_bytes(allocator, "the case is not well formed");
+    } else {
+        let source_bytes = source.as_bytes();
+        var rejected = string::new(allocator);
+        defer rejected.deinit(allocator);
+        try slot_mbt_lower(io, allocator, std_errors, source_bytes, &var dump, &var rejected);
+        if rejected.len() > 0 {
+            try problem.append_bytes(allocator, "the front end or the lowerer rejected the program: ");
+            try problem.append_string(allocator, &rejected);
+        } else {
+            var slotted = array::new<string::String>(allocator);
+            defer slotted.deinit(allocator);
+            let dump_bytes = dump.as_bytes();
+            try slot_mbt_slotted(allocator, dump_bytes, &var slotted, &var problem);
+            try sort::strings(&var slotted);
+            try slot_mbt_join(allocator, &var got, &slotted);
+            var want_list = array::new<string::String>(allocator);
+            defer want_list.deinit(allocator);
+            try slot_mbt_append_all(allocator, &var want_list, &c.expect);
+            try sort::strings(&var want_list);
+            var want = string::new(allocator);
+            defer want.deinit(allocator);
+            try slot_mbt_join(allocator, &var want, &want_list);
+            let got_bytes = got.as_bytes();
+            let want_bytes = want.as_bytes();
+            if problem.len() == 0 and !mem::equal_bytes(got_bytes, want_bytes) {
+                try problem.append_bytes(allocator, "the lowerer gave storage to [");
+                try problem.append_string(allocator, &got);
+                try problem.append_bytes(allocator, "]");
+            }
+        }
+    }
+    if problem.len() == 0 {
+        return false;
+    }
+    let bucket = c.bucket.as_bytes();
+    try io::write_stderr(io, bucket);
+    try io::write_stderr(io, ": ");
+    let what = problem.as_bytes();
+    try io::write_stderr_line(io, what);
+    try slot_mbt_write_list(io, "model gives storage to [", &c.expect);
+    try slot_mbt_write_list(io, "decls [", &c.decls);
+    try slot_mbt_write_list(io, "types [", &c.types);
+    try slot_mbt_write_list(io, "program [", &c.prog);
+    let source_bytes = source.as_bytes();
+    try io::write_stderr(io, source_bytes);
+    return true;
+}
+
+fn slot_mbt_holds(values: &array::Array<string::String>, wanted: []u8) -> bool {
+    var index = 0;
+    while values.at(index) |value| {
+        index = index + 1;
+        let bytes = value.as_bytes();
+        if mem::equal_bytes(bytes, wanted) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn slot_mbt_holds_string(values: &array::Array<string::String>, wanted: &string::String) -> bool {
+    let bytes = wanted.as_bytes();
+    return slot_mbt_holds(values, bytes);
+}
+
+fn slot_mbt_join(allocator: Allocator, out: &var string::String, values: &array::Array<string::String>) -> !void {
+    var index = 0;
+    while values.at(index) |value| {
+        if index > 0 {
+            try out.append_byte(allocator, cast<u8>(44));
+        }
+        index = index + 1;
+        try out.append_string(allocator, value);
+    }
+    return;
+}
+
+fn slot_mbt_write_list(io: Io, label: []u8, values: &array::Array<string::String>) -> !void {
+    try io::write_stderr(io, label);
+    var index = 0;
+    while values.at(index) |value| {
+        if index > 0 {
+            try io::write_stderr(io, " ");
+        }
+        index = index + 1;
+        let bytes = value.as_bytes();
+        try io::write_stderr(io, bytes);
+    }
+    return io::write_stderr_line(io, "]");
+}
+
+/// The std error codes the lowerer needs, or null when they cannot be read.
+fn slot_mbt_std_errors(io: Io, allocator: Allocator, loader: &var project::Loader) -> !?project::StdErrorCodes {
+    let codes = try loader.std_error_codes();
+    match codes {
+        Error(failed) => {
+            failed.deinit(allocator);
+            try io::write_stderr_line(io, "std error codes could not be read");
+            return null;
+        },
+        Codes(std_errors) => return move std_errors,
+    }
+}
+
+test "slot model harness agrees on the known shapes" {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    var std_loader = try project::new_loader(io, allocator, "lib/kizu");
+    defer std_loader.deinit(allocator);
+    if try slot_mbt_std_errors(io, allocator, &var std_loader) |std_errors| {
+        defer std_errors.deinit(allocator);
+        let shapes = slot_mbt_known_shapes();
+        var cases = 0;
+        var failures = 0;
+        var start = 0;
+        var index = 0;
+        while index <= mem::len(shapes) {
+            var at_end = true;
+            if mem::byte_at(shapes, index) |byte| {
+                at_end = byte == cast<u8>(10);
+            }
+            if at_end and index > start {
+                let c = try slot_mbt_known_case(allocator, shapes[start..index]);
+                defer c.deinit(allocator);
+                cases = cases + 1;
+                if try slot_mbt_diverges(io, allocator, &std_errors, &c) {
+                    failures = failures + 1;
+                }
+            }
+            if at_end {
+                start = index + 1;
+            }
+            index = index + 1;
+        }
+        testing::expect_equal<i64>(4, cases);
+        testing::expect_equal<i64>(0, failures);
+    } else {
+        testing::expect(false);
+    }
+}
+
+test "lowerer gives storage where the sampled slot model programs say" {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    // KIZU_MBT_FIXTURE replays another fixture, such as a wider sample than
+    // the checked-in one.
+    var path = "compiler/tests/mbt/ir_slots.json";
+    if process::env("KIZU_MBT_FIXTURE") |other| {
+        path = other;
+    }
+    let data = try fs::read_file(io, allocator, path, mem::Limit::Unlimited);
+    defer data.deinit(allocator);
+    let bytes = data.as_bytes();
+    var fixture = try json::decode<SlotMbtFixture>(allocator, bytes);
+    defer fixture.deinit(allocator);
+    var std_loader = try project::new_loader(io, allocator, "lib/kizu");
+    defer std_loader.deinit(allocator);
+    if try slot_mbt_std_errors(io, allocator, &var std_loader) |std_errors| {
+        defer std_errors.deinit(allocator);
+        var failures = 0;
+        var index = 0;
+        while fixture.cases.at(index) |entry| {
+            index = index + 1;
+            let c = try slot_mbt_from_entry(allocator, entry);
+            defer c.deinit(allocator);
+            if try slot_mbt_diverges(io, allocator, &std_errors, &c) {
+                failures = failures + 1;
+            }
+        }
+        testing::expect(fixture.cases.len() > 0);
+        testing::expect_equal<i64>(0, failures);
+    } else {
+        testing::expect(false);
+    }
+}
