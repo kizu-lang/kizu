@@ -1,29 +1,36 @@
 import compiler::internal::ir;
 import std::array;
 
-// Reduction loops over an array, run with NEON. A loop qualifies when its
-// header holds only phis, constants and the test `k < n`, its body is
-// acyclic and reads exactly one element, `a.get_or_panic(k)`, of an integer
-// array that does not change in the loop, and everything else the body
-// computes is lane-wise integer arithmetic on the element, on k and on
-// values from before the loop. Every other header phi is an accumulator of
-// one integer type: `acc op x` with op one of `+ - ^ & |`; the join of a
-// branch on a comparison of x and acc that picks one of them (a minimum or
-// a maximum); or the join of a branch on a comparison of lane values that
-// picks `acc op x` (op one of `+ - ^ |`) on one side and acc on the other.
-// Nothing in the body can fail but the bounds check, so where the loop
-// enters with 0 <= k < n <= len the elements up to n run several registers
-// at a time, each accumulator kept per lane, and the lanes are folded into
-// the phis before the scalar loop runs the rest. Any other loop, or an
-// entry the test rejects, runs the scalar loop alone. Wrapping addition and
-// the bitwise ops are associative and commutative, and so are min and max,
-// so the order the lanes fold in does not change the result.
+// Reduction loops over arrays and slices, run with NEON. A loop qualifies
+// when its header holds only phis, constants and the test `k < n`, its body
+// is acyclic and reads elements only as `a.get_or_panic(k)` or `s[k]`, of
+// integer arrays and slices that do not change in the loop, and everything
+// else the body computes is lane-wise integer arithmetic on the elements,
+// on k and on values from before the loop. Every other header phi is an
+// accumulator of one integer type: `acc op x` with op one of `+ - ^ & |`;
+// the join of a branch on a comparison of x and acc that picks one of them
+// (a minimum or a maximum); or the join of a branch on a comparison of lane
+// values that picks `acc op x` (op one of `+ - ^ |`) on one side and acc on
+// the other. Nothing in the body can fail but the bounds checks, so where
+// the loop enters with 0 <= k < n <= every length the elements up to n run
+// several registers at a time, each accumulator kept per lane, and the
+// lanes are folded into the phis before the scalar loop runs the rest. Any
+// other loop, or an entry the test rejects, runs the scalar loop alone.
+// Wrapping addition and the bitwise ops are associative and commutative,
+// and so are min and max, so the order the lanes fold in does not change
+// the result.
 //
 // The lanes are as wide as the accumulators. A narrower element is loaded
 // and extended (by its own signedness) to the lane width; on such a value
 // only the operations whose result the extension does not change run --
 // comparisons, `^ & |` and widening casts. A comparison makes a mask of all
 // ones; a conditional update adds x masked.
+//
+// The NEON loop reads one element. A loop that reads more, or multiplies
+// (NEON has no 64-bit lane multiply), runs in general registers instead
+// when its values are all words and its accumulators all unconditional:
+// behind the same test, without the bounds checks, several elements a turn,
+// each accumulator kept once per element of the turn.
 //
 // The vector registers are not allocated: the loop names v0..v7 and
 // v16..v31 directly, holds none of them across a call, and leaves v8..v15,
@@ -92,6 +99,20 @@ struct Plan {
     inc: ir::Name,
     unroll: i64,
     uses_index: bool,
+    // The body multiplies; there is no 64-bit lane multiply.
+    multiplies: bool,
+    // The loop runs in general registers: no lanes, the bounds tests gone.
+    scalar: bool,
+}
+
+/// Is one element read of the body: name = source[k], source an array or a
+/// slice.
+struct Load {
+    name: ir::Name,
+    source: ir::Value,
+    slice: bool,
+    elem: i64,
+    signed: bool,
 }
 
 /// Is the planner's working state, keyed by value name.
@@ -105,6 +126,7 @@ struct Tables {
     elems: array::Array<ir::Name>,
     alias_from: array::Array<ir::Name>,
     alias_to: array::Array<ir::Name>,
+    loads: array::Array<Load>,
 }
 
 fn (self: Tables) deinit(allocator: Allocator) -> void {
@@ -117,6 +139,7 @@ fn (self: Tables) deinit(allocator: Allocator) -> void {
     self.elems.deinit(allocator);
     self.alias_from.deinit(allocator);
     self.alias_to.deinit(allocator);
+    self.loads.deinit(allocator);
     return;
 }
 
@@ -230,7 +253,8 @@ fn (self: &var Selector) vectorize_entry(module: &ir::Module, from: ir::Name, ta
         invs: array::new<ir::Name>(self.allocator),
         elems: array::new<ir::Name>(self.allocator),
         alias_from: array::new<ir::Name>(self.allocator),
-        alias_to: array::new<ir::Name>(self.allocator)
+        alias_to: array::new<ir::Name>(self.allocator),
+        loads: array::new<Load>(self.allocator)
     };
     defer tables.deinit(self.allocator);
     var plan = Plan {
@@ -247,12 +271,18 @@ fn (self: &var Selector) vectorize_entry(module: &ir::Module, from: ir::Name, ta
         acc_type: ir::empty_name(),
         inc: ir::empty_name(),
         unroll: 4,
-        uses_index: false
+        uses_index: false,
+        multiplies: false,
+        scalar: false
     };
     if !try self.plan_loop(module, from, &var plan, &var tables) {
         return false;
     }
-    try self.emit_vector_loop(module, &plan, &var tables);
+    if plan.scalar {
+        try self.emit_scalar_loop(module, &plan, &var tables);
+    } else {
+        try self.emit_vector_loop(module, &plan, &var tables);
+    }
     return true;
 }
 
@@ -375,9 +405,7 @@ fn (self: &var Selector) plan_loop(module: &ir::Module, from: ir::Name, plan: &v
     if !try self.collect_body(module, plan, entry, exit, tables) {
         return false;
     }
-    // The body's values, in order.
-    var body_phis = 0;
-    var compares = 0;
+    // The uses inside the body, then the body's values, in order.
     var body_index = 0;
     while tables.body.get(body_index) |mir| {
         body_index = body_index + 1;
@@ -397,6 +425,20 @@ fn (self: &var Selector) plan_loop(module: &ir::Module, from: ir::Name, plan: &v
                 incoming_index = incoming_index + 1;
                 try note_use(allocator, tables, incoming.value.name);
             }
+        }
+        try note_use(allocator, tables, block_node.terminator.cond.name);
+    }
+    var body_phis = 0;
+    var compares = 0;
+    body_index = 0;
+    while tables.body.get(body_index) |mir| {
+        body_index = body_index + 1;
+        let block = self.ir_blocks.get(mir) orelse return false;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let node = module.instrs.at(instr.node);
             if node.fields.len() > 0 or node.cleanups.len() > 0 {
                 return false;
             }
@@ -407,7 +449,12 @@ fn (self: &var Selector) plan_loop(module: &ir::Module, from: ir::Name, plan: &v
                     }
                 },
                 ArrayGetOrPanic => {
-                    if !try self.plan_load(module, node, plan, tables) {
+                    if !try self.plan_load(module, node, false, plan, tables) {
+                        return false;
+                    }
+                },
+                SliceIndex => {
+                    if !try self.plan_load(module, node, true, plan, tables) {
                         return false;
                     }
                 },
@@ -418,7 +465,10 @@ fn (self: &var Selector) plan_loop(module: &ir::Module, from: ir::Name, plan: &v
                     }
                 },
                 Cast => {
-                    if !try self.plan_cast(module, node, plan, tables) {
+                    // A cast nothing reads (left by a bounds test the
+                    // optimizer dropped) is not computed.
+                    let dead = inner_uses(tables, node.result.name) == 0 and !ir::same_name(node.result.name, plan.inc);
+                    if !dead and !try self.plan_cast(module, node, plan, tables) {
                         return false;
                     }
                 },
@@ -428,8 +478,6 @@ fn (self: &var Selector) plan_loop(module: &ir::Module, from: ir::Name, plan: &v
                 _ => return false,
             }
         }
-        let term = block_node.terminator;
-        try note_use(allocator, tables, term.cond.name);
     }
     // The branches: each a minimum, a maximum or a conditional update.
     var joined = 0;
@@ -478,7 +526,7 @@ fn (self: &var Selector) plan_loop(module: &ir::Module, from: ir::Name, plan: &v
             return false;
         }
     }
-    if tables.accs.len() == 0 or inner_uses(tables, plan.inc) != 1 {
+    if tables.accs.len() == 0 or inner_uses(tables, plan.inc) != 1 or role_of(tables, plan.inc) != Role::Used {
         return false;
     }
     // Uses inside the loop: an accumulator feeds only its update (and its
@@ -506,6 +554,9 @@ fn (self: &var Selector) plan_loop(module: &ir::Module, from: ir::Name, plan: &v
     }
     if plan.uses_index and plan.width != 8 {
         return false;
+    }
+    if plan.multiplies or tables.loads.len() > 1 {
+        return plan_scalar(plan, tables);
     }
     if self.pool_need(plan, tables) > pool_size() {
         plan.unroll = 2;
@@ -653,19 +704,23 @@ fn (self: &var Selector) collect_body(module: &ir::Module, plan: &Plan, entry: i
     return true;
 }
 
-/// Plans the element load: the one `get_or_panic(k)` of an array the loop
-/// does not define, of an integer no wider than the lanes.
-fn (self: &var Selector) plan_load(module: &ir::Module, node: &ir::InstrNode, plan: &var Plan, tables: &var Tables) -> !bool {
-    if !ir::is_empty(plan.load) {
+/// Plans an element load: `get_or_panic(k)` of an array, or `[k]` of a
+/// slice, the loop does not define, of an integer no wider than the lanes.
+/// The first load is plan.load.
+fn (self: &var Selector) plan_load(module: &ir::Module, node: &ir::InstrNode, slice: bool, plan: &var Plan, tables: &var Tables) -> !bool {
+    if tables.loads.len() >= 4 {
         return false;
     }
-    let array_value = node.args.get(0) orelse return false;
+    let source = node.args.get(0) orelse return false;
     let index = node.args.get(1) orelse return false;
-    if role_of(tables, index.name) != Role::Index or role_of(tables, array_value.name) != Role::Outside {
+    if role_of(tables, index.name) != Role::Index or role_of(tables, source.name) != Role::Outside {
         return false;
     }
-    let held = self.val(array_value.name);
-    if held.kind != ValKind::Reg and held.kind != ValKind::Agg {
+    let held = self.val(source.name);
+    if slice and held.kind != ValKind::Pair and held.kind != ValKind::Agg {
+        return false;
+    }
+    if !slice and held.kind != ValKind::Reg and held.kind != ValKind::Agg {
         return false;
     }
     let shape = shape_of(module, node.result.type_name);
@@ -675,15 +730,60 @@ fn (self: &var Selector) plan_load(module: &ir::Module, node: &ir::InstrNode, pl
     if shape.size != 1 and shape.size != 2 and shape.size != 4 and shape.size != 8 {
         return false;
     }
-    if shape.size > plan.width or element_shape(module, array_value).size != shape.size {
+    if shape.size > plan.width or !slice and element_shape(module, source).size != shape.size {
         return false;
     }
-    plan.load = node.result.name;
-    plan.array = array_value;
-    plan.elem = shape.size;
-    plan.elem_signed = shape.signed;
+    if ir::is_empty(plan.load) {
+        plan.load = node.result.name;
+        plan.array = source;
+        plan.elem = shape.size;
+        plan.elem_signed = shape.signed;
+    }
+    try tables.loads.append(self.allocator, Load { name: node.result.name, source: source, slice: slice, elem: shape.size, signed: shape.signed });
     try set_role(self.allocator, tables, node.result.name, Role::Elem);
     return true;
+}
+
+/// Plans the loop for general registers, where it multiplies or reads
+/// more than one element: the 64-bit lanes NEON lacks a multiply for, and
+/// the vector loop reads one element. It qualifies when every value is a
+/// word, every accumulator updates unconditionally by `+ - ^ & |`, and the
+/// copies of the accumulators, the pointers and the uniform values leave
+/// registers for the temporaries: unrolled 4 times, else 2.
+fn plan_scalar(plan: &var Plan, tables: &Tables) -> bool {
+    if plan.width != 8 or plan.uses_index {
+        return false;
+    }
+    var index = 0;
+    while tables.loads.get(index) |load| {
+        index = index + 1;
+        if load.elem != 8 {
+            return false;
+        }
+    }
+    index = 0;
+    while tables.accs.get(index) |acc| {
+        index = index + 1;
+        if is_select(acc.kind) or !ir::is_empty(acc.cond) {
+            return false;
+        }
+    }
+    let held = tables.loads.len() + 1 + tables.invs.len() + 3;
+    plan.unroll = 4;
+    if held + tables.accs.len() * plan.unroll > word_budget() {
+        plan.unroll = 2;
+    }
+    if held + tables.accs.len() * plan.unroll > word_budget() {
+        return false;
+    }
+    plan.scalar = true;
+    return true;
+}
+
+/// Returns how many general registers a loop for general registers may
+/// hold at once, of the 24 the allocator hands out.
+fn word_budget() -> i64 {
+    return 20;
 }
 
 /// Plans a cast: of a constant, a constant of the new type; of a lane value,
@@ -820,8 +920,8 @@ fn (self: &var Selector) plan_binary(module: &ir::Module, node: &ir::InstrNode, 
         return null;
     }
     // The extension of a narrower value survives only the bitwise ops.
-    let wraps = module.names.is(op, "+") or module.names.is(op, "-") or module.names.is(op, "<<") or
-        module.names.is(op, ">>");
+    let wraps = module.names.is(op, "+") or module.names.is(op, "-") or module.names.is(op, "*") or
+        module.names.is(op, "<<") or module.names.is(op, ">>");
     if wraps and shape.size != plan.width {
         return null;
     }
@@ -834,7 +934,9 @@ fn (self: &var Selector) plan_binary(module: &ir::Module, node: &ir::InstrNode, 
     } else {
         let lane_op = module.names.is(op, "+") or module.names.is(op, "-") or module.names.is(op, "^") or
             module.names.is(op, "&") or module.names.is(op, "|");
-        if !lane_op {
+        if module.names.is(op, "*") {
+            plan.multiplies = true;
+        } else if !lane_op {
             return null;
         }
         try self.lane_operand(left.name, lr, plan, tables);
@@ -1172,39 +1274,12 @@ fn (self: &var Selector) emit_vector_loop(module: &ir::Module, plan: &Plan, tabl
         try set_vreg_slot(allocator, tables, name, pool.temps + index);
         index = index + 1;
     }
-    // The guard: 0 <= k, n <= len, k < n and a full step to run.
-    var n = 0 - 1;
-    let n_held = self.val(plan.n.name);
-    if n_held.kind == ValKind::Const {
-        n = try self.imm_reg_nz(n_held.imm);
-    } else {
-        n = n_held.reg;
-    }
-    let header_reg = try self.header_addr(module, plan.array) orelse reg_none();
-    let length = self.func.new_vreg();
-    try self.load(length, header_reg, 8, 8, true);
-    try self.cmp_imm_or_reg(k, 0);
-    var next = try self.new_vector_block();
-    self.func.end(self.current, Term::Flags, Cond::Lt, reg_none(), plan.header, next);
-    try self.start_block(next);
-    try self.op3(MOp::Cmp, reg_none(), n, length);
-    next = try self.new_vector_block();
-    self.func.end(self.current, Term::Flags, Cond::Gt, reg_none(), plan.header, next);
-    try self.start_block(next);
-    try self.op3(MOp::Cmp, reg_none(), n, k);
-    next = try self.new_vector_block();
-    self.func.end(self.current, Term::Flags, Cond::Le, reg_none(), plan.header, next);
-    try self.start_block(next);
-    let rest = self.func.new_vreg();
-    try self.op3(MOp::Sub, rest, n, k);
-    try self.cmp_imm_or_reg(rest, step);
-    next = try self.new_vector_block();
-    self.func.end(self.current, Term::Flags, Cond::Lt, reg_none(), plan.header, next);
-    try self.start_block(next);
+    var sources = array::new<Val>(allocator);
+    defer sources.deinit(allocator);
+    let rest = try self.emit_guard(module, plan, tables, step, &var sources);
     // The set-up: where the elements start and end, the uniform values and
     // the index in their lanes, each accumulator's start value in its lanes.
-    let data = self.func.new_vreg();
-    try self.load(data, header_reg, 0, 8, false);
+    let data = sources.get_or_panic(0).reg;
     let ptr = self.func.new_vreg();
     var at = blank(MOp::AddShift);
     at.rd = ptr;
@@ -1354,6 +1429,234 @@ fn (self: &var Selector) emit_vector_loop(module: &ir::Module, plan: &Plan, tabl
     try self.op3(MOp::Add, k, k, count);
     self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), plan.header, 0 - 1);
     return;
+}
+
+/// Emits the guard the unchecked loop runs behind -- 0 <= k, n <= the
+/// length of every source, k < n and a full step to run -- going to the
+/// header where it fails, and returns n - k. sources gets where each load's
+/// elements start and how many there are.
+fn (self: &var Selector) emit_guard(module: &ir::Module, plan: &Plan, tables: &Tables, step: i64, sources: &var array::Array<Val>) -> !i64 {
+    let k = self.val(plan.k).reg;
+    var n = 0 - 1;
+    let n_held = self.val(plan.n.name);
+    if n_held.kind == ValKind::Const {
+        n = try self.imm_reg_nz(n_held.imm);
+    } else {
+        n = n_held.reg;
+    }
+    var index = 0;
+    while tables.loads.get(index) |load| {
+        index = index + 1;
+        if load.slice {
+            let regs = try self.slice_regs(module, load.source) orelse pair_val(reg_none(), reg_none());
+            try sources.append(self.allocator, regs);
+            continue;
+        }
+        let header = try self.header_addr(module, load.source) orelse reg_none();
+        let data = self.func.new_vreg();
+        let length = self.func.new_vreg();
+        try self.load(data, header, 0, 8, false);
+        try self.load(length, header, 8, 8, true);
+        try sources.append(self.allocator, pair_val(data, length));
+    }
+    try self.cmp_imm_or_reg(k, 0);
+    var next = try self.new_vector_block();
+    self.func.end(self.current, Term::Flags, Cond::Lt, reg_none(), plan.header, next);
+    try self.start_block(next);
+    index = 0;
+    while sources.get(index) |source| {
+        index = index + 1;
+        try self.op3(MOp::Cmp, reg_none(), n, source.reg2);
+        next = try self.new_vector_block();
+        self.func.end(self.current, Term::Flags, Cond::Gt, reg_none(), plan.header, next);
+        try self.start_block(next);
+    }
+    try self.op3(MOp::Cmp, reg_none(), n, k);
+    next = try self.new_vector_block();
+    self.func.end(self.current, Term::Flags, Cond::Le, reg_none(), plan.header, next);
+    try self.start_block(next);
+    let rest = self.func.new_vreg();
+    try self.op3(MOp::Sub, rest, n, k);
+    try self.cmp_imm_or_reg(rest, step);
+    next = try self.new_vector_block();
+    self.func.end(self.current, Term::Flags, Cond::Lt, reg_none(), plan.header, next);
+    try self.start_block(next);
+    return rest;
+}
+
+/// Emits the loop for general registers behind the guard: plan.unroll
+/// elements a turn, each accumulator kept once per element of the turn and
+/// folded into its phi after, k moved past the elements done; the scalar
+/// loop runs the rest. Wrapping `+ - ^ & |` are associative and
+/// commutative, so splitting an accumulator does not change its result.
+fn (self: &var Selector) emit_scalar_loop(module: &ir::Module, plan: &Plan, tables: &var Tables) -> !void {
+    let allocator = self.allocator;
+    let unroll = plan.unroll;
+    let k = self.val(plan.k).reg;
+    var sources = array::new<Val>(allocator);
+    defer sources.deinit(allocator);
+    let rest = try self.emit_guard(module, plan, tables, unroll, &var sources);
+    // The set-up: a pointer per load, where the first stops, the uniform
+    // values, each accumulator once per element of a turn.
+    var ptrs = array::new<i64>(allocator);
+    defer ptrs.deinit(allocator);
+    let count = self.func.new_vreg();
+    try self.op_imm(MOp::AndImm, count, rest, 0 - unroll);
+    var index = 0;
+    while sources.get(index) |source| {
+        index = index + 1;
+        let ptr = self.func.new_vreg();
+        var at = blank(MOp::AddShift);
+        at.rd = ptr;
+        at.rn = source.reg;
+        at.rm = k;
+        at.imm = 3;
+        try self.inst(at);
+        try ptrs.append(allocator, ptr);
+    }
+    let end = self.func.new_vreg();
+    var past = blank(MOp::AddShift);
+    past.rd = end;
+    past.rn = ptrs.get_or_panic(0);
+    past.rm = count;
+    past.imm = 3;
+    try self.inst(past);
+    index = 0;
+    while tables.invs.get(index) |name| {
+        index = index + 1;
+        let held = self.val(name);
+        var reg = held.reg;
+        if held.kind == ValKind::Const {
+            reg = try self.imm_reg_nz(held.imm);
+        }
+        try set_vreg_slot(allocator, tables, name, reg);
+    }
+    var accs = array::new<i64>(allocator);
+    defer accs.deinit(allocator);
+    index = 0;
+    while tables.accs.get(index) |acc| {
+        index = index + 1;
+        for 0..unroll |u| {
+            let reg = self.func.new_vreg();
+            if u == 0 {
+                try self.mov(reg, self.val(acc.phi).reg);
+            } else if acc.kind == AccKind::And {
+                try self.mov_imm(reg, 0 - 1);
+            } else {
+                try self.mov_imm(reg, 0);
+            }
+            try accs.append(allocator, reg);
+        }
+    }
+    let body = try self.new_vector_block();
+    let fold = try self.new_vector_block();
+    self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), body, 0 - 1);
+    // The loop: each element of the turn read, computed and combined.
+    try self.start_block(body);
+    for 0..unroll |u| {
+        index = 0;
+        while tables.loads.get(index) |load| {
+            let reg = self.func.new_vreg();
+            try self.load(reg, ptrs.get_or_panic(index), u * 8, 8, load.signed);
+            try set_vreg_slot(allocator, tables, load.name, reg);
+            index = index + 1;
+        }
+        var body_index = 0;
+        while tables.body.get(body_index) |mir| {
+            body_index = body_index + 1;
+            let block = self.ir_blocks.get_or_panic(mir);
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let node = module.instrs.at(instr.node);
+                if node.op == ir::Op::Binary and role_of(tables, node.result.name) == Role::Elem {
+                    try self.word_binary(module, node, tables);
+                }
+            }
+        }
+        index = 0;
+        while tables.accs.get(index) |acc| {
+            let reg = accs.get_or_panic(index * unroll + u);
+            try self.op3(word_op(acc.kind), reg, reg, vreg_slot(tables, resolve(tables, acc.x)));
+            index = index + 1;
+        }
+    }
+    index = 0;
+    while ptrs.get(index) |ptr| {
+        index = index + 1;
+        try self.op_imm(MOp::AddImm, ptr, ptr, unroll * 8);
+    }
+    try self.op3(MOp::Cmp, reg_none(), ptrs.get_or_panic(0), end);
+    self.func.end(self.current, Term::Flags, Cond::Lo, reg_none(), body, fold);
+    // The fold: the copies into the phis.
+    try self.start_block(fold);
+    index = 0;
+    while tables.accs.get(index) |acc| {
+        var kind = acc.kind;
+        if kind == AccKind::Sub {
+            kind = AccKind::Add;
+        }
+        let first = accs.get_or_panic(index * unroll);
+        var u = 1;
+        while u < unroll {
+            try self.op3(word_op(kind), first, first, accs.get_or_panic(index * unroll + u));
+            u = u + 1;
+        }
+        try self.mov(self.val(acc.phi).reg, first);
+        index = index + 1;
+    }
+    try self.op3(MOp::Add, k, k, count);
+    self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), plan.header, 0 - 1);
+    return;
+}
+
+/// Returns the general-register op an accumulator of `+ - ^ & |` combines
+/// by.
+fn word_op(kind: AccKind) -> MOp {
+    match kind {
+        Sub => return MOp::Sub,
+        Xor => return MOp::Eor,
+        And => return MOp::And,
+        Or => return MOp::Orr,
+        _ => return MOp::Add,
+    }
+}
+
+/// Emits one element op of the body in general registers, the result in a
+/// register of its own.
+fn (self: &var Selector) word_binary(module: &ir::Module, node: &ir::InstrNode, tables: &var Tables) -> !void {
+    let left = node.args.get_or_panic(0);
+    let right = node.args.get_or_panic(1);
+    let dst = self.func.new_vreg();
+    let lhs = vreg_slot(tables, resolve(tables, left.name));
+    let op = node.operand;
+    if module.names.is(op, "<<") or module.names.is(op, ">>") {
+        var shift_op = MOp::LslImm;
+        if module.names.is(op, ">>") {
+            shift_op = MOp::LsrImm;
+            if shape_of(module, left.type_name).signed {
+                shift_op = MOp::AsrImm;
+            }
+        }
+        try self.op_imm(shift_op, dst, lhs, self.val(right.name).imm);
+    } else {
+        let rhs = vreg_slot(tables, resolve(tables, right.name));
+        var word = MOp::Orr;
+        if module.names.is(op, "+") {
+            word = MOp::Add;
+        } else if module.names.is(op, "-") {
+            word = MOp::Sub;
+        } else if module.names.is(op, "*") {
+            word = MOp::Mul;
+        } else if module.names.is(op, "^") {
+            word = MOp::Eor;
+        } else if module.names.is(op, "&") {
+            word = MOp::And;
+        }
+        try self.op3(word, dst, lhs, rhs);
+    }
+    return set_vreg_slot(self.allocator, tables, node.result.name, dst);
 }
 
 fn (self: &var Selector) dup(v: i64, reg: i64, width: i64) -> !void {
