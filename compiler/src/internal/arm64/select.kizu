@@ -1,5 +1,6 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
+import compiler::internal::hostabi;
 import compiler::internal::ir;
 import compiler::internal::typ;
 import std::array;
@@ -166,6 +167,9 @@ pub struct Selector {
     // state, and through the one with.
     pub invokes: bool,
     pub state_invokes: bool,
+    // The state types a task set starts workers with, each once: every one
+    // gets a thunk of its own (select_task_invoke).
+    pub task_invokes: array::Array<ir::Name>,
     // Whether the function being selected is an `export "c"` one, which C
     // calls with narrow arguments not extended past 32 bits.
     exports_c: bool,
@@ -215,6 +219,7 @@ pub fn new_selector(allocator: Allocator, arch: Arch) -> !Selector {
         is_main: false,
         invokes: false,
         state_invokes: false,
+        task_invokes: array::new<ir::Name>(allocator),
         exports_c: false,
         stacks_variadics: true,
         fn_name: ir::empty_name(),
@@ -1351,58 +1356,13 @@ fn append_c_symbol(allocator: Allocator, out: &var string::String, bytes: []u8) 
     return;
 }
 
-/// Reports whether a call goes to the hosted runtime through its out-slot
-/// convention: a builtin whose result is an error union or an optional, or
-/// that takes an aggregate.
-fn uses_hosted_abi(module: &ir::Module, node: &ir::InstrNode) -> bool {
-    if !module.names.starts_with(node.operand, "std::internal::builtin::") {
-        return false;
-    }
-    let result_text = ir::name_text(&module.names, node.result.type_name);
-    let result_bytes = result_text.as_bytes();
-    if mem::starts_with(result_bytes, "?") and !mem::starts_with(result_bytes, "?ptr<") {
-        return true;
-    }
-    if has_bang(result_bytes) {
-        return true;
-    }
-    var index = 0;
-    while node.args.get(index) |arg| {
-        index = index + 1;
-        if module.names.starts_with(arg.type_name, "[]") {
-            return true;
-        }
-        let arg_text = ir::name_text(&module.names, arg.type_name);
-        let arg_bytes = arg_text.as_bytes();
-        if module.structs.contains(arg_bytes) or module.unions.contains(arg_bytes) {
-            return true;
-        }
-    }
-    return false;
-}
-
-fn has_bang(bytes: []u8) -> bool {
-    var depth = 0;
-    var index = 0;
-    while index < mem::len(bytes) {
-        let byte = bytes[index];
-        if byte == cast<u8>(60) or byte == cast<u8>(40) {
-            depth = depth + 1;
-        }
-        if byte == cast<u8>(62) or byte == cast<u8>(41) {
-            depth = depth - 1;
-        }
-        if byte == cast<u8>(33) and depth == 0 {
-            return true;
-        }
-        index = index + 1;
-    }
-    return false;
-}
-
-/// Selects a call into the hosted runtime: x0 is where the result goes,
-/// aggregates follow behind pointers, scalars by value.
-fn (self: &var Selector) select_hosted_call(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+/// Selects a call into the hosted runtime by the C signature hostabi
+/// declares for it: the result written through Out, the other parameters
+/// one word each in the order C takes them -- the argument registers, then
+/// 8-byte stack slots, which is where both AAPCS64 and System V put a word.
+/// A parameter this backend cannot make, or one C would not take as a
+/// whole word past the registers, refuses the call.
+fn (self: &var Selector) select_hosted_call(module: &ir::Module, node: &ir::InstrNode, signature: &hostabi::Signature) -> !?diagnostic::Diagnostic {
     let shape = shape_of(module, node.result.type_name);
     if shape.class == Class::Unsupported {
         return try self.fail(module, "result type", node.result.type_name);
@@ -1415,27 +1375,61 @@ fn (self: &var Selector) select_hosted_call(module: &ir::Module, node: &ir::Inst
     let result = try self.frame_addr(slot, 0);
     var words = array::new<i64>(self.allocator);
     defer words.deinit(self.allocator);
-    try words.append(self.allocator, result);
     var index = 0;
-    while node.args.get(index) |arg| {
+    while signature.params.get(index) |param| {
         index = index + 1;
-        let arg_shape = shape_of(module, arg.type_name);
-        if arg_shape.class == Class::Aggregate {
-            let address = try self.addr(module, arg) orelse return try self.fail_op(module, node);
-            try words.append(self.allocator, address);
+        if param.source == hostabi::Source::Out {
+            try words.append(self.allocator, result);
             continue;
         }
-        if arg_shape.class != Class::Scalar {
-            return try self.fail_op(module, node);
+        let arg = node.args.get(param.arg) orelse return try self.fail_op(module, node);
+        let arg_shape = shape_of(module, arg.type_name);
+        match param.source {
+            Address => {
+                if arg_shape.class != Class::Aggregate {
+                    return try self.fail_op(module, node);
+                }
+                let address = try self.addr(module, arg) orelse return try self.fail_op(module, node);
+                try words.append(self.allocator, address);
+            },
+            TaskInvoke => {
+                if arg_shape.class != Class::Aggregate or is_slice(module, arg.type_name) {
+                    return try self.fail_op(module, node);
+                }
+                let thunk = self.func.new_vreg();
+                var thunk_addr = blank(MOp::SymAddr);
+                thunk_addr.rd = thunk;
+                thunk_addr.sym = try self.task_invoke_symbol(module, arg.type_name);
+                try self.inst(thunk_addr);
+                try words.append(self.allocator, thunk);
+                try self.note_task_invoke(arg.type_name);
+            },
+            SizeOf => {
+                if arg_shape.class == Class::Unsupported {
+                    return try self.fail_op(module, node);
+                }
+                try words.append(self.allocator, try self.imm_reg(arg_shape.size));
+            },
+            Value => {
+                // A float goes in a float register, which this convention
+                // does not place.
+                if arg_shape.class != Class::Scalar {
+                    return try self.fail_op(module, node);
+                }
+                if param.c_type != hostabi::CType::Operand and arg_shape.size != 8 {
+                    return try self.fail_op(module, node);
+                }
+                // C packs a stack argument narrower than a word, so past
+                // the argument registers only whole words go where
+                // place_words puts them.
+                if words.len() >= arg_regs(self.arch) and arg_shape.size != 8 {
+                    return try self.fail_op(module, node);
+                }
+                let reg = try self.reg(module, arg) orelse return try self.fail_op(module, node);
+                try words.append(self.allocator, reg);
+            },
+            Out => {},
         }
-        // C packs a stack argument narrower than a word, so past the
-        // argument registers only whole words go where place_words puts
-        // them.
-        if words.len() >= arg_regs(self.arch) and arg_shape.size != 8 {
-            return try self.fail_op(module, node);
-        }
-        let reg = try self.reg(module, arg) orelse return try self.fail_op(module, node);
-        try words.append(self.allocator, reg);
     }
     let count = try self.place_words(&words);
     var symbol = string::new(self.allocator);
@@ -1453,6 +1447,33 @@ fn (self: &var Selector) select_hosted_call(module: &ir::Module, node: &ir::Inst
     }
     try self.set_val(node.result.name, held);
     return null;
+}
+
+/// Selects a call to a builtin by the C signature hostabi declares for it:
+/// through Out by select_hosted_call, and otherwise as the C call it is,
+/// by the target's C convention, when C takes exactly the call's operands.
+fn (self: &var Selector) select_builtin_call(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let signature = try hostabi::declare(self.allocator, module, node.operand, node);
+    defer signature.deinit(self.allocator);
+    if signature.out {
+        return self.select_hosted_call(module, node, &signature);
+    }
+    let text = ir::name_text(&module.names, node.operand);
+    let bytes = text.as_bytes();
+    if module.function_named(bytes) |callee| {
+        return self.select_internal_call(module, node, callee);
+    }
+    var index = 0;
+    while signature.params.get(index) |param| {
+        if param.source != hostabi::Source::Value or param.arg != index {
+            return try self.fail_op(module, node);
+        }
+        index = index + 1;
+    }
+    if index != node.args.len() {
+        return try self.fail_op(module, node);
+    }
+    return self.select_c_call(module, node, node.operand);
 }
 
 fn (self: &var Selector) select_call(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
@@ -1473,8 +1494,8 @@ fn (self: &var Selector) select_call(module: &ir::Module, node: &ir::InstrNode) 
     if module.names.is(node.operand, "std::internal::builtin::thread_pool_each_lane") {
         return self.select_pool_round(module, node, 2);
     }
-    if uses_hosted_abi(module, node) {
-        return self.select_hosted_call(module, node);
+    if hostabi::is_builtin(module, node.operand) {
+        return self.select_builtin_call(module, node);
     }
     let text = ir::name_text(&module.names, node.operand);
     let bytes = text.as_bytes();
@@ -1758,6 +1779,72 @@ pub fn (self: &var Selector) select_thread_invoke(states: bool) -> !void {
     try self.mov(0, code);
     self.func.end(self.current, Term::Return, Cond::Eq, reg_none(), 0 - 1, 0 - 1);
     return;
+}
+
+/// Returns the symbol of the thunk a task set starts a worker taking a
+/// state of one type through.
+pub fn (self: &var Selector) task_invoke_symbol(module: &ir::Module, state_type: ir::Name) -> !ir::Name {
+    var out = try string::from_bytes(self.allocator, "_kz$task_invoke_");
+    defer out.deinit(self.allocator);
+    let text = ir::name_text(&module.names, state_type);
+    let bytes = text.as_bytes();
+    try append_mangled(self.allocator, &var out, bytes);
+    let out_bytes = out.as_bytes();
+    return self.syms.intern(out_bytes);
+}
+
+/// Notes that a task set starts workers with a state of one type, so its
+/// thunk is emitted once.
+fn (self: &var Selector) note_task_invoke(state_type: ir::Name) -> !void {
+    var index = 0;
+    while self.task_invokes.get(index) |seen| {
+        if ir::same_name(seen, state_type) {
+            return;
+        }
+        index = index + 1;
+    }
+    return self.task_invokes.append(self.allocator, state_type);
+}
+
+/// Selects the thunk a task set starts a worker through, hostabi's
+/// TaskInvoke: C calls `invoke(entry, io, allocator, state)`, and it calls
+/// `entry`, a `fn(Io, Allocator, S) -> void`, by the backend's own
+/// convention with a copy of the S at state. The state is the runtime's,
+/// and the worker owns what it is handed, so it is handed a copy of its own.
+pub fn (self: &var Selector) select_task_invoke(module: &ir::Module, state_type: ir::Name) -> !?diagnostic::Diagnostic {
+    self.gen = self.gen + 1;
+    self.func.reset(self.allocator);
+    self.cold.clear(self.allocator);
+    self.ir_blocks.clear(self.allocator);
+    self.entry_imm.clear(self.allocator);
+    self.entry_reg.clear(self.allocator);
+    self.is_main = false;
+    self.func.is_main = false;
+    self.fn_name = ir::empty_name();
+    let entry = try self.func.add_block(self.allocator);
+    try self.cold.append(self.allocator, false);
+    try self.start_block(entry);
+    let worker = try self.param_word(0);
+    let io = try self.param_word(1);
+    let allocator = try self.param_word(2);
+    let state = try self.param_word(3);
+    let copy = try self.load_value(module, state_type, state, 0, true) orelse return try self.fail(module, "task state type", state_type);
+    var words = array::new<i64>(self.allocator);
+    defer words.deinit(self.allocator);
+    try words.append(self.allocator, io);
+    try words.append(self.allocator, allocator);
+    if !try self.push_val_words(module, copy, state_type, &var words) {
+        return try self.fail(module, "task state type", state_type);
+    }
+    let count = try self.place_words(&words);
+    var call = blank(MOp::CallReg);
+    call.rn = worker;
+    call.imm = count;
+    call.ra = reg_none();
+    self.func.calls = true;
+    try self.inst(call);
+    self.func.end(self.current, Term::Return, Cond::Eq, reg_none(), 0 - 1, 0 - 1);
+    return null;
 }
 
 /// Reports whether a parameter reads through an address it is handed the
