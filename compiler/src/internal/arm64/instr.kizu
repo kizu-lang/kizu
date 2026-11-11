@@ -154,6 +154,8 @@ fn (self: &var Selector) select_instr(module: &ir::Module, node: &ir::InstrNode,
         FloatFma => return self.select_float_fma(module, node),
         BufferAddr => return self.select_buffer_addr(module, node),
         TableGet => return self.select_table_get(module, node),
+        VectorNew => return self.select_vector_new(module, node),
+        VectorLane => return self.select_vector_lane(module, node),
         _ => return try self.fail_op(module, node),
     }
 }
@@ -370,6 +372,9 @@ fn (self: &var Selector) flags_compare(module: &ir::Module, held: Val) -> !?Cond
 fn (self: &var Selector) select_binary(module: &ir::Module, node: &ir::InstrNode, next: ir::Value, next_op: ir::Op) -> !?diagnostic::Diagnostic {
     let left = node.args.get(0) orelse return try self.fail_op(module, node);
     let right = node.args.get(1) orelse return try self.fail_op(module, node);
+    if is_vector_type(module, node.result.type_name) {
+        return self.select_vector_binary(module, node);
+    }
     let operand_shape = shape_of(module, left.type_name);
     if operand_shape.class == Class::Float {
         return self.select_float_binary(module, node, next, next_op);
@@ -611,6 +616,9 @@ fn (self: &var Selector) select_unary(module: &ir::Module, node: &ir::InstrNode,
         flags.reg = value;
         flags.imm = 0;
         return self.bind_flags(module, node.result, flags, next, next_op);
+    }
+    if is_vector_type(module, node.result.type_name) {
+        return self.select_vector_unary(module, node);
     }
     let shape = shape_of(module, node.result.type_name);
     if shape.class == Class::Float and module.names.is(node.operand, "-") {
