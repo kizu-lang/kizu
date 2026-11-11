@@ -1,4 +1,5 @@
 import harness::behavior;
+import harness::bootstrap;
 import std::io;
 import std::mem;
 import std::process;
@@ -8,25 +9,36 @@ import std::process;
 // the compiler under test (stage1), from the repository root:
 //
 //     kizu run compiler/tests/harness -- behavior <kizu>
+//     kizu run compiler/tests/harness -- bootstrap <kizu>
 //
 // `behavior` runs the cases internal/conformance's format declares that have
 // to cross the selfhost CLI boundary (see behavior.kizu) with <kizu> and
 // checks what each prints against its declaration.
+//
+// `bootstrap` has <kizu> build compiler/ again with an empty build cache and
+// requires the result to be <kizu> byte for byte (see bootstrap.kizu).
+//
+// The harness's own tests run with `kizu test compiler/tests/harness`.
 
 fn main() -> !process::ExitStatus {
     let allocator = mem::page_allocator();
     let handle = io::blocking();
     if process::arg_count() != 2 {
-        try io::write_stderr_line(handle, "usage: harness behavior <kizu>");
+        try io::write_stderr_line(handle, "usage: harness behavior|bootstrap <kizu>");
         return process::ExitStatus::Failure;
     }
     let suite = try process::arg(0);
-    if !mem::equal_bytes(suite, "behavior") {
-        try io::write_stderr_line(handle, "usage: harness behavior <kizu>");
+    let kizu = try process::arg(1);
+    var passed = false;
+    if mem::equal_bytes(suite, "behavior") {
+        passed = try behavior::run(handle, allocator, kizu);
+    } else if mem::equal_bytes(suite, "bootstrap") {
+        passed = try bootstrap::run(handle, allocator, kizu);
+    } else {
+        try io::write_stderr_line(handle, "usage: harness behavior|bootstrap <kizu>");
         return process::ExitStatus::Failure;
     }
-    let kizu = try process::arg(1);
-    if try behavior::run(handle, allocator, kizu) {
+    if passed {
         return process::ExitStatus::Success;
     }
     return process::ExitStatus::Failure;

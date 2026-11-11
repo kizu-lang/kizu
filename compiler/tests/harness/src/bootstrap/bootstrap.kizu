@@ -1,0 +1,177 @@
+import harness::scratch;
+import std::fmt;
+import std::fs;
+import std::io;
+import std::mem;
+import std::net;
+import std::process;
+import std::string;
+
+// The fixed point: the compiler under test (stage1) builds the same
+// compiler/ source again (stage2), and the two executables have to be
+// identical.
+//
+// It is the one gate that asks the selfhost compiler to build its own source
+// the whole way down. Reproducing itself byte for byte is what says the
+// self-built compiler compiles that source the way the compiler that built
+// stage1 does, so the comparisons against that one hold for the self-built
+// one without running those behavior gates twice. Mach-O's linker-made UUID
+// and its derived ad-hoc signature are normalized first (macho.kizu): they
+// identify a link invocation rather than compiler output, and every other
+// byte still has to agree.
+
+pub error Failure = scratch::Failure or fs::Error or io::Error or net::Error or process::Error;
+
+/// How far apart two equal-length builds are.
+struct Difference {
+    count: i64,
+    // -1 when they agree.
+    first_at: i64,
+}
+
+/// Has `stage1` build compiler/ from the repository root and compares what
+/// it builds with itself. It answers whether stage2 reproduced stage1.
+pub fn run(handle: Io, allocator: Allocator, stage1: []u8) -> Failure!bool {
+    var root = try scratch::dir(allocator, "kizu-bootstrap-");
+    defer root.deinit(allocator);
+    let root_path = root.as_bytes();
+    try fs::create_dir(handle, root_path);
+    // stage2 is written as `kizu`, the name stage1 is built under, in a
+    // directory of its own: the linker records the output file's name inside the
+    // executable, so two builds that differ only in where they were asked to
+    // write would differ by those bytes and by nothing else.
+    var stage2_dir = try scratch::join(allocator, root_path, "stage2");
+    defer stage2_dir.deinit(allocator);
+    let stage2_dir_path = stage2_dir.as_bytes();
+    try fs::create_dir(handle, stage2_dir_path);
+    var stage2 = try scratch::join(allocator, stage2_dir_path, "kizu");
+    defer stage2.deinit(allocator);
+    let stage2_path = stage2.as_bytes();
+    // stage2 compiles every unit itself. A shared cache would hand it the
+    // objects stage1's build left there, and a clang that compiled the same
+    // text differently twice would go unseen.
+    var cache = try scratch::join(allocator, root_path, "stage2-cache");
+    defer cache.deinit(allocator);
+    let cache_path = cache.as_bytes();
+
+    var command = try net::command(allocator, stage1);
+    defer command.deinit(allocator);
+    try command.arg(allocator, "build");
+    try command.arg(allocator, "--target");
+    try command.arg(allocator, "native");
+    try command.arg(allocator, "-o");
+    try command.arg(allocator, stage2_path);
+    try command.arg(allocator, "compiler");
+    try command.env(allocator, "KIZU_CACHE_DIR", cache_path);
+    // The build prints the path it wrote; what goes wrong it says on
+    // stderr, which reaches whoever runs the harness.
+    command.set_stdin(net::Stdio::Null);
+    command.set_stdout(net::Stdio::Null);
+    var child = try command.spawn(handle);
+    defer child.deinit();
+    let status = try child.wait(handle);
+    if status != 0 {
+        var message = string::new(allocator);
+        defer message.deinit(allocator);
+        try message.append_bytes(allocator, "bootstrap: selfhost compiler building itself: exit status ");
+        try fmt::append_i64(allocator, &var message, status);
+        let text = message.as_bytes();
+        try io::write_stdout_line(handle, text);
+        return false;
+    }
+
+    var first = try fs::read_file(handle, allocator, stage1, mem::Limit::Unlimited);
+    defer first.deinit(allocator);
+    var second = try fs::read_file(handle, allocator, stage2_path, mem::Limit::Unlimited);
+    defer second.deinit(allocator);
+    var report = string::new(allocator);
+    defer report.deinit(allocator);
+    try compare(allocator, &var first, &var second, &var report);
+    try scratch::remove_tree(handle, allocator, root_path);
+    let text = report.as_bytes();
+    try io::write_stdout_line(handle, text);
+    return mem::starts_with(text, "bootstrap: ok");
+}
+
+/// Compares two builds the way the fixed point asks: equal length, then
+/// equal bytes once each is normalized. It writes one line to `report`,
+/// starting `bootstrap: ok` only when they agree.
+fn compare(
+    allocator: Allocator,
+    first: &var string::String,
+    second: &var string::String,
+    report: &var string::String
+) -> mem::Error!void {
+    let length = first.len();
+    if length != second.len() {
+        try report.append_bytes(allocator, "bootstrap: selfhost compiler does not reproduce itself: stage1 is ");
+        try fmt::append_i64(allocator, report, length);
+        try report.append_bytes(allocator, " bytes, stage2 is ");
+        try fmt::append_i64(allocator, report, second.len());
+        return;
+    }
+    if !try normalize_stage(allocator, "stage1", first, report) {
+        return;
+    }
+    if !try normalize_stage(allocator, "stage2", second, report) {
+        return;
+    }
+    let first_bytes = first.as_bytes();
+    let second_bytes = second.as_bytes();
+    let difference = differing_bytes(first_bytes, second_bytes);
+    if difference.count != 0 {
+        try report.append_bytes(allocator, "bootstrap: selfhost compiler does not reproduce itself: ");
+        try fmt::append_i64(allocator, report, difference.count);
+        try report.append_bytes(allocator, " of ");
+        try fmt::append_i64(allocator, report, length);
+        try report.append_bytes(allocator, " bytes differ, first at offset ");
+        try fmt::append_i64(allocator, report, difference.first_at);
+        return;
+    }
+    try report.append_bytes(allocator, "bootstrap: ok, stage2 reproduces stage1 (");
+    try fmt::append_i64(allocator, report, length);
+    try report.append_bytes(allocator, " bytes)");
+    return;
+}
+
+/// Normalizes one stage, writing why to `report` when its Mach-O load
+/// commands do not fit it.
+fn normalize_stage(
+    allocator: Allocator,
+    stage: []u8,
+    executable: &var string::String,
+    report: &var string::String
+) -> mem::Error!bool {
+    var problem = string::new(allocator);
+    defer problem.deinit(allocator);
+    let bytes = executable.as_mut_bytes();
+    try normalize(allocator, bytes, &var problem);
+    if problem.len() == 0 {
+        return true;
+    }
+    try report.append_bytes(allocator, "bootstrap: normalize ");
+    try report.append_bytes(allocator, stage);
+    try report.append_bytes(allocator, " Mach-O: ");
+    try report.append_string(allocator, &problem);
+    return false;
+}
+
+/// Counts the bytes two equal-length builds disagree on and the first offset
+/// they disagree at, so a broken fixed point says how far from one it is
+/// rather than only that it is not one.
+fn differing_bytes(first: []u8, second: []u8) -> Difference {
+    var count = 0;
+    var first_at = -1;
+    let length = mem::len(first);
+    var index = 0;
+    while index < length {
+        if first[index] != second[index] {
+            if first_at < 0 {
+                first_at = index;
+            }
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return Difference { count: count, first_at: first_at };
+}
