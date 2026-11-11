@@ -6,8 +6,8 @@
 ```
 spec/ownership/ownership.qnt        モデル: checker の判定、実行時の意味、プログラムの生成器、性質
 spec/ownership/ownership_test.qnt   既知の形に対するモデルの判定(quint test)
-scripts/ownership-mbt/              quint run の trace を層化して fixture に書く
-internal/ownership/testdata/ownership_mbt.json   その fixture(checked in)
+scripts/ownership-mbt/main.kizu     quint run の trace を層化して fixture に書く(Kizu)
+compiler/tests/mbt/ownership.json   その fixture(checked in)
 internal/ownership/mbt_test.go      fixture を Kizu にして checker に当て、モデルの予測と比べる
 ```
 
@@ -110,7 +110,7 @@ simulator は `any` の有効な枝を等しく選ぶので、重みは枝の構
   他のモードでは 2 つは無効で、`step` は前と同じ一様な選択です。
 * `initTargeted` の単一クラス / 全体の半々は `nondet roll` で付けます。
 
-`scripts/ownership-mbt` は各モード × seed の trace から完成したプログラムを重複なく
+`scripts/ownership-mbt/main.kizu` は各モード × seed の trace から完成したプログラムを重複なく
 集め、「予測された診断クラスの組 × 使っている構文(`loop` / `while` / `nested` /
 `carried` / `defer` / `unrelated` / `mutate` / `short`)」の bucket に分け、bucket ごとに
 1 本だけ残します。何千回の実行で埋まる bucket も、まれな分岐で 1 回だけ埋まる bucket も
@@ -172,6 +172,9 @@ just spec-ownership                                  # quint test、健全性の
 go test ./internal/ownership -run TestOwnershipModel # fixture を checker に当てる(go test に含まれる)
 KIZU_MBT_BIN=path/to/kizu go test ./internal/ownership -run TestOwnershipModel
 ```
+
+生成器は `go run ./cmd/kizu run scripts/ownership-mbt/main.kizu -- -seeds 10 -per 1000000`
+のように `--` の後に `-model` / `-out` / `-samples` / `-seeds` / `-per` / `-modes` を取ります。
 
 `quint`(0.33、rust backend)が PATH に要ります。Java は要りません。`go test` は
 Quint を動かさず、checked-in の fixture だけを読みます。モデルを変えたら

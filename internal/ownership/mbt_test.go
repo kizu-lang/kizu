@@ -26,7 +26,7 @@ import (
 // from compiler/. KIZU_MBT_FIXTURE=<file> replays another fixture, such as a
 // wider sample than the checked-in one.
 
-// mbtCase is one program of the fixture written by scripts/ownership-mbt.
+// mbtCase is one program of the fixture scripts/ownership-mbt/main.kizu writes.
 type mbtCase struct {
 	Bucket string   `json:"bucket"`
 	Prog   []string `json:"prog"`
@@ -89,7 +89,7 @@ func TestOwnershipModelKnownShapes(t *testing.T) {
 func TestOwnershipModelTraces(t *testing.T) {
 	path := os.Getenv("KIZU_MBT_FIXTURE")
 	if path == "" {
-		path = filepath.Join("testdata", "ownership_mbt.json")
+		path = filepath.Join("..", "..", "compiler", "tests", "mbt", "ownership.json")
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

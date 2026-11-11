@@ -155,7 +155,7 @@ spec-ownership:
             --max-steps 25 --invariant soundness --witnesses reachedAccept reachedAcceptNested \
             reachedBorrowed reachedLoopConsume reachedDoubleDefer reachedOnlyBorrowed \
             reachedOnlyDoubleDefer reachedOnlyLoopConsume || exit 1; done
-    go run ./scripts/ownership-mbt
+    go run ./cmd/kizu run scripts/ownership-mbt/main.kizu
 
 # Test the unsafe marker model, search it for an unsound acceptance, require each
 # mutant (one rule broken) to fail the search, and resample the programs
