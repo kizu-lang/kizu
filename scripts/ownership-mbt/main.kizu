@@ -1,0 +1,888 @@
+// Samples programs from the Quint model of the ownership checker and writes
+// them, with the diagnostics the model predicts, as the fixture the replays in
+// compiler/src/ownership_mbt_test.kizu and internal/ownership/mbt_test.go put
+// to the checkers.
+//
+// Run it from the repository root with quint on PATH:
+//
+//     just spec-ownership
+//
+// It takes flags after `--`: -model, -out, -samples (runs per seed and mode),
+// -seeds (seeds per mode), -per (programs kept per bucket) and -modes (a
+// comma-separated list of generator modes).
+//
+// Random runs mostly produce short programs with common errors, so the samples
+// are stratified: each program falls into a bucket named by what the model
+// predicts and which constructs it uses, and each bucket keeps at most -per
+// programs. A bucket that a rare branch fills stays as large as one that
+// thousands of runs fill.
+
+import std::array;
+import std::fmt;
+import std::fs;
+import std::io;
+import std::json;
+import std::map;
+import std::mem;
+import std::net;
+import std::process;
+import std::sort;
+import std::string;
+
+error Failure = mem::Error or fs::Error or io::Error or json::DecodeError or net::Error or process::Error or array::Error or Usage;
+
+error Usage {
+    BadFlag,
+    QuintFailed,
+    UnknownStatement,
+}
+
+/// One program of the fixture: its statements in the token form the replays
+/// render, and the diagnostic classes the model allows. An empty expect means
+/// the checker must accept.
+pub struct Case {
+    pub bucket: string::String,
+    pub prog: array::Array<string::String>,
+    pub expect: array::Array<string::String>,
+}
+
+/// The file the replays read.
+pub struct Fixture {
+    pub note: string::String,
+    pub cases: array::Array<Case>,
+}
+
+/// The part of an ITF trace this reads: each state's finished flag, program
+/// and predicted classes. Quint values stay as JSON values because their keys
+/// (`#bigint`, `#set`, `#tup`) are not field names.
+pub struct TraceState {
+    pub done: bool,
+    pub prog: array::Array<json::Value>,
+    pub expected: json::Value,
+}
+
+pub struct Trace {
+    pub states: array::Array<TraceState>,
+}
+
+/// The settings the flags give.
+struct Options {
+    model: string::String,
+    out: string::String,
+    samples: i64,
+    seeds: i64,
+    per: i64,
+    modes: array::Array<string::String>,
+}
+
+/// The distinct finished programs of several quint runs.
+struct Sampler {
+    cases: array::Array<Case>,
+    // The joined program of every case seen, so a program found twice is kept once.
+    seen: map::Map<[]u8, i64>,
+    // finished and fresh count, per mode, the runs that finished a program
+    // and the programs no earlier run had found.
+    finished: array::Array<i64>,
+    fresh: array::Array<i64>,
+}
+
+fn main() -> Failure!void {
+    let allocator = mem::page_allocator();
+    let handle = io::blocking();
+    var options = try parse_options(allocator);
+    defer options.deinit(allocator);
+
+    // quint keeps a run's traces in memory until it writes them: 10,000 ran
+    // out of the 4 GB node heap, so a wider sweep takes more seeds. The traces
+    // go to a directory of this run's own, and each run's are removed once
+    // read: a wide sweep writes gigabytes of them.
+    var dir = string::new(allocator);
+    defer dir.deinit(allocator);
+    if process::env("TMPDIR") |tmp| {
+        try dir.append_bytes(allocator, tmp);
+    } else {
+        try dir.append_bytes(allocator, "/tmp");
+    }
+    if !holds_suffix(&dir, "/") {
+        try dir.append_byte(allocator, cast<u8>(47));
+    }
+    try dir.append_bytes(allocator, "ownership-mbt-");
+    try fmt::append_i64(allocator, &var dir, process::unix_millis());
+    let dir_path = dir.as_bytes();
+    try fs::create_dir(handle, dir_path);
+
+    var sampler = Sampler {
+        cases: array::new<Case>(allocator),
+        seen: map::new<[]u8, i64>(allocator),
+        finished: array::new<i64>(allocator),
+        fresh: array::new<i64>(allocator),
+    };
+    defer sampler.deinit(allocator);
+    var mode = 0;
+    while options.modes.at(mode) |init| {
+        try sampler.finished.append(allocator, 0);
+        try sampler.fresh.append(allocator, 0);
+        var k = 1;
+        while k <= options.seeds {
+            // Neighboring seeds can fall into the same sequence of runs after
+            // a few dozen of them (seen with 0x1 and 0x2 on the rust backend),
+            // so the seeds are spread over 32 bits.
+            let seed = (k * 2654435769) & 4294967295;
+            let init_bytes = init.as_bytes();
+            try sampler.sample(handle, allocator, &options, dir_path, mode, init_bytes, seed);
+            k = k + 1;
+        }
+        mode = mode + 1;
+    }
+    try fs::remove_dir(handle, dir_path);
+
+    var fixture = try sampler.fixture(allocator, options.per);
+    defer fixture.deinit(allocator);
+    var text = string::new(allocator);
+    defer text.deinit(allocator);
+    try json::encode_with_spaces<Fixture>(allocator, 2, fixture, text);
+    try text.append_byte(allocator, cast<u8>(10));
+    let out_path = options.out.as_bytes();
+    let bytes = text.as_bytes();
+    try fs::write_file(handle, out_path, bytes);
+    return sampler.report(handle, allocator, &options, &fixture);
+}
+
+/// Reads the flags after `--`, each `-name value`.
+fn parse_options(allocator: Allocator) -> Failure!Options {
+    var options = Options {
+        model: string::new(allocator),
+        out: string::new(allocator),
+        samples: 3000,
+        seeds: 3,
+        per: 1,
+        modes: array::new<string::String>(allocator),
+    };
+    errdefer options.deinit(allocator);
+    try options.model.append_bytes(allocator, "spec/ownership/ownership.qnt");
+    try options.out.append_bytes(allocator, "compiler/tests/mbt/ownership.json");
+    var modes = try string::from_bytes(allocator,
+        "initGuided,initOneMistake,initFree,initTargeted");
+    defer modes.deinit(allocator);
+    var index = 0;
+    while index < process::arg_count() {
+        let name = try process::arg(index);
+        let value = try process::arg(index + 1);
+        index = index + 2;
+        if mem::equal_bytes(name, "-model") {
+            options.model.clear();
+            try options.model.append_bytes(allocator, value);
+        } else if mem::equal_bytes(name, "-out") {
+            options.out.clear();
+            try options.out.append_bytes(allocator, value);
+        } else if mem::equal_bytes(name, "-samples") {
+            options.samples = try parse_count(value);
+        } else if mem::equal_bytes(name, "-seeds") {
+            options.seeds = try parse_count(value);
+        } else if mem::equal_bytes(name, "-per") {
+            options.per = try parse_count(value);
+        } else if mem::equal_bytes(name, "-modes") {
+            modes.clear();
+            try modes.append_bytes(allocator, value);
+        } else {
+            return Usage::BadFlag;
+        }
+    }
+    let list = modes.as_bytes();
+    try split_into(allocator, &var options.modes, list, cast<u8>(44));
+    return move options;
+}
+
+/// Reads a positive decimal count.
+fn parse_count(text: []u8) -> Usage!i64 {
+    var value = 0;
+    var index = 0;
+    while mem::byte_at(text, index) |byte| {
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            return Usage::BadFlag;
+        }
+        value = value * 10 + cast<i64>(byte - cast<u8>(48));
+        index = index + 1;
+    }
+    if value <= 0 {
+        return Usage::BadFlag;
+    }
+    return value;
+}
+
+/// Appends each separator-delimited field of text to out.
+fn split_into(
+    allocator: Allocator,
+    out: &var array::Array<string::String>,
+    text: []u8,
+    separator: u8
+) -> mem::Error!void {
+    var start = 0;
+    var index = 0;
+    while index <= mem::len(text) {
+        var at_end = true;
+        if mem::byte_at(text, index) |byte| {
+            at_end = byte == separator;
+        }
+        if at_end {
+            let field = try string::from_bytes(allocator, text[start..index]);
+            try out.append(allocator, move field);
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+/// Runs quint once from one initial action and seed and files each new
+/// finished program. The run checks the soundness invariant too: a model that
+/// breaks it has no business predicting the checker.
+fn (self: &var Sampler) sample(
+    handle: Io,
+    allocator: Allocator,
+    options: &Options,
+    dir: []u8,
+    mode: i64,
+    init: []u8,
+    seed: i64
+) -> Failure!void {
+    var traces = try string::from_bytes(allocator, dir);
+    defer traces.deinit(allocator);
+    try traces.append_byte(allocator, cast<u8>(47));
+    try traces.append_bytes(allocator, init);
+    try traces.append_byte(allocator, cast<u8>(95));
+    try fmt::append_i64(allocator, &var traces, seed);
+    let traces_path = traces.as_bytes();
+    try fs::create_dir(handle, traces_path);
+
+    var seed_text = try string::from_bytes(allocator, "0x");
+    defer seed_text.deinit(allocator);
+    try append_hex(allocator, &var seed_text, cast<u64>(seed), 1);
+    var samples = string::new(allocator);
+    defer samples.deinit(allocator);
+    try fmt::append_i64(allocator, &var samples, options.samples);
+    var out_itf = string::new(allocator);
+    defer out_itf.deinit(allocator);
+    try out_itf.append_string(allocator, &traces);
+    try out_itf.append_bytes(allocator, "/t_{seq}.itf.json");
+
+    var command = try net::command(allocator, "quint");
+    defer command.deinit(allocator);
+    try command.arg(allocator, "run");
+    let model = options.model.as_bytes();
+    try command.arg(allocator, model);
+    try command.arg(allocator, "--init");
+    try command.arg(allocator, init);
+    try command.arg(allocator, "--backend");
+    try command.arg(allocator, "rust");
+    try command.arg(allocator, "--seed");
+    let seed_bytes = seed_text.as_bytes();
+    try command.arg(allocator, seed_bytes);
+    let samples_bytes = samples.as_bytes();
+    try command.arg(allocator, "--max-samples");
+    try command.arg(allocator, samples_bytes);
+    try command.arg(allocator, "--n-traces");
+    try command.arg(allocator, samples_bytes);
+    try command.arg(allocator, "--max-steps");
+    try command.arg(allocator, "25");
+    try command.arg(allocator, "--invariant");
+    try command.arg(allocator, "soundness");
+    try command.arg(allocator, "--out-itf");
+    let out_itf_bytes = out_itf.as_bytes();
+    try command.arg(allocator, out_itf_bytes);
+    // quint's report goes to stdout; it is shown only when the run fails.
+    command.set_stdout(net::Stdio::Pipe);
+    var child = try command.spawn(handle);
+    defer child.deinit();
+    var output = string::new(allocator);
+    defer output.deinit(allocator);
+    while try child.read_stdout_into(handle, allocator, &var output, 65536) > 0 {}
+    let status = try child.wait(handle);
+    if status != 0 {
+        try io::write_stderr(handle, "ownership-mbt: quint run --init ");
+        try io::write_stderr(handle, init);
+        try io::write_stderr(handle, " --seed ");
+        try io::write_stderr_line(handle, seed_bytes);
+        let report = output.as_bytes();
+        try io::write_stderr(handle, report);
+        return Usage::QuintFailed;
+    }
+
+    var entries = try fs::read_dir(handle, allocator, traces_path);
+    defer entries.deinit(allocator);
+    var index = 0;
+    while entries.at(index) |entry| {
+        index = index + 1;
+        let path = entry.path.as_bytes();
+        let name = entry.name.as_bytes();
+        if ends_with(name, ".itf.json") {
+            try self.file(handle, allocator, mode, path);
+        }
+        try fs::remove_file(handle, path);
+    }
+    return fs::remove_dir(handle, traces_path);
+}
+
+/// Files the program of one trace, if it finished and is new.
+fn (self: &var Sampler) file(handle: Io, allocator: Allocator, mode: i64, path: []u8) -> Failure!void {
+    let data = try fs::read_file(handle, allocator, path, mem::Limit::Unlimited);
+    defer data.deinit(allocator);
+    let bytes = data.as_bytes();
+    var trace = try json::decode_ignore_unknown<Trace>(allocator, bytes);
+    defer trace.deinit(allocator);
+    let count = trace.states.len();
+    if count == 0 {
+        return;
+    }
+    if trace.states.at(count - 1) |last| {
+        if !last.done {
+            return;
+        }
+        var c = try read_case(allocator, last);
+        errdefer c.deinit(allocator);
+        if self.finished.at_mut(mode) |finished| {
+            finished.* = finished.* + 1;
+        }
+        var key = try join(allocator, &c.prog, cast<u8>(59));
+        defer key.deinit(allocator);
+        let key_bytes = key.as_bytes();
+        if self.seen.contains(key_bytes) {
+            c.deinit(allocator);
+            return;
+        }
+        try self.seen.insert(allocator, key_bytes, 1);
+        if self.fresh.at_mut(mode) |fresh| {
+            fresh.* = fresh.* + 1;
+        }
+        try self.cases.append(allocator, move c);
+    }
+    return;
+}
+
+/// Reads the finished program and its predicted classes from the last state.
+fn read_case(allocator: Allocator, state: &TraceState) -> Failure!Case {
+    var c = Case {
+        bucket: string::new(allocator),
+        prog: array::new<string::String>(allocator),
+        expect: array::new<string::String>(allocator),
+    };
+    errdefer c.deinit(allocator);
+    var index = 0;
+    while state.prog.at(index) |stmt| {
+        index = index + 1;
+        let token = try stmt_token(allocator, stmt);
+        try c.prog.append(allocator, move token);
+    }
+    match state.expected {
+        Obj(fields) => {
+            if fields.at("#set") |set| {
+                match set {
+                    Arr(kinds) => {
+                        var kind = 0;
+                        while kinds.at(kind) |value| {
+                            kind = kind + 1;
+                            var tag = string::new(allocator);
+                            errdefer tag.deinit(allocator);
+                            try append_member(allocator, &var tag, value, "tag");
+                            try c.expect.append(allocator, move tag);
+                        }
+                    },
+                    _ => {},
+                }
+            }
+        },
+        _ => {},
+    }
+    try sort::strings(&var c.expect);
+    var bucket = string::new(allocator);
+    errdefer bucket.deinit(allocator);
+    try append_bucket(allocator, &var bucket, &c.prog, &c.expect);
+    try c.bucket.append_string(allocator, &bucket);
+    bucket.deinit(allocator);
+    return move c;
+}
+
+/// Appends the string member key of an object value, if it has one.
+fn append_member(allocator: Allocator, out: &var string::String, value: &json::Value, key: []u8) -> mem::Error!void {
+    match value {
+        Obj(fields) => {
+            if fields.at(key) |member| {
+                match member {
+                    Str(text) => return out.append_string(allocator, text),
+                    _ => {},
+                }
+            }
+        },
+        _ => {},
+    }
+    return;
+}
+
+/// Writes one statement as its token and, for those that name a binding, the
+/// binding's id.
+fn stmt_token(allocator: Allocator, stmt: &json::Value) -> Failure!string::String {
+    var tag = string::new(allocator);
+    defer tag.deinit(allocator);
+    try append_member(allocator, &var tag, stmt, "tag");
+    let name = tag.as_bytes();
+    let token = statement_token(name);
+    if mem::len(token) == 0 {
+        try io::write_stderr(io::blocking(), "ownership-mbt: unknown statement ");
+        try io::write_stderr_line(io::blocking(), name);
+        return Usage::UnknownStatement;
+    }
+    var out = try string::from_bytes(allocator, token);
+    errdefer out.deinit(allocator);
+    match stmt {
+        Obj(fields) => {
+            if fields.at("value") |arg| {
+                var id = string::new(allocator);
+                defer id.deinit(allocator);
+                try append_member(allocator, &var id, arg, "#bigint");
+                if id.len() > 0 {
+                    try out.append_byte(allocator, cast<u8>(32));
+                    try out.append_string(allocator, &id);
+                }
+            }
+        },
+        _ => {},
+    }
+    return move out;
+}
+
+/// The token each statement of the model has in the fixture, or "" for one
+/// the model does not have.
+fn statement_token(tag: []u8) -> []u8 {
+    if mem::equal_bytes(tag, "View") { return "view"; }
+    if mem::equal_bytes(tag, "UseView") { return "use_view"; }
+    if mem::equal_bytes(tag, "Borrow") { return "borrow"; }
+    if mem::equal_bytes(tag, "UseBorrow") { return "use_borrow"; }
+    if mem::equal_bytes(tag, "ReadOwner") { return "read"; }
+    if mem::equal_bytes(tag, "Mutate") { return "mutate"; }
+    if mem::equal_bytes(tag, "Deinit") { return "deinit"; }
+    if mem::equal_bytes(tag, "MoveOut") { return "move"; }
+    if mem::equal_bytes(tag, "DeferDeinit") { return "defer"; }
+    if mem::equal_bytes(tag, "Unrelated") { return "unrelated"; }
+    if mem::equal_bytes(tag, "LoopBegin") { return "loop"; }
+    if mem::equal_bytes(tag, "WhileBegin") { return "while"; }
+    if mem::equal_bytes(tag, "LoopEnd") { return "end"; }
+    return "";
+}
+
+/// shortest is the length up to which a program is its own stratum: the
+/// smallest programs (one statement and the closing deinit, or a lone read)
+/// are the boundary of the generator, and in a bucket with longer ones the
+/// hash seldom keeps them.
+fn shortest() -> i64 {
+    return 2;
+}
+
+/// Appends the stratum of a case: the predicted classes and the constructs
+/// whose interaction the model is about.
+fn append_bucket(
+    allocator: Allocator,
+    out: &var string::String,
+    prog: &array::Array<string::String>,
+    expect: &array::Array<string::String>
+) -> mem::Error!void {
+    if expect.len() == 0 {
+        try out.append_bytes(allocator, "accept");
+    } else {
+        var verdict = try join(allocator, expect, cast<u8>(43));
+        defer verdict.deinit(allocator);
+        try out.append_string(allocator, &verdict);
+    }
+    try out.append_byte(allocator, cast<u8>(47));
+    var has_loop = false;
+    var has_while = false;
+    var has_nested = false;
+    var has_carried = false;
+    var has_defer = false;
+    var has_unrelated = false;
+    var has_mutate = false;
+    // The loop depth each binding was declared at: a read deeper than that is
+    // read again by the next turn of the loops in between.
+    var declared_at = map::new<[]u8, i64>(allocator);
+    defer declared_at.deinit(allocator);
+    var depth = 0;
+    var index = 0;
+    while prog.at(index) |stmt| {
+        index = index + 1;
+        let text = stmt.as_bytes();
+        let cut = space_at(text);
+        let token = text[0..cut];
+        var id_start = cut + 1;
+        if id_start > mem::len(text) {
+            id_start = mem::len(text);
+        }
+        let id = text[id_start..mem::len(text)];
+        if mem::equal_bytes(token, "loop") or mem::equal_bytes(token, "while") {
+            depth = depth + 1;
+            if depth == 2 {
+                has_nested = true;
+            }
+        } else if mem::equal_bytes(token, "end") {
+            depth = depth - 1;
+        } else if mem::equal_bytes(token, "view") or mem::equal_bytes(token, "borrow") {
+            if declared_at.at_mut(id) |held| {
+                held.* = depth;
+            } else {
+                try declared_at.insert(allocator, id, depth);
+            }
+        } else if mem::equal_bytes(token, "use_view") or mem::equal_bytes(token, "use_borrow") {
+            var declared = 0;
+            if declared_at.get(id) |at| {
+                declared = at;
+            }
+            if depth > declared {
+                has_carried = true;
+            }
+        }
+        if mem::equal_bytes(token, "loop") { has_loop = true; }
+        if mem::equal_bytes(token, "while") { has_while = true; }
+        if mem::equal_bytes(token, "defer") { has_defer = true; }
+        if mem::equal_bytes(token, "unrelated") { has_unrelated = true; }
+        if mem::equal_bytes(token, "mutate") { has_mutate = true; }
+    }
+    var first = true;
+    try append_feature(allocator, out, &var first, has_loop, "loop");
+    try append_feature(allocator, out, &var first, has_while, "while");
+    try append_feature(allocator, out, &var first, has_nested, "nested");
+    try append_feature(allocator, out, &var first, has_carried, "carried");
+    try append_feature(allocator, out, &var first, has_defer, "defer");
+    try append_feature(allocator, out, &var first, has_unrelated, "unrelated");
+    try append_feature(allocator, out, &var first, has_mutate, "mutate");
+    let short = prog.len() <= shortest();
+    return append_feature(allocator, out, &var first, short, "short");
+}
+
+fn append_feature(
+    allocator: Allocator,
+    out: &var string::String,
+    first: &var bool,
+    has: bool,
+    name: []u8
+) -> mem::Error!void {
+    if !has {
+        return;
+    }
+    if !first.* {
+        try out.append_byte(allocator, cast<u8>(44));
+    }
+    first.* = false;
+    return out.append_bytes(allocator, name);
+}
+
+/// The index of the first space in text, or its length.
+fn space_at(text: []u8) -> i64 {
+    var index = 0;
+    while mem::byte_at(text, index) |byte| {
+        if byte == cast<u8>(32) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return index;
+}
+
+fn ends_with(text: []u8, suffix: []u8) -> bool {
+    let start = mem::len(text) - mem::len(suffix);
+    if start < 0 {
+        return false;
+    }
+    return mem::equal_bytes(text[start..mem::len(text)], suffix);
+}
+
+/// Joins strings with a separator byte.
+fn join(allocator: Allocator, parts: &array::Array<string::String>, separator: u8) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    var index = 0;
+    while parts.at(index) |part| {
+        if index > 0 {
+            try out.append_byte(allocator, separator);
+        }
+        index = index + 1;
+        try out.append_string(allocator, part);
+    }
+    return move out;
+}
+
+/// Appends value in lowercase hex, padded with zeros to at least width digits.
+fn append_hex(allocator: Allocator, out: &var string::String, value: u64, width: i64) -> mem::Error!void {
+    let digits = "0123456789abcdef";
+    var length = 16;
+    while length > width and (value >> cast<u64>(length * 4 - 4)) & cast<u64>(15) == cast<u64>(0) {
+        length = length - 1;
+    }
+    while length > 0 {
+        length = length - 1;
+        let nibble = cast<i64>((value >> cast<u64>(length * 4)) & cast<u64>(15));
+        if mem::byte_at(digits, nibble) |digit| {
+            try out.append_byte(allocator, digit);
+        }
+    }
+    return;
+}
+
+/// The FNV-1a hash of a program's statements, each followed by ";". It orders
+/// programs without favoring short ones.
+fn hash_prog(prog: &array::Array<string::String>) -> u64 {
+    var hash: u64 = cast<u64>(-3750763034362895579);
+    let prime = cast<u64>(1099511628211);
+    var index = 0;
+    while prog.at(index) |stmt| {
+        index = index + 1;
+        let bytes = stmt.as_bytes();
+        var at = 0;
+        while mem::byte_at(bytes, at) |byte| {
+            at = at + 1;
+            hash = (hash ^ cast<u64>(byte)) * prime;
+        }
+        hash = (hash ^ cast<u64>(59)) * prime;
+    }
+    return hash;
+}
+
+/// Keeps at most per programs of each bucket, buckets in name order and, in
+/// each, programs in hash order: a hash of the program, not the order quint
+/// found it in, picks the kept ones, so a bucket keeps long programs as well
+/// as short ones.
+fn (self: &var Sampler) fixture(allocator: Allocator, per: i64) -> Failure!Fixture {
+    // Each case's sort key is its bucket, a zero byte (below every byte of a
+    // name, so a bucket sorts before one it is a prefix of) and its hash in
+    // fixed-width hex, so byte order is bucket order and then hash order.
+    var keys = array::new<string::String>(allocator);
+    defer keys.deinit(allocator);
+    var positions = map::new<[]u8, i64>(allocator);
+    defer positions.deinit(allocator);
+    var index = 0;
+    while self.cases.at(index) |c| {
+        var key = string::new(allocator);
+        errdefer key.deinit(allocator);
+        try key.append_string(allocator, &c.bucket);
+        try key.append_byte(allocator, cast<u8>(0));
+        try append_hex(allocator, &var key, hash_prog(&c.prog), 16);
+        try keys.append(allocator, move key);
+        if keys.at(index) |stored| {
+            let key_bytes = stored.as_bytes();
+            try positions.insert(allocator, key_bytes, index);
+        }
+        index = index + 1;
+    }
+    try sort::strings(&var keys);
+
+    var fixture = Fixture {
+        note: string::new(allocator),
+        cases: array::new<Case>(allocator),
+    };
+    errdefer fixture.deinit(allocator);
+    try fixture.note.append_bytes(allocator,
+        "generated by `just spec-ownership` from spec/ownership/ownership.qnt; do not edit");
+    var bucket = string::new(allocator);
+    defer bucket.deinit(allocator);
+    var kept = 0;
+    index = 0;
+    while keys.at(index) |key| {
+        index = index + 1;
+        let key_bytes = key.as_bytes();
+        if positions.get(key_bytes) |position| {
+            if self.cases.at(position) |c| {
+                let name = c.bucket.as_bytes();
+                if !holds(&bucket, name) {
+                    bucket.clear();
+                    try bucket.append_bytes(allocator, name);
+                    kept = 0;
+                }
+                if kept < per {
+                    kept = kept + 1;
+                    let copy = try clone_case(allocator, c);
+                    try fixture.cases.append(allocator, move copy);
+                }
+            }
+        }
+    }
+    return move fixture;
+}
+
+fn holds_suffix(text: &string::String, suffix: []u8) -> bool {
+    let held = text.as_bytes();
+    return ends_with(held, suffix);
+}
+
+fn holds(text: &string::String, bytes: []u8) -> bool {
+    let held = text.as_bytes();
+    return mem::equal_bytes(held, bytes);
+}
+
+fn clone_case(allocator: Allocator, c: &Case) -> mem::Error!Case {
+    var copy = Case {
+        bucket: string::new(allocator),
+        prog: array::new<string::String>(allocator),
+        expect: array::new<string::String>(allocator),
+    };
+    errdefer copy.deinit(allocator);
+    try copy.bucket.append_string(allocator, &c.bucket);
+    try append_all(allocator, &var copy.prog, &c.prog);
+    try append_all(allocator, &var copy.expect, &c.expect);
+    return move copy;
+}
+
+fn append_all(
+    allocator: Allocator,
+    out: &var array::Array<string::String>,
+    values: &array::Array<string::String>
+) -> mem::Error!void {
+    var index = 0;
+    while values.at(index) |value| {
+        index = index + 1;
+        let bytes = value.as_bytes();
+        let copy = try string::from_bytes(allocator, bytes);
+        try out.append(allocator, move copy);
+    }
+    return;
+}
+
+/// Prints how many programs each mode found and how they spread over the
+/// verdicts, so that a change to the generator shows which strata it thinned.
+fn (self: &Sampler) report(handle: Io, allocator: Allocator, options: &Options, fixture: &Fixture) -> Failure!void {
+    var line = string::new(allocator);
+    defer line.deinit(allocator);
+    var mode = 0;
+    while options.modes.at(mode) |init| {
+        line.clear();
+        let name = init.as_bytes();
+        try pad_right(allocator, &var line, name, 15);
+        var finished = 0;
+        if self.finished.get(mode) |count| {
+            finished = count;
+        }
+        var fresh = 0;
+        if self.fresh.get(mode) |count| {
+            fresh = count;
+        }
+        try line.append_byte(allocator, cast<u8>(32));
+        try pad_number(allocator, &var line, finished, 6);
+        try line.append_bytes(allocator, " finished ");
+        try pad_number(allocator, &var line, fresh, 6);
+        try line.append_bytes(allocator, " new");
+        let text = line.as_bytes();
+        try io::write_stdout_line(handle, text);
+        mode = mode + 1;
+    }
+
+    // Programs, buckets and kept cases per verdict, the part of a bucket
+    // name before its "/".
+    var programs = map::new<[]u8, i64>(allocator);
+    defer programs.deinit(allocator);
+    var buckets = map::new<[]u8, i64>(allocator);
+    defer buckets.deinit(allocator);
+    var kept = map::new<[]u8, i64>(allocator);
+    defer kept.deinit(allocator);
+    var seen_buckets = map::new<[]u8, i64>(allocator);
+    defer seen_buckets.deinit(allocator);
+    var verdicts = array::new<string::String>(allocator);
+    defer verdicts.deinit(allocator);
+    var index = 0;
+    while self.cases.at(index) |c| {
+        index = index + 1;
+        let name = c.bucket.as_bytes();
+        let verdict = name[0..slash_at(name)];
+        if !programs.contains(verdict) {
+            let copy = try string::from_bytes(allocator, verdict);
+            try verdicts.append(allocator, move copy);
+            try programs.insert(allocator, verdict, 0);
+            try buckets.insert(allocator, verdict, 0);
+            try kept.insert(allocator, verdict, 0);
+        }
+        try bump(&var programs, verdict);
+        if !seen_buckets.contains(name) {
+            try seen_buckets.insert(allocator, name, 1);
+            try bump(&var buckets, verdict);
+        }
+    }
+    index = 0;
+    while fixture.cases.at(index) |c| {
+        index = index + 1;
+        let name = c.bucket.as_bytes();
+        let verdict = name[0..slash_at(name)];
+        try bump(&var kept, verdict);
+    }
+    try sort::strings(&var verdicts);
+    line.clear();
+    try pad_right(allocator, &var line, "verdict", 50);
+    try line.append_bytes(allocator, " programs  buckets   kept");
+    let header = line.as_bytes();
+    try io::write_stdout_line(handle, header);
+    index = 0;
+    while verdicts.at(index) |verdict| {
+        index = index + 1;
+        let name = verdict.as_bytes();
+        line.clear();
+        try pad_right(allocator, &var line, name, 50);
+        try line.append_byte(allocator, cast<u8>(32));
+        try pad_number(allocator, &var line, count_of(&programs, name), 8);
+        try line.append_byte(allocator, cast<u8>(32));
+        try pad_number(allocator, &var line, count_of(&buckets, name), 8);
+        try line.append_byte(allocator, cast<u8>(32));
+        try pad_number(allocator, &var line, count_of(&kept, name), 6);
+        let text = line.as_bytes();
+        try io::write_stdout_line(handle, text);
+    }
+    line.clear();
+    try fmt::append_i64(allocator, &var line, self.cases.len());
+    try line.append_bytes(allocator, " distinct programs, ");
+    try fmt::append_i64(allocator, &var line, seen_buckets.len());
+    try line.append_bytes(allocator, " buckets, ");
+    try fmt::append_i64(allocator, &var line, fixture.cases.len());
+    try line.append_bytes(allocator, " kept");
+    let summary = line.as_bytes();
+    return io::write_stdout_line(handle, summary);
+}
+
+fn slash_at(name: []u8) -> i64 {
+    var index = 0;
+    while mem::byte_at(name, index) |byte| {
+        if byte == cast<u8>(47) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return index;
+}
+
+fn bump(counts: &var map::Map<[]u8, i64>, key: []u8) -> mem::Error!void {
+    if counts.at_mut(key) |count| {
+        count.* = count.* + 1;
+    }
+    return;
+}
+
+fn count_of(counts: &map::Map<[]u8, i64>, key: []u8) -> i64 {
+    if counts.get(key) |count| {
+        return count;
+    }
+    return 0;
+}
+
+fn pad_right(allocator: Allocator, out: &var string::String, text: []u8, width: i64) -> mem::Error!void {
+    try out.append_bytes(allocator, text);
+    var length = mem::len(text);
+    while length < width {
+        try out.append_byte(allocator, cast<u8>(32));
+        length = length + 1;
+    }
+    return;
+}
+
+fn pad_number(allocator: Allocator, out: &var string::String, value: i64, width: i64) -> mem::Error!void {
+    var digits = string::new(allocator);
+    defer digits.deinit(allocator);
+    try fmt::append_i64(allocator, &var digits, value);
+    var length = digits.len();
+    while length < width {
+        try out.append_byte(allocator, cast<u8>(32));
+        length = length + 1;
+    }
+    return out.append_string(allocator, &digits);
+}

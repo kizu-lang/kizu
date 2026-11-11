@@ -147,7 +147,8 @@ spec-ir:
         --invariant soundness
     go run ./scripts/ir-mbt
 # Test the ownership model, search it for an unsound acceptance, and resample the
-# programs internal/ownership replays against the checker (spec/ownership/README.md).
+# programs compiler/ and internal/ownership replay against their checkers
+# (spec/ownership/README.md).
 spec-ownership:
     cd spec/ownership && quint test ownership_test.qnt
     cd spec/ownership && for init in initGuided initOneMistake initFree initTargeted; do \
@@ -155,7 +156,7 @@ spec-ownership:
             --max-steps 25 --invariant soundness --witnesses reachedAccept reachedAcceptNested \
             reachedBorrowed reachedLoopConsume reachedDoubleDefer reachedOnlyBorrowed \
             reachedOnlyDoubleDefer reachedOnlyLoopConsume || exit 1; done
-    go run ./scripts/ownership-mbt
+    go run ./cmd/kizu run scripts/ownership-mbt/main.kizu
 
 # Test the unsafe marker model, search it for an unsound acceptance, require each
 # mutant (one rule broken) to fail the search, and resample the programs
