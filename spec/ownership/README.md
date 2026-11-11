@@ -8,7 +8,8 @@ spec/ownership/ownership.qnt        モデル: checker の判定、実行時の�
 spec/ownership/ownership_test.qnt   既知の形に対するモデルの判定(quint test)
 scripts/ownership-mbt/main.kizu     quint run の trace を層化して fixture に書く(Kizu)
 compiler/tests/mbt/ownership.json   その fixture(checked in)
-internal/ownership/mbt_test.go      fixture を Kizu にして checker に当て、モデルの予測と比べる
+compiler/src/ownership_mbt_test.kizu  fixture を Kizu にして compiler/ の checker に当て、モデルの予測と比べる
+internal/ownership/mbt_test.go      同じ fixture を Go 実装の checker に当てる
 ```
 
 ## 範囲
@@ -125,35 +126,40 @@ seed は 32 bit に散らして渡します。rust backend では隣り合う se
 使い切るので、広げるときは `-seeds` を増やします。trace は 1 回の実行ごとに読んで
 消します。
 
-`mbt_test.go` は各プログラムを Kizu にし、`kizu check` と同じ type check → ownership
-check を in-process で走らせ、診断の文面をクラスに分類して比べます。不一致は
+replay は 2 つあり、同じ fixture を読みます。`compiler/src/ownership_mbt_test.kizu` は
+`compiler/` の checker を、`internal/ownership/mbt_test.go` は Go 実装の checker を
+見ます。どちらも各プログラムを Kizu にし、`kizu check` と同じ type check → ownership
+check を in-process で走らせ、最初の診断の文面をクラスに分類して比べます。不一致は
 
 * モデルが受理なのに拒否 / 拒否なのに受理
 * 報告されたクラスがモデルの集合に無い
 * モデルの知らない診断(生成器か renderer の不備)
 
-のどれかで、プログラムと Kizu ソースを添えて落ちます。`KIZU_MBT_BIN=<kizu>` で
-外部の binary(`compiler/` から build したもの)に、`KIZU_MBT_FIXTURE=<file>` で別の
-fixture に当てられます。
+のどれかで、プログラムと Kizu ソースを添えて落ちます。`KIZU_MBT_FIXTURE=<file>` で
+別の fixture に当てられます(両方)。Go 側は `KIZU_MBT_BIN=<kizu>` で外部の binary にも
+当てられます。
 
 ### 規模と結果(2026-11-08)
 
 * 生成: 4 モード × 3 seed × 3,000 回(36,000 trace、旧 3 モード × 3 × 1,000 = 9,000)。
   相異なる 16,697 本、1,034 bucket(旧 2,049 本、490 bucket)。`just spec-ownership`
   全体で約 113 秒(旧 約 34 秒)。
-* checked-in fixture: 1,034 本。in-process で約 5.4 秒(旧 490 本で約 2.6 秒)。
-  食い違い **0**。
+* checked-in fixture: 1,034 本。Go の in-process で約 5.4 秒(旧 490 本で約 2.6 秒)。
+  食い違い **0**。`compiler/` 側の replay も食い違い **0** で、`kizu test compiler` に
+  約 30 秒足します(負荷の高い手元機での測定)。
 * 一回限りの広いスイープ(`-seeds 10 -per 1000000`): 相異なる 54,020 本、1,178 bucket。
   生成 約 310 秒、replay 約 253 秒。食い違い **0**。
-* mutant 確認(一時的に壊して戻したもの。食い違いの本数は 旧 fixture → 新 fixture):
+* mutant 確認(一時的に壊して戻したもの。食い違いの本数は 旧 fixture → 新 fixture。
+  `compiler/` 列は同じ変異を `compiler/src/internal/ownership` に入れたときの新 fixture
+  での本数で、括弧内は既知形):
 
-  | 壊したもの | 旧 | 新 |
-  | --- | --- | --- |
-  | checker: 2 つ目の `defer` を許す | 9 | 44 |
-  | checker: `try` の error exit の leak を見ない | 17 | 41 |
-  | checker: ループ内の consume を許す | 1 | 3 |
-  | checker: 借用中の `move` を許す | 2 | 14 |
-  | モデル: ループ本体の `defer` がターン終了時に借用中でも `Borrowed` にしない(F1) | 1 | 4 |
+  | 壊したもの | 旧 | 新 | `compiler/` |
+  | --- | --- | --- | --- |
+  | checker: 2 つ目の `defer` を許す | 9 | 44 | 44(1) |
+  | checker: `try` の error exit の leak を見ない | 17 | 41 | 41(1) |
+  | checker: ループ内の consume を許す | 1 | 3 | 3(3) |
+  | checker: 借用中の `move` を許す | 2 | 14 | 14(0) |
+  | モデル: ループ本体の `defer` がターン終了時に借用中でも `Borrowed` にしない(F1) | 1 | 4 | 4 |
 
   最後のものは `soundness` では見つかりません(どのプログラムも `LoopConsume` で
   拒否されるので受理の集合が変わらない)。
@@ -169,21 +175,20 @@ fixture に当てられます。
 
 ```sh
 just spec-ownership                                  # quint test、健全性の探索、fixture の再生成
-go test ./internal/ownership -run TestOwnershipModel # fixture を checker に当てる(go test に含まれる)
+just selfhost                                        # compiler/ の checker に当てる(kizu test compiler に含まれる)
+go test ./internal/ownership -run TestOwnershipModel # Go 実装の checker に当てる(go test に含まれる)
 KIZU_MBT_BIN=path/to/kizu go test ./internal/ownership -run TestOwnershipModel
 ```
 
 生成器は `go run ./cmd/kizu run scripts/ownership-mbt/main.kizu -- -seeds 10 -per 1000000`
 のように `--` の後に `-model` / `-out` / `-samples` / `-seeds` / `-per` / `-modes` を取ります。
 
-`quint`(0.33、rust backend)が PATH に要ります。Java は要りません。`go test` は
-Quint を動かさず、checked-in の fixture だけを読みます。モデルを変えたら
-`just spec-ownership` で fixture を作り直してください。
+`quint`(0.33、rust backend)が PATH に要ります。Java は要りません。`go test` と
+`kizu test compiler` は Quint を動かさず、checked-in の fixture だけを読みます。モデルを
+変えたら `just spec-ownership` で fixture を作り直してください。
 
 ## 残課題
 
-* **selfhost compiler への定常的な適用**。CLI モードは用意したが、`compiler/` の
-  checker をこの fixture に当てる経路は `go test` に入っていません(binary の build が要る)。
 * **`&var` / `as_mut_bytes`、`if` / `match`、field path 借用、`errdefer`** への拡張(範囲の節)。
 * **複数クラスの予測が多い**。誤りが重なるプログラムは受理 / 拒否しか鋭く区別しない
   ので、`LoopConsume` を外す mutant は 3 本でしか落ちません(ループ内の consume は

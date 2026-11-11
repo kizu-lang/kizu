@@ -147,7 +147,8 @@ spec-ir:
         --invariant soundness
     go run ./scripts/ir-mbt
 # Test the ownership model, search it for an unsound acceptance, and resample the
-# programs internal/ownership replays against the checker (spec/ownership/README.md).
+# programs compiler/ and internal/ownership replay against their checkers
+# (spec/ownership/README.md).
 spec-ownership:
     cd spec/ownership && quint test ownership_test.qnt
     cd spec/ownership && for init in initGuided initOneMistake initFree initTargeted; do \

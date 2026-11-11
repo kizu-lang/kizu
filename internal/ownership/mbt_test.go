@@ -19,7 +19,8 @@ import (
 // the test renders it to Kizu, checks it, and compares. A divergence is either
 // a checker bug or a model bug, and which one is a question for SPEC.md: record
 // it in findings/ownership-quint-findings.md rather than adjusting either side
-// to agree.
+// to agree. compiler/src/ownership_mbt_test.kizu replays the same fixture
+// against the checker in compiler/.
 //
 // KIZU_MBT_BIN=<kizu binary> runs `<binary> check` on each program instead of
 // the in-process checker, so the same cases can be put to the compiler built
