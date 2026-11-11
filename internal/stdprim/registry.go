@@ -154,7 +154,7 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 		Return: "std::net::Error!i64",
 	},
 	"std::internal::builtin::net_child_spawn": {
-		Args:   []ArgKind{ArgIo, ArgBytes, ArgI64},
+		Args:   []ArgKind{ArgIo, ArgBytes, ArgI64, ArgBytes, ArgBytes},
 		Return: "std::net::Error!i64",
 	},
 	"std::internal::builtin::net_child_fd":       {Args: []ArgKind{ArgI64, ArgI64}, Return: "i64"},
