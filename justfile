@@ -160,7 +160,8 @@ spec-ownership:
 
 # Test the unsafe marker model, search it for an unsound acceptance, require each
 # mutant (one rule broken) to fail the search, and resample the programs
-# internal/unsafecap replays against the checker (spec/unsafecap/README.md).
+# compiler/ and internal/unsafecap replay against their checkers
+# (spec/unsafecap/README.md).
 spec-unsafecap:
     cd spec/unsafecap && quint test unsafecap_test.qnt
     cd spec/unsafecap && for init in initGuided initOneMistake initFree; do \
@@ -172,7 +173,7 @@ spec-unsafecap:
         if quint run unsafecap.qnt --main $mutant --init initFree --backend rust --seed 0x2 \
             --max-samples 3000 --max-steps 12 --invariant soundness > /dev/null; then \
             echo "$mutant: no counterexample"; exit 1; fi; done
-    go run ./scripts/unsafecap-mbt
+    go run ./cmd/kizu run scripts/unsafecap-mbt/main.kizu
 
 # Test the C header import model, search it for an unsound acceptance, require
 # the importer as it is and each mutant (one rule broken) to fail the search, and
