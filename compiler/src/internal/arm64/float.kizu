@@ -1,15 +1,20 @@
 import compiler::internal::diagnostic;
 import compiler::internal::ir;
 import compiler::internal::typ;
+import std::array;
 import std::float;
 import std::fmt;
 import std::string;
 
-// Floating point: `f64` and `f32` values are held as their IEEE 754 bits in
-// general registers like any other word, so moves, phis, spills, memory and
-// the backend's own calls need nothing of their own. Only the instructions
-// that read a value as a number go through a float register, which none
-// holds from one machine instruction to the next.
+// Floating point: `f64` and `f32` values are their IEEE 754 bits in a
+// register like any other word, so moves, phis, spills, memory and the
+// backend's own calls need nothing of their own. On arm64, allocation keeps
+// the values only float instructions compute with in float registers (see
+// float_registers), where the bits are the same; elsewhere, and for a value
+// also read as an integer, a general register holds them and the
+// instructions that read a value as a number move it through a scratch
+// float register (v16..v19), which none holds from one machine instruction
+// to the next.
 //
 // The operations are the ones the LLVM backend asks of LLVM: IEEE 754
 // arithmetic rounded to nearest even, ordered comparisons except `!=`,
@@ -335,6 +340,201 @@ fn (self: &var Selector) pick_bound(value: i64, bound: i64, cond: Cond) -> !i64 
     return out;
 }
 
+// ---- allocation ----
+
+/// Picks the virtual registers arm64 allocation keeps in float registers:
+/// those a float instruction reads or writes as a number, and those only
+/// moved, loaded, stored or selected alongside them, while nothing reads
+/// or writes them as an integer. Such a register holds the same bits a
+/// general one would; only the instructions that touch it change, so the
+/// choice never changes a result. A select keeps its three registers in
+/// one class, as `fcsel` and `csel` do not mix them.
+fn float_registers(allocator: Allocator, func: &MFunction, out: &var array::Array<bool>) -> !void {
+    let nv = func.vregs;
+    var wants = array::new<bool>(allocator);
+    defer wants.deinit(allocator);
+    var forced = array::new<bool>(allocator);
+    defer forced.deinit(allocator);
+    out.clear(allocator);
+    for 0..nv |_index| {
+        try wants.append(allocator, false);
+        try forced.append(allocator, false);
+        try out.append(allocator, false);
+    }
+    var regs = array::new<i64>(allocator);
+    defer regs.deinit(allocator);
+    var block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        block_id = block_id + 1;
+        try mark_reg(&var forced, block.treg);
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            match inst.op {
+                FBin => try mark_regs(&var wants, inst.rd, inst.rn, inst.rm, inst.ra),
+                FUn => try mark_regs(&var wants, inst.rd, inst.rn, inst.rm, inst.ra),
+                FMAdd => try mark_regs(&var wants, inst.rd, inst.rn, inst.rm, inst.ra),
+                FCmp => try mark_regs(&var wants, inst.rd, inst.rn, inst.rm, inst.ra),
+                FCvt => try mark_regs(&var wants, inst.rd, inst.rn, inst.rm, inst.ra),
+                FArg => try mark_reg(&var wants, inst.rn),
+                FRet => try mark_reg(&var wants, inst.rd),
+                FToInt => {
+                    try mark_reg(&var wants, inst.rn);
+                    try mark_reg(&var forced, inst.rd);
+                },
+                IntToF => {
+                    try mark_reg(&var wants, inst.rd);
+                    try mark_reg(&var forced, inst.rn);
+                },
+                Mov => {},
+                MovImm => {},
+                CSel => {},
+                ParCopy => {},
+                Load => try mark_memory(&var forced, inst, true),
+                LoadIdx => try mark_memory(&var forced, inst, true),
+                Store => try mark_memory(&var forced, inst, false),
+                StoreIdx => try mark_memory(&var forced, inst, false),
+                _ => {
+                    try reads(inst, &var regs, allocator, &func.copies);
+                    var index = 0;
+                    while regs.get(index) |reg| {
+                        index = index + 1;
+                        try mark_reg(&var forced, reg);
+                    }
+                    if writes_rd(inst.op) {
+                        try mark_reg(&var forced, inst.rd);
+                    }
+                },
+            }
+        }
+    }
+    for 0..nv |v| {
+        try out.set(v, wants.get_or_panic(v) and !forced.get_or_panic(v));
+    }
+    // A register only copied to or from one in a float register joins it,
+    // so the copy is a float move.
+    var changed = true;
+    var rounds = 0;
+    while changed and rounds < 8 {
+        changed = false;
+        rounds = rounds + 1;
+        block_id = 0;
+        while func.blocks.at(block_id) |block| {
+            block_id = block_id + 1;
+            var inst_index = 0;
+            while block.insts.at(inst_index) |inst| {
+                inst_index = inst_index + 1;
+                if inst.op == MOp::Mov {
+                    if try join_float(out, &forced, inst.rd, inst.rn) {
+                        changed = true;
+                    }
+                }
+                if inst.op == MOp::ParCopy {
+                    for 0..inst.imm |index| {
+                        let copy = func.copies.get_or_panic(inst.slot + index);
+                        if !copy.src_imm and try join_float(out, &forced, copy.dst, copy.src) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // A select with any register outside them takes all three out.
+    changed = true;
+    while changed {
+        changed = false;
+        block_id = 0;
+        while func.blocks.at(block_id) |block| {
+            block_id = block_id + 1;
+            var inst_index = 0;
+            while block.insts.at(inst_index) |inst| {
+                inst_index = inst_index + 1;
+                if inst.op != MOp::CSel {
+                    continue;
+                }
+                if in_float(out, inst.rd) and in_float(out, inst.rn) and in_float(out, inst.rm) {
+                    continue;
+                }
+                if try leave_float(out, inst.rd) {
+                    changed = true;
+                }
+                if try leave_float(out, inst.rn) {
+                    changed = true;
+                }
+                if try leave_float(out, inst.rm) {
+                    changed = true;
+                }
+            }
+        }
+    }
+    return;
+}
+
+fn mark_reg(table: &var array::Array<bool>, reg: i64) -> !void {
+    if is_vreg(reg) {
+        try table.set(reg - first_vreg(), true);
+    }
+    return;
+}
+
+fn mark_regs(table: &var array::Array<bool>, a: i64, b: i64, c: i64, d: i64) -> !void {
+    try mark_reg(table, a);
+    try mark_reg(table, b);
+    try mark_reg(table, c);
+    return mark_reg(table, d);
+}
+
+/// Marks the registers of a load or store a float register cannot hold:
+/// the address operands, and the data one unless it is a whole word or a
+/// zero-extended half word, which `ldr d` and `ldr s` read.
+fn mark_memory(forced: &var array::Array<bool>, inst: &MInst, load: bool) -> !void {
+    try mark_reg(forced, inst.rn);
+    try mark_reg(forced, inst.rm);
+    let whole = inst.width == 8 or inst.width == 4 and !(load and inst.signed);
+    if !whole {
+        try mark_reg(forced, inst.rd);
+    }
+    return;
+}
+
+fn in_float(chosen: &array::Array<bool>, reg: i64) -> bool {
+    if !is_vreg(reg) {
+        return false;
+    }
+    return chosen.get_or_panic(reg - first_vreg());
+}
+
+/// Puts whichever of a copy's two registers is outside the float ones in
+/// with the other, when nothing reads or writes it as an integer.
+fn join_float(chosen: &var array::Array<bool>, forced: &array::Array<bool>, a: i64, b: i64) -> !bool {
+    if !is_vreg(a) or !is_vreg(b) {
+        return false;
+    }
+    let ia = a - first_vreg();
+    let ib = b - first_vreg();
+    if chosen.get_or_panic(ia) == chosen.get_or_panic(ib) {
+        return false;
+    }
+    if chosen.get_or_panic(ia) and !forced.get_or_panic(ib) {
+        try chosen.set(ib, true);
+        return true;
+    }
+    if chosen.get_or_panic(ib) and !forced.get_or_panic(ia) {
+        try chosen.set(ia, true);
+        return true;
+    }
+    return false;
+}
+
+fn leave_float(chosen: &var array::Array<bool>, reg: i64) -> !bool {
+    if !in_float(chosen, reg) {
+        return false;
+    }
+    try chosen.set(reg - first_vreg(), false);
+    return true;
+}
+
 // ---- printing ----
 
 /// Is what the printer knows across the float instructions of one block:
@@ -392,9 +592,13 @@ fn fmov_out(allocator: Allocator, out: &var string::String, reg: i64, v: i64, wi
     return newline(allocator, out);
 }
 
-/// Returns the float register holding operand reg, moving it into scratch
-/// when v16 does not already hold it.
+/// Returns the float register holding operand reg: its own when allocation
+/// gave it one, otherwise v16 when that already holds it, or scratch after
+/// moving it in.
 fn float_operand(allocator: Allocator, out: &var string::String, cache: &FloatCache, reg: i64, width: i64, scratch: i64) -> !i64 {
+    if is_float_reg(reg) {
+        return float_reg_index(reg);
+    }
     if cache.reg >= 0 and cache.reg == reg and cache.width == width {
         return 16;
     }
@@ -402,10 +606,32 @@ fn float_operand(allocator: Allocator, out: &var string::String, cache: &FloatCa
     return scratch;
 }
 
-/// Writes `op v16, a[, b[, c]]` over float registers of a width.
-fn float_line(allocator: Allocator, out: &var string::String, op: []u8, width: i64, a: i64, b: i64, c: i64) -> !void {
+/// Returns the float register an instruction computes rd in: rd's own, or
+/// v16, from which it is then moved out.
+fn float_dest(rd: i64) -> i64 {
+    if is_float_reg(rd) {
+        return float_reg_index(rd);
+    }
+    return 16;
+}
+
+/// Moves a result computed in v16 out to the general register rd, which
+/// the cache then names; a result computed in rd's own float register
+/// needs nothing.
+fn float_result(allocator: Allocator, out: &var string::String, rd: i64, width: i64, cache: &var FloatCache) -> !void {
+    if is_float_reg(rd) {
+        return;
+    }
+    try fmov_out(allocator, out, rd, 16, width);
+    cache.reg = rd;
+    cache.width = width;
+    return;
+}
+
+/// Writes `op dest, a[, b[, c]]` over float registers of a width.
+fn float_line(allocator: Allocator, out: &var string::String, op: []u8, width: i64, dest: i64, a: i64, b: i64, c: i64) -> !void {
     try head(allocator, out, op);
-    try freg(allocator, out, 16, width);
+    try freg(allocator, out, dest, width);
     try comma(allocator, out);
     try freg(allocator, out, a, width);
     if b >= 0 {
@@ -456,17 +682,17 @@ fn print_float(allocator: Allocator, out: &var string::String, inst: &MInst, cac
         FBin => {
             let a = try float_operand(allocator, out, cache, inst.rn, width, 17);
             let b = try float_operand(allocator, out, cache, inst.rm, width, 18);
-            try float_line(allocator, out, float_mnemonic(inst.imm), width, a, b, 0 - 1);
+            try float_line(allocator, out, float_mnemonic(inst.imm), width, float_dest(inst.rd), a, b, 0 - 1);
         },
         FUn => {
             let a = try float_operand(allocator, out, cache, inst.rn, width, 17);
-            try float_line(allocator, out, float_mnemonic(inst.imm), width, a, 0 - 1, 0 - 1);
+            try float_line(allocator, out, float_mnemonic(inst.imm), width, float_dest(inst.rd), a, 0 - 1, 0 - 1);
         },
         FMAdd => {
             let a = try float_operand(allocator, out, cache, inst.rn, width, 17);
             let b = try float_operand(allocator, out, cache, inst.rm, width, 18);
             let c = try float_operand(allocator, out, cache, inst.ra, width, 19);
-            try float_line(allocator, out, "fmadd", width, a, b, c);
+            try float_line(allocator, out, "fmadd", width, float_dest(inst.rd), a, b, c);
         },
         FCmp => {
             let a = try float_operand(allocator, out, cache, inst.rn, width, 17);
@@ -484,14 +710,11 @@ fn print_float(allocator: Allocator, out: &var string::String, inst: &MInst, cac
             }
             let a = try float_operand(allocator, out, cache, inst.rn, width, 17);
             try head(allocator, out, "fcvt");
-            try freg(allocator, out, 16, to);
+            try freg(allocator, out, float_dest(inst.rd), to);
             try comma(allocator, out);
             try freg(allocator, out, a, width);
             try newline(allocator, out);
-            try fmov_out(allocator, out, inst.rd, 16, to);
-            cache.reg = inst.rd;
-            cache.width = to;
-            return;
+            return float_result(allocator, out, inst.rd, to, cache);
         },
         FToInt => {
             let a = try float_operand(allocator, out, cache, inst.rn, inst.imm, 17);
@@ -515,16 +738,22 @@ fn print_float(allocator: Allocator, out: &var string::String, inst: &MInst, cac
             } else {
                 try head(allocator, out, "ucvtf");
             }
-            try freg(allocator, out, 16, width);
+            try freg(allocator, out, float_dest(inst.rd), width);
             try comma(allocator, out);
             try reg_name(allocator, out, inst.rn, true);
             try newline(allocator, out);
         },
         FArg => {
+            if is_float_reg(inst.rn) {
+                return float_move(allocator, out, inst.imm, float_reg_index(inst.rn), width);
+            }
             try fmov_in(allocator, out, inst.imm, inst.rn, width);
             return;
         },
         FRet => {
+            if is_float_reg(inst.rd) {
+                return float_move(allocator, out, float_reg_index(inst.rd), inst.imm, width);
+            }
             try fmov_out(allocator, out, inst.rd, inst.imm, width);
             if cache.reg == inst.rd {
                 cache.reg = 0 - 1;
@@ -533,8 +762,47 @@ fn print_float(allocator: Allocator, out: &var string::String, inst: &MInst, cac
         },
         _ => return,
     }
-    try fmov_out(allocator, out, inst.rd, 16, width);
-    cache.reg = inst.rd;
-    cache.width = width;
+    return float_result(allocator, out, inst.rd, width, cache);
+}
+
+/// Writes `fmov vd, vn` between float registers of a width.
+fn float_move(allocator: Allocator, out: &var string::String, vd: i64, vn: i64, width: i64) -> !void {
+    try head(allocator, out, "fmov");
+    try freg(allocator, out, vd, width);
+    try comma(allocator, out);
+    try freg(allocator, out, vn, width);
+    return newline(allocator, out);
+}
+
+/// Puts a constant's bits in the float register rd: from the zero register,
+/// or through x16, which no instruction holds a value in across a constant.
+fn float_constant(allocator: Allocator, out: &var string::String, rd: i64, imm: i64) -> !void {
+    var source = reg_zr();
+    if imm != 0 {
+        try materialize(allocator, out, scratch0(), imm);
+        source = scratch0();
+    }
+    return rr(allocator, out, "fmov", rd, source);
+}
+
+/// Prints a select over float registers as `fcsel`. A spilled operand, which
+/// allocation reloads into a general register, moves through v17 or v18,
+/// and a spilled result through v16.
+fn float_select(allocator: Allocator, out: &var string::String, inst: &MInst) -> !void {
+    let cache = empty_cache();
+    let a = try float_operand(allocator, out, &cache, inst.rn, 8, 17);
+    let b = try float_operand(allocator, out, &cache, inst.rm, 8, 18);
+    try head(allocator, out, "fcsel");
+    try freg(allocator, out, float_dest(inst.rd), 8);
+    try comma(allocator, out);
+    try freg(allocator, out, a, 8);
+    try comma(allocator, out);
+    try freg(allocator, out, b, 8);
+    try comma(allocator, out);
+    try out.append_bytes(allocator, cond_spelling(inst.cond));
+    try newline(allocator, out);
+    if !is_float_reg(inst.rd) {
+        try fmov_out(allocator, out, inst.rd, 16, 8);
+    }
     return;
 }

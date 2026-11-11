@@ -335,9 +335,11 @@ fn print_saved(allocator: Allocator, out: &var string::String, load: bool, saved
         let first = saved.get_or_panic(index);
         if index + 1 < saved.len() {
             let second = saved.get_or_panic(index + 1);
-            try print_pair(allocator, out, load, first, second, reg_sp(), at + index * 8);
-            index = index + 2;
-            continue;
+            if is_float_reg(first) == is_float_reg(second) {
+                try print_pair(allocator, out, load, first, second, reg_sp(), at + index * 8);
+                index = index + 2;
+                continue;
+            }
         }
         try print_mem(allocator, out, load, first, reg_sp(), at + index * 8, 8, false);
         index = index + 1;
@@ -399,12 +401,23 @@ fn reg_name(allocator: Allocator, out: &var string::String, reg: i64, wide: bool
         }
         return out.append_bytes(allocator, "wzr");
     }
+    if is_float_reg(reg) {
+        return freg(allocator, out, float_reg_index(reg), width_of(wide));
+    }
     if wide {
         try out.append_byte(allocator, cast<u8>(120));
     } else {
         try out.append_byte(allocator, cast<u8>(119));
     }
     return fmt::append_i64(allocator, out, reg);
+}
+
+/// Returns the bytes a register spelled wide or not holds.
+fn width_of(wide: bool) -> i64 {
+    if wide {
+        return 8;
+    }
+    return 4;
 }
 
 /// Writes an indented mnemonic and a space; the caller adds the operands.
@@ -805,9 +818,17 @@ fn print_inst(allocator: Allocator, out: &var string::String, func: &MFunction, 
             if inst.rd == inst.rn {
                 return;
             }
+            if is_float_reg(inst.rd) or is_float_reg(inst.rn) {
+                return rr(allocator, out, "fmov", inst.rd, inst.rn);
+            }
             return rr(allocator, out, "mov", inst.rd, inst.rn);
         },
-        MovImm => return materialize(allocator, out, inst.rd, inst.imm),
+        MovImm => {
+            if is_float_reg(inst.rd) {
+                return float_constant(allocator, out, inst.rd, inst.imm);
+            }
+            return materialize(allocator, out, inst.rd, inst.imm);
+        },
         Add => return rrr(allocator, out, "add", inst.rd, inst.rn, inst.rm),
         Sub => return rrr(allocator, out, "sub", inst.rd, inst.rn, inst.rm),
         Mul => return rrr(allocator, out, "mul", inst.rd, inst.rn, inst.rm),
@@ -926,6 +947,9 @@ fn print_inst(allocator: Allocator, out: &var string::String, func: &MFunction, 
             return newline(allocator, out);
         },
         CSel => {
+            if is_float_reg(inst.rd) or is_float_reg(inst.rn) or is_float_reg(inst.rm) {
+                return float_select(allocator, out, inst);
+            }
             try head(allocator, out, "csel");
             try reg_name(allocator, out, inst.rd, true);
             try comma(allocator, out);

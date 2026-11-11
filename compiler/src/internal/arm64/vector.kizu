@@ -32,6 +32,13 @@ import std::array;
 // behind the same test, without the bounds checks, several elements a turn,
 // each accumulator kept once per element of the turn.
 //
+// A loop whose accumulators are `f64` runs that way too, with its
+// elements and the body's `+ - * /` on them in float registers: each
+// accumulator stays one chain, combined with the elements one after another
+// in the order and with the operands the scalar loop has, so every rounding
+// is the one the scalar loop makes. Only the bounds checks and the loop's
+// own tests go.
+//
 // The vector registers are not allocated: the loop names v0..v7 and
 // v16..v31 directly, holds none of them across a call, and leaves v8..v15,
 // whose low halves a callee preserves, alone.
@@ -71,7 +78,8 @@ enum AccKind {
 
 /// Is one accumulator: phi takes update, which is phi combined with x --
 /// where cond is set, only in the lanes where cond is when. via is the
-/// binary op that combines.
+/// binary op that combines; swapped, that it reads x first (`x op phi`),
+/// which a float accumulator keeps.
 struct Acc {
     phi: ir::Name,
     kind: AccKind,
@@ -80,6 +88,7 @@ struct Acc {
     via: ir::Name,
     cond: ir::Name,
     when: bool,
+    swapped: bool,
 }
 
 /// Is what the planner learns of a loop.
@@ -103,6 +112,8 @@ struct Plan {
     multiplies: bool,
     // The loop runs in general registers: no lanes, the bounds tests gone.
     scalar: bool,
+    // The accumulators are `f64`, each one ordered chain.
+    float: bool,
 }
 
 /// Is one element read of the body: name = source[k], source an array or a
@@ -273,7 +284,8 @@ fn (self: &var Selector) vectorize_entry(module: &ir::Module, from: ir::Name, ta
         unroll: 4,
         uses_index: false,
         multiplies: false,
-        scalar: false
+        scalar: false,
+        float: false
     };
     if !try self.plan_loop(module, from, &var plan, &var tables) {
         return false;
@@ -332,7 +344,8 @@ fn (self: &var Selector) plan_loop(module: &ir::Module, from: ir::Name, plan: &v
                 return false;
             }
             let shape = shape_of(module, node.result.type_name);
-            if shape.class != Class::Scalar or module.names.is(node.result.type_name, "bool") {
+            let double = shape.class == Class::Float and shape.size == 8;
+            if shape.class != Class::Scalar and !double or module.names.is(node.result.type_name, "bool") {
                 return false;
             }
             if self.val(node.result.name).kind != ValKind::Reg {
@@ -392,6 +405,7 @@ fn (self: &var Selector) plan_loop(module: &ir::Module, from: ir::Name, plan: &v
             let shape = shape_of(module, node.result.type_name);
             plan.width = shape.size;
             plan.acc_signed = shape.signed;
+            plan.float = shape.class == Class::Float;
         } else if !ir::same_name(plan.acc_type, node.result.type_name) {
             return false;
         }
@@ -555,7 +569,7 @@ fn (self: &var Selector) plan_loop(module: &ir::Module, from: ir::Name, plan: &v
     if plan.uses_index and plan.width != 8 {
         return false;
     }
-    if plan.multiplies or tables.loads.len() > 1 {
+    if plan.float or plan.multiplies or tables.loads.len() > 1 {
         return plan_scalar(plan, tables);
     }
     if self.pool_need(plan, tables) > pool_size() {
@@ -611,7 +625,7 @@ fn (self: &Selector) pool_need(plan: &Plan, tables: &Tables) -> i64 {
 /// Binds a scalar constant of the loop.
 fn (self: &var Selector) plan_const(module: &ir::Module, node: &ir::InstrNode, tables: &var Tables) -> !bool {
     let shape = shape_of(module, node.result.type_name);
-    if shape.class != Class::Scalar or module.names.is(node.result.type_name, "bool") {
+    if shape.class != Class::Scalar and shape.class != Class::Float or module.names.is(node.result.type_name, "bool") {
         return false;
     }
     if try self.select_const(module, node) |failed| {
@@ -724,7 +738,11 @@ fn (self: &var Selector) plan_load(module: &ir::Module, node: &ir::InstrNode, sl
         return false;
     }
     let shape = shape_of(module, node.result.type_name);
-    if shape.class != Class::Scalar or module.names.is(node.result.type_name, "bool") {
+    var element = Class::Scalar;
+    if plan.float {
+        element = Class::Float;
+    }
+    if shape.class != element or module.names.is(node.result.type_name, "bool") {
         return false;
     }
     if shape.size != 1 and shape.size != 2 and shape.size != 4 and shape.size != 8 {
@@ -845,6 +863,9 @@ fn (self: &var Selector) plan_binary(module: &ir::Module, node: &ir::InstrNode, 
         try set_role(allocator, tables, node.result.name, Role::Used);
         return Role::Used;
     }
+    if plan.float {
+        return self.plan_float_binary(module, node, plan, tables);
+    }
     let left_shape = shape_of(module, left.type_name);
     if left_shape.class != Class::Scalar or left_shape.size > plan.width {
         return null;
@@ -911,7 +932,8 @@ fn (self: &var Selector) plan_binary(module: &ir::Module, node: &ir::InstrNode, 
             update: node.result.name,
             via: node.result.name,
             cond: ir::empty_name(),
-            when: true
+            when: true,
+            swapped: false
         });
         try set_role(allocator, tables, node.result.name, Role::Used);
         return Role::Used;
@@ -942,6 +964,67 @@ fn (self: &var Selector) plan_binary(module: &ir::Module, node: &ir::InstrNode, 
         try self.lane_operand(left.name, lr, plan, tables);
         try self.lane_operand(right.name, rr, plan, tables);
     }
+    try set_role(allocator, tables, node.result.name, Role::Elem);
+    try tables.elems.append(allocator, node.result.name);
+    return Role::Elem;
+}
+
+/// Plans a binary op of the body of a loop over `f64` accumulators: an
+/// accumulator's `+` or `-` of an element value, or `+ - * /` of element
+/// values, all `f64`.
+fn (self: &var Selector) plan_float_binary(module: &ir::Module, node: &ir::InstrNode, plan: &var Plan, tables: &var Tables) -> !?Role {
+    let allocator = self.allocator;
+    let left = node.args.get(0) orelse return null;
+    let right = node.args.get(1) orelse return null;
+    let lr = role_of(tables, left.name);
+    let rr = role_of(tables, right.name);
+    let op = node.operand;
+    if !ir::same_name(node.result.type_name, plan.acc_type) or !ir::same_name(left.type_name, plan.acc_type) or
+        !ir::same_name(right.type_name, plan.acc_type) {
+        return null;
+    }
+    if lr == Role::Acc or rr == Role::Acc {
+        if lr == Role::Acc and rr == Role::Acc {
+            return null;
+        }
+        var x = right;
+        if rr == Role::Acc {
+            x = left;
+        }
+        if !lane_value(role_of(tables, x.name)) {
+            return null;
+        }
+        var kind = AccKind::Add;
+        if module.names.is(op, "-") {
+            kind = AccKind::Sub;
+        } else if !module.names.is(op, "+") {
+            return null;
+        }
+        var acc = left;
+        if rr == Role::Acc {
+            acc = right;
+        }
+        try tables.accs.append(allocator, Acc {
+            phi: acc.name,
+            kind: kind,
+            x: x.name,
+            update: node.result.name,
+            via: node.result.name,
+            cond: ir::empty_name(),
+            when: true,
+            swapped: rr == Role::Acc
+        });
+        try set_role(allocator, tables, node.result.name, Role::Used);
+        return Role::Used;
+    }
+    if !lane_value(lr) or !lane_value(rr) or uniform(lr) and uniform(rr) {
+        return null;
+    }
+    if !module.names.is(op, "+") and !module.names.is(op, "-") and !module.names.is(op, "*") and !module.names.is(op, "/") {
+        return null;
+    }
+    try self.lane_operand(left.name, lr, plan, tables);
+    try self.lane_operand(right.name, rr, plan, tables);
     try set_role(allocator, tables, node.result.name, Role::Elem);
     try tables.elems.append(allocator, node.result.name);
     return Role::Elem;
@@ -1115,7 +1198,8 @@ fn (self: &var Selector) plan_select(module: &ir::Module, block_name: ir::Name, 
             update: phi.result.name,
             via: phi.result.name,
             cond: ir::empty_name(),
-            when: true
+            when: true,
+            swapped: false
         });
         try set_role(allocator, tables, phi.result.name, Role::Used);
         phis = phis + 1;
@@ -1488,7 +1572,9 @@ fn (self: &var Selector) emit_guard(module: &ir::Module, plan: &Plan, tables: &T
 /// elements a turn, each accumulator kept once per element of the turn and
 /// folded into its phi after, k moved past the elements done; the scalar
 /// loop runs the rest. Wrapping `+ - ^ & |` are associative and
-/// commutative, so splitting an accumulator does not change its result.
+/// commutative, so splitting an accumulator does not change its result. A
+/// float accumulator is not split: one register takes the elements of the
+/// turn in order.
 fn (self: &var Selector) emit_scalar_loop(module: &ir::Module, plan: &Plan, tables: &var Tables) -> !void {
     let allocator = self.allocator;
     let unroll = plan.unroll;
@@ -1536,8 +1622,14 @@ fn (self: &var Selector) emit_scalar_loop(module: &ir::Module, plan: &Plan, tabl
     index = 0;
     while tables.accs.get(index) |acc| {
         index = index + 1;
+        var chain = 0 - 1;
         for 0..unroll |u| {
+            if plan.float and u > 0 {
+                try accs.append(allocator, chain);
+                continue;
+            }
             let reg = self.func.new_vreg();
+            chain = reg;
             if u == 0 {
                 try self.mov(reg, self.val(acc.phi).reg);
             } else if acc.kind == AccKind::And {
@@ -1571,15 +1663,32 @@ fn (self: &var Selector) emit_scalar_loop(module: &ir::Module, plan: &Plan, tabl
                 instr_index = instr_index + 1;
                 let node = module.instrs.at(instr.node);
                 if node.op == ir::Op::Binary and role_of(tables, node.result.name) == Role::Elem {
-                    try self.word_binary(module, node, tables);
+                    if plan.float {
+                        try self.double_binary(module, node, tables);
+                    } else {
+                        try self.word_binary(module, node, tables);
+                    }
                 }
             }
         }
         index = 0;
         while tables.accs.get(index) |acc| {
             let reg = accs.get_or_panic(index * unroll + u);
-            try self.op3(word_op(acc.kind), reg, reg, vreg_slot(tables, resolve(tables, acc.x)));
+            let x = vreg_slot(tables, resolve(tables, acc.x));
             index = index + 1;
+            if !plan.float {
+                try self.op3(word_op(acc.kind), reg, reg, x);
+                continue;
+            }
+            var kind = float_add();
+            if acc.kind == AccKind::Sub {
+                kind = float_sub();
+            }
+            if acc.swapped {
+                try self.float_op(MOp::FBin, kind, 8, reg, x, reg);
+            } else {
+                try self.float_op(MOp::FBin, kind, 8, reg, reg, x);
+            }
         }
     }
     index = 0;
@@ -1599,6 +1708,9 @@ fn (self: &var Selector) emit_scalar_loop(module: &ir::Module, plan: &Plan, tabl
         }
         let first = accs.get_or_panic(index * unroll);
         var u = 1;
+        if plan.float {
+            u = unroll;
+        }
         while u < unroll {
             try self.op3(word_op(kind), first, first, accs.get_or_panic(index * unroll + u));
             u = u + 1;
@@ -1656,6 +1768,25 @@ fn (self: &var Selector) word_binary(module: &ir::Module, node: &ir::InstrNode, 
         }
         try self.op3(word, dst, lhs, rhs);
     }
+    return set_vreg_slot(self.allocator, tables, node.result.name, dst);
+}
+
+/// Emits one `f64` element op of the body in float registers, the result in
+/// a register of its own.
+fn (self: &var Selector) double_binary(module: &ir::Module, node: &ir::InstrNode, tables: &var Tables) -> !void {
+    let left = node.args.get_or_panic(0);
+    let right = node.args.get_or_panic(1);
+    let dst = self.func.new_vreg();
+    let op = node.operand;
+    var kind = float_div();
+    if module.names.is(op, "+") {
+        kind = float_add();
+    } else if module.names.is(op, "-") {
+        kind = float_sub();
+    } else if module.names.is(op, "*") {
+        kind = float_mul();
+    }
+    try self.float_op(MOp::FBin, kind, 8, dst, vreg_slot(tables, resolve(tables, left.name)), vreg_slot(tables, resolve(tables, right.name)));
     return set_vreg_slot(self.allocator, tables, node.result.name, dst);
 }
 
