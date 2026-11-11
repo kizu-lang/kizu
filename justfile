@@ -176,8 +176,8 @@ spec-unsafecap:
 
 # Test the C header import model, search it for an unsound acceptance, require
 # the importer as it is and each mutant (one rule broken) to fail the search, and
-# resample the programs internal/cimport replays against the importer and the
-# checker (spec/cimport/README.md).
+# resample the programs compiler/ and internal/cimport replay against their
+# importers and checkers (spec/cimport/README.md).
 spec-cimport:
     cd spec/cimport && quint test cimport_test.qnt --main cimport_test --backend typescript
     cd spec/cimport && for init in initGuided initOneMistake initFree initReadonly; do \

@@ -10,7 +10,8 @@ spec/cimport/cimport.qnt          モデル: importer の判定、checker の判
 spec/cimport/cimport_test.qnt     既知の形に対するモデルの判定(quint test)
 scripts/cimport-mbt/main.kizu     quint run の trace を層化して fixture に書く(Kizu)
 compiler/tests/mbt/cimport.json   その fixture(checked in)
-internal/cimport/mbt_test.go      fixture の header を import し、出力と呼び出し側を check して、モデルの予測と比べる
+compiler/src/cimport_mbt_test.kizu  fixture の header を compiler/ の importer で import し、出力と呼び出し側を check して、モデルの予測と比べる
+internal/cimport/mbt_test.go      同じ fixture を Go 実装の importer と checker に当てる
 ```
 
 ## 範囲
@@ -107,19 +108,22 @@ importer と checker が受理したプログラムについて(`soundness` は 
 `arg-wide` / `arg-readonly`、次に `two-decls` / `deep-pointer` / `unnamed` / `call-2` /
 `ptr-ret` / `call` / `pointer` / `plain`)」の bucket に分け、bucket ごとに 3 本残します。
 
-`mbt_test.go` は header を `cimport.Import` に通し、書き出した宣言の文字列をモデルの予測と
-比べ、宣言と呼び出し側を 1 file の module にして `kizu check` と同じ type check →
-ownership check を in-process で走らせます。比べる相手は `implemented` があればそれ、
-無ければ `spec` です。`implemented` に合わず `spec` に合えば「直った」と報告して落ちます
-(fixture と findings の更新を促す)。test は 3 つです。
+replay は 2 つあり、同じ fixture を読みます。`compiler/src/cimport_mbt_test.kizu` は
+`compiler/` の importer と checker を、`internal/cimport/mbt_test.go` は Go 実装のものを
+見ます。どちらも header を importer(`cimport::import_header` / `cimport.Import`)に通し、
+書き出した宣言の文字列をモデルの予測と比べ、宣言と呼び出し側を 1 file の module にして
+`kizu check` と同じ type check → ownership check を in-process で走らせます。比べる相手は
+`implemented` があればそれ、無ければ `spec` です。`implemented` に合わず `spec` に合えば
+「直った」と報告して落ちます(fixture と findings の更新を促す)。test は次の 3 つで、
+`compiler/` 側にも同じものがあります(test 名は文で書いています)。
 
 * `TestCImportModelKnownShapes`: `cimport_test.qnt` と同じ既知形 40 本(F1〜F3 の形を含む)。
   各形を判定を反転させてもう一度当て、必ず食い違いとして出ることも確かめます。
 * `TestCImportModelCoversEveryClass`: 分類器が知っている 16 クラスのすべてを既知形が使うこと。
 * `TestCImportModelTraces`: fixture の再生。
 
-`KIZU_MBT_BIN=<kizu>` で外部の binary(`compiler/` から build したもの)の
-`import-c-header` と `check` に、`KIZU_MBT_FIXTURE=<file>` で別の fixture に当てられます。
+`KIZU_MBT_FIXTURE=<file>` で別の fixture に当てられます(両方)。Go 側は
+`KIZU_MBT_BIN=<kizu>` で外部の binary の `import-c-header` と `check` にも当てられます。
 
 ### 規模と結果(2026-11-08)
 
@@ -137,13 +141,32 @@ ownership check を in-process で走らせます。比べる相手は `implemen
   全 6976 本も 0(約 4 分)。
 * importer / checker への変異注入(手元で 1 か所ずつ書き換えて戻す、checked-in ではない)
   29 種のうち 27 種が `TestCImportModelTraces` 単独で落ちる。残り 2 種は振る舞いの
-  変わらない変異です。内訳は findings の「変異による確認」。
+  変わらない変異です。同じ 29 種を `compiler/` の importer / checker に入れても、`compiler/` 側の
+  fixture の再生で本数まで Go と同じに出る(2026-11-11)。内訳は findings の「変異による確認」。
+* `compiler/` 側の replay(2026-11-11): 既知形 40 本と fixture 837 本が 0、間引かない全
+  6976 本も 0(約 56 秒)。`kizu test compiler` に約 5 秒足す。
+* モデル側の変異(2026-11-11): Kizu の生成器で fixture を作って両方の replay に当てると、
+  食い違いの本数は Go と `compiler/` で同じ。
+
+  | fixture の元 | 本数 | 食い違い |
+  | --- | --- | --- |
+  | `IMPL` の `constCollapse` を `false` にしたモデル | 648 | 162 |
+  | `IMPL` の `dropVolatile` を `false` にしたモデル | 742 | 24 |
+  | `IMPL` の `retNonNull` を `false` にしたモデル | 799 | 359 |
+  | `asImplemented` / `mutantConstCollapse` / `mutantDropVolatile` / `mutantRetNonNull` | 519〜755 | 0 |
+  | checked-in fixture の 2 本の判定を反転したもの | 837 | 2 |
+
+  mutant module は `expected` の写像だけを変え、`implemented`(`IMPL`)は変えないので、
+  replay は食い違いません。`IMPL` を変えたモデル(importer の今の振る舞いを誤って書いた
+  モデル)は replay が落とします。`mutantSign` / `mutantUnmarked` は所見で説明できない
+  食い違いを生成器が見つけて止まります。
 
 ## 実行方法
 
 ```sh
 just spec-cimport                                   # quint test、健全性と mutant の探索、fixture の再生成
-go test ./internal/cimport -run TestCImportModel    # fixture を importer と checker に当てる(go test に含まれる)
+just selfhost                                       # compiler/ の importer と checker に当てる(kizu test compiler に含まれる)
+go test ./internal/cimport -run TestCImportModel    # Go 実装に当てる(go test に含まれる)
 KIZU_MBT_BIN=path/to/kizu go test ./internal/cimport -run TestCImportModel
 ```
 
@@ -151,7 +174,7 @@ KIZU_MBT_BIN=path/to/kizu go test ./internal/cimport -run TestCImportModel
 rust の evaluator は初回に GitHub から取得するもので、取得できない環境では動かないためです。
 TypeScript の simulator は operator を引数に取る定義を入れ子に呼ぶと外側の operator を
 見るので、入れ子の走査は `foldl` で直接書いています(`cimport.qnt` の `lexists` の comment)。
-`go test` は Quint を動かさず、checked-in の fixture だけを読みます。モデルを変えたら
+`go test` と `kizu test compiler` は Quint を動かさず、checked-in の fixture だけを読みます。モデルを変えたら
 `just spec-cimport` で fixture を作り直してください(1 分ほど)。生成器は
 `go run ./cmd/kizu run scripts/cimport-mbt/main.kizu -- -main asImplemented -invariant none`
 のように `--` の後に `-model` / `-main` / `-out` / `-samples` / `-seeds` / `-per` /

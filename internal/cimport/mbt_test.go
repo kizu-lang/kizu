@@ -27,6 +27,8 @@ import (
 // `spec` otherwise. A divergence is an importer or checker bug or a model bug,
 // and which one is a question for SPEC.md: record it in
 // findings/cimport-quint-findings.md rather than adjusting either side to agree.
+// compiler/src/cimport_mbt_test.kizu replays the same fixture against the
+// importer and the checker in compiler/.
 //
 // KIZU_MBT_BIN=<kizu binary> runs `<binary> import-c-header` and
 // `<binary> check` instead of the in-process importer and checker, so the same

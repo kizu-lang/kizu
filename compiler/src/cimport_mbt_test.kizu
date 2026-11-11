@@ -1,0 +1,925 @@
+import compiler::internal::ast;
+import compiler::internal::cimport;
+import compiler::internal::diagnostic;
+import compiler::internal::ownership;
+import compiler::internal::project;
+import compiler::internal::types;
+import std::array;
+import std::fs;
+import std::io;
+import std::json;
+import std::mem;
+import std::process;
+import std::string;
+import std::testing;
+
+// The programs here come from the Quint model of the C header import in
+// spec/cimport/cimport.qnt (README.md there says what it covers);
+// scripts/cimport-mbt samples them into compiler/tests/mbt/cimport.json. Each
+// case is a C header, an optional Kizu caller of its first function, and two
+// predictions: under the faithful mapping (`spec`) and, where the importer as
+// it is differs, under that (`implemented`, with the findings that explain
+// it). This runner imports the header with cimport::import_header, checks what
+// the importer wrote together with the caller the way `kizu check` does (type
+// check, then ownership check), and compares with `implemented` when there is
+// one and `spec` otherwise. A divergence is an importer or checker bug or a
+// model bug, and which one is a question for SPEC.md: record it in
+// findings/cimport-quint-findings.md rather than adjusting either side to
+// agree. internal/cimport/mbt_test.go replays the same fixture against the Go
+// importer and checker.
+//
+// The caller of the header's first function is
+//
+//     fn use(a1: <args[0]>, ..) -> <ret> {
+//         // SAFETY: ..                     only when marked
+//         return unsafe f(a1, ..);          `unsafe` only when marked; no `return` for void
+//     }
+//
+// The files of compiler/src share one namespace, so the names here carry a
+// `ci_` prefix to stay clear of the other replays.
+
+/// The Kizu function that calls the header's first function.
+struct CiCaller {
+    marked: bool,
+    args: array::Array<string::String>,
+    ret: string::String,
+}
+
+/// One outcome: the classes the pipeline may report (none: it must accept),
+/// and, when has_decls, what the importer writes.
+struct CiPrediction {
+    expect: array::Array<string::String>,
+    has_decls: bool,
+    decls: string::String,
+}
+
+/// One program of the fixture.
+struct CiCase {
+    bucket: string::String,
+    header: string::String,
+    has_caller: bool,
+    caller: CiCaller,
+    spec: CiPrediction,
+    has_implemented: bool,
+    implemented: CiPrediction,
+    findings: array::Array<string::String>,
+}
+
+/// What the importer and the checker said about one program. An empty
+/// import_error or check_error is none.
+struct CiResult {
+    decls: string::String,
+    import_error: string::String,
+    check_error: string::String,
+}
+
+/// The fixture file. Its cases are read as JSON values and copied into
+/// CiCase by ci_case_from: the members the fixture leaves out when they have
+/// no value (caller, decls, implemented, findings) are told apart there.
+pub struct CiFixture {
+    pub note: string::String,
+    pub cases: array::Array<json::Value>,
+}
+
+/// Shapes whose outcome SPEC §12.2 and the importer's own tests fix, and the
+/// known divergences of the findings, one per line as
+/// `name|header|caller|spec|implemented|findings`. They mirror
+/// spec/cimport/cimport_test.qnt, so a harness that renders or classifies
+/// wrongly fails here before it disagrees with the model elsewhere.
+///
+/// `\n` in the header and in declarations is a line break. A caller is
+/// `["!"]ret(arg,..)`, "!" for a marked call, or empty for none. A prediction
+/// is its classes separated by `,`, and `=` and the declarations when the
+/// importer writes some; an empty implemented is none, and findings are
+/// separated by `,`. resultType is not a shape the model draws (its caller
+/// takes the result at the C type): it is here so the classifier is seen to
+/// name a result type mismatch.
+fn ci_known_shapes() -> []u8 {
+    return
+        \\puts|int f(const char *s);\n||=extern "c" fn f(s: ptr<const i8>) -> i32||
+        \\writeByte|void f(unsigned char *p, unsigned char value);\n|!void(ptr<u8>,u8)|=extern "c" fn f(p: ptr<u8>, value: u8) -> void||
+        \\innermostConst|int f(const char **p);\n||=extern "c" fn f(p: ptr<ptr<const i8>>) -> i32||
+        \\lenCall|size_t f(const uint8_t *data, size_t n);\n|!usize(ptr<const u8>,usize)|=extern "c" fn f(data: ptr<const u8>, n: usize) -> usize||
+        \\unnamedPointer|int f(const int32_t *);\n||=extern "c" fn f(p1: ptr<const i32>) -> i32||
+        \\unnamedTrailingQualifier|int f(int *const);\n||=extern "c" fn f(const: ptr<i32>) -> i32||
+        \\unnamedScalar|int f(int);\n||Import:type||
+        \\constPointer|void f(char *const p);\n|!void(ptr<const i8>)|Use:arg_type=extern "c" fn f(p: ptr<i8>) -> void|=extern "c" fn f(p: ptr<const i8>) -> void|F1
+        \\middleConst|void f(char *const *p);\n||=extern "c" fn f(p: ptr<const ptr<i8>>) -> void|=extern "c" fn f(p: ptr<ptr<const i8>>) -> void|F1
+        \\pointerResult|char* f(const char* name);\n|!ptr<i8>(ptr<const i8>)|Use:ret_type=extern "c" fn f(name: ptr<const i8>) -> ?ptr<i8>|=extern "c" fn f(name: ptr<const i8>) -> ptr<i8>|F2
+        \\pointerResultChecked|char* f(const char* name);\n|!?ptr<i8>(ptr<const i8>)|=extern "c" fn f(name: ptr<const i8>) -> ?ptr<i8>|=extern "c" fn f(name: ptr<const i8>) -> ptr<i8>|F2
+        \\gluedResult|int *f(void);\n||Import:declaration||
+        \\volatile|void f(volatile int *x);\n||Import:volatile|=extern "c" fn f(x: ptr<i32>) -> void|F3
+        \\topVolatile|int f(int *volatile x);\n||=extern "c" fn f(x: ptr<i32>) -> i32||
+        \\define|#define X 1\n||Import:preprocessor||
+        \\typedef|typedef int my_int;\n||Import:typedef||
+        \\struct|struct point { int x; };\n||Import:struct||
+        \\enum|enum color { RED };\n||Import:enum||
+        \\var|int counter;\n||Import:declaration||
+        \\variadic|int f(int x, ...);\n||Import:variadic||
+        \\fnptr|int f(int (*cb)(int));\n||Import:fnptr||
+        \\array|int f(int buf[8]);\n||Import:array||
+        \\emptyParam|int f(int x, );\n||Import:empty_param||
+        \\long|long f(void);\n||Import:type||
+        \\bool|int f(_Bool b);\n||Import:type||
+        \\defineSwallowsNext|#define X 1\nint f(void);\n||Import:preprocessor||
+        \\firstRejection|int f(int);\ntypedef int my_int;\n||Import:type||
+        \\keywordName|int fn(void);\n||Check:parse=extern "c" fn fn() -> i32||
+        \\keywordParam|int f(int match);\n||Check:parse=extern "c" fn f(match: i32) -> i32||
+        \\voidParam|int f(void x);\n||Check:void_param=extern "c" fn f(x: void) -> i32||
+        \\duplicate|int f(void);\nlong long f(void);\n||Check:duplicate=extern "c" fn f() -> i32\nextern "c" fn f() -> i64||
+        \\noParams|int f();\n|!i32()|=extern "c" fn f() -> i32||
+        \\loneVoid|int f(void);\n|!i32()|=extern "c" fn f() -> i32||
+        \\unmarked|int f(int x);\n|i32(i32)|Use:missing_marker=extern "c" fn f(x: i32) -> i32||
+        \\wide|int f(int x);\n|!i32(i64)|Use:arg_type=extern "c" fn f(x: i32) -> i32||
+        \\nullableArg|int f(int *p);\n|!i32(?ptr<i32>)|Use:arg_type=extern "c" fn f(p: ptr<i32>) -> i32||
+        \\readonlyArg|int f(int *p);\n|!i32(ptr<const i32>)|Use:arg_type=extern "c" fn f(p: ptr<i32>) -> i32||
+        \\sliceArg|int f(uint8_t *p);\n|!i32([]u8)|Use:arg_type=extern "c" fn f(p: ptr<u8>) -> i32||
+        \\resultType|int f(void);\n|!u8()|Use:ret_type=extern "c" fn f() -> i32||
+        \\readonlyToConst|int f(const char *s);\n|!i32(ptr<const i8>)|=extern "c" fn f(s: ptr<const i8>) -> i32||
+    ;
+}
+
+/// Every class the classifier knows. A class no known shape exercises is one
+/// a broken classifier could map anything to unnoticed.
+fn ci_classes() -> []u8 {
+    return "Import:preprocessor,Import:typedef,Import:struct,Import:enum,Import:variadic,Import:fnptr,Import:array,Import:type,Import:empty_param,Import:declaration,Check:void_param,Check:duplicate,Check:parse,Use:missing_marker,Use:arg_type,Use:ret_type";
+}
+
+/// The fragments of an importer or checker message and the class the model
+/// spells them with, one per line as `fragment|class`. The first fragment
+/// found wins.
+fn ci_fragments() -> []u8 {
+    return
+        \\preprocessor directives are unsupported|Import:preprocessor
+        \\typedef is unsupported|Import:typedef
+        \\struct declarations are unsupported|Import:struct
+        \\enum declarations are unsupported|Import:enum
+        \\variadic functions are unsupported|Import:variadic
+        \\function pointers are unsupported|Import:fnptr
+        \\arrays are unsupported|Import:array
+        \\unsupported C type|Import:type
+        \\empty parameter|Import:empty_param
+        \\unsupported declaration|Import:declaration
+        \\cannot have type void|Check:void_param
+        \\duplicate function|Check:duplicate
+        \\requires `unsafe`|Use:missing_marker
+        \\return expects |Use:ret_type
+    ;
+}
+
+/// Appends the class of an importer or checker message, as the model spells
+/// it, or "?" for a message the model does not know.
+fn ci_classify(allocator: Allocator, out: &var string::String, message: []u8) -> !void {
+    let rows = try ci_table_rows(allocator, ci_fragments());
+    defer rows.deinit(allocator);
+    var index = 0;
+    while rows.at(index) |fields| {
+        index = index + 1;
+        if ci_contains_bytes(message, ci_field_at(fields, 0)) {
+            return out.append_bytes(allocator, ci_field_at(fields, 1));
+        }
+    }
+    if ci_contains_bytes(message, "c import error") and ci_contains_bytes(message, "volatile") {
+        return out.append_bytes(allocator, "Import:volatile");
+    }
+    if ci_contains_bytes(message, "arg ") and ci_contains_bytes(message, " expects ") {
+        return out.append_bytes(allocator, "Use:arg_type");
+    }
+    if ci_contains_bytes(message, "expected ") and ci_contains_bytes(message, ", got `") and
+        !ci_contains_bytes(message, "type error") {
+        return out.append_bytes(allocator, "Check:parse");
+    }
+    return out.append_bytes(allocator, "?");
+}
+
+/// Writes the caller of the header's first function.
+fn ci_render_caller(allocator: Allocator, out: &var string::String, c: &CiCaller) -> !void {
+    var params = string::new(allocator);
+    defer params.deinit(allocator);
+    var call = string::new(allocator);
+    defer call.deinit(allocator);
+    if c.marked {
+        try call.append_bytes(allocator, "unsafe ");
+    }
+    try call.append_bytes(allocator, "f(");
+    var index = 0;
+    while c.args.at(index) |ty| {
+        if index > 0 {
+            try params.append_bytes(allocator, ", ");
+            try call.append_bytes(allocator, ", ");
+        }
+        index = index + 1;
+        try params.append_byte(allocator, cast<u8>(97));
+        try ci_append_i64(allocator, &var params, index);
+        try params.append_bytes(allocator, ": ");
+        try params.append_string(allocator, ty);
+        try call.append_byte(allocator, cast<u8>(97));
+        try ci_append_i64(allocator, &var call, index);
+    }
+    try call.append_byte(allocator, cast<u8>(41));
+    try out.append_bytes(allocator, "fn use(");
+    try out.append_string(allocator, &params);
+    try out.append_bytes(allocator, ") -> ");
+    try out.append_string(allocator, &c.ret);
+    try out.append_bytes(allocator, " {");
+    try out.append_byte(allocator, cast<u8>(10));
+    if c.marked {
+        try out.append_bytes(allocator, "    // SAFETY: the arguments are what the C declaration asks for");
+        try out.append_byte(allocator, cast<u8>(10));
+    }
+    try out.append_bytes(allocator, "    ");
+    let ret = c.ret.as_bytes();
+    if !mem::equal_bytes(ret, "void") {
+        try out.append_bytes(allocator, "return ");
+    }
+    try out.append_string(allocator, &call);
+    try out.append_byte(allocator, cast<u8>(59));
+    try out.append_byte(allocator, cast<u8>(10));
+    try out.append_byte(allocator, cast<u8>(125));
+    return out.append_byte(allocator, cast<u8>(10));
+}
+
+fn ci_append_i64(allocator: Allocator, out: &var string::String, value: i64) -> !void {
+    if value >= 10 {
+        try ci_append_i64(allocator, out, value / 10);
+    }
+    return out.append_byte(allocator, cast<u8>(48 + value % 10));
+}
+
+/// Imports the header and checks what the importer wrote together with the
+/// caller, the way `kizu import-c-header` and then `kizu check` do.
+fn ci_run(io: Io, allocator: Allocator, c: &CiCase, got: &var CiResult) -> !void {
+    let header = c.header.as_bytes();
+    let imported = try cimport::import_header(allocator, header);
+    match imported {
+        Error(message) => {
+            defer message.deinit(allocator);
+            return got.import_error.append_string(allocator, &message);
+        },
+        Declarations(declarations) => {
+            defer declarations.deinit(allocator);
+            try got.decls.append_string(allocator, &declarations);
+        },
+    }
+    var source = string::new(allocator);
+    defer source.deinit(allocator);
+    try source.append_string(allocator, &got.decls);
+    try source.append_byte(allocator, cast<u8>(10));
+    if c.has_caller {
+        try ci_render_caller(allocator, &var source, &c.caller);
+    }
+    let source_bytes = source.as_bytes();
+    return ci_check_source(io, allocator, source_bytes, &var got.check_error);
+}
+
+/// Loads and checks one file the way `kizu check` does, and appends the first
+/// diagnostic to out; out stays empty when the program passes.
+fn ci_check_source(io: Io, allocator: Allocator, source: []u8, out: &var string::String) -> !void {
+    var tree = ast::new(allocator);
+    defer tree.deinit(allocator);
+    var loader = try project::new_loader(io, allocator, "lib/kizu");
+    defer loader.deinit(allocator);
+    try loader.override_source("a.kizu", source);
+    var files = array::new<string::String>(allocator);
+    errdefer files.deinit(allocator);
+    let name = try string::from_bytes(allocator, "a.kizu");
+    try files.append(allocator, move name);
+    var modules = array::new<project::Module>(allocator);
+    errdefer modules.deinit(allocator);
+    try modules.append(allocator, project::Module {
+        path: string::new(allocator),
+        files: move files,
+        test_files: array::new<string::String>(allocator)
+    });
+    let graph = project::Graph {
+        package_name: string::new(allocator),
+        modules: move modules
+    };
+    defer graph.deinit(allocator);
+    let loaded = try loader.load_program(&var tree, &graph);
+    match loaded {
+        Error(failed) => {
+            defer failed.deinit(allocator);
+            let text = try failed.error(allocator, &loader.sources);
+            defer text.deinit(allocator);
+            return ci_append_message(allocator, out, &text);
+        },
+        Program(program) => {
+            defer program.deinit(allocator);
+            var diagnostics = try types::check_all(allocator, &var tree, &program);
+            defer diagnostics.deinit(allocator);
+            if diagnostics.len() == 0 {
+                var moves = try ownership::check_all(allocator, &var tree, &program);
+                defer moves.deinit(allocator);
+                return ci_append_first(allocator, out, &moves, &loader);
+            }
+            return ci_append_first(allocator, out, &diagnostics, &loader);
+        },
+    }
+}
+
+fn ci_append_first(
+    allocator: Allocator,
+    out: &var string::String,
+    diagnostics: &array::Array<diagnostic::Diagnostic>,
+    loader: &project::Loader
+) -> !void {
+    if diagnostics.at(0) |first| {
+        let text = try first.error(allocator, &loader.sources);
+        defer text.deinit(allocator);
+        return ci_append_message(allocator, out, &text);
+    }
+    return;
+}
+
+/// Appends a diagnostic's text. A diagnostic always says something; one that
+/// does not still has to count as a rejection.
+fn ci_append_message(allocator: Allocator, out: &var string::String, text: &string::String) -> !void {
+    if text.len() == 0 {
+        return out.append_bytes(allocator, "(empty diagnostic)");
+    }
+    return out.append_string(allocator, text);
+}
+
+/// Copies into out the prediction a case is held to: the importer as it is
+/// when the model says it differs, the faithful mapping otherwise.
+fn ci_wanted(allocator: Allocator, out: &var CiPrediction, c: &CiCase) -> !void {
+    if c.has_implemented {
+        return ci_copy_prediction(allocator, out, &c.implemented);
+    }
+    return ci_copy_prediction(allocator, out, &c.spec);
+}
+
+fn ci_copy_prediction(allocator: Allocator, out: &var CiPrediction, p: &CiPrediction) -> !void {
+    try ci_append_copies(allocator, &var out.expect, &p.expect);
+    out.has_decls = p.has_decls;
+    return out.decls.append_string(allocator, &p.decls);
+}
+
+/// Describes how the pipeline diverged from the model into problem; problem
+/// stays empty when it did not. A case with a known divergence that now
+/// agrees with the faithful mapping is a divergence too: the finding is fixed,
+/// and the fixture and findings/cimport-quint-findings.md need updating.
+/// (Where both predictions allow what the pipeline did, it is not told apart.)
+fn ci_compare(allocator: Allocator, problem: &var string::String, c: &CiCase, got: &CiResult) -> !void {
+    var want = ci_new_prediction(allocator);
+    defer want.deinit(allocator);
+    try ci_wanted(allocator, &var want, c);
+    try ci_match(allocator, problem, &want, got);
+    if problem.len() == 0 or !c.has_implemented {
+        return;
+    }
+    var faithful = string::new(allocator);
+    defer faithful.deinit(allocator);
+    try ci_match(allocator, &var faithful, &c.spec, got);
+    if faithful.len() == 0 {
+        problem.clear();
+        try problem.append_bytes(allocator, "the pipeline now does what the faithful mapping says; ");
+        try ci_append_joined(allocator, problem, &c.findings, ",");
+        try problem.append_bytes(allocator, " is fixed here");
+    }
+    return;
+}
+
+/// Compares one result with one prediction.
+fn ci_match(allocator: Allocator, problem: &var string::String, want: &CiPrediction, got: &CiResult) -> !void {
+    var kind = string::new(allocator);
+    defer kind.deinit(allocator);
+    if got.import_error.len() > 0 {
+        let message = got.import_error.as_bytes();
+        try ci_classify(allocator, &var kind, message);
+        let kind_bytes = kind.as_bytes();
+        if mem::equal_bytes(kind_bytes, "?") {
+            try problem.append_bytes(allocator, "the importer reported an error outside the model: ");
+            return problem.append_bytes(allocator, message);
+        }
+        if want.has_decls {
+            try problem.append_bytes(allocator, "the importer rejected the header: ");
+            return problem.append_bytes(allocator, message);
+        }
+        if !ci_holds(&want.expect, kind_bytes) {
+            try problem.append_bytes(allocator, "the importer reported ");
+            try problem.append_string(allocator, &kind);
+            try problem.append_bytes(allocator, ": ");
+            return problem.append_bytes(allocator, message);
+        }
+        return;
+    }
+    if !want.has_decls {
+        return problem.append_bytes(allocator, "the importer accepted the header");
+    }
+    let decls = got.decls.as_bytes();
+    let want_decls = want.decls.as_bytes();
+    if !mem::equal_bytes(decls, want_decls) {
+        return problem.append_bytes(allocator, "the importer wrote something else");
+    }
+    if got.check_error.len() == 0 {
+        if want.expect.len() > 0 {
+            return problem.append_bytes(allocator, "the checker accepted");
+        }
+        return;
+    }
+    let message = got.check_error.as_bytes();
+    try ci_classify(allocator, &var kind, message);
+    let kind_bytes = kind.as_bytes();
+    if mem::equal_bytes(kind_bytes, "?") {
+        try problem.append_bytes(allocator, "the checker reported a diagnostic outside the model: ");
+        return problem.append_bytes(allocator, message);
+    }
+    if want.expect.len() == 0 {
+        try problem.append_bytes(allocator, "the checker rejected: ");
+        return problem.append_bytes(allocator, message);
+    }
+    if !ci_holds(&want.expect, kind_bytes) {
+        try problem.append_bytes(allocator, "the checker reported ");
+        try problem.append_string(allocator, &kind);
+        try problem.append_bytes(allocator, ": ");
+        return problem.append_bytes(allocator, message);
+    }
+    return;
+}
+
+fn ci_new_result(allocator: Allocator) -> CiResult {
+    return CiResult {
+        decls: string::new(allocator),
+        import_error: string::new(allocator),
+        check_error: string::new(allocator),
+    };
+}
+
+/// Runs one case and describes into problem how it diverged from the model.
+fn ci_problem(io: Io, allocator: Allocator, c: &CiCase, problem: &var string::String) -> !void {
+    var got = ci_new_result(allocator);
+    defer got.deinit(allocator);
+    try ci_run(io, allocator, c, &var got);
+    try ci_compare(allocator, problem, c, &got);
+    if problem.len() > 0 {
+        try ci_report(io, allocator, c, problem, &got);
+    }
+    return;
+}
+
+/// Runs one case and reports on stderr how it diverged from the model.
+/// Returns whether it diverged.
+fn ci_diverges(io: Io, allocator: Allocator, c: &CiCase) -> !bool {
+    var problem = string::new(allocator);
+    defer problem.deinit(allocator);
+    try ci_problem(io, allocator, c, &var problem);
+    return problem.len() > 0;
+}
+
+/// Writes a divergence, the program and both predictions to stderr.
+fn ci_report(io: Io, allocator: Allocator, c: &CiCase, problem: &string::String, got: &CiResult) -> !void {
+    var text = string::new(allocator);
+    defer text.deinit(allocator);
+    try text.append_string(allocator, &c.bucket);
+    try text.append_bytes(allocator, ": ");
+    try text.append_string(allocator, problem);
+    try ci_section(allocator, &var text, "--- header");
+    try text.append_string(allocator, &c.header);
+    try text.append_bytes(allocator, "--- spec ");
+    try ci_append_prediction(allocator, &var text, &c.spec);
+    if c.has_implemented {
+        try text.append_bytes(allocator, "--- implemented ");
+        try ci_append_joined(allocator, &var text, &c.findings, ",");
+        try text.append_byte(allocator, cast<u8>(32));
+        try ci_append_prediction(allocator, &var text, &c.implemented);
+    }
+    try ci_section(allocator, &var text, "--- importer wrote");
+    try text.append_string(allocator, &got.decls);
+    try text.append_byte(allocator, cast<u8>(10));
+    if c.has_caller {
+        try text.append_bytes(allocator, "--- caller");
+        try text.append_byte(allocator, cast<u8>(10));
+        try ci_render_caller(allocator, &var text, &c.caller);
+    }
+    let bytes = text.as_bytes();
+    return io::write_stderr(io, bytes);
+}
+
+fn ci_section(allocator: Allocator, out: &var string::String, title: []u8) -> !void {
+    try out.append_byte(allocator, cast<u8>(10));
+    try out.append_bytes(allocator, title);
+    return out.append_byte(allocator, cast<u8>(10));
+}
+
+fn ci_append_prediction(allocator: Allocator, out: &var string::String, p: &CiPrediction) -> !void {
+    try out.append_byte(allocator, cast<u8>(91));
+    try ci_append_joined(allocator, out, &p.expect, " ");
+    try out.append_byte(allocator, cast<u8>(93));
+    try out.append_byte(allocator, cast<u8>(10));
+    if p.has_decls {
+        try out.append_string(allocator, &p.decls);
+        try out.append_byte(allocator, cast<u8>(10));
+    }
+    return;
+}
+
+fn ci_append_joined(
+    allocator: Allocator,
+    out: &var string::String,
+    parts: &array::Array<string::String>,
+    separator: []u8
+) -> !void {
+    var index = 0;
+    while parts.at(index) |part| {
+        if index > 0 {
+            try out.append_bytes(allocator, separator);
+        }
+        index = index + 1;
+        try out.append_string(allocator, part);
+    }
+    return;
+}
+
+fn ci_holds(values: &array::Array<string::String>, wanted: []u8) -> bool {
+    var index = 0;
+    while values.at(index) |value| {
+        index = index + 1;
+        let bytes = value.as_bytes();
+        if mem::equal_bytes(bytes, wanted) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn ci_contains_bytes(haystack: []u8, needle: []u8) -> bool {
+    let last = mem::len(haystack) - mem::len(needle);
+    var start = 0;
+    while start <= last {
+        if mem::equal_bytes(haystack[start..start + mem::len(needle)], needle) {
+            return true;
+        }
+        start = start + 1;
+    }
+    return false;
+}
+
+fn ci_byte_index(text: []u8, byte: u8) -> i64 {
+    var index = 0;
+    while mem::byte_at(text, index) |at| {
+        if at == byte {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+/// Appends each separator-delimited field of text to out; an empty text has
+/// no fields.
+fn ci_split_fields(allocator: Allocator, out: &var array::Array<string::String>, text: []u8, separator: u8) -> !void {
+    if mem::len(text) == 0 {
+        return;
+    }
+    var start = 0;
+    var index = 0;
+    while index <= mem::len(text) {
+        var at_end = true;
+        if mem::byte_at(text, index) |byte| {
+            at_end = byte == separator;
+        }
+        if at_end {
+            let field = try string::from_bytes(allocator, text[start..index]);
+            try out.append(allocator, move field);
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn ci_field_at(fields: &array::Array<string::String>, at: i64) -> []u8 {
+    if fields.at(at) |field| {
+        let bytes = field.as_bytes();
+        return bytes;
+    }
+    return "";
+}
+
+/// Appends text with each `\n` turned into a line break.
+fn ci_append_unescaped(allocator: Allocator, out: &var string::String, text: []u8) -> !void {
+    var index = 0;
+    while mem::byte_at(text, index) |byte| {
+        index = index + 1;
+        if byte == cast<u8>(92) {
+            if mem::byte_at(text, index) |next| {
+                if next == cast<u8>(110) {
+                    index = index + 1;
+                    try out.append_byte(allocator, cast<u8>(10));
+                    continue;
+                }
+            }
+        }
+        try out.append_byte(allocator, byte);
+    }
+    return;
+}
+
+fn ci_new_prediction(allocator: Allocator) -> CiPrediction {
+    return CiPrediction {
+        expect: array::new<string::String>(allocator),
+        has_decls: false,
+        decls: string::new(allocator),
+    };
+}
+
+fn ci_new_case(allocator: Allocator) -> CiCase {
+    return CiCase {
+        bucket: string::new(allocator),
+        header: string::new(allocator),
+        has_caller: false,
+        caller: CiCaller {
+            marked: false,
+            args: array::new<string::String>(allocator),
+            ret: string::new(allocator),
+        },
+        spec: ci_new_prediction(allocator),
+        has_implemented: false,
+        implemented: ci_new_prediction(allocator),
+        findings: array::new<string::String>(allocator),
+    };
+}
+
+/// Reads a prediction of known_shapes' form: classes, then `=` and the
+/// declarations when there are some.
+fn ci_known_prediction(allocator: Allocator, out: &var CiPrediction, text: []u8) -> !void {
+    var end = mem::len(text);
+    let equals = ci_byte_index(text, cast<u8>(61));
+    if equals >= 0 {
+        end = equals;
+        out.has_decls = true;
+        try ci_append_unescaped(allocator, &var out.decls, text[equals + 1..mem::len(text)]);
+    }
+    return ci_split_fields(allocator, &var out.expect, text[0..end], cast<u8>(44));
+}
+
+/// Reads one line of known_shapes.
+fn ci_known_case(allocator: Allocator, fields: &array::Array<string::String>) -> !CiCase {
+    var c = ci_new_case(allocator);
+    errdefer c.deinit(allocator);
+    try c.bucket.append_bytes(allocator, ci_field_at(fields, 0));
+    try ci_append_unescaped(allocator, &var c.header, ci_field_at(fields, 1));
+    let caller = ci_field_at(fields, 2);
+    if mem::len(caller) > 0 {
+        c.has_caller = true;
+        var start = 0;
+        if mem::byte_at(caller, 0) |first| {
+            if first == cast<u8>(33) {
+                c.caller.marked = true;
+                start = 1;
+            }
+        }
+        let open = ci_byte_index(caller, cast<u8>(40));
+        try c.caller.ret.append_bytes(allocator, caller[start..open]);
+        try ci_split_fields(allocator, &var c.caller.args, caller[open + 1..mem::len(caller) - 1], cast<u8>(44));
+    }
+    try ci_known_prediction(allocator, &var c.spec, ci_field_at(fields, 3));
+    let implemented = ci_field_at(fields, 4);
+    if mem::len(implemented) > 0 {
+        c.has_implemented = true;
+        try ci_known_prediction(allocator, &var c.implemented, implemented);
+    }
+    try ci_split_fields(allocator, &var c.findings, ci_field_at(fields, 5), cast<u8>(44));
+    return move c;
+}
+
+/// Copies one case of the fixture into a CiCase. Members the fixture leaves
+/// out stay unset.
+fn ci_case_from(allocator: Allocator, value: &json::Value) -> !CiCase {
+    var c = ci_new_case(allocator);
+    errdefer c.deinit(allocator);
+    try ci_append_text(allocator, &var c.bucket, value, "bucket");
+    try ci_append_text(allocator, &var c.header, value, "header");
+    if ci_member(value, "caller") |caller| {
+        c.has_caller = true;
+        if ci_member(caller, "marked") |marked| {
+            match marked {
+                Bool(on) => {
+                    c.caller.marked = on;
+                },
+                _ => {},
+            }
+        }
+        try ci_append_texts(allocator, &var c.caller.args, caller, "args");
+        try ci_append_text(allocator, &var c.caller.ret, caller, "ret");
+    }
+    if ci_member(value, "spec") |spec| {
+        try ci_prediction_from(allocator, &var c.spec, spec);
+    }
+    if ci_member(value, "implemented") |implemented| {
+        c.has_implemented = true;
+        try ci_prediction_from(allocator, &var c.implemented, implemented);
+    }
+    try ci_append_texts(allocator, &var c.findings, value, "findings");
+    return move c;
+}
+
+fn ci_prediction_from(allocator: Allocator, out: &var CiPrediction, value: &json::Value) -> !void {
+    try ci_append_texts(allocator, &var out.expect, value, "expect");
+    if ci_member(value, "decls") |_| {
+        out.has_decls = true;
+        try ci_append_text(allocator, &var out.decls, value, "decls");
+    }
+    return;
+}
+
+fn ci_member(value: &json::Value, key: []u8) -> ?&json::Value {
+    match value {
+        Obj(fields) => return fields.at(key),
+        _ => return null,
+    }
+}
+
+/// Appends the string member key of an object value, if it has one.
+fn ci_append_text(allocator: Allocator, out: &var string::String, value: &json::Value, key: []u8) -> !void {
+    if ci_member(value, key) |member| {
+        match member {
+            Str(text) => return out.append_string(allocator, text),
+            _ => {},
+        }
+    }
+    return;
+}
+
+/// Appends each string of the array member key of an object value.
+fn ci_append_texts(
+    allocator: Allocator,
+    out: &var array::Array<string::String>,
+    value: &json::Value,
+    key: []u8
+) -> !void {
+    if ci_member(value, key) |member| {
+        match member {
+            Arr(items) => {
+                var index = 0;
+                while items.at(index) |item| {
+                    index = index + 1;
+                    match item {
+                        Str(text) => {
+                            let bytes = text.as_bytes();
+                            let copy = try string::from_bytes(allocator, bytes);
+                            try out.append(allocator, move copy);
+                        },
+                        _ => {},
+                    }
+                }
+            },
+            _ => {},
+        }
+    }
+    return;
+}
+
+/// Splits a table of known_shapes' form into its lines, each split at `|`.
+fn ci_table_rows(allocator: Allocator, table: []u8) -> !array::Array<array::Array<string::String>> {
+    var rows = array::new<array::Array<string::String>>(allocator);
+    errdefer rows.deinit(allocator);
+    var lines = array::new<string::String>(allocator);
+    defer lines.deinit(allocator);
+    try ci_split_fields(allocator, &var lines, table, cast<u8>(10));
+    var index = 0;
+    while lines.at(index) |text| {
+        index = index + 1;
+        if text.len() == 0 {
+            continue;
+        }
+        var fields = array::new<string::String>(allocator);
+        errdefer fields.deinit(allocator);
+        let bytes = text.as_bytes();
+        try ci_split_fields(allocator, &var fields, bytes, cast<u8>(124));
+        try rows.append(allocator, move fields);
+    }
+    return move rows;
+}
+
+test "C import model harness agrees on the known shapes and notices each flipped verdict" {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    let rows = try ci_table_rows(allocator, ci_known_shapes());
+    defer rows.deinit(allocator);
+    var failures = 0;
+    var index = 0;
+    while rows.at(index) |fields| {
+        index = index + 1;
+        let c = try ci_known_case(allocator, fields);
+        defer c.deinit(allocator);
+        if try ci_diverges(io, allocator, &c) {
+            failures = failures + 1;
+        }
+        // The same program with the opposite verdict must diverge: a renderer
+        // whose programs all fail the same way, or a classifier that agrees
+        // with anything, would let a flipped shape through.
+        var flipped = ci_new_case(allocator);
+        defer flipped.deinit(allocator);
+        try flipped.bucket.append_string(allocator, &c.bucket);
+        try flipped.header.append_string(allocator, &c.header);
+        flipped.has_caller = c.has_caller;
+        flipped.caller.marked = c.caller.marked;
+        try ci_append_copies(allocator, &var flipped.caller.args, &c.caller.args);
+        try flipped.caller.ret.append_string(allocator, &c.caller.ret);
+        var want = ci_new_prediction(allocator);
+        defer want.deinit(allocator);
+        try ci_wanted(allocator, &var want, &c);
+        if want.expect.len() == 0 {
+            try flipped.spec.expect.append(allocator, try string::from_bytes(allocator, "Import:type"));
+        } else {
+            flipped.spec.has_decls = want.has_decls;
+            try flipped.spec.decls.append_string(allocator, &want.decls);
+        }
+        var got = ci_new_result(allocator);
+        defer got.deinit(allocator);
+        try ci_run(io, allocator, &flipped, &var got);
+        var problem = string::new(allocator);
+        defer problem.deinit(allocator);
+        try ci_compare(allocator, &var problem, &flipped, &got);
+        if problem.len() == 0 {
+            failures = failures + 1;
+            let name = c.bucket.as_bytes();
+            try io::write_stderr(io, name);
+            try io::write_stderr_line(io, ": the harness did not notice the flipped verdict");
+        }
+    }
+    testing::expect_equal<i64>(40, rows.len());
+    testing::expect_equal<i64>(0, failures);
+}
+
+/// Appends a copy of each string of values to out.
+fn ci_append_copies(
+    allocator: Allocator,
+    out: &var array::Array<string::String>,
+    values: &array::Array<string::String>
+) -> !void {
+    var index = 0;
+    while values.at(index) |value| {
+        index = index + 1;
+        let bytes = value.as_bytes();
+        let copy = try string::from_bytes(allocator, bytes);
+        try out.append(allocator, move copy);
+    }
+    return;
+}
+
+test "C import model known shapes cover every class the classifier knows" {
+    let allocator = mem::page_allocator();
+    let rows = try ci_table_rows(allocator, ci_known_shapes());
+    defer rows.deinit(allocator);
+    var classes = array::new<string::String>(allocator);
+    defer classes.deinit(allocator);
+    try ci_split_fields(allocator, &var classes, ci_classes(), cast<u8>(44));
+    var missing = 0;
+    var index = 0;
+    while classes.at(index) |class| {
+        index = index + 1;
+        let wanted = class.as_bytes();
+        var seen = false;
+        var row = 0;
+        while rows.at(row) |fields| {
+            row = row + 1;
+            let c = try ci_known_case(allocator, fields);
+            defer c.deinit(allocator);
+            var want = ci_new_prediction(allocator);
+            defer want.deinit(allocator);
+            try ci_wanted(allocator, &var want, &c);
+            if ci_holds(&want.expect, wanted) {
+                seen = true;
+            }
+        }
+        if !seen {
+            missing = missing + 1;
+            try io::write_stderr(io::blocking(), "no known shape the pipeline reports with ");
+            try io::write_stderr_line(io::blocking(), wanted);
+        }
+    }
+    testing::expect_equal<i64>(16, classes.len());
+    testing::expect_equal<i64>(0, missing);
+}
+
+test "C import pipeline agrees with the sampled model programs" {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    // KIZU_MBT_FIXTURE replays another fixture, such as a wider sample than
+    // the checked-in one.
+    var path = "compiler/tests/mbt/cimport.json";
+    if process::env("KIZU_MBT_FIXTURE") |other| {
+        path = other;
+    }
+    let data = try fs::read_file(io, allocator, path, mem::Limit::Unlimited);
+    defer data.deinit(allocator);
+    let bytes = data.as_bytes();
+    var fixture = try json::decode<CiFixture>(allocator, bytes);
+    defer fixture.deinit(allocator);
+    var failures = 0;
+    var index = 0;
+    while fixture.cases.at(index) |value| {
+        index = index + 1;
+        let c = try ci_case_from(allocator, value);
+        defer c.deinit(allocator);
+        if try ci_diverges(io, allocator, &c) {
+            failures = failures + 1;
+        }
+    }
+    testing::expect(fixture.cases.len() > 0);
+    testing::expect_equal<i64>(0, failures);
+}
