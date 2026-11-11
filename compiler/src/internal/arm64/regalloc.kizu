@@ -15,6 +15,12 @@ import std::array;
 // it is read, anything else lives in a frame slot. Afterwards the parallel
 // copies of the phi edges become moves that respect each other's reads.
 //
+// On arm64 the registers only float instructions compute with (see
+// float_registers) take float registers instead: d20..d31, or d8..d15
+// across a hot call or a vectorized loop, whose NEON instructions write
+// vector registers no range tracks. A spilled one is reloaded into a
+// general scratch register like any other; the printer moves it across.
+//
 // x16, x17 and x15 are scratch for the rewrite and the printer, x8 carries
 // an aggregate result's address and is scratch otherwise, x18 is the
 // platform's and x29/x30 the frame's: none of them is handed to a virtual
@@ -49,6 +55,26 @@ fn caller_saved_last(arch: Arch) -> i64 {
         return 8;
     }
     return 14;
+}
+
+/// Returns the end of the float registers a callee keeps, d8..d15 (their
+/// low 64 bits, all a float register holds here).
+fn float_callee_saved_end() -> i64 {
+    return first_float_reg() + 8;
+}
+
+/// Returns the first float register a call may clobber that allocation
+/// hands out: d20..d31. d16..d19 are the printer's float scratch.
+fn float_caller_saved_first() -> i64 {
+    return first_float_reg() + 12;
+}
+
+/// Reports whether reg is saved around a cold call it lives across.
+fn is_cold_saved(reg: i64, arch: Arch) -> bool {
+    if reg >= caller_saved_first() and reg <= caller_saved_last(arch) {
+        return true;
+    }
+    return reg >= float_caller_saved_first() and reg < first_vreg();
 }
 
 fn callee_saved_first() -> i64 {
@@ -1076,7 +1102,16 @@ pub fn allocate(allocator: Allocator, func: &var MFunction, arch: Arch) -> !Allo
     var order = array::new<i64>(allocator);
     errdefer order.deinit(allocator);
     try layout(allocator, func, cold, &var order);
-    return allocate_laid_out(allocator, func, cold, move order, arch);
+    var float = array::new<bool>(allocator);
+    defer float.deinit(allocator);
+    if arch == Arch::Arm64 {
+        try float_registers(allocator, func, &var float);
+    } else {
+        for 0..func.vregs |_index| {
+            try float.append(allocator, false);
+        }
+    }
+    return allocate_laid_out(allocator, func, cold, move order, &float, arch);
 }
 
 /// Runs the machine-level clean-ups allocation starts with.
@@ -1096,7 +1131,14 @@ fn run_passes(allocator: Allocator, func: &var MFunction) -> !void {
     return;
 }
 
-fn allocate_laid_out(allocator: Allocator, func: &var MFunction, cold: &array::Array<bool>, order_in: array::Array<i64>, arch: Arch) -> !Allocation {
+fn allocate_laid_out(
+    allocator: Allocator,
+    func: &var MFunction,
+    cold: &array::Array<bool>,
+    order_in: array::Array<i64>,
+    float: &array::Array<bool>,
+    arch: Arch
+) -> !Allocation {
     var order = move order_in;
     errdefer order.deinit(allocator);
     let nv = func.vregs;
@@ -1123,12 +1165,13 @@ fn allocate_laid_out(allocator: Allocator, func: &var MFunction, cold: &array::A
         count = count + 1;
     }
     let positions = 2 * count + 2;
-    // Marks: hot calls (index 0) and each argument register named (1 + r),
-    // as prefix counts over positions.
+    // Marks: hot calls (index 0), each argument register named (1 + r) and
+    // the NEON instructions, which write vector registers allocation does
+    // not track (9), as prefix counts over positions.
     let stride = positions + 1;
     var marks = array::new<i64>(allocator);
     defer marks.deinit(allocator);
-    for 0..9 * stride |_index| {
+    for 0..10 * stride |_index| {
         try marks.append(allocator, 0);
     }
     var cold_calls = array::new<i64>(allocator);
@@ -1159,12 +1202,16 @@ fn allocate_laid_out(allocator: Allocator, func: &var MFunction, cold: &array::A
                         try bump(&var marks, (1 + r) * stride + 2 * k + 1);
                     }
                 }
+                if is_vector(inst.op) {
+                    try bump(&var marks, 9 * stride + 2 * k);
+                    try bump(&var marks, 9 * stride + 2 * k + 1);
+                }
                 try mark_arguments(&var marks, stride, inst, k);
             }
         }
         index_at = index_at + 1;
     }
-    for 0..9 |row| {
+    for 0..10 |row| {
         var running = 0;
         for 0..stride |p| {
             let at = row * stride + p;
@@ -1494,7 +1541,12 @@ fn allocate_laid_out(allocator: Allocator, func: &var MFunction, cold: &array::A
     var crosses_call = array::new<bool>(allocator);
     defer crosses_call.deinit(allocator);
     for 0..nv |v| {
-        try crosses_call.append(allocator, ranges.first.get_or_panic(v) >= 0 and ranges.spans(v, &marks, 0));
+        var crosses = ranges.first.get_or_panic(v) >= 0 and ranges.spans(v, &marks, 0);
+        // A float register is clobbered by a vectorized loop too.
+        if float.get_or_panic(v) and !crosses {
+            crosses = ranges.first.get_or_panic(v) >= 0 and ranges.spans(v, &marks, 9 * stride);
+        }
+        try crosses_call.append(allocator, crosses);
     }
     var active = array::new<i64>(allocator);
     defer active.deinit(allocator);
@@ -1502,7 +1554,7 @@ fn allocate_laid_out(allocator: Allocator, func: &var MFunction, cold: &array::A
     defer inactive.deinit(allocator);
     var used = array::new<bool>(allocator);
     defer used.deinit(allocator);
-    for 0..32 |_index| {
+    for 0..first_vreg() |_index| {
         try used.append(allocator, false);
     }
     var candidates = array::new<i64>(allocator);
@@ -1550,6 +1602,7 @@ fn allocate_laid_out(allocator: Allocator, func: &var MFunction, cold: &array::A
             try inactive.append(allocator, other);
         }
         let crosses = crosses_call.get_or_panic(v);
+        let wants_float = float.get_or_panic(v);
         // The registers this range may take, in the order it wants them.
         candidates.clear(allocator);
         let mate = partner.get_or_panic(v);
@@ -1577,23 +1630,34 @@ fn allocate_laid_out(allocator: Allocator, func: &var MFunction, cold: &array::A
         if wanted >= 0 {
             try candidates.append(allocator, wanted);
         }
-        if !crosses {
-            for caller_saved_first()..caller_saved_last(arch) + 1 |r| {
+        if wants_float {
+            if !crosses {
+                for float_caller_saved_first()..first_vreg() |r| {
+                    try candidates.append(allocator, r);
+                }
+            }
+            for first_float_reg()..float_callee_saved_end() |r| {
                 try candidates.append(allocator, r);
             }
-            for 0..arg_regs(arch) |r| {
+        } else {
+            if !crosses {
+                for caller_saved_first()..caller_saved_last(arch) + 1 |r| {
+                    try candidates.append(allocator, r);
+                }
+                for 0..arg_regs(arch) |r| {
+                    try candidates.append(allocator, r);
+                }
+            }
+            for callee_saved_first()..callee_saved_last(arch) + 1 |r| {
                 try candidates.append(allocator, r);
             }
-        }
-        for callee_saved_first()..callee_saved_last(arch) + 1 |r| {
-            try candidates.append(allocator, r);
         }
         var chosen = 0 - 1;
         var deferred = 0 - 1;
         var candidate_index = 0;
         while candidates.get(candidate_index) |r| {
             candidate_index = candidate_index + 1;
-            if !may_take(&ranges, &marks, stride, v, r, crosses, arch) {
+            if !may_take(&ranges, &marks, stride, v, r, crosses, wants_float, arch) {
                 continue;
             }
             if register_free(&ranges, &phys, &active, &inactive, &copy_of, &write_at, &write_next, &write_first, v, r) {
@@ -1622,7 +1686,7 @@ fn allocate_laid_out(allocator: Allocator, func: &var MFunction, cold: &array::A
         candidate_index = 0;
         while candidates.get(candidate_index) |r| {
             candidate_index = candidate_index + 1;
-            if !may_take(&ranges, &marks, stride, v, r, crosses, arch) {
+            if !may_take(&ranges, &marks, stride, v, r, crosses, wants_float, arch) {
                 continue;
             }
             let cost = holders_weight(&ranges, &phys, &weight, &active, &inactive, v, r);
@@ -1653,7 +1717,7 @@ fn allocate_laid_out(allocator: Allocator, func: &var MFunction, cold: &array::A
         var mask = 0;
         for 0..nv |v| {
             let reg = phys.get_or_panic(v);
-            if reg >= caller_saved_first() and reg <= caller_saved_last(arch) and ranges.covers(v, 2 * k) and ranges.covers(v, 2 * k + 1) {
+            if is_cold_saved(reg, arch) and ranges.covers(v, 2 * k) and ranges.covers(v, 2 * k + 1) {
                 mask = mask | (1 << reg);
             }
         }
@@ -1661,7 +1725,7 @@ fn allocate_laid_out(allocator: Allocator, func: &var MFunction, cold: &array::A
     }
     var save_slots = array::new<i64>(allocator);
     defer save_slots.deinit(allocator);
-    for 0..32 |_index| {
+    for 0..first_vreg() |_index| {
         try save_slots.append(allocator, 0 - 1);
     }
     // A pure instruction whose result is dead right after it -- one of the
@@ -1696,6 +1760,11 @@ fn allocate_laid_out(allocator: Allocator, func: &var MFunction, cold: &array::A
             try saved.append(allocator, reg);
         }
     }
+    for first_float_reg()..float_callee_saved_end() |reg| {
+        if used.get_or_panic(reg) {
+            try saved.append(allocator, reg);
+        }
+    }
     return Allocation { order: move order, saved: move saved };
 }
 
@@ -1715,7 +1784,13 @@ fn closes_cycle(avoid_src: &array::Array<i64>, avoid_dst: &array::Array<i64>, ph
     return false;
 }
 
-fn may_take(ranges: &Ranges, marks: &array::Array<i64>, stride: i64, v: i64, reg: i64, crosses: bool, arch: Arch) -> bool {
+fn may_take(ranges: &Ranges, marks: &array::Array<i64>, stride: i64, v: i64, reg: i64, crosses: bool, float: bool, arch: Arch) -> bool {
+    if float or is_float_reg(reg) {
+        if !float or !is_float_reg(reg) {
+            return false;
+        }
+        return !crosses or reg < float_callee_saved_end();
+    }
     if crosses and reg < callee_saved_first() {
         return false;
     }
@@ -2058,7 +2133,7 @@ fn rewrite(
             }
             let mask = cold_saves.get(p) orelse 0;
             if (inst.op == MOp::Call or inst.op == MOp::CallReg) and mask != 0 {
-                for 9..15 |reg| {
+                for 9..first_vreg() |reg| {
                     if (mask & (1 << reg)) != 0 {
                         if save_slots.get_or_panic(reg) < 0 {
                             try save_slots.set(reg, try func.add_slot(allocator, 8, 8));
@@ -2067,7 +2142,7 @@ fn rewrite(
                     }
                 }
                 try rewrite_inst(allocator, inst, phys, spill, remat, &var out);
-                for 9..15 |reg| {
+                for 9..first_vreg() |reg| {
                     if (mask & (1 << reg)) != 0 {
                         try out.append(allocator, spill_load(reg, save_slots.get_or_panic(reg)));
                     }
