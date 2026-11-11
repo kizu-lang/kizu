@@ -1603,6 +1603,22 @@ fn (self: &var Selector) run_cleanups(module: &ir::Module, node: &ir::InstrNode)
             try self.release_map(header.reg, allocator_reg, value.size);
             continue;
         }
+        // A Box cell is released as a `box.deinit` statement releases it; a
+        // payload with its own deinit arrives as a call cleanup instead.
+        if cleanup.op == ir::Op::BoxDeinit {
+            let cell_val = vals.get(0) orelse return try self.fail(module, "cleanup", cleanup.operand);
+            let allocator_val = vals.get(1) orelse return try self.fail(module, "cleanup", cleanup.operand);
+            let payload = box_payload(module, types.get_or_panic(0));
+            if cell_val.kind != ValKind::Reg or payload.class == Class::Unsupported {
+                return try self.fail(module, "cleanup", cleanup.operand);
+            }
+            var allocator_reg = allocator_val.reg;
+            if allocator_val.kind == ValKind::Const {
+                allocator_reg = try self.imm_reg(allocator_val.imm);
+            }
+            try self.release_box_cell(cell_val.reg, allocator_reg, payload.size);
+            continue;
+        }
         if cleanup.op != ir::Op::Call {
             return try self.fail(module, "cleanup", cleanup.operand);
         }
