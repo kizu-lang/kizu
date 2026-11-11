@@ -1382,6 +1382,10 @@ fn (self: &var Selector) select_hosted_call(module: &ir::Module, node: &ir::Inst
             try words.append(self.allocator, result);
             continue;
         }
+        if param.source == hostabi::Source::Zero {
+            try words.append(self.allocator, reg_zr());
+            continue;
+        }
         let arg = node.args.get(param.arg) orelse return try self.fail_op(module, node);
         let arg_shape = shape_of(module, arg.type_name);
         match param.source {
@@ -1410,6 +1414,26 @@ fn (self: &var Selector) select_hosted_call(module: &ir::Module, node: &ir::Inst
                 }
                 try words.append(self.allocator, try self.imm_reg(arg_shape.size));
             },
+            ElementSize => {
+                let text = ir::name_text(&module.names, arg.type_name);
+                let bytes = text.as_bytes();
+                let element = hostabi::element_type(bytes) orelse return try self.fail_op(module, node);
+                let element_shape = shape_of_bytes(module, bytes[element.start..element.end], 1);
+                if element_shape.class == Class::Unsupported {
+                    return try self.fail_op(module, node);
+                }
+                try words.append(self.allocator, try self.imm_reg(element_shape.size));
+            },
+            PoolInvoke => {
+                if !try self.pool_invoke_word(module, node, false, &var words) {
+                    return try self.fail_op(module, node);
+                }
+            },
+            PoolStateInvoke => {
+                if !try self.pool_invoke_word(module, node, true, &var words) {
+                    return try self.fail_op(module, node);
+                }
+            },
             Value => {
                 // A float goes in a float register, which this convention
                 // does not place.
@@ -1429,6 +1453,7 @@ fn (self: &var Selector) select_hosted_call(module: &ir::Module, node: &ir::Inst
                 try words.append(self.allocator, reg);
             },
             Out => {},
+            Zero => {},
         }
     }
     let count = try self.place_words(&words);
@@ -1487,12 +1512,6 @@ fn (self: &var Selector) select_call(module: &ir::Module, node: &ir::InstrNode) 
         }
         try self.set_val(node.result.name, const_val(shape.size));
         return null;
-    }
-    if module.names.is(node.operand, "std::internal::builtin::thread_pool_each") {
-        return self.select_pool_round(module, node, 1);
-    }
-    if module.names.is(node.operand, "std::internal::builtin::thread_pool_each_lane") {
-        return self.select_pool_round(module, node, 2);
     }
     if hostabi::is_builtin(module, node.operand) {
         return self.select_builtin_call(module, node);
@@ -1648,86 +1667,26 @@ pub fn (self: &var Selector) invoke_symbol(states: bool) -> !ir::Name {
     return self.syms.intern("_kz$thread_invoke");
 }
 
-/// Selects a pool round, a call into the runtime that does not know T or S:
-/// the result goes through a leading slot, the `[]T` behind its address
-/// followed by what T measures, the states' Array (or null) followed by what
-/// S measures, then the worker and the thunk the runtime calls it through.
-/// data_index is where the `[]T` is among the operands.
-fn (self: &var Selector) select_pool_round(module: &ir::Module, node: &ir::InstrNode, data_index: i64) -> !?diagnostic::Diagnostic {
-    let shaped = data_index * 2 + 1;
-    if node.args.len() <= shaped or !is_coded(module, node.result.type_name) {
-        return try self.fail_op(module, node);
+/// Appends the address of the thunk hostabi's PoolInvoke or PoolStateInvoke
+/// names, the one every worker of a round goes through (select_thread_invoke),
+/// and notes that it is used. Reports false when the round's result is not
+/// the code word the thunk answers.
+fn (self: &var Selector) pool_invoke_word(module: &ir::Module, node: &ir::InstrNode, states: bool, words: &var array::Array<i64>) -> !bool {
+    if !is_coded(module, node.result.type_name) {
+        return false;
     }
-    let states = node.args.len() > shaped + 1;
-    let result = try self.new_slot(shape_of(module, node.result.type_name));
-    var words = array::new<i64>(self.allocator);
-    defer words.deinit(self.allocator);
-    try words.append(self.allocator, result);
-    for 0..shaped |index| {
-        let arg = node.args.get_or_panic(index);
-        if index == data_index {
-            let data_text = ir::name_text(&module.names, arg.type_name);
-            let data_bytes = data_text.as_bytes();
-            if !is_slice(module, arg.type_name) {
-                return try self.fail_op(module, node);
-            }
-            let elem = shape_of_bytes(module, data_bytes[2..mem::len(data_bytes)], 1);
-            if elem.class == Class::Unsupported {
-                return try self.fail_op(module, node);
-            }
-            let address = try self.addr(module, arg) orelse return try self.fail_op(module, node);
-            try words.append(self.allocator, address);
-            try words.append(self.allocator, try self.imm_reg(elem.size));
-            continue;
-        }
-        if shape_of(module, arg.type_name).class != Class::Scalar {
-            return try self.fail_op(module, node);
-        }
-        let reg = try self.reg(module, arg) orelse return try self.fail_op(module, node);
-        try words.append(self.allocator, reg);
-    }
-    if states {
-        let states_arg = node.args.get_or_panic(shaped);
-        let states_text = ir::name_text(&module.names, states_arg.type_name);
-        let states_bytes = states_text.as_bytes();
-        let prefix = mem::len("&var std::array::Array<");
-        let states_len = mem::len(states_bytes);
-        if states_len <= prefix or !mem::starts_with(states_bytes, "&var std::array::Array<") {
-            return try self.fail_op(module, node);
-        }
-        let state = shape_of_bytes(module, states_bytes[prefix..states_len - 1], 1);
-        if state.class == Class::Unsupported {
-            return try self.fail_op(module, node);
-        }
-        let reg = try self.reg(module, states_arg) orelse return try self.fail_op(module, node);
-        try words.append(self.allocator, reg);
-        try words.append(self.allocator, try self.imm_reg(state.size));
-        self.state_invokes = true;
-    } else {
-        try words.append(self.allocator, reg_zr());
-        try words.append(self.allocator, reg_zr());
-        self.invokes = true;
-    }
-    let worker = node.args.get_or_panic(node.args.len() - 1);
-    let worker_reg = try self.reg(module, worker) orelse return try self.fail_op(module, node);
-    try words.append(self.allocator, worker_reg);
     let thunk = self.func.new_vreg();
     var thunk_addr = blank(MOp::SymAddr);
     thunk_addr.rd = thunk;
     thunk_addr.sym = try self.invoke_symbol(states);
     try self.inst(thunk_addr);
     try words.append(self.allocator, thunk);
-    let count = try self.place_words(&words);
-    var symbol = string::new(self.allocator);
-    defer symbol.deinit(self.allocator);
-    let name_text = ir::name_text(&module.names, node.operand);
-    let name_bytes = name_text.as_bytes();
-    try append_c_symbol(self.allocator, &var symbol, name_bytes);
-    let symbol_bytes = symbol.as_bytes();
-    let sym = try self.syms.intern(symbol_bytes);
-    try self.call_sym(sym, count, reg_none());
-    try self.set_val(node.result.name, fresh_val(result));
-    return null;
+    if states {
+        self.state_invokes = true;
+    } else {
+        self.invokes = true;
+    }
+    return true;
 }
 
 /// Selects the thunk a pool calls a worker through, the C function

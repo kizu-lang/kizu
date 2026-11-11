@@ -31,7 +31,7 @@ fn (self: &var Emitter) call_kind(module: &ir::Module, node: &ir::InstrNode) -> 
     if module.names.is(node.extern_abi, "c") {
         return CallKind::Foreign;
     }
-    if thread_round_data(&module.names, node.operand) |_| {
+    if hostabi::hands_worker(module, node.operand) {
         return CallKind::Builtin;
     }
     if module.names.is(node.operand, "std::internal::builtin::mem_size_of") {
@@ -103,8 +103,8 @@ fn (self: &var Emitter) write_call(module: &ir::Module, node: &ir::InstrNode) ->
 /// runtime, the Go `writeCompilerBuiltin`: a pool round, or the size of a
 /// type.
 fn (self: &var Emitter) write_compiler_builtin(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    if thread_round_data(&module.names, node.operand) |data_index| {
-        return self.write_thread_pool_round(module, node, data_index);
+    if hostabi::hands_worker(module, node.operand) {
+        return self.write_thread_pool_round(module, node);
     }
     return self.write_size_of(module, node);
 }
@@ -397,12 +397,6 @@ fn (self: &var Emitter) write_hosted_runtime_call(
         let index = param.arg;
         match param.source {
             Out => try args.append(self.allocator, try self.sprint2("ptr %s", Arg::Str(result_slot), Arg::None)),
-            Value => {
-                let arg = node.args.get_or_panic(index);
-                let value = try self.operand(module, arg);
-                let arg_type = try self.hosted_param_type(module, node, param);
-                try args.append(self.allocator, try self.sprint2("%s %s", Arg::Str(arg_type), Arg::Str(value.operand)));
-            },
             Address => {
                 let arg = node.args.get_or_panic(index);
                 let arg_type = try self.llvm_type_of(module, arg.type_name);
@@ -414,15 +408,10 @@ fn (self: &var Emitter) write_hosted_runtime_call(
                 }
                 try args.append(self.allocator, try self.sprint2("ptr %s", Arg::Str(arg_slot), Arg::None));
             },
-            TaskInvoke => {
-                let state = node.args.get_or_panic(index);
-                let invoke = try self.task_invoke_thunk_name(module, state.type_name);
-                try args.append(self.allocator, try self.sprint2("ptr @%s", Arg::Str(invoke), Arg::None));
-            },
-            SizeOf => {
-                let arg = node.args.get_or_panic(index);
-                let size = try self.element_size_operand(module, arg.type_name);
-                try args.append(self.allocator, try self.sprint2("i64 %s", Arg::Str(size), Arg::None));
+            _ => {
+                if try self.append_hosted_arg(module, node, param, &var args) |failed| {
+                    return move failed;
+                }
             },
         }
     }
@@ -431,6 +420,56 @@ fn (self: &var Emitter) write_hosted_runtime_call(
     try self.line2("  call void @%s(%s)", Arg::Str(symbol), Arg::Owned(move joined));
     try self.line3("  %s = load %s, ptr %s", Arg::Str(result_name), Arg::Str(result_type), Arg::Str(result_slot));
     try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Appends the argument for one declared C parameter that is neither Out
+/// nor Address, whose memory each writer names its own way.
+fn (self: &var Emitter) append_hosted_arg(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    param: hostabi::Param,
+    args: &var array::Array<string::String>
+) -> !?diagnostic::Diagnostic {
+    match param.source {
+        Value => {
+            let arg = node.args.get_or_panic(param.arg);
+            let value = try self.operand(module, arg);
+            let arg_type = try self.hosted_param_type(module, node, param);
+            try args.append(self.allocator, try self.sprint2("%s %s", Arg::Str(arg_type), Arg::Str(value.operand)));
+        },
+        TaskInvoke => {
+            let state = node.args.get_or_panic(param.arg);
+            let invoke = try self.task_invoke_thunk_name(module, state.type_name);
+            try args.append(self.allocator, try self.sprint2("ptr @%s", Arg::Str(invoke), Arg::None));
+        },
+        SizeOf => {
+            let arg = node.args.get_or_panic(param.arg);
+            let size = try self.element_size_operand(module, arg.type_name);
+            try args.append(self.allocator, try self.sprint2("i64 %s", Arg::Str(size), Arg::None));
+        },
+        ElementSize => {
+            let arg = node.args.get_or_panic(param.arg);
+            let text = ir::name_text(&module.names, arg.type_name);
+            let bytes = text.as_bytes();
+            let element = hostabi::element_type(bytes) orelse return try self.fail_name2(
+                module, "llvm error: %s is handed %s, which holds no elements", node.operand, arg.type_name);
+            let size = try self.element_size_operand_bytes(module, bytes[element.start..element.end]);
+            try args.append(self.allocator, try self.sprint2("i64 %s", Arg::Str(size), Arg::None));
+        },
+        Zero => {
+            if param.c_type == hostabi::CType::Pointer {
+                try args.append(self.allocator, try string::from_bytes(self.allocator, "ptr null"));
+            } else {
+                let zero_type = try self.hosted_param_type(module, node, param);
+                try args.append(self.allocator, try self.sprint2("%s 0", Arg::Str(zero_type), Arg::None));
+            }
+        },
+        PoolInvoke => return self.pool_invoke_arg(module, node, false, args),
+        PoolStateInvoke => return self.pool_invoke_arg(module, node, true, args),
+        Out => return try self.fail_name1(module, "llvm error: %s declares Out where it has no slot", node.operand),
+        Address => return try self.fail_name1(module, "llvm error: %s declares an Address where it has no slot", node.operand),
+    }
     return null;
 }
 
@@ -502,9 +541,6 @@ fn (self: &var Emitter) rendered_llvm_type(module: &ir::Module, value: typ::Type
 /// `externalCallDecl`.
 fn (self: &var Emitter) external_call_decl(module: &ir::Module, name: ir::Name, node: &ir::InstrNode) -> !string::String {
     let symbol = try self.callee_symbol(module, name);
-    if thread_round_data(&module.names, name) |data_index| {
-        return self.thread_pool_round_decl(module, name, node, data_index);
-    }
     var params = array::new<string::String>(self.allocator);
     defer params.deinit(self.allocator);
     if try self.uses_hosted_runtime_abi(module, name, node) {
