@@ -55,6 +55,10 @@ pub enum Cond {
     Ls,
     Hi,
     Hs,
+    // Only a float comparison leaves these: less than, ordered (Mi), and
+    // its negation, less than or unordered (Pl).
+    Mi,
+    Pl,
 }
 
 /// Returns the condition that holds exactly when cond does not.
@@ -70,6 +74,8 @@ pub fn invert(cond: Cond) -> Cond {
         Ls => Cond::Hi,
         Hi => Cond::Ls,
         Hs => Cond::Lo,
+        Mi => Cond::Pl,
+        Pl => Cond::Mi,
     };
 }
 
@@ -86,6 +92,10 @@ pub fn swap_cond(cond: Cond) -> Cond {
         Ls => Cond::Hs,
         Hi => Cond::Lo,
         Hs => Cond::Ls,
+        // A float comparison is never swapped; these keep the integer
+        // reading of the flags.
+        Mi => Cond::Mi,
+        Pl => Cond::Pl,
     };
 }
 
@@ -102,6 +112,8 @@ pub fn cond_spelling(cond: Cond) -> []u8 {
         Ls => "ls",
         Hi => "hi",
         Hs => "hs",
+        Mi => "mi",
+        Pl => "pl",
     };
 }
 
@@ -228,7 +240,50 @@ pub enum MOp {
     VBic,
     // rd = lane 0 of vn, extended by signed
     VToGpr,
+    // Floating point over the general registers holding the bits, of width
+    // bytes (8 an `f64`, 4 an `f32`). Each moves its operands into scratch
+    // float registers (v16 and up), computes, and moves the result back, so
+    // no float register holds a value from one instruction to the next.
+    // rd = rn <op> rm, op the FloatOp in imm
+    FBin,
+    // rd = <op> rn, op the FloatOp in imm
+    FUn,
+    // rd = rn * rm + ra, rounded once
+    FMAdd,
+    // flags = rn compared with rm
+    FCmp,
+    // rd = rn converted from a float of width bytes to the other width
+    FCvt,
+    // rd = rn, a float of imm bytes, toward zero and saturating to an
+    // integer of width bytes (4 or 8), signed or not; NaN is 0
+    FToInt,
+    // rd = rn, a 64-bit integer signed or not, rounded to a float of width
+    // bytes
+    IntToF,
+    // float argument register imm = rn, just before a C call
+    FArg,
+    // rd = the float result register, just after a C call
+    FRet,
 }
+
+// The operations an FBin or FUn names in its imm.
+fn float_add() -> i64 { return 0; }
+
+fn float_sub() -> i64 { return 1; }
+
+fn float_mul() -> i64 { return 2; }
+
+fn float_div() -> i64 { return 3; }
+
+fn float_neg() -> i64 { return 4; }
+
+fn float_sqrt() -> i64 { return 5; }
+
+fn float_floor() -> i64 { return 6; }
+
+fn float_ceil() -> i64 { return 7; }
+
+fn float_trunc() -> i64 { return 8; }
 
 /// Is one machine instruction. Fields an op does not read are zero or none.
 pub struct MInst {
@@ -544,6 +599,17 @@ pub fn reads(inst: &MInst, out: &var array::Array<i64>, allocator: Allocator, co
         VIns => try add_read(allocator, out, inst.rn),
         VLdp => try add_read(allocator, out, inst.rn),
         VLdr => try add_read(allocator, out, inst.rn),
+        FBin => try add_two(allocator, out, inst.rn, inst.rm),
+        FUn => try add_read(allocator, out, inst.rn),
+        FMAdd => {
+            try add_two(allocator, out, inst.rn, inst.rm);
+            try add_read(allocator, out, inst.ra);
+        },
+        FCmp => try add_two(allocator, out, inst.rn, inst.rm),
+        FCvt => try add_read(allocator, out, inst.rn),
+        FToInt => try add_read(allocator, out, inst.rn),
+        IntToF => try add_read(allocator, out, inst.rn),
+        FArg => try add_read(allocator, out, inst.rn),
         _ => {},
     }
     return;
@@ -575,6 +641,8 @@ pub fn writes_rd(op: MOp) -> bool {
         Trap => false,
         ParCopy => false,
         VToGpr => true,
+        FCmp => false,
+        FArg => false,
         _ => !is_vector(op),
     };
 }
@@ -593,6 +661,8 @@ pub fn has_effect(op: MOp) -> bool {
         CallReg => true,
         Trap => true,
         ParCopy => true,
+        FCmp => true,
+        FArg => true,
         // A NEON op writes a vector register, which no liveness tracks.
         VToGpr => false,
         // A division by zero is defined on arm64, so it has no effect either.
