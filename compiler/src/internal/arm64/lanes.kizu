@@ -1,0 +1,159 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import compiler::internal::typ;
+
+// Vector values (SPEC §7.3): an `f64x2`, `i32x4` and the rest are an
+// aggregate of 16 bytes aligned to 16, the lanes in order from the lowest
+// address, the layout the LLVM backend's `<2 x double>` has in memory. Like
+// any aggregate the value lives in a frame slot and goes between Kizu
+// functions by address, so moves, phis, calls, fields and containers need
+// nothing of their own; a C call or export with a vector is refused with
+// the other aggregates.
+//
+// The operations work one lane at a time through the scalar instructions:
+// a float lane is the same IEEE 754 operation the scalar of its type is, an
+// integer lane wraps at its width the way LLVM's vector `add`, `sub` and
+// `mul` do.
+
+/// Returns the shape of a vector type's lane and its lane count, or null
+/// for any other type.
+fn vector_lane(module: &ir::Module, type_name: ir::Name) -> ?VectorLane {
+    let text = ir::name_text(&module.names, type_name);
+    let bytes = text.as_bytes();
+    let kind = typ::vector_kind(bytes);
+    if kind < 0 {
+        return null;
+    }
+    let lane = shape_of_bytes(module, typ::vector_lane_of_kind(kind), 0);
+    return VectorLane { shape: lane, count: typ::vector_lanes(bytes) };
+}
+
+/// Is the lane of one vector type.
+struct VectorLane {
+    shape: Shape,
+    count: i64,
+}
+
+/// Reports whether a type is a vector.
+fn is_vector_type(module: &ir::Module, type_name: ir::Name) -> bool {
+    let text = ir::name_text(&module.names, type_name);
+    let bytes = text.as_bytes();
+    return typ::is_vector(bytes);
+}
+
+/// Selects `vector.new`: each lane value stored at its place in a fresh
+/// slot.
+fn (self: &var Selector) select_vector_new(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let lane = vector_lane(module, node.result.type_name) orelse return try self.fail_op(module, node);
+    if node.args.len() != lane.count {
+        return try self.fail_op(module, node);
+    }
+    let shape = shape_of(module, node.result.type_name);
+    let address = try self.new_slot(shape);
+    var index = 0;
+    while node.args.get(index) |value| {
+        if !try self.store_value(module, value, lane.shape, address, index * lane.shape.size) {
+            return try self.fail_op(module, node);
+        }
+        index = index + 1;
+    }
+    try self.set_val(node.result.name, fresh_val(address));
+    return null;
+}
+
+/// Selects `vector.lane`: the lane the literal index names, read out of the
+/// vector's memory.
+fn (self: &var Selector) select_vector_lane(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let vector = node.args.get(0) orelse return try self.fail_op(module, node);
+    let lane = vector_lane(module, vector.type_name) orelse return try self.fail_op(module, node);
+    let index_text = ir::name_text(&module.names, node.immediate);
+    let index_bytes = index_text.as_bytes();
+    let index = parse_integer(index_bytes) orelse return try self.fail_op(module, node);
+    if index < 0 or index >= lane.count {
+        return try self.fail_op(module, node);
+    }
+    let base = try self.addr(module, vector) orelse return try self.fail_op(module, node);
+    let held = try self.load_value(module, node.result.type_name, base, index * lane.shape.size, false) orelse
+        return try self.fail_op(module, node);
+    try self.set_val(node.result.name, held);
+    return null;
+}
+
+/// Selects `+ - *` of two vectors and `/` of two float vectors, lane by
+/// lane into a fresh slot.
+fn (self: &var Selector) select_vector_binary(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let left = node.args.get_or_panic(0);
+    let right = node.args.get_or_panic(1);
+    let lane = vector_lane(module, node.result.type_name) orelse return try self.fail_op(module, node);
+    if !ir::same_name(left.type_name, node.result.type_name) or !ir::same_name(right.type_name, node.result.type_name) {
+        return try self.fail_op(module, node);
+    }
+    let float = lane.shape.class == Class::Float;
+    var op = MOp::Add;
+    var kind = 0 - 1;
+    if module.names.is(node.operand, "+") {
+        kind = float_add();
+    } else if module.names.is(node.operand, "-") {
+        op = MOp::Sub;
+        kind = float_sub();
+    } else if module.names.is(node.operand, "*") {
+        op = MOp::Mul;
+        kind = float_mul();
+    } else if float and module.names.is(node.operand, "/") {
+        kind = float_div();
+    }
+    if kind < 0 {
+        return try self.fail_op(module, node);
+    }
+    let lhs = try self.addr(module, left) orelse return try self.fail_op(module, node);
+    let rhs = try self.addr(module, right) orelse return try self.fail_op(module, node);
+    let address = try self.new_slot(shape_of(module, node.result.type_name));
+    let size = lane.shape.size;
+    var index = 0;
+    while index < lane.count {
+        let offset = index * size;
+        let a = self.func.new_vreg();
+        let b = self.func.new_vreg();
+        try self.load(a, lhs, offset, size, lane.shape.signed);
+        try self.load(b, rhs, offset, size, lane.shape.signed);
+        let rd = self.func.new_vreg();
+        if float {
+            try self.float_op(MOp::FBin, kind, size, rd, a, b);
+        } else {
+            try self.op3(op, rd, a, b);
+        }
+        try self.store(rd, address, offset, size);
+        index = index + 1;
+    }
+    try self.set_val(node.result.name, fresh_val(address));
+    return null;
+}
+
+/// Selects unary `-` of a vector, lane by lane: a float lane's sign flipped,
+/// an integer lane negated with wrapping.
+fn (self: &var Selector) select_vector_unary(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let source = node.args.get(0) orelse return try self.fail_op(module, node);
+    let lane = vector_lane(module, node.result.type_name) orelse return try self.fail_op(module, node);
+    if !module.names.is(node.operand, "-") or !ir::same_name(source.type_name, node.result.type_name) {
+        return try self.fail_op(module, node);
+    }
+    let base = try self.addr(module, source) orelse return try self.fail_op(module, node);
+    let address = try self.new_slot(shape_of(module, node.result.type_name));
+    let size = lane.shape.size;
+    var index = 0;
+    while index < lane.count {
+        let offset = index * size;
+        let value = self.func.new_vreg();
+        try self.load(value, base, offset, size, lane.shape.signed);
+        let rd = self.func.new_vreg();
+        if lane.shape.class == Class::Float {
+            try self.float_op(MOp::FUn, float_neg(), size, rd, value, reg_none());
+        } else {
+            try self.op3(MOp::Neg, rd, value, reg_none());
+        }
+        try self.store(rd, address, offset, size);
+        index = index + 1;
+    }
+    try self.set_val(node.result.name, fresh_val(address));
+    return null;
+}
