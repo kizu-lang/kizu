@@ -190,7 +190,7 @@ spec-cimport:
         if quint run cimport.qnt --main $mutant --init initFree --backend typescript --seed 0x2 \
             --max-samples 3000 --max-steps 1 --invariant soundness > /dev/null; then \
             echo "$mutant: no counterexample"; exit 1; fi; done
-    go run ./scripts/cimport-mbt
+    go run ./cmd/kizu run scripts/cimport-mbt/main.kizu
 
 # Regenerate the traces from the Lean specifications (spec/README.md).
 spec-trace:

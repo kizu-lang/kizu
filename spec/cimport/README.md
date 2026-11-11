@@ -8,8 +8,8 @@ SPEC §12.2 の header import(`kizu import-c-header`)—— どの C 宣言を�
 ```
 spec/cimport/cimport.qnt          モデル: importer の判定、checker の判定、C 型の真の対応、生成器、性質、mutant
 spec/cimport/cimport_test.qnt     既知の形に対するモデルの判定(quint test)
-scripts/cimport-mbt/              quint run の trace を層化して fixture に書く
-internal/cimport/testdata/cimport_mbt.json   その fixture(checked in)
+scripts/cimport-mbt/main.kizu     quint run の trace を層化して fixture に書く(Kizu)
+compiler/tests/mbt/cimport.json   その fixture(checked in)
 internal/cimport/mbt_test.go      fixture の header を import し、出力と呼び出し側を check して、モデルの予測と比べる
 ```
 
@@ -101,7 +101,7 @@ importer と checker が受理したプログラムについて(`soundness` は 
 
 各プログラムは 2 つの予測を持ちます。`spec`(忠実な写像)と、importer が違うところでは
 `implemented` とそれを説明する所見(`F1` / `F2` / `F3`、各規則を 1 つずつ importer の
-ものにして結果が変わるか)。`scripts/cimport-mbt` は 4 モード × seed の trace から
+ものにして結果が変わるか)。`scripts/cimport-mbt/main.kizu` は 4 モード × seed の trace から
 重複なく集め、「`spec` の予測クラス × `implemented` の予測クラスと所見 × 使っている構文の
 うち最も珍しいもの(呼び出し側が C の型と違えて渡す引数の種類 `arg-slice` / `arg-nullable` /
 `arg-wide` / `arg-readonly`、次に `two-decls` / `deep-pointer` / `unnamed` / `call-2` /
@@ -152,7 +152,10 @@ rust の evaluator は初回に GitHub から取得するもので、取得で�
 TypeScript の simulator は operator を引数に取る定義を入れ子に呼ぶと外側の operator を
 見るので、入れ子の走査は `foldl` で直接書いています(`cimport.qnt` の `lexists` の comment)。
 `go test` は Quint を動かさず、checked-in の fixture だけを読みます。モデルを変えたら
-`just spec-cimport` で fixture を作り直してください(1 分ほど)。
+`just spec-cimport` で fixture を作り直してください(1 分ほど)。生成器は
+`go run ./cmd/kizu run scripts/cimport-mbt/main.kizu -- -main asImplemented -invariant none`
+のように `--` の後に `-model` / `-main` / `-out` / `-samples` / `-seeds` / `-per` /
+`-invariant`(`none` で検査なし)を取ります。
 
 ## 残課題
 

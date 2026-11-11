@@ -52,7 +52,7 @@ type mbtPrediction struct {
 	Decls  *string  `json:"decls,omitempty"`
 }
 
-// mbtCase is one program of the fixture written by scripts/cimport-mbt.
+// mbtCase is one program of the fixture scripts/cimport-mbt/main.kizu writes.
 type mbtCase struct {
 	Bucket      string         `json:"bucket"`
 	Header      string         `json:"header"`
@@ -216,7 +216,7 @@ func TestCImportModelKnownShapes(t *testing.T) {
 func TestCImportModelTraces(t *testing.T) {
 	path := os.Getenv("KIZU_MBT_FIXTURE")
 	if path == "" {
-		path = filepath.Join("testdata", "cimport_mbt.json")
+		path = filepath.Join("..", "..", "compiler", "tests", "mbt", "cimport.json")
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
