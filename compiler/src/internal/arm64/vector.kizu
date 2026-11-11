@@ -114,6 +114,10 @@ struct Plan {
     scalar: bool,
     // The accumulators are `f64`, each one ordered chain.
     float: bool,
+    // How many unrolled copies run together: each of them has registers of
+    // its own for the values the body computes, and they run each op in
+    // turn. 1 runs each copy whole, the copies sharing the temporaries.
+    group: i64,
 }
 
 /// Is one element read of the body: name = source[k], source an array or a
@@ -285,7 +289,8 @@ fn (self: &var Selector) vectorize_entry(module: &ir::Module, from: ir::Name, ta
         uses_index: false,
         multiplies: false,
         scalar: false,
-        float: false
+        float: false,
+        group: 1
     };
     if !try self.plan_loop(module, from, &var plan, &var tables) {
         return false;
@@ -572,14 +577,17 @@ fn (self: &var Selector) plan_loop(module: &ir::Module, from: ir::Name, plan: &v
     if plan.float or plan.multiplies or tables.loads.len() > 1 {
         return plan_scalar(plan, tables);
     }
-    if self.pool_need(plan, tables) > pool_size() {
+    if self.pool_need(plan, tables, 1) > pool_size() {
         plan.unroll = 2;
         if plan.elem < plan.width and 2 * 16 * plan.elem / plan.width < 8 {
             return false;
         }
     }
-    if self.pool_need(plan, tables) > pool_size() {
+    if self.pool_need(plan, tables, 1) > pool_size() {
         return false;
+    }
+    if self.pool_need(plan, tables, plan.unroll) <= pool_size() {
+        plan.group = plan.unroll;
     }
     return true;
 }
@@ -594,32 +602,47 @@ fn counts_one(self: &Selector, acc: Acc) -> bool {
     return held.kind == ValKind::Const and held.imm == 1;
 }
 
-/// Returns how many vector registers the loop needs at plan.unroll.
-fn (self: &Selector) pool_need(plan: &Plan, tables: &Tables) -> i64 {
+/// Returns how many vector registers the loop needs at plan.unroll, with
+/// the temporaries once for each of copies copies.
+fn (self: &Selector) pool_need(plan: &Plan, tables: &Tables, copies: i64) -> i64 {
     let unroll = plan.unroll;
-    var need = unroll + tables.accs.len() * unroll + tables.invs.len() + tables.elems.len();
+    var need = unroll + tables.accs.len() * unroll + tables.invs.len() + tables.elems.len() * copies;
     if plan.uses_index {
         need = need + unroll + 1;
     }
-    var masked = false;
-    var scratch = false;
+    if needs_masked(tables) {
+        need = need + copies;
+    }
+    if needs_scratch(plan, tables) {
+        need = need + copies;
+    }
+    return need;
+}
+
+/// Reports whether an accumulator updates under a mask, which takes a
+/// register for x masked.
+fn needs_masked(tables: &Tables) -> bool {
     var index = 0;
     while tables.accs.get(index) |acc| {
         index = index + 1;
         if !ir::is_empty(acc.cond) {
-            masked = true;
+            return true;
         }
+    }
+    return false;
+}
+
+/// Reports whether an accumulator is a 64-bit minimum or maximum, which
+/// takes a register for the comparison NEON has no single op for.
+fn needs_scratch(plan: &Plan, tables: &Tables) -> bool {
+    var index = 0;
+    while tables.accs.get(index) |acc| {
+        index = index + 1;
         if is_select(acc.kind) and plan.width == 8 {
-            scratch = true;
+            return true;
         }
     }
-    if masked {
-        need = need + 1;
-    }
-    if scratch {
-        need = need + 1;
-    }
-    return need;
+    return false;
 }
 
 /// Binds a scalar constant of the loop.
@@ -767,7 +790,11 @@ fn (self: &var Selector) plan_load(module: &ir::Module, node: &ir::InstrNode, sl
 /// the vector loop reads one element. It qualifies when every value is a
 /// word, every accumulator updates unconditionally by `+ - ^ & |`, and the
 /// copies of the accumulators, the pointers and the uniform values leave
-/// registers for the temporaries: unrolled 4 times, else 2.
+/// registers for the temporaries: unrolled 4 times, else 2. Copies run in
+/// pairs when the elements of a pair fit beside them too, as a pair reads
+/// all its elements before it computes (and two words in a row from one
+/// source load as one pair); not more, as the values live through the loop
+/// take registers too.
 fn plan_scalar(plan: &var Plan, tables: &Tables) -> bool {
     if plan.width != 8 or plan.uses_index {
         return false;
@@ -795,6 +822,16 @@ fn plan_scalar(plan: &var Plan, tables: &Tables) -> bool {
         return false;
     }
     plan.scalar = true;
+    // A float loop keeps the copies apart and in order: its chain takes
+    // the elements one by one, so they gain nothing by running together.
+    if plan.float {
+        return true;
+    }
+    // In pairs, the three temporaries held allows become the elements of a
+    // pair and a register for each value the body computes from them.
+    if held - 3 + tables.accs.len() * plan.unroll + (tables.loads.len() + tables.elems.len()) * 2 <= word_budget() {
+        plan.group = 2;
+    }
     return true;
 }
 
@@ -1300,9 +1337,28 @@ struct Pool {
     step: i64,
     accs: i64,
     invs: i64,
+    // The temporaries, masked and scratch: each once, or once per copy
+    // (copies of them side by side) when the copies run together.
     temps: i64,
     masked: i64,
     scratch: i64,
+    copies: i64,
+}
+
+/// Returns which of a temporary's registers copy u uses.
+fn (self: &Pool) copy(u: i64) -> i64 {
+    return u % self.copies;
+}
+
+/// Returns the register of name, bound to slot, in unrolled copy u: a
+/// value the body computes has one for each of copies copies running
+/// together, the uniform values one for all.
+fn per_copy(copies: i64, tables: &Tables, name: ir::Name, slot: i64, u: i64) -> i64 {
+    let role = role_of(tables, name);
+    if role == Role::Elem or role == Role::Mask {
+        return slot + u % copies;
+    }
+    return slot;
 }
 
 /// Returns the pool index holding a lane value in unrolled copy u.
@@ -1314,7 +1370,7 @@ fn lane_reg(plan: &Plan, pool: &Pool, tables: &Tables, name: ir::Name, u: i64) -
     if role_of(tables, held) == Role::Index {
         return pool.index + u;
     }
-    return vreg_slot(tables, held);
+    return per_copy(pool.copies, tables, held, vreg_slot(tables, held), u);
 }
 
 fn (self: &var Selector) new_vector_block() -> !i64 {
@@ -1333,7 +1389,7 @@ fn (self: &var Selector) emit_vector_loop(module: &ir::Module, plan: &Plan, tabl
     let bytes = step * plan.elem;
     let shift = power_of_two(plan.elem);
     let k = self.val(plan.k).reg;
-    var pool = Pool { elems: 0, index: 0, step: 0, accs: 0, invs: 0, temps: 0, masked: 0, scratch: 0 };
+    var pool = Pool { elems: 0, index: 0, step: 0, accs: 0, invs: 0, temps: 0, masked: 0, scratch: 0, copies: plan.group };
     var next_free = unroll;
     if plan.uses_index {
         pool.index = next_free;
@@ -1345,9 +1401,12 @@ fn (self: &var Selector) emit_vector_loop(module: &ir::Module, plan: &Plan, tabl
     pool.invs = next_free;
     next_free = next_free + tables.invs.len();
     pool.temps = next_free;
-    next_free = next_free + tables.elems.len();
+    next_free = next_free + tables.elems.len() * pool.copies;
     pool.masked = next_free;
-    pool.scratch = next_free + 1;
+    if needs_masked(tables) {
+        next_free = next_free + pool.copies;
+    }
+    pool.scratch = next_free;
     var index = 0;
     while tables.invs.get(index) |name| {
         try set_vreg_slot(allocator, tables, name, pool.invs + index);
@@ -1355,7 +1414,7 @@ fn (self: &var Selector) emit_vector_loop(module: &ir::Module, plan: &Plan, tabl
     }
     index = 0;
     while tables.elems.get(index) |name| {
-        try set_vreg_slot(allocator, tables, name, pool.temps + index);
+        try set_vreg_slot(allocator, tables, name, pool.temps + index * pool.copies);
         index = index + 1;
     }
     var sources = array::new<Val>(allocator);
@@ -1437,10 +1496,13 @@ fn (self: &var Selector) emit_vector_loop(module: &ir::Module, plan: &Plan, tabl
     let body = try self.new_vector_block();
     let fold = try self.new_vector_block();
     self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), body, 0 - 1);
-    // The loop: load the elements, compute each copy, combine.
+    // The loop: load the elements, compute each copy, combine. Copies
+    // that run together run each op in turn.
     try self.start_block(body);
     try self.load_lanes(plan, ptr, bytes);
-    for 0..unroll |u| {
+    try self.op_imm(MOp::AddImm, ptr, ptr, bytes);
+    let each = plan.group;
+    for 0..unroll / each |turn| {
         var body_index = 0;
         while tables.body.get(body_index) |mir| {
             body_index = body_index + 1;
@@ -1454,17 +1516,22 @@ fn (self: &var Selector) emit_vector_loop(module: &ir::Module, plan: &Plan, tabl
                     continue;
                 }
                 let role = role_of(tables, node.result.name);
-                if role == Role::Elem {
-                    try self.lane_binary(module, node, plan, &pool, tables, u);
-                } else if role == Role::Mask {
-                    try self.lane_compare(module, node, plan, &pool, tables, u);
+                for 0..each |copy| {
+                    let u = turn * each + copy;
+                    if role == Role::Elem {
+                        try self.lane_binary(module, node, plan, &pool, tables, u);
+                    } else if role == Role::Mask {
+                        try self.lane_compare(module, node, plan, &pool, tables, u);
+                    }
                 }
             }
         }
         index = 0;
         while tables.accs.get(index) |acc| {
-            let reg = pool.accs + index * unroll + u;
-            try self.update_lanes(acc, plan, &pool, tables, reg, u);
+            for 0..each |copy| {
+                let u = turn * each + copy;
+                try self.update_lanes(acc, plan, &pool, tables, pool.accs + index * unroll + u, u);
+            }
             index = index + 1;
         }
     }
@@ -1473,7 +1540,6 @@ fn (self: &var Selector) emit_vector_loop(module: &ir::Module, plan: &Plan, tabl
             try self.vop(MOp::VAdd, width, pool.index + u, pool.index + u, pool.step);
         }
     }
-    try self.op_imm(MOp::AddImm, ptr, ptr, bytes);
     try self.op3(MOp::Cmp, reg_none(), ptr, end);
     self.func.end(self.current, Term::Flags, Cond::Lo, reg_none(), body, fold);
     // The fold: the copies into the first, the lanes into lane 0, into the
@@ -1644,13 +1710,18 @@ fn (self: &var Selector) emit_scalar_loop(module: &ir::Module, plan: &Plan, tabl
     let fold = try self.new_vector_block();
     self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), body, 0 - 1);
     // The loop: each element of the turn read, computed and combined.
+    // Copies that run together read all their elements first, a source's
+    // in order, then run each op in turn.
     try self.start_block(body);
-    for 0..unroll |u| {
+    let each = plan.group;
+    for 0..unroll / each |turn| {
         index = 0;
         while tables.loads.get(index) |load| {
-            let reg = self.func.new_vreg();
-            try self.load(reg, ptrs.get_or_panic(index), u * 8, 8, load.signed);
-            try set_vreg_slot(allocator, tables, load.name, reg);
+            let first = self.func.new_vregs(each);
+            try set_vreg_slot(allocator, tables, load.name, first);
+            for 0..each |copy| {
+                try self.load(first + copy, ptrs.get_or_panic(index), (turn * each + copy) * 8, 8, load.signed);
+            }
             index = index + 1;
         }
         var body_index = 0;
@@ -1666,28 +1737,35 @@ fn (self: &var Selector) emit_scalar_loop(module: &ir::Module, plan: &Plan, tabl
                     if plan.float {
                         try self.double_binary(module, node, tables);
                     } else {
-                        try self.word_binary(module, node, tables);
+                        try self.word_binary(module, node, tables, each);
                     }
                 }
             }
         }
         index = 0;
         while tables.accs.get(index) |acc| {
-            let reg = accs.get_or_panic(index * unroll + u);
-            let x = vreg_slot(tables, resolve(tables, acc.x));
+            let x = resolve(tables, acc.x);
+            let at = index * unroll + turn * each;
             index = index + 1;
             if !plan.float {
-                try self.op3(word_op(acc.kind), reg, reg, x);
+                for 0..each |copy| {
+                    let reg = accs.get_or_panic(at + copy);
+                    try self.op3(word_op(acc.kind), reg, reg, per_copy(each, tables, x, vreg_slot(tables, x), copy));
+                }
                 continue;
             }
+            // One chain in the order of the source: plan.group is 1, so
+            // the turn is the element, and x + acc keeps x first.
+            let reg = accs.get_or_panic(at);
+            let slot = vreg_slot(tables, x);
             var kind = float_add();
             if acc.kind == AccKind::Sub {
                 kind = float_sub();
             }
             if acc.swapped {
-                try self.float_op(MOp::FBin, kind, 8, reg, x, reg);
+                try self.float_op(MOp::FBin, kind, 8, reg, slot, reg);
             } else {
-                try self.float_op(MOp::FBin, kind, 8, reg, reg, x);
+                try self.float_op(MOp::FBin, kind, 8, reg, reg, slot);
             }
         }
     }
@@ -1735,13 +1813,23 @@ fn word_op(kind: AccKind) -> MOp {
     }
 }
 
-/// Emits one element op of the body in general registers, the result in a
-/// register of its own.
-fn (self: &var Selector) word_binary(module: &ir::Module, node: &ir::InstrNode, tables: &var Tables) -> !void {
+/// Emits one element op of the body in general registers for each of
+/// copies copies, each result in a register of its own.
+fn (self: &var Selector) word_binary(module: &ir::Module, node: &ir::InstrNode, tables: &var Tables, copies: i64) -> !void {
+    let first = self.func.new_vregs(copies);
+    try set_vreg_slot(self.allocator, tables, node.result.name, first);
+    for 0..copies |copy| {
+        try self.word_copy(module, node, tables, first + copy, copy, copies);
+    }
+    return;
+}
+
+/// Emits copy of one element op of the body into dst.
+fn (self: &var Selector) word_copy(module: &ir::Module, node: &ir::InstrNode, tables: &Tables, dst: i64, copy: i64, copies: i64) -> !void {
     let left = node.args.get_or_panic(0);
     let right = node.args.get_or_panic(1);
-    let dst = self.func.new_vreg();
-    let lhs = vreg_slot(tables, resolve(tables, left.name));
+    let left_held = resolve(tables, left.name);
+    let lhs = per_copy(copies, tables, left_held, vreg_slot(tables, left_held), copy);
     let op = node.operand;
     if module.names.is(op, "<<") or module.names.is(op, ">>") {
         var shift_op = MOp::LslImm;
@@ -1753,7 +1841,8 @@ fn (self: &var Selector) word_binary(module: &ir::Module, node: &ir::InstrNode, 
         }
         try self.op_imm(shift_op, dst, lhs, self.val(right.name).imm);
     } else {
-        let rhs = vreg_slot(tables, resolve(tables, right.name));
+        let right_held = resolve(tables, right.name);
+        let rhs = per_copy(copies, tables, right_held, vreg_slot(tables, right_held), copy);
         var word = MOp::Orr;
         if module.names.is(op, "+") {
             word = MOp::Add;
@@ -1768,7 +1857,7 @@ fn (self: &var Selector) word_binary(module: &ir::Module, node: &ir::InstrNode, 
         }
         try self.op3(word, dst, lhs, rhs);
     }
-    return set_vreg_slot(self.allocator, tables, node.result.name, dst);
+    return;
 }
 
 /// Emits one `f64` element op of the body in float registers, the result in
@@ -1863,7 +1952,7 @@ fn (self: &var Selector) extend_lanes(op: MOp, size: i64, signed: bool, vd: i64,
 fn (self: &var Selector) update_lanes(acc: Acc, plan: &Plan, pool: &Pool, tables: &Tables, reg: i64, u: i64) -> !void {
     let width = plan.width;
     if ir::is_empty(acc.cond) {
-        return self.combine(acc.kind, width, reg, lane_reg(plan, pool, tables, acc.x, u), pool.scratch);
+        return self.combine(acc.kind, width, reg, lane_reg(plan, pool, tables, acc.x, u), pool.scratch + pool.copy(u));
     }
     let mask = lane_reg(plan, pool, tables, acc.cond, u);
     if counts_one(self, acc) {
@@ -1871,12 +1960,13 @@ fn (self: &var Selector) update_lanes(acc: Acc, plan: &Plan, pool: &Pool, tables
         return self.vop(MOp::VSub, width, reg, reg, mask);
     }
     let x = lane_reg(plan, pool, tables, acc.x, u);
+    let masked = pool.masked + pool.copy(u);
     if acc.when {
-        try self.vop(MOp::VAnd, width, pool.masked, x, mask);
+        try self.vop(MOp::VAnd, width, masked, x, mask);
     } else {
-        try self.vop(MOp::VBic, width, pool.masked, x, mask);
+        try self.vop(MOp::VBic, width, masked, x, mask);
     }
-    return self.combine(acc.kind, width, reg, pool.masked, pool.scratch);
+    return self.combine(acc.kind, width, reg, masked, pool.scratch + pool.copy(u));
 }
 
 /// Emits one comparison of lane values for unrolled copy u: all ones where
@@ -1884,7 +1974,7 @@ fn (self: &var Selector) update_lanes(acc: Acc, plan: &Plan, pool: &Pool, tables
 fn (self: &var Selector) lane_compare(module: &ir::Module, node: &ir::InstrNode, plan: &Plan, pool: &Pool, tables: &Tables, u: i64) -> !void {
     let left = node.args.get_or_panic(0);
     let right = node.args.get_or_panic(1);
-    let dst = vreg_slot(tables, node.result.name);
+    let dst = per_copy(pool.copies, tables, node.result.name, vreg_slot(tables, node.result.name), u);
     let lhs = lane_reg(plan, pool, tables, left.name, u);
     let rhs = lane_reg(plan, pool, tables, right.name, u);
     let signed = shape_of(module, left.type_name).signed;
@@ -1912,7 +2002,7 @@ fn (self: &var Selector) lane_compare(module: &ir::Module, node: &ir::InstrNode,
 fn (self: &var Selector) lane_binary(module: &ir::Module, node: &ir::InstrNode, plan: &Plan, pool: &Pool, tables: &Tables, u: i64) -> !void {
     let left = node.args.get_or_panic(0);
     let right = node.args.get_or_panic(1);
-    let dst = vreg_slot(tables, node.result.name);
+    let dst = per_copy(pool.copies, tables, node.result.name, vreg_slot(tables, node.result.name), u);
     let lhs = lane_reg(plan, pool, tables, left.name, u);
     let op = node.operand;
     let width = plan.width;
