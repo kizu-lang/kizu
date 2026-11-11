@@ -5,14 +5,22 @@ import std::fmt;
 import std::mem;
 import std::string;
 
-// The arm64 backend: a lowered module straight to Darwin AArch64 assembly
-// text, which the system assembler and linker turn into the executable.
+// The arm64 backend: a lowered module straight to AArch64 assembly text,
+// Mach-O for Darwin or ELF for Linux, which the system assembler and
+// linker turn into the executable.
 // Every function is selected into machine IR, given registers, and printed;
 // an op or a type the backend does not lower stops the build with a
 // diagnostic naming it rather than being handed to another backend.
 
-/// Emits a lowered module as assembly text.
-pub fn emit(allocator: Allocator, module: &ir::Module, out: &var string::String) -> !?diagnostic::Diagnostic {
+/// Is the object format the assembly text is written for. Selection names
+/// symbols the Mach-O way; printing for ELF spells them through symbol.
+pub enum Format {
+    MachO,
+    Elf,
+}
+
+/// Emits a lowered module as assembly text for format.
+pub fn emit(allocator: Allocator, module: &ir::Module, format: Format, out: &var string::String) -> !?diagnostic::Diagnostic {
     var selector = try new_selector(allocator);
     defer selector.deinit(allocator);
     if module.error_sets.at("std::mem::Error") |declared| {
@@ -29,7 +37,11 @@ pub fn emit(allocator: Allocator, module: &ir::Module, out: &var string::String)
             main_ret = ret;
         }
     }
-    try out.append_bytes(allocator, "    .section __TEXT,__text,regular,pure_instructions");
+    if format == Format::Elf {
+        try out.append_bytes(allocator, "    .text");
+    } else {
+        try out.append_bytes(allocator, "    .section __TEXT,__text,regular,pure_instructions");
+    }
     try newline(allocator, out);
     // Select every function first, so a call can take a copy of its
     // callee's body; then allocate and print each.
@@ -87,29 +99,33 @@ pub fn emit(allocator: Allocator, module: &ir::Module, out: &var string::String)
             let exported_text = ir::name_text(&selector.syms, exported);
             let exported_bytes = exported_text.as_bytes();
             try out.append_bytes(allocator, "    .globl ");
-            try out.append_bytes(allocator, exported_bytes);
+            try symbol(allocator, out, format, exported_bytes);
             try newline(allocator, out);
             try out.append_bytes(allocator, "    .p2align 4");
             try newline(allocator, out);
-            try out.append_bytes(allocator, exported_bytes);
+            try symbol(allocator, out, format, exported_bytes);
             try out.append_bytes(allocator, ":");
             try newline(allocator, out);
         }
-        try print_function(allocator, out, func, &allocation, symbol_bytes, ordinal, &selector.syms);
+        try print_function(allocator, out, func, &allocation, symbol_bytes, ordinal, &selector.syms, format);
         ordinal = ordinal + 1;
     }
     if selector.main_wraps {
-        try write_error_names(allocator, module, &var selector, out);
+        try write_error_names(allocator, module, &var selector, format, out);
     }
     if selector.table_starts.len() > 0 {
-        try write_tables(allocator, &selector, out);
+        try write_tables(allocator, &selector, format, out);
     }
     if selector.literals.len() > 0 {
-        try out.append_bytes(allocator, "    .section __TEXT,__cstring,cstring_literals");
+        if format == Format::Elf {
+            try elf_section(allocator, out, ".rodata.str1.1", "aMS", ",%progbits,1");
+        } else {
+            try out.append_bytes(allocator, "    .section __TEXT,__cstring,cstring_literals");
+        }
         try newline(allocator, out);
         var literal_index = 0;
         while selector.literals.get(literal_index) |literal| {
-            try out.append_bytes(allocator, "Lkz_str.");
+            try symbol(allocator, out, format, "Lkz_str.");
             try fmt::append_i64(allocator, out, literal_index);
             try out.append_bytes(allocator, ":");
             try newline(allocator, out);
@@ -136,14 +152,60 @@ pub fn emit(allocator: Allocator, module: &ir::Module, out: &var string::String)
             try newline(allocator, out);
         }
     }
-    try out.append_bytes(allocator, ".subsections_via_symbols");
+    if format == Format::Elf {
+        // The stack is not executable.
+        try elf_section(allocator, out, ".note.GNU-stack", "", ",%progbits");
+    } else {
+        try out.append_bytes(allocator, ".subsections_via_symbols");
+    }
     try newline(allocator, out);
     return null;
 }
 
+/// Writes an assembler symbol the selector named the Mach-O way. ELF has
+/// no `_` in front of a C symbol, and keeps a local label out of the
+/// symbol table by a `.L` start rather than an `L` one.
+fn symbol(allocator: Allocator, out: &var string::String, format: Format, bytes: []u8) -> !void {
+    if format == Format::Elf and mem::len(bytes) > 0 {
+        if bytes[0] == cast<u8>(95) {
+            return out.append_bytes(allocator, bytes[1..mem::len(bytes)]);
+        }
+        if bytes[0] == cast<u8>(76) {
+            try out.append_bytes(allocator, ".");
+        }
+    }
+    return out.append_bytes(allocator, bytes);
+}
+
+/// Writes a symbol with a relocation operator: ELF's in front
+/// (`:lo12:sym`), Mach-O's behind (`sym@PAGEOFF`).
+fn relocated(allocator: Allocator, out: &var string::String, format: Format, bytes: []u8, elf: []u8, mach_o: []u8) -> !void {
+    if format == Format::Elf {
+        try out.append_bytes(allocator, elf);
+        return symbol(allocator, out, format, bytes);
+    }
+    try out.append_bytes(allocator, bytes);
+    return out.append_bytes(allocator, mach_o);
+}
+
+/// Writes an ELF `.section name,"flags"rest` line, without the newline.
+fn elf_section(allocator: Allocator, out: &var string::String, name: []u8, flags: []u8, rest: []u8) -> !void {
+    try out.append_bytes(allocator, "    .section ");
+    try out.append_bytes(allocator, name);
+    try out.append_bytes(allocator, ",");
+    try out.append_byte(allocator, cast<u8>(34));
+    try out.append_bytes(allocator, flags);
+    try out.append_byte(allocator, cast<u8>(34));
+    return out.append_bytes(allocator, rest);
+}
+
 /// Writes the read-only tables of table.get, eight bytes an entry.
-fn write_tables(allocator: Allocator, selector: &Selector, out: &var string::String) -> !void {
-    try out.append_bytes(allocator, "    .section __TEXT,__const");
+fn write_tables(allocator: Allocator, selector: &Selector, format: Format, out: &var string::String) -> !void {
+    if format == Format::Elf {
+        try out.append_bytes(allocator, "    .section .rodata");
+    } else {
+        try out.append_bytes(allocator, "    .section __TEXT,__const");
+    }
     try newline(allocator, out);
     var table = 0;
     while selector.table_starts.get(table) |start| {
@@ -153,7 +215,7 @@ fn write_tables(allocator: Allocator, selector: &Selector, out: &var string::Str
         }
         try out.append_bytes(allocator, "    .p2align 3");
         try newline(allocator, out);
-        try out.append_bytes(allocator, "Lkz_table.");
+        try symbol(allocator, out, format, "Lkz_table.");
         try fmt::append_i64(allocator, out, table);
         try out.append_bytes(allocator, ":");
         try newline(allocator, out);
@@ -533,16 +595,16 @@ fn print_mem(allocator: Allocator, out: &var string::String, load: bool, data: i
     return newline(allocator, out);
 }
 
-fn block_label(allocator: Allocator, out: &var string::String, ordinal: i64, block: i64) -> !void {
-    try out.append_bytes(allocator, "LBB");
+fn block_label(allocator: Allocator, out: &var string::String, format: Format, ordinal: i64, block: i64) -> !void {
+    try symbol(allocator, out, format, "LBB");
     try fmt::append_i64(allocator, out, ordinal);
     try out.append_bytes(allocator, "_");
     return fmt::append_i64(allocator, out, block);
 }
 
-fn branch(allocator: Allocator, out: &var string::String, op: []u8, ordinal: i64, block: i64) -> !void {
+fn branch(allocator: Allocator, out: &var string::String, format: Format, op: []u8, ordinal: i64, block: i64) -> !void {
     try head(allocator, out, op);
-    try block_label(allocator, out, ordinal, block);
+    try block_label(allocator, out, format, ordinal, block);
     return newline(allocator, out);
 }
 
@@ -564,19 +626,20 @@ fn print_function(
     out: &var string::String,
     func: &var MFunction,
     allocation: &Allocation,
-    symbol: []u8,
+    name: []u8,
     ordinal: i64,
-    syms: &ir::NameTable
+    syms: &ir::NameTable,
+    format: Format
 ) -> !void {
     let frame = plan_frame(func, allocation);
     if func.is_main {
         try out.append_bytes(allocator, "    .globl ");
-        try out.append_bytes(allocator, symbol);
+        try symbol(allocator, out, format, name);
         try newline(allocator, out);
     }
     try out.append_bytes(allocator, "    .p2align 4");
     try newline(allocator, out);
-    try out.append_bytes(allocator, symbol);
+    try symbol(allocator, out, format, name);
     try out.append_bytes(allocator, ":");
     try newline(allocator, out);
     if frame.needed {
@@ -589,7 +652,7 @@ fn print_function(
         if allocation.order.get(order_index) |next| {
             following = next;
         }
-        try block_label(allocator, out, ordinal, block_id);
+        try block_label(allocator, out, format, ordinal, block_id);
         try out.append_bytes(allocator, ":");
         try newline(allocator, out);
         if func.blocks.at(block_id) |block| {
@@ -602,7 +665,7 @@ fn print_function(
                     continue;
                 }
                 cache = empty_cache();
-                try print_inst(allocator, out, func, inst, syms);
+                try print_inst(allocator, out, func, inst, syms, format);
             }
             match block.term {
                 Open => {
@@ -611,7 +674,7 @@ fn print_function(
                 },
                 Jump => {
                     if block.succ0 != following {
-                        try branch(allocator, out, "b", ordinal, block.succ0);
+                        try branch(allocator, out, format, "b", ordinal, block.succ0);
                     }
                 },
                 Flags => {
@@ -621,21 +684,21 @@ fn print_function(
                         try op.append_bytes(allocator, "b.");
                         try op.append_bytes(allocator, cond_spelling(invert(block.cond)));
                         let op_bytes = op.as_bytes();
-                        try branch(allocator, out, op_bytes, ordinal, block.succ1);
+                        try branch(allocator, out, format, op_bytes, ordinal, block.succ1);
                     } else {
                         var op = string::new(allocator);
                         defer op.deinit(allocator);
                         try op.append_bytes(allocator, "b.");
                         try op.append_bytes(allocator, cond_spelling(block.cond));
                         let op_bytes = op.as_bytes();
-                        try branch(allocator, out, op_bytes, ordinal, block.succ0);
+                        try branch(allocator, out, format, op_bytes, ordinal, block.succ0);
                         if block.succ1 != following {
-                            try branch(allocator, out, "b", ordinal, block.succ1);
+                            try branch(allocator, out, format, "b", ordinal, block.succ1);
                         }
                     }
                 },
-                Zero => try print_test_branch(allocator, out, "cbz", "cbnz", block.treg, ordinal, block.succ0, block.succ1, following),
-                NonZero => try print_test_branch(allocator, out, "cbnz", "cbz", block.treg, ordinal, block.succ0, block.succ1, following),
+                Zero => try print_test_branch(allocator, out, format, "cbz", "cbnz", block.treg, ordinal, block.succ0, block.succ1, following),
+                NonZero => try print_test_branch(allocator, out, format, "cbnz", "cbz", block.treg, ordinal, block.succ0, block.succ1, following),
                 Return => {
                     if frame.needed {
                         try print_epilogue(allocator, out, frame, &allocation.saved);
@@ -653,6 +716,7 @@ fn print_function(
 fn print_test_branch(
     allocator: Allocator,
     out: &var string::String,
+    format: Format,
     op: []u8,
     inverse: []u8,
     reg: i64,
@@ -665,16 +729,16 @@ fn print_test_branch(
         try head(allocator, out, inverse);
         try reg_name(allocator, out, reg, true);
         try comma(allocator, out);
-        try block_label(allocator, out, ordinal, other);
+        try block_label(allocator, out, format, ordinal, other);
         return newline(allocator, out);
     }
     try head(allocator, out, op);
     try reg_name(allocator, out, reg, true);
     try comma(allocator, out);
-    try block_label(allocator, out, ordinal, taken);
+    try block_label(allocator, out, format, ordinal, taken);
     try newline(allocator, out);
     if other != following {
-        try branch(allocator, out, "b", ordinal, other);
+        try branch(allocator, out, format, "b", ordinal, other);
     }
     return;
 }
@@ -692,7 +756,7 @@ fn resolve_base(func: &MFunction, inst: &MInst) -> Frame {
     return Frame { needed: true, total: inst.rn, saved_at: inst.imm };
 }
 
-fn print_inst(allocator: Allocator, out: &var string::String, func: &MFunction, inst: &MInst, syms: &ir::NameTable) -> !void {
+fn print_inst(allocator: Allocator, out: &var string::String, func: &MFunction, inst: &MInst, syms: &ir::NameTable, format: Format) -> !void {
     match inst.op {
         Mov => {
             if inst.rd == inst.rn {
@@ -868,16 +932,14 @@ fn print_inst(allocator: Allocator, out: &var string::String, func: &MFunction, 
             try head(allocator, out, "adrp");
             try reg_name(allocator, out, inst.rd, true);
             try comma(allocator, out);
-            try out.append_bytes(allocator, bytes);
-            try out.append_bytes(allocator, "@PAGE");
+            try relocated(allocator, out, format, bytes, "", "@PAGE");
             try newline(allocator, out);
             try head(allocator, out, "add");
             try reg_name(allocator, out, inst.rd, true);
             try comma(allocator, out);
             try reg_name(allocator, out, inst.rd, true);
             try comma(allocator, out);
-            try out.append_bytes(allocator, bytes);
-            try out.append_bytes(allocator, "@PAGEOFF");
+            try relocated(allocator, out, format, bytes, ":lo12:", "@PAGEOFF");
             return newline(allocator, out);
         },
         GotAddr => {
@@ -886,23 +948,22 @@ fn print_inst(allocator: Allocator, out: &var string::String, func: &MFunction, 
             try head(allocator, out, "adrp");
             try reg_name(allocator, out, inst.rd, true);
             try comma(allocator, out);
-            try out.append_bytes(allocator, bytes);
-            try out.append_bytes(allocator, "@GOTPAGE");
+            try relocated(allocator, out, format, bytes, ":got:", "@GOTPAGE");
             try newline(allocator, out);
             try head(allocator, out, "ldr");
             try reg_name(allocator, out, inst.rd, true);
             try out.append_bytes(allocator, ", [");
             try reg_name(allocator, out, inst.rd, true);
             try out.append_bytes(allocator, ", ");
-            try out.append_bytes(allocator, bytes);
-            try out.append_bytes(allocator, "@GOTPAGEOFF]");
+            try relocated(allocator, out, format, bytes, ":got_lo12:", "@GOTPAGEOFF");
+            try out.append_bytes(allocator, "]");
             return newline(allocator, out);
         },
         Call => {
             let text = ir::name_text(syms, inst.sym);
             let bytes = text.as_bytes();
             try head(allocator, out, "bl");
-            try out.append_bytes(allocator, bytes);
+            try symbol(allocator, out, format, bytes);
             return newline(allocator, out);
         },
         CallReg => {
@@ -1161,7 +1222,7 @@ fn print_indexed(allocator: Allocator, out: &var string::String, load: bool, ins
 /// Writes the table the entry point reads a failure's name from: one
 /// (pointer, length) row per error code, row 0 and codes no set declares
 /// empty, each name a string literal.
-fn write_error_names(allocator: Allocator, module: &ir::Module, selector: &var Selector, out: &var string::String) -> !void {
+fn write_error_names(allocator: Allocator, module: &ir::Module, selector: &var Selector, format: Format, out: &var string::String) -> !void {
     var rows = 1;
     var set_index = 0;
     while module.error_sets.key_at(set_index) |set_name| {
@@ -1205,11 +1266,17 @@ fn write_error_names(allocator: Allocator, module: &ir::Module, selector: &var S
             }
         }
     }
-    try out.append_bytes(allocator, "    .section __DATA,__const");
+    if format == Format::Elf {
+        // The rows hold addresses, which a position-independent
+        // executable relocates when it is loaded.
+        try elf_section(allocator, out, ".data.rel.ro", "aw", ",%progbits");
+    } else {
+        try out.append_bytes(allocator, "    .section __DATA,__const");
+    }
     try newline(allocator, out);
     try out.append_bytes(allocator, "    .p2align 3");
     try newline(allocator, out);
-    try out.append_bytes(allocator, "Lkz_error_names:");
+    try symbol(allocator, out, format, "Lkz_error_names:");
     try newline(allocator, out);
     for 0..rows |row| {
         let label = labels.get_or_panic(row);
@@ -1217,7 +1284,8 @@ fn write_error_names(allocator: Allocator, module: &ir::Module, selector: &var S
             try out.append_bytes(allocator, "    .quad 0");
             try newline(allocator, out);
         } else {
-            try out.append_bytes(allocator, "    .quad Lkz_str.");
+            try out.append_bytes(allocator, "    .quad ");
+            try symbol(allocator, out, format, "Lkz_str.");
             try fmt::append_i64(allocator, out, label);
             try newline(allocator, out);
         }
