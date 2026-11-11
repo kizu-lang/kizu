@@ -40,7 +40,13 @@ fn caller_saved_first() -> i64 {
     return 9;
 }
 
-fn caller_saved_last() -> i64 {
+fn caller_saved_last(arch: Arch) -> i64 {
+    // amd64 has no register left for this pool: its six argument
+    // registers, five callee-saved ones, the two scratch registers and rax
+    // (x8, and the printer's own scratch) are all of them.
+    if arch == Arch::Amd64 {
+        return 8;
+    }
     return 14;
 }
 
@@ -48,7 +54,11 @@ fn callee_saved_first() -> i64 {
     return 19;
 }
 
-fn callee_saved_last() -> i64 {
+fn callee_saved_last(arch: Arch) -> i64 {
+    // rbx and r12..r15 on amd64.
+    if arch == Arch::Amd64 {
+        return 23;
+    }
     return 28;
 }
 
@@ -1048,7 +1058,7 @@ fn (self: &Ranges) spans(v: i64, before: &array::Array<i64>, base: i64) -> bool 
 }
 
 /// Allocates registers for a function and rewrites it to use them.
-pub fn allocate(allocator: Allocator, func: &var MFunction) -> !Allocation {
+pub fn allocate(allocator: Allocator, func: &var MFunction, arch: Arch) -> !Allocation {
     var cold_flags = array::new<bool>(allocator);
     defer cold_flags.deinit(allocator);
     var flag_index = 0;
@@ -1061,7 +1071,7 @@ pub fn allocate(allocator: Allocator, func: &var MFunction) -> !Allocation {
     var order = array::new<i64>(allocator);
     errdefer order.deinit(allocator);
     try layout(allocator, func, cold, &var order);
-    return allocate_laid_out(allocator, func, cold, move order);
+    return allocate_laid_out(allocator, func, cold, move order, arch);
 }
 
 /// Runs the machine-level clean-ups allocation starts with.
@@ -1081,7 +1091,7 @@ fn run_passes(allocator: Allocator, func: &var MFunction) -> !void {
     return;
 }
 
-fn allocate_laid_out(allocator: Allocator, func: &var MFunction, cold: &array::Array<bool>, order_in: array::Array<i64>) -> !Allocation {
+fn allocate_laid_out(allocator: Allocator, func: &var MFunction, cold: &array::Array<bool>, order_in: array::Array<i64>, arch: Arch) -> !Allocation {
     var order = move order_in;
     errdefer order.deinit(allocator);
     let nv = func.vregs;
@@ -1563,14 +1573,14 @@ fn allocate_laid_out(allocator: Allocator, func: &var MFunction, cold: &array::A
             try candidates.append(allocator, wanted);
         }
         if !crosses {
-            for caller_saved_first()..caller_saved_last() + 1 |r| {
+            for caller_saved_first()..caller_saved_last(arch) + 1 |r| {
                 try candidates.append(allocator, r);
             }
-            for 0..8 |r| {
+            for 0..arg_regs(arch) |r| {
                 try candidates.append(allocator, r);
             }
         }
-        for callee_saved_first()..callee_saved_last() + 1 |r| {
+        for callee_saved_first()..callee_saved_last(arch) + 1 |r| {
             try candidates.append(allocator, r);
         }
         var chosen = 0 - 1;
@@ -1578,7 +1588,7 @@ fn allocate_laid_out(allocator: Allocator, func: &var MFunction, cold: &array::A
         var candidate_index = 0;
         while candidates.get(candidate_index) |r| {
             candidate_index = candidate_index + 1;
-            if !may_take(&ranges, &marks, stride, v, r, crosses) {
+            if !may_take(&ranges, &marks, stride, v, r, crosses, arch) {
                 continue;
             }
             if register_free(&ranges, &phys, &active, &inactive, &copy_of, &write_at, &write_next, &write_first, v, r) {
@@ -1607,7 +1617,7 @@ fn allocate_laid_out(allocator: Allocator, func: &var MFunction, cold: &array::A
         candidate_index = 0;
         while candidates.get(candidate_index) |r| {
             candidate_index = candidate_index + 1;
-            if !may_take(&ranges, &marks, stride, v, r, crosses) {
+            if !may_take(&ranges, &marks, stride, v, r, crosses, arch) {
                 continue;
             }
             let cost = holders_weight(&ranges, &phys, &weight, &active, &inactive, v, r);
@@ -1638,7 +1648,7 @@ fn allocate_laid_out(allocator: Allocator, func: &var MFunction, cold: &array::A
         var mask = 0;
         for 0..nv |v| {
             let reg = phys.get_or_panic(v);
-            if reg >= caller_saved_first() and reg <= caller_saved_last() and ranges.covers(v, 2 * k) and ranges.covers(v, 2 * k + 1) {
+            if reg >= caller_saved_first() and reg <= caller_saved_last(arch) and ranges.covers(v, 2 * k) and ranges.covers(v, 2 * k + 1) {
                 mask = mask | (1 << reg);
             }
         }
@@ -1676,7 +1686,7 @@ fn allocate_laid_out(allocator: Allocator, func: &var MFunction, cold: &array::A
     try rewrite(allocator, func, &order, &phys, &spill, &remat, &cold_saves, &var save_slots, &dead);
     var saved = array::new<i64>(allocator);
     errdefer saved.deinit(allocator);
-    for 19..29 |reg| {
+    for callee_saved_first()..callee_saved_last(arch) + 1 |reg| {
         if used.get_or_panic(reg) {
             try saved.append(allocator, reg);
         }
@@ -1700,15 +1710,15 @@ fn closes_cycle(avoid_src: &array::Array<i64>, avoid_dst: &array::Array<i64>, ph
     return false;
 }
 
-fn may_take(ranges: &Ranges, marks: &array::Array<i64>, stride: i64, v: i64, reg: i64, crosses: bool) -> bool {
+fn may_take(ranges: &Ranges, marks: &array::Array<i64>, stride: i64, v: i64, reg: i64, crosses: bool, arch: Arch) -> bool {
     if crosses and reg < callee_saved_first() {
         return false;
     }
-    if reg < 8 {
+    if reg < arg_regs(arch) {
         return !ranges.spans(v, marks, (1 + reg) * stride);
     }
-    return (reg >= caller_saved_first() and reg <= caller_saved_last()) or
-        (reg >= callee_saved_first() and reg <= callee_saved_last());
+    return (reg >= caller_saved_first() and reg <= caller_saved_last(arch)) or
+        (reg >= callee_saved_first() and reg <= callee_saved_last(arch));
 }
 
 /// Reports whether no range holding reg overlaps v, a copy and its source

@@ -1,0 +1,284 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::array;
+import std::string;
+
+// Calls into C by the System V AMD64 convention, as Linux applies it, for
+// the amd64 printer, which names x0..x5 rdi, rsi, rdx, rcx, r8 and r9 and
+// x8 rax.
+//
+// A scalar takes the next general register and a float the next of xmm0..7;
+// one that finds none left goes on the stack, in an 8-byte slot, in the
+// order of the arguments. A C struct by value (laid out as C lays it out)
+// is classified by its eightbytes:
+//
+// - at most 16 bytes: each eightbyte holding only floats goes in an xmm
+//   register, any other in a general one, as an argument and as a result
+//   (the general ones come back in rax and rdx, the float ones in xmm0 and
+//   xmm1). An argument the registers left would not hold whole goes on the
+//   stack instead;
+// - more: an argument is copied onto the stack, a result is written to
+//   memory the caller provides, its address the hidden first argument.
+//
+// A variadic callee takes its unnamed arguments as named ones and reads in
+// al how many xmm registers they use.
+//
+// A struct aligned to more than 8 bytes is refused: none C can name here
+// is.
+
+/// Is how one C struct type crosses a call by System V.
+struct SysvStruct {
+    size: i64,
+    align: i64,
+    // Over 16 bytes: on the stack, a result in memory.
+    memory: bool,
+    // The eightbytes.
+    count: i64,
+    // Whether each eightbyte holds only floats.
+    sse0: bool,
+    sse1: bool,
+}
+
+fn (self: SysvStruct) sse(index: i64) -> bool {
+    if index == 0 {
+        return self.sse0;
+    }
+    return self.sse1;
+}
+
+/// Returns how a C struct type crosses a call, or null when it holds what C
+/// cannot name or nothing at all.
+fn sysv_struct(module: &ir::Module, type_name: ir::Name, allocator: Allocator) -> !?SysvStruct {
+    let shape = shape_of(module, type_name);
+    if shape.class != Class::Aggregate or shape.size == 0 or shape.align > 8 {
+        return null;
+    }
+    let text = ir::name_text(&module.names, type_name);
+    let bytes = text.as_bytes();
+    var leaves = array::new<CLeaf>(allocator);
+    defer leaves.deinit(allocator);
+    if !try c_leaves(module, bytes, 0, &var leaves, allocator, 0) {
+        return null;
+    }
+    var passing = SysvStruct {
+        size: shape.size,
+        align: shape.align,
+        memory: shape.size > 16,
+        count: (shape.size + 7) / 8,
+        sse0: true,
+        sse1: true,
+    };
+    var index = 0;
+    while leaves.get(index) |leaf| {
+        index = index + 1;
+        if !leaf.float {
+            if leaf.offset < 8 {
+                passing.sse0 = false;
+            } else {
+                passing.sse1 = false;
+            }
+        }
+    }
+    return passing;
+}
+
+/// Adds a word argument to the next general register, or the stack when
+/// none is left.
+fn (self: &var Selector) sysv_word(args: &var CCallArgs, reg: i64) -> !void {
+    if args.words.len() < arg_regs(self.arch) {
+        return args.words.append(self.allocator, reg);
+    }
+    return args.stacked.append(self.allocator, reg);
+}
+
+/// Adds a float argument of width bytes to the next xmm register, or the
+/// stack when none is left.
+fn (self: &var Selector) sysv_float(args: &var CCallArgs, reg: i64, width: i64) -> !void {
+    if args.floats.len() < 8 {
+        try args.floats.append(self.allocator, reg);
+        return args.float_widths.append(self.allocator, width);
+    }
+    return args.stacked.append(self.allocator, reg);
+}
+
+/// Adds a C struct argument to the registers or stack slots it travels in.
+/// Returns false when it is not one this backend passes.
+fn (self: &var Selector) sysv_struct_arg(module: &ir::Module, arg: ir::Value, args: &var CCallArgs) -> !bool {
+    let passing = try sysv_struct(module, arg.type_name, self.allocator) orelse return false;
+    let src = try self.addr(module, arg) orelse return false;
+    // A struct whose size is not whole words is copied into one that is, so
+    // the last word's load stays inside memory of its own.
+    var base = src;
+    if passing.size % 8 != 0 {
+        base = try self.c_slot(passing.count * 8, passing.align);
+        try self.copy_bytes(base, src, passing.size);
+    }
+    var in_regs = !passing.memory;
+    if in_regs {
+        var ints = 0;
+        var sses = 0;
+        for 0..passing.count |index| {
+            if passing.sse(index) {
+                sses = sses + 1;
+            } else {
+                ints = ints + 1;
+            }
+        }
+        if args.words.len() + ints > arg_regs(self.arch) or args.floats.len() + sses > 8 {
+            in_regs = false;
+        }
+    }
+    for 0..passing.count |index| {
+        let reg = self.func.new_vreg();
+        try self.load(reg, base, index * 8, 8, false);
+        if !in_regs {
+            try args.stacked.append(self.allocator, reg);
+        } else if passing.sse(index) {
+            try args.floats.append(self.allocator, reg);
+            try args.float_widths.append(self.allocator, 8);
+        } else {
+            try args.words.append(self.allocator, reg);
+        }
+    }
+    return true;
+}
+
+/// Selects a call to C by System V.
+fn (self: &var Selector) select_sysv_call(module: &ir::Module, node: &ir::InstrNode, symbol_name: ir::Name) -> !?diagnostic::Diagnostic {
+    var args = CCallArgs {
+        words: array::new<i64>(self.allocator),
+        floats: array::new<i64>(self.allocator),
+        float_widths: array::new<i64>(self.allocator),
+        stacked: array::new<i64>(self.allocator),
+    };
+    defer args.deinit(self.allocator);
+    let result = node.result;
+    var result_passing = SysvStruct { size: 0, align: 1, memory: false, count: 0, sse0: false, sse1: false };
+    let struct_result = is_c_struct(module, result.type_name);
+    var sret = reg_none();
+    if struct_result {
+        result_passing = try sysv_struct(module, result.type_name, self.allocator) orelse
+            return try self.fail(module, "C result type", result.type_name);
+        if result_passing.memory {
+            sret = try self.c_slot(result_passing.size, result_passing.align);
+            try args.words.append(self.allocator, sret);
+        }
+    } else {
+        let shape = shape_of(module, result.type_name);
+        if !is_word(shape) and shape.class != Class::Void {
+            return try self.fail(module, "C result type", result.type_name);
+        }
+    }
+    var index = 0;
+    while node.args.get(index) |arg| {
+        let at = index;
+        index = index + 1;
+        let unnamed = node.variadic_fixed > 0 and at >= node.variadic_fixed;
+        var takes_address = false;
+        if node.call_params.get(at) |param| {
+            takes_address = takes_address_of(module, param, arg.type_name);
+        }
+        if takes_address {
+            let address = try self.c_copy_address(module, arg) orelse return try self.fail_op(module, node);
+            try self.sysv_word(&var args, address);
+            continue;
+        }
+        let shape = shape_of(module, arg.type_name);
+        if !unnamed and is_c_struct(module, arg.type_name) {
+            if !try self.sysv_struct_arg(module, arg, &var args) {
+                return try self.fail(module, "C argument type", arg.type_name);
+            }
+            continue;
+        }
+        if !is_word(shape) {
+            if unnamed {
+                return try self.fail(module, "C variadic argument type", arg.type_name);
+            }
+            return try self.fail(module, "C argument type", arg.type_name);
+        }
+        let reg = try self.reg(module, arg) orelse return try self.fail_op(module, node);
+        if shape.class == Class::Float {
+            try self.sysv_float(&var args, reg, shape.size);
+        } else {
+            try self.sysv_word(&var args, reg);
+        }
+    }
+    index = 0;
+    while args.stacked.get(index) |reg| {
+        try self.store(reg, reg_sp(), index * 8, 8);
+        index = index + 1;
+    }
+    if args.stacked.len() > self.func.out_words {
+        self.func.out_words = args.stacked.len();
+    }
+    let count = try self.place_words(&args.words);
+    index = 0;
+    while args.floats.get(index) |reg| {
+        var inst = blank(MOp::FArg);
+        inst.rn = reg;
+        inst.imm = index;
+        inst.width = args.float_widths.get_or_panic(index);
+        try self.inst(inst);
+        index = index + 1;
+    }
+    if node.variadic_fixed > 0 {
+        // al: how many xmm registers the arguments use.
+        try self.mov_imm(8, args.floats.len());
+    }
+    var symbol = string::new(self.allocator);
+    defer symbol.deinit(self.allocator);
+    let name_text = ir::name_text(&module.names, symbol_name);
+    let name_bytes = name_text.as_bytes();
+    try append_c_symbol(self.allocator, &var symbol, name_bytes);
+    let symbol_bytes = symbol.as_bytes();
+    let sym = try self.syms.intern(symbol_bytes);
+    try self.call_sym(sym, count, reg_none());
+    if !struct_result {
+        try self.bind_result(module, result, reg_none(), true);
+        return null;
+    }
+    if sret == reg_none() {
+        sret = try self.sysv_struct_result(result_passing);
+    }
+    try self.set_val(result.name, fresh_val(sret));
+    return null;
+}
+
+/// Moves a C struct result out of the registers it came back in, right
+/// after the call, into a slot of its own and returns the slot's address.
+/// The general eightbytes come in rax, which the printer moves to x0 after
+/// a call to C, and rdx, which is x2; the float ones in xmm0 and xmm1.
+fn (self: &var Selector) sysv_struct_result(passing: SysvStruct) -> !i64 {
+    var regs = array::new<i64>(self.allocator);
+    defer regs.deinit(self.allocator);
+    // The general ones first, before anything else may be given rdx.
+    var ints = 0;
+    for 0..passing.count |index| {
+        let reg = self.func.new_vreg();
+        if !passing.sse(index) {
+            if ints == 0 {
+                try self.mov(reg, 0);
+            } else {
+                try self.mov(reg, 2);
+            }
+            ints = ints + 1;
+        }
+        try regs.append(self.allocator, reg);
+    }
+    var sses = 0;
+    for 0..passing.count |index| {
+        if passing.sse(index) {
+            var inst = blank(MOp::FRet);
+            inst.rd = regs.get_or_panic(index);
+            inst.imm = sses;
+            inst.width = 8;
+            try self.inst(inst);
+            sses = sses + 1;
+        }
+    }
+    let slot = try self.c_slot(passing.count * 8, passing.align);
+    for 0..passing.count |index| {
+        try self.store(regs.get_or_panic(index), slot, index * 8, 8);
+    }
+    return slot;
+}

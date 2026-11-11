@@ -154,9 +154,58 @@ fn (self: &var Selector) select_float_unary(module: &ir::Module, node: &ir::Inst
     }
     let value = try self.reg(module, source) orelse return try self.fail_op(module, node);
     let rd = self.func.new_vreg();
+    if self.arch == Arch::Amd64 and kind != float_neg() and kind != float_sqrt() {
+        // Rounding to an integral value is SSE4.1, past the x86-64
+        // baseline; C's floor, ceil and trunc compute it, as LLVM calls
+        // them for that baseline.
+        var name = "trunc";
+        if kind == float_floor() {
+            name = "floor";
+        } else if kind == float_ceil() {
+            name = "ceil";
+        }
+        try self.call_float_c(name, shape.size, rd, value, reg_none(), reg_none());
+        try self.set_val(node.result.name, reg_val(rd));
+        return null;
+    }
     try self.float_op(MOp::FUn, kind, shape.size, rd, value, reg_none());
     try self.set_val(node.result.name, reg_val(rd));
     return null;
+}
+
+/// Calls the C function name of the float width (with an `f` for `f32`)
+/// over up to three float arguments and binds its float result to rd.
+fn (self: &var Selector) call_float_c(name: []u8, width: i64, rd: i64, a: i64, b: i64, c: i64) -> !void {
+    var index = 0;
+    for 0..3 |position| {
+        var reg = a;
+        if position == 1 {
+            reg = b;
+        } else if position == 2 {
+            reg = c;
+        }
+        if reg == reg_none() {
+            break;
+        }
+        var arg = blank(MOp::FArg);
+        arg.rn = reg;
+        arg.imm = index;
+        arg.width = width;
+        try self.inst(arg);
+        index = index + 1;
+    }
+    var symbol = string::new(self.allocator);
+    defer symbol.deinit(self.allocator);
+    try symbol.append_bytes(self.allocator, name);
+    if width == 4 {
+        try symbol.append_bytes(self.allocator, "f");
+    }
+    let symbol_bytes = symbol.as_bytes();
+    try self.call_c(symbol_bytes, 0);
+    var ret = blank(MOp::FRet);
+    ret.rd = rd;
+    ret.width = width;
+    return self.inst(ret);
 }
 
 /// Selects the fused multiply-add x * y + z.
@@ -169,6 +218,12 @@ fn (self: &var Selector) select_float_fma(module: &ir::Module, node: &ir::InstrN
     let y = try self.reg(module, node.args.get_or_panic(1)) orelse return try self.fail_op(module, node);
     let z = try self.reg(module, node.args.get_or_panic(2)) orelse return try self.fail_op(module, node);
     let rd = self.func.new_vreg();
+    if self.arch == Arch::Amd64 {
+        // FMA3 is past the x86-64 baseline; C's fma rounds once too.
+        try self.call_float_c("fma", shape.size, rd, x, y, z);
+        try self.set_val(node.result.name, reg_val(rd));
+        return null;
+    }
     var inst = blank(MOp::FMAdd);
     inst.rd = rd;
     inst.rn = x;

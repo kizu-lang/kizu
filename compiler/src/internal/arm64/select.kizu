@@ -173,9 +173,11 @@ pub struct Selector {
     // stack, as Darwin's does, rather than as it takes a named one.
     pub stacks_variadics: bool,
     fn_name: ir::Name,
+    // The machine the module is selected for.
+    pub arch: Arch,
 }
 
-pub fn new_selector(allocator: Allocator) -> !Selector {
+pub fn new_selector(allocator: Allocator, arch: Arch) -> !Selector {
     let syms = try ir::new_name_table(allocator);
     return Selector {
         allocator: allocator,
@@ -215,7 +217,8 @@ pub fn new_selector(allocator: Allocator) -> !Selector {
         state_invokes: false,
         exports_c: false,
         stacks_variadics: true,
-        fn_name: ir::empty_name()
+        fn_name: ir::empty_name(),
+        arch: arch
     };
 }
 
@@ -229,8 +232,9 @@ fn finish_failure(allocator: Allocator, module: &ir::Module, text: &var string::
 }
 
 fn (self: &var Selector) fail(module: &ir::Module, what: []u8, detail: ir::Name) -> !diagnostic::Diagnostic {
-    var text = try string::from_bytes(self.allocator, "arm64 error: unsupported ");
+    var text = try string::from_bytes(self.allocator, arch_name(self.arch));
     defer text.deinit(self.allocator);
+    try text.append_bytes(self.allocator, " error: unsupported ");
     try text.append_bytes(self.allocator, what);
     if !ir::is_empty(detail) {
         try text.append_bytes(self.allocator, " `");
@@ -241,13 +245,21 @@ fn (self: &var Selector) fail(module: &ir::Module, what: []u8, detail: ir::Name)
 }
 
 fn (self: &var Selector) fail_op(module: &ir::Module, node: &ir::InstrNode) -> !diagnostic::Diagnostic {
-    var text = try string::from_bytes(self.allocator, "arm64 error: unsupported instruction `");
+    var text = try string::from_bytes(self.allocator, arch_name(self.arch));
     defer text.deinit(self.allocator);
+    try text.append_bytes(self.allocator, " error: unsupported instruction `");
     try ir::append_op(self.allocator, &var text, &module.names, node.op, node.operand);
     try text.append_bytes(self.allocator, "` of type `");
     try module.names.append_to(&var text, node.result.type_name);
     try text.append_bytes(self.allocator, "`");
     return finish_failure(self.allocator, module, &var text, self.fn_name);
+}
+
+fn arch_name(arch: Arch) -> []u8 {
+    if arch == Arch::Amd64 {
+        return "amd64";
+    }
+    return "arm64";
 }
 
 // ---- tables keyed by name id, valid for the current function only ----
@@ -1076,11 +1088,12 @@ fn (self: &var Selector) select_params(module: &ir::Module, params: &array::Arra
 /// Returns a register holding the word-th incoming argument word.
 fn (self: &var Selector) param_word(word: i64) -> !i64 {
     let reg = self.func.new_vreg();
-    if word < 8 {
+    let count = arg_regs(self.arch);
+    if word < count {
         try self.mov(reg, word);
         return reg;
     }
-    try self.load(reg, reg_inarg(), (word - 8) * 8, 8, false);
+    try self.load(reg, reg_inarg(), (word - count) * 8, 8, false);
     return reg;
 }
 
@@ -1105,30 +1118,32 @@ fn (self: &var Selector) call_sym(sym: ir::Name, count: i64, sret: i64) -> !void
     return self.inst(inst);
 }
 
-/// Places the words of call arguments: the first eight in x0..x7, the rest
-/// in the outgoing area. Returns the number of register words.
+/// Places the words of call arguments: the first ones in the argument
+/// registers (x0..x7 on arm64, x0..x5 on amd64), the rest in the outgoing
+/// area. Returns the number of register words.
 fn (self: &var Selector) place_words(words: &array::Array<i64>) -> !i64 {
+    let count = arg_regs(self.arch);
     var index = 0;
     while words.get(index) |reg| {
-        if index >= 8 {
-            try self.store(reg, reg_sp(), (index - 8) * 8, 8);
+        if index >= count {
+            try self.store(reg, reg_sp(), (index - count) * 8, 8);
         }
         index = index + 1;
     }
     index = 0;
     while words.get(index) |reg| {
-        if index >= 8 {
+        if index >= count {
             break;
         }
         try self.mov(index, reg);
         index = index + 1;
     }
-    let stack_words = words.len() - 8;
+    let stack_words = words.len() - count;
     if stack_words > self.func.out_words {
         self.func.out_words = stack_words;
     }
-    if words.len() > 8 {
-        return 8;
+    if words.len() > count {
+        return count;
     }
     return words.len();
 }
@@ -1413,9 +1428,10 @@ fn (self: &var Selector) select_hosted_call(module: &ir::Module, node: &ir::Inst
         if arg_shape.class != Class::Scalar {
             return try self.fail_op(module, node);
         }
-        // C packs a stack argument narrower than a word, so past x7 only
-        // whole words go where place_words puts them.
-        if words.len() >= 8 and arg_shape.size != 8 {
+        // C packs a stack argument narrower than a word, so past the
+        // argument registers only whole words go where place_words puts
+        // them.
+        if words.len() >= arg_regs(self.arch) and arg_shape.size != 8 {
             return try self.fail_op(module, node);
         }
         let reg = try self.reg(module, arg) orelse return try self.fail_op(module, node);
@@ -1489,9 +1505,9 @@ fn (self: &var Selector) check_c_export(module: &ir::Module, node: &ir::Function
         }
         words = words + 1;
     }
-    // C packs narrow stack arguments, so a ninth word would be read from
-    // the wrong place.
-    if words > 8 {
+    // C packs narrow stack arguments, so a word past the argument
+    // registers would be read from the wrong place.
+    if words > arg_regs(self.arch) {
         return try self.fail(module, "C export parameter count", node.name);
     }
     return null;
@@ -1541,7 +1557,7 @@ fn (self: &var Selector) select_func_addr(module: &ir::Module, node: &ir::InstrN
 fn (self: &var Selector) select_indirect_call(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let callee = node.args.get(0) orelse return try self.fail_op(module, node);
     let foreign = module.names.starts_with(callee.type_name, typ::c_func_head());
-    if foreign and node.args.len() > 9 {
+    if foreign and node.args.len() > arg_regs(self.arch) + 1 {
         return try self.fail_op(module, node);
     }
     let target = try self.reg_nz(module, callee) orelse return try self.fail_op(module, node);

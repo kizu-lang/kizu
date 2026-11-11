@@ -3,7 +3,8 @@ import compiler::internal::ir;
 import std::array;
 import std::string;
 
-// Calls into C by the C calling convention, AAPCS64 as Darwin applies it.
+// Calls into C by the C calling convention, AAPCS64 as Darwin applies it
+// (arm64; amd64 calls by System V, in sysv.kizu).
 // A scalar takes the next general register, a float the next float
 // register. A C struct by value is laid out the way C lays it out (the
 // backend's struct layout already is: field after field at its natural
@@ -47,6 +48,8 @@ struct CStructPassing {
 
 /// Is one scalar of a flattened C struct.
 struct CLeaf {
+    // The byte offset in the outermost struct.
+    offset: i64,
     size: i64,
     float: bool,
 }
@@ -59,32 +62,37 @@ fn is_c_struct(module: &ir::Module, type_name: ir::Name) -> bool {
     return module.structs.contains(bytes);
 }
 
-/// Appends the scalars of a struct in field order, nested structs
+/// Appends the scalars of a struct at base in field order, nested structs
 /// flattened. Returns false when a field is not one C can name.
-fn c_leaves(module: &ir::Module, name: []u8, leaves: &var array::Array<CLeaf>, allocator: Allocator, depth: i64) -> !bool {
+fn c_leaves(module: &ir::Module, name: []u8, base: i64, leaves: &var array::Array<CLeaf>, allocator: Allocator, depth: i64) -> !bool {
     if depth > 64 {
         return false;
     }
     if module.structs.at(name) |declared| {
+        var offset = 0;
         var index = 0;
         while declared.fields.get(index) |field| {
             index = index + 1;
             let field_text = ir::name_text(&module.names, field.type_name);
             let field_bytes = field_text.as_bytes();
-            if module.structs.contains(field_bytes) {
-                if !try c_leaves(module, field_bytes, leaves, allocator, depth + 1) {
-                    return false;
-                }
-                continue;
-            }
             let shape = shape_of_bytes(module, field_bytes, 0);
             if shape.class == Class::Void {
                 continue;
             }
-            if !is_word(shape) {
-                return false;
+            offset = round_up(offset, shape.align);
+            if module.structs.contains(field_bytes) {
+                if !try c_leaves(module, field_bytes, base + offset, leaves, allocator, depth + 1) {
+                    return false;
+                }
+            } else {
+                if !is_word(shape) {
+                    return false;
+                }
+                try leaves.append(
+                    allocator, CLeaf { offset: base + offset, size: shape.size, float: shape.class == Class::Float }
+                );
             }
-            try leaves.append(allocator, CLeaf { size: shape.size, float: shape.class == Class::Float });
+            offset = offset + shape.size;
         }
         return true;
     }
@@ -102,7 +110,7 @@ fn c_struct_passing(module: &ir::Module, type_name: ir::Name, allocator: Allocat
     let bytes = text.as_bytes();
     var leaves = array::new<CLeaf>(allocator);
     defer leaves.deinit(allocator);
-    if !try c_leaves(module, bytes, &var leaves, allocator, 0) {
+    if !try c_leaves(module, bytes, 0, &var leaves, allocator, 0) {
         return null;
     }
     var passing = CStructPassing {
@@ -232,8 +240,12 @@ fn (self: &var Selector) c_copy_address(module: &ir::Module, arg: ir::Value) -> 
 }
 
 /// Selects a call to C: the runtime's plain builtins and extern "c"
-/// functions, by the convention this file describes.
+/// functions, by the convention this file describes, or on amd64 by the
+/// System V one (sysv.kizu).
 fn (self: &var Selector) select_c_call(module: &ir::Module, node: &ir::InstrNode, symbol_name: ir::Name) -> !?diagnostic::Diagnostic {
+    if self.arch == Arch::Amd64 {
+        return self.select_sysv_call(module, node, symbol_name);
+    }
     var args = CCallArgs {
         words: array::new<i64>(self.allocator),
         floats: array::new<i64>(self.allocator),
