@@ -130,7 +130,7 @@ func TestBoundsModelKnownShapes(t *testing.T) {
 
 // TestBoundsModelTraces replays the sampled bounds programs.
 func TestBoundsModelTraces(t *testing.T) {
-	replayRuntime(t, boundsModel, readRuntimeFixture(t, "bounds_mbt.json"))
+	replayRuntime(t, boundsModel, readRuntimeFixture(t, "ir_bounds.json"))
 }
 
 // TestDeferModelKnownShapes checks the harness on shapes with a known answer.
@@ -140,7 +140,7 @@ func TestDeferModelKnownShapes(t *testing.T) {
 
 // TestDeferModelTraces replays the sampled defer programs.
 func TestDeferModelTraces(t *testing.T) {
-	replayRuntime(t, deferModel, readRuntimeFixture(t, "defer_mbt.json"))
+	replayRuntime(t, deferModel, readRuntimeFixture(t, "ir_defer.json"))
 }
 
 // runtimeModel is how one model's cases become a program and its runs.
@@ -165,7 +165,7 @@ func readRuntimeFixture(t *testing.T, name string) []runtimeCase {
 	t.Helper()
 	path := os.Getenv("KIZU_MBT_FIXTURE")
 	if path == "" {
-		path = filepath.Join("testdata", name)
+		path = filepath.Join("..", "..", "compiler", "tests", "mbt", name)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

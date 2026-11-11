@@ -136,7 +136,8 @@ spec-quint:
     scripts/spec-quint.sh
 
 # Test the internal/ir models, search them for a broken property, and resample the
-# programs internal/ir replays against the lowerer and the optimizer (spec/ir/README.md).
+# programs compiler/ and internal/ir replay against the lowerer and the optimizer
+# (spec/ir/README.md).
 spec-ir:
     cd spec/ir && quint test slots_test.qnt && quint test bounds_test.qnt && quint test defer_test.qnt
     cd spec/ir && quint run slots.qnt --backend rust --seed 0x1 --max-samples 2000 --max-steps 20 \
@@ -145,7 +146,7 @@ spec-ir:
         --invariant soundness
     cd spec/ir && quint run defer.qnt --backend rust --seed 0x1 --max-samples 1000 --max-steps 20 \
         --invariant soundness
-    go run ./scripts/ir-mbt
+    go run ./cmd/kizu run scripts/ir-mbt/main.kizu
 # Test the ownership model, search it for an unsound acceptance, and resample the
 # programs compiler/ and internal/ownership replay against their checkers
 # (spec/ownership/README.md).

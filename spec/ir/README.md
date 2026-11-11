@@ -8,9 +8,10 @@ ownership checker の検証(`spec/ownership/`)に揃えています。
 spec/ir/slots.qnt, slots_test.qnt    local に storage を与える判定(slots.go)
 spec/ir/bounds.qnt, bounds_test.qnt  index check の挿入 / 省略(bounds.go)
 spec/ir/defer.qnt, defer_test.qnt    defer / errdefer の実行位置(defer.go, control.go)
-scripts/ir-mbt/                      quint run の trace を層化して fixture に書く
-internal/ir/testdata/*_mbt.json      その fixture(checked in)
-internal/ir/slots_mbt_test.go        slots: lowered IR の local.slot をモデルと比べる
+scripts/ir-mbt/main.kizu             quint run の trace を層化して fixture に書く(Kizu)
+compiler/tests/mbt/ir_*.json         その fixture(checked in。slots / bounds / defer)
+compiler/src/ir_slots_mbt_test.kizu  slots: compiler/ で lower した IR の local.slot をモデルと比べる
+internal/ir/slots_mbt_test.go        slots: 同じ fixture を Go 実装の lowerer に当てる
 internal/ir/runtime_mbt_test.go      bounds / defer: wasm で実行し、出力をモデルと比べる
 internal/ir/testdata/wasi_runs.mjs   その実行に使う node の WASI driver
 ```
@@ -99,21 +100,26 @@ SPEC に書かれていないので、生成するプログラムは `let n = a.
 
 ## モデルベーステスト
 
-`scripts/ir-mbt` は各モデルを 3 seed × 1000 回走らせ(`--invariant soundness` 付き)、
+`scripts/ir-mbt/main.kizu` は各モデルを 3 seed × 1000 回走らせ(`--invariant soundness` 付き)、
 完成したプログラムを重複なく集め、「予測 × 使っている構文」の bucket ごとに
 slots / defer は 2 本、bounds は 1 本残します(bounds は 1 本あたり 20 入力で、停止する
 入力ごとに wasm instance を作り直すので重い)。
 
-* `slots_mbt_test.go`: 各プログラムを lower し、main の `local.slot` の集合をモデルと比べます。
-* `runtime_mbt_test.go`: fixture 全体を 1 つの Kizu プログラム(case ごとに 1 関数)にして
+* slots の replay は 2 つあり、同じ fixture を読みます。`compiler/src/ir_slots_mbt_test.kizu` は
+  `compiler/` の lowerer を、`internal/ir/slots_mbt_test.go` は Go 実装の lowerer を見ます。
+  どちらも各プログラムを type check → ownership check → lower の順に in-process で通し、
+  main の `local.slot` の集合をモデルと比べます。既知形 4 本(`slots_test.qnt` と同じ)も
+  両方にあります。
+* `runtime_mbt_test.go`(Go 実装だけ): fixture 全体を 1 つの Kizu プログラム(case ごとに 1 関数)にして
   1 回 build し、node の 1 プロセスで全入力を走らせます。1 instance が停止するまで順に
   回し、停止した run だけ記録して次の instance で続けます。全体の build が落ちたら
   二分して build できない case を特定し、残りを走らせます。node が無ければ skip します
   (cmd/kizu の wasmtime テストと同じ扱い)。
 
-`KIZU_MBT_BIN=<kizu>` で外部の binary(`compiler/` から build したもの)を使います
-(slots は `<bin> ir`、bounds / defer は `<bin> build --target wasm32-wasi --emit wasm --opt`)。
-`KIZU_MBT_FIXTURE=<file>` で別の fixture を当てます。
+Go の test は `KIZU_MBT_BIN=<kizu>` で外部の binary(`compiler/` から build したもの)を
+使います(slots は `<bin> ir`、bounds / defer は `<bin> build --target wasm32-wasi --emit wasm --opt`)。
+`KIZU_MBT_FIXTURE=<file>` で別の fixture を当てます(`compiler/` 側の slots の replay も
+読みます)。
 
 ### 結果(2026-11-08、基点 24b0b09a)
 
@@ -138,24 +144,31 @@ slots / defer は 2 本、bounds は 1 本残します(bounds は 1 本あたり
 * 本体に変異を 1 つずつ入れて当てた結果(変異は commit していません)。B3 の `next-index` と
   D3 の `block-exit-order` は、fixture だけでは捕まえ方が薄い変異のために足した既知形です。
 
-| 変異 | 内容 | 食い違うプログラム |
-| --- | --- | --- |
-| S1 | `markLentMethodArgs` が引数の位置を receiver の分ずらさずに読む(`Params[index]`) | 131 本 + 既知形 1 |
-| S2 | `defer` の receiver を storage にしない(`errdefer` はそのまま) | 105 本 + 既知形 1 |
-| B1 | `leavesHeaders` が `array.pop` を header を変えないと扱う | 24 本 + 既知形 2 |
-| B2 | `i < n` から `i >= 0` も学ぶ | 11 本 + 既知形 1 |
-| B3 | `i < n` から `i + 1 < n` も学ぶ(`<` と `<=` の取り違え) | 19 本 + 既知形 1 |
-| B4 | 合流点で、dominator からの経路の pop / append を見ずに header の事実を引き継ぐ | 9 本 + 既知形 1 |
-| D1 | `break` / `continue` が loop 本体の frame の cleanup を飛ばす | 6 本 + 既知形 1 |
-| D2 | error return で errdefer を走らせない | 21 本 + 既知形 2 |
-| D3 | block を抜けるとき、その frame の defer を登録の順に走らせる | 5 本 + 既知形 1 |
-| D4 | 成功の `return` でも errdefer を走らせる | 84 本 + 既知形 1 |
+S1 / S2 は同じ変異を `compiler/src/internal/ir/slots.kizu` に入れて
+`compiler/src/ir_slots_mbt_test.kizu` を回した本数も載せています(2026-11-11、同じ 283 本)。
+bounds / defer の replay は `compiler/` にまだ無いので、その行の `compiler/` 列は空です。
+fixture の予測を 2 本書き換えたもの(受理 1 本に storage を足し、1 本から 1 つ消す)を
+`KIZU_MBT_FIXTURE` で当てると、両方の replay がちょうど 2 本食い違います。
+
+| 変異 | 内容 | 食い違うプログラム | `compiler/` |
+| --- | --- | --- | --- |
+| S1 | `markLentMethodArgs` が引数の位置を receiver の分ずらさずに読む(`Params[index]`) | 131 本 + 既知形 1 | 131 本 + 既知形 1(`mark_lent_method_signature`) |
+| S2 | `defer` の receiver を storage にしない(`errdefer` はそのまま) | 105 本 + 既知形 1 | 105 本 + 既知形 1(`collect_mut_borrows_stmt`) |
+| B1 | `leavesHeaders` が `array.pop` を header を変えないと扱う | 24 本 + 既知形 2 | |
+| B2 | `i < n` から `i >= 0` も学ぶ | 11 本 + 既知形 1 | |
+| B3 | `i < n` から `i + 1 < n` も学ぶ(`<` と `<=` の取り違え) | 19 本 + 既知形 1 | |
+| B4 | 合流点で、dominator からの経路の pop / append を見ずに header の事実を引き継ぐ | 9 本 + 既知形 1 | |
+| D1 | `break` / `continue` が loop 本体の frame の cleanup を飛ばす | 6 本 + 既知形 1 | |
+| D2 | error return で errdefer を走らせない | 21 本 + 既知形 2 | |
+| D3 | block を抜けるとき、その frame の defer を登録の順に走らせる | 5 本 + 既知形 1 | |
+| D4 | 成功の `return` でも errdefer を走らせる | 84 本 + 既知形 1 | |
 
 ## 実行方法
 
 ```sh
 just spec-ir                                   # quint test、性質の探索、fixture の再生成
 go test ./internal/ir -run 'Model|KnownDivergences'
+just selfhost                                  # compiler/ 側の slots の replay を含む
 KIZU_MBT_BIN=path/to/kizu go test ./internal/ir -run 'Model'
 
 # 性質が空振りしていないこと(どれも violation が出るのが正しい)
@@ -168,12 +181,17 @@ quint run defer.qnt  --init initErrDeferAlways  --backend rust --max-samples 200
 
 `quint`(0.33、rust backend)と、runtime の test には `node`(WASI preview1)が要ります。
 Java は要りません。`go test` は Quint を動かさず、checked-in の fixture だけを読みます。
+生成器は `go run ./cmd/kizu run scripts/ir-mbt/main.kizu -- -model bounds -samples 300`
+のように `--` の後に `-model`(`slots` / `bounds` / `defer` / `all`)/ `-out`(`-model` を
+1 つ選んだときだけ)/ `-samples` / `-seeds` / `-steps` / `-per` を取ります。
 
 ## 残課題
 
-* **selfhost compiler への適用**。`KIZU_MBT_BIN` の経路は用意したが、この環境には clang が
-  無く selfhost binary を build できないので、`compiler/` 側には当てていません。F1 と同じ
-  形(`apply_bounds_plan` の `site` が呼び出しごとに 0 から)はコード上 selfhost にもあります。
+* **bounds / defer の `compiler/` への適用**。slots は `compiler/` の lowerer に in-process で
+  当てていますが、bounds / defer は wasm32-wasi に build して node で走らせる replay なので、
+  test ハーネスの Kizu 化(#1984 のフェーズ 2)と一緒に移します。それまでは Go 実装だけを
+  見ます。F1 と同じ形(`apply_bounds_plan` の `site` が呼び出しごとに 0 から)はコード上
+  `compiler/` にもあります。
 * **native 経路**。clang のある環境で、同じ fixture を native build でも走らせる経路。
 * 範囲の節で入れなかったもの。特に `VersionLoopsForBounds` の版分けと view の index。
 * **`quint verify`(Apalache)による網羅検査**。Java が無い環境ではランダム探索だけです。
