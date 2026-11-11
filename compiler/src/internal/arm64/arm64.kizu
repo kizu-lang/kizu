@@ -10,7 +10,9 @@ import std::string;
 // linker turn into the executable.
 // Every function is selected into machine IR, given registers, and printed;
 // an op or a type the backend does not lower stops the build with a
-// diagnostic naming it rather than being handed to another backend.
+// diagnostic naming it rather than being handed to another backend. The
+// same machine IR, allocated, is also printed as x86-64 by the amd64
+// printer.
 
 /// Is the object format the assembly text is written for. Selection names
 /// symbols the Mach-O way; printing for ELF spells them through symbol.
@@ -19,9 +21,10 @@ pub enum Format {
     Elf,
 }
 
-/// Emits a lowered module as assembly text for format.
-pub fn emit(allocator: Allocator, module: &ir::Module, format: Format, out: &var string::String) -> !?diagnostic::Diagnostic {
-    var selector = try new_selector(allocator);
+/// Emits a lowered module as assembly text for arch, in format. The amd64
+/// printer writes ELF only; the caller rejects amd64 with Mach-O.
+pub fn emit(allocator: Allocator, module: &ir::Module, arch: Arch, format: Format, out: &var string::String) -> !?diagnostic::Diagnostic {
+    var selector = try new_selector(allocator, arch);
     defer selector.deinit(allocator);
     selector.stacks_variadics = format == Format::MachO;
     if module.error_sets.at("std::mem::Error") |declared| {
@@ -91,11 +94,16 @@ pub fn emit(allocator: Allocator, module: &ir::Module, format: Format, out: &var
     var ordinal = 0;
     while functions.at_mut(ordinal) |func| {
         let symbol = symbols.get_or_panic(ordinal);
-        let allocation = try allocate(allocator, func);
+        let allocation = try allocate(allocator, func, arch);
         defer allocation.deinit(allocator);
         let symbol_text = ir::name_text(&selector.syms, symbol);
         let symbol_bytes = symbol_text.as_bytes();
         let exported = exports.get_or_panic(ordinal);
+        if arch == Arch::Amd64 {
+            try amd64_print_function(allocator, out, func, &allocation, symbol_bytes, exported, ordinal, &selector.syms, format);
+            ordinal = ordinal + 1;
+            continue;
+        }
         if !ir::is_empty(exported) {
             let exported_text = ir::name_text(&selector.syms, exported);
             let exported_bytes = exported_text.as_bytes();
