@@ -171,7 +171,7 @@ spec-unsafecap:
         if quint run unsafecap.qnt --main $mutant --init initFree --backend rust --seed 0x2 \
             --max-samples 3000 --max-steps 12 --invariant soundness > /dev/null; then \
             echo "$mutant: no counterexample"; exit 1; fi; done
-    go run ./scripts/unsafecap-mbt
+    go run ./cmd/kizu run scripts/unsafecap-mbt/main.kizu
 
 # Test the C header import model, search it for an unsound acceptance, require
 # the importer as it is and each mutant (one rule broken) to fail the search, and

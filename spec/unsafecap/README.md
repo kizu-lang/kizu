@@ -7,8 +7,8 @@ SPEC §12 の `unsafe` マーカー規則 —— どの操作が未証明で、�
 ```
 spec/unsafecap/unsafecap.qnt        モデル: checker の判定、実際に走る義務、生成器、性質、mutant
 spec/unsafecap/unsafecap_test.qnt   既知の形に対するモデルの判定(quint test)
-scripts/unsafecap-mbt/              quint run の trace を層化して fixture に書く
-internal/unsafecap/testdata/unsafecap_mbt.json   その fixture(checked in)
+scripts/unsafecap-mbt/main.kizu     quint run の trace を層化して fixture に書く(Kizu)
+compiler/tests/mbt/unsafecap.json   その fixture(checked in)
 internal/unsafecap/mbt_test.go      fixture を 2 file の Kizu module にして checker に当て、モデルの予測と比べる
 ```
 
@@ -106,7 +106,7 @@ checker 層が受理したプログラムについて、義務層が次を守る
 「marker の無い `ptr_read` だけ」のプログラムが 5544 本中 0 本で、`ptr_read` を
 検査しない checker を fixture が見逃していました。
 
-`scripts/unsafecap-mbt` は各モード × seed の trace から完成したプログラムを重複なく
+`scripts/unsafecap-mbt/main.kizu` は各モード × seed の trace から完成したプログラムを重複なく
 集め、「予測クラス(1 クラスなら操作の種類まで、複数ならクラスの組) × 使っている構文の
 うち最も珍しいもの(`calls-g` / `fnptr` / `block` / `away` / `unsafe-fn` /
 `covering-op` / `sum` / `plain`)」の bucket に分け、bucket ごとに 2 本残します。
@@ -159,7 +159,10 @@ KIZU_MBT_BIN=path/to/kizu go test ./internal/unsafecap -run TestUnsafeModel
 
 `quint`(0.33、rust backend)が PATH に要ります。Java は要りません。`go test` は
 Quint を動かさず、checked-in の fixture だけを読みます。モデルを変えたら
-`just spec-unsafecap` で fixture を作り直してください(2 分ほど)。
+`just spec-unsafecap` で fixture を作り直してください(2 分ほど)。生成器は
+`go run ./cmd/kizu run scripts/unsafecap-mbt/main.kizu -- -main mutantInherit -invariant none`
+のように `--` の後に `-model` / `-main` / `-out` / `-samples` / `-seeds` / `-per` /
+`-invariant`(`none` で検査なし)を取ります。
 
 ## 残課題
 
