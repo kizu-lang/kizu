@@ -4,10 +4,11 @@ import std::fmt;
 import std::mem;
 import std::string;
 
-// The amd64 printer: allocated machine IR as x86-64 assembly for Linux (ELF,
-// AT&T syntax). Selection and allocation are the arm64 ones; this printer
-// gives each register the backend names a machine register and lowers each
-// AArch64-shaped instruction to the x86-64 ones that compute the same.
+// The amd64 printer: allocated machine IR as x86-64 assembly (AT&T syntax)
+// for Linux (ELF) or Windows (COFF). Selection and allocation are the arm64
+// ones; this printer gives each register the backend names a machine
+// register and lowers each AArch64-shaped instruction to the x86-64 ones
+// that compute the same.
 //
 // Registers. The argument registers x0..x5 are rdi, rsi, rdx, rcx, r8 and
 // r9, in the System V order, so a call to C needs no moves; the
@@ -17,10 +18,22 @@ import std::string;
 // that sets it to the call that reads it, and at the entry of the callee).
 // rbp is the frame pointer.
 //
+// Under Windows the argument registers are x0..x3, rcx, rdx, r8 and r9, in
+// the order of its convention; rdi and rsi, which that convention has a
+// callee keep, are x24 and x25, callee-saved with rbx and r12..r15. Every
+// frame that calls leaves the 32 bytes the convention has a caller leave
+// below the stack arguments, which a backend's own call leaves too, so
+// both conventions find the stack arguments in the same place. The
+// convention has a callee keep xmm6..15 too, so the float scratch
+// registers are xmm3..5 there rather than xmm13..15; and a frame of a page
+// or more is probed page by page, as Windows grows the stack only into the
+// page below the one touched last.
+//
 // Results. The backend's own functions return in x0 (and x1), rdi and rsi,
 // and also leave them in rax and rdx, where C reads a result: so C may call
 // any of them, and a call of one needs no moves. A call to C moves rax to
-// rdi; a call through a pointer, which may be either, moves both.
+// rdi; a call through a pointer, which may be either, moves both. Under
+// Windows x0 is rcx and x1 rdx, so only rax moves.
 //
 // Flags. Few AArch64 instructions write the flags; most x86-64 ones do. A
 // comparison selected ahead of the instructions between it and its use
@@ -36,6 +49,14 @@ struct Amd {
     allocator: Allocator,
     // Spells the selection's Mach-O style names through symbol.
     format: Format,
+    // The Windows convention: its registers, frame and float scratch.
+    windows: bool,
+    // The numbers the backend gives rdx and rcx, which division and shifts
+    // borrow.
+    rdx: i64,
+    rcx: i64,
+    // The bytes below the stack arguments a frame that calls leaves free.
+    shadow: i64,
     ordinal: i64,
     labels: i64,
     // Bytes pushed below the frame since the prologue, which every
@@ -63,11 +84,17 @@ pub fn amd64_print_function(
     exported: ir::Name,
     ordinal: i64,
     syms: &ir::NameTable,
+    arch: Arch,
     format: Format
 ) -> !void {
+    let windows = arch == Arch::Amd64Windows;
     var amd = Amd {
         allocator: allocator,
         format: format,
+        windows: windows,
+        rdx: 2,
+        rcx: 3,
+        shadow: 0,
         ordinal: ordinal,
         labels: 0,
         pushed: 0,
@@ -77,6 +104,11 @@ pub fn amd64_print_function(
         live: 0 - 1,
         zf: 0 - 1
     };
+    if windows {
+        amd.rdx = 1;
+        amd.rcx = 0;
+        amd.shadow = 32;
+    }
     amd.plan_frame(func);
     if !ir::is_empty(exported) {
         let exported_text = ir::name_text(syms, exported);
@@ -227,7 +259,7 @@ fn (self: &var Amd) print_block(
         Return => {
             // C reads the result from rax (and rdx).
             try self.rr(out, "movq", 0, 8, 8);
-            try self.rr(out, "movq", 1, 2, 8);
+            try self.mov(out, 1, self.rdx);
             if self.needed {
                 try self.epilogue(out, saved);
             }
@@ -240,9 +272,10 @@ fn (self: &var Amd) print_block(
 
 // ---- frame ----
 
-/// Lays the frame out: from rsp after the prologue, the outgoing argument
-/// words, then the slots; above them the callee-saved registers, pushed,
-/// and the caller's rbp. rsp stays 16-byte aligned at every call.
+/// Lays the frame out: from rsp after the prologue, the shadow bytes of a
+/// frame that calls, the outgoing argument words, then the slots; above
+/// them the callee-saved registers, pushed, and the caller's rbp. rsp stays
+/// 16-byte aligned at every call.
 fn (self: &var Amd) plan_frame(func: &var MFunction) -> void {
     var uses_inarg = false;
     var block_index = 0;
@@ -256,7 +289,10 @@ fn (self: &var Amd) plan_frame(func: &var MFunction) -> void {
             }
         }
     }
-    var offset = func.out_words * 8;
+    if !func.calls {
+        self.shadow = 0;
+    }
+    var offset = self.shadow + func.out_words * 8;
     var slot_index = 0;
     while func.slots.at_mut(slot_index) |slot| {
         slot_index = slot_index + 1;
@@ -282,6 +318,15 @@ fn (self: &var Amd) prologue(out: &var string::String, saved: &array::Array<i64>
         try self.op(out, "pushq");
         try self.reg(out, reg, 8);
         try self.nl(out);
+    }
+    if self.windows and self.frame_size >= 4096 {
+        // ___chkstk_ms touches each page of rax bytes below rsp and keeps
+        // every register; rax is x8, live at the entry, kept in r11.
+        try self.line(out, "movq %rax, %r11");
+        try self.ir(out, "movl", self.frame_size, 8, 4);
+        try self.line(out, "call ___chkstk_ms");
+        try self.line(out, "subq %rax, %rsp");
+        return self.line(out, "movq %r11, %rax");
     }
     if self.frame_size > 0 {
         try self.op(out, "subq");
@@ -589,10 +634,25 @@ fn plan_flags(
 // ---- text ----
 
 /// Returns the x86-64 name of a register the backend names, at a size in
-/// bytes; an unknown one is spelled so that the assembler rejects it.
-fn x86_reg(reg: i64, size: i64) -> []u8 {
+/// bytes, under Windows by its convention; an unknown one is spelled so that
+/// the assembler rejects it.
+fn x86_reg(reg: i64, size: i64, windows: bool) -> []u8 {
     var names = "bad";
-    if reg == 0 {
+    if windows and reg >= 0 and reg <= 5 {
+        if reg == 0 {
+            names = "rcx ecx cx cl";
+        } else if reg == 1 {
+            names = "rdx edx dx dl";
+        } else if reg == 2 {
+            names = "r8 r8d r8w r8b";
+        } else if reg == 3 {
+            names = "r9 r9d r9w r9b";
+        }
+    } else if windows and reg == 24 {
+        names = "rdi edi di dil";
+    } else if windows and reg == 25 {
+        names = "rsi esi si sil";
+    } else if reg == 0 {
         names = "rdi edi di dil";
     } else if reg == 1 {
         names = "rsi esi si sil";
@@ -731,7 +791,7 @@ fn (self: &Amd) op_sized(out: &var string::String, mnemonic: []u8, size: i64) ->
 
 fn (self: &Amd) reg(out: &var string::String, reg: i64, size: i64) -> !void {
     try out.append_byte(self.allocator, cast<u8>(37));
-    return self.text(out, x86_reg(reg, size));
+    return self.text(out, x86_reg(reg, size, self.windows));
 }
 
 fn (self: &Amd) imm(out: &var string::String, value: i64) -> !void {
@@ -863,7 +923,15 @@ fn (self: &Amd) mem(out: &var string::String, func: &MFunction, base: i64, disp:
         offset = held.offset + disp;
     } else if base == reg_inarg() {
         at = 29;
+        // Above the return address and rbp, and under Windows the shadow
+        // bytes the caller left.
         offset = 16 + disp;
+        if self.windows {
+            offset = offset + 32;
+        }
+    } else if base == reg_sp() {
+        // An outgoing argument word, above the shadow bytes.
+        offset = self.shadow + disp;
     }
     if at == reg_sp() {
         offset = offset + self.pushed;
@@ -981,11 +1049,17 @@ fn (self: &var Amd) inst(out: &var string::String, func: &MFunction, inst: &MIns
         LsrImm => return self.shift_imm(out, inst, "shrq"),
         AsrImm => return self.shift_imm(out, inst, "sarq"),
         MSub => {
+            if inst.rn == 8 or inst.rm == 8 or inst.ra == 8 {
+                return self.multiply_add_aside(out, inst, true);
+            }
             try self.product(out, inst.rn, inst.rm);
             try self.r1(out, "negq", 8, 8);
             return self.add_rax(out, inst.ra, inst.rd);
         },
         MAdd => {
+            if inst.rn == 8 or inst.rm == 8 or inst.ra == 8 {
+                return self.multiply_add_aside(out, inst, false);
+            }
             try self.product(out, inst.rn, inst.rm);
             return self.add_rax(out, inst.ra, inst.rd);
         },
@@ -1140,6 +1214,9 @@ fn (self: &var Amd) inst(out: &var string::String, func: &MFunction, inst: &MIns
         StoreIdx => {
             var index = inst.rm;
             var shift = inst.imm;
+            if shift > 3 and (inst.rd == 8 or inst.rn == 8 or inst.rm == 8) {
+                return self.store_scaled_aside(out, inst);
+            }
             if shift > 3 {
                 try self.mov(out, inst.rm, 8);
                 try self.ir(out, "shlq", shift, 8, 8);
@@ -1175,6 +1252,15 @@ fn (self: &var Amd) inst(out: &var string::String, func: &MFunction, inst: &MIns
         GotAddr => {
             let text = ir::name_text(syms, inst.sym);
             let bytes = text.as_bytes();
+            if self.format == Format::Coff {
+                // No global offset table: a C function in a DLL is reached
+                // through the thunk the linker makes for it.
+                try self.op(out, "leaq");
+                try self.sym(out, bytes);
+                try self.text(out, "(%rip), ");
+                try self.reg(out, inst.rd, 8);
+                return self.nl(out);
+            }
             try self.op(out, "movq");
             try self.sym(out, bytes);
             try self.text(out, "@GOTPCREL(%rip), ");
@@ -1189,7 +1275,9 @@ fn (self: &var Amd) inst(out: &var string::String, func: &MFunction, inst: &MIns
             if mem::starts_with(bytes, "_kz") {
                 return self.nl(out);
             }
-            try self.text(out, "@PLT");
+            if self.format == Format::Elf {
+                try self.text(out, "@PLT");
+            }
             try self.nl(out);
             // C leaves its result in rax.
             return self.rr(out, "movq", 8, 0, 8);
@@ -1202,7 +1290,7 @@ fn (self: &var Amd) inst(out: &var string::String, func: &MFunction, inst: &MIns
             // C or the backend's own: either leaves the result in rax and
             // rdx.
             try self.rr(out, "movq", 8, 0, 8);
-            return self.rr(out, "movq", 2, 1, 8);
+            return self.mov(out, self.rdx, 1);
         },
         Trap => return self.line(out, "ud2"),
         ParCopy => return,
@@ -1212,10 +1300,10 @@ fn (self: &var Amd) inst(out: &var string::String, func: &MFunction, inst: &MIns
         FCvt => {
             try self.float_in(out, inst.rn, 15, inst.width);
             if inst.width == 8 {
-                try self.line(out, "cvtsd2ss %xmm15, %xmm15");
+                try self.xx(out, "cvtsd2ss", 15, 15);
                 return self.float_out(out, 15, inst.rd, 4);
             }
-            try self.line(out, "cvtss2sd %xmm15, %xmm15");
+            try self.xx(out, "cvtss2sd", 15, 15);
             return self.float_out(out, 15, inst.rd, 8);
         },
         FToInt => return self.float_to_int(out, inst),
@@ -1247,6 +1335,81 @@ fn (self: &var Amd) commutative(out: &var string::String, mnemonic: []u8, inst: 
     }
     try self.mov(out, inst.rn, inst.rd);
     return self.rr(out, mnemonic, inst.rm, inst.rd, 8);
+}
+
+/// Returns a register to borrow that none of a, b, c and d is: r10, r11,
+/// rdx, rcx or rbx.
+fn (self: &Amd) spare(a: i64, b: i64, c: i64, d: i64) -> i64 {
+    for 0..5 |k| {
+        var reg = 19;
+        if k == 0 {
+            reg = 16;
+        } else if k == 1 {
+            reg = 17;
+        } else if k == 2 {
+            reg = self.rdx;
+        } else if k == 3 {
+            reg = self.rcx;
+        }
+        if reg != a and reg != b and reg != c and reg != d {
+            return reg;
+        }
+    }
+    return 19;
+}
+
+/// rd = ra + rn * rm, or ra - rn * rm, when an operand is x8: rewriting
+/// spilled operands loads the third one there, and rax is the product's
+/// scratch otherwise. The product goes in a register saved around it.
+fn (self: &var Amd) multiply_add_aside(out: &var string::String, inst: &MInst, subtract: bool) -> !void {
+    let t = self.spare(inst.rn, inst.rm, inst.ra, inst.rd);
+    try self.r1(out, "pushq", t, 8);
+    self.pushed = self.pushed + 8;
+    if is_zr(inst.rn) or is_zr(inst.rm) {
+        try self.mov_imm(out, 0, t);
+    } else {
+        try self.mov(out, inst.rn, t);
+        try self.rr(out, "imulq", inst.rm, t, 8);
+    }
+    if subtract {
+        try self.r1(out, "negq", t, 8);
+    }
+    if !is_zr(inst.ra) {
+        try self.rr(out, "addq", inst.ra, t, 8);
+    }
+    try self.mov(out, t, inst.rd);
+    self.pushed = self.pushed - 8;
+    return self.r1(out, "popq", t, 8);
+}
+
+/// Stores rd at rn + (rm << imm), the shift past what an address scales,
+/// when an operand is x8, which the shift would otherwise use as scratch:
+/// the address goes in a register saved around it.
+fn (self: &var Amd) store_scaled_aside(out: &var string::String, inst: &MInst) -> !void {
+    let t = self.spare(inst.rd, inst.rn, inst.rm, 0 - 1);
+    try self.r1(out, "pushq", t, 8);
+    self.pushed = self.pushed + 8;
+    if is_zr(inst.rm) {
+        try self.mov_imm(out, 0, t);
+    } else {
+        try self.mov(out, inst.rm, t);
+        try self.ir(out, "shlq", inst.imm, t, 8);
+    }
+    if !is_zr(inst.rn) {
+        try self.rr(out, "addq", inst.rn, t, 8);
+    }
+    try self.op_sized(out, "mov", inst.width);
+    if is_zr(inst.rd) {
+        try self.imm(out, 0);
+    } else {
+        try self.reg(out, inst.rd, inst.width);
+    }
+    try self.text(out, ", (");
+    try self.reg(out, t, 8);
+    try self.text(out, ")");
+    try self.nl(out);
+    self.pushed = self.pushed - 8;
+    return self.r1(out, "popq", t, 8);
 }
 
 /// rax = rn * rm.
@@ -1386,7 +1549,8 @@ fn (self: &var Amd) wide(out: &var string::String, inst: &MInst, mnemonic: []u8,
         }
         return self.mov_imm(out, 0, inst.rd);
     }
-    let save = inst.rm == 2 or (inst.rd != 2 and self.is_live(2));
+    let rdx = self.rdx;
+    let save = inst.rm == rdx or (inst.rd != rdx and self.is_live(rdx));
     if save {
         try self.line(out, "pushq %rdx");
         self.pushed = self.pushed + 8;
@@ -1399,10 +1563,10 @@ fn (self: &var Amd) wide(out: &var string::String, inst: &MInst, mnemonic: []u8,
     }
     var result = 8;
     if high {
-        result = 2;
+        result = rdx;
     }
     try self.mov(out, result, inst.rd);
-    return self.end_wide(out, save, inst.rd == 2);
+    return self.end_wide(out, save, inst.rd == rdx);
 }
 
 /// Divides rn by rm into rax (quotient) and rdx (remainder). When both are
@@ -1436,7 +1600,7 @@ fn (self: &var Amd) divide(out: &var string::String, rn: i64, rm: i64, signed: b
 /// from the saved copy on the stack when it is rdx.
 fn (self: &Amd) wide_operand(out: &var string::String, mnemonic: []u8, rm: i64, size: i64) -> !void {
     try self.op(out, mnemonic);
-    if rm == 2 {
+    if rm == self.rdx {
         try self.text(out, "(%rsp)");
     } else {
         try self.reg(out, rm, size);
@@ -1469,7 +1633,8 @@ fn (self: &var Amd) divide_remainder(out: &var string::String, div: &MInst, msub
     if is_zr(div.rm) or is_zr(div.rn) {
         return self.error_line(out, "amd64: division by the zero register");
     }
-    let save = div.rm == 2 or (q != 2 and r != 2 and self.is_live(2));
+    let rdx = self.rdx;
+    let save = div.rm == rdx or (q != rdx and r != rdx and self.is_live(rdx));
     if save {
         try self.line(out, "pushq %rdx");
         self.pushed = self.pushed + 8;
@@ -1477,15 +1642,15 @@ fn (self: &var Amd) divide_remainder(out: &var string::String, div: &MInst, msub
     try self.divide(out, div.rn, div.rm, div.op == MOp::SDiv);
     // q may share r's register, being dead from here; r wins.
     if q == r {
-        try self.mov(out, 2, r);
-    } else if q == 2 {
-        try self.mov(out, 2, r);
+        try self.mov(out, rdx, r);
+    } else if q == rdx {
+        try self.mov(out, rdx, r);
         try self.mov(out, 8, q);
     } else {
         try self.mov(out, 8, q);
-        try self.mov(out, 2, r);
+        try self.mov(out, rdx, r);
     }
-    return self.end_wide(out, save, q == 2 or r == 2);
+    return self.end_wide(out, save, q == rdx or r == rdx);
 }
 
 /// rd = rn shifted by rm, which x86-64 reads from cl; rcx is saved on the
@@ -1494,19 +1659,20 @@ fn (self: &var Amd) shift(out: &var string::String, inst: &MInst, mnemonic: []u8
     if is_zr(inst.rm) {
         return self.mov(out, inst.rn, inst.rd);
     }
+    let rcx = self.rcx;
     try self.mov(out, inst.rn, 8);
-    if inst.rm == 3 {
+    if inst.rm == rcx {
         try self.op(out, mnemonic);
         try self.text(out, "%cl, %rax");
         try self.nl(out);
         return self.mov(out, 8, inst.rd);
     }
-    let save = inst.rd != 3 and self.is_live(3);
+    let save = inst.rd != rcx and self.is_live(rcx);
     if save {
         try self.line(out, "pushq %rcx");
         self.pushed = self.pushed + 8;
     }
-    try self.rr(out, "movq", inst.rm, 3, 8);
+    try self.rr(out, "movq", inst.rm, rcx, 8);
     try self.op(out, mnemonic);
     try self.text(out, "%cl, %rax");
     try self.nl(out);
@@ -1603,9 +1769,23 @@ fn (self: &Amd) float_out(out: &var string::String, xmm: i64, reg: i64, width: i
     return self.nl(out);
 }
 
+/// Writes xmm n; under Windows the scratch xmm13..15 are xmm3..5, which a
+/// callee need not keep there.
 fn (self: &Amd) xmm(out: &var string::String, n: i64) -> !void {
     try self.text(out, "%xmm");
+    if self.windows and n >= 13 {
+        return fmt::append_i64(self.allocator, out, n - 10);
+    }
     return fmt::append_i64(self.allocator, out, n);
+}
+
+/// Writes `op %xmm a, %xmm b`.
+fn (self: &Amd) xx(out: &var string::String, mnemonic: []u8, a: i64, b: i64) -> !void {
+    try self.op(out, mnemonic);
+    try self.xmm(out, a);
+    try self.comma(out);
+    try self.xmm(out, b);
+    return self.nl(out);
 }
 
 /// Writes `op<ss|sd> %xmm a, %xmm b`.
@@ -1676,9 +1856,9 @@ fn (self: &var Amd) float_compare(out: &var string::String, inst: &MInst) -> !vo
     try self.float_in(out, inst.rn, 15, inst.width);
     try self.float_in(out, inst.rm, 14, inst.width);
     if inst.width == 8 {
-        try self.line(out, "ucomisd %xmm14, %xmm15");
+        try self.xx(out, "ucomisd", 14, 15);
     } else {
-        try self.line(out, "ucomiss %xmm14, %xmm15");
+        try self.xx(out, "ucomiss", 14, 15);
     }
     let done = self.new_label();
     try self.ir(out, "movabsq", 0 - 9223372036854775807 - 1, 8, 8);
@@ -1721,7 +1901,8 @@ fn (self: &var Amd) float_to_int(out: &var string::String, inst: &MInst) -> !voi
     if inst.signed {
         let size = inst.width;
         try self.op(out, cvt);
-        try self.text(out, "%xmm15, ");
+        try self.xmm(out, 15);
+        try self.comma(out);
         try self.reg(out, 8, size);
         try self.nl(out);
         // The out-of-range answer is the most negative integer, the only
@@ -1729,17 +1910,13 @@ fn (self: &var Amd) float_to_int(out: &var string::String, inst: &MInst) -> !voi
         try self.ir(out, "cmp", 1, 8, size);
         try self.local_jump(out, "jno", done);
         let not_nan = self.new_label();
-        try self.op(out, compare);
-        try self.text(out, "%xmm15, %xmm15");
-        try self.nl(out);
+        try self.xx(out, compare, 15, 15);
         try self.local_jump(out, "jnp", not_nan);
         try self.ir(out, "movl", 0, 8, 4);
         try self.local_jump(out, "jmp", done);
         try self.local_label(out, not_nan);
-        try self.line(out, "xorps %xmm14, %xmm14");
-        try self.op(out, compare);
-        try self.text(out, "%xmm14, %xmm15");
-        try self.nl(out);
+        try self.xx(out, "xorps", 14, 14);
+        try self.xx(out, compare, 14, 15);
         try self.local_jump(out, "jbe", done);
         // Positive: the most negative integer, inverted, is the largest.
         try self.r1(out, "not", 8, size);
@@ -1752,19 +1929,16 @@ fn (self: &var Amd) float_to_int(out: &var string::String, inst: &MInst) -> !voi
     let zero = self.new_label();
     let saturate = self.new_label();
     // Not above zero (or NaN): 0.
-    try self.line(out, "xorps %xmm14, %xmm14");
-    try self.op(out, compare);
-    try self.text(out, "%xmm14, %xmm15");
-    try self.nl(out);
+    try self.xx(out, "xorps", 14, 14);
+    try self.xx(out, compare, 14, 15);
     try self.local_jump(out, "jbe", zero);
     if inst.width == 4 {
         try self.float_const(out, two32, 14, from);
-        try self.op(out, compare);
-        try self.text(out, "%xmm14, %xmm15");
-        try self.nl(out);
+        try self.xx(out, compare, 14, 15);
         try self.local_jump(out, "jae", saturate);
         try self.op(out, cvt);
-        try self.text(out, "%xmm15, %rax");
+        try self.xmm(out, 15);
+        try self.text(out, ", %rax");
         try self.nl(out);
         try self.local_jump(out, "jmp", done);
         try self.local_label(out, saturate);
@@ -1777,24 +1951,22 @@ fn (self: &var Amd) float_to_int(out: &var string::String, inst: &MInst) -> !voi
     }
     let big = self.new_label();
     try self.float_const(out, two63, 14, from);
-    try self.op(out, compare);
-    try self.text(out, "%xmm14, %xmm15");
-    try self.nl(out);
+    try self.xx(out, compare, 14, 15);
     try self.local_jump(out, "jae", big);
     try self.op(out, cvt);
-    try self.text(out, "%xmm15, %rax");
+    try self.xmm(out, 15);
+    try self.text(out, ", %rax");
     try self.nl(out);
     try self.local_jump(out, "jmp", done);
     try self.local_label(out, big);
     try self.float_const(out, two64, 13, from);
-    try self.op(out, compare);
-    try self.text(out, "%xmm13, %xmm15");
-    try self.nl(out);
+    try self.xx(out, compare, 13, 15);
     try self.local_jump(out, "jae", saturate);
     // [2^63, 2^64): convert x - 2^63, then put the top bit back.
     try self.float_rr(out, "sub", from, 14, 15);
     try self.op(out, cvt);
-    try self.text(out, "%xmm15, %rax");
+    try self.xmm(out, 15);
+    try self.text(out, ", %rax");
     try self.nl(out);
     try self.ir(out, "btcq", 63, 8, 8);
     try self.local_jump(out, "jmp", done);
@@ -1820,7 +1992,8 @@ fn (self: &var Amd) int_to_float(out: &var string::String, inst: &MInst) -> !voi
     if inst.signed {
         try self.op(out, cvt);
         try self.reg(out, inst.rn, 8);
-        try self.text(out, ", %xmm15");
+        try self.comma(out);
+        try self.xmm(out, 15);
         try self.nl(out);
         return self.float_out(out, 15, inst.rd, inst.width);
     }
@@ -1831,7 +2004,8 @@ fn (self: &var Amd) int_to_float(out: &var string::String, inst: &MInst) -> !voi
     try self.local_jump(out, "js", big);
     try self.op(out, cvt);
     try self.reg(out, inst.rn, 8);
-    try self.text(out, ", %xmm15");
+    try self.comma(out);
+    try self.xmm(out, 15);
     try self.nl(out);
     try self.local_jump(out, "jmp", done);
     try self.local_label(out, big);
@@ -1843,7 +2017,8 @@ fn (self: &var Amd) int_to_float(out: &var string::String, inst: &MInst) -> !voi
     try self.line(out, "orq $1, %rax");
     try self.local_label(out, even);
     try self.op(out, cvt);
-    try self.text(out, "%rax, %xmm15");
+    try self.text(out, "%rax, ");
+    try self.xmm(out, 15);
     try self.nl(out);
     try self.float_rr(out, "add", inst.width, 15, 15);
     try self.local_label(out, done);
