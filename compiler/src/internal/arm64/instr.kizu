@@ -121,6 +121,24 @@ fn (self: &var Selector) select_instr(module: &ir::Module, node: &ir::InstrNode,
         UnionTag => return self.select_union(module, node),
         UnionPayload => return self.select_union(module, node),
         UnionPayloadRef => return self.select_union(module, node),
+        ArenaNew => return self.select_arena(module, node),
+        ArenaAdd => return self.select_arena(module, node),
+        ArenaAt => return self.select_arena(module, node),
+        ArenaAtMut => return self.select_arena(module, node),
+        ArenaPopOrPanic => return self.select_arena(module, node),
+        ArenaLen => return self.select_array_len(module, node),
+        ArenaDeinit => return self.select_array_deinit(module, node),
+        BoxNew => return self.select_box(module, node),
+        BoxBorrow => return self.select_box(module, node),
+        BoxBorrowMut => return self.select_box(module, node),
+        BoxDeinit => return self.select_box(module, node),
+        BoxTake => return self.select_box(module, node),
+        PtrOffset => return self.select_ptr_offset(module, node),
+        PtrValue => {
+            let pointer = node.args.get(0) orelse return try self.fail_op(module, node);
+            try self.set_val(node.result.name, self.val(pointer.name));
+            return null;
+        },
         OptNull => return self.select_optional(module, node, next, next_op),
         OptSome => return self.select_optional(module, node, next, next_op),
         OptHas => return self.select_optional(module, node, next, next_op),
@@ -1359,7 +1377,9 @@ fn (self: &var Selector) run_cleanups(module: &ir::Module, node: &ir::InstrNode)
             try vals.append(self.allocator, self.val(arg.name));
             try types.append(self.allocator, arg.type_name);
         }
-        if cleanup.op == ir::Op::ArrayDeinit {
+        // An arena's storage is released the way an array's is: its header
+        // leads with the same three words.
+        if cleanup.op == ir::Op::ArrayDeinit or cleanup.op == ir::Op::ArenaDeinit {
             let header = vals.get(0) orelse return try self.fail(module, "cleanup", cleanup.operand);
             let allocator_val = vals.get(1) orelse return try self.fail(module, "cleanup", cleanup.operand);
             if header.kind != ValKind::Agg {
