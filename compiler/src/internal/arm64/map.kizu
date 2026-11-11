@@ -207,13 +207,16 @@ fn (self: &var Selector) select_map_lookup(module: &ir::Module, node: &ir::Instr
 }
 
 /// Binds `?V` from a nullable pointer to a value: a copy of it when the
-/// pointer is set, absent otherwise.
+/// pointer is set, absent otherwise. A scalar niche optional is the word
+/// itself; any other is a slot, as select_optional holds it -- an aggregate
+/// niche optional is the value's bytes with absence as all zero, and the
+/// tagged one is `{ i8, V }`.
 fn (self: &var Selector) optional_from_pointer(module: &ir::Module, node: &ir::InstrNode, pointer: i64, shape: Shape) -> !?diagnostic::Diagnostic {
     let optional = optional_layout(module, node.result.type_name) orelse return try self.fail_op(module, node);
     let present = try self.new_join();
     let absent = try self.new_join();
     let join = try self.new_join();
-    if optional.niche {
+    if optional.niche and optional.shape.class == Class::Scalar {
         let word = self.func.new_vreg();
         self.func.end(self.current, Term::NonZero, Cond::Ne, pointer, present, absent);
         try self.start_block(absent);
@@ -229,13 +232,19 @@ fn (self: &var Selector) optional_from_pointer(module: &ir::Module, node: &ir::I
     let result = try self.new_slot(optional.shape);
     self.func.end(self.current, Term::NonZero, Cond::Ne, pointer, present, absent);
     try self.start_block(absent);
-    try self.store(reg_zr(), result, 0, 1);
+    if optional.niche {
+        try self.zero_bytes(result, optional.shape.size);
+    } else {
+        try self.store(reg_zr(), result, 0, 1);
+    }
     self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), join, 0 - 1);
     try self.start_block(present);
     let target = try self.add_offset(result, optional.offset);
     try self.copy_bytes(target, pointer, shape.size);
-    let one = try self.imm_reg_nz(1);
-    try self.store(one, result, 0, 1);
+    if !optional.niche {
+        let one = try self.imm_reg_nz(1);
+        try self.store(one, result, 0, 1);
+    }
     self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), join, 0 - 1);
     try self.start_block(join);
     try self.set_val(node.result.name, fresh_val(result));
