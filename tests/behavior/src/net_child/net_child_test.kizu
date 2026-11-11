@@ -1,13 +1,15 @@
 import std::io;
 import std::mem;
 import std::net;
+import std::process;
 import std::string;
 import std::testing;
 
 // docs/std/net.md 子プロセス: a Child's status is its exit code or 128 plus
 // the signal, a program that cannot start exits 127, an argument the host's
 // argv cannot carry is InvalidLength, a stream that was not piped is Closed,
-// and try_wait does not wait. The children are `sh`, so these run where the
+// try_wait does not wait, and `env` / `set_dir` change only what the child
+// starts with. The children are `sh`, so these run where the
 // pipes do; Windows spawns nothing (OperationFailed) and is skipped.
 
 error Failure = net::Error or mem::Error;
@@ -87,6 +89,110 @@ test "an empty program or an argument with a NUL is InvalidLength" {
     let view = bytes.as_bytes();
     if command.arg(allocator, view) {
         testing::fail("an argument with a NUL was accepted");
+    } else |failed| {
+        testing::expect(failed == net::Error::InvalidLength);
+    }
+}
+
+// stdout reads what a child prints to its end.
+fn stdout_of(handle: Io, allocator: Allocator, command: &net::Command) -> Failure!string::String {
+    var child = try command.spawn(handle);
+    defer child.deinit();
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    while try child.read_stdout_into(handle, allocator, &var out, 64) > 0 {}
+    let status = try child.wait(handle);
+    testing::expect_equal<i64>(0, status);
+    return move out;
+}
+
+test "env lays bindings over the inherited environment and the last one wins" {
+    comptime if std::target::is_windows() {
+        return;
+    }
+    let allocator = mem::page_allocator();
+    let handle = io::blocking();
+    var command = try shell(
+        allocator,
+        \\printf '%s|%s|%s' "$KIZU_CHILD_A" "$KIZU_CHILD_B" "$HOME"
+    );
+    defer command.deinit(allocator);
+    command.set_stdout(net::Stdio::Pipe);
+    try command.env(allocator, "KIZU_CHILD_A", "first");
+    try command.env(allocator, "KIZU_CHILD_B", "b=c");
+    try command.env(allocator, "KIZU_CHILD_A", "second");
+    try command.env(allocator, "HOME", "/kizu-home");
+    let out = try stdout_of(handle, allocator, &command);
+    defer out.deinit(allocator);
+    let said = out.as_bytes();
+    testing::expect(mem::equal_bytes(said, "second|b=c|/kizu-home"));
+}
+
+test "the environment a child does not override is inherited" {
+    comptime if std::target::is_windows() {
+        return;
+    }
+    let allocator = mem::page_allocator();
+    let handle = io::blocking();
+    // PATH is inherited, or `sh` would not find `printf` -- and it is printed
+    // to say it arrived unchanged.
+    var command = try shell(
+        allocator,
+        \\printf '%s' "$PATH"
+    );
+    defer command.deinit(allocator);
+    command.set_stdout(net::Stdio::Pipe);
+    try command.env(allocator, "KIZU_CHILD_A", "set");
+    let out = try stdout_of(handle, allocator, &command);
+    defer out.deinit(allocator);
+    let said = out.as_bytes();
+    let path = process::env("PATH") orelse "";
+    testing::expect(mem::equal_bytes(said, path));
+}
+
+test "set_dir starts the child in the directory and a missing one exits 127" {
+    comptime if std::target::is_windows() {
+        return;
+    }
+    let allocator = mem::page_allocator();
+    let handle = io::blocking();
+    var command = try shell(allocator, "pwd -P | tr -d '[:space:]'");
+    defer command.deinit(allocator);
+    command.set_stdout(net::Stdio::Pipe);
+    try command.set_dir(allocator, "/");
+    let out = try stdout_of(handle, allocator, &command);
+    defer out.deinit(allocator);
+    let said = out.as_bytes();
+    testing::expect(mem::equal_bytes(said, "/"));
+
+    var missing = try shell(allocator, "exit 0");
+    defer missing.deinit(allocator);
+    try missing.set_dir(allocator, "/kizu-no-such-directory");
+    var child = try missing.spawn(handle);
+    defer child.deinit();
+    let status = try child.wait(handle);
+    testing::expect_equal<i64>(127, status);
+}
+
+test "a binding or directory the host cannot carry is InvalidLength" {
+    let allocator = mem::page_allocator();
+    var command = try net::command(allocator, "sh");
+    defer command.deinit(allocator);
+    var bytes = [3]u8{};
+    bytes[0] = cast<u8>(97);
+    bytes[2] = cast<u8>(98);
+    let nul = bytes.as_bytes();
+    expect_invalid(command.env(allocator, "", "x"));
+    expect_invalid(command.env(allocator, "A=B", "x"));
+    expect_invalid(command.env(allocator, nul, "x"));
+    expect_invalid(command.env(allocator, "A", nul));
+    expect_invalid(command.set_dir(allocator, ""));
+    expect_invalid(command.set_dir(allocator, nul));
+}
+
+fn expect_invalid(result: net::Error!void) -> void {
+    if result {
+        testing::fail("a value the host cannot carry was accepted");
     } else |failed| {
         testing::expect(failed == net::Error::InvalidLength);
     }

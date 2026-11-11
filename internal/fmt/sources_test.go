@@ -18,6 +18,7 @@ func TestSourcesAreFormatted(t *testing.T) {
 		"examples",
 		"tests/behavior/src",
 		"compiler/src",
+		"compiler/tests/harness/src",
 	}
 	var unformatted []string
 	for _, dir := range roots {

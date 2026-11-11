@@ -3705,19 +3705,86 @@ pub fn runtime_source() -> []u8 {
         \\}
         \\#endif
         \\
+        \\#if !defined(_WIN32)
+        \\extern char **environ;
+        \\
+        \\/* The environment a child starts with: this process's, with each binding in
+        \\ * env_bytes ("NAME=value" followed by a NUL, which the Kizu side builds and
+        \\ * checks) replacing the entry of the same name or added after the rest. The
+        \\ * table points into this process's environment and into text, so both have to
+        \\ * outlive the exec. It is built before the fork because the child of a
+        \\ * threaded process may only make async-signal-safe calls. */
+        \\static char **kizu_child_environment(KizuSliceU8 env_bytes, char **text) {
+        \\    int64_t inherited = 0;
+        \\    while (environ[inherited]) {
+        \\        inherited++;
+        \\    }
+        \\    int64_t bindings = 0;
+        \\    for (int64_t i = 0; i < env_bytes.len; i++) {
+        \\        if (env_bytes.ptr[i] == 0) {
+        \\            bindings++;
+        \\        }
+        \\    }
+        \\    *text = (char *)malloc((size_t)env_bytes.len);
+        \\    char **table = (char **)calloc((size_t)(inherited + bindings + 1), sizeof *table);
+        \\    if (!*text || !table) {
+        \\        free(*text);
+        \\        free(table);
+        \\        *text = NULL;
+        \\        return NULL;
+        \\    }
+        \\    memcpy(*text, env_bytes.ptr, (size_t)env_bytes.len);
+        \\    int64_t count = 0;
+        \\    while (count < inherited) {
+        \\        table[count] = environ[count];
+        \\        count++;
+        \\    }
+        \\    int64_t at = 0;
+        \\    while (at < env_bytes.len) {
+        \\        char *binding = *text + at;
+        \\        size_t length = strlen(binding);
+        \\        size_t name = (size_t)(strchr(binding, '=') - binding);
+        \\        int64_t slot = count;
+        \\        for (int64_t i = 0; i < count; i++) {
+        \\            if (strncmp(table[i], binding, name + 1) == 0) {
+        \\                slot = i;
+        \\                break;
+        \\            }
+        \\        }
+        \\        table[slot] = binding;
+        \\        if (slot == count) {
+        \\            count++;
+        \\        }
+        \\        at += (int64_t)length + 1;
+        \\    }
+        \\    return table;
+        \\}
+        \\#endif
+        \\
         \\/* argv is every argument followed by a NUL, which the Kizu side builds and
-        \\ * checks. modes packs how stdin, stdout and stderr are set up, two bits each. */
+        \\ * checks. modes packs how stdin, stdout and stderr are set up, two bits each.
+        \\ * env is the bindings laid over this process's environment, empty for none,
+        \\ * and dir the directory the child starts in, empty for this process's. */
         \\static KizuErrorI64 kizu_std_builtin_net_child_spawn_result(
-        \\    void *io, KizuSliceU8 argv_bytes, int64_t modes) {
+        \\    void *io, KizuSliceU8 argv_bytes, int64_t modes, KizuSliceU8 env_bytes,
+        \\    KizuSliceU8 dir_bytes) {
         \\    if (kizu_io_is_failing(io)) {
         \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_IO_FAILING);
         \\    }
         \\#if defined(_WIN32)
         \\    (void)argv_bytes;
         \\    (void)modes;
+        \\    (void)env_bytes;
+        \\    (void)dir_bytes;
         \\    return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_OPERATION_FAILED);
         \\#else
         \\    if (argv_bytes.len < 2 || argv_bytes.ptr[0] == 0 || argv_bytes.ptr[argv_bytes.len - 1] != 0) {
+        \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_INVALID_LENGTH);
+        \\    }
+        \\    if (env_bytes.len > 0 && env_bytes.ptr[env_bytes.len - 1] != 0) {
+        \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_INVALID_LENGTH);
+        \\    }
+        \\    if (dir_bytes.len > 0 && memchr(dir_bytes.ptr, 0, (size_t)dir_bytes.len) != NULL) {
         \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_INVALID_LENGTH);
         \\    }
         \\    int64_t argc = 0;
@@ -3728,12 +3795,21 @@ pub fn runtime_source() -> []u8 {
         \\    }
         \\    char *text = (char *)malloc((size_t)argv_bytes.len);
         \\    char **argv = (char **)calloc((size_t)argc + 1, sizeof *argv);
+        \\    char *dir = (char *)calloc((size_t)dir_bytes.len + 1, 1);
+        \\    char *env_text = NULL;
+        \\    char **envp = env_bytes.len > 0 ? kizu_child_environment(env_bytes, &env_text) : NULL;
         \\    KizuChild *child = (KizuChild *)calloc(1, sizeof *child);
-        \\    if (!text || !argv || !child) {
+        \\    if (!text || !argv || !dir || (env_bytes.len > 0 && !envp) || !child) {
         \\        free(text);
         \\        free(argv);
+        \\        free(dir);
+        \\        free(env_text);
+        \\        free(envp);
         \\        free(child);
         \\        return kizu_err_i64(KIZU_ERR_STD_NET_ERROR_OUT_OF_MEMORY);
+        \\    }
+        \\    if (dir_bytes.len > 0) {
+        \\        memcpy(dir, dir_bytes.ptr, (size_t)dir_bytes.len);
         \\    }
         \\    memcpy(text, argv_bytes.ptr, (size_t)argv_bytes.len);
         \\    int64_t at = 0;
@@ -3783,11 +3859,22 @@ pub fn runtime_source() -> []u8 {
         \\                dup2(ends[i][0], i);
         \\            }
         \\        }
+        \\        /* A directory the child cannot enter ends it the way a program it
+        \\           cannot run does: only the child knows. */
+        \\        if (dir[0] != 0 && chdir(dir) != 0) {
+        \\            _exit(127);
+        \\        }
+        \\        if (envp) {
+        \\            environ = envp;
+        \\        }
         \\        execvp(argv[0], argv);
         \\        _exit(127);
         \\    }
         \\    free(argv);
         \\    free(text);
+        \\    free(dir);
+        \\    free(env_text);
+        \\    free(envp);
         \\    if (failure != 0) {
         \\        kizu_child_close_ends(ends);
         \\        free(child);
@@ -3807,9 +3894,11 @@ pub fn runtime_source() -> []u8 {
         \\    KizuErrorI64 *out,
         \\    void *io,
         \\    const KizuSliceU8 *argv,
-        \\    int64_t modes
+        \\    int64_t modes,
+        \\    const KizuSliceU8 *env,
+        \\    const KizuSliceU8 *dir
         \\) {
-        \\    *out = kizu_std_builtin_net_child_spawn_result(io, *argv, modes);
+        \\    *out = kizu_std_builtin_net_child_spawn_result(io, *argv, modes, *env, *dir);
         \\}
         \\
         \\/* The descriptor this process holds for one of the child's streams, or -1. */

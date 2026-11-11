@@ -157,7 +157,7 @@ CLI のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 | --- | --- | --- |
 | conformance | `go test ./cmd/kizu` | `examples/`、`tests/behavior/`、`docs/tutorial/` を全件実行。case を書いていない例があれば落ちる |
 | ユニット | `go test ./...`(pre-push hook) | 各 internal パッケージ + CLI smoke |
-| 両実装の突き合わせ | `go test ./cmd/kizu`(`TestSelfhostFrontend` / `TestSelfhostBehavior`) | Kizu compiler と Go seed の出力差分。`compiler/tests/` の corpus は `-update` で両方を同時に更新する |
+| 両実装の突き合わせ | `go test ./cmd/kizu`(`TestSelfhostFrontend` / `TestSelfhostBehavior`) | Kizu compiler と Go seed の出力差分。`compiler/tests/` の corpus は `-update` で両方を同時に更新する。`TestSelfhostBehavior` は Kizu で書いたハーネス `compiler/tests/harness` を selfhost compiler で `kizu run compiler/tests/harness -- behavior <kizu>` と呼ぶだけ |
 | bootstrap | `go test ./cmd/kizu -run TestSelfhostBootstrap` | Kizu compiler が自分自身を build し、byte 単位で同じ実行ファイルになること |
 | Kizu 側 unit test | `go test ./internal/selfhost`(= `kizu test compiler`、`just selfhost` でも) | `compiler/src/**/*_test.kizu`。seed が compiler とその test を 1 つの実行ファイルにして走らせる。`cmd/kizu` と並んで走るよう別 package |
 | commit hooks | `pre-commit run --all-files` | gofmt / golangci-lint / コメント検査 + `kizu check compiler`。数秒で終わるものだけ |
