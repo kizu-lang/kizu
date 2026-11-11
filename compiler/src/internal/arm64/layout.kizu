@@ -5,8 +5,10 @@ import std::mem;
 
 // How the arm64 backend holds a value of each IR type: a scalar lives in one
 // general register, normalized to its width (sign- or zero-extended to 64
-// bits, a bool 0 or 1); an aggregate lives in memory and the backend handles
-// its address. Aggregates are laid out the way the LLVM backend's types are,
+// bits, a bool 0 or 1); a float lives in one general register too, as its
+// IEEE 754 bits (an `f32` zero-extended), and only the float instructions
+// move it through a float register; an aggregate lives in memory and the
+// backend handles its address. Aggregates are laid out the way the LLVM backend's types are,
 // field after field with C alignment, so memory the C runtime writes reads
 // the same here.
 
@@ -14,6 +16,9 @@ import std::mem;
 pub enum Class {
     Void,
     Scalar,
+    // An `f64` or `f32`: a word of bits wherever a scalar would be, except
+    // that arithmetic, comparison, casts and C calls treat it as a float.
+    Float,
     Aggregate,
     Unsupported,
 }
@@ -34,6 +39,10 @@ fn void_shape() -> Shape {
 
 fn scalar(size: i64, signed: bool) -> Shape {
     return Shape { class: Class::Scalar, size: size, align: size, signed: signed };
+}
+
+fn float_shape(size: i64) -> Shape {
+    return Shape { class: Class::Float, size: size, align: size, signed: false };
 }
 
 fn aggregate(size: i64, align: i64) -> Shape {
@@ -92,7 +101,13 @@ pub fn shape_of_bytes(module: &ir::Module, name: []u8, depth: i64) -> Shape {
     if mem::equal_bytes(name, "u64") or mem::equal_bytes(name, "usize") {
         return scalar(8, false);
     }
-    if mem::equal_bytes(name, "f32") or mem::equal_bytes(name, "f64") or typ::is_vector(name) {
+    if mem::equal_bytes(name, "f64") {
+        return float_shape(8);
+    }
+    if mem::equal_bytes(name, "f32") {
+        return float_shape(4);
+    }
+    if typ::is_vector(name) {
         return unsupported();
     }
     if mem::equal_bytes(name, "Allocator") or mem::equal_bytes(name, "Io") {
@@ -311,4 +326,10 @@ pub fn container_elem(name: []u8) -> []u8 {
         return rest[0..0];
     }
     return rest[open + 1..mem::len(rest) - 1];
+}
+
+/// Reports whether a shape is one word in a general register: a scalar or
+/// the bits of a float.
+pub fn is_word(shape: Shape) -> bool {
+    return shape.class == Class::Scalar or shape.class == Class::Float;
 }

@@ -101,6 +101,9 @@ pub fn emit(allocator: Allocator, module: &ir::Module, out: &var string::String)
     if selector.main_wraps {
         try write_error_names(allocator, module, &var selector, out);
     }
+    if selector.table_starts.len() > 0 {
+        try write_tables(allocator, &selector, out);
+    }
     if selector.literals.len() > 0 {
         try out.append_bytes(allocator, "    .section __TEXT,__cstring,cstring_literals");
         try newline(allocator, out);
@@ -136,6 +139,34 @@ pub fn emit(allocator: Allocator, module: &ir::Module, out: &var string::String)
     try out.append_bytes(allocator, ".subsections_via_symbols");
     try newline(allocator, out);
     return null;
+}
+
+/// Writes the read-only tables of table.get, eight bytes an entry.
+fn write_tables(allocator: Allocator, selector: &Selector, out: &var string::String) -> !void {
+    try out.append_bytes(allocator, "    .section __TEXT,__const");
+    try newline(allocator, out);
+    var table = 0;
+    while selector.table_starts.get(table) |start| {
+        var end = selector.table_words.len();
+        if selector.table_starts.get(table + 1) |next| {
+            end = next;
+        }
+        try out.append_bytes(allocator, "    .p2align 3");
+        try newline(allocator, out);
+        try out.append_bytes(allocator, "Lkz_table.");
+        try fmt::append_i64(allocator, out, table);
+        try out.append_bytes(allocator, ":");
+        try newline(allocator, out);
+        table = table + 1;
+        var at = start;
+        while at < end {
+            try out.append_bytes(allocator, "    .quad ");
+            try fmt::append_i64(allocator, out, selector.table_words.get_or_panic(at));
+            try newline(allocator, out);
+            at = at + 1;
+        }
+    }
+    return;
 }
 
 fn newline(allocator: Allocator, out: &var string::String) -> !void {
@@ -562,9 +593,15 @@ fn print_function(
         try out.append_bytes(allocator, ":");
         try newline(allocator, out);
         if func.blocks.at(block_id) |block| {
+            var cache = empty_cache();
             var inst_index = 0;
             while block.insts.at(inst_index) |inst| {
                 inst_index = inst_index + 1;
+                if is_float_op(inst.op) {
+                    try print_float(allocator, out, inst, &var cache);
+                    continue;
+                }
+                cache = empty_cache();
                 try print_inst(allocator, out, func, inst, syms);
             }
             match block.term {

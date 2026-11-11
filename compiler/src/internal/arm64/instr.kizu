@@ -145,6 +145,15 @@ fn (self: &var Selector) select_instr(module: &ir::Module, node: &ir::InstrNode,
         OptSome => return self.select_optional(module, node, next, next_op),
         OptHas => return self.select_optional(module, node, next, next_op),
         OptValue => return self.select_optional(module, node, next, next_op),
+        FloatBits => return self.select_float_bits(module, node),
+        FloatFromBits => return self.select_float_bits(module, node),
+        FloatSqrt => return self.select_float_unary(module, node, float_sqrt()),
+        FloatFloor => return self.select_float_unary(module, node, float_floor()),
+        FloatCeil => return self.select_float_unary(module, node, float_ceil()),
+        FloatTrunc => return self.select_float_unary(module, node, float_trunc()),
+        FloatFma => return self.select_float_fma(module, node),
+        BufferAddr => return self.select_buffer_addr(module, node),
+        TableGet => return self.select_table_get(module, node),
         _ => return try self.fail_op(module, node),
     }
 }
@@ -179,6 +188,9 @@ fn (self: &var Selector) select_const(module: &ir::Module, node: &ir::InstrNode)
         return null;
     }
     let shape = shape_of(module, node.result.type_name);
+    if shape.class == Class::Float {
+        return self.select_float_const(module, node, shape);
+    }
     if shape.class != Class::Scalar {
         return try self.fail_op(module, node);
     }
@@ -341,6 +353,9 @@ fn (self: &var Selector) bind_flags(module: &ir::Module, result: ir::Value, held
 
 /// Makes the comparison a Flags value describes.
 fn (self: &var Selector) flags_compare(module: &ir::Module, held: Val) -> !?Cond {
+    if held.float > 0 {
+        return self.float_compare(module, held);
+    }
     if held.test {
         try self.op_imm(MOp::TstImm, reg_none(), held.reg, held.imm);
         return held.cond;
@@ -356,6 +371,9 @@ fn (self: &var Selector) select_binary(module: &ir::Module, node: &ir::InstrNode
     let left = node.args.get(0) orelse return try self.fail_op(module, node);
     let right = node.args.get(1) orelse return try self.fail_op(module, node);
     let operand_shape = shape_of(module, left.type_name);
+    if operand_shape.class == Class::Float {
+        return self.select_float_binary(module, node, next, next_op);
+    }
     if module.names.is(node.result.type_name, "bool") {
         if comparison(module, node.operand, operand_shape.signed) |cond| {
             if operand_shape.class != Class::Scalar {
@@ -595,6 +613,9 @@ fn (self: &var Selector) select_unary(module: &ir::Module, node: &ir::InstrNode,
         return self.bind_flags(module, node.result, flags, next, next_op);
     }
     let shape = shape_of(module, node.result.type_name);
+    if shape.class == Class::Float and module.names.is(node.operand, "-") {
+        return self.select_float_unary(module, node, float_neg());
+    }
     if shape.class != Class::Scalar {
         return try self.fail_op(module, node);
     }
@@ -619,6 +640,9 @@ fn (self: &var Selector) select_cast(module: &ir::Module, node: &ir::InstrNode) 
     if ir::same_name(source.type_name, node.result.type_name) {
         try self.set_val(node.result.name, self.val(source.name));
         return null;
+    }
+    if from.class == Class::Float or to.class == Class::Float {
+        return self.select_float_cast(module, node, from, to);
     }
     if from.class != Class::Scalar or to.class != Class::Scalar {
         return try self.fail_op(module, node);
@@ -928,6 +952,83 @@ fn (self: &var Selector) select_buffer_new(module: &ir::Module, node: &ir::Instr
     return null;
 }
 
+/// Selects the address of element index of an array's storage, which the
+/// lowering has already checked the index against.
+fn (self: &var Selector) select_buffer_addr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let pointer = node.args.get(0) orelse return try self.fail_op(module, node);
+    let position = node.args.get(1) orelse return try self.fail_op(module, node);
+    let storage_text = ir::name_text(&module.names, pointer.type_name);
+    let storage_bytes = storage_text.as_bytes();
+    let storage = deref_bytes(storage_bytes);
+    let _ = buffer_count(storage) orelse return try self.fail_op(module, node);
+    let elem_bytes = buffer_elem(storage);
+    let elem = shape_of_bytes(module, elem_bytes, 1);
+    if elem.class == Class::Unsupported or elem.class == Class::Void {
+        return try self.fail_op(module, node);
+    }
+    let base = try self.reg_nz(module, pointer) orelse return try self.fail_op(module, node);
+    let held = self.val(position.name);
+    if held.kind == ValKind::Const {
+        let address = try self.add_offset(base, held.imm * elem.size);
+        try self.set_val(node.result.name, reg_val(address));
+        return null;
+    }
+    let index = try self.reg_nz(module, position) orelse return try self.fail_op(module, node);
+    let address = try self.scaled_addr(base, index, elem.size);
+    try self.set_val(node.result.name, reg_val(address));
+    return null;
+}
+
+/// Selects a table.get: the value at index in the module's read-only copy
+/// of the table, an index at or past the last entry reading the last.
+fn (self: &var Selector) select_table_get(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let position = node.args.get(0) orelse return try self.fail_op(module, node);
+    if node.args.len() != 1 {
+        return try self.fail_op(module, node);
+    }
+    var values = array::new<u64>(self.allocator);
+    defer values.deinit(self.allocator);
+    try ir::table_values(self.allocator, module, node, &var values);
+    let ordinal = self.table_starts.len();
+    try self.table_starts.append(self.allocator, self.table_words.len());
+    var at = 0;
+    while values.get(at) |value| {
+        at = at + 1;
+        try self.table_words.append(self.allocator, cast<i64>(value));
+    }
+    let last = values.len() - 1;
+    let index = try self.reg_nz(module, position) orelse return try self.fail_op(module, node);
+    try self.cmp_imm_or_reg(index, last);
+    let limit = try self.imm_reg_nz(last);
+    let clamped = self.func.new_vreg();
+    var pick = blank(MOp::CSel);
+    pick.rd = clamped;
+    pick.rn = index;
+    pick.rm = limit;
+    pick.cond = Cond::Lo;
+    try self.inst(pick);
+    var label = string_new(self.allocator);
+    defer label.deinit(self.allocator);
+    try label.append_bytes(self.allocator, "Lkz_table.");
+    try append_decimal(self.allocator, &var label, ordinal);
+    let label_bytes = label.as_bytes();
+    let table = self.func.new_vreg();
+    var table_addr = blank(MOp::SymAddr);
+    table_addr.rd = table;
+    table_addr.sym = try self.syms.intern(label_bytes);
+    try self.inst(table_addr);
+    let rd = self.func.new_vreg();
+    var load = blank(MOp::LoadIdx);
+    load.rd = rd;
+    load.rn = table;
+    load.rm = clamped;
+    load.imm = 3;
+    load.width = 8;
+    try self.inst(load);
+    try self.set_val(node.result.name, reg_val(rd));
+    return null;
+}
+
 fn (self: &var Selector) select_buffer_as_bytes(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let pointer = node.args.get(0) orelse return try self.fail_op(module, node);
     let base = try self.reg_nz(module, pointer) orelse return try self.fail_op(module, node);
@@ -1006,7 +1107,7 @@ fn (self: &var Selector) select_slice_index(module: &ir::Module, node: &ir::Inst
     let regs = try self.slice_regs(module, source) orelse return try self.fail_op(module, node);
     let shape = shape_of(module, node.result.type_name);
     let index_held = self.val(index.name);
-    if shape.class == Class::Scalar and index_held.kind != ValKind::Const and power_of_two(shape.size) >= 0 {
+    if is_word(shape) and index_held.kind != ValKind::Const and power_of_two(shape.size) >= 0 {
         let index_reg = try self.reg(module, index) orelse return try self.fail_op(module, node);
         let rd = self.func.new_vreg();
         var inst = blank(MOp::LoadIdx);
@@ -1033,7 +1134,7 @@ fn (self: &var Selector) select_slice_store(module: &ir::Module, node: &ir::Inst
     let regs = try self.slice_regs(module, source) orelse return try self.fail_op(module, node);
     let shape = shape_of(module, value.type_name);
     let index_held = self.val(index.name);
-    if shape.class == Class::Scalar and index_held.kind != ValKind::Const and power_of_two(shape.size) >= 0 {
+    if is_word(shape) and index_held.kind != ValKind::Const and power_of_two(shape.size) >= 0 {
         let index_reg = try self.reg(module, index) orelse return try self.fail_op(module, node);
         let value_reg = try self.reg(module, value) orelse return try self.fail_op(module, node);
         var inst = blank(MOp::StoreIdx);

@@ -54,6 +54,9 @@ pub struct Val {
     pub masked: i64,
     pub mask: i64,
     pub test: bool,
+    // For a Flags value comparing floats, their width in bytes; 0 for
+    // integers.
+    pub float: i64,
     gen: i64,
 }
 
@@ -71,6 +74,7 @@ fn no_val() -> Val {
         masked: reg_none(),
         mask: 0,
         test: false,
+        float: 0,
         gen: 0
     };
 }
@@ -116,6 +120,10 @@ pub struct Selector {
     pub allocator: Allocator,
     pub syms: ir::NameTable,
     pub literals: array::Array<ir::Name>,
+    // The words of every table.get's table, one after another, and where
+    // each table starts.
+    pub table_words: array::Array<i64>,
+    pub table_starts: array::Array<i64>,
     pub func: MFunction,
     pub cold: array::Array<bool>,
     gen: i64,
@@ -166,6 +174,8 @@ pub fn new_selector(allocator: Allocator) -> !Selector {
         allocator: allocator,
         syms: move syms,
         literals: array::new<ir::Name>(allocator),
+        table_words: array::new<i64>(allocator),
+        table_starts: array::new<i64>(allocator),
         func: new_function(allocator),
         cold: array::new<bool>(allocator),
         gen: 0,
@@ -276,10 +286,16 @@ fn (self: &var Selector) count_use(module: &ir::Module, value: ir::Value) -> !vo
             try self.set_val(value.name, const_val(1));
         } else if mem::equal_bytes(bytes, "false") {
             try self.set_val(value.name, const_val(0));
-        } else if parse_integer(bytes) |literal| {
+        } else if !mem::starts_with(bytes, "%") {
             let shape = shape_of(module, value.type_name);
-            if shape.class == Class::Scalar {
-                try self.set_val(value.name, const_val(normalize_imm(literal, shape)));
+            if shape.class == Class::Float {
+                if try float_literal_bits(self.allocator, bytes, shape) |held| {
+                    try self.set_val(value.name, const_val(held));
+                }
+            } else if shape.class == Class::Scalar {
+                if parse_integer(bytes) |literal| {
+                    try self.set_val(value.name, const_val(normalize_imm(literal, shape)));
+                }
             }
         }
     }
@@ -648,7 +664,7 @@ fn (self: &var Selector) store_value(module: &ir::Module, value: ir::Value, shap
         return true;
     }
     let held = self.val(value.name);
-    if shape.class == Class::Scalar {
+    if is_word(shape) {
         let reg = try self.reg(module, value) orelse return false;
         try self.store(reg, base, offset, shape.size);
         return true;
@@ -686,6 +702,11 @@ fn (self: &var Selector) load_value(module: &ir::Module, type_name: ir::Name, ba
         Scalar => {
             let reg = self.func.new_vreg();
             try self.load(reg, base, offset, shape.size, shape.signed);
+            return reg_val(reg);
+        },
+        Float => {
+            let reg = self.func.new_vreg();
+            try self.load(reg, base, offset, shape.size, false);
             return reg_val(reg);
         },
         Aggregate => {
@@ -968,6 +989,11 @@ fn (self: &var Selector) bind_phi(module: &ir::Module, node: &ir::InstrNode, mir
             try self.set_val(node.result.name, reg_val(reg));
             return null;
         },
+        Float => {
+            let reg = self.func.new_vreg();
+            try self.set_val(node.result.name, reg_val(reg));
+            return null;
+        },
         Aggregate => {
             if is_slice(module, node.result.type_name) {
                 let ptr = self.func.new_vreg();
@@ -1160,6 +1186,13 @@ fn (self: &var Selector) bind_result(module: &ir::Module, result: ir::Value, sre
         return self.set_val(result.name, fresh_val(sret));
     }
     var reg = self.func.new_vreg();
+    if c_call and shape.class == Class::Float {
+        var inst = blank(MOp::FRet);
+        inst.rd = reg;
+        inst.width = shape.size;
+        try self.inst(inst);
+        return self.set_val(result.name, reg_val(reg));
+    }
     try self.mov(reg, 0);
     if c_call {
         // C leaves the bits above a narrow result unspecified.
@@ -1394,24 +1427,44 @@ fn (self: &var Selector) select_c_call(module: &ir::Module, node: &ir::InstrNode
     }
     var words = array::new<i64>(self.allocator);
     defer words.deinit(self.allocator);
+    // A float argument takes the next float register, d0..d7, apart from
+    // the general ones.
+    var floats = array::new<i64>(self.allocator);
+    defer floats.deinit(self.allocator);
+    var float_widths = array::new<i64>(self.allocator);
+    defer float_widths.deinit(self.allocator);
     var index = 0;
     while node.args.get(index) |arg| {
         index = index + 1;
         let shape = shape_of(module, arg.type_name);
-        if shape.class != Class::Scalar {
+        if !is_word(shape) {
             return try self.fail(module, "C argument type", arg.type_name);
         }
         let reg = try self.reg(module, arg) orelse return try self.fail_op(module, node);
-        try words.append(self.allocator, reg);
+        if shape.class == Class::Float {
+            try floats.append(self.allocator, reg);
+            try float_widths.append(self.allocator, shape.size);
+        } else {
+            try words.append(self.allocator, reg);
+        }
     }
-    if words.len() > 8 {
+    if words.len() > 8 or floats.len() > 8 {
         return try self.fail_op(module, node);
     }
     let shape = shape_of(module, node.result.type_name);
-    if shape.class != Class::Scalar and shape.class != Class::Void {
+    if !is_word(shape) and shape.class != Class::Void {
         return try self.fail(module, "C result type", node.result.type_name);
     }
     let count = try self.place_words(&words);
+    index = 0;
+    while floats.get(index) |reg| {
+        var arg = blank(MOp::FArg);
+        arg.rn = reg;
+        arg.imm = index;
+        arg.width = float_widths.get_or_panic(index);
+        try self.inst(arg);
+        index = index + 1;
+    }
     var symbol = string::new(self.allocator);
     defer symbol.deinit(self.allocator);
     let name_text = ir::name_text(&module.names, symbol_name);
