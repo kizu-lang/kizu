@@ -1421,64 +1421,6 @@ fn (self: &var Selector) select_hosted_call(module: &ir::Module, node: &ir::Inst
     return null;
 }
 
-/// Selects a call to C: the runtime's plain builtins and extern "c"
-/// functions, scalars only.
-fn (self: &var Selector) select_c_call(module: &ir::Module, node: &ir::InstrNode, symbol_name: ir::Name) -> !?diagnostic::Diagnostic {
-    if node.variadic_fixed > 0 {
-        return try self.fail(module, "variadic call", symbol_name);
-    }
-    var words = array::new<i64>(self.allocator);
-    defer words.deinit(self.allocator);
-    // A float argument takes the next float register, d0..d7, apart from
-    // the general ones.
-    var floats = array::new<i64>(self.allocator);
-    defer floats.deinit(self.allocator);
-    var float_widths = array::new<i64>(self.allocator);
-    defer float_widths.deinit(self.allocator);
-    var index = 0;
-    while node.args.get(index) |arg| {
-        index = index + 1;
-        let shape = shape_of(module, arg.type_name);
-        if !is_word(shape) {
-            return try self.fail(module, "C argument type", arg.type_name);
-        }
-        let reg = try self.reg(module, arg) orelse return try self.fail_op(module, node);
-        if shape.class == Class::Float {
-            try floats.append(self.allocator, reg);
-            try float_widths.append(self.allocator, shape.size);
-        } else {
-            try words.append(self.allocator, reg);
-        }
-    }
-    if words.len() > 8 or floats.len() > 8 {
-        return try self.fail_op(module, node);
-    }
-    let shape = shape_of(module, node.result.type_name);
-    if !is_word(shape) and shape.class != Class::Void {
-        return try self.fail(module, "C result type", node.result.type_name);
-    }
-    let count = try self.place_words(&words);
-    index = 0;
-    while floats.get(index) |reg| {
-        var arg = blank(MOp::FArg);
-        arg.rn = reg;
-        arg.imm = index;
-        arg.width = float_widths.get_or_panic(index);
-        try self.inst(arg);
-        index = index + 1;
-    }
-    var symbol = string::new(self.allocator);
-    defer symbol.deinit(self.allocator);
-    let name_text = ir::name_text(&module.names, symbol_name);
-    let name_bytes = name_text.as_bytes();
-    try append_c_symbol(self.allocator, &var symbol, name_bytes);
-    let symbol_bytes = symbol.as_bytes();
-    let sym = try self.syms.intern(symbol_bytes);
-    try self.call_sym(sym, count, reg_none());
-    try self.bind_result(module, node.result, reg_none(), true);
-    return null;
-}
-
 fn (self: &var Selector) select_call(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if module.names.is(node.extern_abi, "c") {
         return self.select_c_call(module, node, node.extern_name);
