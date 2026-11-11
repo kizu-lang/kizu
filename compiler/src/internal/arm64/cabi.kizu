@@ -16,8 +16,11 @@ import std::string;
 // - otherwise as the address of a copy the caller makes, and a result in
 //   memory the caller provides, its address in x8.
 //
-// A variadic callee takes its named arguments as any callee does and, on
-// Darwin, every argument after them on the stack, one 8-byte slot each.
+// A variadic callee takes its named arguments as any callee does. On
+// Darwin every argument after them goes on the stack, one 8-byte slot each.
+// Elsewhere (AAPCS64 as Linux applies it) an unnamed argument goes where a
+// named one would, and a scalar the registers left would not hold takes the
+// next 8-byte stack slot, as C rounds a stack argument of 8 bytes or less.
 //
 // What would spill a named argument onto the stack is refused: C packs a
 // stack argument by its own size and alignment, which this backend does not
@@ -243,13 +246,14 @@ fn (self: &var Selector) select_c_call(module: &ir::Module, node: &ir::InstrNode
         let at = index;
         index = index + 1;
         let unnamed = node.variadic_fixed > 0 and at >= node.variadic_fixed;
+        let stacks_unnamed = unnamed and self.stacks_variadics;
         var takes_address = false;
         if node.call_params.get(at) |param| {
             takes_address = takes_address_of(module, param, arg.type_name);
         }
         if takes_address {
             let address = try self.c_copy_address(module, arg) orelse return try self.fail_op(module, node);
-            if unnamed {
+            if stacks_unnamed or (unnamed and args.words.len() >= 8) {
                 try args.stacked.append(self.allocator, address);
             } else {
                 try args.words.append(self.allocator, address);
@@ -257,7 +261,7 @@ fn (self: &var Selector) select_c_call(module: &ir::Module, node: &ir::InstrNode
             continue;
         }
         let shape = shape_of(module, arg.type_name);
-        if unnamed {
+        if stacks_unnamed {
             // A scalar or a float fills its slot as the word it is held in.
             if !is_word(shape) {
                 return try self.fail(module, "C variadic argument type", arg.type_name);
@@ -276,6 +280,18 @@ fn (self: &var Selector) select_c_call(module: &ir::Module, node: &ir::InstrNode
             return try self.fail(module, "C argument type", arg.type_name);
         }
         let reg = try self.reg(module, arg) orelse return try self.fail_op(module, node);
+        if unnamed {
+            // Past the registers of its kind, an unnamed scalar fills the
+            // next stack slot as the word it is held in.
+            var bank = args.words.len();
+            if shape.class == Class::Float {
+                bank = args.floats.len();
+            }
+            if bank >= 8 {
+                try args.stacked.append(self.allocator, reg);
+                continue;
+            }
+        }
         if shape.class == Class::Float {
             try args.floats.append(self.allocator, reg);
             try args.float_widths.append(self.allocator, shape.size);
