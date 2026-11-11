@@ -1,0 +1,423 @@
+import harness::conformance;
+import std::array;
+import std::fmt;
+import std::fs;
+import std::io;
+import std::mem;
+import std::net;
+import std::process;
+import std::string;
+
+// The executable behavior that has to cross the selfhost CLI boundary: the
+// consolidated behavior package, the testing failures, and the positive
+// I/O and process examples. Frontend success and diagnostics are held by the
+// shared corpora and the focused CLI parity cases; how a runtime failure is
+// spelled is held by the byte-identical runtime source and the Go
+// conformance run of every case.
+
+pub error Failure = conformance::Failure or io::Error or net::Error or process::Error;
+
+/// What one run of the compiler under test did.
+struct Outcome {
+    // stdout, then stderr with the toolchain noise dropped.
+    output: string::String,
+    failed: bool,
+    status: i64,
+}
+
+/// Runs every selected case with `kizu` and reports each. It answers whether
+/// all of them kept their promise.
+pub fn run(handle: Io, allocator: Allocator, kizu: []u8) -> Failure!bool {
+    var problem = string::new(allocator);
+    defer problem.deinit(allocator);
+    if conformance::discover(handle, allocator, &var problem) |cases| {
+        defer cases.deinit(allocator);
+        return run_cases(handle, allocator, kizu, &cases);
+    } else |failed| {
+        let text = problem.as_bytes();
+        try io::write_stderr(handle, "behavior: ");
+        try io::write_stderr_line(handle, text);
+        return failed;
+    }
+}
+
+fn run_cases(
+    handle: Io,
+    allocator: Allocator,
+    kizu: []u8,
+    cases: &array::Array<conformance::Case>
+) -> Failure!bool {
+    var root = try fs::real_path(handle, allocator, ".");
+    defer root.deinit(allocator);
+    let root_path = root.as_bytes();
+    var scratch = try scratch_dir(allocator);
+    defer scratch.deinit(allocator);
+    let scratch_path = scratch.as_bytes();
+    try fs::create_dir(handle, scratch_path);
+
+    var count = 0;
+    var failures = 0;
+    var index = 0;
+    while cases.at(index) |entry| {
+        index = index + 1;
+        if !selected(entry) {
+            continue;
+        }
+        count = count + 1;
+        // Each case gets a TMPDIR of its own, removed after it.
+        var tmp = string::new(allocator);
+        defer tmp.deinit(allocator);
+        try tmp.append_bytes(allocator, scratch_path);
+        try tmp.append_byte(allocator, cast<u8>(47));
+        try fmt::append_i64(allocator, &var tmp, count);
+        let tmp_path = tmp.as_bytes();
+        try fs::create_dir(handle, tmp_path);
+        var message = string::new(allocator);
+        defer message.deinit(allocator);
+        try check(handle, allocator, kizu, root_path, tmp_path, entry, &var message);
+        try remove_tree(handle, allocator, tmp_path);
+        let name = entry.path.as_bytes();
+        if message.len() == 0 {
+            try io::write_stdout(handle, "ok   ");
+            try io::write_stdout_line(handle, name);
+        } else {
+            failures = failures + 1;
+            try io::write_stdout(handle, "FAIL ");
+            try io::write_stdout_line(handle, name);
+            let text = message.as_bytes();
+            try io::write_stdout_line(handle, text);
+        }
+    }
+    try fs::remove_dir(handle, scratch_path);
+    var summary = string::new(allocator);
+    defer summary.deinit(allocator);
+    try summary.append_bytes(allocator, "behavior: ");
+    try fmt::append_i64(allocator, &var summary, count);
+    try summary.append_bytes(allocator, " cases, ");
+    try fmt::append_i64(allocator, &var summary, failures);
+    try summary.append_bytes(allocator, " failed");
+    let summary_text = summary.as_bytes();
+    try io::write_stdout_line(handle, summary_text);
+    return failures == 0;
+}
+
+/// Keeps the cases whose behavior the shared frontend corpora cannot stand
+/// in for: every `test` (the behavior package holds ordinary language
+/// assertions in one link, and the test failures exercise the runner
+/// boundary) and the `run` cases that do I/O or start processes.
+fn selected(entry: &conformance::Case) -> bool {
+    let command = entry.command.as_bytes();
+    if mem::equal_bytes(command, "test") {
+        return true;
+    }
+    if !mem::equal_bytes(command, "run") or entry.must_fail {
+        return false;
+    }
+    var index = 0;
+    while entry.features.at(index) |feature| {
+        index = index + 1;
+        let name = feature.as_bytes();
+        if mem::equal_bytes(name, "std-io") or mem::equal_bytes(name, "std-process") {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Runs one case and writes to `message` how it broke its promise, leaving
+/// it empty when it kept it.
+fn check(
+    handle: Io,
+    allocator: Allocator,
+    kizu: []u8,
+    root: []u8,
+    tmp: []u8,
+    entry: &conformance::Case,
+    message: &var string::String
+) -> Failure!void {
+    let outcome = try run_case(handle, allocator, kizu, root, tmp, entry);
+    defer outcome.deinit(allocator);
+    let out = outcome.output.as_bytes();
+    let command = entry.command.as_bytes();
+    if entry.pending.len() > 0 {
+        // A declared gap has to still be a gap: a case that starts passing
+        // loses its `pending:` line in the change that fixes it.
+        if passes(entry, &outcome) {
+            try message.append_bytes(allocator, "passes now; remove its `pending:` line (");
+            try message.append_string(allocator, &entry.pending);
+            try message.append_bytes(allocator, ")");
+        }
+        return;
+    }
+    if entry.must_fail {
+        if !outcome.failed {
+            try message.append_bytes(allocator, "expected command to fail");
+            try message.append_byte(allocator, cast<u8>(10));
+            try message.append_bytes(allocator, out);
+            return;
+        }
+        let want = entry.error_text.as_bytes();
+        if !conformance::contains(out, "error:") {
+            try message.append_bytes(allocator, "got ");
+            try quote(allocator, message, out);
+            try message.append_bytes(allocator, ", want readable error prefix");
+            return;
+        }
+        if !conformance::contains(out, want) {
+            try message.append_bytes(allocator, "got ");
+            try quote(allocator, message, out);
+            try message.append_bytes(allocator, ", want substring ");
+            try quote(allocator, message, want);
+            return;
+        }
+        let located = mem::equal_bytes(command, "check") or mem::equal_bytes(command, "parse");
+        if located and !conformance::contains(out, "--> ") {
+            try message.append_bytes(allocator, "the diagnostic says no location:");
+            try message.append_byte(allocator, cast<u8>(10));
+            try message.append_bytes(allocator, out);
+        }
+        return;
+    }
+    if outcome.failed {
+        try message.append_bytes(allocator, "command failed: exit status ");
+        try fmt::append_i64(allocator, message, outcome.status);
+        try message.append_byte(allocator, cast<u8>(10));
+        try message.append_bytes(allocator, out);
+        return;
+    }
+    if mem::equal_bytes(command, "check") {
+        return;
+    }
+    let want = entry.stdout.as_bytes();
+    if !mem::equal_bytes(out, want) {
+        try message.append_bytes(allocator, "got ");
+        try quote(allocator, message, out);
+        try message.append_bytes(allocator, ", want ");
+        try quote(allocator, message, want);
+    }
+    return;
+}
+
+/// Whether a case already keeps its promise.
+fn passes(entry: &conformance::Case, outcome: &Outcome) -> bool {
+    let out = outcome.output.as_bytes();
+    if entry.must_fail {
+        let want = entry.error_text.as_bytes();
+        return outcome.failed and conformance::contains(out, "error:") and
+            conformance::contains(out, want);
+    }
+    if outcome.failed {
+        return false;
+    }
+    let command = entry.command.as_bytes();
+    if mem::equal_bytes(command, "check") {
+        return true;
+    }
+    let want = entry.stdout.as_bytes();
+    return mem::equal_bytes(out, want);
+}
+
+/// Runs `kizu <command> <path> <args>` from the repository root, with the
+/// environment this process has plus a TMPDIR of the case's own, the
+/// bindings the case declares, and PWD naming the root.
+fn run_case(
+    handle: Io,
+    allocator: Allocator,
+    kizu: []u8,
+    root: []u8,
+    tmp: []u8,
+    entry: &conformance::Case
+) -> Failure!Outcome {
+    var command = try net::command(allocator, kizu);
+    defer command.deinit(allocator);
+    let verb = entry.command.as_bytes();
+    try command.arg(allocator, verb);
+    let path = entry.path.as_bytes();
+    try command.arg(allocator, path);
+    var index = 0;
+    while entry.args.at(index) |given| {
+        index = index + 1;
+        let arg = given.as_bytes();
+        try command.arg(allocator, arg);
+    }
+    try command.set_dir(allocator, root);
+    try command.env(allocator, "TMPDIR", tmp);
+    index = 0;
+    while entry.env.at(index) |binding| {
+        index = index + 1;
+        let text = binding.as_bytes();
+        let equals = conformance::index_of(text, "=") orelse 0;
+        try command.env(allocator, text[0..equals], text[equals + 1..mem::len(text)]);
+    }
+    try command.env(allocator, "PWD", root);
+    command.set_stdin(net::Stdio::Null);
+    command.set_stdout(net::Stdio::Pipe);
+    command.set_stderr(net::Stdio::Pipe);
+
+    var child = try command.spawn(handle);
+    defer child.deinit();
+    var stdout = string::new(allocator);
+    defer stdout.deinit(allocator);
+    var stderr = string::new(allocator);
+    defer stderr.deinit(allocator);
+    // Both pipes are read as they fill, so a child writing much to one is
+    // never stopped waiting for the other to be read.
+    var poller = try net::poller_new(handle, 2);
+    defer poller.deinit();
+    try poller.watch_child_stdout(handle, &child, 1);
+    try poller.watch_child_stderr(handle, &child, 2);
+    var out_open = true;
+    var err_open = true;
+    while out_open or err_open {
+        let ready = try poller.wait(handle, 0);
+        var at = 0;
+        while at < ready {
+            let event = poller.ready(at) orelse break;
+            at = at + 1;
+            if event.token == 1 and out_open {
+                if try child.read_stdout_ready(handle, allocator, &var stdout, 65536) |got| {
+                    if got == 0 {
+                        child.close_stdout();
+                        out_open = false;
+                    }
+                }
+            }
+            if event.token == 2 and err_open {
+                if try child.read_stderr_ready(handle, allocator, &var stderr, 65536) |got| {
+                    if got == 0 {
+                        child.close_stderr();
+                        err_open = false;
+                    }
+                }
+            }
+        }
+    }
+    let status = try child.wait(handle);
+    var output = string::new(allocator);
+    errdefer output.deinit(allocator);
+    try output.append_string(allocator, &stdout);
+    let err_text = stderr.as_bytes();
+    try append_without_noise(allocator, &var output, err_text);
+    return Outcome { output: move output, failed: status != 0, status: status };
+}
+
+/// Appends stderr without the toolchain lines the Go CLI captures and drops
+/// on success, which the selfhost CLI lets through because std::process
+/// inherits the child's streams: a clang wrapper that adds include paths to
+/// every command has clang say it did not use them on an IR input. What is
+/// left ends with a newline, and nothing is left when only noise was.
+fn append_without_noise(allocator: Allocator, out: &var string::String, text: []u8) -> mem::Error!void {
+    var end = mem::len(text);
+    if end > 0 and text[end - 1] == cast<u8>(10) {
+        end = end - 1;
+    }
+    let body = text[0..end];
+    var kept = 0;
+    var only_empty = true;
+    var start = 0;
+    var index = 0;
+    while index <= end {
+        if index == end or body[index] == cast<u8>(10) {
+            let line = body[start..index];
+            if !mem::starts_with(line, "clang: warning: argument unused during compilation: ") {
+                if kept > 0 {
+                    try out.append_byte(allocator, cast<u8>(10));
+                }
+                try out.append_bytes(allocator, line);
+                if mem::len(line) > 0 {
+                    only_empty = false;
+                }
+                kept = kept + 1;
+            }
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    if kept > 1 or (kept == 1 and !only_empty) {
+        try out.append_byte(allocator, cast<u8>(10));
+    }
+    return;
+}
+
+/// Writes `bytes` the way Go's `%q` does for the ASCII a CLI prints, so a
+/// mismatch reads the same as it did from `go test`.
+fn quote(allocator: Allocator, out: &var string::String, bytes: []u8) -> mem::Error!void {
+    try out.append_byte(allocator, cast<u8>(34));
+    let length = mem::len(bytes);
+    var index = 0;
+    while index < length {
+        let byte = bytes[index];
+        index = index + 1;
+        if byte == cast<u8>(10) {
+            try out.append_bytes(allocator, "\n");
+        } else if byte == cast<u8>(9) {
+            try out.append_bytes(allocator, "\t");
+        } else if byte == cast<u8>(13) {
+            try out.append_bytes(allocator, "\r");
+        } else if byte == cast<u8>(34) {
+            try out.append_bytes(allocator, "\");
+            try out.append_byte(allocator, byte);
+        } else if byte == cast<u8>(92) {
+            try out.append_bytes(allocator, "\\");
+        } else if byte < cast<u8>(32) or byte == cast<u8>(127) {
+            try out.append_bytes(allocator, "\x");
+            try out.append_byte(allocator, hex_digit(byte / cast<u8>(16)));
+            try out.append_byte(allocator, hex_digit(byte % cast<u8>(16)));
+        } else {
+            try out.append_byte(allocator, byte);
+        }
+    }
+    try out.append_byte(allocator, cast<u8>(34));
+    return;
+}
+
+fn hex_digit(value: u8) -> u8 {
+    if value < cast<u8>(10) {
+        return value + cast<u8>(48);
+    }
+    return value + cast<u8>(87);
+}
+
+/// The name of a directory of this run's own under TMPDIR.
+fn scratch_dir(allocator: Allocator) -> Failure!string::String {
+    var dir = string::new(allocator);
+    errdefer dir.deinit(allocator);
+    if process::env("TMPDIR") |tmp| {
+        try dir.append_bytes(allocator, tmp);
+    } else {
+        try dir.append_bytes(allocator, "/tmp");
+    }
+    if !ends_with_slash(&dir) {
+        try dir.append_byte(allocator, cast<u8>(47));
+    }
+    try dir.append_bytes(allocator, "kizu-behavior-");
+    try fmt::append_i64(allocator, &var dir, process::unix_millis());
+    return move dir;
+}
+
+fn ends_with_slash(text: &string::String) -> bool {
+    let bytes = text.as_bytes();
+    return conformance::ends_with(bytes, "/");
+}
+
+/// Removes a directory and everything under it.
+fn remove_tree(handle: Io, allocator: Allocator, dir: []u8) -> Failure!void {
+    var entries = try fs::read_dir(handle, allocator, dir);
+    defer entries.deinit(allocator);
+    var index = 0;
+    while entries.at(index) |entry| {
+        index = index + 1;
+        let path = entry.path.as_bytes();
+        // A link is removed, never followed: unlinking a real directory
+        // fails, and only then is it emptied first.
+        if entry.is_dir {
+            if fs::remove_file(handle, path) {} else |_| {
+                try remove_tree(handle, allocator, path);
+            }
+        } else {
+            try fs::remove_file(handle, path);
+        }
+    }
+    try fs::remove_dir(handle, dir);
+    return;
+}
