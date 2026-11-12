@@ -7,13 +7,13 @@ import std::string;
 
 // Floating point: `f64` and `f32` values are their IEEE 754 bits in a
 // register like any other word, so moves, phis, spills, memory and the
-// backend's own calls need nothing of their own. On arm64, allocation keeps
-// the values only float instructions compute with in float registers (see
-// float_registers), where the bits are the same; elsewhere, and for a value
-// also read as an integer, a general register holds them and the
-// instructions that read a value as a number move it through a scratch
-// float register (v16..v19), which none holds from one machine instruction
-// to the next.
+// backend's own calls need nothing of their own. On arm64 and System V
+// amd64, allocation keeps the values only float instructions compute with
+// in float registers (see float_registers), where the bits are the same;
+// elsewhere, and for a value also read as an integer, a general register
+// holds them and the instructions that read a value as a number move it
+// through a scratch float register (v16..v19, or xmm13..xmm15), which none
+// holds from one machine instruction to the next.
 //
 // The operations are the ones the LLVM backend asks of LLVM: IEEE 754
 // arithmetic rounded to nearest even, ordered comparisons except `!=`,
@@ -341,14 +341,15 @@ fn (self: &var Selector) pick_bound(value: i64, bound: i64, cond: Cond) -> !i64 
 
 // ---- allocation ----
 
-/// Picks the virtual registers arm64 allocation keeps in float registers:
+/// Picks the virtual registers allocation keeps in float registers:
 /// those a float instruction reads or writes as a number, and those only
 /// moved, loaded, stored or selected alongside them, while nothing reads
 /// or writes them as an integer. Such a register holds the same bits a
 /// general one would; only the instructions that touch it change, so the
 /// choice never changes a result. A select keeps its three registers in
-/// one class, as `fcsel` and `csel` do not mix them.
-fn float_registers(allocator: Allocator, func: &MFunction, out: &var array::Array<bool>) -> !void {
+/// one class, as `fcsel` and `csel` do not mix them; on amd64, which has
+/// no select of xmm registers, a select keeps them in general ones.
+fn float_registers(allocator: Allocator, func: &MFunction, arch: Arch, out: &var array::Array<bool>) -> !void {
     let nv = func.vregs;
     var wants = array::new<bool>(allocator);
     defer wants.deinit(allocator);
@@ -452,7 +453,7 @@ fn float_registers(allocator: Allocator, func: &MFunction, out: &var array::Arra
                 if inst.op != MOp::CSel {
                     continue;
                 }
-                if in_float(out, inst.rd) and in_float(out, inst.rn) and in_float(out, inst.rm) {
+                if !is_x86(arch) and in_float(out, inst.rd) and in_float(out, inst.rn) and in_float(out, inst.rm) {
                     continue;
                 }
                 if try leave_float(out, inst.rd) {

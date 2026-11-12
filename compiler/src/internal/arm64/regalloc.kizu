@@ -18,8 +18,12 @@ import std::array;
 // On arm64 the registers only float instructions compute with (see
 // float_registers) take float registers instead: d20..d31, or d8..d15
 // across a hot call or a vectorized loop, whose NEON instructions write
-// vector registers no range tracks. A spilled one is reloaded into a
-// general scratch register like any other; the printer moves it across.
+// vector registers no range tracks. On amd64 under System V they take
+// xmm8..xmm12, or xmm0..xmm7 where nothing inside the range names those,
+// and none across a hot call, as the convention has a callee keep no xmm
+// register; under Windows they stay in general registers. A
+// spilled one is reloaded into a general scratch register like any other;
+// the printer moves it across.
 //
 // x16, x17 and x15 are scratch for the rewrite and the printer, x8 carries
 // an aggregate result's address and is scratch otherwise, x18 is the
@@ -58,15 +62,43 @@ fn caller_saved_last(arch: Arch) -> i64 {
 }
 
 /// Returns the end of the float registers a callee keeps, d8..d15 (their
-/// low 64 bits, all a float register holds here).
-fn float_callee_saved_end() -> i64 {
+/// low 64 bits, all a float register holds here). System V has a callee
+/// keep no xmm register, so on amd64 there are none.
+fn float_callee_saved_end(arch: Arch) -> i64 {
+    if is_x86(arch) {
+        return first_float_reg();
+    }
     return first_float_reg() + 8;
 }
 
 /// Returns the first float register a call may clobber that allocation
-/// hands out: d20..d31. d16..d19 are the printer's float scratch.
-fn float_caller_saved_first() -> i64 {
+/// hands out: d20..d31 on arm64, where d16..d19 are the printer's float
+/// scratch; xmm8..xmm12 on amd64, where xmm0..xmm7 carry C's float
+/// arguments and xmm13..xmm15 are the printer's float scratch.
+fn float_caller_saved_first(arch: Arch) -> i64 {
+    if is_x86(arch) {
+        return first_float_reg();
+    }
     return first_float_reg() + 12;
+}
+
+/// Returns the end of the float registers a call may clobber that
+/// allocation hands out.
+fn float_caller_saved_end(arch: Arch) -> i64 {
+    if is_x86(arch) {
+        return first_float_reg() + 5;
+    }
+    return first_vreg();
+}
+
+/// Returns the end of the float registers a range may take only where no
+/// call, float argument or float result is inside it: on amd64 xmm0..xmm7,
+/// numbered after xmm8..xmm12; none on arm64.
+fn float_named_end(arch: Arch) -> i64 {
+    if is_x86(arch) {
+        return float_caller_saved_end(arch) + 8;
+    }
+    return float_caller_saved_end(arch);
 }
 
 /// Reports whether reg is saved around a cold call it lives across.
@@ -74,7 +106,7 @@ fn is_cold_saved(reg: i64, arch: Arch) -> bool {
     if reg >= caller_saved_first() and reg <= caller_saved_last(arch) {
         return true;
     }
-    return reg >= float_caller_saved_first() and reg < first_vreg();
+    return reg >= float_caller_saved_first(arch) and reg < float_caller_saved_end(arch);
 }
 
 fn callee_saved_first() -> i64 {
@@ -545,12 +577,16 @@ fn spill_place(allocator: Allocator, func: &var MFunction, remat: &array::Array<
 
 /// Moves each constant that takes more than one instruction to the entry
 /// block, once per value: inlining can leave a callee's entry constants
-/// inside a caller's loop.
-fn hoist_constants(allocator: Allocator, func: &var MFunction) -> !void {
+/// inside a caller's loop. On amd64 under System V a constant a float
+/// operation reads is left to place_float_constants.
+fn hoist_constants(allocator: Allocator, func: &var MFunction, arch: Arch) -> !void {
     var def_count = array::new<i64>(allocator);
     defer def_count.deinit(allocator);
+    var float_read = array::new<bool>(allocator);
+    defer float_read.deinit(allocator);
     for 0..func.vregs |_index| {
         try def_count.append(allocator, 0);
+        try float_read.append(allocator, false);
     }
     var block_id = 0;
     while func.blocks.at(block_id) |block| {
@@ -560,6 +596,11 @@ fn hoist_constants(allocator: Allocator, func: &var MFunction) -> !void {
             inst_index = inst_index + 1;
             if writes_rd(inst.op) and is_vreg(inst.rd) {
                 try add_to(&var def_count, inst.rd - first_vreg(), 1);
+            }
+            if arch == Arch::Amd64 and computes_float(inst.op) {
+                try mark_read(&var float_read, inst.rn);
+                try mark_read(&var float_read, inst.rm);
+                try mark_read(&var float_read, inst.ra);
             }
             if inst.op == MOp::ParCopy {
                 var index = 0;
@@ -599,7 +640,8 @@ fn hoist_constants(allocator: Allocator, func: &var MFunction) -> !void {
         while block.insts.get(read) |inst| {
             read = read + 1;
             let wide = !(inst.imm >= 0 - 65536 and inst.imm < 65536) or in_loop;
-            if inst.op == MOp::MovImm and wide and is_vreg(inst.rd) and def_count.get_or_panic(inst.rd - first_vreg()) == 1 {
+            if inst.op == MOp::MovImm and wide and is_vreg(inst.rd) and def_count.get_or_panic(inst.rd - first_vreg()) == 1 and
+                !float_read.get_or_panic(inst.rd - first_vreg()) {
                 moved_any = true;
                 var known = 0 - 1;
                 var at = 0;
@@ -667,12 +709,439 @@ fn hoist_constants(allocator: Allocator, func: &var MFunction) -> !void {
     return;
 }
 
+/// Reports whether an instruction computes with floats: what reads a
+/// constant there wants it in a float register.
+fn computes_float(op: MOp) -> bool {
+    return op == MOp::FBin or op == MOp::FUn or op == MOp::FMAdd or op == MOp::FCmp or op == MOp::FCvt;
+}
+
+/// On amd64 under System V, where no xmm register outlives a call, puts
+/// each constant a float operation reads where its readers need it and no
+/// sooner: in the nearest block outside every loop that dominates all of
+/// them, before the first of them there or else at the end, once per value
+/// and block. So it is made neither in a loop nor ahead of a call it need
+/// not live across.
+fn place_float_constants(allocator: Allocator, func: &var MFunction) -> !void {
+    let nv = func.vregs;
+    let nb = func.blocks.len();
+    var def_count = array::new<i64>(allocator);
+    defer def_count.deinit(allocator);
+    var float_read = array::new<bool>(allocator);
+    defer float_read.deinit(allocator);
+    for 0..nv |_index| {
+        try def_count.append(allocator, 0);
+        try float_read.append(allocator, false);
+    }
+    var block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        block_id = block_id + 1;
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            if writes_rd(inst.op) and is_vreg(inst.rd) {
+                try add_to(&var def_count, inst.rd - first_vreg(), 1);
+            }
+            if computes_float(inst.op) {
+                try mark_read(&var float_read, inst.rn);
+                try mark_read(&var float_read, inst.rm);
+                try mark_read(&var float_read, inst.ra);
+            }
+            if inst.op == MOp::ParCopy {
+                for 0..inst.imm |index| {
+                    let copy = func.copies.get_or_panic(inst.slot + index);
+                    if is_vreg(copy.dst) {
+                        try add_to(&var def_count, copy.dst - first_vreg(), 1);
+                    }
+                }
+            }
+        }
+    }
+    var wanted = array::new<bool>(allocator);
+    defer wanted.deinit(allocator);
+    var any = false;
+    for 0..nv |_index| {
+        try wanted.append(allocator, false);
+    }
+    block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        block_id = block_id + 1;
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            if inst.op == MOp::MovImm and is_vreg(inst.rd) {
+                let v = inst.rd - first_vreg();
+                if def_count.get_or_panic(v) == 1 and float_read.get_or_panic(v) {
+                    try wanted.set(v, true);
+                    any = true;
+                }
+            }
+        }
+    }
+    if !any or nb == 0 {
+        return;
+    }
+    var order = array::new<i64>(allocator);
+    defer order.deinit(allocator);
+    try reverse_postorder(allocator, func, &var order);
+    var place = array::new<i64>(allocator);
+    defer place.deinit(allocator);
+    var idom = array::new<i64>(allocator);
+    defer idom.deinit(allocator);
+    var looped = array::new<bool>(allocator);
+    defer looped.deinit(allocator);
+    try dominators(allocator, func, &order, &var place, &var idom, &var looped);
+    // The block dominating every reader of each constant.
+    var meet = array::new<i64>(allocator);
+    defer meet.deinit(allocator);
+    for 0..nv |_index| {
+        try meet.append(allocator, 0 - 1);
+    }
+    var reads_buf = array::new<i64>(allocator);
+    defer reads_buf.deinit(allocator);
+    block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        let b = block_id;
+        block_id = block_id + 1;
+        if place.get_or_panic(b) < 0 {
+            continue;
+        }
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            try reads(inst, &var reads_buf, allocator, &func.copies);
+            var read_index = 0;
+            while reads_buf.get(read_index) |reg| {
+                read_index = read_index + 1;
+                try meet_at(&var meet, &wanted, &place, &idom, reg, b);
+            }
+        }
+        try meet_at(&var meet, &wanted, &place, &idom, block.treg, b);
+    }
+    // Where each goes: its block, out of loops, and the instruction it
+    // goes before there (the block's length for the end). Constants of one
+    // value going to one block share the first register.
+    var target = array::new<i64>(allocator);
+    defer target.deinit(allocator);
+    var before = array::new<i64>(allocator);
+    defer before.deinit(allocator);
+    var rename = array::new<i64>(allocator);
+    defer rename.deinit(allocator);
+    for 0..nv |v| {
+        try target.append(allocator, 0 - 1);
+        try before.append(allocator, 0);
+        try rename.append(allocator, first_vreg() + v);
+    }
+    var imms = array::new<i64>(allocator);
+    defer imms.deinit(allocator);
+    for 0..nv |_index| {
+        try imms.append(allocator, 0);
+    }
+    block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        block_id = block_id + 1;
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            if inst.op == MOp::MovImm and is_vreg(inst.rd) {
+                try imms.set(inst.rd - first_vreg(), inst.imm);
+            }
+        }
+    }
+    var holders = array::new<i64>(allocator);
+    defer holders.deinit(allocator);
+    for 0..nv |v| {
+        var t = meet.get_or_panic(v);
+        if t < 0 {
+            continue;
+        }
+        while t != 0 and looped.get_or_panic(t) {
+            t = idom.get_or_panic(t);
+        }
+        let at = try first_reader(allocator, func, t, first_vreg() + v, &var reads_buf);
+        var shared = 0 - 1;
+        var index = 0;
+        while holders.get(index) |holder| {
+            index = index + 1;
+            let h = holder - first_vreg();
+            if target.get_or_panic(h) == t and imms.get_or_panic(h) == imms.get_or_panic(v) {
+                shared = h;
+            }
+        }
+        if shared >= 0 {
+            try rename.set(v, first_vreg() + shared);
+            try target.set(v, 0 - 2);
+            if at < before.get_or_panic(shared) {
+                try before.set(shared, at);
+            }
+            continue;
+        }
+        try target.set(v, t);
+        try before.set(v, at);
+        try holders.append(allocator, first_vreg() + v);
+    }
+    // Take the constants out, read the shared registers, and put each
+    // holder in place.
+    var fresh = array::new<MInst>(allocator);
+    defer fresh.deinit(allocator);
+    block_id = 0;
+    while func.blocks.at_mut(block_id) |block| {
+        let b = block_id;
+        block_id = block_id + 1;
+        fresh.clear(allocator);
+        let count = block.insts.len();
+        for 0..count + 1 |position| {
+            var index = 0;
+            while holders.get(index) |holder| {
+                index = index + 1;
+                let h = holder - first_vreg();
+                if target.get_or_panic(h) == b and before.get_or_panic(h) == position {
+                    var made = blank(MOp::MovImm);
+                    made.rd = holder;
+                    made.imm = imms.get_or_panic(h);
+                    try fresh.append(allocator, made);
+                }
+            }
+            if position == count {
+                break;
+            }
+            let inst = block.insts.get_or_panic(position);
+            if inst.op == MOp::MovImm and is_vreg(inst.rd) and target.get_or_panic(inst.rd - first_vreg()) != 0 - 1 {
+                continue;
+            }
+            var fixed = inst;
+            fixed.rn = renamed(&rename, inst.rn);
+            fixed.rm = renamed(&rename, inst.rm);
+            fixed.ra = renamed(&rename, inst.ra);
+            if inst.op == MOp::Store or inst.op == MOp::StoreIdx {
+                fixed.rd = renamed(&rename, inst.rd);
+            }
+            try fresh.append(allocator, fixed);
+        }
+        block.insts.clear(allocator);
+        var index = 0;
+        while fresh.get(index) |inst| {
+            index = index + 1;
+            try block.insts.append(allocator, inst);
+        }
+        block.treg = renamed(&rename, block.treg);
+    }
+    var copy_index = 0;
+    while func.copies.at_mut(copy_index) |copy| {
+        copy_index = copy_index + 1;
+        if !copy.src_imm {
+            copy.src = renamed(&rename, copy.src);
+        }
+    }
+    return;
+}
+
+fn mark_read(table: &var array::Array<bool>, reg: i64) -> !void {
+    if is_vreg(reg) {
+        try table.set(reg - first_vreg(), true);
+    }
+    return;
+}
+
+/// Widens the block dominating the readers of reg, when it is a constant
+/// being placed, to take in block b.
+fn meet_at(meet: &var array::Array<i64>, wanted: &array::Array<bool>, place: &array::Array<i64>, idom: &array::Array<i64>, reg: i64, b: i64) -> !void {
+    if !is_vreg(reg) or !wanted.get_or_panic(reg - first_vreg()) {
+        return;
+    }
+    let v = reg - first_vreg();
+    let here = meet.get_or_panic(v);
+    if here < 0 {
+        return meet.set(v, b);
+    }
+    return meet.set(v, common_dominator(place, idom, here, b));
+}
+
+/// Returns the index of the first instruction of block b that reads reg,
+/// or, when none does, where the end of the block starts: before the
+/// parallel copy and the comparison the terminator reads, if any.
+fn first_reader(allocator: Allocator, func: &MFunction, b: i64, reg: i64, buf: &var array::Array<i64>) -> !i64 {
+    if func.blocks.at(b) |block| {
+        var index = 0;
+        while block.insts.at(index) |inst| {
+            try reads(inst, buf, allocator, &func.copies);
+            var read_index = 0;
+            while buf.get(read_index) |read| {
+                read_index = read_index + 1;
+                if read == reg {
+                    return index;
+                }
+            }
+            index = index + 1;
+        }
+        var end = block.insts.len();
+        while end > 0 {
+            let last = block.insts.get_or_panic(end - 1);
+            if last.op != MOp::ParCopy and !(block.term == Term::Flags and is_comparison(last.op)) {
+                break;
+            }
+            end = end - 1;
+        }
+        return end;
+    }
+    return 0;
+}
+
+fn is_comparison(op: MOp) -> bool {
+    return op == MOp::Cmp or op == MOp::CmpImm or op == MOp::CmnImm or op == MOp::TstImm or op == MOp::FCmp;
+}
+
+/// Computes the immediate dominator of each block reachable from the entry
+/// (-1 for the others), each block's place in the reverse postorder, and
+/// which blocks a loop holds: those that reach the source of an edge to a
+/// block dominating it without passing that block, and that block.
+fn dominators(
+    allocator: Allocator,
+    func: &MFunction,
+    order: &array::Array<i64>,
+    place: &var array::Array<i64>,
+    idom: &var array::Array<i64>,
+    looped: &var array::Array<bool>
+) -> !void {
+    let nb = func.blocks.len();
+    var pred_start = array::new<i64>(allocator);
+    defer pred_start.deinit(allocator);
+    var preds = array::new<i64>(allocator);
+    defer preds.deinit(allocator);
+    var fill = array::new<i64>(allocator);
+    defer fill.deinit(allocator);
+    for 0..nb + 1 |_index| {
+        try pred_start.append(allocator, 0);
+    }
+    for 0..nb |b| {
+        try place.append(allocator, 0 - 1);
+        try idom.append(allocator, 0 - 1);
+        try looped.append(allocator, false);
+        for 0..2 |position| {
+            let succ = func.successor(b, position);
+            if succ >= 0 {
+                try pred_start.set(succ + 1, pred_start.get_or_panic(succ + 1) + 1);
+            }
+        }
+    }
+    for 0..nb |b| {
+        try pred_start.set(b + 1, pred_start.get_or_panic(b + 1) + pred_start.get_or_panic(b));
+        try fill.append(allocator, pred_start.get_or_panic(b));
+    }
+    for 0..pred_start.get_or_panic(nb) |_index| {
+        try preds.append(allocator, 0);
+    }
+    for 0..nb |b| {
+        for 0..2 |position| {
+            let succ = func.successor(b, position);
+            if succ >= 0 {
+                try preds.set(fill.get_or_panic(succ), b);
+                try fill.set(succ, fill.get_or_panic(succ) + 1);
+            }
+        }
+    }
+    var index = 0;
+    while order.get(index) |b| {
+        try place.set(b, index);
+        index = index + 1;
+    }
+    let entry = order.get(0) orelse return;
+    try idom.set(entry, entry);
+    var changed = true;
+    while changed {
+        changed = false;
+        index = 1;
+        while order.get(index) |b| {
+            index = index + 1;
+            var chosen = 0 - 1;
+            for pred_start.get_or_panic(b)..pred_start.get_or_panic(b + 1) |at| {
+                let p = preds.get_or_panic(at);
+                if idom.get_or_panic(p) < 0 {
+                    continue;
+                }
+                if chosen < 0 {
+                    chosen = p;
+                } else {
+                    chosen = common_dominator(place, idom, chosen, p);
+                }
+            }
+            if chosen != idom.get_or_panic(b) {
+                try idom.set(b, chosen);
+                changed = true;
+            }
+        }
+    }
+    var stack = array::new<i64>(allocator);
+    defer stack.deinit(allocator);
+    var seen = array::new<i64>(allocator);
+    defer seen.deinit(allocator);
+    for 0..nb |_index| {
+        try seen.append(allocator, 0 - 1);
+    }
+    index = 0;
+    while order.get(index) |b| {
+        index = index + 1;
+        for 0..2 |position| {
+            let head = func.successor(b, position);
+            if head < 0 or !dominates(idom, entry, head, b) {
+                continue;
+            }
+            // The loop of the edge b -> head: back from b to head.
+            let stamp = b * 2 + position;
+            try seen.set(head, stamp);
+            try looped.set(head, true);
+            stack.clear(allocator);
+            try stack.append(allocator, b);
+            while stack.pop() |x| {
+                if seen.get_or_panic(x) == stamp or place.get_or_panic(x) < 0 {
+                    continue;
+                }
+                try seen.set(x, stamp);
+                try looped.set(x, true);
+                for pred_start.get_or_panic(x)..pred_start.get_or_panic(x + 1) |at| {
+                    try stack.append(allocator, preds.get_or_panic(at));
+                }
+            }
+        }
+    }
+    return;
+}
+
+/// Reports whether block a dominates block b.
+fn dominates(idom: &array::Array<i64>, entry: i64, a: i64, b_in: i64) -> bool {
+    var b = b_in;
+    while b != a and b != entry and b >= 0 {
+        b = idom.get_or_panic(b);
+    }
+    return b == a;
+}
+
+/// Returns the nearest block dominating both a and b.
+fn common_dominator(place: &array::Array<i64>, idom: &array::Array<i64>, a_in: i64, b_in: i64) -> i64 {
+    var a = a_in;
+    var b = b_in;
+    while a != b {
+        while place.get_or_panic(a) > place.get_or_panic(b) {
+            a = idom.get_or_panic(a);
+        }
+        while place.get_or_panic(b) > place.get_or_panic(a) {
+            b = idom.get_or_panic(b);
+        }
+    }
+    return a;
+}
+
 /// Marks the blocks inside a loop: those between a back edge's target and
 /// its source in a depth-first reverse postorder.
 fn loop_blocks(allocator: Allocator, func: &MFunction, depth: &var array::Array<i64>) -> !void {
-    let count = func.blocks.len();
     var order = array::new<i64>(allocator);
     defer order.deinit(allocator);
+    try reverse_postorder(allocator, func, &var order);
+    return loop_depths(allocator, func, &order, depth);
+}
+
+/// Lists the blocks reachable from the entry in reverse postorder.
+fn reverse_postorder(allocator: Allocator, func: &MFunction, order: &var array::Array<i64>) -> !void {
+    let count = func.blocks.len();
     var state = array::new<i64>(allocator);
     defer state.deinit(allocator);
     var next = array::new<i64>(allocator);
@@ -710,7 +1179,7 @@ fn loop_blocks(allocator: Allocator, func: &MFunction, depth: &var array::Array<
         try order.append(allocator, post.get_or_panic(index));
         index = index - 1;
     }
-    return loop_depths(allocator, func, &order, depth);
+    return;
 }
 
 fn renamed(rename: &array::Array<i64>, reg: i64) -> i64 {
@@ -1098,14 +1567,14 @@ pub fn allocate(allocator: Allocator, func: &var MFunction, arch: Arch) -> !Allo
         try cold_flags.append(allocator, block.cold);
     }
     let cold = &cold_flags;
-    try run_passes(allocator, func);
+    try run_passes(allocator, func, arch);
     var order = array::new<i64>(allocator);
     errdefer order.deinit(allocator);
     try layout(allocator, func, cold, &var order);
     var float = array::new<bool>(allocator);
     defer float.deinit(allocator);
-    if arch == Arch::Arm64 {
-        try float_registers(allocator, func, &var float);
+    if arch != Arch::Amd64Windows {
+        try float_registers(allocator, func, arch, &var float);
     } else {
         for 0..func.vregs |_index| {
             try float.append(allocator, false);
@@ -1115,8 +1584,11 @@ pub fn allocate(allocator: Allocator, func: &var MFunction, arch: Arch) -> !Allo
 }
 
 /// Runs the machine-level clean-ups allocation starts with.
-fn run_passes(allocator: Allocator, func: &var MFunction) -> !void {
-    try hoist_constants(allocator, func);
+fn run_passes(allocator: Allocator, func: &var MFunction, arch: Arch) -> !void {
+    try hoist_constants(allocator, func, arch);
+    if arch == Arch::Amd64 {
+        try place_float_constants(allocator, func);
+    }
     thread_empty_jumps(func);
     try duplicate_tails(allocator, func);
     fold_constant_branches(func);
@@ -1167,7 +1639,9 @@ fn allocate_laid_out(
     let positions = 2 * count + 2;
     // Marks: hot calls (index 0), each argument register named (1 + r) and
     // the NEON instructions, which write vector registers allocation does
-    // not track (9), as prefix counts over positions.
+    // not track (9), as prefix counts over positions. amd64 has no NEON
+    // instructions; there 9 marks what names xmm0..xmm7: every call, float
+    // argument and float result.
     let stride = positions + 1;
     var marks = array::new<i64>(allocator);
     defer marks.deinit(allocator);
@@ -1202,7 +1676,7 @@ fn allocate_laid_out(
                         try bump(&var marks, (1 + r) * stride + 2 * k + 1);
                     }
                 }
-                if is_vector(inst.op) {
+                if is_vector(inst.op) or (is_x86(arch) and names_float_args(inst.op)) {
                     try bump(&var marks, 9 * stride + 2 * k);
                     try bump(&var marks, 9 * stride + 2 * k + 1);
                 }
@@ -1312,10 +1786,23 @@ fn allocate_laid_out(
     defer partner.deinit(allocator);
     var sink = array::new<i64>(allocator);
     defer sink.deinit(allocator);
+    // On amd64 a float operation's result is computed in place of its left
+    // operand, so it would rather have that operand's register.
+    var tied = array::new<i64>(allocator);
+    defer tied.deinit(allocator);
+    // Its right operand's register would make it a copy through a scratch
+    // register first.
+    var shunned = array::new<i64>(allocator);
+    defer shunned.deinit(allocator);
     for 0..nv |_index| {
         try hint.append(allocator, 0 - 1);
         try partner.append(allocator, 0 - 1);
         try sink.append(allocator, 0 - 1);
+        try tied.append(allocator, 0 - 1);
+        try shunned.append(allocator, 0 - 1);
+    }
+    if is_x86(arch) {
+        try note_tied(func, float, &var tied, &var shunned);
     }
     var order_back = order.len() - 1;
     while order_back >= 0 {
@@ -1543,7 +2030,7 @@ fn allocate_laid_out(
     for 0..nv |v| {
         var crosses = ranges.first.get_or_panic(v) >= 0 and ranges.spans(v, &marks, 0);
         // A float register is clobbered by a vectorized loop too.
-        if float.get_or_panic(v) and !crosses {
+        if arch == Arch::Arm64 and float.get_or_panic(v) and !crosses {
             crosses = ranges.first.get_or_panic(v) >= 0 and ranges.spans(v, &marks, 9 * stride);
         }
         try crosses_call.append(allocator, crosses);
@@ -1602,7 +2089,9 @@ fn allocate_laid_out(
             try inactive.append(allocator, other);
         }
         let crosses = crosses_call.get_or_panic(v);
-        let wants_float = float.get_or_panic(v);
+        // Where no float register outlives a call, a range across one
+        // stays in a general register, as it would without float ones.
+        let wants_float = float.get_or_panic(v) and !(crosses and float_callee_saved_end(arch) == first_float_reg());
         // The registers this range may take, in the order it wants them.
         candidates.clear(allocator);
         let mate = partner.get_or_panic(v);
@@ -1615,6 +2104,13 @@ fn allocate_laid_out(
         // A chain of copies (a select into a join's phi into a loop
         // header's phi) wants the register of the first one along it that
         // has one.
+        let tie = tied.get_or_panic(v);
+        if wants_float and tie >= 0 {
+            let tie_reg = phys.get_or_panic(tie - first_vreg());
+            if tie_reg >= 0 {
+                try candidates.append(allocator, tie_reg);
+            }
+        }
         var drain = sink.get_or_panic(v);
         var hops = 0;
         while drain >= 0 and hops < 4 {
@@ -1632,11 +2128,11 @@ fn allocate_laid_out(
         }
         if wants_float {
             if !crosses {
-                for float_caller_saved_first()..first_vreg() |r| {
+                for float_caller_saved_first(arch)..float_named_end(arch) |r| {
                     try candidates.append(allocator, r);
                 }
             }
-            for first_float_reg()..float_callee_saved_end() |r| {
+            for first_float_reg()..float_callee_saved_end(arch) |r| {
                 try candidates.append(allocator, r);
             }
         } else {
@@ -1654,6 +2150,10 @@ fn allocate_laid_out(
         }
         var chosen = 0 - 1;
         var deferred = 0 - 1;
+        var shun = 0 - 1;
+        if wants_float and shunned.get_or_panic(v) >= 0 {
+            shun = phys.get_or_panic(shunned.get_or_panic(v) - first_vreg());
+        }
         var candidate_index = 0;
         while candidates.get(candidate_index) |r| {
             candidate_index = candidate_index + 1;
@@ -1661,7 +2161,7 @@ fn allocate_laid_out(
                 continue;
             }
             if register_free(&ranges, &phys, &active, &inactive, &copy_of, &write_at, &write_next, &write_first, v, r) {
-                if deferred < 0 and closes_cycle(&avoid_src, &avoid_dst, &phys, v, r) {
+                if deferred < 0 and (r == shun or closes_cycle(&avoid_src, &avoid_dst, &phys, v, r)) {
                     deferred = r;
                     continue;
                 }
@@ -1760,7 +2260,7 @@ fn allocate_laid_out(
             try saved.append(allocator, reg);
         }
     }
-    for first_float_reg()..float_callee_saved_end() |reg| {
+    for first_float_reg()..float_callee_saved_end(arch) |reg| {
         if used.get_or_panic(reg) {
             try saved.append(allocator, reg);
         }
@@ -1789,7 +2289,10 @@ fn may_take(ranges: &Ranges, marks: &array::Array<i64>, stride: i64, v: i64, reg
         if !float or !is_float_reg(reg) {
             return false;
         }
-        return !crosses or reg < float_callee_saved_end();
+        if reg >= float_caller_saved_end(arch) {
+            return reg < float_named_end(arch) and !ranges.spans(v, marks, 9 * stride);
+        }
+        return !crosses or reg < float_callee_saved_end(arch);
     }
     if crosses and reg < callee_saved_first() {
         return false;
@@ -1971,6 +2474,38 @@ fn mark_arguments(marks: &var array::Array<i64>, stride: i64, inst: &MInst, k: i
 
 fn bump(table: &var array::Array<i64>, at: i64) -> !void {
     return table.set(at, table.get_or_panic(at) + 1);
+}
+
+/// Reports whether an instruction names xmm0..xmm7 on amd64: a call, which
+/// clobbers them, or a float argument or result, which moves through one.
+fn names_float_args(op: MOp) -> bool {
+    return op == MOp::Call or op == MOp::CallReg or op == MOp::FArg or op == MOp::FRet;
+}
+
+/// Notes, for each float operation amd64 computes two-address, the left
+/// operand its result would share a register with once that operand dies.
+fn note_tied(func: &MFunction, float: &array::Array<bool>, tied: &var array::Array<i64>, shunned: &var array::Array<i64>) -> !void {
+    var block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        block_id = block_id + 1;
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            if inst.op != MOp::FBin and inst.op != MOp::FUn and inst.op != MOp::FCvt {
+                continue;
+            }
+            if !is_vreg(inst.rd) or !float.get_or_panic(inst.rd - first_vreg()) {
+                continue;
+            }
+            if is_vreg(inst.rn) {
+                try tied.set(inst.rd - first_vreg(), inst.rn);
+            }
+            if inst.op == MOp::FBin and is_vreg(inst.rm) and inst.rm != inst.rn {
+                try shunned.set(inst.rd - first_vreg(), inst.rm);
+            }
+        }
+    }
+    return;
 }
 
 /// Notes which register a virtual register would like: the argument

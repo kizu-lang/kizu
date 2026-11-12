@@ -38,7 +38,8 @@ import std::array;
 // way each accumulator stays one chain, combined with the elements one after
 // another in the order and with the operands the scalar loop has, so every
 // rounding is the one the scalar loop makes. Only the bounds checks and the
-// loop's own tests go.
+// loop's own tests go. On amd64 under System V this loop for general
+// registers over f64 accumulators is the only one taken.
 //
 // The vector registers are not allocated: the loop names v0..v7 and
 // v16..v31 directly, holds none of them across a call, and leaves v8..v15,
@@ -266,8 +267,10 @@ fn pool_size() -> i64 {
 /// after the edge's copies and ends the block, which goes on to the header.
 /// Reports false, having emitted nothing, otherwise.
 fn (self: &var Selector) vectorize_entry(module: &ir::Module, from: ir::Name, target: ir::Name) -> !bool {
-    // The vector loops are NEON; amd64 keeps every loop scalar.
-    if self.arch != Arch::Arm64 {
+    // The vector loops are NEON; amd64 under System V takes only the loop
+    // for general registers over f64 accumulators, whose values live in
+    // xmm registers there, and keeps every other loop scalar.
+    if self.arch == Arch::Amd64Windows {
         return false;
     }
     let header = self.block(target);
@@ -314,6 +317,9 @@ fn (self: &var Selector) vectorize_entry(module: &ir::Module, from: ir::Name, ta
         copies: 1
     };
     if !try self.plan_loop(module, from, &var plan, &var tables) {
+        return false;
+    }
+    if is_x86(self.arch) and !(plan.scalar and plan.float) {
         return false;
     }
     if plan.lanes {
@@ -470,7 +476,7 @@ fn (self: &var Selector) plan_loop(module: &ir::Module, from: ir::Name, plan: &v
         }
         try note_use(allocator, tables, block_node.terminator.cond.name);
     }
-    if plan.float and try self.plan_float_lanes(module, plan, tables) {
+    if plan.float and !is_x86(self.arch) and try self.plan_float_lanes(module, plan, tables) {
         return true;
     }
     var body_phis = 0;
