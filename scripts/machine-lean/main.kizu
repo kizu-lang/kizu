@@ -1,0 +1,868 @@
+// Writes std::machine tables into the generated blocks of a Lean
+// specification.
+//
+// Run it from the repository root with the program that prints the tables on
+// stdin:
+//
+//     kizu run spec/tls_machine.kizu | kizu run scripts/machine-lean/main.kizu -- spec/Tls.lean client server
+//
+// The names give the blocks the documents on stdin belong to, in order. With
+// -check first it writes nothing and fails when the file is not what it would
+// write, which is how `go test ./cmd/kizu` keeps spec/Tls.lean in step with
+// std::tls.
+//
+// A block starts with a line naming its table and its Lean names:
+//
+//     -- BEGIN GENERATED client state=State event=Event table=table post=post applied=Applied
+//
+// and ends with `-- END GENERATED`. Everything between is replaced. The
+// outcome type stays hand written, so two tables of one file can share it.
+
+import std::array;
+import std::fmt;
+import std::fs;
+import std::io;
+import std::json;
+import std::mem;
+import std::process;
+import std::string;
+import std::testing;
+
+error Failure = mem::Error or fs::Error or io::Error or json::DecodeError or process::Error;
+
+// Table, Move, read_tables and validate are the same text in
+// scripts/machine-quint/main.kizu: each generator is one file `kizu run` takes, and the
+// two read one stream. A change to one goes into both.
+
+/// One move of a Table.
+pub struct Move {
+    pub from: string::String,
+    pub event: string::String,
+    pub outcome: string::String,
+    pub to: string::String,
+}
+
+/// One document of std::machine's to_json.
+pub struct Table {
+    pub states: array::Array<string::String>,
+    pub events: array::Array<string::String>,
+    pub outcomes: array::Array<string::String>,
+    pub start: string::String,
+    pub ends: array::Array<string::String>,
+    pub moves: array::Array<Move>,
+}
+
+/// The Lean names of one block.
+struct Options {
+    state: string::String,
+    event: string::String,
+    table: string::String,
+    post: string::String,
+    applied: string::String,
+}
+
+fn main() -> Failure!process::ExitStatus {
+    let allocator = mem::page_allocator();
+    let handle = io::blocking();
+    var first = 0;
+    var check = false;
+    if process::arg_count() > 0 {
+        let flag = try process::arg(0);
+        if mem::equal_bytes(flag, "-check") {
+            check = true;
+            first = 1;
+        }
+    }
+    if process::arg_count() - first < 2 {
+        try io::write_stderr_line(handle, "usage: machine-lean [-check] <spec.lean> <block>... < tables.json");
+        return process::ExitStatus::Failure;
+    }
+    let path = try process::arg(first);
+    var names = array::new<string::String>(allocator);
+    defer names.deinit(allocator);
+    var index = first + 1;
+    while index < process::arg_count() {
+        let name = try process::arg(index);
+        let owned = try string::from_bytes(allocator, name);
+        try names.append(allocator, move owned);
+        index = index + 1;
+    }
+
+    let input = try io::read_stdin(handle, allocator, mem::Limit::Unlimited);
+    defer input.deinit(allocator);
+    var tables = array::new<Table>(allocator);
+    defer tables.deinit(allocator);
+    let input_bytes = input.as_bytes();
+    try read_tables(allocator, input_bytes, &var tables);
+
+    let source = try fs::read_file(handle, allocator, path, mem::Limit::Unlimited);
+    defer source.deinit(allocator);
+    let source_bytes = source.as_bytes();
+    var updated = string::new(allocator);
+    defer updated.deinit(allocator);
+    var problem = string::new(allocator);
+    defer problem.deinit(allocator);
+    let done = try update(allocator, source_bytes, &names, &tables, &var updated, &var problem);
+    if !done {
+        let text = problem.as_bytes();
+        try io::write_stderr(handle, "machine-lean: ");
+        try io::write_stderr_line(handle, text);
+        return process::ExitStatus::Failure;
+    }
+    let updated_bytes = updated.as_bytes();
+    if check {
+        if mem::equal_bytes(updated_bytes, source_bytes) {
+            return process::ExitStatus::Success;
+        }
+        try io::write_stderr(handle, "machine-lean: ");
+        try io::write_stderr(handle, path);
+        try io::write_stderr_line(handle, " is out of step with the tables; run `just spec-table` and `just spec-trace`");
+        return process::ExitStatus::Failure;
+    }
+    try fs::write_file(handle, path, updated_bytes);
+    return process::ExitStatus::Success;
+}
+
+/// Reads a stream of to_json documents, separated by white space.
+fn read_tables(allocator: Allocator, bytes: []u8, tables: &var array::Array<Table>) -> Failure!void {
+    var index = skip_space(bytes, 0);
+    while index < mem::len(bytes) {
+        let end = value_end(bytes, index);
+        let table = try json::decode<Table>(allocator, bytes[index..end]);
+        try tables.append(allocator, move table);
+        index = skip_space(bytes, end);
+    }
+    return;
+}
+
+/// The index of the first byte at or after `index` that is not white space.
+fn skip_space(bytes: []u8, index: i64) -> i64 {
+    var at = index;
+    while mem::byte_at(bytes, at) |byte| {
+        if !is_space(byte) {
+            return at;
+        }
+        at = at + 1;
+    }
+    return at;
+}
+
+/// The end of the JSON value that starts at `start`: past the bracket that
+/// closes an object or array, past the quote that closes a string, or at the
+/// white space after a scalar. json::decode judges what is in between.
+fn value_end(bytes: []u8, start: i64) -> i64 {
+    var depth = 0;
+    var in_string = false;
+    var escaped = false;
+    var index = start;
+    while mem::byte_at(bytes, index) |byte| {
+        index = index + 1;
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == cast<u8>(92) {
+                escaped = true;
+            } else if byte == cast<u8>(34) {
+                in_string = false;
+                if depth == 0 {
+                    return index;
+                }
+            }
+        } else if byte == cast<u8>(34) {
+            in_string = true;
+        } else if byte == cast<u8>(123) or byte == cast<u8>(91) {
+            depth = depth + 1;
+        } else if byte == cast<u8>(125) or byte == cast<u8>(93) {
+            depth = depth - 1;
+            if depth <= 0 {
+                return index;
+            }
+        } else if depth == 0 and is_space(byte) {
+            return index - 1;
+        }
+    }
+    return index;
+}
+
+fn is_space(byte: u8) -> bool {
+    return byte == cast<u8>(32) or byte == cast<u8>(10) or byte == cast<u8>(13) or byte == cast<u8>(9);
+}
+
+/// Writes spec to `out` with each named table written into its block. Every
+/// name must have a block and every block a name, so a table cannot be left
+/// behind. A refusal answers false with the reason in `problem`.
+fn update(
+    allocator: Allocator,
+    spec: []u8,
+    names: &array::Array<string::String>,
+    tables: &array::Array<Table>,
+    out: &var string::String,
+    problem: &var string::String
+) -> mem::Error!bool {
+    if names.len() != tables.len() {
+        try fmt::append_i64(allocator, problem, names.len());
+        try problem.append_bytes(allocator, " names for ");
+        try fmt::append_i64(allocator, problem, tables.len());
+        try problem.append_bytes(allocator, " tables");
+        return false;
+    }
+    var used = array::new<bool>(allocator);
+    defer used.deinit(allocator);
+    var count = 0;
+    while count < names.len() {
+        try used.append(allocator, false);
+        count = count + 1;
+    }
+    let begin = "-- BEGIN GENERATED ";
+    var start = 0;
+    while start < mem::len(spec) {
+        var end = line_end(spec, start);
+        let line = spec[start..end];
+        try out.append_bytes(allocator, line);
+        start = end;
+        if mem::starts_with(line, begin) {
+            var name = string::new(allocator);
+            defer name.deinit(allocator);
+            var options = Options {
+                state: string::new(allocator),
+                event: string::new(allocator),
+                table: string::new(allocator),
+                post: string::new(allocator),
+                applied: string::new(allocator),
+            };
+            defer options.deinit(allocator);
+            let parsed = try parse_begin(allocator, line[mem::len(begin)..mem::len(line)], &var name, &var options, problem);
+            if !parsed {
+                return false;
+            }
+            let name_bytes = name.as_bytes();
+            let found = find_name(names, &used, name_bytes);
+            if found < 0 {
+                try problem.append_bytes(allocator, "no table for block ");
+                try append_quoted(allocator, problem, name_bytes);
+                return false;
+            }
+            mark_name(names, &var used, name_bytes);
+            if tables.at(found) |table| {
+                var block = string::new(allocator);
+                defer block.deinit(allocator);
+                let rendered = try render(allocator, table, &options, &var block);
+                if !rendered {
+                    // render wrote the reason into block.
+                    try problem.append_bytes(allocator, "block ");
+                    try append_quoted(allocator, problem, name_bytes);
+                    try problem.append_bytes(allocator, ": ");
+                    try problem.append_string(allocator, &block);
+                    return false;
+                }
+                try out.append_string(allocator, &block);
+            }
+            var closed = false;
+            while start < mem::len(spec) and !closed {
+                end = line_end(spec, start);
+                let inner = spec[start..end];
+                start = end;
+                if mem::equal_bytes(mem::trim_ascii(inner), "-- END GENERATED") {
+                    try out.append_bytes(allocator, inner);
+                    closed = true;
+                }
+            }
+            if !closed {
+                try problem.append_bytes(allocator, "block ");
+                try append_quoted(allocator, problem, name_bytes);
+                try problem.append_bytes(allocator, " has no ");
+                try append_quoted(allocator, problem, "-- END GENERATED");
+                return false;
+            }
+        }
+    }
+    var index = 0;
+    while names.at(index) |name| {
+        var seen = false;
+        if used.at(index) |flag| {
+            seen = flag.*;
+        }
+        if !seen {
+            try problem.append_bytes(allocator, "no block for table ");
+            let name_bytes = name.as_bytes();
+            try append_quoted(allocator, problem, name_bytes);
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+/// The end of the line that starts at `start`, past its newline.
+fn line_end(text: []u8, start: i64) -> i64 {
+    var index = start;
+    while mem::byte_at(text, index) |byte| {
+        index = index + 1;
+        if byte == cast<u8>(10) {
+            return index;
+        }
+    }
+    return index;
+}
+
+/// The table a block takes: the last of the names that is `name`, as a later
+/// name for the same block wins. -1 when no name is, or the block was written
+/// already.
+fn find_name(names: &array::Array<string::String>, used: &array::Array<bool>, name: []u8) -> i64 {
+    var found = -1;
+    var index = 0;
+    while names.at(index) |candidate| {
+        let candidate_bytes = candidate.as_bytes();
+        if mem::equal_bytes(candidate_bytes, name) {
+            var taken = false;
+            if used.at(index) |flag| {
+                taken = flag.*;
+            }
+            if !taken {
+                found = index;
+            }
+        }
+        index = index + 1;
+    }
+    return found;
+}
+
+/// Marks every name that is `name` as written.
+fn mark_name(names: &array::Array<string::String>, used: &var array::Array<bool>, name: []u8) -> void {
+    var index = 0;
+    while names.at(index) |candidate| {
+        let candidate_bytes = candidate.as_bytes();
+        if mem::equal_bytes(candidate_bytes, name) {
+            if used.at_mut(index) |flag| {
+                flag.* = true;
+            }
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+/// Reads the table name and the Lean names from what follows the marker of a
+/// block line. A refusal answers false with the reason in `problem`.
+fn parse_begin(
+    allocator: Allocator,
+    rest: []u8,
+    name: &var string::String,
+    options: &var Options,
+    problem: &var string::String
+) -> mem::Error!bool {
+    var fields = array::new<string::String>(allocator);
+    defer fields.deinit(allocator);
+    try split_fields(allocator, rest, &var fields);
+    let shown = mem::trim_ascii(rest);
+    if fields.len() != 6 {
+        try problem.append_bytes(allocator, "block line ");
+        try append_block_line(allocator, problem, shown);
+        try problem.append_bytes(allocator, " needs a name and 5 options");
+        return false;
+    }
+    if fields.at(0) |first| {
+        try name.append_string(allocator, first);
+    }
+    var index = 1;
+    while fields.at(index) |field| {
+        index = index + 1;
+        let bytes = field.as_bytes();
+        var equals = -1;
+        var at = 0;
+        while mem::byte_at(bytes, at) |byte| {
+            if equals < 0 and byte == cast<u8>(61) {
+                equals = at;
+            }
+            at = at + 1;
+        }
+        var known = equals >= 0;
+        if known {
+            let key = bytes[0..equals];
+            let value = bytes[equals + 1..mem::len(bytes)];
+            if mem::equal_bytes(key, "state") {
+                options.state.clear();
+                try options.state.append_bytes(allocator, value);
+            } else if mem::equal_bytes(key, "event") {
+                options.event.clear();
+                try options.event.append_bytes(allocator, value);
+            } else if mem::equal_bytes(key, "table") {
+                options.table.clear();
+                try options.table.append_bytes(allocator, value);
+            } else if mem::equal_bytes(key, "post") {
+                options.post.clear();
+                try options.post.append_bytes(allocator, value);
+            } else if mem::equal_bytes(key, "applied") {
+                options.applied.clear();
+                try options.applied.append_bytes(allocator, value);
+            } else {
+                known = false;
+            }
+        }
+        if !known {
+            try problem.append_bytes(allocator, "block line has unknown option ");
+            try append_quoted(allocator, problem, bytes);
+            return false;
+        }
+    }
+    var missing = "";
+    if options.applied.len() == 0 {
+        missing = "applied";
+    }
+    if options.post.len() == 0 {
+        missing = "post";
+    }
+    if options.table.len() == 0 {
+        missing = "table";
+    }
+    if options.event.len() == 0 {
+        missing = "event";
+    }
+    if options.state.len() == 0 {
+        missing = "state";
+    }
+    if mem::len(missing) > 0 {
+        try problem.append_bytes(allocator, "block line ");
+        try append_block_line(allocator, problem, shown);
+        try problem.append_bytes(allocator, " has no ");
+        try problem.append_bytes(allocator, missing);
+        return false;
+    }
+    return true;
+}
+
+/// Splits text at runs of white space, as Go's strings.Fields does for ASCII.
+fn split_fields(allocator: Allocator, text: []u8, out: &var array::Array<string::String>) -> mem::Error!void {
+    var start = -1;
+    var index = 0;
+    while index <= mem::len(text) {
+        var space = true;
+        if mem::byte_at(text, index) |byte| {
+            space = is_space(byte);
+        }
+        if space and start >= 0 {
+            let field = try string::from_bytes(allocator, text[start..index]);
+            try out.append(allocator, move field);
+            start = -1;
+        } else if !space and start < 0 {
+            start = index;
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+/// Writes the state and event types and the two functions of a table. A table
+/// of every pair is required: a pair left out would have no answer in post. A
+/// refusal answers false with the reason, rather than the block, in `out`.
+fn render(allocator: Allocator, table: &Table, options: &Options, out: &var string::String) -> mem::Error!bool {
+    let applied = options.applied.as_bytes();
+    if !contains(&table.outcomes, applied) {
+        try out.append_bytes(allocator, "applied outcome ");
+        try append_quoted(allocator, out, applied);
+        try out.append_bytes(allocator, " is not one of [");
+        try append_joined(allocator, out, &table.outcomes, " ");
+        try out.append_bytes(allocator, "]");
+        return false;
+    }
+    let valid = try validate(allocator, table, out);
+    if !valid {
+        return false;
+    }
+    try write_inductive(allocator, out, &options.state, &table.states);
+    try write_inductive(allocator, out, &options.event, &table.events);
+
+    try out.append_bytes(allocator, "def ");
+    try out.append_string(allocator, &options.table);
+    try out.append_bytes(allocator, " : ");
+    try out.append_string(allocator, &options.state);
+    try out.append_bytes(allocator, " → ");
+    try out.append_string(allocator, &options.event);
+    try out.append_bytes(allocator, " → Option ");
+    try out.append_string(allocator, &options.state);
+    try out.append_byte(allocator, newline());
+    var written = 0;
+    var index = 0;
+    while table.moves.at(index) |move_entry| {
+        index = index + 1;
+        let outcome = move_entry.outcome.as_bytes();
+        if mem::equal_bytes(outcome, applied) {
+            written = written + 1;
+            try out.append_bytes(allocator, "  | .");
+            try append_constructor(allocator, out, &move_entry.from);
+            try out.append_bytes(allocator, ", .");
+            try append_constructor(allocator, out, &move_entry.event);
+            try out.append_bytes(allocator, " => some .");
+            try append_constructor(allocator, out, &move_entry.to);
+            try out.append_byte(allocator, newline());
+        }
+    }
+    if written < table.moves.len() {
+        try append_line(allocator, out, "  | _, _ => none");
+    }
+    try out.append_byte(allocator, newline());
+
+    try out.append_bytes(allocator, "def ");
+    try out.append_string(allocator, &options.post);
+    try out.append_bytes(allocator, " : ");
+    try out.append_string(allocator, &options.state);
+    try out.append_bytes(allocator, " → ");
+    try out.append_string(allocator, &options.event);
+    try out.append_bytes(allocator, " → ");
+    try out.append_string(allocator, &options.state);
+    try append_line(allocator, out, " × Outcome");
+    index = 0;
+    while table.moves.at(index) |move_entry| {
+        index = index + 1;
+        try out.append_bytes(allocator, "  | .");
+        try append_constructor(allocator, out, &move_entry.from);
+        try out.append_bytes(allocator, ", .");
+        try append_constructor(allocator, out, &move_entry.event);
+        try out.append_bytes(allocator, " => (.");
+        try append_constructor(allocator, out, &move_entry.to);
+        try out.append_bytes(allocator, ", .");
+        try append_constructor(allocator, out, &move_entry.outcome);
+        try append_line(allocator, out, ")");
+    }
+    return true;
+}
+
+/// Writes one enum as a Lean inductive type.
+fn write_inductive(
+    allocator: Allocator,
+    out: &var string::String,
+    name: &string::String,
+    variants: &array::Array<string::String>
+) -> mem::Error!void {
+    try out.append_bytes(allocator, "inductive ");
+    try out.append_string(allocator, name);
+    try out.append_byte(allocator, newline());
+    var index = 0;
+    while variants.at(index) |variant| {
+        index = index + 1;
+        try out.append_bytes(allocator, "  | ");
+        try append_constructor(allocator, out, variant);
+        try out.append_byte(allocator, newline());
+    }
+    try append_line(allocator, out, "deriving Repr, DecidableEq");
+    return out.append_byte(allocator, newline());
+}
+
+/// Spells a variant name as Lean spells a constructor: its first letter lower
+/// case.
+fn append_constructor(allocator: Allocator, out: &var string::String, name: &string::String) -> mem::Error!void {
+    let bytes = name.as_bytes();
+    if mem::byte_at(bytes, 0) |first| {
+        var lower = first;
+        if first >= cast<u8>(65) and first <= cast<u8>(90) {
+            lower = first + cast<u8>(32);
+        }
+        try out.append_byte(allocator, lower);
+        return out.append_bytes(allocator, bytes[1..mem::len(bytes)]);
+    }
+    return;
+}
+
+/// Refuses a table that does not answer every pair exactly once. A refusal
+/// answers false with the reason in `problem`.
+fn validate(allocator: Allocator, table: &Table, problem: &var string::String) -> mem::Error!bool {
+    var index = 0;
+    while table.moves.at(index) |move_entry| {
+        index = index + 1;
+        let from = move_entry.from.as_bytes();
+        let event = move_entry.event.as_bytes();
+        let outcome = move_entry.outcome.as_bytes();
+        let to = move_entry.to.as_bytes();
+        var unlisted = "";
+        if !contains(&table.outcomes, outcome) {
+            unlisted = "an outcome";
+        }
+        if !contains(&table.events, event) {
+            unlisted = "an event";
+        }
+        if !contains(&table.states, from) or !contains(&table.states, to) {
+            unlisted = "a state";
+        }
+        if mem::len(unlisted) > 0 {
+            try problem.append_bytes(allocator, "move {");
+            try problem.append_bytes(allocator, from);
+            try problem.append_bytes(allocator, " ");
+            try problem.append_bytes(allocator, event);
+            try problem.append_bytes(allocator, " ");
+            try problem.append_bytes(allocator, outcome);
+            try problem.append_bytes(allocator, " ");
+            try problem.append_bytes(allocator, to);
+            try problem.append_bytes(allocator, "} names ");
+            try problem.append_bytes(allocator, unlisted);
+            try problem.append_bytes(allocator, " the table does not list");
+            return false;
+        }
+        if count_moves(table, from, event, index - 1) > 0 {
+            try problem.append_bytes(allocator, "the table has two moves for ");
+            try problem.append_bytes(allocator, from);
+            try problem.append_bytes(allocator, " and ");
+            try problem.append_bytes(allocator, event);
+            return false;
+        }
+    }
+    var state_index = 0;
+    while table.states.at(state_index) |state| {
+        state_index = state_index + 1;
+        let state_bytes = state.as_bytes();
+        var event_index = 0;
+        while table.events.at(event_index) |event| {
+            event_index = event_index + 1;
+            let event_bytes = event.as_bytes();
+            if count_moves(table, state_bytes, event_bytes, table.moves.len()) == 0 {
+                try problem.append_bytes(allocator, "the table has no move for ");
+                try problem.append_bytes(allocator, state_bytes);
+                try problem.append_bytes(allocator, " and ");
+                try problem.append_bytes(allocator, event_bytes);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/// How many of the first `limit` moves leave `from` on `event`.
+fn count_moves(table: &Table, from: []u8, event: []u8, limit: i64) -> i64 {
+    var count = 0;
+    var index = 0;
+    while index < limit {
+        if table.moves.at(index) |move_entry| {
+            let move_from = move_entry.from.as_bytes();
+            let move_event = move_entry.event.as_bytes();
+            if mem::equal_bytes(move_from, from) and mem::equal_bytes(move_event, event) {
+                count = count + 1;
+            }
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+/// Whether wanted is one of values.
+fn contains(values: &array::Array<string::String>, wanted: []u8) -> bool {
+    var index = 0;
+    while values.at(index) |value| {
+        index = index + 1;
+        let bytes = value.as_bytes();
+        if mem::equal_bytes(bytes, wanted) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Appends the strings joined by separator.
+fn append_joined(
+    allocator: Allocator,
+    out: &var string::String,
+    parts: &array::Array<string::String>,
+    separator: []u8
+) -> mem::Error!void {
+    var index = 0;
+    while parts.at(index) |part| {
+        if index > 0 {
+            try out.append_bytes(allocator, separator);
+        }
+        index = index + 1;
+        try out.append_string(allocator, part);
+    }
+    return;
+}
+
+fn newline() -> u8 {
+    return cast<u8>(10);
+}
+
+/// Appends text and a newline.
+fn append_line(allocator: Allocator, out: &var string::String, text: []u8) -> mem::Error!void {
+    try out.append_bytes(allocator, text);
+    return out.append_byte(allocator, newline());
+}
+
+/// Appends text in double quotes, as a reason names what it refused.
+fn append_quoted(allocator: Allocator, out: &var string::String, text: []u8) -> mem::Error!void {
+    try out.append_byte(allocator, cast<u8>(34));
+    try out.append_bytes(allocator, text);
+    return out.append_byte(allocator, cast<u8>(34));
+}
+
+/// Appends a block line, marker and all, in double quotes.
+fn append_block_line(allocator: Allocator, out: &var string::String, rest: []u8) -> mem::Error!void {
+    try out.append_byte(allocator, cast<u8>(34));
+    try out.append_bytes(allocator, "-- BEGIN GENERATED ");
+    try out.append_bytes(allocator, rest);
+    return out.append_byte(allocator, cast<u8>(34));
+}
+
+// The tests run with `kizu test scripts/machine-lean/main.kizu`, which
+// `go test ./cmd/kizu` does.
+
+/// A sound two-state table the tests change.
+fn sample_json() -> []u8 {
+    return
+        \\{"states": ["Open", "Shut"], "events": ["Close"], "outcomes": ["Applied", "Refused"],
+        \\ "start": "Open", "ends": ["Shut"], "moves": [
+        \\  {"from": "Open", "event": "Close", "outcome": "Applied", "to": "Shut"},
+        \\  {"from": "Shut", "event": "Close", "outcome": "Refused", "to": "Shut"}]}
+    ;
+}
+
+fn sample_block() -> []u8 {
+    return
+        \\before
+        \\-- BEGIN GENERATED door state=Door event=Knock table=table post=post applied=Applied
+        \\old
+        \\-- END GENERATED
+        \\after
+        \\
+    ;
+}
+
+/// Runs update over spec with the tables of `documents` named by `names`, a
+/// list separated by spaces, and answers the text or the reason it refused.
+fn try_update(allocator: Allocator, spec: []u8, names: []u8, documents: []u8) -> Failure!string::String {
+    var tables = array::new<Table>(allocator);
+    defer tables.deinit(allocator);
+    try read_tables(allocator, documents, &var tables);
+    var name_list = array::new<string::String>(allocator);
+    defer name_list.deinit(allocator);
+    try split_fields(allocator, names, &var name_list);
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    var problem = string::new(allocator);
+    errdefer problem.deinit(allocator);
+    let done = try update(allocator, spec, &name_list, &tables, &var out, &var problem);
+    if done {
+        problem.deinit(allocator);
+        return move out;
+    }
+    out.deinit(allocator);
+    return move problem;
+}
+
+/// Whether text holds part.
+fn holds(text: []u8, part: []u8) -> bool {
+    var start = 0;
+    while start + mem::len(part) <= mem::len(text) {
+        if mem::equal_bytes(text[start..start + mem::len(part)], part) {
+            return true;
+        }
+        start = start + 1;
+    }
+    return false;
+}
+
+/// Fails unless update refuses with a reason that holds `want`.
+fn expect_refusal(allocator: Allocator, spec: []u8, names: []u8, documents: []u8, want: []u8) -> Failure!void {
+    var got = try try_update(allocator, spec, names, documents);
+    defer got.deinit(allocator);
+    let bytes = got.as_bytes();
+    if !holds(bytes, want) {
+        testing::fail(bytes);
+    }
+    return;
+}
+
+test "update replaces the block" {
+    let allocator = mem::page_allocator();
+    var got = try try_update(allocator, sample_block(), "door", sample_json());
+    defer got.deinit(allocator);
+    let want =
+        \\before
+        \\-- BEGIN GENERATED door state=Door event=Knock table=table post=post applied=Applied
+        \\inductive Door
+        \\  | open
+        \\  | shut
+        \\deriving Repr, DecidableEq
+        \\
+        \\inductive Knock
+        \\  | close
+        \\deriving Repr, DecidableEq
+        \\
+        \\def table : Door → Knock → Option Door
+        \\  | .open, .close => some .shut
+        \\  | _, _ => none
+        \\
+        \\def post : Door → Knock → Door × Outcome
+        \\  | .open, .close => (.shut, .applied)
+        \\  | .shut, .close => (.shut, .refused)
+        \\-- END GENERATED
+        \\after
+        \\
+    ;
+    let bytes = got.as_bytes();
+    testing::expect_equal<[]u8>(want, bytes);
+}
+
+test "update refuses a table and a file that disagree" {
+    let allocator = mem::page_allocator();
+    let missing =
+        \\{"states": ["Open", "Shut"], "events": ["Close"], "outcomes": ["Applied", "Refused"],
+        \\ "start": "Open", "ends": ["Shut"], "moves": [
+        \\  {"from": "Open", "event": "Close", "outcome": "Applied", "to": "Shut"}]}
+    ;
+    try expect_refusal(allocator, sample_block(), "door", missing, "no move for Shut and Close");
+    let unknown =
+        \\{"states": ["Open", "Shut"], "events": ["Close"], "outcomes": ["Applied", "Refused"],
+        \\ "start": "Open", "ends": ["Shut"], "moves": [
+        \\  {"from": "Open", "event": "Close", "outcome": "Applied", "to": "Shut"},
+        \\  {"from": "Shut", "event": "Close", "outcome": "Refused", "to": "Ajar"}]}
+    ;
+    try expect_refusal(allocator, sample_block(), "door", unknown, "names a state");
+    let twice =
+        \\{"states": ["Open", "Shut"], "events": ["Close"], "outcomes": ["Applied", "Refused"],
+        \\ "start": "Open", "ends": ["Shut"], "moves": [
+        \\  {"from": "Open", "event": "Close", "outcome": "Applied", "to": "Shut"},
+        \\  {"from": "Open", "event": "Close", "outcome": "Refused", "to": "Shut"}]}
+    ;
+    try expect_refusal(allocator, sample_block(), "door", twice, "two moves");
+    try expect_refusal(allocator, sample_block(), "gate", sample_json(), "no table for block");
+    try expect_refusal(allocator, "before", "door", sample_json(), "no block for table");
+    let open =
+        \\before
+        \\-- BEGIN GENERATED door state=Door event=Knock table=table post=post applied=Applied
+        \\old
+    ;
+    try expect_refusal(allocator, open, "door", sample_json(), "has no");
+    try expect_refusal(allocator, sample_block(), "door gate", sample_json(), "2 names for 1 tables");
+    let option =
+        \\-- BEGIN GENERATED door state=Door event=Knock table=table post=post bogus=Applied
+        \\-- END GENERATED
+    ;
+    try expect_refusal(allocator, option, "door", sample_json(), "unknown option");
+    let empty =
+        \\-- BEGIN GENERATED door state= event=Knock table=table post=post applied=Applied
+        \\-- END GENERATED
+    ;
+    try expect_refusal(allocator, empty, "door", sample_json(), "has no state");
+}
+
+test "read_tables reads a stream and refuses an unknown field" {
+    let allocator = mem::page_allocator();
+    var tables = array::new<Table>(allocator);
+    defer tables.deinit(allocator);
+    let stream =
+        \\{"states": ["A"], "events": [], "outcomes": [], "start": "A", "ends": [], "moves": []}
+        \\ {"states": ["B"], "events": [], "outcomes": [], "start": "B", "ends": [], "moves": []}
+    ;
+    try read_tables(allocator, stream, &var tables);
+    testing::expect_equal<i64>(2, tables.len());
+    if tables.at(1) |second| {
+        let start = second.start.as_bytes();
+        testing::expect_equal<[]u8>("B", start);
+    }
+    var refused = array::new<Table>(allocator);
+    defer refused.deinit(allocator);
+    let rows =
+        \\{"rows": []}
+    ;
+    if read_tables(allocator, rows, &var refused) {
+        testing::fail("an unknown field was read");
+    } else |err| {
+        testing::expect(err == json::Error::UnknownField);
+    }
+}

@@ -124,7 +124,7 @@ compress-fixtures:
 
 # Regenerate the tables of the TLS specification from std::tls, then check them (spec/README.md).
 spec-table: && spec-verify
-    go run ./cmd/kizu run spec/tls_machine.kizu | go run ./scripts/machine-lean spec/Tls.lean client server
+    go run ./cmd/kizu run spec/tls_machine.kizu | go run ./cmd/kizu run scripts/machine-lean/main.kizu -- spec/Tls.lean client server
     go run ./cmd/kizu run spec/tls_machine.kizu | go run ./scripts/machine-quint spec/tls_client.qnt spec/tls_server.qnt
 
 # Check every reachable state of the Quint machines with TLC (spec/README.md).
