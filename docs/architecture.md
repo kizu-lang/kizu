@@ -29,7 +29,6 @@ internal/            Go 実装(1 パッケージ = 1 責務)
   stdmethod, stdprim, stdmeta, stdtarget
                                 std の method / primitive と compiler-defined form
   staticexpr, stdmath           static 引数の整数式と、comptime の sin / cos(std::math と同じ bit)
-  machinelean, machinequint     std::machine の表を Lean / Quint へ書き出す
   unsafecap                     unsafe が覆う操作の種類と診断文言
   conformance                   example が末尾に宣言する case の読み取り
   version, selfhost             binary の名乗りと、移植先が読めない生成 source
