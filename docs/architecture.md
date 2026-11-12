@@ -159,10 +159,12 @@ CLI のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 | 両実装の突き合わせ | `go test ./cmd/kizu`(`TestSelfhostFrontend` / `TestSelfhostBehavior`) | Kizu compiler と Go seed の出力差分。`compiler/tests/` の corpus は `-update` で両方を同時に更新する。`TestSelfhostBehavior` は Kizu で書いたハーネス `compiler/tests/harness` を selfhost compiler で `kizu run compiler/tests/harness -- behavior <kizu>` と呼ぶだけ |
 | bootstrap | `go test ./cmd/kizu -run TestSelfhostBootstrap` | Kizu compiler が自分自身を空の build cache で build し、byte 単位で同じ実行ファイルになること。stage1 が `kizu test compiler/tests/harness`(Mach-O 正規化と不一致報告の test)と `kizu run compiler/tests/harness -- bootstrap <kizu>` を回し、Go の test はそれを呼ぶだけ |
 | Kizu 側 unit test | `go test ./internal/selfhost`(= `kizu test compiler`、`just selfhost` でも) | `compiler/src/**/*_test.kizu`。seed が compiler とその test を 1 つの実行ファイルにして走らせる。`cmd/kizu` と並んで走るよう別 package |
+| 種からの build | `just selfhost-seed`(CI は `seed (ubuntu-latest)`) | pin した前リリース(種)で `compiler/` を check / test し、種が build した stage1 でもう一度 check / test する。`docs/bootstrap.md` |
 | commit hooks | `pre-commit run --all-files` | gofmt / golangci-lint / コメント検査 + `kizu check compiler`。数秒で終わるものだけ |
 
 CI は push/PR ごとに 1 job(`go test ./...` + gofmt)を macOS / Linux の両方で回します
 (`internal/selfhost` は host に依らないので macOS だけ)。
+それと並んで、種からの build を `seed (ubuntu-latest)` job が Linux で回します。
 定時実行は置きません。
 言語機能を足したら `examples/` に実例を足し、その末尾に case を書きます。
 書式は `internal/conformance` の package doc にあります。
@@ -194,6 +196,7 @@ CI は push/PR ごとに 1 job(`go test ./...` + gofmt)を macOS / Linux の両�
 | 作りながら覚える(web server など) | docs/tutorial/ |
 | trusted builtin の境界と std API 追加の規則 | docs/stdlib.md |
 | build / cache 性能の測り方 | docs/perf.md |
+| 種の pin と更新手順、2 リリースがかりの規律 | docs/bootstrap.md |
 | self-host の移植を選んだ理由 | docs/adr/0130-selfhost-by-mechanical-porting.md |
 | 移植で見つかった言語 / std の gap | docs/language-gaps.md |
 | API の形の選び方(不在 / 失敗 / バグ) | docs/style.md |

@@ -48,6 +48,9 @@ package doc にあります。
   完了の判定は相互検証が全部通ること(`go test ./cmd/kizu` の Selfhost 系
   —— Behavior / Bootstrap / corpus —— と `just selfhost`)。
   片方しか直せていない状態では commit せず、残っている側と理由を報告して止まる。
+- `compiler/` は `scripts/seed.txt` に pin した前リリース(種)が、その std ごと
+  build できる範囲に保つ。種の知らない言語機能や std API を `compiler/` で使う
+  変更は 2 リリースがかりにする(`docs/bootstrap.md`)。確認は `just selfhost-seed`。
 - Go の comment は英語で書く。package comment と `package main` の command
   comment は必須(pre-commit の `go comments` が見ている)。
 
