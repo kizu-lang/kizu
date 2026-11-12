@@ -51,9 +51,14 @@ func ConstructExpansion(
 		statements = append(statements, &LetStmt{
 			Name: binding,
 			Value: &TryExpr{Value: &CallExpr{
+				// The owner is concrete and the field is one of its own, so
+				// the list is bound already: read where `construct` sits, a
+				// field named like a type parameter or capture there would
+				// name that instead.
 				Callee: &TypeApplyExpr{
-					Callee:  &IdentExpr{Name: worker},
-					TypeArg: owner + ", " + field.Name,
+					Callee:   &IdentExpr{Name: worker},
+					TypeArg:  owner + ", " + field.Name,
+					Resolved: true,
 				},
 				Args: args,
 			}},
