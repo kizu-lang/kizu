@@ -27,6 +27,10 @@ type Parser struct {
 	// safety is the `// SAFETY:` text of the statement being parsed. It is the
 	// justification every `unsafe` marker in that statement is stamped with.
 	safety string
+	// embeds lists the `@embed_file` calls read so far, in source order. The
+	// parser does not know which package a file belongs to, so the loader
+	// reads each file and fills in the literal's bytes.
+	embeds []*ast.StringExpr
 }
 
 // New creates a parser over l.
@@ -49,6 +53,12 @@ func (p *Parser) Errors() []string {
 // Diagnostics returns parse diagnostics collected so far.
 func (p *Parser) Diagnostics() []Diagnostic {
 	return p.errors
+}
+
+// Embeds returns the `@embed_file` calls parsed so far, in source order, for
+// the loader to fill in.
+func (p *Parser) Embeds() []*ast.StringExpr {
+	return p.embeds
 }
 
 // commentText normalizes the comment lines the lexer attached to a token. Both
@@ -1657,16 +1667,8 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 	switch p.cur.Type {
 	case token.Ident:
 		return p.parseIdentPrefixExpression()
-	case token.Int:
-		return p.parseIntLiteral()
-	case token.Float:
-		return p.parseFloatLiteral()
-	case token.String:
-		return &ast.StringExpr{Value: p.cur.Literal}
-	case token.CString:
-		return p.parseCStringLiteral()
-	case token.True, token.False, token.Null:
-		return p.parseKeywordLiteralExpression()
+	case token.Int, token.Float, token.String, token.CString, token.True, token.False, token.Null:
+		return p.parseLiteralExpression()
 	case token.If:
 		return p.parseIfStmt()
 	case token.Match:
@@ -1692,10 +1694,62 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 		return left
 	case token.LBracket:
 		return p.parseBufferLiteralExpr()
+	case token.At:
+		return p.parseBuiltinExpr()
 	default:
 		p.errorf("expected expression, got %s", tokenDescription(p.cur))
 		return &ast.IdentExpr{Name: "<error>", Span: tokenSpan(p.cur)}
 	}
+}
+
+// parseLiteralExpression parses the literal under the cursor.
+func (p *Parser) parseLiteralExpression() ast.Expression {
+	switch p.cur.Type {
+	case token.Int:
+		return p.parseIntLiteral()
+	case token.Float:
+		return p.parseFloatLiteral()
+	case token.String:
+		return &ast.StringExpr{Value: p.cur.Literal}
+	case token.CString:
+		return p.parseCStringLiteral()
+	default:
+		return p.parseKeywordLiteralExpression()
+	}
+}
+
+// parseBuiltinExpr parses a builtin call `@name(...)` in expression position.
+// The names are the compiler's and a program cannot declare one, so a name the
+// compiler does not know is refused here, as an unknown attribute is above a
+// declaration. `@embed_file` is the only one.
+func (p *Parser) parseBuiltinExpr() ast.Expression {
+	start := tokenSpan(p.cur)
+	recovered := &ast.IdentExpr{Name: "<error>", Span: start}
+	if p.peek.Type != token.Ident {
+		p.errorf("parse error: expected a builtin name after `@`, got %s", tokenDescription(p.peek))
+		return recovered
+	}
+	p.nextToken()
+	name := p.cur.Literal
+	if name != "embed_file" {
+		p.errorf("parse error: unknown builtin @%s", name)
+		return recovered
+	}
+	if !p.expectPeek(token.LParen) {
+		return recovered
+	}
+	p.nextToken()
+	path := p.cur.Literal
+	if p.cur.Type != token.String || p.peek.Type != token.RParen {
+		p.errorf("parse error: @embed_file takes one string literal, the path of the file")
+		return recovered
+	}
+	p.nextToken()
+	span := start
+	span.End = tokenSpan(p.cur).End
+	expr := &ast.StringExpr{Embed: &ast.EmbedFile{Path: path, Span: span}}
+	p.embeds = append(p.embeds, expr)
+	return expr
 }
 
 // parseBufferLiteralExpr parses a fixed-length array literal (ADR-0097):

@@ -34,7 +34,7 @@ func StdGraphForImports(imports []string) (Graph, error) {
 	if err != nil {
 		return Graph{}, err
 	}
-	return Graph{PackageName: graph.PackageName, Modules: modules}, nil
+	return Graph{PackageName: graph.PackageName, Modules: modules, Root: graph.Root}, nil
 }
 
 var stdGraph struct {

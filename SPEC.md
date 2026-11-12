@@ -1134,6 +1134,36 @@ let label = match color {
 };
 ```
 
+### 6.13 builtin 呼び出し
+
+式の位置の `@name(...)` は builtin 呼び出しです。名前は compiler が予約していて、
+program が宣言することはできません。compiler が知らない名前は compile error です。
+builtin は `@embed_file` だけです。
+
+```text
+@embed_file(path) -> []u8
+```
+
+`@embed_file` は file の中身を compile 時に program へ埋め込みます。
+
+```kizu
+fn usage() -> []u8 {
+    return @embed_file("text/help.txt");
+}
+```
+
+* 引数は文字列 literal 1 つだけです。変数や comptime の式は書けません。
+* path は呼び出しのある package の `kizu.toml` がある directory からの相対 path
+  です。`/` で始まる path と、package に属さない file での呼び出しは compile error
+  です。
+* 値は file の bytes そのものの `[]u8` 定数で、文字列 literal と同じに扱います。
+  escape も文字コードも解釈せず、実行時に file を読み直しません。
+* file が無い、または読めない場合は compile error です。
+* 同じ中身の定数は実行ファイルの中で 1 つにまとまるので、同じ path を何度
+  埋め込んでもデータは 1 つです。
+* build cache は埋め込んだ file の中身を追跡します(§17)。file を書き換えると、
+  source が同じでも build し直します。
+
 ## 7. 型
 
 基本型:
@@ -4058,8 +4088,8 @@ native build は生成物の隣に `<output>.kizu-build.json` を書き、実際
 ABI、libc、runtime、emit mode、linker command を記録します。
 
 build cache key には、compiler version、manifest hash、resolved module graph hash、
-source hash、public interface hash、target、backend、optimization mode、stdlib hash
-を含めます。
+source hash、`@embed_file` が埋め込んだ file の中身、public interface hash、target、
+backend、optimization mode、stdlib hash を含めます。
 
 `kizu test` は top-level `test` block runner として実装済みです。
 `kizu lint` は未実装です。

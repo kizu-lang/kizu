@@ -967,14 +967,15 @@ func TestParseUnsafeFunction(t *testing.T) {
 }
 
 // TestParseRejectsUnsafeCapabilityBlock keeps the removed capability block out.
-// `@` no longer starts a statement, so the old spelling fails at the sigil.
+// `@` starts a builtin call in expression position, and `unsafe` is a keyword
+// rather than a builtin name, so the old spelling fails at the sigil.
 func TestParseRejectsUnsafeCapabilityBlock(t *testing.T) {
 	p := New(lexer.New("fn main() { @unsafe(ptr_read) { return; } }"))
 	p.ParseProgram()
 	if len(p.Errors()) == 0 {
 		t.Fatal("expected parser error")
 	}
-	if got := p.Errors()[0]; !strings.Contains(got, "expected expression, got `@`") {
+	if got := p.Errors()[0]; !strings.Contains(got, "expected a builtin name after `@`, got `unsafe`") {
 		t.Fatalf("first error = %q", got)
 	}
 }

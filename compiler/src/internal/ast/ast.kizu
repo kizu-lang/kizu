@@ -526,9 +526,22 @@ pub struct FloatExpr {
     pub value: Text,
 }
 
-/// Represents a string literal.
+/// Is the file an `@embed_file` call names: `path` as written, relative to
+/// the kizu.toml of the package the call is in, and `span` where the call is,
+/// for a file that cannot be read. The span is kept in `Ast.spans`, as a
+/// declaration's is, so the field stays plain data an optional may hold.
+pub struct EmbedFile {
+    pub path: Text,
+    pub span: arena::Handle<Span>,
+}
+
+/// Represents a string literal. An `@embed_file("path")` is one too, with
+/// `embed` set: its value is a constant `[]u8` like a literal's, so every
+/// phase after the loader reads it as the literal it is. The parser leaves
+/// `value` empty and the loader fills it with the file's bytes.
 pub struct StringExpr {
     pub value: Text,
+    pub embed: ?EmbedFile,
 }
 
 /// Represents a C string literal `c"..."`. `value` is the bytes between the
@@ -1073,9 +1086,17 @@ fn append_expression(
         Int(value) => try append_text(allocator, out, ast, value.value),
         Float(value) => try append_text(allocator, out, ast, value.value),
         String(value) => {
-            let retained = ast.texts.at(value.value.node);
-            let bytes = retained.as_bytes();
-            try fmt::append_bytes_literal(allocator, out, bytes);
+            if value.embed |embed| {
+                try out.append_bytes(allocator, "@embed_file(");
+                let path = ast.texts.at(embed.path.node);
+                let path_bytes = path.as_bytes();
+                try fmt::append_bytes_literal(allocator, out, path_bytes);
+                try out.append_byte(allocator, cast<u8>(41));
+            } else {
+                let retained = ast.texts.at(value.value.node);
+                let bytes = retained.as_bytes();
+                try fmt::append_bytes_literal(allocator, out, bytes);
+            }
         },
         CString(value) => {
             let retained = ast.texts.at(value.value.node);
