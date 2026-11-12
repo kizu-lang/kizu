@@ -74,13 +74,11 @@ raw pointer runtime operations
 option<T> runtime helper
 full stdlib
 kizu lint
-self-hosting compiler
 async fn / await syntax
 thread handle / channel / mutex / atomic API
 Rust 同等以上の runtime performance guarantee
 ```
 
-self-host は Go の構造に沿って `compiler/` へ移植中で、shipping 実装は Go 一本です。
 thread は `std::thread::Pool` の 1 つの形だけを持ちます(§15.3、ADR-0025)。
 
 ## 1. 目標

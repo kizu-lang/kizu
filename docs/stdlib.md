@@ -31,7 +31,7 @@ std からしか届かず、user code からの直接呼び出しは拒否され
   capability の可視性は Kizu 側の wrapper が持つ。
 - Kizu で書けるようになった primitive は消す。消すときは example と conformance で
   挙動が変わらないことを見せる。
-- Go 側の分岐は `std::internal::builtin::*` の名前を使う。public な `std::...` の
+- compiler 側の分岐は `std::internal::builtin::*` の名前を使う。public な `std::...` の
   名前で分岐しない。
 - hidden な global allocator / global runtime / 暗黙の blocking I/O / 無言の
   fallback を持たない(`docs/principles.md` 原理 4)。

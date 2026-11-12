@@ -10,7 +10,7 @@ Kizu の関数は LLVM の symbol にそのままの名前で降りていまし�
 `@send`、`fn read(...)` は `@read` です。default の linkage は external なので、
 その symbol は **linker が誰にでも差し出す答え**になります。
 
-同じ実行ファイルには C runtime(`internal/native/runtime/runtime.c`)が並んで
+同じ実行ファイルには C runtime(`compiler/src/internal/native/runtime_source.kizu` が持つ C source)が並んで
 link されていて、runtime は libc を名前で呼びます —— `send`、`recv`、`close`、
 `rename`、`exit`。片方が定義し、片方が要求する名前が一致すれば、linker は
 プログラムの定義を選びます。

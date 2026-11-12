@@ -43,7 +43,7 @@ may add suffixes if typed local constants need a compact spelling.
 - Small literals in explicit low-level APIs no longer need `cast<T>(literal)`.
 - Kizu still has no implicit numeric promotion for variables or expressions.
 - Overflow remains explicit: `take_u8(256)` is rejected before execution.
-- The Go type checker and ownership checker share the same contextual literal rule.
+- The type checker and ownership checker share the same contextual literal rule.
 - IR lowering reads the same context, so the constant is emitted at the context
   type. A backend receives `u8 9`, not an `i64` it has to narrow after the fact.
 - The self-host parser does not need a new syntax path for this change.

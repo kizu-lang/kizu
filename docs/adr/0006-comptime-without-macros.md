@@ -31,8 +31,8 @@ static 引数 `<n: i64>`。
 表が正しい形である。
 
 f64 の comptime 値は、build 中の target で同じ式が実行時に計算する bit に畳む。
-sin / cos は std の実装そのもの(Go seed は `internal/stdmath` が同じ算法を持ち、
-Kizu compiler は `math::sin_with<fused>` を呼ぶ)で評価し、host の libm は使わない。
+sin / cos は std の実装そのもの(compiler は `math::sin_with<fused>` を呼ぶ)で評価し、
+host の libm は使わない。
 libm は OS と言語で値が違い(測った 80000 点で macOS libm と Go は std と 3276 /
 20413 点食い違う)、`comptime` を付けると値が変わる言語になるからである。
 
@@ -41,7 +41,7 @@ libm は OS と言語で値が違い(測った 80000 点で macOS libm と Go �
 | 案 | 却下理由 |
 |---|---|
 | macro / AST rewrite API | 検査前の書き換えは型・所有権の検査対象にできず、読む側に展開後の形を要求する |
-| 任意の Kizu 関数の comptime 実行(Zig の comptime interpreter) | checker / IR と別の評価器を持ち、両実装(Go seed と Kizu compiler)の一致点が増える。build 時間の上限も失う |
+| 任意の Kizu 関数の comptime 実行(Zig の comptime interpreter) | checker / IR と別の評価器を持つ(決定時は Go seed と Kizu compiler の両方に要り、両実装の一致点も増えた)。build 時間の上限も失う |
 | `inline for` を別 keyword にする | `comptime for` が field / variant で既に同じ意味を持つ。展開するかどうかは `comptime` の 1 語で読める |
 | 展開数の上限を持たない | body の複製が無制限に生成され、build 時間と binary size が source から読めなくなる |
 | top-level `const` に comptime 評価した表を置く | global data を持つかは別の問い(hidden global runtime を持たない方針、§15)。必要になれば別 ADR |

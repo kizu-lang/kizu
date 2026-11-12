@@ -43,7 +43,7 @@ compiler/src/unsafecap_mbt_test.kizu  fixture を 2 file の Kizu module にし�
   marker の状態は関数本体の検査に入るたびに空から始まる(`checkBlock(.., nil)`)ので
   本体の種類で変わらず、関数 `g` / `f` の 2 つで代表させました。
 * **`unsafe` の中でも残る型 / move / borrow の検査**(§12 末尾)。ownership 側のモデルの
-  範囲で、`internal/ownership` の `TestCheckUnsafeDoesNotDisableMoveAndBorrowRules` が
+  範囲で、`examples/negative/unsafe_moved_value.kizu` と `unsafe_borrow_escape.kizu` が
   押さえています。
 
 ## モデルの形
