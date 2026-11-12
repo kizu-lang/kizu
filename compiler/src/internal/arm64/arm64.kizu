@@ -16,8 +16,9 @@ import std::string;
 // diagnostic naming it rather than being handed to another backend. The
 // same machine IR, allocated, is also printed as x86-64 by the amd64
 // printer: as assembly text, for Mach-O, ELF or COFF, which the system
-// assembler assembles, or for Linux as an ELF object of its own
-// (amd64_encode.kizu), as the assembler would make it of that text.
+// assembler assembles, or for Linux and Windows as an ELF or COFF object
+// of its own (amd64_encode.kizu, coff.kizu), as the assembler would make it
+// of that text.
 
 /// Is the object format the code is written for. Selection names symbols
 /// the Mach-O way; ELF and COFF spell them through symbol.
@@ -45,7 +46,8 @@ pub fn emit(allocator: Allocator, module: &ir::Module, arch: Arch, format: Forma
 }
 
 /// Emits a lowered module as an object in format: for arm64 Mach-O for
-/// Darwin or ELF for Linux, for x86-64 (Linux) ELF. Each instruction is
+/// Darwin or ELF for Linux, for x86-64 ELF for Linux or COFF for Windows.
+/// Each instruction is
 /// encoded here, laid out the way the system assembler would lay it out.
 /// An operand no encoding takes stops the build. A Mach-O object's
 /// LC_BUILD_VERSION names no version; the link stamps the one of the
@@ -95,6 +97,11 @@ fn emit_into(allocator: Allocator, module: &ir::Module, arch: Arch, format: Form
     var selector = try new_selector(allocator, arch);
     defer selector.deinit(allocator);
     selector.stacks_variadics = format == Format::MachO;
+    if arch == Arch::Amd64Windows {
+        // The stack probe a frame of a page or more calls, spelled the
+        // Mach-O way like every name the selector makes.
+        let _ = try selector.syms.intern("____chkstk_ms");
+    }
     if module.error_sets.at("std::mem::Error") |declared| {
         selector.oom = declared.tags.get("OutOfMemory") orelse 0 - 1;
     }
@@ -211,6 +218,8 @@ fn emit_into(allocator: Allocator, module: &ir::Module, arch: Arch, format: Form
             // The stack is not executable.
             try out.obj.enter(allocator, &var selector.syms, SectionKind::Note);
             try out.obj.write_elf(allocator, &selector.syms, &var out.text);
+        } else if format == Format::Coff {
+            try out.obj.write_coff(allocator, &selector.syms, &var out.text);
         } else {
             try out.obj.write_macho(allocator, &selector.syms, 0, &var out.text);
         }

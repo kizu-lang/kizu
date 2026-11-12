@@ -154,7 +154,7 @@ pub fn amd64_print_function(
         try amd.nl(out);
     }
     if amd.needed {
-        try amd.prologue(out, &allocation.saved);
+        try amd.prologue(out, &allocation.saved, syms);
     }
     var restore = array::new<i64>(allocator);
     defer restore.deinit(allocator);
@@ -331,7 +331,7 @@ fn (self: &var Amd) plan_frame(func: &var MFunction) -> void {
     return;
 }
 
-fn (self: &var Amd) prologue(out: &var Out, saved: &array::Array<i64>) -> !void {
+fn (self: &var Amd) prologue(out: &var Out, saved: &array::Array<i64>, syms: &ir::NameTable) -> !void {
     try self.r1(out, "pushq", 29, 8);
     try self.rr(out, "movq", reg_sp(), 29, 8);
     var index = 0;
@@ -344,7 +344,13 @@ fn (self: &var Amd) prologue(out: &var Out, saved: &array::Array<i64>) -> !void 
         // every register; rax is x8, live at the entry, kept in r11.
         try self.rr(out, "movq", 8, 17, 8);
         try self.ir(out, "movl", self.frame_size, 8, 4);
-        try self.line(out, "call ___chkstk_ms");
+        // The selector's spelling, with the `_` in front that a COFF
+        // symbol drops: emit_into names it for a Windows module.
+        if syms.lookup("____chkstk_ms") |probe| {
+            try self.call(out, syms, probe, false);
+        } else {
+            try self.error_line(out, "amd64: ___chkstk_ms is not named");
+        }
         try self.rr(out, "subq", 8, reg_sp(), 8);
         return self.rr(out, "movq", 17, 8, 8);
     }
@@ -768,17 +774,6 @@ fn (self: &Amd) error_line(out: &var Out, message: []u8) -> !void {
 
 fn (self: &Amd) nl(out: &var Out) -> !void {
     return out.text.append_byte(self.allocator, cast<u8>(10));
-}
-
-/// Writes an indented line of text, which has no machine code here: it
-/// names a symbol of Windows only.
-fn (self: &Amd) line(out: &var Out, bytes: []u8) -> !void {
-    if out.binary {
-        return out.obj.fail_message(self.allocator, bytes);
-    }
-    try self.text(out, "    ");
-    try self.text(out, bytes);
-    return self.nl(out);
 }
 
 /// Writes an indented mnemonic and a space.

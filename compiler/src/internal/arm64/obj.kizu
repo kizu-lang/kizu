@@ -10,7 +10,7 @@ import std::string;
 // printer fills, the symbols and relocations its instructions name, and
 // the branches within a function, patched when it ends (on x86-64, whose
 // jumps are short or near, laid out when it ends: amd64_encode.kizu). The file the system
-// linker reads is laid out from it by macho.kizu or elf.kizu, the way the
+// linker reads is laid out from it by macho.kizu, elf.kizu or coff.kizu, the way the
 // system assembler lays out the same code, so the object is byte for byte
 // the one the assembler would make.
 
@@ -184,7 +184,13 @@ fn (self: &var Obj) symbol_of(allocator: Allocator, syms: &ir::NameTable, name: 
 }
 
 /// Enters a section, creating it and its start symbol the first time.
-pub fn (self: &var Obj) enter(allocator: Allocator, syms: &var ir::NameTable, kind: SectionKind) -> !void {
+pub fn (self: &var Obj) enter(allocator: Allocator, syms: &var ir::NameTable, given: SectionKind) -> !void {
+    var kind = given;
+    if self.format == Format::Coff and kind != SectionKind::Text {
+        // COFF keeps the strings, the tables and the error names in one
+        // `.rdata`, in the order they are written.
+        kind = SectionKind::TextConst;
+    }
     var index = 0;
     while self.sections.at(index) |section| {
         if section.kind == kind {
@@ -197,6 +203,9 @@ pub fn (self: &var Obj) enter(allocator: Allocator, syms: &var ir::NameTable, ki
     if self.format == Format::Elf {
         // The section symbol, in the table only if a relocation names it.
         try self.symbols.append(allocator, unnamed(SymbolKind::Section, index, 0));
+    } else if self.format == Format::Coff {
+        // Every section has its symbol, which the writer adds.
+        start = 0 - 1;
     } else {
         start = try self.start_symbol(allocator, syms, index);
     }
