@@ -37,7 +37,7 @@ suspended だけ)です。
 
 `Tls.lean` の表は手で書きません。`-- BEGIN GENERATED` と `-- END GENERATED` の間は
 `std::tls` の `advance` と `advance_server` の全組から作るので、証明は実際に動く表に
-ついてのものです。`go test` は生成器を `-check` で回し、block と Quint の機械が今の
+ついてのものです。`just selfhost` は生成器を `-check` で回し、block と Quint の機械が今の
 `std::tls` と同じことを Lean 無しで確かめ、定理は手で書いたままなので、性質を壊す
 変更は `lean` で落ちます。その代わり、RFC と
 照らす独立した表ではなくなりました。誤った変更を止めるのは定理の範囲までです。
@@ -61,13 +61,13 @@ just spec-table     # std::tls を読んで spec/Tls.lean の block と Quint �
 just spec-verify    # 到達できる全部の状態で Quint の性質を TLC で確かめる(Java が要る)
 just spec-quint     # Quint のランダムな実行で性質を探す(Java は要らない)
 just spec-trace     # lean --run spec/<Name>.lean > examples/fixtures/<name>_trace.json
-just spec-ir        # internal/ir モデルの quint test と性質の探索、internal/ir の fixture の再生成
-just spec-ownership # ownership モデルの quint test と健全性の探索、internal/ownership の fixture の再生成
-just spec-unsafecap # unsafe マーカーモデルの quint test、健全性と mutant の探索、internal/unsafecap の fixture の再生成
-just spec-cimport   # C header import モデルの quint test、健全性と mutant の探索、internal/cimport の fixture の再生成
+just spec-ir        # internal/ir モデルの quint test と性質の探索、compiler/tests/mbt の fixture の再生成
+just spec-ownership # ownership モデルの quint test と健全性の探索、compiler/tests/mbt の fixture の再生成
+just spec-unsafecap # unsafe マーカーモデルの quint test、健全性と mutant の探索、compiler/tests/mbt の fixture の再生成
+just spec-cimport   # C header import モデルの quint test、健全性と mutant の探索、compiler/tests/mbt の fixture の再生成
 ```
 
-`go test` も CI も Lean と Quint を動かしません。対応する箇所を変えた人が手元で回します
+`just selfhost` も CI も Lean と Quint を動かしません。対応する箇所を変えた人が手元で回します
 (`AGENTS.md`)。
 
 Lean と Quint は役割が違います。Lean は上限のない列について証明し、Quint は破れた時に

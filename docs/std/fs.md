@@ -61,7 +61,7 @@ capability だけを Wasmtime へ渡します。`real_path` の結果もその c
 JavaScript で filesystem を偽装せず、build 時に target 非対応として拒否します。
 
 `Metadata` と `DirEntry` の layout は C runtime が `KizuFsMetadata` /
-`KizuFsDirEntry` として写しています(`internal/native/runtime/runtime.c`)。field を変える
+`KizuFsDirEntry` として写しています(`compiler/src/internal/native/runtime_source.kizu`)。field を変える
 なら両方を変えます。
 
 `std::fs::Error` は `InvalidPath`、`NotFound`、`PermissionDenied`、`IsDirectory`、

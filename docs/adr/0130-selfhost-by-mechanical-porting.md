@@ -1,4 +1,4 @@
-# ADR-0130: selfhost は機械移植で作り、Go は seed として残す
+# ADR-0130: selfhost は機械移植で作る
 
 ## Status
 
@@ -8,8 +8,9 @@ Accepted.
 
 Kizu compiler を Kizu 自身で書くにあたって、Go 実装(`internal/` + `cmd/kizu`)から
 どう移るかを決める必要がありました。移植は完了し、release する binary は
-`compiler/` から build した Kizu compiler です。Go 実装はそれを build する seed で
-あり、両実装の出力を突き合わせる oracle でもあります。
+`compiler/` から build した Kizu compiler です。Go 実装は移植の間それを build する
+seed であり、両実装の出力を突き合わせる oracle でしたが、v0.6.0 を最後に削除し、
+seed は pin した前のリリースになりました(`docs/bootstrap.md`)。
 
 この ADR が残すのは、その進め方を選んだ理由と、却下した案です。移植の手順そのもの
 (work unit の切り方、review loop、module ごとの進捗)は移植が終わった時点で
@@ -48,5 +49,6 @@ diagnostic 文面は変えない。
   これで、cutover 後に表現を設計し直せば縮む
 - `compiler/tests/` の差分 corpus は両実装が共有する。Go 側の挙動を変えたら
   `-update` で corpus を再生成し、移植側も同じ commit で追従させる
-- Go をいつ削除するかは別の判断で、削除の判断と、その後 Kizu compiler を build する
-  seed をどう供給するかの判断は同じ 1 つになる
+- Go の削除と、その後 Kizu compiler を build する seed の供給は 1 つの判断として
+  行った。seed は `scripts/seed.txt` に pin した前のリリースで、`compiler/` は
+  その seed が build できる範囲に保つ(`docs/bootstrap.md`)

@@ -145,7 +145,7 @@ server の機械は `WaitClientHello` → (自分の flight を送って)`WaitFi
 (`server_takes_no_certificate`)、の証明が対応します。
 
 `spec/Tls.lean` の表は、`spec/tls_machine.kizu` が `advance` と `advance_server` の全組
-(client 96 組、server 36 組)を `std::machine` で読んで作ります。`go test` は表が今の
+(client 96 組、server 36 組)を `std::machine` で読んで作ります。`just selfhost`(`scripts/check-sources.sh`)は表が今の
 `std::tls` と同じことを確かめるので、機械を変えたら `just spec-table` で作り直して Quint の性質を全数で
 確かめ、`just spec-trace` で Lean の証明が通ることを確かめます。
 
@@ -173,10 +173,6 @@ header が TLS 1.3 のものでない、tag が合わない、type が無い rec
 
 RFC 8448 §3 の handshake の secret、key、record は `tests/behavior/src/tls/` が
 全部確かめ、server が書く ServerHello と Certificate は RFC の bytes と一致します。
-`cmd/kizu` の test は Go の `crypto/tls` の server と実際に handshake して echo し、
-名前の違う host と別の root では拒否されることを見ます。server 側は Go の client が
-P-256 / P-384 / RSA の証明書で接続して echo し、別の root を信頼する client には
-拒否されることを見ます。
 
 ## まだ無いもの
 

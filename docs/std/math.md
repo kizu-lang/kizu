@@ -151,10 +151,8 @@ multiply-add で積と和の丸め誤差を厳密に拾います(分岐なし)�
   小数部(どちらも元の符号)に分け、struct で 2 つの値を返します。`modf(±inf)` は
   整数部 `±inf`、小数部 `±0` です。
 
-`cmd/kizu` の `TestMath` が数千の値で、真の値を 1 回だけ丸めた参照
-(`cmd/kizu/testdata/std_math.txt`、mpmath で作る)と突き合わせ、native と wasm の
-両方で同じ bit を返すことを確かめています。IEEE の演算と bit 操作、`fma`、
-`round_even`、`frexp` / `modf` は参照と一致し、残りは 1 ulp 以内(`sinh` は 2 ulp)です。
+IEEE の演算と bit 操作、`fma`、`round_even`、`frexp` / `modf` は真の値を 1 回だけ
+丸めた値と一致し、残りは 1 ulp 以内(`sinh` は 2 ulp)です。
 
 ## f32
 

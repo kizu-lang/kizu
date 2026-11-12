@@ -6,37 +6,33 @@
 
 ## 1. 全体像: shipping 実装は 1 つ
 
-利用者が受け取る binary は `compiler/` から build した Kizu compiler です。Go の
-`internal/` + `cmd/kizu` はそれを build する seed であり、両実装の出力を突き合わせる
-oracle でもあります。以前の selfhost は独立した第二実装として育ち、片方がもう片方を
-偽装して緑を保ったため削除しました。今回は Go の構造と挙動を保った機械移植にし、
-両者の差分を corpus で突き合わせています(ADR-0130)。
+利用者が受け取る binary は `compiler/` から build した Kizu compiler です。それを
+build するのは `scripts/seed.txt` に pin した前のリリース(種)で、compiler を build する
+経路はこの 1 本だけです(`docs/bootstrap.md`)。`compiler/` は Go 実装の構造と挙動を
+保った機械移植として作り(ADR-0130)、Go 実装は v0.6.0 を最後に削除しました。
 
 規模感(2026-11 時点): Kizu 製 compiler 約 131k 行(`compiler/src`、`*_test.kizu` を
-除く)、Go 実装 約 83k 行 + テスト 約 29k 行、Kizu 製 std 約 28k 行、examples 約 25k 行。
+除く)、Kizu 製 std 約 28k 行、examples 約 25k 行。
 
 ## 2. リポジトリ地図
 
 ```
-cmd/kizu/            CLI 本体と、パッケージ横断の統合テスト・conformance
-cmd/kizu-lsp/        LSP server(実体は internal/lsp)
-internal/            Go 実装(1 パッケージ = 1 責務)
-  source, token, lexer, parser, ast   入力 text・字句・構文・AST
-  typ                           型の綴りを 1 度だけ parse した形(文字列手術の代わり)
-  types, ownership              型検査・所有権/借用検査
-  ir, llvm, wasm, native        typed SSA IR と各 backend
-  project, stdlib, manifest     パッケージ/モジュール解決(std も含む)、std の在処、kizu.toml
-  stdmethod, stdprim, stdmeta, stdtarget
-                                std の method / primitive と compiler-defined form
-  staticexpr, stdmath           static 引数の整数式と、comptime の sin / cos(std::math と同じ bit)
-  unsafecap                     unsafe が覆う操作の種類と診断文言
-  conformance                   example が末尾に宣言する case の読み取り
-  version, selfhost             binary の名乗りと、移植先が読めない生成 source
-  fmt, diagnostic, quote, buildcache, cimport, lsp
-compiler/            shipping する Kizu 製 compiler(Go の seed が build する)
+compiler/            shipping する Kizu 製 compiler(pin した種が build する)
   src/main.kizu      CLI 本体。release binary はここから build される
   src/internal/      1 directory = 1 module の、package 外へ公開しない実装
-  tests/             両実装の出力を突き合わせる差分 corpus
+    source, token, lexer, parser, ast   入力 text・字句・構文・AST
+    typ                           型の綴りを 1 度だけ parse した形(文字列手術の代わり)
+    types, ownership              型検査・所有権/借用検査
+    ir, llvm, wasm, native        typed SSA IR と各 backend
+    project, manifest             パッケージ/モジュール解決(std も含む)、kizu.toml
+    stdmethod, stdprim, stdmeta, stdtarget
+                                  std の method / primitive と compiler-defined form
+    staticexpr, stdmath           static 引数の整数式と、comptime の sin / cos(std::math と同じ bit)
+    unsafecap                     unsafe が覆う操作の種類と診断文言
+    version                       binary の名乗り(生成 source)
+    fmt, diagnostic, buildcache, cimport
+  tests/             frontend / IR / LLVM の corpus、MBT fixture、test harness
+scripts/             種の取得と bootstrap(bootstrap.sh)、生成器、計測
 lib/kizu/             release binaryが隣で読むlibrary tree
   std/src/            Kizuで書かれた標準ライブラリ
   browser/app.mjs     browser ESM出力へcopyする共通host runtime
@@ -51,14 +47,14 @@ docs/, docs/adr/     設計ドキュメントと ADR
 ## 3. パイプライン
 
 ```
-source.kizu
-  → internal/lexer → internal/parser → internal/ast
-  → internal/project が import した std module を合流(std も 1 つの package)
+source.kizu   (module は compiler/src/internal/ 以下)
+  → lexer → parser → ast
+  → project が import した std module を合流(std も 1 つの package)
   → build target を types / ownership / IR の comptime evaluator へ渡す
-  → internal/types(型)→ internal/ownership(所有権)
-  → internal/ir(typed SSA)→ target の entry / export から到達可能性を閉じる
-                           → internal/llvm → clang(internal/native)
-                           → internal/wasm → 共通 WebAssembly module
+  → types(型)→ ownership(所有権)
+  → ir(typed SSA)→ target の entry / export から到達可能性を閉じる
+                  → llvm → clang(native)
+                  → wasm → 共通 WebAssembly module
                                            → WAT / binary `.wasm`
                                              (wasm32-wasi / wasm32-browser)
                                            → browser ESM directory
@@ -68,7 +64,7 @@ source.kizu
 `run` と `test` は生成した実行ファイルを走らせます。経路は 1 本で、interpreter は
 ありません(ADR-0083)。挙動の正は例そのものが末尾に書いた case が持ちます。
 
-`internal/llvm` は出した text を自分で検査します(`verify.go`)。読む register が
+`llvm` は出した text を自分で検査します(`verify.kizu`)。読む register が
 その関数の中で定義されていること、`alloca` が entry block にあることの 2 つで、
 どちらも壊れると診断の無い実行時の失敗になります —— 前者は clang が SSA 名だけを
 言って落ち、後者はループがスタックを 1 回転ごとに食って guard page で死にます。
@@ -103,9 +99,8 @@ link)、2 回目以降 ~10ms —— 絶対値は host と clang によります�
 読みます。selfhost の bootstrap 検査は第 2 段を空の cache で build し、object を
 compile し直した結果が第 1 段と一致することを見ます。
 
-`internal/wasm` は typed SSA IR を 1 度だけ WebAssembly module へ lower し、その同じ
-module を inspection 用 WAT と deterministic な binary `.wasm` に描画します。Go seed と
-Kizu 製 compiler の binary output は corpus で byte 単位に突き合わせます。WASI は
+`wasm` は typed SSA IR を 1 度だけ WebAssembly module へ lower し、その同じ
+module を inspection 用 WAT と deterministic な binary `.wasm` に描画します。WASI は
 `wasmtime`、browser target は JavaScript host adapter で同じ conformance output を検査し、
 target 差は import、entry / export、host capability だけが持ちます。
 `--emit esm` はそのbrowser binaryと`lib/kizu/browser/app.mjs`を同じdirectoryへ置くだけで、
@@ -128,22 +123,18 @@ CLI のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 `build`(`--emit-llvm` / `--target native|wasm32-wasi|wasm32-browser`、nativeの
 `--emit obj`、browserの`--emit esm`)`cache` `import-c-header`
 `version`。基本の実行経路は `kizu run examples/hello.kizu`。どのコマンドがどこへ
-流れるかは `cmd/kizu/main.go` の `dispatch`(移植側は `compiler/src/main.kizu`)
-が全てです。
+流れるかは `compiler/src/main.kizu` が全てです。
 
 ## 4. std の二層構造
 
 - 実行時の組み込み(stdout への 1 行書き込み、メモリ、fs、process、net、coro 等)は compiler が
-  提供し(Go 側は `internal/stdprim`、Kizu 側は対応する module)、
+  提供し(`stdprim`)、
   `lib/kizu/std/src/*/*.kizu` はその上の Kizu 製 API 面(`std::array` `std::map`
   `std::string` `std::http` …)。境界の一覧は docs/stdlib.md。
-- Go 側は `internal/project`(+ `internal/types` の `knownTypes`)経由で std の宣言を
-  取り込みます。std は利用者の package と同じ loader を通り、`internal/stdlib` が
-  持つのは「ツリーがどこにあるか」だけです。std に public 型を足すときは
-  **`knownTypes` の更新が必要**(漏れると checked コードでその型名が
-  `unknown type` になります)。
-- std が宣言する method 署名は `internal/stdmethod` が、その裏の `std::internal::builtin::*`
-  primitive の形は `internal/stdprim` が一本化します。checker と backend は署名を
+- std の宣言は `project` が取り込みます。std は利用者の package と同じ loader を
+  通ります。
+- std が宣言する method 署名は `stdmethod` が、その裏の `std::internal::builtin::*`
+  primitive の形は `stdprim` が一本化します。checker と backend は署名を
   書き直さずにここを読みます。
 
 ## 5. テスト体系
@@ -154,35 +145,32 @@ CLI のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 
 | 層 | 実行方法 | 内容 |
 | --- | --- | --- |
-| conformance | `go test ./cmd/kizu` | `examples/`、`tests/behavior/`、`docs/tutorial/` を全件実行。case を書いていない例があれば落ちる |
-| ユニット | `go test ./...`(pre-push hook) | 各 internal パッケージ + CLI smoke |
-| 両実装の突き合わせ | `go test ./cmd/kizu`(`TestSelfhostFrontend` / `TestSelfhostBehavior`) | Kizu compiler と Go seed の出力差分。`compiler/tests/` の corpus は `-update` で両方を同時に更新する。`TestSelfhostBehavior` は Kizu で書いたハーネス `compiler/tests/harness` を selfhost compiler で `kizu run compiler/tests/harness -- behavior <kizu>` と呼ぶだけ |
-| bootstrap | `go test ./cmd/kizu -run TestSelfhostBootstrap` | Kizu compiler が自分自身を空の build cache で build し、byte 単位で同じ実行ファイルになること。stage1 が `kizu test compiler/tests/harness`(Mach-O 正規化と不一致報告の test)と `kizu run compiler/tests/harness -- bootstrap <kizu>` を回し、Go の test はそれを呼ぶだけ |
-| Kizu 側 unit test | `go test ./internal/selfhost`(= `kizu test compiler`、`just selfhost` でも) | `compiler/src/**/*_test.kizu`。seed が compiler とその test を 1 つの実行ファイルにして走らせる。`cmd/kizu` と並んで走るよう別 package |
-| 種からの build | `just selfhost-seed`(CI は `seed (ubuntu-latest)`) | pin した前リリース(種)で `compiler/` を check / test し、種が build した stage1 でもう一度 check / test する。`docs/bootstrap.md` |
-| commit hooks | `pre-commit run --all-files` | gofmt / golangci-lint / コメント検査 + `kizu check compiler`。数秒で終わるものだけ |
+| 種からの build | `just selfhost`(= `scripts/bootstrap.sh`、pre-push hook と CI) | pin した前リリース(種)で `compiler/` を check / test し、種が build した stage1 でもう一度 check / test する。`docs/bootstrap.md` |
+| Kizu 側 unit test | 同上(`kizu test compiler`) | `compiler/src/**/*_test.kizu`。`compiler/tests/` の corpus と MBT fixture の再生もここ |
+| 生成物と整形 | 同上(`scripts/check-sources.sh`) | checked-in の Kizu source が `kizu fmt` の形であること、std::tls から生成する spec の表が最新であること |
+| behavior | 同上(`kizu run compiler/tests/harness -- behavior <kizu>`) | conformance case のうち CLI 境界を越える実行の振る舞い(`tests/behavior/`、test 系と std-io / std-process の example)。harness 自身の test は `kizu test compiler/tests/harness` |
+| bootstrap | 同上(`kizu run compiler/tests/harness -- bootstrap <stage2>`) | stage1 が build した stage2 が、自分自身を空の build cache で build し直して byte 単位で同じ実行ファイルになること |
+| commit hooks | `pre-commit run --all-files` | 種と stage1 による `kizu check compiler`(`scripts/bootstrap.sh --check-only`)。数秒で終わるものだけ |
 
-CI は push/PR ごとに 1 job(`go test ./...` + gofmt)を macOS / Linux の両方で回します
-(`internal/selfhost` は host に依らないので macOS だけ)。
-それと並んで、種からの build を `seed (ubuntu-latest)` job が Linux で回します。
-定時実行は置きません。
+CI は push/PR ごとに、必須 job `test (ubuntu-latest)` と `test (macos-15)` で
+`scripts/bootstrap.sh` を全部回します。定時実行は置きません。
 言語機能を足したら `examples/` に実例を足し、その末尾に case を書きます。
-書式は `internal/conformance` の package doc にあります。
+書式は `compiler/tests/harness/src/conformance/conformance.kizu` の冒頭にあります。
 
 ## 6. 開発フロー
 
 - 作業は topic branch + PR(`main` 直 push 禁止)。PR には目的・主要変更・検証結果を書く。
-- コミット時に hooks(gofmt / lint / コメント検査 / selfhost check)、push 時に
-  `go test ./...` が走る。
+- コミット時に hooks(種と stage1 の selfhost check)、push 時に
+  `scripts/bootstrap.sh` のフル版が走る。
 - 仕様に関わる判断をしたら SPEC.md か docs/adr/ を必ず更新する。
 
 ## 7. オンボーディング順路(読む順)
 
 1. `README.ja.md` → `SPEC.md` の冒頭と §13 あたりまで(言語像)
 2. `examples/hello.kizu` を `kizu run` / `check` / `build --emit-llvm` で触る
-3. `cmd/kizu/main.go` の `dispatch`(CLI の入口)
-4. `internal/types` と `internal/ownership`(何が拒否されるか)
-5. `internal/ir` → `internal/llvm`(生成系)
+3. `compiler/src/main.kizu`(CLI の入口)
+4. `compiler/src/internal/types` と `compiler/src/internal/ownership`(何が拒否されるか)
+5. `compiler/src/internal/ir` → `compiler/src/internal/llvm`(生成系)
 6. 必要になった領域の docs/ と docs/adr/(下の索引)
 
 ## 8. ドキュメント索引

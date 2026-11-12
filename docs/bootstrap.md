@@ -1,8 +1,7 @@
 # 種(seed)からの build
 
 `compiler/` は、前のリリースのバイナリ(種)で build できる範囲に保ちます。
-Go の seed を外したあとに compiler を build する経路はこれだけになるので、
-今のうちから CI で毎回確かめます。
+compiler を build する経路はこれだけなので、CI で毎回確かめます。
 
 ## 種の pin
 
@@ -15,18 +14,25 @@ Go の seed を外したあとに compiler を build する経路はこれだけ
 
 ## 流れ
 
-`just selfhost-seed`(= `scripts/bootstrap.sh`)が回すもの:
+`just selfhost`(= `scripts/bootstrap.sh`)が回すもの:
 
 1. 種で `kizu check compiler` と `kizu test compiler`。種は自分のアーカイブに
    入っている std(`lib/kizu`)を読む。`KIZU_LIB_DIR` は空にして渡す
 2. 種で現行の compiler を build して stage1 を得る
-3. stage1 で `kizu check compiler` と `kizu test compiler`。stage1 は現行の
-   `lib/kizu` を読む
+3. stage1 で `kizu check compiler` と `kizu test compiler`、
+   `scripts/check-sources.sh`(`kizu fmt` との一致と、std::tls から生成する
+   spec の表の鮮度)。stage1 は現行の `lib/kizu` を読む
+4. stage1 で test harness(`compiler/tests/harness`)の test と behavior suite
+5. stage1 で stage2 を build し、stage2 が自分自身を byte 単位で再現すること
 
-CI は同じスクリプトを `seed (ubuntu-latest)` job で回します。`compiler/` は
-host に依らないので Linux だけです。PR では待ち時間を短くするため
-`--check-only` を付け、種と stage1 は check だけをします(手元では
-`just selfhost-seed-check`)。main への push では上の流れを全部回します。
+CI の必須 job `test (ubuntu-latest)` と `test (macos-15)` は、どちらも同じ
+スクリプトを全部回します。native の link は host の clang を通るので、両方の
+platform で build と test をします。
+
+`--check-only` は種と stage1 の check だけで止まり、commit hook が使います
+(手元では `just selfhost-check`)。`--stage1-only` は stage1 を build するだけで、
+`just stage1` と、`just run` など stage1 を使う recipe、release の build が使います。
+stage1 は `target/seed/stage1/bin/kizu` に置かれます。
 
 ## 規律: 破壊的変更は 2 リリースがかり
 
@@ -46,7 +52,7 @@ std の API を消す・変えるときも同じです。種が build に使う�
 1. リリースの全アセットを落とし、`shasum -a 256`(Linux は `sha256sum`)で
    自分で計算する。GitHub の release API が返す `digest` とも突き合わせる
 2. `scripts/seed.txt` の `version` と各 `sha256` を書き換える
-3. `just selfhost-seed` を通す
+3. `just selfhost` を通す
 4. pin の変更だけの commit にする
 
 pin は直前のリリースでなくてもかまいません。上げるのは、`compiler/` が新しい

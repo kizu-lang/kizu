@@ -3,7 +3,7 @@
 // the checker accepts and rejects, and that the obligation layer sees the
 // operation each rejection is there for. `quint test unsafecap_test.qnt`.
 //
-// internal/unsafecap/mbt_test.go puts the same shapes to the checker.
+// compiler/src/unsafecap_mbt_test.kizu puts the same shapes to the checker.
 module unsafecap_test {
   import unsafecap(
     INHERIT_CALLER_MARK = false,

@@ -1,8 +1,9 @@
 // -*- mode: Bluespec; -*-
-// The slot decision of internal/ir/slots.go as a model: which locals of a
-// function the lowerer gives storage (a `local.slot`) because something hands
-// them over as the caller's storage (`&var`). The decision is made once per
-// function, before the body is lowered, and it holds for every use of the name.
+// The slot decision of compiler/src/internal/ir/slots.kizu as a model: which
+// locals of a function the lowerer gives storage (a `local.slot`) because
+// something hands them over as the caller's storage (`&var`). The decision is
+// made once per function, before the body is lowered, and it holds for every
+// use of the name.
 //
 // A program declares up to three struct types A, B, C, each with up to two
 // methods named `poke` and `note`. Several types may declare a method of the
@@ -12,8 +13,8 @@
 // receiver). The model keeps the declarations apart and says which one each
 // call reaches.
 //
-// The programs are rendered to Kizu by internal/ir/slots_mbt_test.go; the
-// frame is
+// The programs are rendered to Kizu by compiler/src/ir_slots_mbt_test.kizu;
+// the frame is
 //
 //   struct A { n: i64, }   (B, C the same)
 //   fn (self: <recv> T) <m>(total: <arg>) -> void { ... }   (each declared method)

@@ -11,8 +11,8 @@ CLI は `run` / `check` / `test` / `parse` が中核で、`build` / `ir` / `fmt`
 言語の正しさは 2 つが持ちます。`examples/` は読んで分かるプログラムと、その出力。
 `tests/behavior/` は振る舞いの assert を 1 package にまとめたもので、link も実行も
 1 回で済みます。どちらも自分が何を約束するかを**ファイル末尾のコメントブロック**に
-書き、conformance test が木を歩いてそれを読みます。書式は `internal/conformance` の
-package doc にあります。
+書き、conformance test が木を歩いてそれを読みます。書式は
+`compiler/tests/harness/src/conformance/conformance.kizu` の冒頭にあります。
 
 リポジトリ全体の構造とデータフローは `docs/architecture.md` を先に読んでください。
 
@@ -34,25 +34,20 @@ package doc にあります。
   borrow / ownership の検査規則、`test` 宣言。境界は「利用者が自分で同じものを
   書けるか」で決まる。`std::json` は書けるので `docs/std/`、`Array.at` が
   capture 条件でしか消費できないのは書けないので SPEC。
-- shipping する binary は `compiler/` から build した Kizu compiler です。Go の
-  `internal/` + `cmd/kizu` はそれを build する seed であり、両実装の出力を
-  突き合わせる oracle でもあります(ADR-0130)。片方だけに言語機能を足さない。
-  `compiler/` の check / test / build は `just selfhost` から回す。`kizu version` が
-  名乗る行は commit ごとに変わるので checked-in にできず、
-  `scripts/gen-selfhost-version.sh` が先に生成する必要がある(pre-commit と
-  `go test` は自分で走らせる)。`compiler/` の test block は
-  `go test ./internal/selfhost` が走らせる。commit hook は `kizu check compiler`
-  までで、test は push 時と CI に回る。
-- コンパイラの挙動を変える変更は、言語機能の追加でなくバグ修正でも、Go 実装と
-  `compiler/` の両方に同じ変更を入れる。片方だけ直して完了としない。
-  完了の判定は相互検証が全部通ること(`go test ./cmd/kizu` の Selfhost 系
-  —— Behavior / Bootstrap / corpus —— と `just selfhost`)。
-  片方しか直せていない状態では commit せず、残っている側と理由を報告して止まる。
+- shipping する binary は `compiler/` から build した Kizu compiler です。それを
+  build する経路は `scripts/seed.txt` に pin した前リリース(種)から始まる 1 本
+  だけです(`docs/bootstrap.md`)。種が `compiler/` を build して stage1 を作り、
+  stage1 が check / test を回す。`compiler/` の check / test / build は
+  `just selfhost`(= `scripts/bootstrap.sh`)から回す。`kizu version` が名乗る行は
+  commit ごとに変わるので checked-in にできず、`scripts/gen-selfhost-version.sh` が
+  先に生成する必要がある(`scripts/bootstrap.sh` は自分で走らせる)。
+  commit hook は種と stage1 の check までで、test は push 時と CI に回る。
+- コンパイラの挙動を変える変更は、言語機能の追加でなくバグ修正でも、
+  `just selfhost` が全部通ること(種と stage1 の check / test、test harness、
+  stage2 の self-rebuild、`scripts/check-sources.sh`)で完了とする。
 - `compiler/` は `scripts/seed.txt` に pin した前リリース(種)が、その std ごと
   build できる範囲に保つ。種の知らない言語機能や std API を `compiler/` で使う
-  変更は 2 リリースがかりにする(`docs/bootstrap.md`)。確認は `just selfhost-seed`。
-- Go の comment は英語で書く。package comment と `package main` の command
-  comment は必須(pre-commit の `go comments` が見ている)。
+  変更は 2 リリースがかりにする(`docs/bootstrap.md`)。確認は `just selfhost`。
 
 ## ADR
 
@@ -97,12 +92,13 @@ ADR が持つのは **なぜそうしたか** と **却下した案とその理�
 遅くなったら profile、重複削除、アルゴリズム改善、不要な gate 分離で改善します。
 雑な並列化でごまかす改善は NG です。
 commit 前は原則 `pre-commit run --all-files` を通してください(数秒)。
-`go test ./...` は pre-push hook にあり、commit 時ではなく push 時に走ります。
-Kizu compiler 自身の test(`kizu test compiler`)もそこに含まれます。
+`scripts/bootstrap.sh`(`just selfhost`)のフル版は pre-push hook にあり、commit 時
+ではなく push 時に走ります。Kizu compiler 自身の test(`kizu test compiler`)も
+そこに含まれます。
 
 ## 形式仕様
 
-`spec/` の Lean と Quint は `go test` でも CI でも動かしません。CI を長くしないためで、
+`spec/` の Lean と Quint は `just selfhost` でも CI でも動かしません。CI を長くしないためで、
 対応する箇所を変えた人が手元で回します。形は `spec/README.md` にあります。
 
 | 変えたもの | 流すもの |
@@ -111,7 +107,7 @@ Kizu compiler 自身の test(`kizu test compiler`)もそこに含まれます。
 | `spec/tls_properties.qnt` | `just spec-verify` |
 | `spec/*.lean` | `just spec-trace` |
 
-`std::tls` を変えて生成物が古いままなら `go test` が落ちます。生成された範囲と
+`std::tls` を変えて生成物が古いままなら `just selfhost`(`scripts/check-sources.sh`)が落ちます。生成された範囲と
 `spec/*.qnt` の生成物は手で書き換えず、検査を通すために性質を弱めません。
 
 ## PR Workflow
