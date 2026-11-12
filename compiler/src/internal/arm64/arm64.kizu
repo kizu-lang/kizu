@@ -14,10 +14,10 @@ import std::string;
 // an op or a type the backend does not lower stops the build with a
 // diagnostic naming it rather than being handed to another backend. The
 // same machine IR, allocated, is also printed as x86-64 by the amd64
-// printer. On Darwin arm64 the printer can also write each line's machine
-// code itself into a Mach-O object (macho.kizu, encode.kizu), the object the
-// assembler would make of the text; the text stays the reference it is
-// checked against.
+// printer. On arm64 the printer can also write each line's machine code
+// itself into a Mach-O or ELF object (encode.kizu, obj.kizu, macho.kizu,
+// elf.kizu), the object the assembler would make of the text; the text
+// stays the reference it is checked against.
 
 /// Is the object format the assembly text is written for. Selection names
 /// symbols the Mach-O way; printing for ELF or COFF spells them through
@@ -32,7 +32,7 @@ pub enum Format {
 /// printer writes Mach-O, ELF and COFF, and arm64 Mach-O and ELF only; the
 /// caller rejects the other pairs.
 pub fn emit(allocator: Allocator, module: &ir::Module, arch: Arch, format: Format, out: &var string::String) -> !?diagnostic::Diagnostic {
-    var sink = new_out(allocator, false);
+    var sink = new_out(allocator, false, format);
     defer sink.deinit(allocator);
     if try emit_into(allocator, module, arch, format, &var sink) |failed| {
         return move failed;
@@ -41,14 +41,15 @@ pub fn emit(allocator: Allocator, module: &ir::Module, arch: Arch, format: Forma
     return null;
 }
 
-/// Emits a lowered module for Darwin arm64 as a Mach-O object: the lines
-/// emit would write, encoded here rather than by the assembler, so the text
-/// stays what the object is checked against. Its LC_BUILD_VERSION names
-/// no version; the link stamps the one of the runtime it links with.
-pub fn emit_object(allocator: Allocator, module: &ir::Module, out: &var string::String) -> !?diagnostic::Diagnostic {
-    var sink = new_out(allocator, true);
+/// Emits a lowered module for arm64 as an object in format, Mach-O for
+/// Darwin or ELF for Linux: the lines emit would write, encoded here rather
+/// than by the assembler, so the text stays what the object is checked
+/// against. A Mach-O object's LC_BUILD_VERSION names no version; the link
+/// stamps the one of the runtime it links with.
+pub fn emit_object(allocator: Allocator, module: &ir::Module, format: Format, out: &var string::String) -> !?diagnostic::Diagnostic {
+    var sink = new_out(allocator, true, format);
     defer sink.deinit(allocator);
-    if try emit_into(allocator, module, Arch::Arm64, Format::MachO, &var sink) |failed| {
+    if try emit_into(allocator, module, Arch::Arm64, format, &var sink) |failed| {
         return move failed;
     }
     if sink.obj.failure.len() > 0 {
@@ -70,8 +71,8 @@ pub struct Out {
     obj: Obj,
 }
 
-fn new_out(allocator: Allocator, binary: bool) -> Out {
-    return Out { binary: binary, text: string::new(allocator), obj: new_obj(allocator) };
+fn new_out(allocator: Allocator, binary: bool, format: Format) -> Out {
+    return Out { binary: binary, text: string::new(allocator), obj: new_obj(allocator, format) };
 }
 
 /// Appends one instruction word to the object.
@@ -210,7 +211,13 @@ fn emit_into(allocator: Allocator, module: &ir::Module, arch: Arch, format: Form
         }
     }
     if out.binary {
-        try out.obj.write(allocator, &selector.syms, 0, &var out.text);
+        if format == Format::Elf {
+            // The stack is not executable.
+            try out.obj.enter(allocator, &var selector.syms, SectionKind::Note);
+            try out.obj.write_elf(allocator, &selector.syms, &var out.text);
+        } else {
+            try out.obj.write_macho(allocator, &selector.syms, 0, &var out.text);
+        }
         return null;
     }
     if format == Format::Elf {

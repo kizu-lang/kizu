@@ -37,6 +37,7 @@ fn section_name(kind: SectionKind) -> []u8 {
         DataConst => "__const",
         TextConst => "__const",
         Cstring => "__cstring",
+        Note => "",
     };
 }
 
@@ -65,7 +66,7 @@ fn round_to(value: i64, size: i64) -> i64 {
 /// names macOS minos (the version as the load command packs it), for the
 /// link to replace with the deployment target of the runtime it links
 /// with.
-pub fn (self: &var Obj) write(allocator: Allocator, syms: &ir::NameTable, minos: i64, out: &var string::String) -> !void {
+pub fn (self: &var Obj) write_macho(allocator: Allocator, syms: &ir::NameTable, minos: i64, out: &var string::String) -> !void {
     // A relocation against an assembler-local label in a section the
     // linker splits by symbol names the section's start and the offset
     // instead; in a section of C strings, which the linker splits by
@@ -364,11 +365,9 @@ fn (self: &Obj) append_sorted(
     return;
 }
 
-/// Builds the string table of the symbols in table: a zero byte, then the
-/// names ordered by their reversed spelling, greatest first, so a name that
-/// ends another follows it and is found at that one's tail rather than
-/// written again; padded to eight bytes. offsets gets each symbol's
-/// string offset, in table order.
+/// Builds the string table of the symbols in table, merged by common
+/// tail and padded to eight bytes. offsets gets each symbol's string
+/// offset, in table order.
 fn (self: &Obj) string_table(
     allocator: Allocator,
     syms: &ir::NameTable,
@@ -376,85 +375,19 @@ fn (self: &Obj) string_table(
     out: &var string::String,
     offsets: &var array::Array<i64>
 ) -> !void {
-    var reversed = array::new<string::String>(allocator);
-    defer reversed.deinit(allocator);
+    var names = array::new<string::String>(allocator);
+    defer names.deinit(allocator);
     var position = 0;
     while table.get(position) |index| {
         position = position + 1;
         let symbol = self.symbols.get_or_panic(index);
         let text = ir::name_text(syms, symbol.name);
         let bytes = text.as_bytes();
-        var back = string::new(allocator);
-        errdefer back.deinit(allocator);
-        var at = mem::len(bytes);
-        while at > 0 {
-            at = at - 1;
-            try back.append_byte(allocator, bytes[at]);
-        }
-        try reversed.append(allocator, move back);
+        try names.append(allocator, try string::from_bytes(allocator, bytes));
     }
-    try sort::strings(&var reversed);
-    try out.append_byte(allocator, cast<u8>(0));
-    // by_offset[symbol] is the string offset of the symbol's name.
-    var by_symbol = array::new<i64>(allocator);
-    defer by_symbol.deinit(allocator);
-    for 0..self.symbols.len() |_symbol| {
-        try by_symbol.append(allocator, 0);
-    }
-    var previous_start = 0 - 1;
-    var previous_len = 0;
-    var sorted_index = reversed.len() - 1;
-    var name = string::new(allocator);
-    defer name.deinit(allocator);
-    while sorted_index >= 0 {
-        var back_bytes = array::new<u8>(allocator);
-        defer back_bytes.deinit(allocator);
-        if reversed.at(sorted_index) |back| {
-            let back_view = back.as_bytes();
-            try back_bytes.append_bytes(allocator, back_view);
-        }
-        sorted_index = sorted_index - 1;
-        name.clear();
-        var at = back_bytes.len();
-        while at > 0 {
-            at = at - 1;
-            try name.append_byte(allocator, back_bytes.get_or_panic(at));
-        }
-        let name_bytes = name.as_bytes();
-        let size = mem::len(name_bytes);
-        var offset = 0;
-        // A name that ends the one written last is found at its tail.
-        if previous_start >= 0 and previous_len >= size and
-            tail_matches(out, previous_start + previous_len - size, name_bytes) {
-            offset = previous_start + previous_len - size;
-        } else {
-            offset = out.len();
-            try out.append_bytes(allocator, name_bytes);
-            try out.append_byte(allocator, cast<u8>(0));
-            previous_start = offset;
-            previous_len = size;
-        }
-        if syms.lookup(name_bytes) |held| {
-            let known = self.by_name.get(ir::name_id(held)) orelse 0;
-            if known > 0 {
-                try by_symbol.set(known - 1, offset);
-            }
-        }
-    }
+    try merge_strings(allocator, &names, out, offsets);
     while out.len() % 8 != 0 {
         try out.append_byte(allocator, cast<u8>(0));
     }
-    position = 0;
-    while table.get(position) |index| {
-        position = position + 1;
-        try offsets.append(allocator, by_symbol.get_or_panic(index));
-    }
     return;
-}
-
-/// Reports whether the bytes of out at start are name and nothing after it
-/// but the terminator the name written last ends with.
-fn tail_matches(out: &string::String, start: i64, name: []u8) -> bool {
-    let all = out.as_bytes();
-    return mem::equal_bytes(all[start..start + mem::len(name)], name);
 }
