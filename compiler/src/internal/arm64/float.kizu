@@ -575,27 +575,35 @@ fn freg(allocator: Allocator, out: &var string::String, v: i64, width: i64) -> !
 }
 
 /// Writes `fmov vd, rn`: the bits of a general register into a float one.
-fn fmov_in(allocator: Allocator, out: &var string::String, v: i64, reg: i64, width: i64) -> !void {
-    try head(allocator, out, "fmov");
-    try freg(allocator, out, v, width);
-    try comma(allocator, out);
-    try reg_name(allocator, out, reg, width == 8);
-    return newline(allocator, out);
+fn fmov_in(allocator: Allocator, out: &var Out, v: i64, reg: i64, width: i64) -> !void {
+    if out.binary {
+        return out.word(allocator, enc_fmov(true, width, reg, v), "fmov");
+    }
+    let text = &var out.text;
+    try head(allocator, text, "fmov");
+    try freg(allocator, text, v, width);
+    try comma(allocator, text);
+    try reg_name(allocator, text, reg, width == 8);
+    return newline(allocator, text);
 }
 
 /// Writes `fmov rd, vn`: the bits of a float register into a general one.
-fn fmov_out(allocator: Allocator, out: &var string::String, reg: i64, v: i64, width: i64) -> !void {
-    try head(allocator, out, "fmov");
-    try reg_name(allocator, out, reg, width == 8);
-    try comma(allocator, out);
-    try freg(allocator, out, v, width);
-    return newline(allocator, out);
+fn fmov_out(allocator: Allocator, out: &var Out, reg: i64, v: i64, width: i64) -> !void {
+    if out.binary {
+        return out.word(allocator, enc_fmov(false, width, reg, v), "fmov");
+    }
+    let text = &var out.text;
+    try head(allocator, text, "fmov");
+    try reg_name(allocator, text, reg, width == 8);
+    try comma(allocator, text);
+    try freg(allocator, text, v, width);
+    return newline(allocator, text);
 }
 
 /// Returns the float register holding operand reg: its own when allocation
 /// gave it one, otherwise v16 when that already holds it, or scratch after
 /// moving it in.
-fn float_operand(allocator: Allocator, out: &var string::String, cache: &FloatCache, reg: i64, width: i64, scratch: i64) -> !i64 {
+fn float_operand(allocator: Allocator, out: &var Out, cache: &FloatCache, reg: i64, width: i64, scratch: i64) -> !i64 {
     if is_float_reg(reg) {
         return float_reg_index(reg);
     }
@@ -618,7 +626,7 @@ fn float_dest(rd: i64) -> i64 {
 /// Moves a result computed in v16 out to the general register rd, which
 /// the cache then names; a result computed in rd's own float register
 /// needs nothing.
-fn float_result(allocator: Allocator, out: &var string::String, rd: i64, width: i64, cache: &var FloatCache) -> !void {
+fn float_result(allocator: Allocator, out: &var Out, rd: i64, width: i64, cache: &var FloatCache) -> !void {
     if is_float_reg(rd) {
         return;
     }
@@ -628,21 +636,26 @@ fn float_result(allocator: Allocator, out: &var string::String, rd: i64, width: 
     return;
 }
 
-/// Writes `op dest, a[, b[, c]]` over float registers of a width.
-fn float_line(allocator: Allocator, out: &var string::String, op: []u8, width: i64, dest: i64, a: i64, b: i64, c: i64) -> !void {
-    try head(allocator, out, op);
-    try freg(allocator, out, dest, width);
-    try comma(allocator, out);
-    try freg(allocator, out, a, width);
+/// Writes `op dest, a[, b[, c]]` over float registers of a width; word is
+/// its encoding.
+fn float_line(allocator: Allocator, out: &var Out, op: []u8, word: i64, width: i64, dest: i64, a: i64, b: i64, c: i64) -> !void {
+    if out.binary {
+        return out.word(allocator, word, op);
+    }
+    let text = &var out.text;
+    try head(allocator, text, op);
+    try freg(allocator, text, dest, width);
+    try comma(allocator, text);
+    try freg(allocator, text, a, width);
     if b >= 0 {
-        try comma(allocator, out);
-        try freg(allocator, out, b, width);
+        try comma(allocator, text);
+        try freg(allocator, text, b, width);
     }
     if c >= 0 {
-        try comma(allocator, out);
-        try freg(allocator, out, c, width);
+        try comma(allocator, text);
+        try freg(allocator, text, c, width);
     }
-    return newline(allocator, out);
+    return newline(allocator, text);
 }
 
 fn float_mnemonic(kind: i64) -> []u8 {
@@ -676,32 +689,39 @@ fn float_mnemonic(kind: i64) -> []u8 {
 /// Prints one float instruction. A result goes through v16, which the
 /// cache then names, so an instruction reading the result right after
 /// does not move it in again.
-fn print_float(allocator: Allocator, out: &var string::String, inst: &MInst, cache: &var FloatCache) -> !void {
+fn print_float(allocator: Allocator, out: &var Out, inst: &MInst, cache: &var FloatCache) -> !void {
     let width = inst.width;
     match inst.op {
         FBin => {
             let a = try float_operand(allocator, out, cache, inst.rn, width, 17);
             let b = try float_operand(allocator, out, cache, inst.rm, width, 18);
-            try float_line(allocator, out, float_mnemonic(inst.imm), width, float_dest(inst.rd), a, b, 0 - 1);
+            let dest = float_dest(inst.rd);
+            try float_line(allocator, out, float_mnemonic(inst.imm), enc_float(inst.imm, width, dest, a, b), width, dest, a, b, 0 - 1);
         },
         FUn => {
             let a = try float_operand(allocator, out, cache, inst.rn, width, 17);
-            try float_line(allocator, out, float_mnemonic(inst.imm), width, float_dest(inst.rd), a, 0 - 1, 0 - 1);
+            let dest = float_dest(inst.rd);
+            try float_line(allocator, out, float_mnemonic(inst.imm), enc_float(inst.imm, width, dest, a, 0 - 1), width, dest, a, 0 - 1, 0 - 1);
         },
         FMAdd => {
             let a = try float_operand(allocator, out, cache, inst.rn, width, 17);
             let b = try float_operand(allocator, out, cache, inst.rm, width, 18);
             let c = try float_operand(allocator, out, cache, inst.ra, width, 19);
-            try float_line(allocator, out, "fmadd", width, float_dest(inst.rd), a, b, c);
+            let dest = float_dest(inst.rd);
+            try float_line(allocator, out, "fmadd", enc_fmadd(width, dest, a, b, c), width, dest, a, b, c);
         },
         FCmp => {
             let a = try float_operand(allocator, out, cache, inst.rn, width, 17);
             let b = try float_operand(allocator, out, cache, inst.rm, width, 18);
-            try head(allocator, out, "fcmp");
-            try freg(allocator, out, a, width);
-            try comma(allocator, out);
-            try freg(allocator, out, b, width);
-            return newline(allocator, out);
+            if out.binary {
+                return out.word(allocator, enc_fcmp(width, a, b), "fcmp");
+            }
+            let text = &var out.text;
+            try head(allocator, text, "fcmp");
+            try freg(allocator, text, a, width);
+            try comma(allocator, text);
+            try freg(allocator, text, b, width);
+            return newline(allocator, text);
         },
         FCvt => {
             var to = 4;
@@ -709,39 +729,56 @@ fn print_float(allocator: Allocator, out: &var string::String, inst: &MInst, cac
                 to = 8;
             }
             let a = try float_operand(allocator, out, cache, inst.rn, width, 17);
-            try head(allocator, out, "fcvt");
-            try freg(allocator, out, float_dest(inst.rd), to);
-            try comma(allocator, out);
-            try freg(allocator, out, a, width);
-            try newline(allocator, out);
+            let dest = float_dest(inst.rd);
+            if out.binary {
+                try out.word(allocator, enc_fcvt(width, dest, a), "fcvt");
+            } else {
+                let text = &var out.text;
+                try head(allocator, text, "fcvt");
+                try freg(allocator, text, dest, to);
+                try comma(allocator, text);
+                try freg(allocator, text, a, width);
+                try newline(allocator, text);
+            }
             return float_result(allocator, out, inst.rd, to, cache);
         },
         FToInt => {
             let a = try float_operand(allocator, out, cache, inst.rn, inst.imm, 17);
-            if inst.signed {
-                try head(allocator, out, "fcvtzs");
+            if out.binary {
+                try out.word(allocator, enc_fcvtz(inst.signed, width, inst.imm, inst.rd, a), "fcvtz");
             } else {
-                try head(allocator, out, "fcvtzu");
+                let text = &var out.text;
+                if inst.signed {
+                    try head(allocator, text, "fcvtzs");
+                } else {
+                    try head(allocator, text, "fcvtzu");
+                }
+                try reg_name(allocator, text, inst.rd, width == 8);
+                try comma(allocator, text);
+                try freg(allocator, text, a, inst.imm);
+                try newline(allocator, text);
             }
-            try reg_name(allocator, out, inst.rd, width == 8);
-            try comma(allocator, out);
-            try freg(allocator, out, a, inst.imm);
-            try newline(allocator, out);
             if cache.reg == inst.rd {
                 cache.reg = 0 - 1;
             }
             return;
         },
         IntToF => {
-            if inst.signed {
-                try head(allocator, out, "scvtf");
+            let dest = float_dest(inst.rd);
+            if out.binary {
+                try out.word(allocator, enc_cvtf(inst.signed, width, dest, inst.rn), "cvtf");
             } else {
-                try head(allocator, out, "ucvtf");
+                let text = &var out.text;
+                if inst.signed {
+                    try head(allocator, text, "scvtf");
+                } else {
+                    try head(allocator, text, "ucvtf");
+                }
+                try freg(allocator, text, dest, width);
+                try comma(allocator, text);
+                try reg_name(allocator, text, inst.rn, true);
+                try newline(allocator, text);
             }
-            try freg(allocator, out, float_dest(inst.rd), width);
-            try comma(allocator, out);
-            try reg_name(allocator, out, inst.rn, true);
-            try newline(allocator, out);
         },
         FArg => {
             if is_float_reg(inst.rn) {
@@ -766,17 +803,21 @@ fn print_float(allocator: Allocator, out: &var string::String, inst: &MInst, cac
 }
 
 /// Writes `fmov vd, vn` between float registers of a width.
-fn float_move(allocator: Allocator, out: &var string::String, vd: i64, vn: i64, width: i64) -> !void {
-    try head(allocator, out, "fmov");
-    try freg(allocator, out, vd, width);
-    try comma(allocator, out);
-    try freg(allocator, out, vn, width);
-    return newline(allocator, out);
+fn float_move(allocator: Allocator, out: &var Out, vd: i64, vn: i64, width: i64) -> !void {
+    if out.binary {
+        return out.word(allocator, enc_fmov_float(width, vd, vn), "fmov");
+    }
+    let text = &var out.text;
+    try head(allocator, text, "fmov");
+    try freg(allocator, text, vd, width);
+    try comma(allocator, text);
+    try freg(allocator, text, vn, width);
+    return newline(allocator, text);
 }
 
 /// Puts a constant's bits in the float register rd: from the zero register,
 /// or through x16, which no instruction holds a value in across a constant.
-fn float_constant(allocator: Allocator, out: &var string::String, rd: i64, imm: i64) -> !void {
+fn float_constant(allocator: Allocator, out: &var Out, rd: i64, imm: i64) -> !void {
     var source = reg_zr();
     if imm != 0 {
         try materialize(allocator, out, scratch0(), imm);
@@ -788,19 +829,25 @@ fn float_constant(allocator: Allocator, out: &var string::String, rd: i64, imm: 
 /// Prints a select over float registers as `fcsel`. A spilled operand, which
 /// allocation reloads into a general register, moves through v17 or v18,
 /// and a spilled result through v16.
-fn float_select(allocator: Allocator, out: &var string::String, inst: &MInst) -> !void {
+fn float_select(allocator: Allocator, out: &var Out, inst: &MInst) -> !void {
     let cache = empty_cache();
     let a = try float_operand(allocator, out, &cache, inst.rn, 8, 17);
     let b = try float_operand(allocator, out, &cache, inst.rm, 8, 18);
-    try head(allocator, out, "fcsel");
-    try freg(allocator, out, float_dest(inst.rd), 8);
-    try comma(allocator, out);
-    try freg(allocator, out, a, 8);
-    try comma(allocator, out);
-    try freg(allocator, out, b, 8);
-    try comma(allocator, out);
-    try out.append_bytes(allocator, cond_spelling(inst.cond));
-    try newline(allocator, out);
+    let dest = float_dest(inst.rd);
+    if out.binary {
+        try out.word(allocator, enc_fcsel(8, dest, a, b, inst.cond), "fcsel");
+    } else {
+        let text = &var out.text;
+        try head(allocator, text, "fcsel");
+        try freg(allocator, text, dest, 8);
+        try comma(allocator, text);
+        try freg(allocator, text, a, 8);
+        try comma(allocator, text);
+        try freg(allocator, text, b, 8);
+        try comma(allocator, text);
+        try text.append_bytes(allocator, cond_spelling(inst.cond));
+        try newline(allocator, text);
+    }
     if !is_float_reg(inst.rd) {
         try fmov_out(allocator, out, inst.rd, 16, 8);
     }
