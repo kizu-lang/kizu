@@ -15,34 +15,16 @@ import std::string;
 // an op or a type the backend does not lower stops the build with a
 // diagnostic naming it rather than being handed to another backend. The
 // same machine IR, allocated, is also printed as x86-64 by the amd64
-// printer: as assembly text, for Mach-O, ELF or COFF, which the system
-// assembler assembles, or for Linux and Windows as an ELF or COFF object
-// of its own (amd64_encode.kizu, coff.kizu), as the assembler would make it
-// of that text.
+// printer, for Linux and Windows as an ELF or COFF object
+// (amd64_encode.kizu, elf.kizu, coff.kizu), laid out as the system
+// assembler would lay out the same code.
 
 /// Is the object format the code is written for. Selection names symbols
-/// the Mach-O way; ELF and COFF spell them through symbol.
+/// the Mach-O way; the ELF and COFF writers spell them their own.
 pub enum Format {
     MachO,
     Elf,
     Coff,
-}
-
-/// Emits a lowered module as x86-64 assembly text, in format: Mach-O, ELF
-/// or COFF. arm64 has no text; emit_object writes its object.
-pub fn emit(allocator: Allocator, module: &ir::Module, arch: Arch, format: Format, out: &var string::String) -> !?diagnostic::Diagnostic {
-    if !is_x86(arch) {
-        return try diagnostic::from_text(
-            allocator, diagnostic::Severity::Error, ast::zero_span(), "arm64 error: arm64 is written as an object, not as assembly text"
-        );
-    }
-    var sink = new_out(allocator, false, format);
-    defer sink.deinit(allocator);
-    if try emit_into(allocator, module, arch, format, &var sink) |failed| {
-        return move failed;
-    }
-    try out.append_string(allocator, &sink.text);
-    return null;
 }
 
 /// Emits a lowered module as an object in format: for arm64 Mach-O for
@@ -53,7 +35,7 @@ pub fn emit(allocator: Allocator, module: &ir::Module, arch: Arch, format: Forma
 /// LC_BUILD_VERSION names no version; the link stamps the one of the
 /// runtime it links with.
 pub fn emit_object(allocator: Allocator, module: &ir::Module, arch: Arch, format: Format, out: &var string::String) -> !?diagnostic::Diagnostic {
-    var sink = new_out(allocator, true, format);
+    var sink = new_out(allocator, format);
     defer sink.deinit(allocator);
     let x86 = is_x86(arch);
     sink.obj.x86 = x86;
@@ -71,21 +53,19 @@ pub fn emit_object(allocator: Allocator, module: &ir::Module, arch: Arch, format
         let bytes = message.as_bytes();
         return try diagnostic::from_text(allocator, diagnostic::Severity::Error, ast::zero_span(), bytes);
     }
-    try out.append_string(allocator, &sink.text);
+    try out.append_string(allocator, &sink.file);
     return null;
 }
 
-/// Is where the printer writes: x86-64 assembly text, or with binary set
-/// the machine code of each instruction into obj, and then the object file
-/// into text.
+/// Is where the printer writes: the machine code of each instruction into
+/// obj, and then the object file into file.
 pub struct Out {
-    binary: bool,
-    text: string::String,
+    file: string::String,
     obj: Obj,
 }
 
-fn new_out(allocator: Allocator, binary: bool, format: Format) -> Out {
-    return Out { binary: binary, text: string::new(allocator), obj: new_obj(allocator, format) };
+fn new_out(allocator: Allocator, format: Format) -> Out {
+    return Out { file: string::new(allocator), obj: new_obj(allocator, format) };
 }
 
 /// Appends one instruction word to the object.
@@ -116,16 +96,7 @@ fn emit_into(allocator: Allocator, module: &ir::Module, arch: Arch, format: Form
             main_ret = ret;
         }
     }
-    if out.binary {
-        try out.obj.enter(allocator, &var selector.syms, SectionKind::Text);
-    } else {
-        if format != Format::MachO {
-            try out.text.append_bytes(allocator, "    .text");
-        } else {
-            try out.text.append_bytes(allocator, "    .section __TEXT,__text,regular,pure_instructions");
-        }
-        try newline(allocator, &var out.text);
-    }
+    try out.obj.enter(allocator, &var selector.syms, SectionKind::Text);
     // Select every function first, so a call can take a copy of its
     // callee's body; then allocate and print each.
     var functions = array::new<MFunction>(allocator);
@@ -188,7 +159,7 @@ fn emit_into(allocator: Allocator, module: &ir::Module, arch: Arch, format: Form
         defer allocation.deinit(allocator);
         let exported = exports.get_or_panic(ordinal);
         if is_x86(arch) {
-            try amd64_print_function(allocator, out, func, &allocation, symbol, exported, ordinal, &selector.syms, arch, format);
+            try amd64_print_function(allocator, out, func, &allocation, symbol, exported, &selector.syms, arch, format);
             ordinal = ordinal + 1;
             continue;
         }
@@ -201,80 +172,24 @@ fn emit_into(allocator: Allocator, module: &ir::Module, arch: Arch, format: Form
         ordinal = ordinal + 1;
     }
     if selector.main_wraps {
-        try write_error_names(allocator, module, &var selector, format, out);
+        try write_error_names(allocator, module, &var selector, out);
     }
     if selector.table_starts.len() > 0 {
-        try write_tables(allocator, &var selector, format, out);
+        try write_tables(allocator, &var selector, out);
     }
     if selector.literals.len() > 0 {
-        if out.binary {
-            try write_literal_bytes(allocator, &var selector, &var out.obj);
-        } else {
-            try write_literals(allocator, &selector, format, &var out.text);
-        }
-    }
-    if out.binary {
-        if format == Format::Elf {
-            // The stack is not executable.
-            try out.obj.enter(allocator, &var selector.syms, SectionKind::Note);
-            try out.obj.write_elf(allocator, &selector.syms, &var out.text);
-        } else if format == Format::Coff {
-            try out.obj.write_coff(allocator, &selector.syms, &var out.text);
-        } else {
-            try out.obj.write_macho(allocator, &selector.syms, 0, &var out.text);
-        }
-        return null;
+        try write_literal_bytes(allocator, &var selector, &var out.obj);
     }
     if format == Format::Elf {
         // The stack is not executable.
-        try elf_section(allocator, &var out.text, ".note.GNU-stack", "", ",%progbits");
-        try newline(allocator, &var out.text);
-    } else if format == Format::MachO {
-        try out.text.append_bytes(allocator, ".subsections_via_symbols");
-        try newline(allocator, &var out.text);
+        try out.obj.enter(allocator, &var selector.syms, SectionKind::Note);
+        try out.obj.write_elf(allocator, &selector.syms, &var out.file);
+    } else if format == Format::Coff {
+        try out.obj.write_coff(allocator, &selector.syms, &var out.file);
+    } else {
+        try out.obj.write_macho(allocator, &selector.syms, 0, &var out.file);
     }
     return null;
-}
-
-/// Writes the string literals as text, each NUL-terminated.
-fn write_literals(allocator: Allocator, selector: &Selector, format: Format, out: &var string::String) -> !void {
-    if format == Format::Elf {
-        try elf_section(allocator, out, ".rodata.str1.1", "aMS", ",%progbits,1");
-    } else if format == Format::Coff {
-        try elf_section(allocator, out, ".rdata", "dr", "");
-    } else {
-        try out.append_bytes(allocator, "    .section __TEXT,__cstring,cstring_literals");
-    }
-    try newline(allocator, out);
-    var literal_index = 0;
-    while selector.literals.get(literal_index) |literal| {
-        try symbol(allocator, out, format, "Lkz_str.");
-        try fmt::append_i64(allocator, out, literal_index);
-        try out.append_bytes(allocator, ":");
-        try newline(allocator, out);
-        literal_index = literal_index + 1;
-        let text = ir::name_text(&selector.syms, literal);
-        let bytes = text.as_bytes();
-        var at = 0;
-        while at < mem::len(bytes) {
-            if at % 16 == 0 {
-                if at > 0 {
-                    try newline(allocator, out);
-                }
-                try out.append_bytes(allocator, "    .byte ");
-            } else {
-                try out.append_bytes(allocator, ",");
-            }
-            try fmt::append_i64(allocator, out, cast<i64>(bytes[at]));
-            at = at + 1;
-        }
-        if mem::len(bytes) > 0 {
-            try newline(allocator, out);
-        }
-        try out.append_bytes(allocator, "    .byte 0");
-        try newline(allocator, out);
-    }
-    return;
 }
 
 /// Writes the string literals into the object's C string section.
@@ -302,91 +217,24 @@ fn local_label(allocator: Allocator, syms: &var ir::NameTable, prefix: []u8, ind
     return syms.intern(bytes);
 }
 
-/// Writes an assembler symbol the selector named the Mach-O way. ELF and
-/// x86-64 COFF have no `_` in front of a C symbol, and keep a local label
-/// out of the symbol table by a `.L` start rather than an `L` one.
-fn symbol(allocator: Allocator, out: &var string::String, format: Format, bytes: []u8) -> !void {
-    if format != Format::MachO and mem::len(bytes) > 0 {
-        if bytes[0] == cast<u8>(95) {
-            return out.append_bytes(allocator, bytes[1..mem::len(bytes)]);
-        }
-        if bytes[0] == cast<u8>(76) {
-            try out.append_bytes(allocator, ".");
-        }
-    }
-    return out.append_bytes(allocator, bytes);
-}
-
-/// Writes an ELF or COFF `.section name,"flags"rest` line, without the
-/// newline.
-fn elf_section(allocator: Allocator, out: &var string::String, name: []u8, flags: []u8, rest: []u8) -> !void {
-    try out.append_bytes(allocator, "    .section ");
-    try out.append_bytes(allocator, name);
-    try out.append_bytes(allocator, ",");
-    try out.append_byte(allocator, cast<u8>(34));
-    try out.append_bytes(allocator, flags);
-    try out.append_byte(allocator, cast<u8>(34));
-    return out.append_bytes(allocator, rest);
-}
-
 /// Writes the read-only tables of table.get, eight bytes an entry.
-fn write_tables(allocator: Allocator, selector: &var Selector, format: Format, sink: &var Out) -> !void {
-    if sink.binary {
-        try sink.obj.enter(allocator, &var selector.syms, SectionKind::TextConst);
-        var table = 0;
-        while selector.table_starts.get(table) |start| {
-            var end = selector.table_words.len();
-            if selector.table_starts.get(table + 1) |next| {
-                end = next;
-            }
-            try sink.obj.align(allocator, 3);
-            let label = try local_label(allocator, &var selector.syms, "Lkz_table.", table);
-            try sink.obj.define(allocator, &selector.syms, label);
-            table = table + 1;
-            for start..end |at| {
-                try sink.obj.datum(allocator, selector.table_words.get_or_panic(at), 8);
-            }
-        }
-        return;
-    }
-    return write_tables_text(allocator, selector, format, &var sink.text);
-}
-
-fn write_tables_text(allocator: Allocator, selector: &Selector, format: Format, out: &var string::String) -> !void {
-    if format == Format::Elf {
-        try out.append_bytes(allocator, "    .section .rodata");
-    } else if format == Format::Coff {
-        try elf_section(allocator, out, ".rdata", "dr", "");
-    } else {
-        try out.append_bytes(allocator, "    .section __TEXT,__const");
-    }
-    try newline(allocator, out);
+fn write_tables(allocator: Allocator, selector: &var Selector, sink: &var Out) -> !void {
+    try sink.obj.enter(allocator, &var selector.syms, SectionKind::TextConst);
     var table = 0;
     while selector.table_starts.get(table) |start| {
         var end = selector.table_words.len();
         if selector.table_starts.get(table + 1) |next| {
             end = next;
         }
-        try out.append_bytes(allocator, "    .p2align 3");
-        try newline(allocator, out);
-        try symbol(allocator, out, format, "Lkz_table.");
-        try fmt::append_i64(allocator, out, table);
-        try out.append_bytes(allocator, ":");
-        try newline(allocator, out);
+        try sink.obj.align(allocator, 3);
+        let label = try local_label(allocator, &var selector.syms, "Lkz_table.", table);
+        try sink.obj.define(allocator, &selector.syms, label);
         table = table + 1;
-        var at = start;
-        while at < end {
-            try out.append_bytes(allocator, "    .quad ");
-            try fmt::append_i64(allocator, out, selector.table_words.get_or_panic(at));
-            try newline(allocator, out);
-            at = at + 1;
+        for start..end |at| {
+            try sink.obj.datum(allocator, selector.table_words.get_or_panic(at), 8);
         }
     }
     return;
-}
-
-fn newline(allocator: Allocator, out: &var string::String) -> !void {
-    return out.append_byte(allocator, cast<u8>(10));
 }
 
 /// Is where a function's frame puts things, from the stack pointer after
@@ -1066,7 +914,7 @@ fn print_indexed(allocator: Allocator, out: &var Out, load: bool, inst: &MInst) 
 /// Writes the table the entry point reads a failure's name from: one
 /// (pointer, length) row per error code, row 0 and codes no set declares
 /// empty, each name a string literal.
-fn write_error_names(allocator: Allocator, module: &ir::Module, selector: &var Selector, format: Format, sink: &var Out) -> !void {
+fn write_error_names(allocator: Allocator, module: &ir::Module, selector: &var Selector, sink: &var Out) -> !void {
     var rows = 1;
     var set_index = 0;
     while module.error_sets.key_at(set_index) |set_name| {
@@ -1110,64 +958,19 @@ fn write_error_names(allocator: Allocator, module: &ir::Module, selector: &var S
             }
         }
     }
-    if sink.binary {
-        let obj = &var sink.obj;
-        try obj.enter(allocator, &var selector.syms, SectionKind::DataConst);
-        try obj.align(allocator, 3);
-        let table = try selector.syms.intern("Lkz_error_names");
-        try obj.define(allocator, &selector.syms, table);
-        for 0..rows |row| {
-            let label = labels.get_or_panic(row);
-            if label >= 0 {
-                let literal = try local_label(allocator, &var selector.syms, "Lkz_str.", label);
-                try obj.relocate(allocator, &selector.syms, literal, reloc_unsigned());
-            }
-            try obj.datum(allocator, 0, 8);
-            try obj.datum(allocator, lengths.get_or_panic(row), 8);
-        }
-        return;
-    }
-    return write_error_rows(allocator, format, &labels, &lengths, rows, &var sink.text);
-}
-
-/// Writes the rows of the error name table as text.
-fn write_error_rows(
-    allocator: Allocator,
-    format: Format,
-    labels: &array::Array<i64>,
-    lengths: &array::Array<i64>,
-    rows: i64,
-    out: &var string::String
-) -> !void {
-    if format == Format::Elf {
-        // The rows hold addresses, which a position-independent
-        // executable relocates when it is loaded.
-        try elf_section(allocator, out, ".data.rel.ro", "aw", ",%progbits");
-    } else if format == Format::Coff {
-        // The loader applies the image's base relocations to these too.
-        try elf_section(allocator, out, ".rdata", "dr", "");
-    } else {
-        try out.append_bytes(allocator, "    .section __DATA,__const");
-    }
-    try newline(allocator, out);
-    try out.append_bytes(allocator, "    .p2align 3");
-    try newline(allocator, out);
-    try symbol(allocator, out, format, "Lkz_error_names:");
-    try newline(allocator, out);
+    let obj = &var sink.obj;
+    try obj.enter(allocator, &var selector.syms, SectionKind::DataConst);
+    try obj.align(allocator, 3);
+    let table = try selector.syms.intern("Lkz_error_names");
+    try obj.define(allocator, &selector.syms, table);
     for 0..rows |row| {
         let label = labels.get_or_panic(row);
-        if label < 0 {
-            try out.append_bytes(allocator, "    .quad 0");
-            try newline(allocator, out);
-        } else {
-            try out.append_bytes(allocator, "    .quad ");
-            try symbol(allocator, out, format, "Lkz_str.");
-            try fmt::append_i64(allocator, out, label);
-            try newline(allocator, out);
+        if label >= 0 {
+            let literal = try local_label(allocator, &var selector.syms, "Lkz_str.", label);
+            try obj.relocate(allocator, &selector.syms, literal, reloc_unsigned());
         }
-        try out.append_bytes(allocator, "    .quad ");
-        try fmt::append_i64(allocator, out, lengths.get_or_panic(row));
-        try newline(allocator, out);
+        try obj.datum(allocator, 0, 8);
+        try obj.datum(allocator, lengths.get_or_panic(row), 8);
     }
     return;
 }

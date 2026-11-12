@@ -1,19 +1,15 @@
 import compiler::internal::ir;
 import std::array;
-import std::fmt;
 import std::mem;
 
-// The amd64 printer: allocated machine IR as x86-64 assembly (AT&T syntax)
-// for Darwin (Mach-O), Linux (ELF) or Windows (COFF), or for Linux as the
-// machine code of the same lines, written into an ELF object
-// (amd64_encode.kizu). Which lines a function takes is decided once; only
-// the leaves that write a line (rr, ir, mr, jump, ...) tell text from
-// machine code. Darwin and Linux
-// share the System V convention; only the spelling of symbols, sections
-// and C references differs. Selection and allocation are the arm64
-// ones; this printer gives each register the backend names a machine
-// register and lowers each AArch64-shaped instruction to the x86-64 ones
-// that compute the same.
+// The amd64 printer: allocated machine IR as x86-64 machine code for Linux
+// (ELF) or Windows (COFF), written into the object (amd64_encode.kizu).
+// Which instructions a function takes is decided here; the leaves (rr, ir,
+// mr, jump, ...) hand each to the encoder, named by its AT&T mnemonic.
+// Linux has the System V convention, Windows its own. Selection and
+// allocation are the arm64 ones; this printer gives each register the
+// backend names a machine register and lowers each AArch64-shaped
+// instruction to the x86-64 ones that compute the same.
 //
 // Registers. The argument registers x0..x5 are rdi, rsi, rdx, rcx, r8 and
 // r9, in the System V order, so a call to C needs no moves; the
@@ -52,7 +48,7 @@ import std::mem;
 /// Is the printer's state for one function.
 struct Amd {
     allocator: Allocator,
-    // Spells the selection's Mach-O style names through symbol.
+    // COFF has no global offset table.
     format: Format,
     // The Windows convention: its registers, frame and float scratch.
     windows: bool,
@@ -62,7 +58,6 @@ struct Amd {
     rcx: i64,
     // The bytes below the stack arguments a frame that calls leaves free.
     shadow: i64,
-    ordinal: i64,
     labels: i64,
     // Bytes pushed below the frame since the prologue, which every
     // displacement from rsp adds.
@@ -94,7 +89,6 @@ pub fn amd64_print_function(
     allocation: &Allocation,
     name: ir::Name,
     exported: ir::Name,
-    ordinal: i64,
     syms: &ir::NameTable,
     arch: Arch,
     format: Format
@@ -107,7 +101,6 @@ pub fn amd64_print_function(
         rdx: 2,
         rcx: 3,
         shadow: 0,
-        ordinal: ordinal,
         labels: 0,
         pushed: 0,
         frame_size: 0,
@@ -124,44 +117,17 @@ pub fn amd64_print_function(
         amd.shadow = 32;
     }
     amd.plan_frame(func);
-    if out.binary {
-        if !ir::is_empty(exported) {
-            try out.obj.global(allocator, syms, exported);
-            try out.obj.align(allocator, 4);
-            try out.obj.define(allocator, syms, exported);
-        }
-        if func.is_main {
-            try out.obj.global(allocator, syms, name);
-        }
+    if !ir::is_empty(exported) {
+        try out.obj.global(allocator, syms, exported);
         try out.obj.align(allocator, 4);
-        try out.obj.define(allocator, syms, name);
-        try out.obj.begin_function(allocator, func.blocks.len());
-    } else {
-        let symbol_text = ir::name_text(syms, name);
-        let symbol = symbol_text.as_bytes();
-        if !ir::is_empty(exported) {
-            let exported_text = ir::name_text(syms, exported);
-            let exported_bytes = exported_text.as_bytes();
-            try amd.text(out, "    .globl ");
-            try amd.sym(out, exported_bytes);
-            try amd.nl(out);
-            try amd.text(out, "    .p2align 4");
-            try amd.nl(out);
-            try amd.sym(out, exported_bytes);
-            try amd.text(out, ":");
-            try amd.nl(out);
-        }
-        if func.is_main {
-            try amd.text(out, "    .globl ");
-            try amd.sym(out, symbol);
-            try amd.nl(out);
-        }
-        try amd.text(out, "    .p2align 4");
-        try amd.nl(out);
-        try amd.sym(out, symbol);
-        try amd.text(out, ":");
-        try amd.nl(out);
+        try out.obj.define(allocator, syms, exported);
     }
+    if func.is_main {
+        try out.obj.global(allocator, syms, name);
+    }
+    try out.obj.align(allocator, 4);
+    try out.obj.define(allocator, syms, name);
+    try out.obj.begin_function(allocator, func.blocks.len());
     if amd.needed {
         try amd.prologue(out, &allocation.saved, syms);
     }
@@ -190,9 +156,7 @@ pub fn amd64_print_function(
             try amd.print_block(out, func, block, following, &allocation.saved, syms, &var restore, &var wrap, &var reads_buf, &after);
         }
     }
-    if out.binary {
-        try out.obj.end_function(allocator);
-    }
+    try out.obj.end_function(allocator);
     return;
 }
 
@@ -211,7 +175,7 @@ fn (self: &var Amd) print_block(
     let allocator = self.allocator;
     let unsafe_window = try plan_flags(allocator, block, &func.copies, restore, wrap, reads_buf);
     if unsafe_window {
-        try self.error_line(out, "amd64: flags live across a call");
+        try self.fail(out, "amd64: flags live across a call");
     }
     self.zf = 0 - 1;
     self.fcmp = 0;
@@ -268,7 +232,7 @@ fn (self: &var Amd) print_block(
         Open => try self.bare(out, "ud2"),
         Jump => {
             if block.succ0 != following {
-                try self.jump(out, "jmp", block.succ0);
+                try self.jump(out, block.succ0);
             }
         },
         Flags => {
@@ -277,7 +241,7 @@ fn (self: &var Amd) print_block(
             } else {
                 try self.jcc(out, block.cond, block.succ0);
                 if block.succ1 != following {
-                    try self.jump(out, "jmp", block.succ1);
+                    try self.jump(out, block.succ1);
                 }
             }
         },
@@ -364,9 +328,9 @@ fn (self: &var Amd) prologue(out: &var Out, saved: &array::Array<i64>, syms: &ir
         // The selector's spelling, with the `_` in front that a COFF
         // symbol drops: emit_into names it for a Windows module.
         if syms.lookup("____chkstk_ms") |probe| {
-            try self.call(out, syms, probe, false);
+            try self.call(out, syms, probe);
         } else {
-            try self.error_line(out, "amd64: ___chkstk_ms is not named");
+            try self.fail(out, "amd64: ___chkstk_ms is not named");
         }
         try self.rr(out, "subq", 8, reg_sp(), 8);
         return self.rr(out, "movq", 17, 8, 8);
@@ -378,7 +342,7 @@ fn (self: &var Amd) prologue(out: &var Out, saved: &array::Array<i64>, syms: &ir
 }
 
 fn (self: &var Amd) epilogue(out: &var Out, saved: &array::Array<i64>) -> !void {
-    try self.mr(out, "leaq", based(29, 0 - 8 * saved.len(), true), reg_sp(), 8);
+    try self.mr(out, "leaq", based(29, 0 - 8 * saved.len()), reg_sp());
     var index = saved.len() - 1;
     while index >= 0 {
         try self.r1(out, "popq", saved.get_or_panic(index), 8);
@@ -666,84 +630,7 @@ fn plan_flags(
     return unsafe_window;
 }
 
-// ---- text ----
-
-/// Returns the x86-64 name of a register the backend names, at a size in
-/// bytes, under Windows by its convention; an unknown one is spelled so that
-/// the assembler rejects it.
-fn x86_reg(reg: i64, size: i64, windows: bool) -> []u8 {
-    var names = "bad";
-    if windows and reg >= 0 and reg <= 5 {
-        if reg == 0 {
-            names = "rcx ecx cx cl";
-        } else if reg == 1 {
-            names = "rdx edx dx dl";
-        } else if reg == 2 {
-            names = "r8 r8d r8w r8b";
-        } else if reg == 3 {
-            names = "r9 r9d r9w r9b";
-        }
-    } else if windows and reg == 24 {
-        names = "rdi edi di dil";
-    } else if windows and reg == 25 {
-        names = "rsi esi si sil";
-    } else if reg == 0 {
-        names = "rdi edi di dil";
-    } else if reg == 1 {
-        names = "rsi esi si sil";
-    } else if reg == 2 {
-        names = "rdx edx dx dl";
-    } else if reg == 3 {
-        names = "rcx ecx cx cl";
-    } else if reg == 4 {
-        names = "r8 r8d r8w r8b";
-    } else if reg == 5 {
-        names = "r9 r9d r9w r9b";
-    } else if reg == 8 {
-        names = "rax eax ax al";
-    } else if reg == 16 {
-        names = "r10 r10d r10w r10b";
-    } else if reg == 17 {
-        names = "r11 r11d r11w r11b";
-    } else if reg == 19 {
-        names = "rbx ebx bx bl";
-    } else if reg == 20 {
-        names = "r12 r12d r12w r12b";
-    } else if reg == 21 {
-        names = "r13 r13d r13w r13b";
-    } else if reg == 22 {
-        names = "r14 r14d r14w r14b";
-    } else if reg == 23 {
-        names = "r15 r15d r15w r15b";
-    } else if reg == 29 {
-        names = "rbp ebp bp bpl";
-    } else if reg == reg_sp() {
-        names = "rsp esp sp spl";
-    }
-    var want = 0;
-    if size == 4 {
-        want = 1;
-    } else if size == 2 {
-        want = 2;
-    } else if size == 1 {
-        want = 3;
-    }
-    var field = 0;
-    var start = 0;
-    var index = 0;
-    let len = mem::len(names);
-    while index <= len {
-        if index == len or names[index] == cast<u8>(32) {
-            if field == want {
-                return names[start..index];
-            }
-            field = field + 1;
-            start = index + 1;
-        }
-        index = index + 1;
-    }
-    return names;
-}
+// ---- leaves ----
 
 /// Returns the x86-64 condition code suffix that holds when cond would.
 fn x86_cc(cond: Cond) -> []u8 {
@@ -847,56 +734,14 @@ fn is_zr(reg: i64) -> bool {
     return reg == reg_zr() or reg < 0;
 }
 
-fn (self: &Amd) text(out: &var Out, bytes: []u8) -> !void {
-    return out.text.append_bytes(self.allocator, bytes);
-}
-
-/// Writes a `.error` line, which stops the assembler: what this printer
-/// cannot lower fails the build rather than running wrong. In machine code
-/// it is the object's failure, which stops the build the same way.
-fn (self: &Amd) error_line(out: &var Out, message: []u8) -> !void {
-    if out.binary {
-        return out.obj.fail_message(self.allocator, message);
-    }
-    try self.text(out, "    .error ");
-    try out.text.append_byte(self.allocator, cast<u8>(34));
-    try self.text(out, message);
-    try out.text.append_byte(self.allocator, cast<u8>(34));
-    return self.nl(out);
-}
-
-fn (self: &Amd) nl(out: &var Out) -> !void {
-    return out.text.append_byte(self.allocator, cast<u8>(10));
-}
-
-/// Writes an indented mnemonic and a space.
-fn (self: &Amd) op(out: &var Out, mnemonic: []u8) -> !void {
-    try self.text(out, "    ");
-    try self.text(out, mnemonic);
-    return out.text.append_byte(self.allocator, cast<u8>(32));
-}
-
-fn (self: &Amd) reg(out: &var Out, reg: i64, size: i64) -> !void {
-    try out.text.append_byte(self.allocator, cast<u8>(37));
-    return self.text(out, x86_reg(reg, size, self.windows));
-}
-
-fn (self: &Amd) imm(out: &var Out, value: i64) -> !void {
-    try out.text.append_byte(self.allocator, cast<u8>(36));
-    return fmt::append_i64(self.allocator, &var out.text, value);
-}
-
-fn (self: &Amd) comma(out: &var Out) -> !void {
-    return self.text(out, ", ");
-}
-
-fn (self: &Amd) sym(out: &var Out, bytes: []u8) -> !void {
-    return symbol(self.allocator, &var out.text, self.format, bytes);
+/// Records message as the object's failure, which stops the build: what
+/// this printer cannot lower fails the build rather than running wrong.
+fn (self: &Amd) fail(out: &var Out, message: []u8) -> !void {
+    return out.obj.fail_message(self.allocator, message);
 }
 
 /// Returns the machine's number (0..15) of a register the backend names,
-/// under Windows by its convention, or -1 for one it does not have, as
-/// x86_reg spells it.
+/// under Windows by its convention, or -1 for one it does not have.
 fn (self: &Amd) number(reg: i64) -> i64 {
     if self.windows and reg >= 0 and reg <= 5 {
         if reg == 0 {
@@ -970,41 +815,18 @@ fn (self: &Amd) number_or_none(reg: i64) -> i64 {
     return self.number(reg);
 }
 
-fn (self: &Amd) block_label(out: &var Out, block: i64) -> !void {
-    try self.sym(out, "LBB");
-    try fmt::append_i64(self.allocator, &var out.text, self.ordinal);
-    try self.text(out, "_");
-    return fmt::append_i64(self.allocator, &var out.text, block);
-}
-
 /// Places a block here: its label.
 fn (self: &Amd) place_block(out: &var Out, block: i64) -> !void {
-    if out.binary {
-        return out.obj.place_block(block);
-    }
-    try self.block_label(out, block);
-    try self.text(out, ":");
-    return self.nl(out);
+    return out.obj.place_block(block);
 }
 
-fn (self: &Amd) jump(out: &var Out, mnemonic: []u8, block: i64) -> !void {
-    if out.binary {
-        return out.obj.x86_jump(self.allocator, 0 - 1, block, false);
-    }
-    try self.op(out, mnemonic);
-    try self.block_label(out, block);
-    return self.nl(out);
+/// Writes `jmp` to a block.
+fn (self: &Amd) jump(out: &var Out, block: i64) -> !void {
+    return out.obj.x86_jump(self.allocator, 0 - 1, block, false);
 }
 
 fn (self: &Amd) jcc(out: &var Out, cond: Cond, block: i64) -> !void {
-    if out.binary {
-        return out.obj.x86_jump(self.allocator, x86_cc_code(self.cc(cond)), block, false);
-    }
-    try self.text(out, "    j");
-    try self.text(out, self.cc(cond));
-    try self.text(out, " ");
-    try self.block_label(out, block);
-    return self.nl(out);
+    return out.obj.x86_jump(self.allocator, x86_cc_code(self.cc(cond)), block, false);
 }
 
 fn (self: &Amd) test_branch(out: &var Out, cond: Cond, taken: i64, other: i64, following: i64) -> !void {
@@ -1013,7 +835,7 @@ fn (self: &Amd) test_branch(out: &var Out, cond: Cond, taken: i64, other: i64, f
     }
     try self.jcc(out, cond, taken);
     if other != following {
-        try self.jump(out, "jmp", other);
+        try self.jump(out, other);
     }
     return;
 }
@@ -1024,38 +846,21 @@ fn (self: &var Amd) new_label() -> i64 {
     return self.labels;
 }
 
-fn (self: &Amd) local(out: &var Out, label: i64) -> !void {
-    try self.sym(out, "Lx");
-    try fmt::append_i64(self.allocator, &var out.text, self.ordinal);
-    try self.text(out, "_");
-    return fmt::append_i64(self.allocator, &var out.text, label);
-}
-
 /// Writes a jump to a label of the printer's own: jmp, or j and a
 /// condition.
 fn (self: &Amd) local_jump(out: &var Out, mnemonic: []u8, label: i64) -> !void {
-    if out.binary {
-        var cc = 0 - 1;
-        if !mem::equal_bytes(mnemonic, "jmp") {
-            cc = x86_cc_code(mnemonic[1..mem::len(mnemonic)]);
-            if cc < 0 {
-                return out.obj.fail_message(self.allocator, mnemonic);
-            }
+    var cc = 0 - 1;
+    if !mem::equal_bytes(mnemonic, "jmp") {
+        cc = x86_cc_code(mnemonic[1..mem::len(mnemonic)]);
+        if cc < 0 {
+            return out.obj.fail_message(self.allocator, mnemonic);
         }
-        return out.obj.x86_jump(self.allocator, cc, label, true);
     }
-    try self.op(out, mnemonic);
-    try self.local(out, label);
-    return self.nl(out);
+    return out.obj.x86_jump(self.allocator, cc, label, true);
 }
 
 fn (self: &Amd) local_label(out: &var Out, label: i64) -> !void {
-    if out.binary {
-        return out.obj.place_local(self.allocator, label);
-    }
-    try self.local(out, label);
-    try self.text(out, ":");
-    return self.nl(out);
+    return out.obj.place_local(self.allocator, label);
 }
 
 /// Writes `op %src, %dst` at a size.
@@ -1065,175 +870,78 @@ fn (self: &Amd) rr(out: &var Out, mnemonic: []u8, src: i64, dst: i64, size: i64)
 
 /// Writes `op %src, %dst`, each at its own size.
 fn (self: &Amd) rr2(out: &var Out, mnemonic: []u8, src: i64, src_size: i64, dst: i64, dst_size: i64) -> !void {
-    if out.binary {
-        return out.obj.x86_rr(self.allocator, mnemonic, self.number(src), src_size, self.number(dst), dst_size);
-    }
-    try self.op(out, mnemonic);
-    try self.reg(out, src, src_size);
-    try self.comma(out);
-    try self.reg(out, dst, dst_size);
-    return self.nl(out);
+    return out.obj.x86_rr(self.allocator, mnemonic, self.number(src), src_size, self.number(dst), dst_size);
 }
 
 /// Writes `op $imm, %dst` at a size.
 fn (self: &Amd) ir(out: &var Out, mnemonic: []u8, value: i64, dst: i64, size: i64) -> !void {
-    if out.binary {
-        return out.obj.x86_ir(self.allocator, mnemonic, value, self.number(dst), size);
-    }
-    try self.op(out, mnemonic);
-    try self.imm(out, value);
-    try self.comma(out);
-    try self.reg(out, dst, size);
-    return self.nl(out);
+    return out.obj.x86_ir(self.allocator, mnemonic, value, self.number(dst), size);
 }
 
 /// Writes `op %reg` at a size.
 fn (self: &Amd) r1(out: &var Out, mnemonic: []u8, reg: i64, size: i64) -> !void {
-    if out.binary {
-        return out.obj.x86_r1(self.allocator, mnemonic, self.number(reg), size);
-    }
-    try self.op(out, mnemonic);
-    try self.reg(out, reg, size);
-    return self.nl(out);
+    return out.obj.x86_r1(self.allocator, mnemonic, self.number(reg), size);
 }
 
 /// Writes an instruction without operands.
 fn (self: &Amd) bare(out: &var Out, mnemonic: []u8) -> !void {
-    if out.binary {
-        return out.obj.x86_bare(self.allocator, mnemonic);
-    }
-    try self.text(out, "    ");
-    try self.text(out, mnemonic);
-    return self.nl(out);
+    return out.obj.x86_bare(self.allocator, mnemonic);
 }
 
-/// Writes `op mem, %dst` at a size.
-fn (self: &Amd) mr(out: &var Out, mnemonic: []u8, at: Mem, dst: i64, size: i64) -> !void {
-    if out.binary {
-        return out.obj.x86_mr(
-            self.allocator, mnemonic, self.number_or_none(at.base), self.number_or_none(at.index), at.shift, at.disp, self.number(dst)
-        );
-    }
-    try self.op(out, mnemonic);
-    try self.mem_text(out, at);
-    try self.comma(out);
-    try self.reg(out, dst, size);
-    return self.nl(out);
+/// Writes `op mem, %dst`.
+fn (self: &Amd) mr(out: &var Out, mnemonic: []u8, at: Mem, dst: i64) -> !void {
+    return out.obj.x86_mr(
+        self.allocator, mnemonic, self.number_or_none(at.base), self.number_or_none(at.index), at.shift, at.disp, self.number(dst)
+    );
 }
 
-/// Writes `op %src, mem`, src at a size.
-fn (self: &Amd) rm(out: &var Out, mnemonic: []u8, src: i64, size: i64, at: Mem) -> !void {
-    if out.binary {
-        return out.obj.x86_rm(
-            self.allocator, mnemonic, self.number(src), self.number_or_none(at.base), self.number_or_none(at.index), at.shift, at.disp
-        );
-    }
-    try self.op(out, mnemonic);
-    try self.reg(out, src, size);
-    try self.comma(out);
-    try self.mem_text(out, at);
-    return self.nl(out);
+/// Writes `op %src, mem`.
+fn (self: &Amd) rm(out: &var Out, mnemonic: []u8, src: i64, at: Mem) -> !void {
+    return out.obj.x86_rm(
+        self.allocator, mnemonic, self.number(src), self.number_or_none(at.base), self.number_or_none(at.index), at.shift, at.disp
+    );
 }
 
 /// Writes `op $imm, mem`.
 fn (self: &Amd) im(out: &var Out, mnemonic: []u8, value: i64, at: Mem) -> !void {
-    if out.binary {
-        return out.obj.x86_im(
-            self.allocator, mnemonic, value, self.number_or_none(at.base), self.number_or_none(at.index), at.shift, at.disp
-        );
-    }
-    try self.op(out, mnemonic);
-    try self.imm(out, value);
-    try self.comma(out);
-    try self.mem_text(out, at);
-    return self.nl(out);
+    return out.obj.x86_im(
+        self.allocator, mnemonic, value, self.number_or_none(at.base), self.number_or_none(at.index), at.shift, at.disp
+    );
 }
 
 /// Writes `op mem`.
 fn (self: &Amd) m1(out: &var Out, mnemonic: []u8, at: Mem) -> !void {
-    if out.binary {
-        return out.obj.x86_m1(self.allocator, mnemonic, self.number_or_none(at.base), self.number_or_none(at.index), at.shift, at.disp);
-    }
-    try self.op(out, mnemonic);
-    try self.mem_text(out, at);
-    return self.nl(out);
+    return out.obj.x86_m1(self.allocator, mnemonic, self.number_or_none(at.base), self.number_or_none(at.index), at.shift, at.disp);
 }
 
 /// Writes `op %cl, %dst`: a shift by cl.
 fn (self: &Amd) shift_cl(out: &var Out, mnemonic: []u8, dst: i64) -> !void {
-    if out.binary {
-        return out.obj.x86_shift_cl(self.allocator, mnemonic, self.number(dst));
-    }
-    try self.op(out, mnemonic);
-    try self.text(out, "%cl, ");
-    try self.reg(out, dst, 8);
-    return self.nl(out);
+    return out.obj.x86_shift_cl(self.allocator, mnemonic, self.number(dst));
 }
 
 /// Writes `set<cc> %reg`, a byte register.
 fn (self: &Amd) setcc(out: &var Out, cond: Cond, reg: i64) -> !void {
-    if out.binary {
-        return out.obj.x86_setcc(self.allocator, x86_cc_code(self.cc(cond)), self.number(reg));
-    }
-    try self.text(out, "    set");
-    try self.text(out, self.cc(cond));
-    try self.text(out, " ");
-    try self.reg(out, reg, 1);
-    return self.nl(out);
+    return out.obj.x86_setcc(self.allocator, x86_cc_code(self.cc(cond)), self.number(reg));
 }
 
 /// Writes `leaq sym(%rip), %dst`.
 fn (self: &Amd) sym_address(out: &var Out, syms: &ir::NameTable, name: ir::Name, dst: i64) -> !void {
-    if out.binary {
-        return out.obj.x86_rip(self.allocator, syms, name, self.number(dst), false);
-    }
-    let text = ir::name_text(syms, name);
-    let bytes = text.as_bytes();
-    try self.op(out, "leaq");
-    try self.sym(out, bytes);
-    try self.text(out, "(%rip), ");
-    try self.reg(out, dst, 8);
-    return self.nl(out);
+    return out.obj.x86_rip(self.allocator, syms, name, self.number(dst), false);
 }
 
 /// Writes `movq sym@GOTPCREL(%rip), %dst`.
 fn (self: &Amd) got_address(out: &var Out, syms: &ir::NameTable, name: ir::Name, dst: i64) -> !void {
-    if out.binary {
-        return out.obj.x86_rip(self.allocator, syms, name, self.number(dst), true);
-    }
-    let text = ir::name_text(syms, name);
-    let bytes = text.as_bytes();
-    try self.op(out, "movq");
-    try self.sym(out, bytes);
-    try self.text(out, "@GOTPCREL(%rip), ");
-    try self.reg(out, dst, 8);
-    return self.nl(out);
+    return out.obj.x86_rip(self.allocator, syms, name, self.number(dst), true);
 }
 
-/// Writes `call sym`, through the PLT with plt.
-fn (self: &Amd) call(out: &var Out, syms: &ir::NameTable, name: ir::Name, plt: bool) -> !void {
-    if out.binary {
-        return out.obj.x86_call(self.allocator, syms, name);
-    }
-    let text = ir::name_text(syms, name);
-    let bytes = text.as_bytes();
-    try self.op(out, "call");
-    try self.sym(out, bytes);
-    if plt {
-        try self.text(out, "@PLT");
-    }
-    return self.nl(out);
+/// Writes `call sym`.
+fn (self: &Amd) call(out: &var Out, syms: &ir::NameTable, name: ir::Name) -> !void {
+    return out.obj.x86_call(self.allocator, syms, name);
 }
 
 /// Writes `call *%reg`.
 fn (self: &Amd) call_reg(out: &var Out, reg: i64) -> !void {
-    if out.binary {
-        return out.obj.x86_call_reg(self.allocator, self.number(reg));
-    }
-    try self.op(out, "call");
-    try self.text(out, "*");
-    try self.reg(out, reg, 8);
-    return self.nl(out);
+    return out.obj.x86_call_reg(self.allocator, self.number(reg));
 }
 
 /// Puts a constant in a register without touching the flags.
@@ -1259,10 +967,9 @@ fn (self: &Amd) mov(out: &var Out, src: i64, dst: i64) -> !void {
     return self.rr(out, "movq", src, dst, 8);
 }
 
-/// Returns a memory operand at a displacement from base; shown keeps a
-/// zero displacement in the text.
-fn based(base: i64, disp: i64, shown: bool) -> Mem {
-    return Mem { base: base, index: 0 - 1, shift: 0, disp: disp, shown: shown };
+/// Returns a memory operand at a displacement from base.
+fn based(base: i64, disp: i64) -> Mem {
+    return Mem { base: base, index: 0 - 1, shift: 0, disp: disp };
 }
 
 /// Returns the memory operand base, the frame and incoming argument pseudo
@@ -1289,30 +996,12 @@ fn (self: &Amd) mem(func: &MFunction, base: i64, disp: i64, slot: i64) -> Mem {
     if at == reg_sp() {
         offset = offset + self.pushed;
     }
-    return based(at, offset, false);
+    return based(at, offset);
 }
 
 /// Returns `(%base,%index,scale)`.
 fn indexed(base: i64, index: i64, shift: i64) -> Mem {
-    return Mem { base: base, index: index, shift: shift, disp: 0, shown: false };
-}
-
-/// Writes a memory operand as text.
-fn (self: &Amd) mem_text(out: &var Out, at: Mem) -> !void {
-    if at.disp != 0 or at.shown {
-        try fmt::append_i64(self.allocator, &var out.text, at.disp);
-    }
-    try self.text(out, "(");
-    if !is_zr(at.base) {
-        try self.reg(out, at.base, 8);
-    }
-    if at.index >= 0 {
-        try self.comma(out);
-        try self.reg(out, at.index, 8);
-        try self.comma(out);
-        try fmt::append_i64(self.allocator, &var out.text, 1 << at.shift);
-    }
-    return self.text(out, ")");
+    return Mem { base: base, index: index, shift: shift, disp: 0 };
 }
 
 /// Returns the mnemonic that loads width bytes, extended as the backend's
@@ -1337,14 +1026,6 @@ fn load_mnemonic(width: i64, signed: bool) -> []u8 {
         return "movsbq";
     }
     return "movzbl";
-}
-
-/// Returns the size of the register a load of width bytes writes.
-fn load_size(width: i64, signed: bool) -> i64 {
-    if width == 8 or signed {
-        return 8;
-    }
-    return 4;
 }
 
 /// Returns the mnemonic that stores width bytes.
@@ -1398,7 +1079,7 @@ fn (self: &var Amd) inst(out: &var Out, func: &MFunction, inst: &MInst, syms: &i
             if base == reg_sp() {
                 at.disp = self.pushed;
             }
-            return self.mr(out, "leaq", at, inst.rd, 8);
+            return self.mr(out, "leaq", at, inst.rd);
         },
         Sub => {
             if is_zr(inst.rm) {
@@ -1451,7 +1132,7 @@ fn (self: &var Amd) inst(out: &var Out, func: &MFunction, inst: &MInst, syms: &i
                 return self.mov(out, inst.rn, inst.rd);
             }
             if inst.imm <= 3 {
-                return self.mr(out, "leaq", indexed(inst.rn, inst.rm, inst.imm), inst.rd, 8);
+                return self.mr(out, "leaq", indexed(inst.rn, inst.rm, inst.imm), inst.rd);
             }
             try self.mov(out, inst.rm, 8);
             try self.ir(out, "shlq", inst.imm, 8, 8);
@@ -1540,7 +1221,7 @@ fn (self: &var Amd) inst(out: &var Out, func: &MFunction, inst: &MInst, syms: &i
             if is_zr(inst.rm) {
                 try self.mov_imm(out, 1, 8);
             } else {
-                try self.mr(out, "leaq", based(inst.rm, 1, false), 8, 8);
+                try self.mr(out, "leaq", based(inst.rm, 1), 8);
             }
             return self.select(out, inst.cond, inst.rn, 8, inst.rd);
         },
@@ -1549,7 +1230,7 @@ fn (self: &var Amd) inst(out: &var Out, func: &MFunction, inst: &MInst, syms: &i
             if is_float_reg(inst.rd) {
                 return self.xmm_load(out, inst, at);
             }
-            return self.mr(out, load_mnemonic(inst.width, inst.signed), at, inst.rd, load_size(inst.width, inst.signed));
+            return self.mr(out, load_mnemonic(inst.width, inst.signed), at, inst.rd);
         },
         Store => {
             let at = self.mem(func, inst.rn, inst.imm, inst.slot);
@@ -1559,7 +1240,7 @@ fn (self: &var Amd) inst(out: &var Out, func: &MFunction, inst: &MInst, syms: &i
             if is_zr(inst.rd) {
                 return self.im(out, store_mnemonic(inst.width), 0, at);
             }
-            return self.rm(out, store_mnemonic(inst.width), inst.rd, inst.width, at);
+            return self.rm(out, store_mnemonic(inst.width), inst.rd, at);
         },
         LoadIdx => {
             var index = inst.rm;
@@ -1574,7 +1255,7 @@ fn (self: &var Amd) inst(out: &var Out, func: &MFunction, inst: &MInst, syms: &i
             if is_float_reg(inst.rd) {
                 return self.xmm_load(out, inst, at);
             }
-            return self.mr(out, load_mnemonic(inst.width, inst.signed), at, inst.rd, load_size(inst.width, inst.signed));
+            return self.mr(out, load_mnemonic(inst.width, inst.signed), at, inst.rd);
         },
         StoreIdx => {
             var index = inst.rm;
@@ -1595,11 +1276,11 @@ fn (self: &var Amd) inst(out: &var Out, func: &MFunction, inst: &MInst, syms: &i
             if is_zr(inst.rd) {
                 return self.im(out, store_mnemonic(inst.width), 0, at);
             }
-            return self.rm(out, store_mnemonic(inst.width), inst.rd, inst.width, at);
+            return self.rm(out, store_mnemonic(inst.width), inst.rd, at);
         },
         FrameAddr => {
             let at = self.mem(func, reg_frame(), inst.imm, inst.slot);
-            return self.mr(out, "leaq", at, inst.rd, 8);
+            return self.mr(out, "leaq", at, inst.rd);
         },
         SymAddr => return self.sym_address(out, syms, inst.sym, inst.rd),
         GotAddr => {
@@ -1611,12 +1292,12 @@ fn (self: &var Amd) inst(out: &var Out, func: &MFunction, inst: &MInst, syms: &i
             return self.got_address(out, syms, inst.sym, inst.rd);
         },
         Call => {
+            try self.call(out, syms, inst.sym);
             let text = ir::name_text(syms, inst.sym);
             let bytes = text.as_bytes();
             if mem::starts_with(bytes, "_kz") {
-                return self.call(out, syms, inst.sym, false);
+                return;
             }
-            try self.call(out, syms, inst.sym, self.format == Format::Elf);
             // C leaves its result in rax.
             return self.rr(out, "movq", 8, 0, 8);
         },
@@ -1656,7 +1337,7 @@ fn (self: &var Amd) inst(out: &var Out, func: &MFunction, inst: &MInst, syms: &i
             }
             return self.float_out(out, inst.imm, inst.rd, inst.width);
         },
-        _ => return self.error_line(out, "amd64: an instruction this printer does not lower"),
+        _ => return self.fail(out, "amd64: an instruction this printer does not lower"),
     }
 }
 
@@ -1745,11 +1426,11 @@ fn (self: &var Amd) store_scaled_aside(out: &var Out, inst: &MInst) -> !void {
         try self.rr(out, "addq", inst.rn, t, 8);
     }
     if is_float_reg(inst.rd) {
-        try self.xmm_store(out, inst, based(t, 0, false));
+        try self.xmm_store(out, inst, based(t, 0));
     } else if is_zr(inst.rd) {
-        try self.im(out, store_mnemonic(inst.width), 0, based(t, 0, false));
+        try self.im(out, store_mnemonic(inst.width), 0, based(t, 0));
     } else {
-        try self.rm(out, store_mnemonic(inst.width), inst.rd, inst.width, based(t, 0, false));
+        try self.rm(out, store_mnemonic(inst.width), inst.rd, based(t, 0));
     }
     self.pushed = self.pushed - 8;
     return self.r1(out, "popq", t, 8);
@@ -1769,7 +1450,7 @@ fn (self: &Amd) add_rax(out: &var Out, ra: i64, rd: i64) -> !void {
     if is_zr(ra) {
         return self.mov(out, 8, rd);
     }
-    return self.mr(out, "leaq", indexed(ra, 8, 0), rd, 8);
+    return self.mr(out, "leaq", indexed(ra, 8, 0), rd);
 }
 
 /// rd = rn + imm, by lea, which leaves the flags.
@@ -1779,7 +1460,7 @@ fn (self: &Amd) add_imm(out: &var Out, rd: i64, rn: i64, value: i64) -> !void {
     }
     if !fits_i32(value) {
         try self.ir(out, "movabsq", value, 8, 8);
-        return self.mr(out, "leaq", indexed(rn, 8, 0), rd, 8);
+        return self.mr(out, "leaq", indexed(rn, 8, 0), rd);
     }
     if value == 0 and rn != reg_sp() {
         return self.mov(out, rn, rd);
@@ -1788,7 +1469,7 @@ fn (self: &Amd) add_imm(out: &var Out, rd: i64, rn: i64, value: i64) -> !void {
     if rn == reg_sp() {
         offset = offset + self.pushed;
     }
-    return self.mr(out, "leaq", based(rn, offset, true), rd, 8);
+    return self.mr(out, "leaq", based(rn, offset), rd);
 }
 
 fn (self: &Amd) cmp_imm(out: &var Out, rn: i64, value: i64) -> !void {
@@ -1831,7 +1512,7 @@ fn (self: &Amd) select(out: &var Out, cond: Cond, a: i64, b: i64, rd: i64) -> !v
     if is_zr(right) {
         if left == rd {
             if left == 8 {
-                return self.error_line(out, "amd64: select of rax and zero into rax");
+                return self.fail(out, "amd64: select of rax and zero into rax");
             }
             try self.mov_imm(out, 0, 8);
             right = 8;
@@ -1851,16 +1532,7 @@ fn (self: &Amd) select(out: &var Out, cond: Cond, a: i64, b: i64, rd: i64) -> !v
 }
 
 fn (self: &Amd) cmov(out: &var Out, cond: Cond, src: i64, dst: i64) -> !void {
-    if out.binary {
-        return out.obj.x86_cmov(self.allocator, x86_cc_code(self.cc(cond)), self.number(src), self.number(dst));
-    }
-    try self.text(out, "    cmov");
-    try self.text(out, self.cc(cond));
-    try self.text(out, "q ");
-    try self.reg(out, src, 8);
-    try self.comma(out);
-    try self.reg(out, dst, 8);
-    return self.nl(out);
+    return out.obj.x86_cmov(self.allocator, x86_cc_code(self.cc(cond)), self.number(src), self.number(dst));
 }
 
 /// Reports whether a machine register is live after the instruction being
@@ -1877,7 +1549,7 @@ fn (self: &var Amd) wide(out: &var Out, inst: &MInst, mnemonic: []u8, signed: bo
     if is_zr(inst.rm) or is_zr(inst.rn) {
         if !high {
             // Selection divides by a register it knows is nonzero.
-            return self.error_line(out, "amd64: division by the zero register");
+            return self.fail(out, "amd64: division by the zero register");
         }
         return self.mov_imm(out, 0, inst.rd);
     }
@@ -1933,9 +1605,9 @@ fn (self: &var Amd) divide(out: &var Out, rn: i64, rm: i64, signed: bool) -> !vo
 fn (self: &Amd) wide_operand(out: &var Out, mnemonic: []u8, rm: i64, size: i64) -> !void {
     let into_rax = mem::equal_bytes(mnemonic, "orq");
     if rm == self.rdx {
-        let saved = based(reg_sp(), 0, false);
+        let saved = based(reg_sp(), 0);
         if into_rax {
-            return self.mr(out, mnemonic, saved, 8, 8);
+            return self.mr(out, mnemonic, saved, 8);
         }
         return self.m1(out, mnemonic, saved);
     }
@@ -1953,7 +1625,7 @@ fn (self: &var Amd) end_wide(out: &var Out, save: bool, wrote_rdx: bool) -> !voi
     }
     self.pushed = self.pushed - 8;
     if wrote_rdx {
-        return self.mr(out, "leaq", based(reg_sp(), 8, false), reg_sp(), 8);
+        return self.mr(out, "leaq", based(reg_sp(), 8), reg_sp());
     }
     return self.r1(out, "popq", self.rdx, 8);
 }
@@ -1965,7 +1637,7 @@ fn (self: &var Amd) divide_remainder(out: &var Out, div: &MInst, msub: &MInst) -
     let q = div.rd;
     let r = msub.rd;
     if is_zr(div.rm) or is_zr(div.rn) {
-        return self.error_line(out, "amd64: division by the zero register");
+        return self.fail(out, "amd64: division by the zero register");
     }
     let rdx = self.rdx;
     let save = div.rm == rdx or (q != rdx and r != rdx and self.is_live(rdx));
@@ -2080,64 +1752,24 @@ fn (self: &Amd) xmm_number(n: i64) -> i64 {
     return n;
 }
 
-/// Writes xmm n.
-fn (self: &Amd) xmm(out: &var Out, n: i64) -> !void {
-    try self.text(out, "%xmm");
-    return fmt::append_i64(self.allocator, &var out.text, self.xmm_number(n));
-}
-
 /// Writes `op %xmm a, %xmm b`.
 fn (self: &Amd) xx(out: &var Out, mnemonic: []u8, a: i64, b: i64) -> !void {
-    if out.binary {
-        return out.obj.x86_xx(self.allocator, mnemonic, 0, self.xmm_number(a), self.xmm_number(b));
-    }
-    try self.op(out, mnemonic);
-    try self.xmm(out, a);
-    try self.comma(out);
-    try self.xmm(out, b);
-    return self.nl(out);
+    return out.obj.x86_xx(self.allocator, mnemonic, 0, self.xmm_number(a), self.xmm_number(b));
 }
 
 /// Writes `op<ss|sd> %xmm a, %xmm b`.
 fn (self: &Amd) float_rr(out: &var Out, mnemonic: []u8, width: i64, a: i64, b: i64) -> !void {
-    if out.binary {
-        return out.obj.x86_xx(self.allocator, mnemonic, width, self.xmm_number(a), self.xmm_number(b));
-    }
-    try self.text(out, "    ");
-    try self.text(out, mnemonic);
-    if width == 8 {
-        try self.text(out, "sd ");
-    } else {
-        try self.text(out, "ss ");
-    }
-    try self.xmm(out, a);
-    try self.comma(out);
-    try self.xmm(out, b);
-    return self.nl(out);
+    return out.obj.x86_xx(self.allocator, mnemonic, width, self.xmm_number(a), self.xmm_number(b));
 }
 
 /// Writes `op %reg, %xmm n`, reg at a size.
 fn (self: &Amd) rx(out: &var Out, mnemonic: []u8, reg: i64, size: i64, xmm: i64) -> !void {
-    if out.binary {
-        return out.obj.x86_rx(self.allocator, mnemonic, self.number(reg), size, self.xmm_number(xmm));
-    }
-    try self.op(out, mnemonic);
-    try self.reg(out, reg, size);
-    try self.comma(out);
-    try self.xmm(out, xmm);
-    return self.nl(out);
+    return out.obj.x86_rx(self.allocator, mnemonic, self.number(reg), size, self.xmm_number(xmm));
 }
 
 /// Writes `op %xmm n, %reg`, reg at a size.
 fn (self: &Amd) xr(out: &var Out, mnemonic: []u8, xmm: i64, reg: i64, size: i64) -> !void {
-    if out.binary {
-        return out.obj.x86_xr(self.allocator, mnemonic, self.xmm_number(xmm), self.number(reg), size);
-    }
-    try self.op(out, mnemonic);
-    try self.xmm(out, xmm);
-    try self.comma(out);
-    try self.reg(out, reg, size);
-    return self.nl(out);
+    return out.obj.x86_xr(self.allocator, mnemonic, self.xmm_number(xmm), self.number(reg), size);
 }
 
 /// Returns the xmm register a float register number names: 40..44 are
@@ -2227,34 +1859,16 @@ fn scalar_move(width: i64) -> []u8 {
 
 /// Loads a float from memory into its xmm register.
 fn (self: &Amd) xmm_load(out: &var Out, inst: &MInst, at: Mem) -> !void {
-    let xmm = xmm_of(inst.rd);
-    let mnemonic = scalar_move(inst.width);
-    if out.binary {
-        return out.obj.x86_mx(
-            self.allocator, mnemonic, self.number_or_none(at.base), self.number_or_none(at.index), at.shift, at.disp, self.xmm_number(xmm)
-        );
-    }
-    try self.op(out, mnemonic);
-    try self.mem_text(out, at);
-    try self.comma(out);
-    try self.xmm(out, xmm);
-    return self.nl(out);
+    return out.obj.x86_mx(
+        self.allocator, scalar_move(inst.width), self.number_or_none(at.base), self.number_or_none(at.index), at.shift, at.disp, self.xmm_number(xmm_of(inst.rd))
+    );
 }
 
 /// Stores a float from its xmm register to memory.
 fn (self: &Amd) xmm_store(out: &var Out, inst: &MInst, at: Mem) -> !void {
-    let xmm = xmm_of(inst.rd);
-    let mnemonic = scalar_move(inst.width);
-    if out.binary {
-        return out.obj.x86_xm(
-            self.allocator, mnemonic, self.xmm_number(xmm), self.number_or_none(at.base), self.number_or_none(at.index), at.shift, at.disp
-        );
-    }
-    try self.op(out, mnemonic);
-    try self.xmm(out, xmm);
-    try self.comma(out);
-    try self.mem_text(out, at);
-    return self.nl(out);
+    return out.obj.x86_xm(
+        self.allocator, scalar_move(inst.width), self.xmm_number(xmm_of(inst.rd)), self.number_or_none(at.base), self.number_or_none(at.index), at.shift, at.disp
+    );
 }
 
 fn (self: &Amd) float_binary(out: &var Out, inst: &MInst) -> !void {
@@ -2293,7 +1907,7 @@ fn (self: &Amd) float_unary(out: &var Out, inst: &MInst) -> !void {
         if is_zr(inst.rn) {
             return self.mov(out, 8, inst.rd);
         }
-        try self.mr(out, "leaq", indexed(inst.rn, 8, 0), inst.rd, 8);
+        try self.mr(out, "leaq", indexed(inst.rn, 8, 0), inst.rd);
         if inst.width == 4 {
             try self.rr(out, "movl", inst.rd, inst.rd, 4);
         }
@@ -2322,7 +1936,7 @@ fn (self: &Amd) float_unary(out: &var Out, inst: &MInst) -> !void {
         try self.float_rr(out, "sqrt", inst.width, a, dest);
         return self.xmm_result(out, dest, inst.rd, inst.width);
     }
-    return self.error_line(out, "amd64: float rounding is a C call");
+    return self.fail(out, "amd64: float rounding is a C call");
 }
 
 /// Compares two floats and leaves the flags an AArch64 `fcmp` would, as an
