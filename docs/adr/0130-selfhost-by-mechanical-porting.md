@@ -27,8 +27,8 @@ Go 実装の挙動、処理順、diagnostic、package 境界を保ったまま�
 diagnostic・処理順が Go と同じなら Kizu-native に変えてよい。pass 構成と
 diagnostic 文面は変えない。
 
-両実装が食い違ったときの判断は Kizu 側が先に来る。Go は追従するか、追従できない
-ならその gate を落とす。
+移植の間、両実装が食い違ったときの判断は Kizu 側が先に来た。Go は追従するか、
+追従できないならその gate を落とした。
 
 利用者が通る経路は 1 つに保つ。Go を fallback にも feature flag にも戻さない。
 
@@ -40,15 +40,16 @@ diagnostic 文面は変えない。
 | 汎用 Go-to-Kizu transpiler を維持する | Go の interface、GC、slice、pointer semantics を再実装する恒久的な第二 toolchain になる |
 | Go と Kizu を長期間ともに shipping する | 言語機能を二度実装し、fallback が片方の欠陥を隠した以前の失敗を繰り返す |
 | file ごとに規則なしで AI へ一括変換させる | ownership、module 境界、diagnostic の判断が file ごとに分岐する |
-| 生成 text を golden として pin し、それを契約にする | 実装の形を固定し、挙動が正しくても変更できない。契約は `examples/` と `tests/behavior/` が持つ。両実装の出力を突き合わせる差分 corpus(`compiler/tests/`)は別物で、これは採用している — golden と違い、Go 側を変えれば `-update` で両方が一緒に動く |
+| 生成 text を golden として pin し、それを契約にする | 実装の形を固定し、挙動が正しくても変更できない。契約は `examples/` と `tests/behavior/` が持つ。両実装の出力を突き合わせる差分 corpus(`compiler/tests/`)は別物として採用した — golden と違い、Go 側を変えれば `-update` で両方が一緒に動いた |
 
 ## Consequences
 
 - 逐語訳なので、Go が「文字列も pointer も自由に共有できる」前提で書いた場所は、
   所有権のある言語では copy か再検索になる。移植版が Go より遅い分の主な出どころが
   これで、cutover 後に表現を設計し直せば縮む
-- `compiler/tests/` の差分 corpus は両実装が共有する。Go 側の挙動を変えたら
-  `-update` で corpus を再生成し、移植側も同じ commit で追従させる
+- `compiler/tests/` の差分 corpus は移植の間、両実装が共有した。Go 側の挙動を変えたら
+  `-update` で corpus を再生成し、移植側も同じ commit で追従させた。Go の削除で
+  `-update` は無くなり、期待値は Go が最後に生成したものが checked-in のまま残っている
 - Go の削除と、その後 Kizu compiler を build する seed の供給は 1 つの判断として
   行った。seed は `scripts/seed.txt` に pin した前のリリースで、`compiler/` は
   その seed が build できる範囲に保つ(`docs/bootstrap.md`)

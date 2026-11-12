@@ -67,9 +67,9 @@ artifact の file サイズの合計だけで、entry を全部読んで並べ�
 CI は `KIZU_CACHE_DIR` を runner の一時 directory に固定し、commit ごとの key で
 content-addressed artifact を復元・保存します。新しい commit は直近 cache を prefix
 match で復元しますが、全 test は毎回実行し、key が合わない artifact だけを
-再 build します。shipping compiler が build する selfhost の第 1 stage も、全入力 file の
-hash が一致するときだけ復元します。`TestSelfhostBootstrap` の第 2 stage は毎回
-build するため、fixed point の検査は cache hit で省略しません。
+再 build します。種が build する stage1 もこの cache を通ります。bootstrap の検査
+(`compiler/tests/harness` の `bootstrap`)は stage2 に空の cache で自分自身を build し直させる
+ため、fixed point の検査は cache hit で省略しません。
 
 ## cache 設計の制約
 
