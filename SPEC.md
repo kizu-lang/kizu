@@ -227,9 +227,9 @@ std::arena::Handle<T>
 
 ## 5. 実装方針
 
-利用者が受け取る実装は 1 つ、`compiler/` の Kizu 製 compiler です。Go 実装
-(`internal/` + `cmd/kizu`)はそれを build する seed であり、両実装の出力を
-突き合わせる oracle でもあります(ADR-0130)。利用者が通る経路を 2 つにはしません。
+利用者が受け取る実装は 1 つ、`compiler/` の Kizu 製 compiler です。それを build する
+のは pin した前のリリース(種)です(`docs/bootstrap.md`)。利用者が通る経路を 2 つには
+しません。
 
 `run` と `test` は生成した実行ファイルを走らせます。経路は 1 本で、interpreter は
 ありません(ADR-0083)。native code は LLVM IR backend が生成します。
@@ -2937,7 +2937,7 @@ package 名は、その package の中では import なしに束縛されてい�
 `std` package の module なので、この file は `std::` で始まる完全パスをそのまま
 書けます。
 
-戻り値の型が完全パスなのは、`std::array::Array` が Go 実装の持つ型で、この file が
+戻り値の型が完全パスなのは、`std::array::Array` が compiler の持つ型で、この file が
 宣言したものではないからです。compiler が提供する storage type は完全パスでだけ
 名前を持ちます。自分の file が宣言した型は短い名前で書けます —— `std::string::String`
 は `string.kizu` の `pub struct String` なので、同じ file の中では `String { ... }`

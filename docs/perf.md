@@ -27,7 +27,7 @@ single-file edit を通しで測ります。`just perf-cache-isolated` は隔離
 一時 cache directory で同じことをします。
 
 baseline の対象は `parse` / `check` / `run` / `ir` / `build --emit-llvm` /
-`build --target wasm32-wasi` / `cache status` と、`go test ./...`、
+`build --target wasm32-wasi` / `cache status` と、`scripts/bootstrap.sh`、
 `pre-commit run --all-files` です。入力は `examples/hello.kizu` と、complex app
 baseline として `examples/user_registry.kizu` を使います。
 
@@ -58,7 +58,6 @@ prune も linker の既定に任せます(空の cache で build すればここ
 
 toolchain は driver・target・flag・SDK です。`build --emit-llvm` の LLVM IR と
 `build --target wasm32-wasi` の出力は cache せず、毎回 lower します(ADR-0126)。
-Go seed と Kizu 製 compiler は同じ directory と同じ key を共有します。
 
 `cache prune` が全消し、既定の上限(256 MiB)を超えた分は最後に使われたのが古い順
 (LRU)に落ちます。hit のたびに entry の `used_at` を更新します。保存のたびに見るのは
