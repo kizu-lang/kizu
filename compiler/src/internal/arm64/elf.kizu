@@ -3,8 +3,8 @@ import std::array;
 import std::mem;
 import std::string;
 
-// The ELF object of Linux arm64 (ELF64 AArch64, ET_REL), written from the
-// Obj the printer filled (obj.kizu). It lays the object out the way the
+// The ELF object of Linux arm64 or x86-64 (ELF64 AArch64 or x86-64,
+// ET_REL), written from the Obj the printer filled (obj.kizu). It lays the object out the way the
 // system assembler lays out the same lines: among the section headers the
 // string table first, then the sections in the order they are first
 // entered, each followed by its relocations, and the symbol table last;
@@ -15,8 +15,24 @@ import std::string;
 // section contents come first, then the symbols, the relocations, the
 // strings and the section headers.
 
-// The AArch64 ELF relocation of each relocation kind the printer records.
-fn elf_reloc_type(kind: i64) -> i64 {
+// The ELF relocation of each relocation kind the printer records.
+fn elf_reloc_type(kind: i64, x86: bool) -> i64 {
+    if x86 {
+        if kind == reloc_x86_pc32() {
+            // R_X86_64_PC32
+            return 2;
+        }
+        if kind == reloc_x86_plt32() {
+            // R_X86_64_PLT32
+            return 4;
+        }
+        if kind == reloc_x86_gotpcrelx() {
+            // R_X86_64_REX_GOTPCRELX
+            return 42;
+        }
+        // R_X86_64_64
+        return 1;
+    }
     if kind == reloc_unsigned() {
         // R_AARCH64_ABS64
         return 257;
@@ -124,10 +140,12 @@ fn elf_symbol_name(allocator: Allocator, syms: &ir::NameTable, symbol: &Symbol, 
 }
 
 /// Resolves what the assembler resolves before it writes an ELF object: a
-/// call to a local function of its own section is patched in place, and a
-/// relocation against a local symbol names its section's symbol with the
-/// symbol's offset as the addend, but for one through the GOT, which names
-/// the symbol itself.
+/// call to a local function of its own section is patched in place (on
+/// x86-64 any reference relative to the instruction), and a relocation
+/// against a local symbol names its section's symbol with the symbol's
+/// offset as the addend, but for one through the GOT, and one with an
+/// addend into a section of merged strings, which name the symbol itself:
+/// the linker finds a merged string by where the reference points.
 fn (self: &var Obj) resolve_elf(allocator: Allocator) -> !void {
     var starts = array::new<i64>(allocator);
     defer starts.deinit(allocator);
@@ -163,8 +181,23 @@ fn (self: &var Obj) resolve_elf(allocator: Allocator) -> !void {
                 try self.patch(section_index, reloc.address, 0x94000000 | (distance & 0x3FFFFFF));
                 continue;
             }
-            let got = reloc.kind == reloc_got_page21() or reloc.kind == reloc_got_pageoff12();
-            if local and !got {
+            let relative = reloc.kind == reloc_x86_pc32() or reloc.kind == reloc_x86_plt32();
+            if self.x86 and relative and local and symbol.section == section_index {
+                let distance = symbol.value + reloc.addend - reloc.address;
+                if distance < 0 - 2147483648 or distance > 2147483647 {
+                    try self.fail(allocator, "reference out of range", distance);
+                }
+                try self.patch(section_index, reloc.address, distance);
+                continue;
+            }
+            let got = reloc.kind == reloc_got_page21() or reloc.kind == reloc_got_pageoff12() or reloc.kind == reloc_x86_gotpcrelx();
+            var merged = false;
+            if symbol.section >= 0 {
+                if self.sections.at(symbol.section) |held| {
+                    merged = held.kind == SectionKind::Cstring and reloc.addend != 0;
+                }
+            }
+            if local and !got and !merged {
                 reloc.symbol = starts.get_or_panic(symbol.section);
                 reloc.addend = reloc.addend + symbol.value;
             } else if symbol.section < 0 and symbol.temp {
@@ -209,7 +242,7 @@ fn elf_local(symbol: &Symbol) -> bool {
     return !symbol.global and symbol.section >= 0;
 }
 
-/// Writes the object: a 64-bit little-endian AArch64 ET_REL.
+/// Writes the object: a 64-bit little-endian AArch64 or x86-64 ET_REL.
 pub fn (self: &var Obj) write_elf(allocator: Allocator, syms: &ir::NameTable, out: &var string::String) -> !void {
     try self.resolve_elf(allocator);
     // The section header table: the null section, the string table, each
@@ -324,9 +357,13 @@ pub fn (self: &var Obj) write_elf(allocator: Allocator, syms: &ir::NameTable, ou
     // ELFCLASS64, ELFDATA2LSB, EV_CURRENT, the System V ABI
     try put(allocator, out, 0x010102, 4);
     try put(allocator, out, 0, 8);
-    // ET_REL, EM_AARCH64, EV_CURRENT
+    // ET_REL, EM_X86_64 or EM_AARCH64, EV_CURRENT
     try put(allocator, out, 1, 2);
-    try put(allocator, out, 183, 2);
+    if self.x86 {
+        try put(allocator, out, 62, 2);
+    } else {
+        try put(allocator, out, 183, 2);
+    }
     try put(allocator, out, 1, 4);
     try put(allocator, out, 0, 8);
     try put(allocator, out, 0, 8);
@@ -397,7 +434,7 @@ pub fn (self: &var Obj) write_elf(allocator: Allocator, syms: &ir::NameTable, ou
             reloc_index = reloc_index + 1;
             let symbol = self.symbols.get_or_panic(reloc.symbol);
             try put(allocator, out, reloc.address, 8);
-            try put(allocator, out, elf_reloc_type(reloc.kind), 4);
+            try put(allocator, out, elf_reloc_type(reloc.kind, self.x86), 4);
             try put(allocator, out, symbol.index, 4);
             try put(allocator, out, reloc.addend, 8);
         }

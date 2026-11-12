@@ -14,9 +14,10 @@ import std::string;
 // Every function is selected into machine IR, given registers, and printed;
 // an op or a type the backend does not lower stops the build with a
 // diagnostic naming it rather than being handed to another backend. The
-// same machine IR, allocated, is also printed as x86-64 assembly text by
-// the amd64 printer, for Mach-O, ELF or COFF, which the system assembler
-// assembles.
+// same machine IR, allocated, is also printed as x86-64 by the amd64
+// printer: as assembly text, for Mach-O, ELF or COFF, which the system
+// assembler assembles, or for Linux as an ELF object of its own
+// (amd64_encode.kizu), as the assembler would make it of that text.
 
 /// Is the object format the code is written for. Selection names symbols
 /// the Mach-O way; ELF and COFF spell them through symbol.
@@ -43,19 +44,26 @@ pub fn emit(allocator: Allocator, module: &ir::Module, arch: Arch, format: Forma
     return null;
 }
 
-/// Emits a lowered module for arm64 as an object in format, Mach-O for
-/// Darwin or ELF for Linux: each instruction encoded here, laid out the
-/// way the system assembler would lay it out. An operand no encoding takes
-/// stops the build. A Mach-O object's LC_BUILD_VERSION names no version;
-/// the link stamps the one of the runtime it links with.
-pub fn emit_object(allocator: Allocator, module: &ir::Module, format: Format, out: &var string::String) -> !?diagnostic::Diagnostic {
+/// Emits a lowered module as an object in format: for arm64 Mach-O for
+/// Darwin or ELF for Linux, for x86-64 (Linux) ELF. Each instruction is
+/// encoded here, laid out the way the system assembler would lay it out.
+/// An operand no encoding takes stops the build. A Mach-O object's
+/// LC_BUILD_VERSION names no version; the link stamps the one of the
+/// runtime it links with.
+pub fn emit_object(allocator: Allocator, module: &ir::Module, arch: Arch, format: Format, out: &var string::String) -> !?diagnostic::Diagnostic {
     var sink = new_out(allocator, true, format);
     defer sink.deinit(allocator);
-    if try emit_into(allocator, module, Arch::Arm64, format, &var sink) |failed| {
+    let x86 = is_x86(arch);
+    sink.obj.x86 = x86;
+    if try emit_into(allocator, module, arch, format, &var sink) |failed| {
         return move failed;
     }
     if sink.obj.failure.len() > 0 {
-        var message = try string::from_bytes(allocator, "arm64 error: no encoding for ");
+        var prefix = "arm64 error: no encoding for ";
+        if x86 {
+            prefix = "amd64 error: no encoding for ";
+        }
+        var message = try string::from_bytes(allocator, prefix);
         defer message.deinit(allocator);
         try message.append_string(allocator, &sink.obj.failure);
         let bytes = message.as_bytes();
@@ -66,8 +74,8 @@ pub fn emit_object(allocator: Allocator, module: &ir::Module, format: Format, ou
 }
 
 /// Is where the printer writes: x86-64 assembly text, or with binary set
-/// (arm64) the machine code of each instruction into obj, and then the
-/// object file into text.
+/// the machine code of each instruction into obj, and then the object file
+/// into text.
 pub struct Out {
     binary: bool,
     text: string::String,
@@ -171,11 +179,9 @@ fn emit_into(allocator: Allocator, module: &ir::Module, arch: Arch, format: Form
         let symbol = symbols.get_or_panic(ordinal);
         let allocation = try allocate(allocator, func, arch);
         defer allocation.deinit(allocator);
-        let symbol_text = ir::name_text(&selector.syms, symbol);
-        let symbol_bytes = symbol_text.as_bytes();
         let exported = exports.get_or_panic(ordinal);
         if is_x86(arch) {
-            try amd64_print_function(allocator, &var out.text, func, &allocation, symbol_bytes, exported, ordinal, &selector.syms, arch, format);
+            try amd64_print_function(allocator, out, func, &allocation, symbol, exported, ordinal, &selector.syms, arch, format);
             ordinal = ordinal + 1;
             continue;
         }
