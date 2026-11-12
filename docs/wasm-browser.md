@@ -175,4 +175,5 @@ kizu build --target wasm32-browser --emit esm -o dist examples/modules/target_ad
 small integer ABI を実 Chrome で検査します。
 `tests/browser/esm_bundle.html` は`--emit esm`の`app.mjs`が隣のbinaryをbrowserから読み、
 明示した`start()`で実行することを検査します。
-広い corpus は `scripts/backend-matrix` の `browser` route が同じ adapter を使って測ります。
+広い corpus を同じ adapter で測っていた `scripts/backend-matrix` は Go で書かれていて、
+Go 実装と一緒に削除しました。今は代わる経路がありません。

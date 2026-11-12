@@ -28,6 +28,10 @@ pub struct Parser {
     // being parsed, which the extern declaration they belong to takes.
     link_library: ?ast::Text,
     link_framework: ?ast::Text,
+    /// The `@embed_file` calls read so far, in source order. The parser does
+    /// not know which package a file belongs to, so the loader reads each file
+    /// and fills in the literal's bytes.
+    pub embeds: array::Array<ast::Expression>,
 }
 
 struct NameList {
@@ -54,7 +58,8 @@ pub fn new(allocator: Allocator, scanner: lexer::Lexer) -> !Parser {
         diagnostics_store: array::new<diagnostic::Diagnostic>(allocator),
         safety: null,
         link_library: null,
-        link_framework: null
+        link_framework: null,
+        embeds: array::new<ast::Expression>(allocator)
     };
 }
 
@@ -2393,11 +2398,52 @@ fn (self: &var Parser) parse_prefix_expression(
             inner
         },
         LBracket => try self.parse_buffer_literal_expr(tree),
+        At => try self.parse_builtin_expr(tree),
         _ => {
             try self.error_token("expected expression, got ", self.current_token());
             try tree.add_recovered_expression(token_span_at(self))
         },
     };
+}
+
+// Parses a builtin call `@name(...)` in expression position. The names are
+// the compiler's and a program cannot declare one, so a name the compiler does
+// not know is refused here, as an unknown attribute is above a declaration.
+// `@embed_file` is the only one.
+fn (self: &var Parser) parse_builtin_expr(
+    tree: &var ast::Ast
+) -> !ast::Expression {
+    let start = token_span_at(self);
+    if self.peek_kind() != token::Kind::Ident {
+        try self.error_token("parse error: expected a builtin name after `@`, got ",
+            self.peek_token());
+        return try tree.add_recovered_expression(start);
+    }
+    try self.next_token();
+    if !token_literal_equal(self.current_token(), "embed_file") {
+        try self.error_literal("parse error: unknown builtin @", self.current_token());
+        return try tree.add_recovered_expression(start);
+    }
+    if !try self.expect_peek(token::Kind::LParen) {
+        return try tree.add_recovered_expression(start);
+    }
+    try self.next_token();
+    if self.current_kind() != token::Kind::String or
+        self.peek_kind() != token::Kind::RParen {
+        try self.error_text(
+            "parse error: @embed_file takes one string literal, the path of the file");
+        return try tree.add_recovered_expression(start);
+    }
+    let path = try self.retain_current_literal(tree);
+    try self.next_token();
+    let empty = try tree.add_empty_text();
+    let span = try tree.add_span(span_through(start, token_span_at(self)));
+    let embed = ast::EmbedFile { path: path, span: span };
+    let expression = try tree.add_expression(ast::ExpressionNode::String(
+        ast::StringExpr { value: empty, embed: embed }
+    ));
+    try self.embeds.append(self.allocator, expression);
+    return expression;
 }
 
 fn (self: &Parser) retain_literal_expression(
@@ -2407,7 +2453,7 @@ fn (self: &Parser) retain_literal_expression(
     let value = try self.retain_current_literal(tree);
     if quoted {
         return try tree.add_expression(ast::ExpressionNode::String(
-            ast::StringExpr { value: value }
+            ast::StringExpr { value: value, embed: null }
         ));
     }
     return try tree.add_expression(ast::ExpressionNode::Int(
@@ -2982,7 +3028,7 @@ fn (self: &var Parser) parse_type_apply_expr(
         return try tree.add_recovered_expression(token_span_at(self));
     let type_arg = try tree.add_text(move spelling);
     let expression = try tree.add_expression(ast::ExpressionNode::TypeApply(
-        ast::TypeApplyExpr { callee: callee, type_arg: type_arg }
+        ast::TypeApplyExpr { callee: callee, type_arg: type_arg, resolved: false }
     ));
     let _ = try self.expect_type_close();
     return expression;

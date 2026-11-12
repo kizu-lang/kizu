@@ -6,6 +6,11 @@
 決まった部分は実装と同時に `docs/perf.md` / `docs/architecture.md` / 該当 ADR へ移し、
 この文書は役目を終えたら消します。
 
+A1・A2 と U3(`--opt --thinlto`)は実装済みで、今の形は `docs/perf.md` が持ちます。
+書いた時点では Go 実装と `compiler/` の両方があり、§1 の場所(`internal/` の `.go`)と
+§2・§5・§7 A1 の「両実装」「`-update`」はその時点の記述です。Go 実装は削除したので、
+残る B1〜B3 は `compiler/` だけを変えます。
+
 ## 0. 要約
 
 | 段 | 内容 | 速くなるもの | 前提 |
@@ -133,8 +138,8 @@ symbol が要るので、その安全性を **名前で** 保つ。
 
 ## 5. bootstrap のバイト一致
 
-`TestSelfhostBootstrap` は seed が作った stage1 と、stage1 が自分を build した stage2 の
-byte 一致を見る。分割後も一致させるため、両実装に同じ規則を置く。
+bootstrap(`kizu run compiler/tests/harness -- bootstrap <stage2>`)は stage2 が自分自身を
+build し直した結果との byte 一致を見る。分割後も一致させるため、次の規則を置く。
 
 一致を保つ規則:
 
@@ -197,10 +202,9 @@ comptime は user 関数を実行しない(ADR-0006)ので、comptime のため�
 
 ### 6.2 B1 のテスト
 
-- `tests/fixtures/` に編集の対を置き、hash を比べる Go の test を足す: private 関数の body、
+- `tests/fixtures/` に編集の対を置き、hash を比べる test を `compiler/` に足す: private 関数の body、
   コメント、private 関数の追加では不変 / pub 署名、pub 型の private field、generic body の
   変更では変化。
-- 両実装の export data を corpus で byte 比較する(hash の一致を両実装で揃える)。
 
 ## 7. 移行手順
 
@@ -271,7 +275,7 @@ front end の出力(unit text)を cache するには、key に compiler 自身�
 
 | ID | 問い | 選択肢 | 判断材料 |
 | --- | --- | --- | --- |
-| U1 | compiler identity をどう作るか(B2) | (a) 実行ファイルの path を std から取れるようにし binary を hash する(Go の build ID 相当) (b) build 時に compiler/ と std の source tree hash を version module に生成して埋める(`gen-selfhost-version` の延長、Go seed も同じ規則で自分の source hash を持つ) | ADR-0126 は「selfhost が自分の path を知れない」「version 文字列は開発中に変わらない」で却下した。(b) は両方を避け両実装で対称。(a) は毎回 18MB 級の hash(perf-audit #3 で Kizu の SHA-256 は遅い) |
+| U1 | compiler identity をどう作るか(B2) | (a) 実行ファイルの path を std から取れるようにし binary を hash する(Go の build ID 相当) (b) build 時に compiler/ と std の source tree hash を version module に生成して埋める(`gen-selfhost-version` の延長) | ADR-0126 は「selfhost が自分の path を知れない」「version 文字列は開発中に変わらない」で却下した。(b) は両方を避ける。(a) は毎回 18MB 級の hash(perf-audit #3 で Kizu の SHA-256 は遅い) |
 | U2 | error code を module 間で独立に決める方法(B3) | (a) qualified な member 名の hash から code を作り、program unit で衝突を検査 (b) module ごとの番号範囲 (c) 現状維持し、error set を持つ module の追加・削除で後続 module を再処理する | ADR-0127(合成 set は code の和集合で再番号しない)と、runtime の `#define` は std の set だけを使うこと(`runtimeErrorSets`)。code の値が SPEC の約束に入るなら SPEC 判断 |
 | U3 | `--opt` に ThinLTO を入れるか | (a) single unit のまま (b) unit を bitcode にして `-flto=thin` + ThinLTO cache | toolchain 依存(Apple ld64 の libLTO、llvm-mingw の lld)、binary 速度の差、release build 時間。A1 の後に compiler の `--opt` build で測る |
 | U4 | debug の `build --emit-llvm` が何を印字するか | (a) 今どおり single unit の text (b) unit ごとの file を directory に出す | (a) は compile される text と別物になる。(b) は出力の形が変わる |

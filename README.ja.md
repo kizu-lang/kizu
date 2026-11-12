@@ -18,10 +18,9 @@ Rust より単純で、safe code では C/C++/Zig より安全で、CI とビル
 ## 現在の状態
 
 Kizu は初期プロトタイプで、自分自身を compile します。release が配る binary は
-`compiler/` にある Kizu 製の Kizu compiler です。Go 実装(`internal/` + `cmd/kizu`)は
-それを build する seed であり、両実装の出力を突き合わせる oracle でもあります
-(ADR-0130)。`TestSelfhostBootstrap` は、self-build した compiler が自分自身を
-byte 単位で再現することを要求します。
+`compiler/` にある Kizu 製の Kizu compiler で、それを build する seed は前のリリース
+です([docs/bootstrap.md](docs/bootstrap.md))。`just selfhost` は、self-build した
+compiler が自分自身を byte 単位で再現することを要求します。
 
 このリポジトリはまだ実験的です。言語設計の検証中は、構文と実装の詳細が変わり得ます。
 
@@ -35,14 +34,14 @@ lowering は 1 本しかないため、同じプログラムが `run` と `build
 
 | 機能 | 例の数 | check | run | llvm | wasm | wasm-opt | wasm-bin | browser |
 | --- | ---: | :--: | :--: | :--: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 55 | ✅ | ✅ | ✅ | 54/55 | 54/55 | 54/55 | 53/55 |
+| fn / let / struct / literals | 56 | ✅ | ✅ | ✅ | 55/56 | 55/56 | 55/56 | 54/56 |
 | arithmetic / bitwise / float | 11 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | while / break / continue / for / label | 11 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | if / match | 21 | ✅ | ✅ | ✅ | 20/21 | 20/21 | 20/21 | 18/21 |
-| enum / union | 20 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 17/20 |
-| error union `!T` / try / errdefer | 61 | ✅ | ✅ | ✅ | 39/61 | 39/61 | 39/61 | 36/61 |
+| enum / union | 21 | ✅ | ✅ | ✅ | 20/21 | 20/21 | 20/21 | 17/21 |
+| error union `!T` / try / errdefer | 62 | ✅ | ✅ | ✅ | 39/62 | 39/62 | 39/62 | 36/62 |
 | optional `?T` / orelse / capture | 30 | ✅ | ✅ | ✅ | 29/30 | 29/30 | 29/30 | 27/30 |
-| move / borrow | 74 | ✅ | ✅ | ✅ | 70/74 | 70/74 | 70/74 | 70/74 |
+| move / borrow | 75 | ✅ | ✅ | ✅ | 71/75 | 71/75 | 71/75 | 71/75 |
 | deinit / defer | 25 | ✅ | ✅ | ✅ | 24/25 | 24/25 | 24/25 | 24/25 |
 | arena / handle | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | comptime / reflection | 20 | ✅ | ✅ | ✅ | 18/20 | 18/20 | 18/20 | 18/20 |
@@ -64,15 +63,14 @@ lowering は 1 本しかないため、同じプログラムが `run` と `build
 | std::date | 2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::fmt | 7 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::testing | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::fs / path / io / process | 34 | ✅ | ✅ | ✅ | 14/34 | 14/34 | 14/34 | 4/34 |
-| std::net / http | 23 | ✅ | ✅ | ✅ | 4/23 | 4/23 | 4/23 | 4/23 |
+| std::fs / path / io / process | 35 | ✅ | ✅ | ✅ | 14/35 | 14/35 | 14/35 | 4/35 |
+| std::net / http | 24 | ✅ | ✅ | ✅ | 4/24 | 4/24 | 4/24 | 4/24 |
 | async / coro | 2 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | std::thread | 3 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 
 `✅` はその行の example が全て通ること、分数は一部だけ通ること、`❌` は 1 つも
 通らないことを表します。各行は自分の feature tag を宣言した example を数えるので、
-1 つの example は複数の行に現れます。表は `just backend-matrix` が生成します。
-backend を触ったら回し直してください。`run`、`wasm`、`wasm-opt`、`wasm-bin`、
+1 つの example は複数の行に現れます。`run`、`wasm`、`wasm-opt`、`wasm-bin`、
 `browser` はプログラムの出力で判定します。`run` は native build を実行し、`wasm` と
 `wasm-opt` は既定と最適化後の WAT を、`wasm-bin` は binary module を `wasmtime` で、
 `browser` は browser binary を JavaScript host adapter で読み込みます。`llvm` は
@@ -99,7 +97,6 @@ language core 周辺の tooling:
 - 上限付きローカルビルドキャッシュ(artifact が何でできているかで content-addressed)
 - extern function 宣言向けの限定的な C header import
 - `lib/kizu/std/` のKizu標準ライブラリと`lib/kizu/browser/`のbrowser host runtime
-- LSP server (`cmd/kizu-lsp`)
 
 interpreter はありません。`kizu test` は `kizu run` が `main` をビルドして実行するのと
 同じ経路で test block をビルドして実行します。言語機能の実装は 1 つだけです。
@@ -129,7 +126,7 @@ Windows では `kizu` 自身がそのまま動き、既定で Windows 向けに 
 | raw pointer の実行時操作 | **check のみ。** `pointer_policy.kizu` と `raw_pointer_deref.kizu` は検査だけで実行しません |
 | type alias | **未着手** |
 | `kizu lint` | **未着手** |
-| TLS / HTTPS、middleware | **未着手。** `std::http` は平文 TCP 上の HTTP/1 です。middleware は closure 待ちです |
+| HTTP の middleware | **未着手。** middleware は closure 待ちです。`std::http` は平文 TCP か TLS 1.3(`std::tls`)の上で HTTP/1 の server と client を持ちます |
 | full generics | **その形では予定しません。** 明示的な static 引数のみ。推論・bounds・HKT は入れません(ADR-0066) |
 | `async fn` / `await` 構文 | **採用しません。** function coloring はこの言語が払わないコストです(ADR-0025) |
 | Rust の `Send` / `Sync` trait | **採用しません。** 代わりに置くものは、ユーザーが読める 1 つの規則であって、手書きの whitelist ではありません(ADR-0025) |
@@ -147,7 +144,7 @@ fn main() {
 ```
 
 ```sh
-go run ./cmd/kizu run examples/hello.kizu
+kizu run examples/hello.kizu
 ```
 
 test block は `main` を通らずに同じ経路で走ります。
@@ -159,8 +156,8 @@ test "std testing assertions" {
 ```
 
 ```sh
-go run ./cmd/kizu test examples/std_testing.kizu
-go run ./cmd/kizu run examples/std_io_process.kizu -- input.kizu   # process 引数は -- 以降
+kizu test examples/std_testing.kizu
+kizu run examples/std_io_process.kizu -- input.kizu   # process 引数は -- 以降
 ```
 
 [`examples/`](examples/README.md) は機能ごとに読めるプログラムを 1 つずつ、
@@ -176,22 +173,20 @@ prebuilt binary は [GitHub Releases](https://github.com/kizu-lang/kizu/releases
 に添付します。それぞれ `kizu version` で自分の version を名乗るので、古い binary が
 新しい source に対して不可解な parse error を出す代わりに、自分が古いことを言います。
 Windows 版は `bin/kizu.exe` を含む zip です。link に llvm-mingw を使うので、上のとおり
-PATH に入れてください。同じ layout は flake でも build できます。
+PATH に入れてください。
+
+開発中は pin した種のリリース([docs/bootstrap.md](docs/bootstrap.md))で
+`compiler/` を `target/seed/stage1/bin/kizu` に build し、`just` の recipe はそれを
+使います。compiler の変更が recipe 1 回で試せます。
 
 ```sh
-nix build   # ./result/bin/kizu と ./result/lib/kizu
-```
-
-開発中は Go seed を source から動かします。compiler の変更が `go run` 1 回で試せます。
-
-```sh
-go run ./cmd/kizu run examples/hello.kizu
+just run examples/hello.kizu   # stage1 を build し直してから、それで実行する
 ```
 
 ## 開発環境
 
-推奨する開発環境は Nix flake です。shell には Go、golangci-lint、pre-commit、just、
-wasmtime、Node.js が入ります。
+推奨する開発環境は Nix flake です。shell には pre-commit、just、
+wasmtime、Node.js と LLVM 21 の clang が入ります。
 
 ```sh
 nix develop
@@ -201,10 +196,10 @@ pre-commit install
 recipe の一覧は `just --list` です。よく使うもの:
 
 ```sh
-just verify          # gofmt + go test ./... + golangci-lint
+just verify          # just check + just selfhost
 just check           # pre-commit run --all-files(commit gate)
-just selfhost        # compiler/ の Kizu compiler を check / test する
-just backend-matrix  # 上の表を作り直す
+just selfhost        # 種 -> stage1 で compiler/ の check / test、harness、self-rebuild
+just stage1          # 種で compiler/ を target/seed/stage1/bin/kizu に build する
 just perf            # build と cache の計測
 just wasi-smoke      # wasm の例を wasmtime で走らせる
 ```

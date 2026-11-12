@@ -177,7 +177,7 @@ fn (self: &var Lowerer) lower_type_apply_call(
         return null;
     }
     if try self.function_callee_name(tree, type_apply.callee) |name| {
-        return self.lower_typed_named_call_expr(tree, name, type_arg, args, out);
+        return self.lower_typed_named_call_expr(tree, name, type_arg, type_apply.resolved, args, out);
     }
     let rendered = try self.expression_name(tree, callee);
     return try self.fail1(tree, "ir error: unsupported callee `%s`", Arg::Str(rendered));
@@ -900,6 +900,7 @@ fn (self: &var Lowerer) lower_typed_named_call_expr(
     tree: &var ast::Ast,
     name: Name,
     type_arg: Name,
+    resolved: bool,
     raw_args: ast::ExpressionList,
     out: &var Value
 ) -> !?diagnostic::Diagnostic {
@@ -917,7 +918,7 @@ fn (self: &var Lowerer) lower_typed_named_call_expr(
     // for a float, so the wrapper body runs and reports through `std::float`.
     if self.name_is(name, "std::testing::expect_equal") and !self.module.names.is(type_arg, "f64") {
         var params = no_params();
-        if try self.declared_instance_params(tree, name, type_arg, &var params) |failed| {
+        if try self.declared_instance_params(tree, name, type_arg, resolved, &var params) |failed| {
             return move failed;
         }
         var args = array::new<Value>(self.allocator);
@@ -942,7 +943,7 @@ fn (self: &var Lowerer) lower_typed_named_call_expr(
         return null;
     }
     var instance = self.blank_instance();
-    if try self.request_generic_instance(tree, name, type_arg, &var instance) |failed| {
+    if try self.request_generic_instance(tree, name, type_arg, resolved, &var instance) |failed| {
         return move failed;
     }
     var args = array::new<Value>(self.allocator);
@@ -973,7 +974,7 @@ fn (self: &var Lowerer) lower_print_call(
     }
     let name = try self.module.names.intern("std::fmt::print");
     var instance = self.blank_instance();
-    if try self.request_generic_instance(tree, name, arg.type_name, &var instance) |failed| {
+    if try self.request_generic_instance(tree, name, arg.type_name, false, &var instance) |failed| {
         return move failed;
     }
     let param = self.signature_param(instance.signature, 0) orelse
@@ -1627,7 +1628,7 @@ fn (self: &var Lowerer) std_container_params(
 ) -> !?diagnostic::Diagnostic {
     let symbol = try self.std_method_name(receiver, method);
     var instance = self.blank_instance();
-    if try self.request_generic_instance(tree, symbol, type_arg, &var instance) |failed| {
+    if try self.request_generic_instance(tree, symbol, type_arg, false, &var instance) |failed| {
         return move failed;
     }
     out.* = params_after_self(instance.signature);
@@ -1684,7 +1685,7 @@ fn (self: &var Lowerer) std_container_call_op(
 ) -> !?diagnostic::Diagnostic {
     let symbol = try self.std_method_name(receiver, method);
     var instance = self.blank_instance();
-    if try self.request_generic_instance(tree, symbol, type_arg, &var instance) |failed| {
+    if try self.request_generic_instance(tree, symbol, type_arg, false, &var instance) |failed| {
         return move failed;
     }
     out.* = ContainerCallOp { symbol: instance.symbol, signature: instance.signature };

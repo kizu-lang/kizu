@@ -206,7 +206,8 @@ native では kernel の entropy(`getentropy`)、WASI では `random_get`、brow
 ## 検証
 
 test は公開されている test vector を使います。FIPS 180-4 の例、RFC 4231、RFC 5869、
-RFC 8439、RFC 7748、RFC 6979 の case が `tests/behavior/src/crypto/` にあり、`examples/`
-の crypto example が出力する hex は `cmd/kizu` の test が Go の実装の出力と比べます。
-ECDSA と RSA は Go が生成した鍵で署名したものを Kizu が検証する test と、Kizu が
-署名したものを Go が検証する test があります。
+RFC 8439、RFC 7748、RFC 6979 の case が `tests/behavior/src/crypto/` にあります。
+ECDSA と RSA の検証は Project Wycheproof の case、RSA の署名は Wycheproof と NIST CAVP
+の署名と一致することを `tests/behavior/src/crypto_vectors/` が確かめます。`examples/`
+の crypto example が出力する hex は、別の実装(`shasum`、OpenSSL、Python の `hmac`)が
+同じ入力から出す値で、example の冒頭にその求め方があります。

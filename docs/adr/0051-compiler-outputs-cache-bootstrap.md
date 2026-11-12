@@ -88,11 +88,15 @@ Before any production path switches from Go to Kizu, these must pass:
 
 Any allowed oracle diff must be documented in an ADR before it is accepted.
 
+These criteria were met and the switch is complete: the release binary is the
+Kizu compiler built from `compiler/`, and the Go implementation was removed
+after v0.6.0 (ADR-0130, `docs/bootstrap.md`). They no longer gate anything.
+
 ## Consequences
 
 The compiler must separate check, run, and build paths. Heavy artifacts and
 performance measurements remain explicit so CI and local cache size stay
 predictable.
 
-The Go implementation remains the reference oracle until self-host behavior is
-measured and equivalent.
+The Go implementation was the reference oracle until self-host behavior was
+measured and equivalent, and has since been removed.

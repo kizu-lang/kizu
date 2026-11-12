@@ -62,7 +62,7 @@ explicit `deinit` でも同じで、退役後の error exit path では実行し
 解放することになる。
 
 1. **退役は静的に決まる。** cleanup は各 exit 地点に emit される
-   (`internal/ir/defer.go` の `errorCleanups` / `emitCleanups`)。move 地点で
+   (`compiler/src/internal/ir/defer.kizu` の `error_cleanups` / `emit_cleanups`)。move 地点で
    entry を退役させれば、それ以降の exit には cleanup が並ばない。runtime flag は
    要らない。
 2. **move state は既存の追跡をそのまま使う。** 分岐の片方でだけ move された

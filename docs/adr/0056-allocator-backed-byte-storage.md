@@ -104,7 +104,8 @@ for `String`. It would also risk circular dependencies between `std::string` and
 
 ## Consequences
 
-- Go remains the trusted backing allocation boundary for now.
+- The compiler runtime (then the Go implementation) remains the trusted backing
+  allocation boundary.
 - Ordinary stdlib logic continues moving to Kizu source.
 - The next implementation step is narrow: #363 hardens and tests the existing
   `std::string::String` storage boundary instead of adding a broad memory API.

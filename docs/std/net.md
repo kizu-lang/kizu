@@ -67,6 +67,8 @@ fn (self: Poller) deinit() -> void
 pub enum Stdio { Inherit, Null, Pipe }
 pub fn command(allocator: Allocator, program: []u8) -> std::net::Error!std::net::Command
 fn (self: &var Command) arg(allocator: Allocator, value: []u8) -> std::net::Error!void
+fn (self: &var Command) env(allocator: Allocator, name: []u8, value: []u8) -> std::net::Error!void
+fn (self: &var Command) set_dir(allocator: Allocator, path: []u8) -> std::net::Error!void
 fn (self: &var Command) set_stdin(stdio: std::net::Stdio) -> void
 fn (self: &var Command) set_stdout(stdio: std::net::Stdio) -> void
 fn (self: &var Command) set_stderr(stdio: std::net::Stdio) -> void
@@ -296,6 +298,13 @@ if try child.read_stdout_ready(handle, allocator, &var out, 4096) |got| {
 
 - 3 つの stream はどれも `Inherit` で始まり、`Null` は捨て、`Pipe` はこの
   プロセスがもう一端を持ちます。pipe でない stream を読むと `Closed` です。
+- 環境変数と作業 directory もこのプロセスのものを引き継ぎます。`env` は
+  1 つの変数を引き継いだ環境の上に置き、同じ名前は後から置いたものが勝ちます。
+  `PATH` を置いた場合、program はその `PATH` で探します。
+  `set_dir` は子が始まる directory を変え、相対 path の program もそこから
+  探します。入れない directory は error ではなく、起動できない program と同じく
+  子が 127 で終わります。空の名前、`=` を含む名前、NUL を含む値、空の
+  directory は `InvalidLength` です。
 - `read_stdout_ready` / `read_stderr_ready` は `TcpStream.read_ready` と同じ
   契約です。null は「まだ無い」、0 は「子が閉じた」。
 - **0 を読んだら閉じます。** 終端に達した pipe は readable のままなので、
@@ -337,7 +346,7 @@ ConnectionReset     接続が切れた
 PermissionDenied    その port / address を開く権限が無い
 TooManyOpenFiles    descriptor が尽きた
 TimedOut            deadline を過ぎた、または接続が時間内に確立しなかった
-InvalidLength       read の上限が 0 以下、command の program が空、引数に NUL がある
+InvalidLength       read の上限が 0 以下、command の program が空、引数・環境変数・directory を host が運べない
 ReadFailed          read が失敗した
 WriteFailed         write が失敗した
 OutOfMemory         buffer を伸ばせなかった

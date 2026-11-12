@@ -8,7 +8,7 @@
 //
 //   <decl 1>;  [<decl 2>;]                       the header
 //   fn use(a1: T1, .., an: Tn) -> R {            the caller, rendered by
-//       // SAFETY: ..                            internal/cimport/mbt_test.go
+//       // SAFETY: ..                            compiler/src/cimport_mbt_test.kizu
 //       return unsafe f(a1, .., an);
 //   }
 //

@@ -1,15 +1,15 @@
 // -*- mode: Bluespec; -*-
-// Where deferred cleanups run (internal/ir/defer.go, SPEC §6.3.1): a
-// `defer` runs when its block exits, an `errdefer` only when the block exits
-// on an error return, both in the reverse of registration order, on every
-// way out -- the end of the block, `break`, `continue`, `return`, and a
-// `try` that fails.
+// Where deferred cleanups run (compiler/src/internal/ir/defer.kizu,
+// SPEC §6.3.1): a `defer` runs when its block exits, an `errdefer` only when
+// the block exits on an error return, both in the reverse of registration
+// order, on every way out -- the end of the block, `break`, `continue`,
+// `return`, and a `try` that fails.
 //
 // `run` interprets a program on one input and records what it prints; the
-// replay test (internal/ir/runtime_mbt_test.go) runs the lowered program on
-// the same input and compares. The interpreter also keeps a ledger of every
-// registration and every cleanup that ran, from which `exitsSound` states
-// the rules above without reading the interpreter's unwinding.
+// replay test (compiler/src/ir_runtime_mbt_test.kizu) runs the lowered
+// program on the same input and compares. The interpreter also keeps a ledger
+// of every registration and every cleanup that ran, from which `exitsSound`
+// states the rules above without reading the interpreter's unwinding.
 //
 // A program is the body of
 //

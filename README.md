@@ -19,10 +19,10 @@ code, and less likely to grow heavy CI and build caches.
 ## Status
 
 Kizu is an early prototype, and it compiles itself. The binary a release ships
-is the Kizu compiler under `compiler/`, written in Kizu; the Go implementation
-(`internal/` + `cmd/kizu`) is the seed that builds it and the oracle both
-implementations are diffed against (ADR-0130). `TestSelfhostBootstrap` requires
-the self-built compiler to reproduce itself byte for byte.
+is the Kizu compiler under `compiler/`, written in Kizu, and the previous
+release is the seed that builds it ([docs/bootstrap.md](docs/bootstrap.md)).
+`just selfhost` requires the self-built compiler to reproduce itself byte for
+byte.
 
 This repository is still experimental. Syntax and implementation details can
 change while the language design is being tested.
@@ -38,14 +38,14 @@ not in any one execution path.
 
 | Feature | Examples | check | run | llvm | wasm | wasm-opt | wasm-bin | browser |
 | --- | ---: | :--: | :--: | :--: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 55 | ✅ | ✅ | ✅ | 54/55 | 54/55 | 54/55 | 53/55 |
+| fn / let / struct / literals | 56 | ✅ | ✅ | ✅ | 55/56 | 55/56 | 55/56 | 54/56 |
 | arithmetic / bitwise / float | 11 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | while / break / continue / for / label | 11 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | if / match | 21 | ✅ | ✅ | ✅ | 20/21 | 20/21 | 20/21 | 18/21 |
-| enum / union | 20 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 17/20 |
-| error union `!T` / try / errdefer | 61 | ✅ | ✅ | ✅ | 39/61 | 39/61 | 39/61 | 36/61 |
+| enum / union | 21 | ✅ | ✅ | ✅ | 20/21 | 20/21 | 20/21 | 17/21 |
+| error union `!T` / try / errdefer | 62 | ✅ | ✅ | ✅ | 39/62 | 39/62 | 39/62 | 36/62 |
 | optional `?T` / orelse / capture | 30 | ✅ | ✅ | ✅ | 29/30 | 29/30 | 29/30 | 27/30 |
-| move / borrow | 74 | ✅ | ✅ | ✅ | 70/74 | 70/74 | 70/74 | 70/74 |
+| move / borrow | 75 | ✅ | ✅ | ✅ | 71/75 | 71/75 | 71/75 | 71/75 |
 | deinit / defer | 25 | ✅ | ✅ | ✅ | 24/25 | 24/25 | 24/25 | 24/25 |
 | arena / handle | 10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | comptime / reflection | 20 | ✅ | ✅ | ✅ | 18/20 | 18/20 | 18/20 | 18/20 |
@@ -67,15 +67,14 @@ not in any one execution path.
 | std::date | 2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::fmt | 7 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | std::testing | 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| std::fs / path / io / process | 34 | ✅ | ✅ | ✅ | 14/34 | 14/34 | 14/34 | 4/34 |
-| std::net / http | 23 | ✅ | ✅ | ✅ | 4/23 | 4/23 | 4/23 | 4/23 |
+| std::fs / path / io / process | 35 | ✅ | ✅ | ✅ | 14/35 | 14/35 | 14/35 | 4/35 |
+| std::net / http | 24 | ✅ | ✅ | ✅ | 4/24 | 4/24 | 4/24 | 4/24 |
 | async / coro | 2 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | std::thread | 3 | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 
 `✅` means every example in the row passes, a fraction means only some do, and
 `❌` means none do. A row counts every example that declares one of its feature
-tags, so an example appears in more than one row. `just backend-matrix`
-regenerates the table; re-run it after touching a backend. `run`, `wasm`,
+tags, so an example appears in more than one row. `run`, `wasm`,
 `wasm-opt`, `wasm-bin`, and `browser` are judged on the program's output: `run`
 executes the native build; `wasm` and `wasm-opt` load the default and optimized
 WAT with `wasmtime`; `wasm-bin` loads the binary module there; `browser` loads
@@ -106,7 +105,6 @@ Tooling around the language core:
 - limited C header import for extern function declarations
 - the Kizu standard library in `lib/kizu/std/` and browser host runtime in
   `lib/kizu/browser/`
-- an LSP server (`cmd/kizu-lsp`)
 
 There is no interpreter. `kizu test` builds and runs test blocks the same way
 `kizu run` builds and runs `main`, so a language feature has exactly one
@@ -139,7 +137,7 @@ deliberately excluded, so the two are not confused.
 | raw pointer runtime operations | **check-only.** `pointer_policy.kizu` and `raw_pointer_deref.kizu` are checked but not executed |
 | type alias | **not started** |
 | `kizu lint` | **not started** |
-| TLS / HTTPS, middleware | **not started.** `std::http` is HTTP/1 over plaintext TCP; middleware waits on closures |
+| HTTP middleware | **not started.** Middleware waits on closures. `std::http` serves and fetches HTTP/1 over plaintext TCP or TLS 1.3 (`std::tls`) |
 | full generics | **not planned as such.** Explicit static arguments only, no inference, no bounds, no HKT (ADR-0066) |
 | `async fn` / `await` syntax | **not adopted.** Function coloring is the cost this language does not pay (ADR-0025) |
 | Rust `Send` / `Sync` traits | **not adopted.** Whatever replaces them must be one rule users can read, not a hand-written whitelist (ADR-0025) |
@@ -157,7 +155,7 @@ fn main() {
 ```
 
 ```sh
-go run ./cmd/kizu run examples/hello.kizu
+kizu run examples/hello.kizu
 ```
 
 A test block runs the same way, without `main`:
@@ -169,8 +167,8 @@ test "std testing assertions" {
 ```
 
 ```sh
-go run ./cmd/kizu test examples/std_testing.kizu
-go run ./cmd/kizu run examples/std_io_process.kizu -- input.kizu   # process args after --
+kizu test examples/std_testing.kizu
+kizu run examples/std_io_process.kizu -- input.kizu   # process args after --
 ```
 
 [`examples/`](examples/README.md) holds one readable program per feature, and
@@ -187,23 +185,20 @@ Prebuilt binaries are attached to
 version with `kizu version`, so an old binary identifies itself instead of
 producing confusing parse errors against newer sources. Windows gets a zip
 with `bin/kizu.exe`; it links through llvm-mingw, so put that on PATH as
-above. The flake builds the same layout locally:
+above.
+
+Development builds `compiler/` with the pinned seed release
+([docs/bootstrap.md](docs/bootstrap.md)) into `target/seed/stage1/bin/kizu`, and
+the `just` recipes run that build, so a compiler change is one recipe away:
 
 ```sh
-nix build   # ./result/bin/kizu with its library tree in ./result/lib/kizu
-```
-
-Development runs the Go seed from source instead, so a compiler change is one
-`go run` away:
-
-```sh
-go run ./cmd/kizu run examples/hello.kizu
+just run examples/hello.kizu   # rebuilds stage1, then runs the file with it
 ```
 
 ## Development Environment
 
 The recommended development environment is the Nix flake. The shell includes
-Go, golangci-lint, pre-commit, just, wasmtime, and Node.js.
+pre-commit, just, wasmtime, Node.js, and clang from LLVM 21.
 
 ```sh
 nix develop
@@ -213,10 +208,10 @@ pre-commit install
 `just --list` shows every recipe. The ones used most:
 
 ```sh
-just verify          # gofmt + go test ./... + golangci-lint
+just verify          # just check + just selfhost
 just check           # pre-commit run --all-files, the commit gate
-just selfhost        # check and test the Kizu compiler under compiler/
-just backend-matrix  # regenerate the table above
+just selfhost        # seed -> stage1: check and test compiler/, the harness, the self-rebuild
+just stage1          # build compiler/ with the seed into target/seed/stage1/bin/kizu
 just perf            # build and cache timings
 just wasi-smoke      # run the wasm examples under wasmtime
 ```

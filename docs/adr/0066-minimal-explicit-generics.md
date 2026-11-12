@@ -65,7 +65,7 @@ This subset deliberately excludes:
 ## Consequences
 
 - Public std wrappers and `std::testing::expect_equal<T>` can live in Kizu
-  source while Go remains the explicit trap/storage/runtime boundary.
+  source while the compiler remains the explicit trap/storage/runtime boundary.
 - Self-host compiler code can use reusable typed helpers without inventing
   per-type assertion families.
 - The checker may instantiate the same generic body multiple times in v0.2;

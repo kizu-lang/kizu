@@ -14,9 +14,10 @@
 //       return 0;
 //   }
 //
-// The prelude internal/unsafecap/mbt_test.go puts around them declares the
-// callees (`ext` / `ev` extern "c", `uf` / `uv` unsafe fn, `sf` / `sv` fn),
-// `pid(q: ptr<i64>) -> i64`, `blen(x: Buf) -> i64` and `setn(x: &var i64)`.
+// The prelude compiler/src/unsafecap_mbt_test.kizu puts around them declares
+// the callees (`ext` / `ev` extern "c", `uf` / `uv` unsafe fn, `sf` / `sv`
+// fn), `pid(q: ptr<i64>) -> i64`, `blen(x: Buf) -> i64` and
+// `setn(x: &var i64)`.
 //
 // The model has two layers. The checker layer (`errorsOf`) follows SPEC §12 the
 // way the checker walks a statement: each operation is charged to the

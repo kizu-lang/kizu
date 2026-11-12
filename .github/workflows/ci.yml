@@ -13,43 +13,26 @@ on:
 jobs:
   test:
     # Named by platform alone: the required checks on main go by these names,
-    # and the matrix's second field would otherwise become part of them.
+    # and a matrix field would otherwise become part of them.
     name: test (${{ matrix.os }})
     # The toolchain links through the host clang, so the gates say nothing
-    # about a platform they never ran on. Both are built and tested.
+    # about a platform they never ran on. Both build and test the compiler.
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-15
-            packages: ./...
-          # The Kizu compiler's own tests (internal/selfhost) compare the text
-          # its front end writes with what the Go seed wrote, and that text
-          # does not depend on the host. One platform runs them; the slower
-          # runner is spared the longest package, and still builds and runs
-          # the compiler itself through cmd/kizu.
-          - os: ubuntu-latest
-            packages: $(go list ./... | grep -v /internal/selfhost)
+        os: [ubuntu-latest, macos-15]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-      # The internal/ir replay tests execute wasm under node's WASI runtime.
-      # The version is pinned instead of taking the image's default: node
-      # 22.23.4 segfaults on those workloads (reproduced on a real Mac with
-      # the same version; 20.19.5 and 26.12.1 run them clean), and an
+      # The IR runtime replay tests in compiler/ execute wasm under node's WASI
+      # runtime. The version is pinned instead of taking the image's default:
+      # node 22.23.4 segfaults on those workloads (reproduced on a real Mac
+      # with the same version; 20.19.5 and 26.12.1 run them clean), and an
       # undeclared tool dependency should not drift with the runner image.
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: Restore selfhost compiler
-        uses: actions/cache@v5
-        with:
-          path: ${{ runner.temp }}/selfhost
-          key: selfhost-${{ runner.os }}-${{ runner.arch }}-v1-${{ hashFiles('go.mod', 'go.sum', 'cmd/kizu/**', 'internal/**', 'compiler/**', 'lib/kizu/std/**') }}
       - name: Restore Kizu build cache
         uses: actions/cache@v5
         with:
@@ -57,10 +40,10 @@ jobs:
           key: kizu-${{ runner.os }}-${{ runner.arch }}-v1-${{ github.sha }}
           restore-keys: |
             kizu-${{ runner.os }}-${{ runner.arch }}-v1-
-      - name: Test
+      # The seed release pinned in scripts/seed.txt checks and tests compiler/
+      # and builds stage1; stage1 checks and tests compiler/, runs the test
+      # harness, and builds stage2, which has to rebuild itself byte for byte.
+      - name: Bootstrap from the seed
         env:
           KIZU_CACHE_DIR: ${{ runner.temp }}/kizu-cache
-          KIZU_TEST_SELFHOST: ${{ runner.temp }}/selfhost/kizu
-        run: go test ${{ matrix.packages }} -count=1 -timeout=15m
-      - name: gofmt
-        run: test -z "$(gofmt -l cmd internal)"
+        run: scripts/bootstrap.sh

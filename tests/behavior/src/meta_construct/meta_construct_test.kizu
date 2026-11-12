@@ -1,0 +1,63 @@
+import std::testing;
+
+// A field is named in its own struct's namespace, so the names the generics
+// around `construct` give their parameters cannot capture it: a field `f` or
+// `T` is still the field, whatever the worker's `f` or the caller's `T` is
+// bound to (#1987).
+
+pub struct Inner {
+    pub f: i64,
+}
+
+pub struct Outer {
+    pub inner: Inner,
+}
+
+pub struct Typed {
+    pub T: i64,
+}
+
+pub struct TypedOuter {
+    pub typed: Typed,
+}
+
+fn make<T>() -> !T {
+    return std::meta::construct<T, make_field>();
+}
+
+fn make_field<T, f: Field>() -> !std::meta::field_type<T, f> {
+    comptime if std::meta::is_struct<std::meta::field_type<T, f>>() {
+        return make<std::meta::field_type<T, f>>();
+    } else {
+        return 7;
+    }
+}
+
+// The worker builds a nested struct by calling `construct` itself, inside the
+// instance whose own `f` is bound to the outer field.
+fn make_direct<T, f: Field>() -> !std::meta::field_type<T, f> {
+    comptime if std::meta::is_struct<std::meta::field_type<T, f>>() {
+        return std::meta::construct<std::meta::field_type<T, f>, make_direct>();
+    } else {
+        return 9;
+    }
+}
+
+test "construct fills a nested field named like the worker's capture" {
+    let outer = try make<Outer>();
+    testing::expect_equal<i64>(7, outer.inner.f);
+}
+
+test "construct fills a field named like the caller's type parameter" {
+    let typed = try make<Typed>();
+    testing::expect_equal<i64>(7, typed.T);
+    let nested = try make<TypedOuter>();
+    testing::expect_equal<i64>(7, nested.typed.T);
+}
+
+test "construct inside a worker fills a field named like that worker's capture" {
+    let outer = try std::meta::construct<Outer, make_direct>();
+    testing::expect_equal<i64>(9, outer.inner.f);
+    let typed = try std::meta::construct<TypedOuter, make_direct>();
+    testing::expect_equal<i64>(9, typed.typed.T);
+}

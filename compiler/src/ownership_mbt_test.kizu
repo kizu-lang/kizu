@@ -1,0 +1,489 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::ownership;
+import compiler::internal::project;
+import compiler::internal::types;
+import std::array;
+import std::fs;
+import std::io;
+import std::json;
+import std::mem;
+import std::process;
+import std::string;
+import std::testing;
+
+// The programs here come from the Quint model of the ownership checker in
+// spec/ownership/ownership.qnt (README.md there says what it covers);
+// scripts/ownership-mbt samples them into compiler/tests/mbt/ownership.json.
+// Each case is one finished program and the diagnostic classes the model
+// allows for it: this runner renders it to Kizu, runs the type check and then
+// the ownership check the way `kizu check` does, and compares the class of the
+// first diagnostic. A divergence is either a checker bug or a model bug, and
+// which one is a question for SPEC.md: record it in
+// findings/ownership-quint-findings.md rather than adjusting either side to
+// agree. internal/ownership/mbt_test.go replays the same fixture against the
+// Go checker.
+
+/// One program of the fixture.
+pub struct MbtCase {
+    pub bucket: string::String,
+    pub prog: array::Array<string::String>,
+    pub expect: array::Array<string::String>,
+}
+
+pub struct MbtFixture {
+    pub note: string::String,
+    pub cases: array::Array<MbtCase>,
+}
+
+/// Shapes whose verdict is known from issues and examples, one per line as
+/// `name|statements|classes`, statements and classes separated by `;`. They
+/// mirror spec/ownership/ownership_test.qnt, so a harness that renders or
+/// classifies wrongly fails here before it disagrees with the model anywhere
+/// else. The first four are #1913: a view read in a loop, then the deinit.
+fn known_shapes() -> []u8 {
+    return
+        \\issue1913/defer|defer;view 0;loop 1;use_view 0;end|
+        \\issue1913/explicit|view 0;loop 1;use_view 0;end;deinit|
+        \\issue1913/unrelated|view 0;unrelated 2;loop 1;use_view 0;end;deinit|
+        \\issue1913/while|defer;view 0;while 1;use_view 0;end|
+        \\deinitWhileViewed|defer;view 0;deinit;use_view 0|Borrowed;UseAfterMove
+        \\deinitWhileBorrowed|borrow 0;deinit;use_borrow 0|Borrowed
+        \\loopCarriedView|defer;view 0;loop 1;use_view 0;mutate;end|Borrowed
+        \\bodyLocalViewEndsWithTurn|defer;loop 0;view 1;use_view 1;mutate;end|
+        \\lastUseEndsBorrow|defer;borrow 0;use_borrow 0;mutate;read|
+        \\sharedBorrowSeesMutation|defer;borrow 0;mutate;use_borrow 0|Borrowed
+        \\useAfterMove|move;read|UseAfterMove
+        \\deferThenDeinit|defer;deinit|UseAfterMove
+        \\doubleDefer|defer;defer|DoubleDefer
+        \\neverDeinitialized|read|Leak
+        \\tryBeforeDefer|mutate;defer|Leak
+        \\consumeInLoop|loop 0;deinit;end|LoopConsume;UseAfterMove
+        \\deferInLoop|loop 0;defer;end|LoopConsume;UseAfterMove
+        \\deferInLoopWhileViewed|view 0;loop 1;defer;end;use_view 0|Borrowed;LoopConsume;UseAfterMove
+        \\nestedCarriedView|defer;view 0;loop 1;while 2;use_view 0;end;mutate;end|Borrowed
+        \\outerBodyViewEndsAfterInnerLoop|defer;loop 0;view 1;loop 2;use_view 1;end;mutate;end|
+        \\nestedConsume|loop 0;loop 1;deinit;end;end|LoopConsume;UseAfterMove
+        \\shortest/deinit|deinit|
+        \\shortest/move|move|
+        \\shortest/defer|defer|
+        \\shortest/try|mutate|Leak
+        \\sharedViewAndBorrowCoexist|view 0;borrow 1;use_view 0;use_borrow 1;deinit|
+    ;
+}
+
+/// The frame every program is a body of. `s` is the one owner the model
+/// follows; `sink` consumes what it is given.
+fn prelude() -> []u8 {
+    return
+        \\import std::mem;
+        \\import std::string;
+        \\
+        \\fn sink(allocator: Allocator, x: string::String) {
+        \\    x.deinit(allocator);
+        \\}
+        \\
+        \\fn main() -> !void {
+        \\    let allocator = mem::page_allocator();
+        \\    var s = try string::from_bytes(allocator, "ab");
+        \\
+    ;
+}
+
+/// What closes the frame.
+fn epilogue() -> []u8 {
+    return
+        \\    return;
+        \\}
+        \\
+    ;
+}
+
+/// The Kizu lines a statement token stands for, with # for its id, separated
+/// by newlines; "" for a token the fixture does not have.
+fn statement_lines(token: []u8) -> []u8 {
+    if mem::equal_bytes(token, "view") { return "let v# = s.as_bytes();"; }
+    if mem::equal_bytes(token, "use_view") { return "print(v#);"; }
+    if mem::equal_bytes(token, "borrow") { return "let r# = &s;"; }
+    if mem::equal_bytes(token, "use_borrow") { return "print(r#.len());"; }
+    if mem::equal_bytes(token, "read") { return "print(s.len());"; }
+    if mem::equal_bytes(token, "mutate") {
+        return
+            \\try s.append_bytes(allocator, "x");
+        ;
+    }
+    if mem::equal_bytes(token, "deinit") { return "s.deinit(allocator);"; }
+    if mem::equal_bytes(token, "move") { return "sink(allocator, move s);"; }
+    if mem::equal_bytes(token, "defer") { return "defer s.deinit(allocator);"; }
+    if mem::equal_bytes(token, "loop") { return "for 0..2 |i#| {"; }
+    if mem::equal_bytes(token, "while") {
+        return
+            \\var i# = 0;
+            \\while i# < 2 {
+        ;
+    }
+    if mem::equal_bytes(token, "unrelated") {
+        return
+            \\var u# = string::new(allocator);
+            \\defer u#.deinit(allocator);
+        ;
+    }
+    return "";
+}
+
+/// Writes a program in the fixture's token form as Kizu into out, or returns
+/// false for one that is not well formed (an unknown token, an unbalanced end).
+fn render(allocator: Allocator, out: &var string::String, prog: &array::Array<string::String>) -> !bool {
+    try out.append_bytes(allocator, prelude());
+    var depth = 1;
+    // Each open loop's kind, innermost last: 1 for a `while`, whose counter
+    // the end steps, 0 for a `for`. The counter's id is kept beside it.
+    var whiles = array::new<bool>(allocator);
+    defer whiles.deinit(allocator);
+    var counters = array::new<string::String>(allocator);
+    defer counters.deinit(allocator);
+    var index = 0;
+    while prog.at(index) |stmt| {
+        index = index + 1;
+        let text = stmt.as_bytes();
+        let cut = byte_index(text, cast<u8>(32));
+        let token = text[0..cut];
+        var id_start = cut + 1;
+        if id_start > mem::len(text) {
+            id_start = mem::len(text);
+        }
+        let id = text[id_start..mem::len(text)];
+        if mem::equal_bytes(token, "end") {
+            if whiles.pop() |is_while| {
+                if counters.pop() |counter| {
+                    defer counter.deinit(allocator);
+                    if is_while {
+                        let name = counter.as_bytes();
+                        try indent(allocator, out, depth);
+                        try out.append_bytes(allocator, "i");
+                        try out.append_bytes(allocator, name);
+                        try out.append_bytes(allocator, " = i");
+                        try out.append_bytes(allocator, name);
+                        try out.append_bytes(allocator, " + 1;");
+                        try out.append_byte(allocator, cast<u8>(10));
+                    }
+                }
+            } else {
+                return false;
+            }
+            depth = depth - 1;
+            try indent(allocator, out, depth);
+            try out.append_byte(allocator, cast<u8>(125));
+            try out.append_byte(allocator, cast<u8>(10));
+            continue;
+        }
+        let lines = statement_lines(token);
+        if mem::len(lines) == 0 {
+            return false;
+        }
+        try indent(allocator, out, depth);
+        var at = 0;
+        while mem::byte_at(lines, at) |byte| {
+            at = at + 1;
+            if byte == cast<u8>(35) {
+                try out.append_bytes(allocator, id);
+            } else if byte == cast<u8>(10) {
+                try out.append_byte(allocator, byte);
+                try indent(allocator, out, depth);
+            } else {
+                try out.append_byte(allocator, byte);
+            }
+        }
+        try out.append_byte(allocator, cast<u8>(10));
+        let opens_while = mem::equal_bytes(token, "while");
+        if opens_while or mem::equal_bytes(token, "loop") {
+            try whiles.append(allocator, opens_while);
+            let counter = try string::from_bytes(allocator, id);
+            try counters.append(allocator, move counter);
+            depth = depth + 1;
+        }
+    }
+    if whiles.len() != 0 {
+        return false;
+    }
+    try out.append_bytes(allocator, epilogue());
+    return true;
+}
+
+fn indent(allocator: Allocator, out: &var string::String, depth: i64) -> !void {
+    var level = 0;
+    while level < depth {
+        try out.append_bytes(allocator, "    ");
+        level = level + 1;
+    }
+    return;
+}
+
+/// The index of the first byte in text, or its length.
+fn byte_index(text: []u8, byte: u8) -> i64 {
+    var index = 0;
+    while mem::byte_at(text, index) |at| {
+        if at == byte {
+            return index;
+        }
+        index = index + 1;
+    }
+    return index;
+}
+
+fn contains_bytes(haystack: []u8, needle: []u8) -> bool {
+    let last = mem::len(haystack) - mem::len(needle);
+    var index = 0;
+    while index <= last {
+        if mem::slice(haystack, index, index + mem::len(needle)) |candidate| {
+            if mem::equal_bytes(candidate, needle) {
+                return true;
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+/// The diagnostic class of a checker message, as the Kind type of the model
+/// has them, or "" for a message the model does not know.
+fn mbt_kind(message: []u8) -> []u8 {
+    if contains_bytes(message, "while string is borrowed") or
+        contains_bytes(message, "cannot be moved while borrowed") {
+        return "Borrowed";
+    }
+    if contains_bytes(message, "already has a registered `defer` cleanup") {
+        return "DoubleDefer";
+    }
+    if contains_bytes(message, "moved value `s` was ") {
+        return "UseAfterMove";
+    }
+    if contains_bytes(message, "is never deinitialized") or
+        contains_bytes(message, "would leak on this `try`") {
+        return "Leak";
+    }
+    if contains_bytes(message, "is consumed inside a loop") {
+        return "LoopConsume";
+    }
+    return "";
+}
+
+/// Loads and checks one program the way `kizu check` does, and appends the
+/// message of the first diagnostic to out; out stays empty when the program
+/// passes.
+fn check_source(io: Io, allocator: Allocator, source: []u8, out: &var string::String) -> !void {
+    var tree = ast::new(allocator);
+    defer tree.deinit(allocator);
+    var loader = try project::new_loader(io, allocator, "lib/kizu");
+    defer loader.deinit(allocator);
+    let loaded = try loader.load_source(&var tree, "mbt.kizu", source);
+    match loaded {
+        Error(failed) => {
+            defer failed.deinit(allocator);
+            let text = try failed.error(allocator, &loader.sources);
+            defer text.deinit(allocator);
+            return out.append_string(allocator, &text);
+        },
+        Program(program) => {
+            defer program.deinit(allocator);
+            var diagnostics = try types::check_all(allocator, &var tree, &program);
+            defer diagnostics.deinit(allocator);
+            if diagnostics.len() == 0 {
+                var moves = try ownership::check_all(allocator, &var tree, &program);
+                defer moves.deinit(allocator);
+                return append_first(allocator, out, &moves);
+            }
+            return append_first(allocator, out, &diagnostics);
+        },
+    }
+}
+
+fn append_first(
+    allocator: Allocator,
+    out: &var string::String,
+    diagnostics: &array::Array<diagnostic::Diagnostic>
+) -> !void {
+    if diagnostics.at(0) |first| {
+        let message = first.message.as_bytes();
+        if mem::len(message) == 0 {
+            // A diagnostic always says something; one that does not still
+            // has to count as a rejection.
+            return out.append_bytes(allocator, "(empty diagnostic)");
+        }
+        return out.append_bytes(allocator, message);
+    }
+    return;
+}
+
+/// Checks one case and reports on stderr how the checker diverged from the
+/// model. Returns whether it diverged.
+fn diverges(io: Io, allocator: Allocator, c: &MbtCase) -> !bool {
+    var source = string::new(allocator);
+    defer source.deinit(allocator);
+    let rendered = try render(allocator, &var source, &c.prog);
+    var got = string::new(allocator);
+    defer got.deinit(allocator);
+    var problem = string::new(allocator);
+    defer problem.deinit(allocator);
+    if !rendered {
+        try problem.append_bytes(allocator, "the program is not well formed");
+    } else {
+        let source_bytes = source.as_bytes();
+        try check_source(io, allocator, source_bytes, &var got);
+        let message = got.as_bytes();
+        let kind = mbt_kind(message);
+        if mem::len(message) == 0 {
+            if c.expect.len() > 0 {
+                try problem.append_bytes(allocator, "checker accepted");
+            }
+        } else if mem::len(kind) == 0 {
+            try problem.append_bytes(allocator, "checker reported a diagnostic outside the model: ");
+            try problem.append_bytes(allocator, message);
+        } else if c.expect.len() == 0 {
+            try problem.append_bytes(allocator, "checker rejected: ");
+            try problem.append_bytes(allocator, message);
+        } else if !holds(&c.expect, kind) {
+            try problem.append_bytes(allocator, "checker reported ");
+            try problem.append_bytes(allocator, kind);
+            try problem.append_bytes(allocator, ": ");
+            try problem.append_bytes(allocator, message);
+        }
+    }
+    if problem.len() == 0 {
+        return false;
+    }
+    let bucket = c.bucket.as_bytes();
+    try io::write_stderr(io, bucket);
+    try io::write_stderr(io, ": ");
+    let what = problem.as_bytes();
+    try io::write_stderr_line(io, what);
+    try io::write_stderr(io, "model allows [");
+    try write_joined(io, &c.expect);
+    try io::write_stderr_line(io, "]");
+    try io::write_stderr(io, "program [");
+    try write_joined(io, &c.prog);
+    try io::write_stderr_line(io, "]");
+    let source_bytes = source.as_bytes();
+    try io::write_stderr(io, source_bytes);
+    return true;
+}
+
+fn holds(values: &array::Array<string::String>, wanted: []u8) -> bool {
+    var index = 0;
+    while values.at(index) |value| {
+        index = index + 1;
+        let bytes = value.as_bytes();
+        if mem::equal_bytes(bytes, wanted) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn write_joined(io: Io, values: &array::Array<string::String>) -> !void {
+    var index = 0;
+    while values.at(index) |value| {
+        if index > 0 {
+            try io::write_stderr(io, " ");
+        }
+        index = index + 1;
+        let bytes = value.as_bytes();
+        try io::write_stderr(io, bytes);
+    }
+    return;
+}
+
+/// Appends each `;`-separated field of text to out; an empty text has none.
+fn split_fields(allocator: Allocator, out: &var array::Array<string::String>, text: []u8) -> !void {
+    if mem::len(text) == 0 {
+        return;
+    }
+    var start = 0;
+    var index = 0;
+    while index <= mem::len(text) {
+        var at_end = true;
+        if mem::byte_at(text, index) |byte| {
+            at_end = byte == cast<u8>(59);
+        }
+        if at_end {
+            let field = try string::from_bytes(allocator, text[start..index]);
+            try out.append(allocator, move field);
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+/// Reads one `name|statements|classes` line of known_shapes.
+fn known_case(allocator: Allocator, line: []u8) -> !MbtCase {
+    var c = MbtCase {
+        bucket: string::new(allocator),
+        prog: array::new<string::String>(allocator),
+        expect: array::new<string::String>(allocator),
+    };
+    errdefer c.deinit(allocator);
+    let first = byte_index(line, cast<u8>(124));
+    try c.bucket.append_bytes(allocator, line[0..first]);
+    let rest = line[first + 1..mem::len(line)];
+    let second = byte_index(rest, cast<u8>(124));
+    try split_fields(allocator, &var c.prog, rest[0..second]);
+    try split_fields(allocator, &var c.expect, rest[second + 1..mem::len(rest)]);
+    return move c;
+}
+
+test "ownership model harness agrees on the known shapes" {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    let shapes = known_shapes();
+    var cases = 0;
+    var failures = 0;
+    var start = 0;
+    var index = 0;
+    while index <= mem::len(shapes) {
+        var at_end = true;
+        if mem::byte_at(shapes, index) |byte| {
+            at_end = byte == cast<u8>(10);
+        }
+        if at_end and index > start {
+            let c = try known_case(allocator, shapes[start..index]);
+            defer c.deinit(allocator);
+            cases = cases + 1;
+            if try diverges(io, allocator, &c) {
+                failures = failures + 1;
+            }
+        }
+        if at_end {
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    testing::expect_equal<i64>(26, cases);
+    testing::expect_equal<i64>(0, failures);
+}
+
+test "ownership checker agrees with the sampled model programs" {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    // KIZU_MBT_FIXTURE replays another fixture, such as a wider sample than
+    // the checked-in one.
+    var path = "compiler/tests/mbt/ownership.json";
+    if process::env("KIZU_MBT_FIXTURE") |other| {
+        path = other;
+    }
+    let data = try fs::read_file(io, allocator, path, mem::Limit::Unlimited);
+    defer data.deinit(allocator);
+    let bytes = data.as_bytes();
+    var fixture = try json::decode<MbtFixture>(allocator, bytes);
+    defer fixture.deinit(allocator);
+    var failures = 0;
+    var index = 0;
+    while fixture.cases.at(index) |c| {
+        index = index + 1;
+        if try diverges(io, allocator, c) {
+            failures = failures + 1;
+        }
+    }
+    testing::expect(fixture.cases.len() > 0);
+    testing::expect_equal<i64>(0, failures);
+}

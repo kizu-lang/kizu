@@ -7,10 +7,11 @@ from. A language assertion that is not such a program belongs in
 `tests/behavior/` instead, where the whole suite links and runs once.
 
 Every example ends with the case it declares -- the command to run it with, the
-feature tags it covers, and what that has to produce. The Go test runner walks
-this directory and reads those blocks, so an example is covered by existing,
-and no list here has to be kept in step with the directory. The grammar of a
-case is documented in the `internal/conformance` package doc.
+feature tags it covers, and what that has to produce. The test harness
+(`compiler/tests/harness`) walks this directory and reads those blocks, so no
+list here has to be kept in step with the directory. The grammar of a case is
+documented at the top of
+`compiler/tests/harness/src/conformance/conformance.kizu`.
 
 ```
 examples/*.kizu             one program each: a feature and its output
@@ -33,21 +34,15 @@ Run them the way the project gate does:
 just verify
 ```
 
-or directly:
+To run one with the compiler `just stage1` builds:
 
 ```sh
-go test ./...
+just run examples/hello.kizu
+just kizu-check examples/negative/moved_value.kizu
+just kizu-check examples/modules/compiler_phases
 ```
 
-To run one:
-
-```sh
-go run ./cmd/kizu run examples/hello.kizu
-go run ./cmd/kizu check examples/negative/moved_value.kizu
-go run ./cmd/kizu check examples/modules/compiler_phases
-```
-
-Which backends accept which examples, grouped by feature tag, is reported by
-`just backend-matrix` and summarized in the top-level [README](../README.md).
+Which backends accept which examples, grouped by feature tag, is summarized in
+the top-level [README](../README.md).
 The memory-safety invariants and the examples that stand for each are in
 [docs/memory-safety.md](../docs/memory-safety.md).

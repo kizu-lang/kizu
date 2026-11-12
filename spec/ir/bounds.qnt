@@ -1,6 +1,7 @@
 // -*- mode: Bluespec; -*-
-// Index checks on a std::array::Array (internal/ir/bounds.go): what an
-// access does at run time, and a rule for when its check may be skipped.
+// Index checks on a std::array::Array (compiler/src/internal/ir/bounds.kizu):
+// what an access does at run time, and a rule for when its check may be
+// skipped.
 //
 // The optimizer may drop the check of an access it has already answered
 // (EliminateBoundsChecks). Whatever it drops, an access whose index is out of
@@ -17,7 +18,7 @@
 // what the optimizer answers; it sorts the sampled programs into those where
 // an answer is plausible and those where one would be wrong (README.md).
 //
-// The programs are rendered to Kizu by internal/ir/runtime_mbt_test.go:
+// The programs are rendered to Kizu by compiler/src/ir_runtime_mbt_test.kizu:
 //
 //   fn caseN(a: &var array::Array<i64>, k: i64, allocator: Allocator) -> !i64 {
 //       var s = 0;

@@ -50,7 +50,7 @@ or implicit conversion to C strings.
 - Caller code can construct value-aware test diagnostics in Kizu source and pass
   the resulting bytes to `std::testing::fail`.
 - Diagnostic construction stays explicit about ownership and allocation.
-- The Go implementation may keep only lower-level storage primitives and other
+- The compiler may keep only lower-level storage primitives and other
   host/runtime boundaries; scalar formatting should be Kizu-movable behavior.
 - Future formatting expansion must remain explicit and should be motivated by
   self-host compiler needs before adding surface area.

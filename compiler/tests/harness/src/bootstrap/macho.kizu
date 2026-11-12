@@ -1,0 +1,132 @@
+import std::fmt;
+import std::mem;
+import std::string;
+
+// The link-invocation identity a thin 64-bit Mach-O executable carries.
+// LC_UUID changes between otherwise identical links on some Apple linker
+// versions, and the ad-hoc code signature changes with it. Code, data,
+// symbols and every load-command field stay in the byte comparison.
+
+// The header is 32 bytes and each load command starts with 8: its kind and
+// its size. LC_UUID is kind 0x1b and LC_CODE_SIGNATURE 0x1d.
+
+/// 0xfeedfacf, the thin 64-bit magic.
+fn magic_64() -> i64 {
+    return 4277009103;
+}
+
+fn header_size() -> i64 {
+    return 32;
+}
+
+fn load_header_size() -> i64 {
+    return 8;
+}
+
+fn lc_uuid() -> i64 {
+    return 27;
+}
+
+fn lc_code_signature() -> i64 {
+    return 29;
+}
+
+/// Clears LC_UUID and the code signature of a thin 64-bit Mach-O
+/// executable. Anything else passes through untouched. A Mach-O whose load
+/// commands do not fit the file leaves the reason in `problem`.
+pub fn normalize(
+    allocator: Allocator,
+    executable: &var []u8,
+    problem: &var string::String
+) -> mem::Error!void {
+    let length = mem::len(executable);
+    if length < 4 or le32(executable, 0) != magic_64() {
+        return;
+    }
+    if length < header_size() {
+        try problem.append_bytes(allocator, "truncated header");
+        return;
+    }
+    let command_count = le32(executable, 16);
+    let commands_end = header_size() + le32(executable, 20);
+    if commands_end > length {
+        try problem.append_bytes(allocator, "load commands exceed file");
+        return;
+    }
+    var offset = header_size();
+    var index = 0;
+    while index < command_count {
+        if offset + load_header_size() > commands_end {
+            try problem.append_bytes(allocator, "truncated load command ");
+            try fmt::append_i64(allocator, problem, index);
+            return;
+        }
+        let command = le32(executable, offset);
+        let command_size = le32(executable, offset + 4);
+        if command_size < load_header_size() or offset + command_size > commands_end {
+            try problem.append_bytes(allocator, "invalid load command ");
+            try fmt::append_i64(allocator, problem, index);
+            try problem.append_bytes(allocator, " size");
+            return;
+        }
+        try clear_identity(allocator, executable, command, command_size, offset, problem);
+        if problem.len() > 0 {
+            return;
+        }
+        offset = offset + command_size;
+        index = index + 1;
+    }
+    if offset != commands_end {
+        try problem.append_bytes(allocator, "load command size mismatch");
+    }
+    return;
+}
+
+/// Clears one identity-bearing load command starting at `start`.
+fn clear_identity(
+    allocator: Allocator,
+    executable: &var []u8,
+    command: i64,
+    command_size: i64,
+    start: i64,
+    problem: &var string::String
+) -> mem::Error!void {
+    if command == lc_uuid() {
+        if command_size < 24 {
+            try problem.append_bytes(allocator, "truncated LC_UUID");
+            return;
+        }
+        clear(executable, start + 8, start + 24);
+        return;
+    }
+    if command == lc_code_signature() {
+        if command_size < 16 {
+            try problem.append_bytes(allocator, "truncated LC_CODE_SIGNATURE");
+            return;
+        }
+        let data_offset = le32(executable, start + 8);
+        let data_end = data_offset + le32(executable, start + 12);
+        if data_end > mem::len(executable) {
+            try problem.append_bytes(allocator, "code signature exceeds file");
+            return;
+        }
+        clear(executable, data_offset, data_end);
+    }
+    return;
+}
+
+/// The unsigned little-endian 32-bit value at `at`. The caller has checked
+/// that four bytes are there.
+fn le32(bytes: &var []u8, at: i64) -> i64 {
+    return cast<i64>(bytes[at]) + cast<i64>(bytes[at + 1]) * 256 +
+        cast<i64>(bytes[at + 2]) * 65536 + cast<i64>(bytes[at + 3]) * 16777216;
+}
+
+fn clear(bytes: &var []u8, start: i64, end: i64) -> void {
+    var index = start;
+    while index < end {
+        bytes[index] = cast<u8>(0);
+        index = index + 1;
+    }
+    return;
+}

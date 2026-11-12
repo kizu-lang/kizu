@@ -26,8 +26,8 @@ kizu build --target wasm32-wasi <file|package>
 kizu build --target wasm32-wasi --emit wasm -o app.wasm <file|package>
 ```
 
-Go seed と shipping Kizu compiler は同じ bytes を出し、WAT / binary は同じ example の
-observable behavior を `wasmtime` で検証する。
+WAT / binary は同じ example の observable behavior を `wasmtime` で検証する
+(`just wasi-smoke`)。
 
 ## 影響
 

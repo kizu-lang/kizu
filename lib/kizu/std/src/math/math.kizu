@@ -214,13 +214,15 @@ fn exp_edges<fused: bool>(value: f64) -> f64 {
     return exp_kernel<fused>(value, 0.0, 0, true);
 }
 
-// exp_kernel returns exp(value + tail), negated when sign_bias is set, for
-// a value below 512 in magnitude: value = k ln2/128 + r with |r| at most
-// ln2/256, so exp(value) = 2^(k/128) exp(r), with 2^(k/128) from the table
-// and exp(r) from a polynomial. The tail carries the low half of a
-// double-double argument (pow); edge says the scale by 2^(k/128) alone
-// could overflow or come out subnormal.
-fn exp_kernel<fused: bool>(value: f64, tail: f64, sign_bias: u64, edge: bool) -> f64 {
+// exp_kernel returns exp(value + tail) times 2^(bias / 128): pow sets the
+// sign bit with bias, and sinh and cosh halve the answer with -128, so that
+// it is rounded once and stays finite where exp alone would overflow.
+// value = k ln2/128 + r with |r| at most ln2/256, so exp(value) =
+// 2^(k/128) exp(r), with 2^(k/128) from the table and exp(r) from a
+// polynomial. The tail carries the low half of a double-double argument
+// (pow); edge says the scale by 2^(k/128) alone could overflow or come out
+// subnormal.
+fn exp_kernel<fused: bool>(value: f64, tail: f64, bias: u64, edge: bool) -> f64 {
     // Adding 1.5 * 2^52 rounds value * 128/ln2 to an integer whose low bits
     // sit in the low bits of the sum.
     let shift = 6755399441055744.0;
@@ -231,7 +233,7 @@ fn exp_kernel<fused: bool>(value: f64, tail: f64, sign_bias: u64, edge: bool) ->
     r = fma_on<fused>(k, -1.2864023111638346e-14, r);
     r = r + tail;
     let index = cast<i64>(ki & 127);
-    let sbits = exp_scale_bits(index) + ((ki + sign_bias) << 45);
+    let sbits = exp_scale_bits(index) + ((ki + bias) << 45);
     let r2 = r * r;
     let low = fma_on<fused>(r2, fma_on<fused>(r, 0.16666666666666666, 0.5), float::from_bits(exp_tail_bits(index)) + r);
     let tmp = fma_on<fused>(r2 * r2, fma_on<fused>(r, 0.008333333333333333, 0.041666666666666664), low);
@@ -948,8 +950,12 @@ pub struct Parts {
 }
 
 // modf splits value into its integral and fractional parts, both with the
-// sign of value: modf(-2.5) is -2.0 and -0.5.
+// sign of value: modf(-2.5) is -2.0 and -0.5. An infinity is all whole:
+// its fraction is a zero of its sign (C99 Annex F.9.3.12).
 fn modf_f64(value: f64) -> Parts {
+    if float::is_infinite(value) {
+        return Parts { whole: value, fraction: copysign_f64(0.0, value) };
+    }
     if value < 1.0 {
         if value < 0.0 {
             let parts = modf_f64(-value);
@@ -990,7 +996,7 @@ fn inv_ln10() -> f64 { return 0.43429448190325182765; }
 // straight from the distance to the zero. Below 2^17 the reduction
 // subtracts pi/64 in 30-bit pieces the msun way, more of them when the
 // subtraction cancels; above it Payne-Hanek reduction leads. tan reduces
-// by pi/4 the Cephes way, as Go's math package spells it. Each answers
+// by pi/2 the same two ways and follows msun's kernel. Each answers
 // within one unit in the last place.
 
 // fma_on is x * y + z rounded once when fused, and the product and the sum
@@ -1281,67 +1287,128 @@ fn arc_of(octant: Octant) -> Arc {
     return Arc { k: k, r: lo, tail: ((r - lo) - w) + octant.lo };
 }
 
-// tan returns the tangent of value in radians. An infinity gives NaN.
+// tan returns the tangent of value in radians. An infinity gives NaN. The
+// angle is taken apart as j pi/4 + (z + lo), j even and |z| at most about
+// pi/4, and tan_kernel answers tan(z + lo), or -1 / tan(z + lo) when j is
+// an odd multiple of 2.
 fn tan_f64(value: f64) -> f64 {
-    if value == 0.0 or float::is_nan(value) {
-        return value;
-    }
-    if float::is_infinite(value) {
+    if float::is_nan(value) or float::is_infinite(value) {
         return nan_f64();
     }
-    var sign = false;
+    if value == 0.0 {
+        // Keeps the sign of -0, which the sum in tan_kernel would lose.
+        return value;
+    }
+    let x = abs_f64(value);
+    if x <= pi_over_4() {
+        return tan_kernel(value, 0.0, false);
+    }
+    if (float::bits(value) >> 52) & 0x7ff >= 0x410 {
+        let octant = reduce_octant_huge(x);
+        let y = tan_kernel(octant.z, octant.lo, octant.j & 2 == 2);
+        if value < 0.0 {
+            return -y;
+        }
+        return y;
+    }
+    let octant = reduce_octant(value);
+    return tan_kernel(octant.z, octant.lo, octant.j & 2 == 2);
+}
+
+// reduce_octant takes a value below 2^17 in magnitude apart as
+// j pi/4 + (z + lo), j = 2n with n value / (pi/2) rounded to nearest: pi/2
+// is subtracted in 33-bit pieces, more of them when the subtraction
+// cancels, as reduce_arc does for pi/64. The msun __ieee754_rem_pio2.
+fn reduce_octant(value: f64) -> Octant {
+    let shift = 6755399441055744.0;
+    let kd = value * 6.36619772367581382433e-01 + shift;
+    let j = (float::bits(kd) << 1) & 7;
+    let steps = kd - shift;
+    var r = value - steps * 1.57079632673412561417e+00;
+    var w = steps * 6.07710050650619224932e-11;
+    var z = r - w;
+    let exponent = cast<i64>((float::bits(value) >> 52) & 0x7ff);
+    var lost = exponent - cast<i64>((float::bits(z) >> 52) & 0x7ff);
+    if lost > 16 {
+        // The second piece brings pi/2 to 66 bits and good to 118, the third
+        // to 99 bits and good to 151.
+        var t = r;
+        w = steps * 6.07710050630396597660e-11;
+        r = t - w;
+        w = steps * 2.02226624879595063154e-21 - ((t - r) - w);
+        z = r - w;
+        lost = exponent - cast<i64>((float::bits(z) >> 52) & 0x7ff);
+        if lost > 49 {
+            t = r;
+            w = steps * 2.02226624871116645580e-21;
+            r = t - w;
+            w = steps * 8.47842766036889956997e-32 - ((t - r) - w);
+            z = r - w;
+        }
+    }
+    return Octant { j: j, z: z, lo: (r - z) - w };
+}
+
+// tan_kernel is tan(x + y) for |x + y| at most about pi/4, or
+// -1 / tan(x + y) when reciprocal is set: the msun __kernel_tan. tan(x) is
+// x + x^3 / 3 + x^5 P(x^2); above 0.6744 the angle is moved to pi/4 - x,
+// where the polynomial is more accurate, and tan(x) recovered from
+// tan(pi/4 - x) by tan(pi/4 - a) = (1 - tan a) / (1 + tan a).
+fn tan_kernel(value: f64, tail: f64, reciprocal: bool) -> f64 {
     var x = value;
-    if x < 0.0 {
-        x = -x;
-        sign = true;
+    var y = tail;
+    let far = abs_f64(x) >= 0.6744;
+    let negative = x < 0.0;
+    if far {
+        if negative {
+            x = -x;
+            y = -y;
+        }
+        x = (pi_over_4() - x) + (3.06161699786838301793e-17 - y);
+        y = 0.0;
     }
-    let octant = reduce_octant(x);
-    let j = octant.j;
-    let z = octant.z;
-    let zz = z * z;
-    var y = z;
-    if zz > 1e-14 {
-        let p = ((-1.30936939181383777646e4 * zz) + 1.15351664838587416140e6) * zz - 1.79565251976484877988e7;
-        let q = (((zz + 1.36812963470692954678e4) * zz - 1.32089234440210967447e6) * zz + 2.50083801823357915839e7) * zz - 5.38695755929454629881e7;
-        y = z + z * (zz * p / q);
+    let z = x * x;
+    var w = z * z;
+    // x^5 P(x^2) split into its even and odd powers of x^4, so that the
+    // dependency chain is short.
+    var r = 1.33333333333201242699e-01 + w * (2.18694882948595424599e-02 + w * (3.59207910759131235356e-03 + w * (5.88041240820264096874e-04 + w * (7.81794442939557092300e-05 + w * -1.85586374855275456654e-05))));
+    var v = z * (5.39682539762260521377e-02 + w * (8.86323982359930005737e-03 + w * (1.45620945432529025516e-03 + w * (2.46463134818469906812e-04 + w * (7.14072491382608190305e-05 + w * 2.59073051863633712884e-05)))));
+    var s = z * x;
+    r = y + z * (s * (r + v) + y);
+    r = r + 3.33333333333334091986e-01 * s;
+    w = x + r;
+    if far {
+        var one = 1.0;
+        if reciprocal {
+            one = -1.0;
+        }
+        let answer = one - 2.0 * (x - (w * w / (w + one) - r));
+        if negative {
+            return -answer;
+        }
+        return answer;
     }
-    if j & 2 == 2 {
-        y = -1.0 / y;
+    if !reciprocal {
+        return w;
     }
-    if sign {
-        y = -y;
-    }
-    return y;
+    // -1 / (x + r) to a unit in the last place: w and the reciprocal are
+    // split into high halves with zeroed low words, whose products are
+    // exact, and the error of each carried on.
+    let low_word = cast<u64>(0xffffffff);
+    let high = float::from_bits(float::bits(w) & ~low_word);
+    v = r - (high - x);
+    let a = -1.0 / w;
+    let t = float::from_bits(float::bits(a) & ~low_word);
+    s = 1.0 + t * high;
+    return t + a * (s + t * v);
 }
 
 // Octant is an angle taken apart as j pi/4 + (z + lo), with j even; lo is
-// the tail of z, which only the Payne-Hanek reduction fills in.
+// the tail of z.
 struct Octant {
     j: u64,
     z: f64,
     lo: f64,
-}
-
-// reduce_octant splits a non-negative x into the octant of x / (pi/4) and
-// the remainder: below 2^29 by subtracting a three-part pi/4, above it by
-// Payne-Hanek reduction. An odd octant is mapped to the even one after it
-// so that the remainder is centred on zero.
-fn reduce_octant(x: f64) -> Octant {
-    if x >= 536870912.0 {
-        return reduce_octant_huge(x);
-    }
-    let pi4_a = 7.85398125648498535156e-1;
-    let pi4_b = 3.77489470793079817668e-8;
-    let pi4_c = 2.69515142907905952645e-15;
-    var j = cast<u64>(x * four_over_pi());
-    var y = cast<f64>(j);
-    if j & 1 == 1 {
-        j = j + 1;
-        y = y + 1.0;
-    }
-    j = j & 7;
-    let z = ((x - y * pi4_a) - y * pi4_b) - y * pi4_c;
-    return Octant { j: j, z: z, lo: 0.0 };
 }
 
 // reduce_octant_huge is Payne-Hanek reduction of x >= pi/4 by pi/4: the
@@ -1573,7 +1640,9 @@ fn atan2_f64(y: f64, x: f64) -> f64 {
     }
     let q = atan_f64(y / x);
     if x < 0.0 {
-        if q <= 0.0 {
+        // The half turn goes the way of y: y / x may have underflowed to a
+        // zero whose sign no longer says which.
+        if y > 0.0 {
             return q + pi_f64();
         }
         return q - pi_f64();
@@ -1625,8 +1694,6 @@ fn atan_reduced(x: f64) -> f64 {
     return z;
 }
 
-fn four_over_pi() -> f64 { return 1.27323954473516268615107010698011489627567716592365; }
-
 fn pi_over_4() -> f64 { return 0.78539816339744830961566084581987572104929234984378; }
 
 fn pi_over_2() -> f64 { return 1.57079632679489661923132169163975144209858469968755; }
@@ -1653,7 +1720,7 @@ fn sinh_f64(value: f64) -> f64 {
     }
     var temp = 0.0;
     if x > 21.0 {
-        temp = exp_f64(x) * 0.5;
+        temp = half_exp(x);
     } else {
         if x > 0.5 {
             let ex = exp_f64(x);
@@ -1674,10 +1741,21 @@ fn sinh_f64(value: f64) -> f64 {
 fn cosh_f64(value: f64) -> f64 {
     let x = abs_f64(value);
     if x > 21.0 {
-        return exp_f64(x) * 0.5;
+        return half_exp(x);
     }
     let ex = exp_f64(x);
     return (ex + 1.0 / ex) * 0.5;
+}
+
+// half_exp is exp(x) / 2 for x above 21, which is sinh(x) and cosh(x) there:
+// exp(-x) is below a unit in the last place of either. The halving is part
+// of the one rounding, so the answer is finite up to ln(2 * max), about
+// 710.4759, though exp(x) overflows from 709.7827.
+fn half_exp(x: f64) -> f64 {
+    if x > 710.4758600739439 {
+        return infinity_f64();
+    }
+    return exp_kernel<false>(x, 0.0, cast<u64>(0) - 128, x >= 512.0);
 }
 
 // tanh returns the hyperbolic tangent of value, in [-1, 1].

@@ -98,8 +98,20 @@ fn (self: &var Checker) check_type_apply_call_expr(
     if try self.reject_unknown_builtin(name_bytes) |problem| {
         return move problem;
     }
-    let instantiated = try self.instantiate_type_arg_text(tree, expression.type_arg);
+    // A resolved list (ast::TypeApplyExpr) is bound already, so nothing in it
+    // is read through the type parameters in force.
+    var instantiated = string::new(self.allocator);
     defer instantiated.deinit(self.allocator);
+    if expression.resolved {
+        let retained = tree.texts.at(expression.type_arg.node);
+        let written = retained.as_bytes();
+        try instantiated.append_bytes(self.allocator, written);
+    } else {
+        let substituted = try self.instantiate_type_arg_text(tree, expression.type_arg);
+        defer substituted.deinit(self.allocator);
+        let bound = substituted.as_bytes();
+        try instantiated.append_bytes(self.allocator, bound);
+    }
     let type_arg = instantiated.as_bytes();
     if try self.reject_optional_static_args(type_arg) |problem| {
         return move problem;
@@ -133,6 +145,7 @@ fn (self: &var Checker) check_type_apply_call_expr(
         scope,
         name_bytes,
         type_arg,
+        expression.resolved,
         args,
         callee_span,
         &var handled,
@@ -375,6 +388,7 @@ fn (self: &var Checker) check_generic_user_type_apply(
     scope: ScopeHandle,
     name: []u8,
     type_arg: []u8,
+    resolved: bool,
     args: ast::ExpressionList,
     span: ast::Span,
     handled: &var bool,
@@ -387,6 +401,7 @@ fn (self: &var Checker) check_generic_user_type_apply(
             handle,
             name,
             type_arg,
+            resolved,
             args,
             span,
             handled,
@@ -403,6 +418,7 @@ fn (self: &var Checker) check_generic_user_type_apply_function(
     handle: FunctionHandle,
     name: []u8,
     type_arg: []u8,
+    resolved: bool,
     args: ast::ExpressionList,
     span: ast::Span,
     handled: &var bool,
@@ -420,7 +436,7 @@ fn (self: &var Checker) check_generic_user_type_apply_function(
     if static_args.len() != static_count {
         return try self.static_arity_error(name, static_count);
     }
-    let result = try self.check_static_args(tree, handle, name, &static_args);
+    let result = try self.check_static_args(tree, handle, name, &static_args, resolved);
     match result {
         Problem(problem) => return move problem,
         Value(checked) => return self.check_generic_user_type_apply_checked(
@@ -545,11 +561,13 @@ fn (self: &Checker) function_return_type(function: FunctionHandle) -> Type {
     return empty_type();
 }
 
+// A resolved list (ast::TypeApplyExpr) names its fields directly.
 fn (self: &var Checker) check_static_args(
     tree: &ast::Ast,
     function: FunctionHandle,
     function_name: []u8,
-    arguments: &array::Array<string::String>
+    arguments: &array::Array<string::String>,
+    resolved: bool
 ) -> !CheckedStaticArgsResult {
     var checked = CheckedStaticArgs {
         names: array::new<string::String>(self.allocator),
@@ -566,6 +584,7 @@ fn (self: &var Checker) check_static_args(
             function_name,
             arguments,
             index,
+            resolved,
             &var checked
         ) |problem| {
             checked.deinit(self.allocator);
@@ -585,6 +604,7 @@ fn (self: &var Checker) check_static_arg(
     function_name: []u8,
     arguments: &array::Array<string::String>,
     index: i64,
+    resolved: bool,
     checked: &var CheckedStaticArgs
 ) -> !?diagnostic::Diagnostic {
     let parameter = try self.copy_static_param(function, index) orelse
@@ -633,7 +653,8 @@ fn (self: &var Checker) check_static_arg(
                     parameter_name,
                     argument_bytes,
                     index,
-                    arguments
+                    arguments,
+                    resolved
                 );
                 match result {
                     Value(field) => {
@@ -796,6 +817,7 @@ fn (self: &var Checker) bind_static_meta_fields(fields: &map::Map<[]u8, MetaFiel
     return;
 }
 
+// A resolved argument is a field name and never a capture.
 fn (self: &var Checker) field_static_arg(
     tree: &ast::Ast,
     function: FunctionHandle,
@@ -803,10 +825,13 @@ fn (self: &var Checker) field_static_arg(
     parameter_name: []u8,
     argument: []u8,
     index: i64,
-    arguments: &array::Array<string::String>
+    arguments: &array::Array<string::String>,
+    resolved: bool
 ) -> !CheckedFieldStaticArgResult {
-    if self.meta_bindings.get(argument) |field| {
-        return CheckedFieldStaticArgResult::Value(field);
+    if !resolved {
+        if self.meta_bindings.get(argument) |field| {
+            return CheckedFieldStaticArgResult::Value(field);
+        }
     }
     if !is_identifier_text(argument) {
         let problem = try self.static_value_kind_error(

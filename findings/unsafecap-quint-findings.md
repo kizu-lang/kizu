@@ -313,22 +313,28 @@ let x = unsafe unsafe ptr_read(p);           unsafe error: `unsafe` covers no op
 書き換えは checked-in していません)。`known` は `TestUnsafeModelKnownShapes`、
 `traces` は `TestUnsafeModelTraces` 単独の結果です。
 
-| 変異 | known | traces(328 本) |
-| --- | --- | --- |
-| `unsafe fn` の本体を使用済みの marker で覆う | 落ちる | 49 本食い違い |
-| 未使用 marker を報告しない | 落ちる | 16 |
-| `// SAFETY:` を要求しない | 落ちる | 16 |
-| file 境界を marker の要求に替える | 落ちる | 3 |
-| `unsafe fn` pointer 経由の呼び出しを課金しない | 落ちる | 9 |
-| `extern "c" fn` pointer 経由の呼び出しを課金しない | 落ちる | 17 |
-| unsafe fn の値を安全な `fn` 型にする(laundering) | 落ちる | 7 |
-| `unsafe struct` の構築を課金しない | 落ちる | 3 |
-| `unsafe struct` の field 書き込みを課金しない | 落ちる | 25 |
-| extern の直接呼び出しを課金しない | 落ちる | 8 |
-| `unsafe fn` の直接呼び出しを課金しない | 落ちる | 8 |
-| marker の無い `ptr_read` を受理 | 落ちる | 7 |
-| 代入先の marker が値も覆う | 落ちる | 18 |
-| 11 種それぞれ「その種類だけ marker 無しで受理」(`requireUnsafeCapabilityAt`) | 11 種とも落ちる | 4〜16 |
+`compiler/` 列は、同じ変異を `compiler/src/internal/types` に入れて
+`compiler/src/unsafecap_mbt_test.kizu` を回したときの本数です(2026-11-11、同じ 328 本。
+括弧内は既知形の test で食い違った形の数で、反転した判定の見逃しを含みます)。
+直接呼び出しの 2 行は、`compiler/` 側では `body_call_user` の分岐を落としたので
+`defer` と `g` の呼び出しも課金されなくなり、Go の変異より広く落ちます。
+
+| 変異 | known | traces(328 本) | `compiler/` |
+| --- | --- | --- | --- |
+| `unsafe fn` の本体を使用済みの marker で覆う | 落ちる | 49 本食い違い | 49(4) |
+| 未使用 marker を報告しない | 落ちる | 16 | 16(8) |
+| `// SAFETY:` を要求しない | 落ちる | 16 | 16(4) |
+| file 境界を marker の要求に替える | 落ちる | 3 | 3(8) |
+| `unsafe fn` pointer 経由の呼び出しを課金しない | 落ちる | 9 | 9(5) |
+| `extern "c" fn` pointer 経由の呼び出しを課金しない | 落ちる | 17 | 17(3) |
+| unsafe fn の値を安全な `fn` 型にする(laundering) | 落ちる | 7 | 7(4) |
+| `unsafe struct` の構築を課金しない | 落ちる | 3 | 3(3) |
+| `unsafe struct` の field 書き込みを課金しない | 落ちる | 25 | 25(3) |
+| extern の直接呼び出しを課金しない | 落ちる | 8 | 19(4) |
+| `unsafe fn` の直接呼び出しを課金しない | 落ちる | 8 | 20(7) |
+| marker の無い `ptr_read` を受理 | 落ちる | 7 | 下の `ptr_read` と同じ |
+| 代入先の marker が値も覆う | 落ちる | 18 | 18(2) |
+| 11 種それぞれ「その種類だけ marker 無しで受理」(`requireUnsafeCapabilityAt`) | 11 種とも落ちる | 4〜16 | 9〜48(2〜15) |
 
 ### 見つかったハーネスの穴(直した)
 

@@ -219,7 +219,7 @@ Runtime failure is acceptable. Silent undefined behavior is not.
 The following components are trusted:
 
 - the compiler's parser, type checker, and ownership checker -- the Kizu
-  implementation under `compiler/` and the Go seed it is diffed against
+  implementation under `compiler/` and the seed release that builds it
 - `std::internal::builtin::*` primitives and the std APIs over them
 - arena / handle runtime representation
 - backend lowering from checked programs to IR, LLVM, or WASM
@@ -278,8 +278,9 @@ memory-safety invariants to representative examples.
 Before declaring safe Kizu memory-safe:
 
 1. `pre-commit run --all-files` must pass.
-2. `go test ./...` must pass.
-3. `go test ./cmd/kizu -run TestConformance -count=1` must pass.
+2. `just selfhost` must pass.
+3. Every conformance case under `examples/`, `tests/behavior/`, and
+   `docs/tutorial/` must pass.
 4. Every invariant in this document must have regression coverage.
 5. New trusted std APIs must document their safe-side preconditions here.
 6. New kinds of unproven operation must add negative tests proving safe checks

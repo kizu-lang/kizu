@@ -310,21 +310,6 @@ fn (self: &var Lowerer) add_slot(name: Name) -> !void {
     return self.slots.append(self.allocator, name);
 }
 
-/// Removes name from the slot set, the Go `delete(found, name)`.
-fn (self: &var Lowerer) remove_slot(name: Name) -> !void {
-    var index = 0;
-    while self.slots.get(index) |slot| {
-        if same_name(slot, name) {
-            let last = self.slots.len() - 1;
-            try self.slots.swap(index, last);
-            let _ = self.slots.pop();
-            return;
-        }
-        index = index + 1;
-    }
-    return;
-}
-
 /// Reports whether any arm of a match names its payload, the Go
 /// `matchBindsPayload`.
 fn match_binds_payload(tree: &ast::Ast, arms: &array::Array<ast::MatchArm>) -> bool {
@@ -836,7 +821,7 @@ fn (self: &var Lowerer) mark_lent_generic_args(
     let name = try self.function_callee_name(tree, type_apply.callee) orelse return;
     let type_arg = try self.text_name(tree, type_apply.type_arg);
     var params = no_params();
-    if try self.declared_instance_params(tree, name, type_arg, &var params) |failed| {
+    if try self.declared_instance_params(tree, name, type_arg, type_apply.resolved, &var params) |failed| {
         failed.deinit(self.allocator);
         // A container primitive has no declaration to read. std::array's
         // wrapper reaches its storage through declared methods; std::arena's
@@ -983,6 +968,13 @@ fn (self: &Lowerer) is_storage_param(name: Name) -> bool {
 fn (self: &var Lowerer) slot_pointer(tree: &ast::Ast, expression: ast::Expression) -> !?Value {
     let ident = ownership::ident_expr(tree, expression) orelse return null;
     let name = try self.text_name(tree, ident.name);
+    return self.named_storage(name);
+}
+
+/// Returns the storage name is bound to, when it is bound to storage, the Go
+/// `namedStorage`: an assignment to such a name stores into it, so the
+/// binding itself never changes while the name is in scope.
+fn (self: &Lowerer) named_storage(name: Name) -> ?Value {
     let value = self.envs.get(self.env, name) orelse return null;
     if self.is_for_index(value.name) {
         return null;

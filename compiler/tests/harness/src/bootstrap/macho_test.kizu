@@ -1,0 +1,190 @@
+import std::mem;
+import std::string;
+import std::testing;
+
+// The 76-byte fixture: a thin 64-bit Mach-O header with two load commands,
+// LC_UUID at 32 and LC_CODE_SIGNATURE at 56 naming 4 signature bytes at 72.
+// `stamp` varies the UUID and signature bytes so two fixtures differ only in
+// link identity.
+fn fixture(allocator: Allocator, stamp: i64) -> mem::Error!string::String {
+    var bytes = string::new(allocator);
+    errdefer bytes.deinit(allocator);
+    var index = 0;
+    while index < 76 {
+        try bytes.append_byte(allocator, cast<u8>(0));
+        index = index + 1;
+    }
+    let view = bytes.as_mut_bytes();
+    put32(view, 0, 4277009103);
+    put32(view, 16, 2);
+    put32(view, 20, 40);
+    view[31] = cast<u8>(127);
+    put32(view, 32, 27);
+    put32(view, 36, 24);
+    put32(view, 56, 29);
+    put32(view, 60, 16);
+    put32(view, 64, 72);
+    put32(view, 68, 4);
+    index = 0;
+    while index < 16 {
+        view[40 + index] = cast<u8>(index + 1 + stamp);
+        index = index + 1;
+    }
+    index = 0;
+    while index < 4 {
+        view[72 + index] = cast<u8>(index + 33 + stamp);
+        index = index + 1;
+    }
+    return move bytes;
+}
+
+fn put32(bytes: &var []u8, at: i64, value: i64) -> void {
+    bytes[at] = cast<u8>(value % 256);
+    bytes[at + 1] = cast<u8>(value / 256 % 256);
+    bytes[at + 2] = cast<u8>(value / 65536 % 256);
+    bytes[at + 3] = cast<u8>(value / 16777216 % 256);
+    return;
+}
+
+/// Normalizes `executable` and requires it to report `want`, empty when
+/// it fits.
+fn expect_problem(allocator: Allocator, executable: &var string::String, want: []u8) -> mem::Error!void {
+    var problem = string::new(allocator);
+    defer problem.deinit(allocator);
+    let view = executable.as_mut_bytes();
+    try normalize(allocator, view, &var problem);
+    let got = problem.as_bytes();
+    testing::expect_equal<[]u8>(want, got);
+    return;
+}
+
+fn difference(first: &string::String, second: &string::String) -> Difference {
+    let first_bytes = first.as_bytes();
+    let second_bytes = second.as_bytes();
+    return differing_bytes(first_bytes, second_bytes);
+}
+
+/// A fixture with the 32-bit field at `at` set to `value`.
+fn broken(allocator: Allocator, at: i64, value: i64) -> mem::Error!string::String {
+    var bytes = try fixture(allocator, 0);
+    errdefer bytes.deinit(allocator);
+    let view = bytes.as_mut_bytes();
+    put32(view, at, value);
+    return move bytes;
+}
+
+/// Requires `compare` to write `want` for these two builds.
+fn expect_report(
+    allocator: Allocator,
+    first: &var string::String,
+    second: &var string::String,
+    want: []u8
+) -> mem::Error!void {
+    var report = string::new(allocator);
+    defer report.deinit(allocator);
+    try compare(allocator, first, second, &var report);
+    let got = report.as_bytes();
+    testing::expect_equal<[]u8>(want, got);
+    return;
+}
+
+test "Mach-O normalization clears only link identity" {
+    let allocator = mem::page_allocator();
+    var first = try fixture(allocator, 0);
+    defer first.deinit(allocator);
+    var second = try fixture(allocator, 16);
+    defer second.deinit(allocator);
+    let before = difference(&first, &second);
+    testing::expect_equal<i64>(20, before.count);
+    testing::expect_equal<i64>(40, before.first_at);
+
+    try expect_problem(allocator, &var first, "");
+    try expect_problem(allocator, &var second, "");
+    let after = difference(&first, &second);
+    testing::expect_equal<i64>(0, after.count);
+    testing::expect_equal<i64>(-1, after.first_at);
+    let bytes = first.as_bytes();
+    testing::expect(bytes[31] == cast<u8>(127));
+}
+
+test "a file that is not Mach-O passes through" {
+    let allocator = mem::page_allocator();
+    var elf = try string::from_bytes(allocator, "ELF and the rest of a file");
+    defer elf.deinit(allocator);
+    try expect_problem(allocator, &var elf, "");
+    let bytes = elf.as_bytes();
+    testing::expect_equal<[]u8>("ELF and the rest of a file", bytes);
+}
+
+test "a Mach-O whose load commands do not fit is reported" {
+    let allocator = mem::page_allocator();
+    var header = try fixture(allocator, 0);
+    defer header.deinit(allocator);
+    try header.truncate(20);
+    try expect_problem(allocator, &var header, "truncated header");
+
+    var past = try broken(allocator, 20, 60);
+    defer past.deinit(allocator);
+    try expect_problem(allocator, &var past, "load commands exceed file");
+
+    var count = try broken(allocator, 16, 3);
+    defer count.deinit(allocator);
+    try expect_problem(allocator, &var count, "truncated load command 2");
+
+    var size = try broken(allocator, 60, 4);
+    defer size.deinit(allocator);
+    try expect_problem(allocator, &var size, "invalid load command 1 size");
+
+    var uuid = try broken(allocator, 36, 16);
+    defer uuid.deinit(allocator);
+    try expect_problem(allocator, &var uuid, "truncated LC_UUID");
+
+    var signature = try broken(allocator, 68, 5);
+    defer signature.deinit(allocator);
+    try expect_problem(allocator, &var signature, "code signature exceeds file");
+
+    var mismatch = try broken(allocator, 16, 1);
+    defer mismatch.deinit(allocator);
+    try expect_problem(allocator, &var mismatch, "load command size mismatch");
+}
+
+test "builds that differ report how many bytes and where first" {
+    let allocator = mem::page_allocator();
+    var first = try fixture(allocator, 0);
+    defer first.deinit(allocator);
+    var second = try fixture(allocator, 16);
+    defer second.deinit(allocator);
+    try expect_report(allocator, &var first, &var second, "bootstrap: ok, stage2 reproduces stage1 (76 bytes)");
+
+    var changed = try fixture(allocator, 0);
+    defer changed.deinit(allocator);
+    let view = changed.as_mut_bytes();
+    view[31] = cast<u8>(0);
+    view[74] = cast<u8>(0);
+    view[75] = cast<u8>(0);
+    try expect_report(
+        allocator,
+        &var first,
+        &var changed,
+        "bootstrap: selfhost compiler does not reproduce itself: 1 of 76 bytes differ, first at offset 31"
+    );
+
+    var short = try fixture(allocator, 0);
+    defer short.deinit(allocator);
+    try short.truncate(75);
+    try expect_report(
+        allocator,
+        &var first,
+        &var short,
+        "bootstrap: selfhost compiler does not reproduce itself: stage1 is 76 bytes, stage2 is 75"
+    );
+
+    var bad = try broken(allocator, 60, 4);
+    defer bad.deinit(allocator);
+    try expect_report(
+        allocator,
+        &var first,
+        &var bad,
+        "bootstrap: normalize stage2 Mach-O: invalid load command 1 size"
+    );
+}

@@ -1,0 +1,2459 @@
+import std::crypto;
+import std::mem;
+import std::string;
+import std::testing;
+
+// Signatures made and judged by other implementations, so that std::crypto
+// is held to what they say and not only to signatures it made itself.
+//
+// The verification cases are Project Wycheproof's (C2SP/wycheproof,
+// testvectors_v1 at commit 65ca494727a52944c204441c860b039e6786b99b):
+// ecdsa_secp256r1_sha256_p1363_test, ecdsa_secp384r1_sha384_p1363_test,
+// rsa_signature_2048_sha{256,384,512}_test, rsa_signature_3072_sha256_test, and
+// rsa_pss_{2048_sha256_mgf1_32,2048_sha384_mgf1_48,3072_sha256_mgf1_32,
+// 4096_sha512_mgf1_64}_test. From each file comes the first case of every
+// verdict and flag set it has (acceptable ones left out); the comment above
+// each names its tcId. Every case of those files gives the verdict
+// Wycheproof lists.
+//
+// The PKCS #1 v1.5 signing cases are rsa_pkcs1_2048_sig_gen_test's, the
+// first valid one per hash; the key's parts are the ones its
+// privateKeyPkcs8 holds. The PSS ones are NIST CAVP's FIPS 186-3
+// SigGenPSS_186-3.txt, mod = 3072, the first message of the two hashes whose
+// salt is as long as the digest. NIST lists n, e and d; p and q are
+// recovered from them (NIST SP 800-56B, Appendix C), which a signature
+// equal to NIST's S confirms.
+
+fn bytes_of_hex_lines(allocator: Allocator, hex: []u8) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    var high = -1;
+    for 0..mem::len(hex) |index| {
+        let byte = cast<i64>(hex[index]);
+        var value = -1;
+        if byte >= 48 and byte <= 57 {
+            value = byte - 48;
+        } else if byte >= 97 and byte <= 102 {
+            value = byte - 87;
+        }
+        if value < 0 {
+            continue;
+        }
+        if high < 0 {
+            high = value;
+        } else {
+            try out.append_byte(allocator, cast<u8>(high * 16 + value));
+            high = -1;
+        }
+    }
+    return move out;
+}
+
+fn ecdsa_verifies(allocator: Allocator, wide: bool, key_hex: []u8, message_hex: []u8, signature_hex: []u8) -> mem::Error!bool {
+    let key = try bytes_of_hex_lines(allocator, key_hex);
+    defer key.deinit(allocator);
+    let message = try bytes_of_hex_lines(allocator, message_hex);
+    defer message.deinit(allocator);
+    let signature = try bytes_of_hex_lines(allocator, signature_hex);
+    defer signature.deinit(allocator);
+    let key_bytes = key.as_bytes();
+    let message_bytes = message.as_bytes();
+    let signature_bytes = signature.as_bytes();
+    if wide {
+        var long = [48]u8{};
+        let long_view = long.as_mut_bytes();
+        crypto::sha384(message_bytes, long_view);
+        let long_digest = long.as_bytes();
+        return crypto::ecdsa_p384_verify(key_bytes, long_digest, signature_bytes);
+    }
+    var short = [32]u8{};
+    let short_view = short.as_mut_bytes();
+    crypto::sha256(message_bytes, short_view);
+    let short_digest = short.as_bytes();
+    return crypto::ecdsa_p256_verify(key_bytes, short_digest, signature_bytes);
+}
+
+// rsa_verifies checks a signature over a message under `hash`, with PSS
+// when `pss` is set and PKCS #1 v1.5 otherwise.
+fn rsa_verifies(
+    allocator: Allocator,
+    hash: crypto::Hash,
+    pss: bool,
+    modulus_hex: []u8,
+    exponent_hex: []u8,
+    message_hex: []u8,
+    signature_hex: []u8
+) -> mem::Error!bool {
+    let modulus = try bytes_of_hex_lines(allocator, modulus_hex);
+    defer modulus.deinit(allocator);
+    let exponent = try bytes_of_hex_lines(allocator, exponent_hex);
+    defer exponent.deinit(allocator);
+    let message = try bytes_of_hex_lines(allocator, message_hex);
+    defer message.deinit(allocator);
+    let signature = try bytes_of_hex_lines(allocator, signature_hex);
+    defer signature.deinit(allocator);
+    var digest_buffer = [64]u8{};
+    let digest = digest_buffer.as_mut_bytes();
+    let message_bytes = message.as_bytes();
+    crypto::digest_of(hash, message_bytes, digest);
+    let digest_view = digest[0..crypto::digest_length(hash)];
+    let n = modulus.as_bytes();
+    let e = exponent.as_bytes();
+    let s = signature.as_bytes();
+    if pss {
+        return crypto::rsa_pss_verify(hash, n, e, digest_view, s);
+    }
+    return crypto::rsa_pkcs1_verify(hash, n, e, digest_view, s);
+}
+
+// rsa_signs signs a message with the key the parts spell, with PSS and that
+// salt when there is one and PKCS #1 v1.5 otherwise, and reports whether
+// the signature is `want`.
+fn rsa_signs(
+    allocator: Allocator,
+    hash: crypto::Hash,
+    salt_hex: []u8,
+    n_hex: []u8,
+    e_hex: []u8,
+    p_hex: []u8,
+    q_hex: []u8,
+    dp_hex: []u8,
+    dq_hex: []u8,
+    qinv_hex: []u8,
+    message_hex: []u8,
+    want_hex: []u8
+) -> crypto::Failure!bool {
+    let n = try bytes_of_hex_lines(allocator, n_hex);
+    defer n.deinit(allocator);
+    let e = try bytes_of_hex_lines(allocator, e_hex);
+    defer e.deinit(allocator);
+    let p = try bytes_of_hex_lines(allocator, p_hex);
+    defer p.deinit(allocator);
+    let q = try bytes_of_hex_lines(allocator, q_hex);
+    defer q.deinit(allocator);
+    let dp = try bytes_of_hex_lines(allocator, dp_hex);
+    defer dp.deinit(allocator);
+    let dq = try bytes_of_hex_lines(allocator, dq_hex);
+    defer dq.deinit(allocator);
+    let qinv = try bytes_of_hex_lines(allocator, qinv_hex);
+    defer qinv.deinit(allocator);
+    let salt = try bytes_of_hex_lines(allocator, salt_hex);
+    defer salt.deinit(allocator);
+    let message = try bytes_of_hex_lines(allocator, message_hex);
+    defer message.deinit(allocator);
+    let want = try bytes_of_hex_lines(allocator, want_hex);
+    defer want.deinit(allocator);
+    let n_bytes = n.as_bytes();
+    let e_bytes = e.as_bytes();
+    let p_bytes = p.as_bytes();
+    let q_bytes = q.as_bytes();
+    let dp_bytes = dp.as_bytes();
+    let dq_bytes = dq.as_bytes();
+    let qinv_bytes = qinv.as_bytes();
+    let key = crypto::RsaPrivateKey {
+        modulus: n_bytes,
+        public_exponent: e_bytes,
+        prime1: p_bytes,
+        prime2: q_bytes,
+        exponent1: dp_bytes,
+        exponent2: dq_bytes,
+        coefficient: qinv_bytes,
+    };
+    var digest_buffer = [64]u8{};
+    let digest = digest_buffer.as_mut_bytes();
+    let message_bytes = message.as_bytes();
+    crypto::digest_of(hash, message_bytes, digest);
+    let digest_view = digest[0..crypto::digest_length(hash)];
+    var signature = [512]u8{};
+    let out = signature.as_mut_bytes();
+    let salt_bytes = salt.as_bytes();
+    if mem::len(salt_bytes) > 0 {
+        try crypto::rsa_pss_sign(hash, &key, digest_view, salt_bytes, out);
+    } else {
+        try crypto::rsa_pkcs1_sign(hash, &key, digest_view, out);
+    }
+    let made = signature.as_bytes();
+    let want_bytes = want.as_bytes();
+    return mem::equal_bytes(made[0..mem::len(n_bytes)], want_bytes);
+}
+
+test "Wycheproof's P-256 with SHA-256 signatures verify as Wycheproof says" {
+    let allocator = mem::page_allocator();
+    // tcId 1: signature malleability (ValidSignature)
+    testing::expect(try ecdsa_verifies(allocator, false, p256_key_0(), "313233343030", p256_sig_1()));
+    // tcId 2: replaced r by r + n (RangeCheck)
+    testing::expect(!try ecdsa_verifies(allocator, false, p256_key_0(), "313233343030", p256_sig_2()));
+    // tcId 4: replaced r by n - r (ModifiedInteger)
+    testing::expect(!try ecdsa_verifies(allocator, false, p256_key_0(), "313233343030", p256_sig_4()));
+    // tcId 5: replaced r by r + 2**256 (IntegerOverflow)
+    testing::expect(!try ecdsa_verifies(allocator, false, p256_key_0(), "313233343030", p256_sig_5()));
+    // tcId 11: Signature with special case values r=0 and s=0 (InvalidSignature)
+    testing::expect(!try ecdsa_verifies(allocator, false, p256_key_0(), "313233343030", p256_sig_11()));
+    // tcId 60: Edge case for Shamir multiplication (EdgeCaseShamirMultiplication)
+    testing::expect(try ecdsa_verifies(allocator, false, p256_key_0(), "3639383139", p256_sig_60()));
+    // tcId 61: special case hash (SpecialCaseHash)
+    testing::expect(try ecdsa_verifies(allocator, false, p256_key_0(), "343236343739373234", p256_sig_61()));
+    // tcId 115: k*G has a large x-coordinate (ArithmeticError)
+    testing::expect(try ecdsa_verifies(allocator, false, p256_key_1(), "313233343030", p256_sig_115()));
+    // tcId 116: r too large (ArithmeticError)
+    testing::expect(!try ecdsa_verifies(allocator, false, p256_key_1(), "313233343030", p256_sig_116()));
+    // tcId 120: small r and s (SmallRandS, ArithmeticError)
+    testing::expect(try ecdsa_verifies(allocator, false, p256_key_2(), "313233343030", p256_sig_120()));
+    // tcId 121: incorrect size of signature (SmallRandS, ArithmeticError, SignatureSize)
+    testing::expect(!try ecdsa_verifies(allocator, false, p256_key_2(), "313233343030", "0501"));
+    // tcId 145: incorrect size of signature (ArithmeticError, SignatureSize)
+    testing::expect(!try ecdsa_verifies(allocator, false, p256_key_3(), "313233343030", "9c44febf31c3594f839ed28247c2b06b"));
+    // tcId 154: edge case modular inverse (ModularInverse, ArithmeticError)
+    testing::expect(try ecdsa_verifies(allocator, false, p256_key_4(), "313233343030", p256_sig_154()));
+    // tcId 169: point at infinity during verify (PointDuplication, ArithmeticError)
+    testing::expect(!try ecdsa_verifies(allocator, false, p256_key_5(), "313233343030", p256_sig_169()));
+    // tcId 204: point duplication during verification (PointDuplication)
+    testing::expect(try ecdsa_verifies(allocator, false, p256_key_6(), "313233343030", p256_sig_204()));
+    // tcId 205: duplication bug (PointDuplication)
+    testing::expect(!try ecdsa_verifies(allocator, false, p256_key_7(), "313233343030", p256_sig_205()));
+    // tcId 229: x-coordinate of the public key has many trailing 0's (EdgeCasePublicKey)
+    testing::expect(try ecdsa_verifies(allocator, false, p256_key_8(), "4d657373616765", p256_sig_229()));
+}
+
+test "Wycheproof's P-384 with SHA-384 signatures verify as Wycheproof says" {
+    let allocator = mem::page_allocator();
+    // tcId 1: signature malleability (ValidSignature)
+    testing::expect(try ecdsa_verifies(allocator, true, p384_key_0(), "313233343030", p384_sig_1()));
+    // tcId 2: replaced r by r + n (RangeCheck)
+    testing::expect(!try ecdsa_verifies(allocator, true, p384_key_0(), "313233343030", p384_sig_2()));
+    // tcId 4: replaced r by n - r (ModifiedInteger)
+    testing::expect(!try ecdsa_verifies(allocator, true, p384_key_0(), "313233343030", p384_sig_4()));
+    // tcId 5: replaced r by r + 2**384 (IntegerOverflow)
+    testing::expect(!try ecdsa_verifies(allocator, true, p384_key_0(), "313233343030", p384_sig_5()));
+    // tcId 11: Signature with special case values r=0 and s=0 (InvalidSignature)
+    testing::expect(!try ecdsa_verifies(allocator, true, p384_key_0(), "313233343030", p384_sig_11()));
+    // tcId 60: Edge case for Shamir multiplication (EdgeCaseShamirMultiplication)
+    testing::expect(try ecdsa_verifies(allocator, true, p384_key_0(), "3133323237", p384_sig_60()));
+    // tcId 61: special case hash (SpecialCaseHash)
+    testing::expect(try ecdsa_verifies(allocator, true, p384_key_0(), "31373530353531383135", p384_sig_61()));
+    // tcId 147: k*G has a large x-coordinate (ArithmeticError)
+    testing::expect(try ecdsa_verifies(allocator, true, p384_key_1(), "313233343030", p384_sig_147()));
+    // tcId 148: r too large (ArithmeticError)
+    testing::expect(!try ecdsa_verifies(allocator, true, p384_key_1(), "313233343030", p384_sig_148()));
+    // tcId 152: small r and s (SmallRandS, ArithmeticError)
+    testing::expect(try ecdsa_verifies(allocator, true, p384_key_2(), "313233343030", p384_sig_152()));
+    // tcId 153: incorrect size of signature (SmallRandS, ArithmeticError, SignatureSize)
+    testing::expect(!try ecdsa_verifies(allocator, true, p384_key_2(), "313233343030", "0201"));
+    // tcId 173: incorrect size of signature (ArithmeticError, SignatureSize)
+    testing::expect(!try ecdsa_verifies(allocator, true, p384_key_3(), "313233343030", "9c44febf31c3594d839ed28247c2b06b"));
+    // tcId 182: edge case modular inverse (ModularInverse, ArithmeticError)
+    testing::expect(try ecdsa_verifies(allocator, true, p384_key_4(), "313233343030", p384_sig_182()));
+    // tcId 197: point at infinity during verify (PointDuplication, ArithmeticError)
+    testing::expect(!try ecdsa_verifies(allocator, true, p384_key_5(), "313233343030", p384_sig_197()));
+    // tcId 228: point duplication during verification (PointDuplication)
+    testing::expect(try ecdsa_verifies(allocator, true, p384_key_6(), "313233343030", p384_sig_228()));
+    // tcId 229: duplication bug (PointDuplication)
+    testing::expect(!try ecdsa_verifies(allocator, true, p384_key_7(), "313233343030", p384_sig_229()));
+    // tcId 253: x-coordinate of the public key is large (EdgeCasePublicKey)
+    testing::expect(try ecdsa_verifies(allocator, true, p384_key_8(), "4d657373616765", p384_sig_253()));
+}
+
+test "Wycheproof's 2048-bit PKCS #1 v1.5 SHA-256 signatures verify as Wycheproof says" {
+    let allocator = mem::page_allocator();
+    // tcId 1: no comment ()
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha256, false, rsa_modulus_0(), "010001", "", pkcs1_2048_sha256_sig_1()));
+    // tcId 9: length of digestInfo uses long form encoding (BerEncodedPadding)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, rsa_modulus_0(), "010001", "313233343030", pkcs1_2048_sha256_sig_9()));
+    // tcId 11: length of digestInfo uses 50 instead of 49 (InvalidAsnInPadding)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, rsa_modulus_0(), "010001", "313233343030", pkcs1_2048_sha256_sig_11()));
+    // tcId 24: appending 0's to digestInfo (ModifiedPadding)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, rsa_modulus_0(), "010001", "313233343030", pkcs1_2048_sha256_sig_24()));
+    // tcId 215: The algorithm encoded in the padding is MD5 instead of SHA-256. (WrongHash)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, rsa_modulus_0(), "010001", "313233343030", pkcs1_2048_sha256_sig_215()));
+    // tcId 236: The message is not hashed. (NoHash)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, rsa_modulus_0(), "010001", "313233343030", pkcs1_2048_sha256_sig_236()));
+    // tcId 238: using PKCS#1 encryption padding: 0002ff...00<hash> (InvalidPadding)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, rsa_modulus_0(), "010001", "313233343030", pkcs1_2048_sha256_sig_238()));
+    // tcId 243: PKCS#1 padding too short: 000001ff... (ShortPadding)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, rsa_modulus_0(), "010001", "313233343030", pkcs1_2048_sha256_sig_243()));
+    // tcId 244: the signature is not reduced (SignatureMalleability)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, rsa_modulus_0(), "010001", "313233343030", pkcs1_2048_sha256_sig_244()));
+    // tcId 247: the signature is empty (InvalidSignature)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, rsa_modulus_0(), "010001", "313233343030", ""));
+    // tcId 255: RSASSA-PSS signature (WrongPrimitive)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, rsa_modulus_0(), "010001", "313233343030", pkcs1_2048_sha256_sig_255()));
+    // tcId 258: small signature (SmallSignature, SmallPublicKey)
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha256, false, rsa_modulus_1(), "03", "33363730", pkcs1_2048_sha256_sig_258()));
+    // tcId 259: signature is close to n (EdgeCaseSignature, SmallPublicKey)
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha256, false, rsa_modulus_2(), "03", "32353934", pkcs1_2048_sha256_sig_259()));
+}
+
+test "Wycheproof's 2048-bit PKCS #1 v1.5 SHA-384 signatures verify as Wycheproof says" {
+    let allocator = mem::page_allocator();
+    // tcId 1: no comment ()
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha384, false, rsa_modulus_3(), "010001", "", pkcs1_2048_sha384_sig_1()));
+    // tcId 9: length of digestInfo uses long form encoding (BerEncodedPadding)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha384, false, rsa_modulus_3(), "010001", "313233343030", pkcs1_2048_sha384_sig_9()));
+    // tcId 11: length of digestInfo uses 66 instead of 65 (InvalidAsnInPadding)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha384, false, rsa_modulus_3(), "010001", "313233343030", pkcs1_2048_sha384_sig_11()));
+    // tcId 24: appending 0's to digestInfo (ModifiedPadding)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha384, false, rsa_modulus_3(), "010001", "313233343030", pkcs1_2048_sha384_sig_24()));
+    // tcId 216: The algorithm encoded in the padding is MD5 instead of SHA-384. (WrongHash)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha384, false, rsa_modulus_3(), "010001", "313233343030", pkcs1_2048_sha384_sig_216()));
+    // tcId 236: The message is not hashed. (NoHash)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha384, false, rsa_modulus_3(), "010001", "313233343030", pkcs1_2048_sha384_sig_236()));
+    // tcId 238: using PKCS#1 encryption padding: 0002ff...00<hash> (InvalidPadding)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha384, false, rsa_modulus_3(), "010001", "313233343030", pkcs1_2048_sha384_sig_238()));
+    // tcId 243: PKCS#1 padding too short: 000001ff... (ShortPadding)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha384, false, rsa_modulus_3(), "010001", "313233343030", pkcs1_2048_sha384_sig_243()));
+    // tcId 244: the signature is not reduced (SignatureMalleability)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha384, false, rsa_modulus_3(), "010001", "313233343030", pkcs1_2048_sha384_sig_244()));
+    // tcId 247: the signature is empty (InvalidSignature)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha384, false, rsa_modulus_3(), "010001", "313233343030", ""));
+    // tcId 255: RSASSA-PSS signature (WrongPrimitive)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha384, false, rsa_modulus_3(), "010001", "313233343030", pkcs1_2048_sha384_sig_255()));
+}
+
+test "Wycheproof's 2048-bit PKCS #1 v1.5 SHA-512 signatures verify as Wycheproof says" {
+    let allocator = mem::page_allocator();
+    // tcId 1: no comment ()
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha512, false, rsa_modulus_4(), "010001", "", pkcs1_2048_sha512_sig_1()));
+    // tcId 9: length of digestInfo uses long form encoding (BerEncodedPadding)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha512, false, rsa_modulus_4(), "010001", "313233343030", pkcs1_2048_sha512_sig_9()));
+    // tcId 11: length of digestInfo uses 82 instead of 81 (InvalidAsnInPadding)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha512, false, rsa_modulus_4(), "010001", "313233343030", pkcs1_2048_sha512_sig_11()));
+    // tcId 24: appending 0's to digestInfo (ModifiedPadding)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha512, false, rsa_modulus_4(), "010001", "313233343030", pkcs1_2048_sha512_sig_24()));
+    // tcId 216: The algorithm encoded in the padding is MD5 instead of SHA-512. (WrongHash)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha512, false, rsa_modulus_4(), "010001", "313233343030", pkcs1_2048_sha512_sig_216()));
+    // tcId 236: The message is not hashed. (NoHash)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha512, false, rsa_modulus_4(), "010001", "313233343030", pkcs1_2048_sha512_sig_236()));
+    // tcId 238: using PKCS#1 encryption padding: 0002ff...00<hash> (InvalidPadding)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha512, false, rsa_modulus_4(), "010001", "313233343030", pkcs1_2048_sha512_sig_238()));
+    // tcId 243: PKCS#1 padding too short: 000001ff... (ShortPadding)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha512, false, rsa_modulus_4(), "010001", "313233343030", pkcs1_2048_sha512_sig_243()));
+    // tcId 244: the signature is not reduced (SignatureMalleability)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha512, false, rsa_modulus_4(), "010001", "313233343030", pkcs1_2048_sha512_sig_244()));
+    // tcId 247: the signature is empty (InvalidSignature)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha512, false, rsa_modulus_4(), "010001", "313233343030", ""));
+    // tcId 255: RSASSA-PSS signature (WrongPrimitive)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha512, false, rsa_modulus_4(), "010001", "313233343030", pkcs1_2048_sha512_sig_255()));
+    // tcId 259: small signature (SmallSignature, SmallPublicKey)
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha512, false, rsa_modulus_5(), "03", "38343432", pkcs1_2048_sha512_sig_259()));
+}
+
+test "Wycheproof's 3072-bit PKCS #1 v1.5 SHA-256 signatures verify as Wycheproof says" {
+    let allocator = mem::page_allocator();
+    // tcId 1: no comment ()
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha256, false, rsa_modulus_6(), "010001", "", pkcs1_3072_sha256_sig_1()));
+    // tcId 9: length of digestInfo uses long form encoding (BerEncodedPadding)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, rsa_modulus_6(), "010001", "313233343030", pkcs1_3072_sha256_sig_9()));
+    // tcId 11: length of digestInfo uses 50 instead of 49 (InvalidAsnInPadding)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, rsa_modulus_6(), "010001", "313233343030", pkcs1_3072_sha256_sig_11()));
+    // tcId 24: appending 0's to digestInfo (ModifiedPadding)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, rsa_modulus_6(), "010001", "313233343030", pkcs1_3072_sha256_sig_24()));
+    // tcId 216: The algorithm encoded in the padding is MD5 instead of SHA-256. (WrongHash)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, rsa_modulus_6(), "010001", "313233343030", pkcs1_3072_sha256_sig_216()));
+    // tcId 237: The message is not hashed. (NoHash)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, rsa_modulus_6(), "010001", "313233343030", pkcs1_3072_sha256_sig_237()));
+    // tcId 239: using PKCS#1 encryption padding: 0002ff...00<hash> (InvalidPadding)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, rsa_modulus_6(), "010001", "313233343030", pkcs1_3072_sha256_sig_239()));
+    // tcId 244: PKCS#1 padding too short: 000001ff... (ShortPadding)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, rsa_modulus_6(), "010001", "313233343030", pkcs1_3072_sha256_sig_244()));
+    // tcId 245: the signature is not reduced (SignatureMalleability)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, rsa_modulus_6(), "010001", "313233343030", pkcs1_3072_sha256_sig_245()));
+    // tcId 248: the signature is empty (InvalidSignature)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, rsa_modulus_6(), "010001", "313233343030", ""));
+    // tcId 256: RSASSA-PSS signature (WrongPrimitive)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, false, rsa_modulus_6(), "010001", "313233343030", pkcs1_3072_sha256_sig_256()));
+    // tcId 259: small signature (SmallSignature, SmallPublicKey)
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha256, false, rsa_modulus_7(), "03", "34333630", pkcs1_3072_sha256_sig_259()));
+}
+
+test "Wycheproof's 2048-bit PSS SHA-256 signatures verify as Wycheproof says" {
+    let allocator = mem::page_allocator();
+    // tcId 1: valid signature (Normal)
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha256, true, rsa_modulus_0(), "010001", "", pss_2048_sha256_sig_1()));
+    // tcId 8: special case for hash (SpecialCaseHash)
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha256, true, rsa_modulus_0(), "010001", "343236343739373234", pss_2048_sha256_sig_8()));
+    // tcId 62: first byte of m_hash modified (ModifiedSignature)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, true, rsa_modulus_0(), "010001", "313233343030", pss_2048_sha256_sig_62()));
+    // tcId 73: salt is all 0 (ModifiedSignature)
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha256, true, rsa_modulus_0(), "010001", "313233343030", pss_2048_sha256_sig_73()));
+    // tcId 108: PKCS #1 v1.5 signature with SHA-256 (WrongPrimitive)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, true, rsa_modulus_0(), "010001", "313233343030", pss_2048_sha256_sig_108()));
+}
+
+test "Wycheproof's 2048-bit PSS SHA-384 signatures verify as Wycheproof says" {
+    let allocator = mem::page_allocator();
+    // tcId 1: valid signature (Normal)
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha384, true, rsa_modulus_3(), "010001", "", pss_2048_sha384_sig_1()));
+    // tcId 8: special case for hash (SpecialCaseHash)
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha384, true, rsa_modulus_3(), "010001", "31373530353531383135", pss_2048_sha384_sig_8()));
+    // tcId 94: first byte of m_hash modified (ModifiedSignature)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha384, true, rsa_modulus_3(), "010001", "313233343030", pss_2048_sha384_sig_94()));
+    // tcId 106: salt is all 0 (ModifiedSignature)
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha384, true, rsa_modulus_3(), "010001", "313233343030", pss_2048_sha384_sig_106()));
+    // tcId 140: PKCS #1 v1.5 signature with SHA-256 (WrongPrimitive)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha384, true, rsa_modulus_3(), "010001", "313233343030", pss_2048_sha384_sig_140()));
+}
+
+test "Wycheproof's 3072-bit PSS SHA-256 signatures verify as Wycheproof says" {
+    let allocator = mem::page_allocator();
+    // tcId 1: valid signature (Normal)
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha256, true, rsa_modulus_6(), "010001", "", pss_3072_sha256_sig_1()));
+    // tcId 8: special case for hash (SpecialCaseHash)
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha256, true, rsa_modulus_6(), "010001", "343236343739373234", pss_3072_sha256_sig_8()));
+    // tcId 62: first byte of m_hash modified (ModifiedSignature)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, true, rsa_modulus_6(), "010001", "313233343030", pss_3072_sha256_sig_62()));
+    // tcId 73: salt is all 0 (ModifiedSignature)
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha256, true, rsa_modulus_6(), "010001", "313233343030", pss_3072_sha256_sig_73()));
+    // tcId 108: PKCS #1 v1.5 signature with SHA-256 (WrongPrimitive)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha256, true, rsa_modulus_6(), "010001", "313233343030", pss_3072_sha256_sig_108()));
+}
+
+test "Wycheproof's 4096-bit PSS SHA-512 signatures verify as Wycheproof says" {
+    let allocator = mem::page_allocator();
+    // tcId 1: valid signature (Normal)
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha512, true, rsa_modulus_8(), "010001", "", pss_4096_sha512_sig_1()));
+    // tcId 8: special case for hash (SpecialCaseHash)
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha512, true, rsa_modulus_8(), "010001", "33393439313934313732", pss_4096_sha512_sig_8()));
+    // tcId 131: first byte of m_hash modified (ModifiedSignature)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha512, true, rsa_modulus_8(), "010001", "313233343030", pss_4096_sha512_sig_131()));
+    // tcId 143: salt is all 0 (ModifiedSignature)
+    testing::expect(try rsa_verifies(allocator, crypto::Hash::Sha512, true, rsa_modulus_8(), "010001", "313233343030", pss_4096_sha512_sig_143()));
+    // tcId 178: PKCS #1 v1.5 signature with SHA-256 (WrongPrimitive)
+    testing::expect(!try rsa_verifies(allocator, crypto::Hash::Sha512, true, rsa_modulus_8(), "010001", "313233343030", pss_4096_sha512_sig_178()));
+}
+
+test "Wycheproof's 2048-bit PKCS #1 v1.5 keys sign to the signatures Wycheproof lists" {
+    let allocator = mem::page_allocator();
+    // rsa_pkcs1_2048_sig_gen_test tcId 81
+    testing::expect(try rsa_signs(allocator, crypto::Hash::Sha256, "", wycheproof_key_0_n(), "010001", wycheproof_key_0_p(), wycheproof_key_0_q(), wycheproof_key_0_dp(), wycheproof_key_0_dq(), wycheproof_key_0_qinv(), "", wycheproof_key_0_sig_81()));
+    // rsa_pkcs1_2048_sig_gen_test tcId 89
+    testing::expect(try rsa_signs(allocator, crypto::Hash::Sha384, "", wycheproof_key_1_n(), "010001", wycheproof_key_1_p(), wycheproof_key_1_q(), wycheproof_key_1_dp(), wycheproof_key_1_dq(), wycheproof_key_1_qinv(), "", wycheproof_key_1_sig_89()));
+    // rsa_pkcs1_2048_sig_gen_test tcId 97
+    testing::expect(try rsa_signs(allocator, crypto::Hash::Sha512, "", wycheproof_key_2_n(), "010001", wycheproof_key_2_p(), wycheproof_key_2_q(), wycheproof_key_2_dp(), wycheproof_key_2_dq(), wycheproof_key_2_qinv(), "", wycheproof_key_2_sig_97()));
+}
+
+test "a PSS SHA-512 signature with a 64-byte salt is the one OpenSSL verified" {
+    let allocator = mem::page_allocator();
+    // No published PSS vector has a salt as long as a SHA-512 digest, so
+    // this signature is std::crypto's own over the message below under
+    // the SHA-512 key of rsa_pkcs1_2048_sig_gen_test, with the SHA-512 of
+    // "salt" as the salt. OpenSSL 3.0.14 (node's crypto.verify, saltLength
+    // 64) verified it, and refused it over another message and with one
+    // bit changed.
+    testing::expect(try rsa_signs(allocator, crypto::Hash::Sha512, pss_sha512_salt(), wycheproof_key_2_n(), "010001", wycheproof_key_2_p(), wycheproof_key_2_q(), wycheproof_key_2_dp(), wycheproof_key_2_dq(), wycheproof_key_2_qinv(), pss_sha512_message(), pss_sha512_signature()));
+}
+
+test "NIST's 3072-bit PSS key signs to the signatures NIST lists with their salts" {
+    let allocator = mem::page_allocator();
+    // SigGenPSS_186-3.txt, mod = 3072, SHAAlg = SHA256, message 1
+    testing::expect(try rsa_signs(allocator, crypto::Hash::Sha256, "3e07ade72a3f52530f53135a5d7d93217435ba001ea55a8f5d5d1304684874bc", nist_pss_3072_n(), "1415a7", nist_pss_3072_p(), nist_pss_3072_q(), nist_pss_3072_dp(), nist_pss_3072_dq(), nist_pss_3072_qinv(), nist_pss_3072_sha256_0_msg(), nist_pss_3072_sha256_0_sig()));
+    // SigGenPSS_186-3.txt, mod = 3072, SHAAlg = SHA384, message 1
+    testing::expect(try rsa_signs(allocator, crypto::Hash::Sha384, nist_pss_3072_sha384_0_salt(), nist_pss_3072_n(), "1415a7", nist_pss_3072_p(), nist_pss_3072_q(), nist_pss_3072_dp(), nist_pss_3072_dq(), nist_pss_3072_qinv(), nist_pss_3072_sha384_0_msg(), nist_pss_3072_sha384_0_sig()));
+}
+
+fn p256_key_0() -> []u8 {
+    return
+        \\042927b10512bae3eddcfe467828128bad2903269919f7086069c8c4df6c7328
+        \\38c7787964eaac00e5921fb1498a60f4606766b3d9685001558d1a974e734151
+        \\3e
+    ;
+}
+
+fn p256_sig_1() -> []u8 {
+    return
+        \\2ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e18
+        \\4cd60b855d442f5b3c7b11eb6c4e0ae7525fe710fab9aa7c77a67f79e6fadd76
+    ;
+}
+
+fn p256_sig_2() -> []u8 {
+    return
+        \\012ba3a8bd6b94d5ed80a6d9d1190a436ebccc0833490686deac8635bcb9bf53
+        \\6900b329f479a2bbd0a5c384ee1493b1f5186a87139cac5df4087c134b491568
+        \\47db
+    ;
+}
+
+fn p256_sig_4() -> []u8 {
+    return
+        \\d45c5740946b2a147f59262ee6f5bc90bd01ed280528b62b3aed5fc93f06f739
+        \\b329f479a2bbd0a5c384ee1493b1f5186a87139cac5df4087c134b49156847db
+    ;
+}
+
+fn p256_sig_5() -> []u8 {
+    return
+        \\012ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e
+        \\1800b329f479a2bbd0a5c384ee1493b1f5186a87139cac5df4087c134b491568
+        \\47db
+    ;
+}
+
+fn p256_sig_11() -> []u8 {
+    return
+        \\0000000000000000000000000000000000000000000000000000000000000000
+        \\0000000000000000000000000000000000000000000000000000000000000000
+    ;
+}
+
+fn p256_sig_60() -> []u8 {
+    return
+        \\64a1aab5000d0e804f3e2fc02bdee9be8ff312334e2ba16d11547c97711c898e
+        \\6af015971cc30be6d1a206d4e013e0997772a2f91d73286ffd683b9bb2cf4f1b
+    ;
+}
+
+fn p256_sig_61() -> []u8 {
+    return
+        \\16aea964a2f6506d6f78c81c91fc7e8bded7d397738448de1e19a0ec580bf266
+        \\252cd762130c6667cfe8b7bc47d27d78391e8e80c578d1cd38c3ff033be928e9
+    ;
+}
+
+fn p256_key_1() -> []u8 {
+    return
+        \\040ad99500288d466940031d72a9f5445a4d43784640855bf0a69874d2de5fe1
+        \\03c5011e6ef2c42dcd50d5d3d29f99ae6eba2c80c9244f4c5422f0979ff0c3ba
+        \\5e
+    ;
+}
+
+fn p256_sig_115() -> []u8 {
+    return
+        \\000000000000000000000000000000004319055358e8617b0c46353d039cdaab
+        \\ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc63254e
+    ;
+}
+
+fn p256_sig_116() -> []u8 {
+    return
+        \\ffffffff00000001000000000000000000000000fffffffffffffffffffffffc
+        \\ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc63254e
+    ;
+}
+
+fn p256_key_2() -> []u8 {
+    return
+        \\04a71af64de5126a4a4e02b7922d66ce9415ce88a4c9d25514d91082c8725ac9
+        \\575d47723c8fbe580bb369fec9c2665d8e30a435b9932645482e7c9f11e87229
+        \\6b
+    ;
+}
+
+fn p256_sig_120() -> []u8 {
+    return
+        \\0000000000000000000000000000000000000000000000000000000000000005
+        \\0000000000000000000000000000000000000000000000000000000000000001
+    ;
+}
+
+fn p256_key_3() -> []u8 {
+    return
+        \\04e075effd9607d08d5f34e3652f64cfa3bd6d20c58d0a232f058491260ab212
+        \\a4cc61760ac8b0680c1b644c03cc628ba9dc4a3c0561368489c692bd40f43aa3
+        \\ca
+    ;
+}
+
+fn p256_key_4() -> []u8 {
+    return
+        \\0461722eaba731c697c7a9ba4d0afdbb5713d8aa12b0eab601bb33dbaf792c5a
+        \\dc272cd993b2b663aba5b3a26c101182ff178684945e83879e71598b95fe647d
+        \\fc
+    ;
+}
+
+fn p256_sig_154() -> []u8 {
+    return
+        \\555555550000000055555555555555553ef7a8e48d07df81a693439654210c70
+        \\02f676969f451a8ccafa4c4f09791810e6d632dbd60b1d5540f3284fbe1889b0
+    ;
+}
+
+fn p256_key_5() -> []u8 {
+    return
+        \\04b533d4695dd5b8c5e07757e55e6e516f7e2c88fa0239e23f60e8ec07dd70f2
+        \\871b134ee58cc583278456863f33c3a85d881f7d4a39850143e29d4eaf009afe
+        \\47
+    ;
+}
+
+fn p256_sig_169() -> []u8 {
+    return
+        \\7fffffff800000007fffffffffffffffde737d56d38bcf4279dce5617e3192a8
+        \\555555550000000055555555555555553ef7a8e48d07df81a693439654210c70
+    ;
+}
+
+fn p256_key_6() -> []u8 {
+    return
+        \\045b812fd521aafa69835a849cce6fbdeb6983b442d2444fe70e134c027fc469
+        \\63838a40f2a36092e9004e92d8d940cf5638550ce672ce8b8d4e15eba5499249
+        \\e9
+    ;
+}
+
+fn p256_sig_204() -> []u8 {
+    return
+        \\6f2347cab7dd76858fe0555ac3bc99048c4aacafdfb6bcbe05ea6c42c4934569
+        \\bb726660235793aa9957a61e76e00c2c435109cf9a15dd624d53f4301047856b
+    ;
+}
+
+fn p256_key_7() -> []u8 {
+    return
+        \\045b812fd521aafa69835a849cce6fbdeb6983b442d2444fe70e134c027fc469
+        \\637c75bf0c5c9f6d17ffb16d2726bf30a9c7aaf31a8d317472b1ea145ab66db6
+        \\16
+    ;
+}
+
+fn p256_sig_205() -> []u8 {
+    return
+        \\6f2347cab7dd76858fe0555ac3bc99048c4aacafdfb6bcbe05ea6c42c4934569
+        \\bb726660235793aa9957a61e76e00c2c435109cf9a15dd624d53f4301047856b
+    ;
+}
+
+fn p256_key_8() -> []u8 {
+    return
+        \\044f337ccfd67726a805e4f1600ae2849df3807eca117380239fbd8169000000
+        \\00ed9dea124cc8c396416411e988c30f427eb504af43a3146cd5df7ea60666d6
+        \\85
+    ;
+}
+
+fn p256_sig_229() -> []u8 {
+    return
+        \\d434e262a49eab7781e353a3565e482550dd0fd5defa013c7f29745eff3569f1
+        \\9b0c0a93f267fb6052fd8077be769c2b98953195d7bc10de844218305c6ba17a
+    ;
+}
+
+fn p384_key_0() -> []u8 {
+    return
+        \\042da57dda1089276a543f9ffdac0bff0d976cad71eb7280e7d9bfd9fee4bdb2
+        \\f20f47ff888274389772d98cc5752138aa4b6d054d69dcf3e25ec49df870715e
+        \\34883b1836197d76f8ad962e78f6571bbc7407b0d6091f9e4d88f01427440617
+        \\4f
+    ;
+}
+
+fn p384_sig_1() -> []u8 {
+    return
+        \\12b30abef6b5476fe6b612ae557c0425661e26b44b1bfe19daf2ca28e3113083
+        \\ba8e4ae4cc45a0320abd3394f1c548d71840da9fc1d2f8f8900cf485d5413b8c
+        \\2574ee3a8d4ca03995ca30240e09513805bf6209b58ac7aa9cff54eecd82b9f1
+    ;
+}
+
+fn p384_sig_2() -> []u8 {
+    return
+        \\0112b30abef6b5476fe6b612ae557c0425661e26b44b1bfe19a25617aad7485e
+        \\6312a8589714f647acf7a94cffbe8a724a00e7bf25603e2d07076ff30b7a2abe
+        \\c473da8b11c572b35fc631991d5de62ddca7525aaba89325dfd04fecc47bff42
+        \\6f82
+    ;
+}
+
+fn p384_sig_4() -> []u8 {
+    return
+        \\ed4cf541094ab8901949ed51aa83fbda99e1d94bb4e401e5ec7083591125fd5b
+        \\9d8bc2cd7c6b0748e22ee5d5daffe09ce7bf25603e2d07076ff30b7a2abec473
+        \\da8b11c572b35fc631991d5de62ddca7525aaba89325dfd04fecc47bff426f82
+    ;
+}
+
+fn p384_sig_5() -> []u8 {
+    return
+        \\0112b30abef6b5476fe6b612ae557c0425661e26b44b1bfe19daf2ca28e31130
+        \\83ba8e4ae4cc45a0320abd3394f1c548d700e7bf25603e2d07076ff30b7a2abe
+        \\c473da8b11c572b35fc631991d5de62ddca7525aaba89325dfd04fecc47bff42
+        \\6f82
+    ;
+}
+
+fn p384_sig_11() -> []u8 {
+    return
+        \\0000000000000000000000000000000000000000000000000000000000000000
+        \\0000000000000000000000000000000000000000000000000000000000000000
+        \\0000000000000000000000000000000000000000000000000000000000000000
+    ;
+}
+
+fn p384_sig_60() -> []u8 {
+    return
+        \\ac042e13ab83394692019170707bc21dd3d7b8d233d11b651757085bdd5767ea
+        \\bbb85322984f14437335de0cdf565684bd770d3ee4beadbabe7ca46e8c470278
+        \\3435228d46e2dd360e322fe61c86926fa49c8116ec940f72ac8c30d9beb3e12f
+    ;
+}
+
+fn p384_sig_61() -> []u8 {
+    return
+        \\d3298a0193c4316b34e3833ff764a82cff4ef57b5dd79ed6237b51ff76ceab13
+        \\bf92131f41030515b7e012d2ba857830bfc7518d2ad20ed5f58f3be79720f186
+        \\6f7a23b3bd1bf913d3916819d008497a071046311d3c2fd05fc284c964a39617
+    ;
+}
+
+fn p384_key_1() -> []u8 {
+    return
+        \\044bf4e52f958427ebb5915fb8c9595551b4d3a3fdab67badd9d6c3093f425ba
+        \\43630df71f42f0eb7ceaa94d9f6448a85dd30331588249fd2fdc0b309ec7ed84
+        \\81bc16f27800c13d7db700fc82e1b1c8545aa0c0d3b56e3bfe789fc18a916887
+        \\c2
+    ;
+}
+
+fn p384_sig_147() -> []u8 {
+    return
+        \\000000000000000000000000000000000000000000000000389cb27e0bc8d21f
+        \\a7e5f24cb74f58851313e696333ad68bffffffffffffffffffffffffffffffff
+        \\ffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52970
+    ;
+}
+
+fn p384_sig_148() -> []u8 {
+    return
+        \\fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe
+        \\ffffffff0000000000000000fffffffeffffffffffffffffffffffffffffffff
+        \\ffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52970
+    ;
+}
+
+fn p384_key_2() -> []u8 {
+    return
+        \\04554f2fd0b700a9f4568752b673d9c0d29dc96c10fe67e38c6d6d339bfafe05
+        \\f970da8c3d2164e82031307a44bd32251171312b61b59113ff0bd3b8a9a4934d
+        \\f262aa8096f840e9d8bffa5d7491ded87b38c496f9b9e4f0ba1089f8d3ffc88a
+        \\9f
+    ;
+}
+
+fn p384_sig_152() -> []u8 {
+    return
+        \\0000000000000000000000000000000000000000000000000000000000000000
+        \\0000000000000000000000000000000200000000000000000000000000000000
+        \\0000000000000000000000000000000000000000000000000000000000000001
+    ;
+}
+
+fn p384_key_3() -> []u8 {
+    return
+        \\0491aa326dabe04a6ad266de30873518f978f634c740705152539787b5b42dd9
+        \\683c4185ace936684683b4c136b5f2ff20cacda42b735cbee78e7b6a43f50b85
+        \\1b85e998c365909f763d3e64210eded159ebf21818dec0e207b877b99ff595be
+        \\af
+    ;
+}
+
+fn p384_key_4() -> []u8 {
+    return
+        \\045abbf618a084f67138c418a896d61af3af1826040835b73e7619846b495eba
+        \\6f7eeaa2e9cc61c85f6100fedc25c16743b065a427bc503139529e4faa63dda5
+        \\53aed2696fd02c2b6ceb2d941d2c4363cf9ac7a6759d50e8b9d07fe286f17cef
+        \\5c
+    ;
+}
+
+fn p384_sig_182() -> []u8 {
+    return
+        \\55555555555555555555555555555555555555555555555542766f2b5167b9f5
+        \\1d5e0490c2e58d28f9a40878eeec6326427f8227a67d9422557647d27945a90a
+        \\e1d2ec2931f90113cd5b407099e3d8f5a889d62069e64c0e1c4efe29690b0992
+    ;
+}
+
+fn p384_key_5() -> []u8 {
+    return
+        \\04f896353cc3a8afdd543ec3aef062ca97bc32ed1724ea38b940b8c0ea0e23b3
+        \\4187afbe70daf8dbaa5b511557e5d2bddac4bd265da67ceeafca636f6f4c0472
+        \\f22a9d02e2289184f73bbb700ae8fc921eff4920f290bfcb49fbb232cc13a210
+        \\28
+    ;
+}
+
+fn p384_sig_197() -> []u8 {
+    return
+        \\7fffffffffffffffffffffffffffffffffffffffffffffffe3b1a6c0fa1b96ef
+        \\ac0d06d9245853bd76760cb5666294b955555555555555555555555555555555
+        \\555555555555555542766f2b5167b9f51d5e0490c2e58d28f9a40878eeec6326
+    ;
+}
+
+fn p384_key_6() -> []u8 {
+    return
+        \\04e585a067d6dff37ae7f17f81583119b61291597345f107acffe237a08f4886
+        \\d4fdf94fe63182e6143c99be25a7b7d86b572c1e06dd2c7b94b873f0578fcb2b
+        \\99d60e246e51245d0804edd44b32f0f000c8f8f88f1d4a65fea51dbbb4ab1e28
+        \\23
+    ;
+}
+
+fn p384_sig_228() -> []u8 {
+    return
+        \\b37699e0d518a4d370dbdaaaea3788850fa03f8186d1f78fdfbae6540aa670b3
+        \\1c8ada0fff3e737bd69520560fe0ce6064adb4d51a93f96bed4665de2d4e1169
+        \\cc95819ec6e9333edfd5c07ca134ceef7c95957b719ae349fc439eaa49fbbe34
+    ;
+}
+
+fn p384_key_7() -> []u8 {
+    return
+        \\04e585a067d6dff37ae7f17f81583119b61291597345f107acffe237a08f4886
+        \\d4fdf94fe63182e6143c99be25a7b7d86ba8d3e1f922d3846b478c0fa87034d4
+        \\6629f1db91aedba2f7fb122bb4cd0f0ffe3707076fe2b59a015ae2444c54e1d7
+        \\dc
+    ;
+}
+
+fn p384_sig_229() -> []u8 {
+    return
+        \\b37699e0d518a4d370dbdaaaea3788850fa03f8186d1f78fdfbae6540aa670b3
+        \\1c8ada0fff3e737bd69520560fe0ce6064adb4d51a93f96bed4665de2d4e1169
+        \\cc95819ec6e9333edfd5c07ca134ceef7c95957b719ae349fc439eaa49fbbe34
+    ;
+}
+
+fn p384_key_8() -> []u8 {
+    return
+        \\04ffffffffaa63f1a239ac70197c6ebfcea5756dc012123f82c51fa874d66028
+        \\be00e976a1080606737cc75c40bdfe4aacacbd85389088a62a6398384c22b52d
+        \\492f23f46e4a27a4724ad55551da5c483438095a247cb0c3378f1f52c3425ff9
+        \\f1
+    ;
+}
+
+fn p384_sig_253() -> []u8 {
+    return
+        \\07648b6660d01ba2520a09d298adf3b1a02c32744bd2877208f5a4162f6c9843
+        \\73139d800a4cdc1ffea15bce4871a0ed99fd367012cb9e02cde2749455e0d495
+        \\c52818f3c14f6e6aad105b0925e2a7290ac4a06d9fadf4b15b578556fe332a5f
+    ;
+}
+
+fn rsa_modulus_0() -> []u8 {
+    return
+        \\a2b451a07d0aa5f96e455671513550514a8a5b462ebef717094fa1fee82224e6
+        \\37f9746d3f7cafd31878d80325b6ef5a1700f65903b469429e89d6eac8845097
+        \\b5ab393189db92512ed8a7711a1253facd20f79c15e8247f3d3e42e46e48c98e
+        \\254a2fe9765313a03eff8f17e1a029397a1fa26a8dce26f490ed81299615d981
+        \\4c22da610428e09c7d9658594266f5c021d0fceca08d945a12be82de4d1ece6b
+        \\4c03145b5d3495d4ed5411eb878daf05fd7afc3e09ada0f1126422f590975a19
+        \\69816f48698bcbba1b4d9cae79d460d8f9f85e7975005d9bc22c4e5ac0f7c1a4
+        \\5d12569a62807d3b9a02e5a530e773066f453d1f5b4c2e9cf7820283f742b9d5
+    ;
+}
+
+fn pkcs1_2048_sha256_sig_1() -> []u8 {
+    return
+        \\840f5dac53106dd1f9c57219224cf51289290c42f20466875ba8e830ac5690e5
+        \\41536fcc8ab03b731f82bf66d83f194e7e180b3963ec7a2f3f7904a7ce49aed4
+        \\7da4d4b79421eaf937d301b3e696169297b797c32c076a12be4de0b58e003c51
+        \\23051a84a10c62f8dac2f42a8640008eb3c7cccd6760ff5b51b6897639225828
+        \\45f048fb8150e5a7a6ca2eccc7bdc85349ad5b26c52137a79fa3fe5c29ab5cd7
+        \\615013219c1941b6708e9c3c23feff5febaf0c8ebca5750b54e3e6e99a3e876b
+        \\396f27860b7f3ec4e9191703c6332d944f6f69751167680c79c4f6b57f1cc875
+        \\5d24b6ec158ccdbacdb23107a33cb6b332516c13274d1f9dccc21dced869e486
+    ;
+}
+
+fn pkcs1_2048_sha256_sig_9() -> []u8 {
+    return
+        \\8a0e82d4f334aca72a718b6f8f643f69c6048d619d5eba71263a5d2d3ac7a7af
+        \\133b780c7595ca2c982c006e861948f543cd0210c758691f9626842c25de2843
+        \\ea314ca8eff285d47e0cffa54180af416004017034962a80a5959c3d3f1bfc15
+        \\4a4824462a93c014f6dfe920824f414a6e30e0e5944d480b99949ec7bf64c4a7
+        \\461575933b17d7d6b0178b5192392ace3ed8469e8ac1dacae51ad5d3ad73dcb2
+        \\13e056d04596e64d8c0703def3110c7cecc93ba8ac8059f0f3d66b89d8712c62
+        \\b41d407e4b4a104f4569558b0290c213cad6d0653898b9df8f4a453ab07d13bf
+        \\b7598d505abbd0c4987e4f1ac66e1a523e113e370ab7cf990f0cc63f50f4f0a4
+    ;
+}
+
+fn pkcs1_2048_sha256_sig_11() -> []u8 {
+    return
+        \\9947c137ebf7013ea9e41f1ce93fd29022e340e6ade56c1119cd826430acf983
+        \\3bbc1ed05c1899757a79d3104c9b4133ff0aef7e1cbeaafc2ada2422bdf9e299
+        \\26626527f947124d5549d9f4fddb809f84923aa335d331c392a5ae5e29cb0f50
+        \\3e230ce7bff114206d5dfd51b812f9ed5448d9100125a8cc2324e560c69f4a49
+        \\2988045c97ab90a2806df900c3b95ab95bd634dd0a50edc5312eeef6463bc4b6
+        \\2e54261cc67e9cb9caa9a0a7550183c9e03f26bd5c8718dd77f54290b3a27a05
+        \\4d7d3e39e8cb45529d585ac0e507b8688219d2b8032268020b68d2284f9f743d
+        \\ebab5cd47fb3fbd77fdfe3a9d7984b11a37cce190ac89a472578a3332b150f5d
+    ;
+}
+
+fn pkcs1_2048_sha256_sig_24() -> []u8 {
+    return
+        \\0e6eb88e130cf0d79056bdcb87f016f99edd9f35519c44bb509a38cd346d996e
+        \\3d9b7b21a40fc976a935f2904a6423dc0f251d8a89c4e1424d3312b1e7e0c14f
+        \\057fa3a45841dcda2bfcf107c2103c0475cbb34d4c769e98b08cbd35964aefc3
+        \\a8dc4178725c16ed7da6b438107da2488af8fd5cb2c15a8849a531e1a955c40c
+        \\d6c147956fc3e8a15a1082e9e9a7878efab929c50d52fd6c14cad0987f667221
+        \\a0c8ab29a682de04e437b20c82e9a759291dabd22fb38e86121b71b3ab473ea0
+        \\977441db6b137d01b63e328412996ccb8dc27e57c8cd6cbeb31e321160df29ea
+        \\3151f34ba36846495b6e4bb766f0bcdba00062265ad7d01847e22c06a463dfeb
+    ;
+}
+
+fn pkcs1_2048_sha256_sig_215() -> []u8 {
+    return
+        \\16b5347808defc31a231c28edac36a3f1789d4c549e8f5c71e2fcf5d5304ba43
+        \\7b4c7c0eb7ffbd80f5c5b2277bf24412b39ee3e74c368517717c438bb88b80b1
+        \\2ad14f7295ecf8841947e5e7457e66d2f869c30d28e9ac2019d7e5eca6229812
+        \\b649c8b6b4ccd4e17b254e7ab496aa5325525e7974be348dcd53c652e6315e67
+        \\0236bbbef2f501e246631b735c50e388ea3af8bb0030fb7fba9743eb70fc6687
+        \\cfdb92d46a4537ce88dba96ef52744e22fb7257af1538e3ffc4e2d9ac9101d6f
+        \\71bc2f5aab71ddcc73a6c635500fa0a9174d25ebcc85dcd7dd85a7d2e8d3138e
+        \\ffd171176bbdf23296ba3df630ee42185720ec141ceeaed1681a6ad0c156e099
+    ;
+}
+
+fn pkcs1_2048_sha256_sig_236() -> []u8 {
+    return
+        \\891f1354e36c2b7faca0981c64f249f73940ae03da86f0a413a971031b00c2be
+        \\d14489345225fea317d9d551cced9c6c6f6f7134cb6bdca1b0319d931a1d7a1e
+        \\24a744eb98fcb0d3254660066f688531fde00822917d07deb9d78aa337bdc2ca
+        \\3a4a050d8debb6c1283cb90e6991429887311f72b95bf3b18d1c5cd68f65f8ed
+        \\934d9e516e2a8503613fc4dc2e786c36d77ea2d5dff75c26dced572298f27de3
+        \\9459c55c6bec73295f20cf1c6e876b345c6fbb2ff23adf52d9d4ece53877a2bd
+        \\6e7cf3a4eae08b1b3ce8dc0468614e119ffb7547f1a765d9d9b5d9d8624ecf3b
+        \\836dce490c8a36a6a60e689c0bdcbdf774eb60fc552bc3e27fc9abeb2c905ddb
+    ;
+}
+
+fn pkcs1_2048_sha256_sig_238() -> []u8 {
+    return
+        \\7553fa477296a68ef8423d82af68103581e3a1681deeb91ad5e8f167d3bbeea5
+        \\de1867969a44a6501b4e447f82be28687706e2fca1862b5dd1e0fb91b146f8e9
+        \\c4a0a9f2f5ddf4da77bbacba56fa219a9eddd7dc234db9f75773218d1317ef5e
+        \\4e52ce2eef80f870d39b59fa3c1bf28f67e4df9ba4e1d12d198904a0cda309b3
+        \\cf2abe2d765fe366bd75652661ec830772102aeb5adf84680457fcb56a8d2716
+        \\04a24090a1f301b00ed67332a721b40e873c8dd3ce9206712ecf39e475a007d5
+        \\9c9cba314f7dcdd75b094da28789893da64628c8ff0d5c892b7e39d5c7655ef9
+        \\11d0dc39d7af59a55e5ada631b1cf3e6353e0f4a555e4558dc4b9a3c8baac281
+    ;
+}
+
+fn pkcs1_2048_sha256_sig_243() -> []u8 {
+    return
+        \\3ca3dec31913ad3cc2f3bb5b9ebd5d1e4bf137df6e5ae55fc5220c2b6ff150c8
+        \\e0fdd6e4a07dd955f67e65546550c6a9fb89b7edff36dd8dec900aa6ff41e691
+        \\f42000cf1e49acef9f491edd5a3bed1fccc3a36d48c0615679e6f166d3fb957d
+        \\04e5a8198dc1d6d9df9605bdb827c7d29fbe40f80ad44fcc63cf9f93a7038941
+        \\065e9a000450a769c4f3daedfd5c16bd79e4b9311f4e8e75a36c7a4b6044ab21
+        \\9f42feff6ec4c06aac0df4ea9152b47834c344c3d7c6e9fbb234d0cbc0b40721
+        \\11b55bfe4187599400ac34c1a24861ffcc556c21a7e5b93160f46c0fbd0616df
+        \\e6b244dc68693081a59047e11b80438c3517031754ef72e4ea9fa3fc86ae1bfd
+    ;
+}
+
+fn pkcs1_2048_sha256_sig_244() -> []u8 {
+    return
+        \\ba0d3d34d59915be6351725300fff4617210fa767b6c48522900ce2e2c8f88b3
+        \\f855bc9de7609603f2f405a81d3d6c1b8ac05a79fd278bb9c6af6dc90a6323c5
+        \\d77c0562cded072bb63e9ce533d9ca497479ecf7d75e6b6a4d4a86418909b865
+        \\21c5d6c7d5d634352d2ed6b15b16873f26b918e31b81e9363ad0ab373e7ac982
+        \\e6aa3eccaa4cb6dbc1a807b73082dfac6a5d7b2abbb0a8d3f12f3c8aac976fe6
+        \\6b44350a2b7a8840f53bcd1fe76d9a0bdec6c6eacfc2081b58c3e818f2e40bb8
+        \\d07b360c5fce83ece59267d39141c87807fdbee5b4ed5fc86e51111a57020211
+        \\a593e4d91a6dd0ebde6317ebc12f52f405415527e7df07ba8af42ecbefc41d7d
+    ;
+}
+
+fn pkcs1_2048_sha256_sig_255() -> []u8 {
+    return
+        \\5e91b5dcbf02d6f19621d41a83dc8f15ea83c0edb83765ef029b0acac2e1ec89
+        \\18b1d2afe1fadf11c48d27594cb9c01fed79d90e5d5a8085c438450111aa7d9f
+        \\a39c2345b14fc3c2cb34128f86db5eb00bdf8dfe38d61f29a41fe31342e7aaef
+        \\cb4b122eb5d63c2f5c263c8df8450e9428ffef974d535818d51dc03a7d60c8b2
+        \\d16c999ae46d73ab40515fe601d9b89b1d09c6d60cd51639a97c1d211e097609
+        \\ba5e8c319c6fbd21b34a634ec8fb8971c5aae21c70b847a4539cc10dc314ddd8
+        \\a9629e8a0e51c66c0cb61fd1f7228c01c6769190abe9bac9a389780005001435
+        \\8594e0fb20dbb458b12aa1346826cc9f7e9c5352b073d62853dafe77c848cb1f
+    ;
+}
+
+fn rsa_modulus_1() -> []u8 {
+    return
+        \\90a5d7aba2c8dc828e616fc1fc45c7c52130c8589dcbe2913da187572f6c2321
+        \\7b89a5186b6f90cbe053abfb0885a91f141dbe106ce6ad303904a5941df26ced
+        \\10478cb56a7bd6cf1313c4966d9cf7c4509d9dc63566aa323e110af219f3398c
+        \\04e79bb486de8703793473136f5c9051af24bd2c0208ea1bf9321a3e8f24af00
+        \\aaca1216842eab248d58cf46ac786c49fd3ca8557e9b53993a4b9718cdc5c474
+        \\bf1cfe58c07ad97b2c5acb7d86accc0fc7bed147adb2e77b8697d80150948117
+        \\714b806ff76f9d88147d84e93987b724bf4870429e85a7a7b51486a78d8a88f1
+        \\688f60e215d43d06221e2b993b5c12a607b80e9e0122472b29945f76b55737c1
+    ;
+}
+
+fn pkcs1_2048_sha256_sig_258() -> []u8 {
+    return
+        \\0000000000000000000000000000000000000000000000000000000000000000
+        \\0000000000000000000000000000000000000000000000000000000000000000
+        \\0000000000000000000000000000000000000000000000000000000000000000
+        \\0000000000000000000000000000000000000000000000000000000000000000
+        \\0000000000000000000000000000000000000000000000000000000000000000
+        \\000000000000000000000989e7ff72e67e680bd21d5f966e4ad8a48c3592dbac
+        \\c4a2f035b4ef4d17a2f25f8a9fef7e78eb99d76d68629ed02d67c43c4b7ec8c3
+        \\badc32e3d0a524c326537739b0fde156723b27c23ae2b09895e470c64d700f5c
+    ;
+}
+
+fn rsa_modulus_2() -> []u8 {
+    return
+        \\92bf17cdbffb42fa9957ce37826bb451708e7cdec8752b809c81a8d16fe5fe4d
+        \\ab6a9db6d11dbb12086645db7546642b322e8331dd7f29eff68bf40b24f80884
+        \\f5152b1fda9b9f7ae2fce2721cdee0fc48f85a6e8e64f767ed9727fd2dc59796
+        \\7e276a5e2e768528afdd9df4b6ddda4c174300e4da3c19a3c32299e1e7857934
+        \\c14dd6203d8c2671289bc392711597155364a59046b2b9f1905fe717ca7efebb
+        \\4c1969b804118effa240c11ebf97cd68c2aa19c787b3be21e68c0e397c7f04c6
+        \\ef98950e27e0e19a40da92a3ea10800fe9252b77026d14c2fa1eb4ac102491e5
+        \\773279f07d856d446f45169b09bf60b8a2695f5e4864eaaf9590aec8c7c2f86d
+    ;
+}
+
+fn pkcs1_2048_sha256_sig_259() -> []u8 {
+    return
+        \\92bf17cdbffb42fa9957ce37826bb451708e7cdec8752b809c81a8d16fe5fe4d
+        \\ab6a9db6d11dbb12086645db7546642b322e8331dd7f29eff68bf40b24f80884
+        \\f5152b1fda9b9f7ae2fce2721cdee0fc48f85a6e8e64f767ed9727fd2dc59796
+        \\7e276a5e2e768528afdd9df4b6ddda4c174300e4da3c19a3c32299e1e7857934
+        \\c14dd6203d8c2671289bc392711597155364a59046b2b9f1905fe717ca7efebb
+        \\4c1969b804118effa240b8bf4bb1a6d0616fd5be2f081dc9ef741a9a4ae72744
+        \\18b791432de470c4556463108388e8e8ed5dcebf3558e4650c2ac97c86fa6821
+        \\76f09b5dd8cfbf15d19c3fe4f961f4607c12cb3dfad9b6a0e59c92faa1fc8622
+    ;
+}
+
+fn rsa_modulus_3() -> []u8 {
+    return
+        \\cda6fa5ca76bfe0492ec57e0a3bfff7272dc8d1e25ad1fb338aa050f02c104e6
+        \\3133d6b5b7c4985ebbae9ac036a5b9c03074d60aec8e25baf392a0c430ff05b8
+        \\8e948805d3dd74511d8885250a7b574215ada015c559076686e253ccc96c0815
+        \\b1291ee787cc3363b4f77d930eb998d7c582b24cea9ce21de9722791989863a2
+        \\7ebc80a00de5bd2f9228775e5a4ceb054d58c9be36a054336971a13642dd9510
+        \\dd696aa268db3aab2299d5d88f8e562434d1427094d3df8e72d1ef69b4ed34d1
+        \\2bac375223b2a25cf227f735f816e85e17239304769a6082154cd15899fc1eae
+        \\fb69b748a3e5ed24d38372597de3e4e2a27b951d6ac7db182d6809d8ff511b7f
+    ;
+}
+
+fn pkcs1_2048_sha384_sig_1() -> []u8 {
+    return
+        \\c5b6f5fd8ea320880e9e27b0026b1d63bcd1152c72855853294b7683a759dee0
+        \\42be8bb0c350b0c31aea76e1ba2c6d79920c3e21b6e97b6cf46fabf92a701a75
+        \\55540dd7c325e7c657fd9a079bc5a58923d2ccaef51014acd6fc6e5296960362
+        \\a94688f2cb2675d5062c5101c3875399b95143511e6ea156ebbdd32c9ef8b061
+        \\dc66e2c912bf2ae37e3ddcfd5f32a72412db8ba7a1ce3b44ea4c6e2a858b3f3c
+        \\b198cf41914e4970b03edb1bf81f8abea6371b469d2e80883d7760c0707dac80
+        \\8fb55e588b285153b8ee5c32ffe90197991a567499d5ed62a6b810581901cf8a
+        \\bf086ddf84c10b03ad6845c977ec72d02028308cbd19daea2668865f00a23ab5
+    ;
+}
+
+fn pkcs1_2048_sha384_sig_9() -> []u8 {
+    return
+        \\3c1d887865eccd6eb7d794756f93819c8126fb018d483b6cea67e10364d24555
+        \\05e228c95106d493538c60d1203ca317aef7926e09e088a39e198915fcaaf316
+        \\346db4ce62908464838efb7bca14041ce4477fd55422b94396dd79883f9024d4
+        \\6b8f9838ca7b5851e2d935329365c917ca03e1c44443a9602ae1cfb95ef89d9c
+        \\7315f7e0b287a39d8133243c75ec0303339d88e937504b118ecedef756f746c6
+        \\a8b244d86ad9e02d02b24ee5e616455deea86beb334af9e294289cee20a7a135
+        \\448739dcd48400da80f15e060c312d4b981d63dba827ddb2751a89bc421ca600
+        \\dbd5cc8915a1da43baa34d09e668d2cf5847cd55b705d5e7fb7d355c42c88d4a
+    ;
+}
+
+fn pkcs1_2048_sha384_sig_11() -> []u8 {
+    return
+        \\8f9c83a3a017383a5cab106589fe076c15802729be880120b956dd69d36b8220
+        \\22f58f6486cbc9009fceadb83b92883b281e3bd998115e522a1a3199b5773845
+        \\aeb54331bed863baca87d6de45f387629bf6f328e8f3b0698fe2e96e4faa95d6
+        \\1d7afe105c15f6c3d11ab561bdefdeca453f87e75945ab1746fcc559fedad0be
+        \\2a494b7b9b9c0089e131f86eb6a0a422da225390ada5559bc64d1990f94ffbe7
+        \\7d00aa19cf1a1676a2362596b32187229180e5e8944173606f54a627ae4457e7
+        \\48c481c3cbfa7416f381157684eabf87490ea96a8a032b1c0c316f99eb18b9c3
+        \\0192094fc8606bb86bf5445c10fc5e9025737fd52b779a008ae60e504b92c3c2
+    ;
+}
+
+fn pkcs1_2048_sha384_sig_24() -> []u8 {
+    return
+        \\1d37a4d8669859074eb9ab3a3a9040745e78fd131d024f80d2e4fc2ee894a4be
+        \\034ce39a3ad6999b4e980a7fc34dbacbd8b1ad980dcf2b7286aff77fc420d875
+        \\156adaba3929fcf316b7957d18b99eaa1427ce7b5c31b59430f253ceaaa806cc
+        \\e501bbf6ead832eec64dd97c13313fda9815a77335d394d7474714b7365e1020
+        \\e1534a3468b6d611bbb67046c265f96d57cfed5bd4cb4302462474986352063a
+        \\6437fd9581ee000f936cd0a706e0c9de243ee2bcbbbb033ea3cbf5a54613a741
+        \\d0977d4e81d6faaf4342e8591c61b218856e631377b1cec9b3e7dbce72a812ba
+        \\55294f32ff65ffad2b0407643ed6eca28fdc2c4e6da9bc5d4793bafebc5b666c
+    ;
+}
+
+fn pkcs1_2048_sha384_sig_216() -> []u8 {
+    return
+        \\6f3ddf150253e805519b99c3e41ebafbcc81d39b328ba9dd388107ef1e7136c6
+        \\242cccf61d3ecc213345fd8b216c3cbc1ae77cd8747d75c60cc648622d25a355
+        \\38558296f3ad3df183ef41c3c80c4d5659186f9a34830ca2b4db950051a99b7d
+        \\23018ae6492ed396eb85b665456b482e81b3f60ff565b3b01f51268c0b4eb8c4
+        \\55627e618ee559a74678d0338cb25411fa0f1123fa9ab38f666068c092c168b3
+        \\3a971664a6ed4359c1e1e2d8c777217d510fca6367cc06b8677e02bb6574a218
+        \\ee48aeacea51405531d81758df68d2eb7ab640fdced07029437a611c1a05ee3d
+        \\2defe2bc2d35e06226c16141fdba4810b14733e8c7aca430bca49257f86c9f54
+    ;
+}
+
+fn pkcs1_2048_sha384_sig_236() -> []u8 {
+    return
+        \\4a2bd5ed1e053d5421808f7d2636779c7c1e6e1d94c47ae2520332113333f0c3
+        \\f229554db384561cc4be4615d2f9b36d7a1cfebb85333c0a070a8379293d5e46
+        \\af0d5c34d71b4cecfee2a190a9bad3baac34aaa8881d048cd2e9b8a74c67a5be
+        \\02fc27368e5417b4fb6d928254d645bdc95577fb1ba79bc169a9e24466427db6
+        \\4406a98a8589e3e164a5889d205ab861acd9ea5551cdc06515813e4455d202b0
+        \\8b829463dda47a55729961dfd2130ee03c4ca92a8579b30478c2b479646c242a
+        \\7e9ff0547c7e774a29469eaa49157d53425e0afe0dca68c88cc71aad8a8a00bb
+        \\fe8f39c36fa3ecc168f605d7333626b0afeaa7465d78862d4d44ad64a4f7a0cb
+    ;
+}
+
+fn pkcs1_2048_sha384_sig_238() -> []u8 {
+    return
+        \\c1d45424fc88ebc3de2cb0f6fef91042822f857835b014e6362b986496d1d0db
+        \\f3ef50d71ee2dff5567027dd00fad1e826216bb34c95954ba3a9ee3fe646f9f6
+        \\90484c2586b96946efff54d6591024d251cfed885d6e8d36baa14757d7621e75
+        \\ad521adea55a217ba7e6ea0a8294651d688ed395920975d52f607d542126db22
+        \\83f00d9ebf48e395bb83901350843cd7812072b67472d16cbdc2cef414ed57e3
+        \\3bc725d53c5d78bb3282116bd3ee672842191e9a5794d78d4f2bb9cf600d6ef8
+        \\f3d538881c9efb80c7f4318f62c091b0a3d13f485923bd0561bacfd7e08f75c2
+        \\6a60c8116b37524f4e4b40cf488035a796bd19d3ae5cba8bcee923e021a78183
+    ;
+}
+
+fn pkcs1_2048_sha384_sig_243() -> []u8 {
+    return
+        \\bbde1e1373cb938add41e6ceeee683908f3c575c6a15e38481ce6e83a5d95fa3
+        \\d2a4b0b6e95e1abf165cdfd5ba308497640f58cc4642298100e9ff6399514469
+        \\51e67aec55ab8e7b9f05abd8870ed3bba86ab875e03d935803d13236fd668870
+        \\69a72d14375a4f17e9fc274cbeedfdfa7c8b77c0b62fc570dc5bd30dd6f9f23f
+        \\309ca58e004495472f2c4e5095202c47f24ee8a10474144e1d101ae173c387dc
+        \\92647a93618d779ff040ae424d75b22262146f457e704240cdad3bff67d086d8
+        \\2b4dba7f8308e1e392691065b28be33e52dcc20787997817104d2d23bb67469d
+        \\21d5e3cb84c035a1d75e6b699cfe363db10d52b9c0b4c82573cb1de5a5cd6cfe
+    ;
+}
+
+fn pkcs1_2048_sha384_sig_244() -> []u8 {
+    return
+        \\35c96d10164da4cc67c396efe2d53d00f7bf8768edbf77d3164c19b6b71e74dd
+        \\e8e7b1c2419f2f2cea13ba9018fb503649f74f9d764822e85d61b2f2393f5256
+        \\3f527efdf7e8899704eb87caae7d049867dbaa771d6e85288026b359792d69c8
+        \\054cf23df9a622d50154b18b0aceecfc70ad759af7661e10b7aa7eb3736629c7
+        \\9b3abaf626a3bcf881679ee2d155259c2bdbf9f9d3c8c298419b2026d7692e76
+        \\f43caad926c98fe3eca5dcd298558527a870fec81ce89390d9f14ccc12b639de
+        \\8d5fc1241455c26e9e35b289b1d9806b487f5472990c80ec2fe230410adb910d
+        \\74117e329b79e2675e7c9ec08bdcc89dafd20bb6dc12e0170ba1a922fd6aec66
+    ;
+}
+
+fn pkcs1_2048_sha384_sig_255() -> []u8 {
+    return
+        \\69a1af712699465ff84ed85dbb35323df339f7627310b2b3cf2b8b9fd4fa5cb0
+        \\f536680d7bf905347a642c1960c3e17495770bf939b7b3d426ed2209b5e47a60
+        \\29af076a8e95f9a7fc959041d2e221d433f3836e37b6075a8388a2a6aed17855
+        \\28cc79348d4dead276988f7f49d827c0ebbbfe7aae9d946f16c7a3598da58771
+        \\0a8d9fc72ca537534959c76a35c91ea90989dd0fce6bbb0d0f8c439188e51e0c
+        \\82debfab4ac1dd7df3c3e48627039a9d3829a7f08432da36b6ca6d9ba0f9a15f
+        \\6a61afa09c1ad305c3182e0a88e128192d8d064af7037950574cfd21b1ddb5f5
+        \\62ceecefed4e62c6d12f82135aab2c0a6dba9a181945f56943b4a81faa42fff0
+    ;
+}
+
+fn rsa_modulus_4() -> []u8 {
+    return
+        \\c2c4a860236d3c9096a076d6ba5107e0f7bd81e1ba916f7375724bd2b0b0b639
+        \\56813715a3457ab0458b71fb35a45b27f9ef7ac3e579dea45dfbfd07819ed6b7
+        \\021aa5336c58442aadd96ca9ee9d32473e9d9278562b4d10258ade6a98fb1c7c
+        \\fdc3b3716ef5dec58cf73b359f389599b4b5865a9863519eb001c324387da755
+        \\450db341309360e3807c0565b8e2c44fbd5e6e8d04d006d7ee768b8e8436082a
+        \\90fa0e837f32f46087ab4a0d9be28aa7da1794ceb0172a7f50ed20f6df641efb
+        \\cbfd2aac89775c761a7310093c671c977fa18b0d6e01fb25f7a432b42c653597
+        \\84c689205719c1cf6e3a65dae2da434c326dde81bb6ffffbdbf6de5c16bba749
+    ;
+}
+
+fn pkcs1_2048_sha512_sig_1() -> []u8 {
+    return
+        \\b03dd72dc84b305ea811267a489aba10a1dc54b59f92e58546a2f0b6883f5435
+        \\12d621951352ef12abafe4bd6e10c2e5b0eabbbbf1d081b66e535fc9b8ad3790
+        \\40c3c71ec8f2b4f5d319f5d2a0240a767ddb4de1fbc878b2c5e8e1e260217bbd
+        \\70971789fedb8c677fc8193f67e4637239607c7b9d3511868ccc0df372374abc
+        \\685c9b4b74b2c5f11758f809b19bb3b5c464db870fea61ddfa5e18be2c4106f3
+        \\e165fe85a7f8241db2806d0fc3c45d8a7f1eb4ca411a46ac411b81c04fd8c4ce
+        \\d5eff497da6bcb8e2fbe1f95cf4c3e761fc3037c82276f7ebfb7e6cc8534cb4f
+        \\d34192074f580c6e31008df4f1404ae8dbcb111503d4bdfe6e7107a1ab5cd8c6
+    ;
+}
+
+fn pkcs1_2048_sha512_sig_9() -> []u8 {
+    return
+        \\93611a697f527bb2d6e4193ea34e079e0b8ec8e4a516962a74cc91c157528bcf
+        \\4654beb487f5eac5ed445f858fcf8461e63fc657a57bd8226d980b212fb5e611
+        \\11e0c654e0a6aa0c959f20001f6345a60ab14b8ef5631a81cdc552a04ad3f17e
+        \\ef287b011ce401be17900e79b4b045c12a90412a852131a1b9ae7c31051e8fe6
+        \\f066b4f7e1d8e9997aef10a8c516fa3d782c9aed73dcbaa1d9794de7300c607c
+        \\17607740f091c2dde354b58c0ed9d4b8fdc43e249847b494821bc9560fbc3c57
+        \\f363e5d2bfcc488c041f123fc379c7bc80a9ea6ae98b7fb76058f9260c0f5fa1
+        \\000a7f865e5a63d1d279fc7f452775186608cae1f3b640594d4b3fd8af4a5a4c
+    ;
+}
+
+fn pkcs1_2048_sha512_sig_11() -> []u8 {
+    return
+        \\a7db33f68fd972b3e122e2dc8c749561d14e513e7df9b03f285422015879de35
+        \\021689bccca37b31aa7d156f39399063a06fc9590c58cee25d83e1debe90037a
+        \\8713eb0c58194e7b54ddaa86baa0e9f83b604afb5585aa1e1a45fe24f38576e6
+        \\44eedbbb86f57031cb43f3ef1428a33998c1decf44011b63763e47d2b2fbdaa9
+        \\0deae270455607b928645b3f5ac39553feab8f5115c9e2f26497155076c13d76
+        \\d95af3ef342bd1828e382949a63c54cd0d4c4c53cb00ff4b8e285034e78ee0f7
+        \\dccf9017839c189ccb3bb8b92f515beb63345c9973e77dfb388b373b8076578e
+        \\41aa3bf3e86bbd4e1875996ad19c8d618c8d69f4eb06b4103cceb2b8ccbd8a58
+    ;
+}
+
+fn pkcs1_2048_sha512_sig_24() -> []u8 {
+    return
+        \\19ab49725adeffce9e1be9623d1188d5449e62403909441891a6179d5803dc61
+        \\e3c647858d8db24ab61aa8f1160db289e7ea0787565d28b097ac975e5602f405
+        \\2b703de1211f112380aa9264180ca1ac117fd21db9c2fe6b32dfa4b9e6fc42a9
+        \\4e5be8700577401b0958888adc4ce5d2720ea79b1e869b42b22e885224fff14d
+        \\e367bd9765e1e426bea325c7ee7982d7d234209e9f07115363fceb459572fb14
+        \\c9b2c1477d36d687dfb2413fbff70a7edebf86a7bbdb99b1b6de454544597d49
+        \\9b240867d2fb2b5efaeeaa1107ef4fd62f5684c44d1aee075e52b467187c3312
+        \\e46889edcc39f3e0bd9b57490c98022c89e5f61a2dd5931685e5d5e8fa1cfcce
+    ;
+}
+
+fn pkcs1_2048_sha512_sig_216() -> []u8 {
+    return
+        \\735758c0d252c3d7eb0d5f7d9b1fce3f3bfaac9c27ab9c64d9dbe53d5a20354a
+        \\1bab7d7b1da1818852f9d8f3fd24afbd7fd94709672106d7b389c1c07f7347b0
+        \\25e49ed058406bc4e0cbdaca5f550e57f4ea07cf924c371ad89dd72a4b5bbfe9
+        \\5e172436b5ddf10b564662a36c1762a88cf94cc164ec65b538ff8c8d527dbb09
+        \\aa2ab60972856f1b4fbba5fbe4d82ba53cc8450feac18a276938a3d175095cb7
+        \\bb923589f54e721b836cec671f7672548392196e1b907afa5fa22f8817d628c9
+        \\22cc1de6c9ff2dbaf691bcc7a53b30d5b39ca8acdbebe6992aff3c28ebc00bb6
+        \\a91d3714e6cacd42d99653cb9eb3f148a44fd2cbaab35336776e73657b756955
+    ;
+}
+
+fn pkcs1_2048_sha512_sig_236() -> []u8 {
+    return
+        \\bfa56d1f9db006144a2714fd66a633ac3d27e7033ad9d59967f816ee45277095
+        \\689203f3b257c8fb64b3b1d16b6e424f1347076b6009ae56ae193075b82d5ece
+        \\6e643f0e645b1675fa0b7998c6f5414511d2acedfcecd0324543f92a462b9f9f
+        \\79223931e7ead2c2915a1dcccafaccbd374669caf1e2f50d45aa986e4511674f
+        \\a9a5bebeac29760bb055acff67026ba83a977aee4d6bcc7b247a76bb77a345ce
+        \\b97996750b77fcf979adcffb71e734c461adf3e23b708591f4987d59ca8983e0
+        \\d10ff5a78199a02f02ee171c26b373160efbb51a23451bd326a7a6dcb66e4d9b
+        \\d02ad30acb4719478b0908831d5cdf4012efe94aa8d87290f9e94d430e9095f0
+    ;
+}
+
+fn pkcs1_2048_sha512_sig_238() -> []u8 {
+    return
+        \\02ff707145810007237dc0477dfc1fd5038aad62296d19c1ab77d0d06ce281ee
+        \\563d2c54735daa32ae12c2e4ceb56f32b8bd4e1b9ae86bc9379a6ad6d63e3247
+        \\80fcfd2ade96ff9c48245c1ae19c8e24f719496f8a26c9d5a7232e8b408c146a
+        \\ce0d4360acdf679bd3167f326eb588525280b55099c809e845c0e64a5e316e7f
+        \\3511d799507f94afaefa42da1128f6654ea42d28028aeedc36082644ecc81f29
+        \\b494c0a726b9b687cb06f2a0293b2501f934ce3dba207f37678eb09a615ca751
+        \\c31824812cbafbfe830d44b160ad00f3eedd9c554cf51930f8578b113b6b307f
+        \\83fc1be945df5c2a025514a830cddceb224568246eca733da0d29ad7c69c4327
+    ;
+}
+
+fn pkcs1_2048_sha512_sig_243() -> []u8 {
+    return
+        \\aaf30570f51e30b58efd71629a8319def1770ccb8ff53a87803557005bcc7c7d
+        \\b80d8ccf703d3b5370d9d022c35238cb9a5c40827c8ea0398bd92db9c9f9035d
+        \\1cb802110a60746823b3d2fd8768e2cfe94f580a75087d9639a9cda7bc4dd768
+        \\33674ab7aef4a5f4553ff2da695a29531cea254a03f0137b7525d8df3757c391
+        \\dfed7837d9b2f8383706e5170a8bae9b1dc60b326f0c588246d3b3399167b49d
+        \\85e24816d0577eee4cc644fffae103b2768447e108c1ca3dbd4fc732c09eaab6
+        \\ef47eee403326dfa3e1e4b06921aedb33017438ed0e965abd39ba848e619376a
+        \\6d2a0a9be997ea4e7f76ab9b37d18db1f43da783e374b7cf5b59de441474976f
+    ;
+}
+
+fn pkcs1_2048_sha512_sig_244() -> []u8 {
+    return
+        \\5be7a01d2544f6fbc482cc8fcc5a6afbf0ebd7195ee6baaeefc32f71e09a6c41
+        \\b0ff78962766b7f49d205dbcd18892aad3e788b5c021282e7a63d63d6d9fb17d
+        \\b9bc3936a66c873dce863e81e271f4fef44ef7162f647ed4c4de6aff7c4a617a
+        \\c951600ea0497e4d736948fe26fef5ec395c269b268794c4935adad61a4a86ae
+        \\9ed83a4a48bb28f8fc56a877f2c4d48c65ff81597b78eec0fdabbb474f703bac
+        \\7626fc78534b805908b0958dd458908ede3246187ce5cc2b7ca37702246424fd
+        \\8f3be6de5835310fdb2c0db8e42885b4ed6dd3fb378714fb54b69d29a78faad6
+        \\5f15b513b3cb53ca3c718277178ceea3568e323ba84dc91a2758fcc11aee5511
+    ;
+}
+
+fn pkcs1_2048_sha512_sig_255() -> []u8 {
+    return
+        \\b6e6752a6f99a6dbc43817850a139bf61d3b983821b022758da22187af9cc02a
+        \\33cc4e7b59586fa829582374031a34d8d7f3ead4d9f7e42d3e50ffa74ea085b4
+        \\cd884bf637039152d05de1fb6611c66b26bb4f4543eb4680dba24249aa0e31ba
+        \\17b6fb4a26994b85bb1b79bd77c59ed18bcd4d4da04e45655c0d981af616a8ef
+        \\5c193135a58c9a61857e1fd4c6afa60b23d214f58a968d31486c57d483dfcf7a
+        \\59d49039bca4d0a7b3469eb47cb2db77dd9fcaec9d906bd206fad6533efe9b06
+        \\a39e61dc1e901fe552fa086fde96f03e58cf3d6b65bf1c4eb9a8b48b218189ff
+        \\4b0008c99aed899a787cc0d4ad447093db347161ce79d1de880d653b1380b4ff
+    ;
+}
+
+fn rsa_modulus_5() -> []u8 {
+    return
+        \\f2ed0e93228f37c2ce1c215e00cce4ef00e2c08a004a39c4170dc73e5fbd9b91
+        \\e7c55e596579ec9c60b9bd341e83029b1934e6493eb60099b6cfbb9804d4179c
+        \\983099e19102bba49eaa28fa505efacc5a9d5374499c0c5775778317ed370de1
+        \\919f38aff22d5aee8c8af36a86d036029e761f243dff3c205a11e9bce9ac1d6b
+        \\af81e79ad4146b119abb13903f8562e8f3e6a918f48223465bc93d5e7d5abe3d
+        \\08503ec42998fe087a1f935d1b8673c495f005dfa7453daf977e1608a8c276da
+        \\2a4cd0567e4af4d18cba05fdbedcde74493ccabd9060c27d35a02f35c760b12a
+        \\4deae1359f649f273fa408626fb789c916434a642d528f41db868ff93b7f889f
+    ;
+}
+
+fn pkcs1_2048_sha512_sig_259() -> []u8 {
+    return
+        \\0000000000000000000000000000000000000000000000000000000000000000
+        \\0000000000000000000000000000000000000000000000000000000000000000
+        \\0000000000000000000000000000000000000000000000000000000000000000
+        \\0000000000000000000000000000000000000000000000000000000000000000
+        \\0000000000000000000000000000000000000000000000000000000000000000
+        \\0000000000000000000009e7a1269086f0bbc0778ded8d7108ff4edcc2313425
+        \\088117b2d5c53e9d9971950a5fe8b2b67d2bcd1be74f6b557a3f90650a96d7e4
+        \\dbd63c05b94f73337eea682417c058d66ce523e4461065ac8ba990c4ecd04932
+    ;
+}
+
+fn rsa_modulus_6() -> []u8 {
+    return
+        \\c6fe23792566023c265287c5ac6f71541c0994d11d059ee6403986efa21c24b5
+        \\1bd91d8862f9df79a4e328e3e27c83df260b25a9b43420affc44b51e8d7525b6
+        \\f29c372a405104732007527a62ed82fac73f4892a80e09682a41a58cd347017f
+        \\3be7d801334f92d9321aafd53b51bffabfc752cfccae0b1ee03bdaff9e428cc1
+        \\c117f1ac96b4fe23f8c23e6381186a66fd59289339ae55c4bcdadbff84abdaa5
+        \\32240d4e1d28b2d0481dadd3b246557ca8fe18092817730b39e6ee378ffcc85b
+        \\19ffdc916a9b991a6b66d4a9c7bab5f5e7a3722101142e7a4108c15d573b1528
+        \\9e07e46eaea07b42c2abcba330e99554b4656165bb4c0db2b6393a07eca575c5
+        \\1a93c4e15bdb0f747909447e3efe34c67ca8954b530e56a20a1b6d84d45ed1bc
+        \\d3aa58ec06f184ee5857aaa819e1cca9a26f4e28d6b977d33916db9896d252d1
+        \\afa762e287cb0d384cc75bfe53f4e922d02dd0a481c042e2d306b4b3c189371e
+        \\575b25e0005a164cf69dd0976e4d5be476806ea6be6084e71ab4f5ac5c1b1203
+    ;
+}
+
+fn pkcs1_3072_sha256_sig_1() -> []u8 {
+    return
+        \\157ffb942b1363b5989ec4beb93fb0187ef016de4ce055620825d13c3dafd4ff
+        \\f621c71920e884ba28c5e98b328baac29ad4bfc4d2cae2f0ecb9d1b6c9fbdfc3
+        \\85aa565aaf6c5b3150e085e0316e21d7d440a873074e5d2700d961114ed42047
+        \\8647a4769d832691f7a004d934a89dc249c9343341902d5d0c3d1a6230012656
+        \\34216beacd5f756821f21c3b58111790657690918a2eafa9e85ab1ee44edd3d8
+        \\bb89e892acf411ba9eaaeef88eca37dffbda72751c117364fd1b38c840d7b423
+        \\18fcd011a4449aeffc2de32836d3a4f704d4c8ad4e078315d0d1758f098f2ea7
+        \\49ccce62aac592ac4041b5e733ba0431b88332a39a2af7f68f9bb1f469a793b2
+        \\80b964f285ce5cd1ff3adcd7dbd464a7c9414ed45791073f08415be2dd9f01dc
+        \\2fec8c3a26fe97d9778e2b2fccf71a1ea5e9ce017d2d46778d7e37bb832ebd58
+        \\25b3257a7852db5cb6c132bcf9ba3522a670b0e866585444ed3601fd32a92281
+        \\8ef6611626eee3ea99cfcfeeaa4c370567cc65e0479bd35e091b772d7445cade
+    ;
+}
+
+fn pkcs1_3072_sha256_sig_9() -> []u8 {
+    return
+        \\46da0267738cab66df530dbea6fbbebbe904ad3d6ea7e7a06e39a3b5f3e38bf5
+        \\856624185080fc756941b226a52c8e6126d07714deb781f6f7944f47147c680a
+        \\eb0dce310c7d6f429429ac73e562510678c23042b635116174a2c2f4e8e8becf
+        \\ee1e4ba3cfbf4e2ee541c7f7c27b1916a2aa165cdeeaafb9f81c84e9754d196c
+        \\3a9bdc777fc55d86b6bbd16270bc4d3cc75c2960f2a7a661105184b436a31de2
+        \\cefad722a14abc1cd2f2c75738b2c81580fecff78d7d385b20d1a03d4aa2c21a
+        \\168e13da18fd628e34be16d821b48136b6dcf7594ab3e1243c0a2a9e785fe404
+        \\36cc6fc460879b673b068cd35a9114b59c2dc61fb875310e103610b74aa5e362
+        \\0c51a257dcc3b9b0adbe774426ede0f779ea9d370f18a19d8844ed9f5d90ebfc
+        \\4e0607a467645711da2b500840d4851e3de63723283bda8d08acc51a012699df
+        \\0e8f5aabe269206f93ba4ca6597e17cdc01d2ead46b5dd2433b82237da01518e
+        \\e3168b133b6a42e9a73194fcf9162b71d08528254c34b20d692e141c657c969d
+    ;
+}
+
+fn pkcs1_3072_sha256_sig_11() -> []u8 {
+    return
+        \\3e65342b3d9322ee9b0473f54f0c3be5a17f56f2cfa5a8168bcf3001ca1256be
+        \\867d3a575b07c3d7d020037590aa10d75dd764a1d57a123976116286ced29b68
+        \\e3b625c3ce0c235a629e27e4f8011afe4b383117a8bfc927a7718bd81ec4a156
+        \\ef6ec5cb206c2f23941b595ab3e8e4a3eed825c8e2af444cc7b0ae0e303c8f10
+        \\9cc149fed6e8a2679c55a2f483dc64642170d0f62f0f20a5387a80c5ee3e72d2
+        \\75a8c3e18c65de6f9af8a7ce886b83d84cd0270bddbca64db5d6de42619ab0f3
+        \\7ec18594a09a80c0183d44dd3ec6b46ca4846daab73effe1d5e2d8ce302db267
+        \\08ae9223369ba5c488bd11ad27751abbf994e2bd18cc999dfff0f65e8c6d6d04
+        \\e229252a5d6704483458d7d094dfdc96cd5a7b0573a2e0b50fc14a8d291fc856
+        \\e63d82343534b75b25298c6ab7af401ce1215cebedf87635ec80d0cc228831d2
+        \\6c40efa5997105fe4b3786d0a44c17be443a67181d35a5ee56da18b7e97db573
+        \\879686a406c3bf340851d12d8ed57c0530433d655aea85eb3211bb7f128c91c0
+    ;
+}
+
+fn pkcs1_3072_sha256_sig_24() -> []u8 {
+    return
+        \\058742fca1521993d7e3bf04b3369a8cbdd505da63f7684ba9279dc8db684134
+        \\2664a5d780dab0b87cde7b2dea6a0fe77ec1b723a47592ea932f895faf2d1e8d
+        \\d8ab16228942a217db65d51c5cd29c05590ce9ddbf6f19111c9092e60e48ac5f
+        \\f720e0f76cce93c6de41023033a902be28cd5c0203d06f589e7b63431dd741a3
+        \\e227709e73793d0e2bbe0fd22dfbbbc1bfd8343dbdb8ec3614d771f1c58e107b
+        \\567b81105546a3b2b54d3b56f8c5785d50f3cac892e03f7f879f22c80c4cef3f
+        \\aceb1038234e6bcdf2382d8565d3ef3ed668b05c64e08e0c7bec759ad77c6178
+        \\161652b95142ff1bb1b3ef0d1738e444082f113a448e4aa7d3bd182ef8caaf6e
+        \\2d07448ef5ca7cf7933690040d6d41b5d19378f41bb9cc7e659251bb63444c39
+        \\83377bb01a176828dae9b255885bc0d872d33a0a257940f3b30b352986f20164
+        \\6efeec10796c6bc43031813f33634b6450a2d9a9d3d96ea95a6660caba876a0f
+        \\311e4b083b25e2fa9f69e405e59fe81d337ef0b27996e76c816bfa84929b8a73
+    ;
+}
+
+fn pkcs1_3072_sha256_sig_216() -> []u8 {
+    return
+        \\a7f03b3383a083af9fe06879d4200e5315d5ab86056dd87ed326fbf48589f95d
+        \\a6b5465158e1b33099c26a962b7b5eccb81fc2962188181a167c6552f1c33ec3
+        \\5ef6eed346ac46b4ce31be3a1726b87387a7e5e7780900f7c0a909e6fa3a8299
+        \\f5629bd8d2da3e6339c181f45d794879ed812974e5203f1cb745a1da6b34bf88
+        \\6928d6fef9111cea3bf64bb57057c885d8dbba5951a23781993c1670b75404b9
+        \\90a01d4eba230b15a65623ff2b2556077fb91d846b098e16eacf85b541cc2303
+        \\9e9516b465b07e2b06783019dff98420fe15caa3546e823e423c5262af7f54b6
+        \\d9ed3dd854e41bd1ac9aa4dd951784714e5365d76c096395d76a647090f2348d
+        \\faed99b4ded7152beb3798da4bcb533813b653efa5789b9ba863cfe1522e5ed0
+        \\de68e53b0382aee6b2b888e33482463962a3f9d817a2dbc26a070212046d5e6b
+        \\80e49767cd85bac25ce2aa0d02c5ebfd4c75ab733d87408c8ef5d21baff4dbd4
+        \\09a4e6d5fa7c55cd4b63796ab79fbdab7587bf234f0690d8e9cd45baf4857ab0
+    ;
+}
+
+fn pkcs1_3072_sha256_sig_237() -> []u8 {
+    return
+        \\a761a8c3db6207c8385574f6ab3d42103e5c9dc941c02ffbe0dc136990036015
+        \\5cb591b32ac8725b01a1d9686ab442af899751d9c4d3a8cec2cdc6725eaff56e
+        \\8a13571506690cb2f26a0530dd49aa380fab93f4f0dfa7a1e6b1c8e392cb8bff
+        \\cce1f5ffab5f82ba45d7dd922f082340acd1738a685abbfd598772fd4d0a03a4
+        \\4c9166d807364437464bc3b186733a4aca3d746ccf84a9cf512fa66f2cd73f02
+        \\9ea837ac15c71b2319d1adc9fe9b8e430a428c8f3f2c4b4ac525f94d56620e3c
+        \\6aec7c87de0afefacd6fe8d817f25ab990ca16d4b3339f15d0fe2de6a0488901
+        \\e4aa2844e42a8d63b46eced84ce33a346ace4ba03daa4f5f978df6bbd956d1d9
+        \\bce89a5964da8eb72d9e3b10de99e9ba54f6d24d59d31ecccc213aaaf2d902fc
+        \\8dfb2059eb2ecb3e17fcef97f8ff01aa59e4c615bcd4811afc10db1d1c04de71
+        \\d0556ddca363b8a34f48d97d540b045fd0026655cf0c37c4c694fcf2423e0116
+        \\165d4bbc7395d72f00f6650a787d6e36357077630974d375c2ce292ceeb568fc
+    ;
+}
+
+fn pkcs1_3072_sha256_sig_239() -> []u8 {
+    return
+        \\4685dc2e6bc376f600b572619784c068b53fda5d05607b23b34a2d2b434863c3
+        \\a49f4cbf806f6001888b63b5ac011991d7487086e9af37eb4e3923d45291ca85
+        \\46333438a9df5e743ecb85f9f0b4e0cc4dab8d854de1aded922465e86ba3c211
+        \\d8a89166c8104a82adccaa44043b74586f4644584d006be91f8f21b90f4378bb
+        \\f6898359fbe697f48b835d004df3829bfd0a7d95f13d3d0804c443eae571b0de
+        \\f6b0d8f914c2c7316c66dd45441236884f41393387f6d94b70c12eba1bb0d16d
+        \\e7c2340bb1c33d61404fb8b22c9e9cacc4a9e92fd95e37bf64ee7f9d0bf8a008
+        \\31d53acc32e25b0cc96613bd74cfcea987efcfcb3d35a3f2ada5645fade99972
+        \\360492c549fbf67b9b249eae2da4dfc7d214740addb5c002498f2560a92782c5
+        \\0df8990bec0a6e9c66e595b2d5c6bfc1122d57d5210788e7d014ba61ef465ed0
+        \\eb1e99ee24087c9647ff067609024949137d7ff2b4d38cbbcb255cbaaa280902
+        \\5678d458e456e753f35087a7c8f44de19d43b990af9ed21dbdf7970f43eef581
+    ;
+}
+
+fn pkcs1_3072_sha256_sig_244() -> []u8 {
+    return
+        \\88cf275c44e89d22f2b2f4773fde444994a0bedf3ed525eda56d9820053b64a8
+        \\73bcb8c7cd5ef7d6f840b1c7342a3b5047399e8c32abd04756b435d02138a8ec
+        \\095a0bcc0ac5015415120cba19e516efe09eca0f2a542a23b3a628ca5cff1893
+        \\88a9d3e4bb9d2d1ca811536ee457de17dcff89f127badfa98e0bfcf447c3fbcc
+        \\ad554848df626466b682fc6bc8b92d435befb5e955d30440373db91bf5db9047
+        \\856792031201b27e58e47866754912536539fdcd5dc5099a7dd5d7182cb6e960
+        \\188a3291923428e33281c9cca1b0b716c87d71612044898ba4190560889dc459
+        \\bd78c9acebde079250678a9b2015777222703e8e0e5e67a734059667d34e1bf7
+        \\cb4a3e5bfb723bb7d0262460e44da937f7fcc263e73c1966b36505b047407f1e
+        \\da98824332942b0321d2d50deef6dc94ecc91f3736705829bfbd62a456f073e1
+        \\e8a1dcb759079ecdd35f12068bab1056360c85f71e57326937dc580703ba454d
+        \\2c0def904c57c5f902771c5718f1aff3c0a3f3ad982bc40f6b0dcab5fe56dd62
+    ;
+}
+
+fn pkcs1_3072_sha256_sig_245() -> []u8 {
+    return
+        \\2a6b5551fb45e3389102a6b87943d1821aafc2098805cb28deb80b5e1cb4f580
+        \\391daaae20fd7ccafd6ba3984d1a587b675ea032b79e270fbd47defd929384e5
+        \\4eb97b61289895728dbc266d786368ebc31f13810a652c2d7371743712f99e89
+        \\c239d8dff3bda454368fec7e805c3ca2b798f3e7397199e9975d6143b1e36463
+        \\eea7b305f221ce27288153b33ccb85bdd118beca9b7ce48eb81397a2c642f176
+        \\05c2a4b675104deff71b0d2ddf274155f266f227ebbafa8b807bc746c7b0088e
+        \\e1f6e9611d0789151b1e94008972ee53303589668f1e97301789bb579c7344fa
+        \\602fe3aac08467c5051a91ebd64e863d3b4b129424a9e0af3a9ef7a4f5189576
+        \\5a9c115b1a3fe88a35bdfe8f30ebe989faddb862a6cc84413db8a55c8a50fe4e
+        \\2bf4c1957aeb5134f27b7e5d99e324857999d22ed5ae5c183818d395bac1f415
+        \\712fd7e76fe280ac850b34a585fe8b01869a2fd4dfb57c9f03ef25e6f00b6a2c
+        \\b2c2204ea2adc90341ea68186f6a7ccc845dfb5ef7770835d3af5f1766667dd0
+    ;
+}
+
+fn pkcs1_3072_sha256_sig_256() -> []u8 {
+    return
+        \\4e28f546283f9ac74cc99c6bca79bc208e47220cfb0717aabc521ac55119ec6b
+        \\bcac880bed0007c04eef92a24b091d9a09ee5d3b5be790abdb2c98a07313d505
+        \\fc876adcbb1089026940e03dfc10fb46a0c2a764ebe86e51ecc2ab489f56daf3
+        \\8764fc0a36a9cb4529367c9880bfd7631c340fb7fbac0edd2e1def00d65bd52e
+        \\597e2eba1be1e41bd89a00f5c66fbc18b93e9cc1b5be962780f6d7a9c6d375a2
+        \\8556114f37a8a3606dcd68c8128bf7a7e5f1205778bcf3048bd4f7c10cbdb4ae
+        \\759954c4e4db0a9fe4df270c41bb86885dbdd8cb7e72a33322238a2d29615a2f
+        \\01e9fc59c230c2cce58ad096c2de5071e020f76c8c39874f1de677dd5d2f96ab
+        \\4dc145098d25b740b5279f05713daff54ba695f950039882059cfc2f86c35a05
+        \\01b8d0914aa59a806e8d1403fb2eef163ba1d6e3d1e18dc99c622f8c2d360bfa
+        \\b2c9e8fd9d74a027e466fbcf4fa56777ee0fea7e04ae1901e65b5361f97146d7
+        \\f4a550adf77539fabb7135967dc16f8ca99e8283dd69627cf27cb9d2df20bbbb
+    ;
+}
+
+fn rsa_modulus_7() -> []u8 {
+    return
+        \\ab54a4f2560b9f65faa2f83bcf77d41803c080e4e5c3eab3534210982bba8a5d
+        \\7e513ba50ba1ece33555c5457c41ba58f3f605a04369408f586c26dfda464c7b
+        \\300a01f1616893264c7606daad4ced14df9a894a1f34586181294297e3ceb958
+        \\0b0c785c056d5c566467f6f227f3084918d1cd17ed156e7f9fcce4757c5794f9
+        \\2770771ea5cf3101ca0425c846775f56938c1d1cad4401f4df2f5e0d3a3b2770
+        \\f99e3c1cb4d9d4896c7ca89287b45831218b099add4bdf1dab6e2fb55d277542
+        \\9386c85dff32c07a6dda504a9627529dd82c943554aaf23c5a5f6cea9c301b4b
+        \\1f066b86bbef2e4bae9dc5b5e82e1fa03c29ff8bf38556729b356d5ba41d37a0
+        \\69fcc8fc23ac715bbea04c1972a2d50c57cc0159a46b5919fb670fb2a502d5ab
+        \\66f0aa99e51016b83a406943ce9bdf0ab9b9e946574a5b32ce95d97ac8b1fbb4
+        \\8f0bf7e3c0d4b7a00d131966d009997a166a6630dee4a74c141cde0114aa4233
+        \\51b1dfdd3893a856fc632b6d90dbc79c8a61a9f9e31702ba69fb222860e60a83
+    ;
+}
+
+fn pkcs1_3072_sha256_sig_259() -> []u8 {
+    return
+        \\0000000000000000000000000000000000000000000000000000000000000000
+        \\0000000000000000000000000000000000000000000000000000000000000000
+        \\0000000000000000000000000000000000000000000000000000000000000000
+        \\0000000000000000000000000000000000000000000000000000000000000000
+        \\0000000000000000000000000000000000000000000000000000000000000000
+        \\0000000000000000000000000000000000000000000000000000000000000000
+        \\0000000000000000000000000000000000000000000000000000000000000000
+        \\0000000000000000000000000000000000000000000000000000000000000001
+        \\1a21abeac8409398319e65c8656f8f72e179dd1e99358c7531fddc037e47c1e6
+        \\88cd70eafd6eea01c823516bc79f89d7e52ee1eb4ffdeaad1d550dc0a47185bc
+        \\9c42e47fce5503c3370a60510f834b4691152ef668deca633cf3873ce6613951
+        \\784aa7dafde118f37f1cdf1a687ac236d5c956bced564b73cf202e3bace59667
+    ;
+}
+
+fn pss_2048_sha256_sig_1() -> []u8 {
+    return
+        \\4f01e0c12b08625ecac89a69231906edf826380f37c959a96690d046316d68ff
+        \\ce9d5c471694fcebfc6b45534864689256e4fc81c78e583f675d0c94b4496474
+        \\51e81beff01a11a516d5e5ce3f1a910437cb8a3a5096b19fb15f4524a35b23d8
+        \\9cdba12cf5b71aac1047b28c562df7c5542c34ce23a182cf7e0e231934b17294
+        \\799d44877a1d68ef1b8f073619b7618e6b7c22db20030d98cf591ffc3d4da5f5
+        \\8613ecd5ecfc3b40a1d02f40891ca43695cd4c088b05a8054c89c595a47e2748
+        \\16f35384226f74459ee63e25a1bfc03c360490552ec38343f8ace502f065303b
+        \\00bc0ec320711b211fde92e57feb9013c3609342495ec0d7cabdec21e54acc38
+    ;
+}
+
+fn pss_2048_sha256_sig_8() -> []u8 {
+    return
+        \\3a52bec84b5b41e09358a7fe24bb7ae0cb39364374c911e0d3f011f2c4c79667
+        \\f43eb700fcb33e44533654b3efdb37e627eaf1352d21a187a70a86b79b2c34ae
+        \\3eef944e3e61d361c3baa446dd465f2ddc0b2ae7bc8beec1761922fb5d7aa6cc
+        \\4fab9d1a0835f15cd71ccb3fcb57c578a46a7197dab478b7d1ed7c6235dea3b1
+        \\17472c334c3a18fb8a574922f511d7ebf030201dd7457a3860a6af6252ddaf90
+        \\d07d90aca03f7037223400c066db1d7feb91d84815af2430190a2170ac7eeff8
+        \\98ebd5c4c7e9bed19aa86293aa257a9ad0a5146be80e7ce6081c8906d269d06b
+        \\f037e34ee18aba113dcfc98eca70abed7249dc9a49f971648e58d7db2282ed6a
+    ;
+}
+
+fn pss_2048_sha256_sig_62() -> []u8 {
+    return
+        \\67d1d1c0a398148625317c3f5e44b738bdf461c27a59594b39ebb2aebef233c7
+        \\809379e54411411b82d2e7ac88f989b58373d532c758baea121878ce97594417
+        \\38d121881c1fa2d04421f02dd565b12770d844611ed1873a0b64d822709a6b78
+        \\d6d3892b294404bce6711001d6c3a54546c76a1d17819674b0be904497a233b4
+        \\66fe4becc832dee740f9ab79e5b9f5db0b0f9aac0084ba05cebf42303b5ca2ad
+        \\95e3d61b29ed6475545c02e93e7b0e118af92f5cddb1faeb2cbc23c9e69c120e
+        \\29df7fe31991e887b3b29e77688c60e80be65cccf3d7861a7a14c39e6a6e5645
+        \\568e2cc5e4a17b75db1dd415aadb45e112a9b582b2ff6e82a43d7a7347b7b56d
+    ;
+}
+
+fn pss_2048_sha256_sig_73() -> []u8 {
+    return
+        \\1591ae743c58ceb723a76f502e21ff6a65c24cabf5f527bab5a6f2a69f20c776
+        \\fd2251e43ad22e09b1486ceb1935b2dc2ade95e233f296cc0e5a8af8109659be
+        \\76b6bfdf37e14837fd6c34bfed1f19ec9d21f974b984fe4d4773896ebcc7fb86
+        \\2fd641cd0d77178485c70c2d68b4d9be1d863f6f254b77991fc9053f5d5415d1
+        \\aa74ba9067e2e6607fb651638c9cc0430a40c9b691977b557a31d95a290a95b5
+        \\6ef2ec8e4313686a9c5ef48235912b210fdd2c50aafac28131104c795c42ae75
+        \\810b0284b2d257e81ecac4240622ebc261ab8bceeeebe80f1cfa70f18d782aeb
+        \\b97d803ea3a895be541be6941df103eaaabd870848bfaf58cdaf6cecdd5a10bf
+    ;
+}
+
+fn pss_2048_sha256_sig_108() -> []u8 {
+    return
+        \\1758eb94588e6fc4f50c1be1afcaa41027869f304cad513b1fb12c2f446d63cd
+        \\c05c4830a7e3e630da7b2da4f7867cc173bf6420f9732277282596de41ded32e
+        \\21d0cc31441174da8765f57419c7764ea758f55bc17646eb100c435d1ac0eed6
+        \\fc7ba6de5f832094ee2f479979765e05ac9976788db3c241a9e32a0da864f001
+        \\9a87646ba623d63f4411af5dee1be9ec488c7e3e1b231479de70b9ac5f78a17b
+        \\1f4120aece45f26c07e7bb345fdfeb05e14bcaacc614672a465fc523624cb19f
+        \\66f9c6c3f642b832ca44cb25176d679f0e05606c3fed022cac24c2bf960a406d
+        \\48818e3eb7ed53b0446032469047dfed95fc18088c92d91d93722c47f88163a8
+    ;
+}
+
+fn pss_2048_sha384_sig_1() -> []u8 {
+    return
+        \\0e899239050ab21c102394e6d22090f51a225112a73257413b7fbc9dc5c479aa
+        \\21537cbe2b126b69b7857d97c58b5425cbd67b41e8b17c37d6df0bb0d73bd468
+        \\103ac09a11ee5edaa42dad5080765b539921c031994cd02b367b586477ddf45a
+        \\280499cc31d5f2853874836c0ed0c220cd388e698d94f10d20f696030af751ba
+        \\9ebe44a19341a9f539ceebee0c0da6ec6333da9c7bfd44b6e48ef29bc07c43e9
+        \\f0d829a888b6b19dd282dbe29e93d80c46a6fd0416c912967319b5c967c85002
+        \\654f75ea03f5ad1e3c7e5c696c01d0bbfbfbe22d3a5ead904c8d810b655443da
+        \\34d76e2f71ff58401bc0d93adcd38175c94a2ae6a2b4b8066b53a9fc38fa5740
+    ;
+}
+
+fn pss_2048_sha384_sig_8() -> []u8 {
+    return
+        \\8bb2f8775cef8652a9bd5f287327a971f4a705a913dc7eb7d80ae418679270a8
+        \\ebfb4a3ec56b575cd9800d238f7d04009b1f27ba522f11b21d1f92e6d94cd754
+        \\9a7bf9463d4c15fed8277b4c1c63235e91ac7ab45c8c7efe85802fbf6db3ec4b
+        \\32fef606bd43f4411cfa272e321c580c976b0b9f996cc874450d0e8dd8d4ba1f
+        \\f71478816b313d86266d21a621d35babd3f970bff8117c6ea6d1922b5bb6f0b0
+        \\928d0fcfd42e5066ccd8932c85dc3e674bad74b31ce69eda6037f4a0df98c882
+        \\613fc12da9bfe29e22b4deddb87deae2b7d8c7ca42f14c746521da7c6171f20b
+        \\091e5ffa2493ff9ecf3e4e30c188778b285bf1f2d4b10c537e371ef91f282520
+    ;
+}
+
+fn pss_2048_sha384_sig_94() -> []u8 {
+    return
+        \\243c6bba129527fcd13b07b335a5203cb3d54965f0ff9ff6bcb24d9b410f360a
+        \\bb6ac198d434da1e8071b18920540af6ee6ba3107557cb8c01ac00dd929c201b
+        \\62f89401131d3db209e8c238a9458f160d966343afe088a2e35d034d91992505
+        \\326ddf2d882cb1b26791fa13fd8756ff55efbb3ae800da65a7cf78ad88bce6a8
+        \\3c3f42de3da0738e0cb18ac979ef11d798e73b5e8a49dcf88a112115e319750a
+        \\c828287b1e500512c0997fe094aa0309671291b0767cceab19340d2ba225887c
+        \\afb8f4a772ffa82222228c220bf8a6e1f4ea44ffaeab73315e880a4696a7d11c
+        \\763e4b9d6c71aca3aecc27bde372c444071c3df971e2b22f9e7c937d57ae6ad5
+    ;
+}
+
+fn pss_2048_sha384_sig_106() -> []u8 {
+    return
+        \\581afeec7d9ea6dc2999a2e3039fb2e7ebcb15a416129077ce1ec60e0f0d0dd9
+        \\d81562d58e79be65d5227671c06ee1f065767fea6ffa543a68c7864f330f852e
+        \\60c923b97433a416711a068236486f6e3005a456305a36e7160ab194b25de507
+        \\61353e9f8e824e55bef6fcf3a455fae37a309af15ec9f094bb4cd51475449829
+        \\d7363f573494e027f0f61c54073ec72dee7ff5f5b1ee952001eef2bc241c5fdb
+        \\9977ee9b4a8e046d5e215db5148e442610744023ea1439021befd095b22b41bd
+        \\129e17bb3e529e9d3e85ecc47f6c7c9f1bc4a41ad8001a0afb38186eb849c79e
+        \\024f2f28933ef48325ebe25fbca14f01cbee722e5ae9a2ad2a8ffc9492f86d53
+    ;
+}
+
+fn pss_2048_sha384_sig_140() -> []u8 {
+    return
+        \\521e5af2451d73b61b7af2d81eb427bba3911a3f2e61105bf38e15c74196c8e6
+        \\6d52239936aa1a7823606fdb4d243b32dca2c4a95cb3b302fd34a9c087971109
+        \\5b4d1e75c59d005836c2b9a05ec1daa63148841b285c10bb70f4683994fb0a59
+        \\8b927415ab2004dbdd6405d57804ea142f21600d5bf5487f3f7419ee2c2790a1
+        \\22199cff03be53847cbda28161f37810f046df1c54ffa9e3070ebd1f8b08b329
+        \\3c6a160ef6593ab497415c2a086cd5242f3509b375f70e12435b01c21bfee65f
+        \\2156448831050eec3da4df7ddb04acdfd89a5cbd5f9afa75a8e3871378933c14
+        \\83c28c1bf405c42625b673bd0de4737ca144285af3981fcaa7302534e8c36e9e
+    ;
+}
+
+fn pss_3072_sha256_sig_1() -> []u8 {
+    return
+        \\b520065682633ba54c9b713b2ef19cdc1fcf275ba1744c2350da7307a20971cc
+        \\30eefa37d1667d23d20001a674f0e00df4f9b9e1d5fe7eb85cc45cab5dd62575
+        \\9de83017995c93d48b126df03aa74ef87daea0c1652dd370ad5d663598a383ca
+        \\c217a208b22c7cf0e448cc7ae0555f892ccb8ded6894cfb0c328cb542be0485d
+        \\860ca77203081f3b04c6f55c5689b1a66b1c24819a4a7ea55f32e00f61accf4b
+        \\411bb320a96c990173b63ccd74e7da7df5ceaf33a39a8acb89a845a594b164ec
+        \\6e22cce940eb06f2d487a8bc4574451878c2bbf57d241f76586e0703bf5f86be
+        \\e832d05b75fabaed6accadfc1ec2cd6e619dbb29b65d6e6f5e118ad52d82a955
+        \\d21005ecd63fb382f32bb8e2e1e57220b345cd6422bdd84a91495d0ab5775b08
+        \\139edee960dab1b4ffd9ea5b27398b58e6e35211c3581501e99bf5e3f17fd793
+        \\81528d28a4927e28082f45bfa9519f98ea663dc84c50317adf0bd5da98b01459
+        \\011cec61800534dd5afc5a567c19e4a400f06dee74112083b5322615c144ce3b
+    ;
+}
+
+fn pss_3072_sha256_sig_8() -> []u8 {
+    return
+        \\5ce99063bb6c6bf8e46772e8701b63abb2feb5f88c5b76b76c00c719402ccb39
+        \\9d6c6d8c67ed5b6fb0f1dfeb8f8dcc5bae03ad57c1b0f53033dd2503b9604fdc
+        \\40eba51e4b03c91a8d12b1a3b929b1ff1e8e79cb58d788114d53f7e07d87a885
+        \\f6dd4d26560583986f7a84dc466ba981db06beddb1fa80b0a444b9a56c82f98a
+        \\927977da9fa1ca83aebaf2c43692cef61b12995d8dd0f3bd6bf061025ddd34af
+        \\3e0257203390a80765ef706acf7df6f43210a7928673d260f2f3c30a9bba9b08
+        \\735dd9aa3ff2fc27a2ee9e130c88ba367c3d1428f173ea08e273886bc153c11e
+        \\24b05cdbf9b00573b013170417fd96b0106f72c073f1216ba872eccc9f56ff9e
+        \\3e08bfde64041d996b117a114b723cd97f70e07068ece643f58d5ee5cadca7e2
+        \\4a18b0a66ab724fb653a01c5749d51d4bf5408d2d2008b30eb3dc20b0e14510c
+        \\06402f789276b6237802d608ab49378001ed6f3604abca038e3c7e057d95e85c
+        \\9e668f397bcce18765132142d6b0f118c511e57defcb316fe41dec06b988d911
+    ;
+}
+
+fn pss_3072_sha256_sig_62() -> []u8 {
+    return
+        \\730a26b2c3fc2df474212c04fcb346b3b78a58c611351871ac1c5262867ce19a
+        \\6f553880d68ba4c35827610b72bb044162b083fe9ffa7a82e236609046482194
+        \\6f2ce1a8ea19b12c10c0e42a52ff805851c226748a9d65d7cb2057c9ee0beddd
+        \\8ca02ae1bc36ced39925d2429d531c2e607bfbf0648708ef4f7d816c8839cc8c
+        \\62036ac37e811f94a943198acf6e19c66cd829bde9dec9969eb4724e2d4ddc4f
+        \\8c2bb2527007ddbaf2975937ece7f1779db28c610503e7ebbf0b03459a1f4794
+        \\136842b57d04f14e22b98ef37939c64d08fb242cca548b7bb2c2d8b1df6bb8b0
+        \\b7f6f38e47226e9fc0a4723c2a518ebdc5c4c8f15db74fe958bb567e55f092d3
+        \\dc8af0128b353e2d273d574433c22cca579c479005b52c715eff1ef4eca8d82d
+        \\2f6d7cc972fe0e75f19eeea3b77ea7fe26b1d29cedbfa7ef0737e4aa50a567b5
+        \\fb417e356fa8034a72a53c5d1c0cd467808df6faeba89dddeaeb09c3ce793745
+        \\0b41e7c1d4403b3033d3531adc24e9f5fe35d877a3e36fd3702289e69b460b97
+    ;
+}
+
+fn pss_3072_sha256_sig_73() -> []u8 {
+    return
+        \\042bea79b22418311d75e86d0c05a9ab4905e59b3e0b12fa0b1e372bbf66690e
+        \\1c23145b23b92735f2214ac1eac2cc4045e299f40f7e418c91ff328e68bf1746
+        \\6eb3e28de3139ec23b57ce5aafbc1e0e1521a292935a35c6d6189a42a81c573f
+        \\8be9a0cf80b34457392faf031b632544fdd50285a7fa82a4ae6150b60dd9a32c
+        \\fd131b246d6c89fc92e9a1df96857a6b56fd9c897aa4c8b4ee8e10dcd0ee8033
+        \\4d2261f02930a3a54a3477c8e155731878637256f70853484930d180a37c0b60
+        \\4aaaf649ce93f886a5f9aaf86e529286bf1ab5c8e189d44a28814d5e1c7e5c37
+        \\6d8e80ece5686d6ebab90a51773be4a919b22bde123ceed06c76d2c1af878540
+        \\b5ec81ce067959ea8333e2340a9f9d7f2b22e1052e7478382ca937cbdad62a6d
+        \\8fa409170ef2a03299126965d558978cad7d399a683d19b76bc598b94f6c94c3
+        \\3c6bb1652d44508c777de0da7b651e7c938e802bac8355d3503029cd1725e2dd
+        \\70a90627df66c04989e541a56dc7df6a6a24175d921ecdcfdcd0e8b454de4a6e
+    ;
+}
+
+fn pss_3072_sha256_sig_108() -> []u8 {
+    return
+        \\636d31d8d5dfe0fc6ab01ef2ccd4602dfea62d386b002c429e7e846e7a98d0cb
+        \\1d448d25be039d5158887ab46a9dd49c41537a89036a065fc10329df051e5f2e
+        \\5c1d4436e84790ff6db4d3f31575e5f0fbdfcaee625722c5492fceaa3fb29d0a
+        \\865200dec06e117b04753ca9450a7ca7f7d1a1176cc38ecab721864413a0d7a2
+        \\2d8fc1595b6cd0032fbf154fbbb31b56d3bf963761ce8ec9fb38bba3419716d0
+        \\d39e976857e79b1faefd5f5a2ce0ebd94968da1ec3a387804694d90f37b34033
+        \\c7f70ccfb26beffaafb7bf56c1b8385d489217458e0a68b5d680f9fa45382fd1
+        \\c227ff3c11e3ec82426ec648a564f0e886e5b12e695dd2fc8465bd9d08731fb1
+        \\40084c79be64d915bcb4ba10f1edb4c37e35231753be2d9f339d37d7b5f22c91
+        \\584a68a973f9cc469a23d3b5800157dbd72a8405fef4e444ff01f7fd23efa143
+        \\c1887504e81773743843d8a73209a1deb66c5f305df539bc30e871332e82330e
+        \\5b66fa6ea253b2b64b4c9781011d20e80ddd8cb83916834eb8fa696b0a4b6bcd
+    ;
+}
+
+fn rsa_modulus_8() -> []u8 {
+    return
+        \\c9a765c2661b4674cff3480e9a5e462ad0ad2fc9bc6fbef62847b3113d20991f
+        \\653967971c28252753f5fbacce012c2a8ab592914d269efafa724fa4b920e340
+        \\930c106f7b36f79cebf0e62e88e0e476888e9f0e22186acdb6c4523a232b65b4
+        \\ff2cc22dc44f8a559527d79d7cd7dcf3773212f7bb9aa133c31165cc663690bf
+        \\123d73923c838929ccafee59d6c7095b8d4a74baf2d192c9a4e87c4e12bc5801
+        \\3078b28a7789e82e9f31de1f4d6a2aa6e80632be8e4bdf263e8d49b09416fb19
+        \\c488c07ad8af722ab79182b23028a71e065d02412a9eebc46d7d8f4e03d79238
+        \\d8c0cb4a97a9a1200ebb6ec64042ebeccad9567526eeef12c17d94c1049c8899
+        \\70b96e94cc353172a268a49c5e8bee13c15b39dec44f2c7a1aa37a7a0b6f7229
+        \\0acada32b1d8af1fc3dc8a89487ba81347cbeb1350925d30f923958106b49959
+        \\c871e7c1dba55da0772e362cf8621d78610868b894e16e5dfec96874a93a4cf3
+        \\79b47e7e318ce315066d70ee3938140a60148f205085cef8a7700ca3c53d52a5
+        \\756a63b3b16f153062b61262a68496210c8be4ef3f9029ca0ea0e3b3a0d5d6d2
+        \\26edbbf44daf8f045dc286ded3c4ec4db6b45347079f33eaf98e3c95b4b60e79
+        \\ef4a3093feec543703422ba74a118511c2193b54fe8b633866ed2c705ccbc6e7
+        \\d9d3656809ec3d3356e7400a9648ec37505041e3e31af1c02eefe924a67047d3
+    ;
+}
+
+fn pss_4096_sha512_sig_1() -> []u8 {
+    return
+        \\bbb7dab2ab26bb86660f02822cac2ce6317872ed07b83022e693c9ad38ca7464
+        \\37cb3601e26a39ed4ee528e023a9f418d16c88bf0096e5e83aae2365ea8aae41
+        \\5f7012f5a303ad2bc37f9749d307ef9a1e4b6a48e49770f46dec1b3a29c96d14
+        \\bad91a441413012cc4a032f8b31d110fc1df22d0ad173be06ab6b81f557d8511
+        \\5b62cc5c557744048771d10ba187f39b28b6166c7560145192ad1e9f3b61a6bf
+        \\9bbfc61ea567ed5c95a807716644ecce8f33de35cccc7813a57605d5754db66a
+        \\38c744ca7a468bba3a0dac4046e472bcd98757383c5fe1c227763b3b1597f17e
+        \\69f11599c16e7175d70cca60b719c008e0629288679644015352c169cac29825
+        \\9cf5724671e316f4c914b522bb507d7f5afb3e9599901aa77ce431102a925cf3
+        \\a66bd1708a8ed1f3428aa9aafe41fc433ea3ea0e5326efa65b42ffe1bc3b7eaf
+        \\d1c52302ecf7d3aa326067b6ed892af9ccb0ca0ca8dc1fa111bae768fed2213d
+        \\e448f8aef2497de83a2d046b7d9a4c1c487bf3892022a243dff3e3c3ba713032
+        \\c5f6bc63d1f206d1831aaab55129787ffcb18b164edecc6fbfb90284b3dfa6a2
+        \\8557b72864b1b8a63d8ad406339badab7b724dec46e4cfaac2b545537aeb3ec2
+        \\b72d6266172eabd22dc276a626663940201bb08a6c91d59fcee8205667a54cb7
+        \\be5770cf6eb5fdbf4a6b76fcc5a7b34b6a56f1bf89ea8ff25ec364dbdfd5159e
+    ;
+}
+
+fn pss_4096_sha512_sig_8() -> []u8 {
+    return
+        \\24b27a1263d43159989f7503711e682b475c81cb07ddae673d815106f6cae25a
+        \\74ea19aa102a15ef8d8c011df29ed17a1f7df504c87566a08b22fad956b7f24e
+        \\6e7541bed10ee3e627fe228fc5c1ba2d95fea48c4a0ded2d7703035cf8fa6f3c
+        \\70ae8d431eda4f790faca0ed34d0719473cb5b2ea1018170bc69a705486d94e6
+        \\a909a395071d450da3e5b4a2067356e6589c38ef12f5c7c4d484bd8c1767d2ac
+        \\b3ba238ecdce5579582908225ede5a34d5b07aa22e2720f0e6c16a2dbb49e344
+        \\a78518e9ffd12663e80928c78cf3f2d022522c79b3684ad9af31fe18b45bf334
+        \\1de84a112f9a96108c2cb79471cf370e0feb25752ec08e1d04df67199891a26e
+        \\b2bed82577dd041ff9c44c624250a5ff6b2195fdc92523b8d51f8c5530d99103
+        \\9ff010988c38ae78c8df7d3f3c71578592822dbc4f6cb40cdacffdd78c4cda12
+        \\5aeaa894c082261ee913d03b48a4b1ed321bf388440b5387f6e30d6848f5be93
+        \\fa16c6a13b9f871adcaae83e66247b48bde4d6ed60b3085173c8e7eadc6efc87
+        \\84d54eb58175539700903438446cd76a0dd0c34bb52e966104a675b3d531576c
+        \\e04351f0b11da6e1f6ef7bd8091eda232235b44955db57f0e495e334b8883990
+        \\d73b4e51549bd9983d265777ffd4342b3ef1f3394379bf0cc58ee4e6242ebf07
+        \\d4f1ee220539f2dbb927f2a8cd824288e138b59109a9c06e3b1c178d94170c5e
+    ;
+}
+
+fn pss_4096_sha512_sig_131() -> []u8 {
+    return
+        \\587b5619eaf818a1eafbc475ffe48009874aa959d9989f51b5e4241f9eccdc0c
+        \\081d7a0c0b4cae9657f0c1307b4b1d78a56859b81d75a3eb45a599f4ba695608
+        \\909da05ac0bfca62832bf944738ce66962455875ab4af87284abd40caf7751fd
+        \\70fdff9adb834a6e8a502c2eec37785de104c5de5849e37c0fe25b95fecf86dd
+        \\0ecf1fe077072d13ee8c3dbfe9843aed1ae693a52f2270a497a5bcc253211721
+        \\1ba87993a2f808bf69fe20a959457b5869bb3c4234ca5edc4381077449801755
+        \\2b2472cd66db323726eeedb94325dd44cd387b2ce98e780d2da8b4898e5d4177
+        \\50ed918b652f16aebb8fcf3a333923cc1c9275257cf870423eb88e715fc3acc3
+        \\bef4c3437250b07acb31f4c5be53e94015bc93fc82b0faa6e721999bb43926a7
+        \\dd2405701cf648a54fbbd314840a0f2e9f4be069027c7cbaba97f0e39131ff61
+        \\bb9d4d12b092061435b924fa44cee843f702311299b0681e0fea42ae31a3dc3c
+        \\b343be9b3e174d457515bd06ab5e1f5d1345fab7c3a12c82dd6c527e39e3fcc4
+        \\17c191d16dd7baf36925f1e041611557610effc81e0dde0abeefbfde4ab546d4
+        \\309baf668375b5187a2e8a8b85f6136511108829bc3eb06cc0eb1448cf246cf4
+        \\a38eca8508b73ed7c232165f5b5afe911df589216fd97a543d0d0adb47928875
+        \\daeaea26c7bc3542e3117f091fb45e12f12d51620c877d731552fc5b7248331b
+    ;
+}
+
+fn pss_4096_sha512_sig_143() -> []u8 {
+    return
+        \\5e609d312a5531c94abd76d5fa3d87ae06e5f42d1db49fc230af7cb4a58fe35f
+        \\c0deb7db60a331877c76c002ddd2fc5f3453a609ae595b3dc4a4c7a7bd5f98d0
+        \\e7645704667875d0d38f85371876655f171a1fe7baf245b7561b0bcea73ed926
+        \\896d5950c28ed4076145d7c88d97aa0e9f58a04ca44315c7150811338e03e7cd
+        \\3f400590a688d43e6728605e4ae861268ab98307d95c09d89a1db3e3b6fe0126
+        \\a547df8d7e8f26dbeef383b1acc5b2270ec956247f18524f45f3edf6d6d4b317
+        \\2d3f72589369d38d89d95b8675564a3591bbadc7fdb1d0fdbe35d45ccbcdee24
+        \\da26db2e6a60aac2d729a28190f66bb273ac9f993d938aa62c733f52a4488a48
+        \\5e4c85462609071b681b2dfa16d826a66a725c826cce7fc760b056974b80a9f6
+        \\363f28af84a0c6a1c791fa1766768e3e01ce480beedc240748ea505c3d998509
+        \\47d18bb86e9507525ef1f6d0c275f5da33fed4526b5cd73afbf9c01a951f8a44
+        \\803a1c640c1600b64e88d145205ae5d1584250b5b65eddca90b384243442f11e
+        \\8e240cca632057592f618fdf733620444539b735f4ca1d2c73bc3325fde00bdc
+        \\7d6c760a23587efe9bbc1b2397147b779c77ae72e6ab7e931a391429a9444709
+        \\f41c526f01557cbace97198e72a4621d8a36bb5ba12d28d05af6f43148e5cb47
+        \\7745edad22731472a4f08bdb9174305efebdcc7a0874efe91fb298f53d18846c
+    ;
+}
+
+fn pss_4096_sha512_sig_178() -> []u8 {
+    return
+        \\8682d5bac51bb32bf283b8cab1172d6e8054dbfc672de6f35f33a9f7b3f0662f
+        \\e19ec01a74d5cbe6d90351843e2b129d0ce30884fdbdcfc962d2721fec5b3b7f
+        \\6a9db4a95b13def111c737cfae72d13aef4d0ea9c29181891505a0d28c5c8853
+        \\ce5c37476654703ea2e7c68ed52591c182bc051b5d837ef3be064901be454967
+        \\be52f9c7d406b7409e93308b74a826d3d1e6aedd8aba3f5f971824784167df53
+        \\d042781b7c2d3cac29428c7da1fbc451680cc211517f9175ff1b2c00f819916d
+        \\6d25581542c8f05479aacfc245e5894763db8e79849d3e2dd8d7178a38cd4cb7
+        \\b03436c150c467540dfcdd001d6c8994b2f8b332705b2b5ae0c841708c83dadc
+        \\7d647ae15e547403d689a00a6bd4de8602633443e0b7edf060bb7b529e0afeb1
+        \\b4171f70a943a14f69c59720b4b5ae59313325685c102d992645fd23af12f3b8
+        \\f8de79399cc6c80f9a0c006c316ff7a6963a1f8ef58a67d107e5b49fd8d7079b
+        \\d45f23ef67f6a83127da157f54fef9dc01415a6cf7a957f5ffa15457a1a8bf83
+        \\1273f48f927ba8bde79da623a8a2784e7d8950c5fcbeef5868311acbb793cdfa
+        \\54c702209073ad8599c4c74b31ce3b662399789febb36d922d77cddf63c1de3a
+        \\6aba21d6d8ed54a1b48f48955602d0f6a4f5eb5546131561809236f0c71b8374
+        \\290106b893ab70f6fec1fbc3bb6ef5e6c0263a7c8cd90c289968671744e853d7
+    ;
+}
+
+fn wycheproof_key_0_n() -> []u8 {
+    return
+        \\a2b451a07d0aa5f96e455671513550514a8a5b462ebef717094fa1fee82224e6
+        \\37f9746d3f7cafd31878d80325b6ef5a1700f65903b469429e89d6eac8845097
+        \\b5ab393189db92512ed8a7711a1253facd20f79c15e8247f3d3e42e46e48c98e
+        \\254a2fe9765313a03eff8f17e1a029397a1fa26a8dce26f490ed81299615d981
+        \\4c22da610428e09c7d9658594266f5c021d0fceca08d945a12be82de4d1ece6b
+        \\4c03145b5d3495d4ed5411eb878daf05fd7afc3e09ada0f1126422f590975a19
+        \\69816f48698bcbba1b4d9cae79d460d8f9f85e7975005d9bc22c4e5ac0f7c1a4
+        \\5d12569a62807d3b9a02e5a530e773066f453d1f5b4c2e9cf7820283f742b9d5
+    ;
+}
+
+fn wycheproof_key_0_p() -> []u8 {
+    return
+        \\dc431050f782e894fb5248247d98cb7d58b8d1e24f3b55d041c56e4de086b0d5
+        \\bb028bda42eeb5d234d5681e5809d415e6a289ad4cfbf78f978f6c35814f50ee
+        \\bff1c5b80a69f788e81e6bab5ddaa78369d659d143ec6f17e79813a575cfad9c
+        \\569156b90113e2e9110ad9e7b48a1c9348a6e653321191290ea36cfb3a5b18f1
+    ;
+}
+
+fn wycheproof_key_0_q() -> []u8 {
+    return
+        \\bd1a81e7977f9898122273ae3222b598ea5fb19eb4eabc38308a5e32196603b2
+        \\e500ffb79f5b886816611debc472fac45544070beb057c941378a6868af3b7a0
+        \\3d3f9880ec47d5e089b94fbde542aba9ae8d72c57088d7abf5b131f39098f7bc
+        \\160f90536abc9492fd4e06f3ed7299d4b97bb03677207d95669f140cfbc20f25
+    ;
+}
+
+fn wycheproof_key_0_dp() -> []u8 {
+    return
+        \\a94b528b28f291599121d91952ffd1c7f21d7c1479d99d478885fb161870ee12
+        \\18bf08472612dbe5497e8d9c650688e09c786961ae3e2c354dc48ae34514759c
+        \\4c23c4588488961dc06b414e61c0e1e7fbbd2923d31532fe289f96da220711e5
+        \\8c14019808e00414276933bb07e4efb9b4a9b37656917205209f33f09515d7c1
+    ;
+}
+
+fn wycheproof_key_0_dq() -> []u8 {
+    return
+        \\3af0e72a933aef09ff2503df78bafed531c02ff1a2bc437c540cdcbd4ad35435
+        \\cf511763596543480629b114ca7f780ff7efa32ea0cb6e000d6d9ea1f2ef71fd
+        \\9cf9948422a165557e37e755edfe70d90b920502eb478bc98a63f788ce3a0f85
+        \\6d6ede7251a383bfa8fa480a81a925af7b3cc538c4bab8c9f7597ffb68011d8d
+    ;
+}
+
+fn wycheproof_key_0_qinv() -> []u8 {
+    return
+        \\2640fbfbcfefb163ee7a87b6483a66ee41f956d90fa8a7939bfc042ee0924b1b
+        \\7993d0445f758d51933e85179c0320b0c968b48a91c38b5be923e1097c0c562f
+        \\88d42294b6a2759bafa5428a74f1270874e45f6fcc60f21602de5eccd143cf31
+        \\241f5921b5ad3983fb54ef17be3b285367e50c999c67247b552fe4bfce945f7b
+    ;
+}
+
+fn wycheproof_key_0_sig_81() -> []u8 {
+    return
+        \\840f5dac53106dd1f9c57219224cf51289290c42f20466875ba8e830ac5690e5
+        \\41536fcc8ab03b731f82bf66d83f194e7e180b3963ec7a2f3f7904a7ce49aed4
+        \\7da4d4b79421eaf937d301b3e696169297b797c32c076a12be4de0b58e003c51
+        \\23051a84a10c62f8dac2f42a8640008eb3c7cccd6760ff5b51b6897639225828
+        \\45f048fb8150e5a7a6ca2eccc7bdc85349ad5b26c52137a79fa3fe5c29ab5cd7
+        \\615013219c1941b6708e9c3c23feff5febaf0c8ebca5750b54e3e6e99a3e876b
+        \\396f27860b7f3ec4e9191703c6332d944f6f69751167680c79c4f6b57f1cc875
+        \\5d24b6ec158ccdbacdb23107a33cb6b332516c13274d1f9dccc21dced869e486
+    ;
+}
+
+fn wycheproof_key_1_n() -> []u8 {
+    return
+        \\cda6fa5ca76bfe0492ec57e0a3bfff7272dc8d1e25ad1fb338aa050f02c104e6
+        \\3133d6b5b7c4985ebbae9ac036a5b9c03074d60aec8e25baf392a0c430ff05b8
+        \\8e948805d3dd74511d8885250a7b574215ada015c559076686e253ccc96c0815
+        \\b1291ee787cc3363b4f77d930eb998d7c582b24cea9ce21de9722791989863a2
+        \\7ebc80a00de5bd2f9228775e5a4ceb054d58c9be36a054336971a13642dd9510
+        \\dd696aa268db3aab2299d5d88f8e562434d1427094d3df8e72d1ef69b4ed34d1
+        \\2bac375223b2a25cf227f735f816e85e17239304769a6082154cd15899fc1eae
+        \\fb69b748a3e5ed24d38372597de3e4e2a27b951d6ac7db182d6809d8ff511b7f
+    ;
+}
+
+fn wycheproof_key_1_p() -> []u8 {
+    return
+        \\ef885b87e25c29d1ee431d1f4ace787c4f882e92d12c4b2766c84f89263106ef
+        \\0be0ddc4de3bf061a2ba46ffe7c132ae67d337f04dc66daeb9de553791f4989f
+        \\50b224c981812b5388d1c2b5d53349a61393bf6611995b6988f143c278ccc260
+        \\cfe82a6ac4a6409807eab32664b7ee3f1c41dfe567e097fd7afe8520871a1c53
+    ;
+}
+
+fn wycheproof_key_1_q() -> []u8 {
+    return
+        \\dbca582288c81a30d6581f272050a5fea773d711301bdd6ecac7214e00c0fcb9
+        \\498f1e585086b14463cc89a02c2e77a89271c058c6f69f3cd13553994d8a76cf
+        \\62ad9e275217720d62eb6e888ec4509cea474b53f37b458fc956dd31df3bb6ec
+        \\7de659e88e7e709fe3be6a8d37264c3d20e7d088276ce7651a403c68d6c47ea5
+    ;
+}
+
+fn wycheproof_key_1_dp() -> []u8 {
+    return
+        \\9d7e87c851d28d80c5eb84f375494ab959c5cdf1a4ed3dc0fb78cbaafedc8f95
+        \\8fb6dbba3cf1263ddc3424c8d0461c9fc60e802255d1197f20210ae10debc88a
+        \\4011d1d4587d68d2750c8ebce620e1d4fbdc52a5b6fea1b7435e7752200169f1
+        \\23e2a0393171aad90ba38b05bc859f76098b5abec8cd48c2572390bef175fe97
+    ;
+}
+
+fn wycheproof_key_1_dq() -> []u8 {
+    return
+        \\0eed602d00432edc30428de31763c2d257c71b4d348a3ff0bd5ee6d9285df30c
+        \\167ddcdebca1593abed86e646d7bbe6eb97b7647d14380af1dba54722dfd0072
+        \\b74df956cc5181527d6c65f66a53d4f1c34b9247225b35ef3d0a643d75ded55e
+        \\9c725f9ad6caa995825f35575fee7ef10be2129c9ca8ddd2550515d53cf8dd6d
+    ;
+}
+
+fn wycheproof_key_1_qinv() -> []u8 {
+    return
+        \\101d1f49afb04d065bd8c29001d212e737bba696108574a330a9cbacc51bf6c9
+        \\6594f37fba9c8de156c226371d49902191e1f69d84a1352193bff29e318eb36e
+        \\de6ffbab93b6555ecf6addca9e134c20220a2d24b03a6d23ef8c608a5186769f
+        \\66fe2f6b21bc39f6277ad706038b907872c4716609c223762130ef03616482f2
+    ;
+}
+
+fn wycheproof_key_1_sig_89() -> []u8 {
+    return
+        \\c5b6f5fd8ea320880e9e27b0026b1d63bcd1152c72855853294b7683a759dee0
+        \\42be8bb0c350b0c31aea76e1ba2c6d79920c3e21b6e97b6cf46fabf92a701a75
+        \\55540dd7c325e7c657fd9a079bc5a58923d2ccaef51014acd6fc6e5296960362
+        \\a94688f2cb2675d5062c5101c3875399b95143511e6ea156ebbdd32c9ef8b061
+        \\dc66e2c912bf2ae37e3ddcfd5f32a72412db8ba7a1ce3b44ea4c6e2a858b3f3c
+        \\b198cf41914e4970b03edb1bf81f8abea6371b469d2e80883d7760c0707dac80
+        \\8fb55e588b285153b8ee5c32ffe90197991a567499d5ed62a6b810581901cf8a
+        \\bf086ddf84c10b03ad6845c977ec72d02028308cbd19daea2668865f00a23ab5
+    ;
+}
+
+fn wycheproof_key_2_n() -> []u8 {
+    return
+        \\c2c4a860236d3c9096a076d6ba5107e0f7bd81e1ba916f7375724bd2b0b0b639
+        \\56813715a3457ab0458b71fb35a45b27f9ef7ac3e579dea45dfbfd07819ed6b7
+        \\021aa5336c58442aadd96ca9ee9d32473e9d9278562b4d10258ade6a98fb1c7c
+        \\fdc3b3716ef5dec58cf73b359f389599b4b5865a9863519eb001c324387da755
+        \\450db341309360e3807c0565b8e2c44fbd5e6e8d04d006d7ee768b8e8436082a
+        \\90fa0e837f32f46087ab4a0d9be28aa7da1794ceb0172a7f50ed20f6df641efb
+        \\cbfd2aac89775c761a7310093c671c977fa18b0d6e01fb25f7a432b42c653597
+        \\84c689205719c1cf6e3a65dae2da434c326dde81bb6ffffbdbf6de5c16bba749
+    ;
+}
+
+fn wycheproof_key_2_p() -> []u8 {
+    return
+        \\e74a124759a174de33185996b3b437c24ed248203d674a87bcc2e76a667be3f5
+        \\4ac15e8f04e4c5e540f4e19f402a71d37d39756dcefbfaefb380095b6cfbdf4d
+        \\78dd20cf085a1f127610e3b7102ca6bde1825941ab602e9b72c08e4533ac5031
+        \\7138e10bf7edfea30f52ee91ea6628c2cc65e76bafc02eb9d21ab66ad374ef27
+    ;
+}
+
+fn wycheproof_key_2_q() -> []u8 {
+    return
+        \\d793b4f5514921bfbc47a1e45faa043eea03f052bce600ec4f5c62b014a7c45a
+        \\eb3f4bc02160e7b12dee135e44b227a31854ca833ac706d14670ab5932a269c9
+        \\b6f9188acb93e698b4a7dff65bb9c963c2e02b2cea3f2d5cb254e07b61679289
+        \\6e37550cb38171c4c32e0a6543bbe6acd4e99abeaba1340a961017412b57bc0f
+    ;
+}
+
+fn wycheproof_key_2_dp() -> []u8 {
+    return
+        \\4dd402049a679730f2169e86f49f8f27c6684236ff1293e4cb22f6c63a083474
+        \\251c9e9a17b677d5261f81109a81eddd91c4d4fc076b894c41a5b3005dd2ff98
+        \\4d3473c6d6f3a4830cd1b01eb8c59db245811c51d9be3ad0ba338b6c43f016e8
+        \\1c465c8c2f789977fb3f17e267f2ca828a4f3c29637193079a68bcbb83be547f
+    ;
+}
+
+fn wycheproof_key_2_dq() -> []u8 {
+    return
+        \\767a352fc5d6bd7794d08186f3948af4d0c40d664b6ed4ff0ab6a97e403bdbcc
+        \\6411cb5df27a419bbcb4656c9fb091dc2ed91adb78883d94f273a598461dc0aa
+        \\1da754f7a2decc130ce65e4e15274c2949c6cdb3c7a1a51a96dfd2e7bc26a200
+        \\69d47b2799d80060b52c2e866ced6ddf7abc50518e1df06e08ff1ae8b41b69bd
+    ;
+}
+
+fn wycheproof_key_2_qinv() -> []u8 {
+    return
+        \\5479dda30fc06b63cb5f77e20bb29db7eec7a6b37a5007f9651a46ffb66c9016
+        \\0be5700145c6a08d9737a98c5f7ba0dcef39352cc5d8612d94fd02383b8e0931
+        \\15376b154fa1cebdf915ddc051a7017d67a238fb4376749ced94712b117a1d0c
+        \\a31cd653a1955dd547346d03b21eb0ad3c123fb85e92c8af50a985db10eba79b
+    ;
+}
+
+fn wycheproof_key_2_sig_97() -> []u8 {
+    return
+        \\b03dd72dc84b305ea811267a489aba10a1dc54b59f92e58546a2f0b6883f5435
+        \\12d621951352ef12abafe4bd6e10c2e5b0eabbbbf1d081b66e535fc9b8ad3790
+        \\40c3c71ec8f2b4f5d319f5d2a0240a767ddb4de1fbc878b2c5e8e1e260217bbd
+        \\70971789fedb8c677fc8193f67e4637239607c7b9d3511868ccc0df372374abc
+        \\685c9b4b74b2c5f11758f809b19bb3b5c464db870fea61ddfa5e18be2c4106f3
+        \\e165fe85a7f8241db2806d0fc3c45d8a7f1eb4ca411a46ac411b81c04fd8c4ce
+        \\d5eff497da6bcb8e2fbe1f95cf4c3e761fc3037c82276f7ebfb7e6cc8534cb4f
+        \\d34192074f580c6e31008df4f1404ae8dbcb111503d4bdfe6e7107a1ab5cd8c6
+    ;
+}
+
+fn wycheproof_key_3_n() -> []u8 {
+    return
+        \\90a5d7aba2c8dc828e616fc1fc45c7c52130c8589dcbe2913da187572f6c2321
+        \\7b89a5186b6f90cbe053abfb0885a91f141dbe106ce6ad303904a5941df26ced
+        \\10478cb56a7bd6cf1313c4966d9cf7c4509d9dc63566aa323e110af219f3398c
+        \\04e79bb486de8703793473136f5c9051af24bd2c0208ea1bf9321a3e8f24af00
+        \\aaca1216842eab248d58cf46ac786c49fd3ca8557e9b53993a4b9718cdc5c474
+        \\bf1cfe58c07ad97b2c5acb7d86accc0fc7bed147adb2e77b8697d80150948117
+        \\714b806ff76f9d88147d84e93987b724bf4870429e85a7a7b51486a78d8a88f1
+        \\688f60e215d43d06221e2b993b5c12a607b80e9e0122472b29945f76b55737c1
+    ;
+}
+
+fn wycheproof_key_3_p() -> []u8 {
+    return
+        \\0de06a7759dcbb9b86ee9997aeda09ecf084f92c7fb4a0adee50a1ae3b7edc4b
+        \\6f7e5fa504e6ec0696b98dd5013be9a448ad1602b22881855df6fd11ca623fef
+        \\41eb1e366c123bd08cae96fca50bf464193d6546b61fa4f4e3988d18ca7444d4
+        \\077ca7cc865f168d9764ab0ef0a5bcb616eca34c3d14a89e9d9f579df97c0708
+        \\ceb83d84dc9425637c8594cd69416e00d5ccba98a003d9aa6a29ff6d2b15e64b
+        \\f9fb5fc9080edbaeb5abf3
+    ;
+}
+
+fn wycheproof_key_3_q() -> []u8 {
+    return
+        \\0a6c8149f2428c1a77259363023c1ada4b808df997e9af999c99faacaaf9f372
+        \\67f3f71a49522d8b2508dbcd17e064d604ee222e75e8088ccafbb063cdd466ca
+        \\7a9d15f88f20879cd444f7670493851d4e9a37e47e7b
+    ;
+}
+
+fn wycheproof_key_3_dp() -> []u8 {
+    return
+        \\094046fa3be87d1259f466651f3c069df5adfb72ffcdc073f435c11ed25492dc
+        \\f4feea6e03449d59b9d10938ab7d466d85c8b95721705658e94f53613196d54a
+        \\2bf21424480c27e05dc9b9fdc35d4d9810d398d9cebfc34ded105e1086f82de2
+        \\afa86fddaeea0f090f987209f5c3d3240f486cdd7e0dc5bf13bf8fbea652af5b
+        \\347ad3ade862c397a8590dde462b9eab393327106aad3bc6f17154f3720e9987
+        \\fbfcea86055f3d1f23c7f7
+    ;
+}
+
+fn wycheproof_key_3_dq() -> []u8 {
+    return
+        \\06f300dbf6d70811a4c3b79756d2bc9187ab09510ff11fbbbdbbfc731ca6a24c
+        \\454d4f66db8c1e5cc35b3d3365404339589ec1744e9ab05ddca7caed33e2ef31
+        \\a71363fb0a15afbde2d8a4ef586258be3466cfeda9a7
+    ;
+}
+
+fn wycheproof_key_3_qinv() -> []u8 {
+    return
+        \\052c428cb7bcb4dd32f6a7485f854bcf9a4455dd882a6946ef6b593521c045e6
+        \\a964477dcf247f99f93db6b836bad6c1a8b62b72bcc4f7d55f27d70fc624d576
+        \\2014269b3eb71c46dcbbc2c5cf883b06d3dc0c137d8ddc42daf8dec9fcb81964
+        \\e4a397ee02045612ff7037e6f8785acd8a3b2a88c37cee30f6eaa3322596ff07
+        \\ae58abfd622f0217fb0b15b0394afa8e32ec7bf4e6179760c3ed8bd67b975162
+        \\719904795c4843b2be35ca
+    ;
+}
+
+fn wycheproof_key_4_n() -> []u8 {
+    return
+        \\f2ed0e93228f37c2ce1c215e00cce4ef00e2c08a004a39c4170dc73e5fbd9b91
+        \\e7c55e596579ec9c60b9bd341e83029b1934e6493eb60099b6cfbb9804d4179c
+        \\983099e19102bba49eaa28fa505efacc5a9d5374499c0c5775778317ed370de1
+        \\919f38aff22d5aee8c8af36a86d036029e761f243dff3c205a11e9bce9ac1d6b
+        \\af81e79ad4146b119abb13903f8562e8f3e6a918f48223465bc93d5e7d5abe3d
+        \\08503ec42998fe087a1f935d1b8673c495f005dfa7453daf977e1608a8c276da
+        \\2a4cd0567e4af4d18cba05fdbedcde74493ccabd9060c27d35a02f35c760b12a
+        \\4deae1359f649f273fa408626fb789c916434a642d528f41db868ff93b7f889f
+    ;
+}
+
+fn wycheproof_key_4_p() -> []u8 {
+    return
+        \\12aa6c4fffac8146f5ed82cae905e5de35dd59103235022daff32421372bf037
+        \\cb7c534a99a2c073826d9c0195e15337bf271804be3542397b1d9316cbb6d1e1
+        \\07dd9c7828053695b7459c4b652946dabefa36b0877d80e465b346b26d7f388d
+        \\deb1fdf440eb9cb378da0f78b39191f1282b69bf7063335c094378aead687659
+        \\cd5cf4fa7a6bb92235224563d21b81f848265b3f07f5fb3e33d24f5c9a2f36fd
+        \\1a115d010136030210cd45
+    ;
+}
+
+fn wycheproof_key_4_q() -> []u8 {
+    return
+        \\0d03b9f80b93504a27f8f70016adbdef3334b3732500fa45181e810ad8b1dd09
+        \\14020e64cde75d33c363ff1ce4c7ec06188a0046ef845cbf7f084ddd64f80c01
+        \\d85e56acf5e2b2f897788487148d4a016b8f7f64a293
+    ;
+}
+
+fn wycheproof_key_4_dp() -> []u8 {
+    return
+        \\0c719d8aaa7300d9f94901dc9b5943e9793e3b602178ac1e754cc2c0cf72a025
+        \\3252e231bbc1d5a256f3bd5663eb8ccfd4c4baadd423817ba7690cb9dd248beb
+        \\5a93bda5700379b924d912dcee1b8491d4a6cf205a53ab42ee778476f3aa25b3
+        \\e9cbfea2d5f26877a5e6b4fb22610bf61ac79bd4f5977792b0d7a5c9c8f04ee6
+        \\88e8a351a6f27b6c236c2e428c1256a5856ee77f5aa3fcd4228c34e866ca24a8
+        \\bc0b935600ceacac0b3383
+    ;
+}
+
+fn wycheproof_key_4_dq() -> []u8 {
+    return
+        \\08ad26a55d0ce0316ffb4f556473d3f4cccdccf76e00a6d8babf00b1e5cbe8b0
+        \\b8015eedde9a3e228242aa13432ff2aebb06aad9f502e87faa05893e43500801
+        \\3ae98f1df941cca5ba50585a0db386ab9d0a54edc1b7
+    ;
+}
+
+fn wycheproof_key_4_qinv() -> []u8 {
+    return
+        \\057973d6bdff122c8aa4bd273792b4f4b7737c7ce8093654407abe0e1289b048
+        \\fd8c13bfa9a0179a60d1be228e4890c064f9608f078cb34008be48e4008fc96e
+        \\8fd08ac8b4e004faae7827a4fe38830b2328ab3f93bf0d8fd45c1acd91d49fcf
+        \\45698d4d8570fd3e1cdf295828626d36e0c788f65341b57dab237c9aa230c236
+        \\3d465144211ceeac2cfcadfefa93107b73d20cf781fd81fd1a142c1bee319cb9
+        \\3d0c2769675acd586a7c3b
+    ;
+}
+
+fn wycheproof_key_5_n() -> []u8 {
+    return
+        \\92bf17cdbffb42fa9957ce37826bb451708e7cdec8752b809c81a8d16fe5fe4d
+        \\ab6a9db6d11dbb12086645db7546642b322e8331dd7f29eff68bf40b24f80884
+        \\f5152b1fda9b9f7ae2fce2721cdee0fc48f85a6e8e64f767ed9727fd2dc59796
+        \\7e276a5e2e768528afdd9df4b6ddda4c174300e4da3c19a3c32299e1e7857934
+        \\c14dd6203d8c2671289bc392711597155364a59046b2b9f1905fe717ca7efebb
+        \\4c1969b804118effa240c11ebf97cd68c2aa19c787b3be21e68c0e397c7f04c6
+        \\ef98950e27e0e19a40da92a3ea10800fe9252b77026d14c2fa1eb4ac102491e5
+        \\773279f07d856d446f45169b09bf60b8a2695f5e4864eaaf9590aec8c7c2f86d
+    ;
+}
+
+fn wycheproof_key_5_p() -> []u8 {
+    return
+        \\0c0f4f3c24bf8d0185bfe3f5be0fd9d94045abc59ed9082ebab4615c4fe5e74a
+        \\26d2d3824276b90631aedbe4e2795873adaaf909fb454f7cc4eb6403c226a8d4
+        \\fe96c429018c6500d227af70236f30ac3e299e502b0a9423ddccffb7e2987aa6
+        \\889611896f3ca767a5d536f9815cd21fefa7f8f177ddb32b9a8c3599c3f37ef9
+        \\10e37e9048e61d0cf79dc14f14c242d0f0e350045ad6b54f278abca959b59c77
+        \\1e68c312aed3e33a71a733
+    ;
+}
+
+fn wycheproof_key_5_q() -> []u8 {
+    return
+        \\0c2b1123368fcab3690929caa41f19b4e7e973c9696a6e1fd13e66b61ca9bb63
+        \\cc30cbac1a8735206aa639fc8dbaca40f273e6b6320752fe2f0b4b5089d932ca
+        \\0422ba3830eb74e462a7dad66f31491c321ad7f861df
+    ;
+}
+
+fn wycheproof_key_5_dp() -> []u8 {
+    return
+        \\080a34d2c32a5e0103d542a3d40a913b802e7283bf3b5ac9d1cd963d8a9944dc
+        \\19e1e256d6f9d0aecbc9e7edec50e5a273c750b1522e34fdd89ced57d6c4708d
+        \\ff0f2d70abb2ee008c1a74f56cf4cb1d7ec6698ac75c62c293ddffcfec65a719
+        \\b0640bb0f4d31a451938cf5100e88c154a6ffb4ba53e7772670823bbd7f7a9fb
+        \\6097a9b585eebe08a513d634b88181e0a0978aad91e478df6fb1d31b9123bda4
+        \\bef0820c748d4226f66f77
+    ;
+}
+
+fn wycheproof_key_5_dq() -> []u8 {
+    return
+        \\081cb61779b531ccf0b0c6871814bbcdeff0f7db9b9c496a8b7eef24131bd242
+        \\882087c811af78c047197bfdb3d1dc2b4c4d447976af8ca974b23235b13b7731
+        \\581726d0209cf89841c53c8ef4cb8612cc11e550413f
+    ;
+}
+
+fn wycheproof_key_5_qinv() -> []u8 {
+    return
+        \\094cdf234ade11daf48b0df60628ad6846140b65d68783caf13171f4c2772e7a
+        \\2f7576fc8ba0d5689074568ebfae719a4f2faee5159f17bbec294029f4b0d7ef
+        \\85f5e7980a872ee5db8f6a39cf6871373abe90c894fc8cd96399a3a28f643752
+        \\ea6bff28a919e88d85fe720ca359aa5d4c828f2530665ad9810d7dcecc0888bd
+        \\ce4d71e05c3a8579845fbe985ff6d0608fb2dfa1121c7b7e4ebd7209ce7fe259
+        \\3ecfa2a061fb4e7b2773cf
+    ;
+}
+
+fn pss_sha512_signature() -> []u8 {
+    return
+        \\4b38eed888716b25cc4d65247d50eb1d79a4d0f4b5b23783b60da8fa094d8083
+        \\49a884d57274761d854123b36933dfd0712df0eddb54406d144dfce5de7ee5e4
+        \\c2d55b315aec4573d37b0786772ba0cfe26f4441d2438ae703a522d3ba1d670e
+        \\ec4a839fbf23a34774c5eb59633a531f98ff6e16ed357bfe4ff96e2d238cf15f
+        \\00a188e9b80bdf3dcf2aa5590980561eba3b5172f7d8e4a147d7b28f0b815b48
+        \\8b2c51621b8c8c99af76a6614b26672af345ebd35e36948493d80ec80878e183
+        \\4d78a4f45e375f86a3bed352f921f82fa6f6657a0997659ce6760b497f29a4fe
+        \\88446890ad303e1493956c3c599328a8cf4cdca7974b3a29b598440b1ed5a4b7
+    ;
+}
+
+fn pss_sha512_salt() -> []u8 {
+    return
+        \\2e3fce77cf8c4c7478a96d207c1c39715892cac84a18cbec9b634f4bc22b390b
+        \\48cd30a4df2e7ebbaee65c346a662c5be2d12441322f7a4bac821a382c4af091
+    ;
+}
+
+fn pss_sha512_message() -> []u8 {
+    return
+        \\54686520717569636b2062726f776e20666f78206a756d7073206f7665722074
+        \\6865206c617a7920646f67
+    ;
+}
+
+fn nist_pss_3072_n() -> []u8 {
+    return
+        \\a7a1882a7fb896786034d07fb1b9f6327c27bdd7ce6fe39c285ae3b6c34259ad
+        \\c0dc4f7b9c7dec3ca4a20d3407339eedd7a12a421da18f5954673cac2ff05915
+        \\6ecc73c6861ec761e6a0f2a5a033a6768c6a42d8b459e1b4932349e84efd92df
+        \\59b45935f3d0e30817c66201aa99d07ae36c5d74f408d69cc08f044151ff4960
+        \\e531360cb19077833adf7bce77ecfaa133c0ccc63c93b856814569e0b9884ee5
+        \\54061b9a20ab46c38263c094dae791aa61a17f8d16f0e85b7e5ce3b067ece89e
+        \\20bc4e8f1ae814b276d234e04f4e766f501da74ea7e3817c24ea35d016676cec
+        \\e652b823b051625573ca92757fc720d254ecf1dcbbfd21d98307561ecaab5454
+        \\80c7c52ad7e9fa6b597f5fe550559c2fe923205ac1761a99737ca02d7b19822e
+        \\008a8969349c87fb874c81620e38f613c8521f0381fe5ba55b74827dad3e1cf2
+        \\aa29c6933629f2b286ad11be88fa6436e7e3f64a75e3595290dc0d1cd5eee7aa
+        \\ac54959cc53bd5a934a365e72dd81a2bd4fb9a67821bffedf2ef2bd94913de8b
+    ;
+}
+
+fn nist_pss_3072_p() -> []u8 {
+    return
+        \\dd553696db8ccb107609b8917e688bdd8373a8926bc9d114c1c77f7958070e23
+        \\6ca1bd2025ded59a71093b63afbfce39e92bde9ffca983959e7c3e18d7565061
+        \\2258c24eebb61a1b4a68603a2721e3e2483d6da27475a228b1341c78f140948b
+        \\5c922822ccaed76dae338dddec1e4c5c34b9c53f34a09ff0b2b61a62254e73e6
+        \\f0ac8013edc2cfa7ecbeb86fcc7309cb0f5b5eddb707af4b9337d34d672af413
+        \\f3b6efd11e3b49c978f06a356f6f4e0ea50a90797fe32ccaa983547ff18ea167
+    ;
+}
+
+fn nist_pss_3072_q() -> []u8 {
+    return
+        \\c1e3089e1bea1141638ca912da01c134f67231a2f737d97e28486e004a43e9c5
+        \\592ff968ee18109fc71aa4c1a97aa88ece5c4734352bc0c1f67726bc4aac59c1
+        \\9301f23a705be5b3f7825fb284e58a950d795f63d18fe72231eaba9d6a5f9086
+        \\6f8dd34b2b0dfc132db8348efa5a62634e5584a788aebbf073ccb4f3e9f5cde8
+        \\d0c2e831412485c7f8cf1473abffabcc5d51d8a2a87a22f39d1a250b3cb66d90
+        \\c573669071aeba9b1080dc079243094a9ae0e5a62e4e8b653cb57f54f4eeaf3d
+    ;
+}
+
+fn nist_pss_3072_dp() -> []u8 {
+    return
+        \\5f8d638d1e0c47794d9305929b4b87281b69397f51b0809573edeb3dcb82f237
+        \\6ee419491adfa4a9d7f6db51d9573f50d025cc64030744c05794d3350a8bd45b
+        \\3c5a69b8552e6cbfa2038fb33d4094dd8bb1095c36d4356a88c6ba114cad0c5a
+        \\cfdd224b3f4bc1af30f9a1ee5ea5407a8ce3c71dd09a1ea33f44e63cb9c0cae1
+        \\76515e1e323874adc5c2b788e23bae5123a90b964e44ec2e9be90b496bb53796
+        \\7d05715e3737cd4c35f2bc87ab7cc9ee70116ed2528b3d62237413dfc56e0e47
+    ;
+}
+
+fn nist_pss_3072_dq() -> []u8 {
+    return
+        \\8ced58a9828526335c9517b5ac58c5ae7e74c9c36a7e6c7f571878f3319f52cb
+        \\8eeaeeee64694ee4a49e582c53b77adac0fb6c808830560c4f130d925e7cbbca
+        \\a1221c8a4d54ce116b4c4ce52a56882c5c38000c441673cb91d381a3c5b09cd8
+        \\ad3d74841fb8d7f9d5cebc4bfd273d2fe28a08fc2df6a57207bef71c6a9d63d5
+        \\4a0d7677d450c6a6d4e9a937a82be8cd4a1677e7ac04712949c7683f412862d4
+        \\0aeaa899640503aabc8794a5ff13e7c72df049ee0fb8203a99fe94a5003c225b
+    ;
+}
+
+fn nist_pss_3072_qinv() -> []u8 {
+    return
+        \\87d010acad9e1540cbfb2c03dcd987d3c2fbd0fa2cd10f2e5b216fad7016a58a
+        \\98fb43fcaee266b21c99d213089696a0faea4710f8ee7bd9a5eb2452341e58fe
+        \\ec965d76e2133236f8b44e8bdd86a591acf8af501cdcc1a5cb1065793b09c0a5
+        \\536ed414cca22163758b0b41add238e62ea07acba89144f97b9e1509584210ac
+        \\ed89986fead9b3d22253f0a7a7372e269a01356070d2e1afac08da15cf23ad29
+        \\438b0b3fc8d9e8e9f99c8ca970ae703cca71974335adb96a16e85c97689c3a8c
+    ;
+}
+
+fn nist_pss_3072_sha256_0_msg() -> []u8 {
+    return
+        \\c16499110ed577202aed2d3e4d51ded6c66373faef6533a860e1934c63484f87
+        \\a8d9b92f3ac45197b2909710abba1daf759fe0510e9bd8dd4d73cec961f06ee0
+        \\7acd9d42c6d40dac9f430ef90374a7e944bde5220096737454f96b614d0f6cdd
+        \\9f08ed529a4ad0e759cf3a023dc8a30b9a872974af9b2af6dc3d111d0feb7006
+    ;
+}
+
+fn nist_pss_3072_sha256_0_sig() -> []u8 {
+    return
+        \\4335707da735cfd10411c9c048ca9b60bb46e2fe361e51fbe336f9508dc945af
+        \\e075503d24f836610f2178996b52c411693052d5d7aed97654a40074ed20ed66
+        \\89c0501b7fbac21dc46b665ac079760086414406cd66f8537d1ebf0dce4cf0c9
+        \\8d4c30c71da359e9cd401ff49718fdd4d0f99efe70ad8dd8ba1304cefb88f24b
+        \\0eedf70116da15932c76f0069551a245b5fc3b91ec101f1d63b9853b598c6fa1
+        \\c1acdbacf9626356c760119be0955644301896d9d0d3ea5e6443cb72ca29f4d4
+        \\5246d16d74d00568c219182feb191179e4593dc152c608fd80536329a533b3a6
+        \\31566814cd654f587c2d8ce696085e6ed1b0b0278e60a049ec7a399f94fccae6
+        \\462371a69695ef525e00936fa7d9781f9ee289d4105ee827a27996583033cedb
+        \\2f297e7b4926d906ce0d09d84128406ab33d7da0f8a1d4d2f666568686c394d1
+        \\39b0e5e99337758de85910a5fa25ca2aa6d8fb1c777244e7d98de4c79bbd426a
+        \\5e6f657e37477e01247432f83797fbf31b50d02b83f69ded26d4945b2bc3f86e
+    ;
+}
+
+fn nist_pss_3072_sha384_0_salt() -> []u8 {
+    return
+        \\61a762f8968d5f367e2dbcacb4021653dc75437d9000e3169d943729703837a5
+        \\cbf4de62bdedc95fd0d1004e84751452
+    ;
+}
+
+fn nist_pss_3072_sha384_0_msg() -> []u8 {
+    return
+        \\9221f0fe9115843554d5685d9fe69dc49e95ceb5793986e428b8a10b894c01d6
+        \\af8782fd7d952faf74c2b637ca3b19dabc19a7fe259b2b924eb363a908c5b368
+        \\f8ab1b2333fc67c30b8ea56b2839dc5bdadefb14ada810bc3e92bac54e2ae1ca
+        \\1594a4b9d8d19337be421f40e0674e0e9fedb43d3ae89e2ca05d90a68203f2c2
+    ;
+}
+
+fn nist_pss_3072_sha384_0_sig() -> []u8 {
+    return
+        \\9687115be478e4b642cd369392b9dd0f3576e704af7218b1f94d7f8fe7f07073
+        \\e3e8e1186fa768977d6b514e513459f2373df6ec52e3de9bd83fcc5cc3e6b97f
+        \\8b3fb534163c64f5267620700e9d8c52b3df61a7c3748ef159d6b390895afa3a
+        \\f59109a5478d016d96c49f68dfc735ba2aafd5012c13515ed6644f0d4109c455
+        \\56e14a3821e1aa24beb8a81a48da27f131de84f7ba51581d81b8ff31ba92b8a1
+        \\fde867f07e32e6c2709253448174dd31324dbc32b05f07587f76a9997decb80f
+        \\38d8c13d0f6eb3c10e3d96a2293f7464f1e04602ef6e84c2d0245d7db256a67d
+        \\132a47cae9abe06b61a8968f50a1749995dc15ef0dcb1d5f5959e4d454c8547b
+        \\bb4d195698f484617bfd122acaae2d0e8c76d28b24005ab03caa781ea97b1c4d
+        \\9396a16f7998eee7ddd9de4cabe57032d9438a5d99c6b34a956122350263c7e9
+        \\98bc61dec91381012e686d079e39e96b1ea4bfdb7cdf630ddb422c6b580e5506
+        \\c9cc3d6c100f2041d17ceaaaa54589249f04a1370ffa3bf3ff1adeb890688698
+    ;
+}

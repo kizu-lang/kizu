@@ -15,7 +15,7 @@ source に出てくる。
 * `extern "c" fn` は `extern "c" struct` を値で受け取り、値で返せる。
   綴りは通常の引数・戻り値と同じで、新しい構文も unsafe の種類も足さない。
 * 値の渡し方は native target の C 呼び出し規約に従い、backend が clang と同じ形に
-  書き換える(`internal/llvm/cabi.go`)。
+  書き換える(`compiler/src/internal/llvm/cabi.kizu`)。
   * arm64(AAPCS64、Darwin / Linux): float 1〜4 個の同型 aggregate は float register、
     16 byte 以下は整数 register 1〜2 本、それより大きいものは copy の address。
     16 byte を超える戻り値は `sret`。

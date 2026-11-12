@@ -87,8 +87,8 @@ zlib や Go の `compress/flate` が持つ level は、この探索をどこま�
 小さくしたい呼び手に必要なのは、つまみではなく新しい format です。
 
 書き出した stream は自分の reader が読み戻すだけでなく、外の reader にも
-読ませます。`examples/compress_gzip.kizu` が印字する member を、Go の
-`compress/gzip` が開くことを `cmd/kizu` の test が見ています。
+読ませます。`examples/compress_gzip.kizu` が印字する member は `gzip -dc` と
+Python の `zlib` が開く bytes で、example の冒頭にその確かめ方があります。
 
 | 入力 | stream |
 | --- | --- |
