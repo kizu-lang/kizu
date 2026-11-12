@@ -1,0 +1,495 @@
+// Writes std::machine tables as Quint modules.
+//
+// Run it from the repository root with the program that prints the tables on
+// stdin and the modules to write as arguments:
+//
+//     kizu run spec/tls_machine.kizu | kizu run scripts/machine-quint/main.kizu -- spec/tls_client.qnt spec/tls_server.qnt
+//
+// Each file takes one document from stdin, in order, and is named for its
+// module. With -check first it writes nothing and fails when a file is not
+// what it would write, which is how `go test ./cmd/kizu` keeps the modules in
+// step with std::tls.
+//
+// A module holds the machine and nothing about what it should do: properties
+// live in a hand written module that imports it, so a regenerated file cannot
+// drop one.
+
+import std::array;
+import std::fmt;
+import std::fs;
+import std::io;
+import std::json;
+import std::mem;
+import std::path;
+import std::process;
+import std::string;
+import std::testing;
+
+error Failure = mem::Error or fs::Error or io::Error or json::DecodeError or process::Error;
+
+// Table, Move, read_tables and validate are the same text in
+// scripts/machine-lean/main.kizu: each generator is one file `kizu run` takes, and the
+// two read one stream. A change to one goes into both.
+
+/// One move of a Table.
+pub struct Move {
+    pub from: string::String,
+    pub event: string::String,
+    pub outcome: string::String,
+    pub to: string::String,
+}
+
+/// One document of std::machine's to_json.
+pub struct Table {
+    pub states: array::Array<string::String>,
+    pub events: array::Array<string::String>,
+    pub outcomes: array::Array<string::String>,
+    pub start: string::String,
+    pub ends: array::Array<string::String>,
+    pub moves: array::Array<Move>,
+}
+
+fn main() -> Failure!process::ExitStatus {
+    let allocator = mem::page_allocator();
+    let handle = io::blocking();
+    var first = 0;
+    var check = false;
+    if process::arg_count() > 0 {
+        let flag = try process::arg(0);
+        if mem::equal_bytes(flag, "-check") {
+            check = true;
+            first = 1;
+        }
+    }
+    let input = try io::read_stdin(handle, allocator, mem::Limit::Unlimited);
+    defer input.deinit(allocator);
+    var tables = array::new<Table>(allocator);
+    defer tables.deinit(allocator);
+    let input_bytes = input.as_bytes();
+    try read_tables(allocator, input_bytes, &var tables);
+    if process::arg_count() - first != tables.len() {
+        var line = string::new(allocator);
+        defer line.deinit(allocator);
+        try line.append_bytes(allocator, "machine-quint: ");
+        try fmt::append_i64(allocator, &var line, process::arg_count() - first);
+        try line.append_bytes(allocator, " files for ");
+        try fmt::append_i64(allocator, &var line, tables.len());
+        try line.append_bytes(allocator, " tables");
+        let text = line.as_bytes();
+        try io::write_stderr_line(handle, text);
+        return process::ExitStatus::Failure;
+    }
+    var stale = false;
+    var index = 0;
+    while tables.at(index) |table| {
+        let file = try process::arg(first + index);
+        index = index + 1;
+        let base = path::basename(file);
+        let extension = path::extension(base);
+        let name = base[0..mem::len(base) - mem::len(extension)];
+        var text = string::new(allocator);
+        defer text.deinit(allocator);
+        let rendered = try render(allocator, name, table, &var text);
+        let text_bytes = text.as_bytes();
+        if !rendered {
+            try io::write_stderr(handle, "machine-quint: ");
+            try io::write_stderr(handle, file);
+            try io::write_stderr(handle, ": ");
+            try io::write_stderr_line(handle, text_bytes);
+            return process::ExitStatus::Failure;
+        }
+        if check {
+            let written = try fs::read_file(handle, allocator, file, mem::Limit::Unlimited);
+            defer written.deinit(allocator);
+            let written_bytes = written.as_bytes();
+            if !mem::equal_bytes(written_bytes, text_bytes) {
+                try io::write_stderr(handle, "machine-quint: ");
+                try io::write_stderr(handle, file);
+                try io::write_stderr_line(handle, " is out of step with the tables; run `just spec-table`");
+                stale = true;
+            }
+        } else {
+            try fs::write_file(handle, file, text_bytes);
+        }
+    }
+    if stale {
+        return process::ExitStatus::Failure;
+    }
+    return process::ExitStatus::Success;
+}
+
+/// Reads a stream of to_json documents, separated by white space.
+fn read_tables(allocator: Allocator, bytes: []u8, tables: &var array::Array<Table>) -> Failure!void {
+    var index = skip_space(bytes, 0);
+    while index < mem::len(bytes) {
+        let end = value_end(bytes, index);
+        let table = try json::decode<Table>(allocator, bytes[index..end]);
+        try tables.append(allocator, move table);
+        index = skip_space(bytes, end);
+    }
+    return;
+}
+
+/// The index of the first byte at or after `index` that is not white space.
+fn skip_space(bytes: []u8, index: i64) -> i64 {
+    var at = index;
+    while mem::byte_at(bytes, at) |byte| {
+        if !is_space(byte) {
+            return at;
+        }
+        at = at + 1;
+    }
+    return at;
+}
+
+/// The end of the JSON value that starts at `start`: past the bracket that
+/// closes an object or array, past the quote that closes a string, or at the
+/// white space after a scalar. json::decode judges what is in between.
+fn value_end(bytes: []u8, start: i64) -> i64 {
+    var depth = 0;
+    var in_string = false;
+    var escaped = false;
+    var index = start;
+    while mem::byte_at(bytes, index) |byte| {
+        index = index + 1;
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == cast<u8>(92) {
+                escaped = true;
+            } else if byte == cast<u8>(34) {
+                in_string = false;
+                if depth == 0 {
+                    return index;
+                }
+            }
+        } else if byte == cast<u8>(34) {
+            in_string = true;
+        } else if byte == cast<u8>(123) or byte == cast<u8>(91) {
+            depth = depth + 1;
+        } else if byte == cast<u8>(125) or byte == cast<u8>(93) {
+            depth = depth - 1;
+            if depth <= 0 {
+                return index;
+            }
+        } else if depth == 0 and is_space(byte) {
+            return index - 1;
+        }
+    }
+    return index;
+}
+
+fn is_space(byte: u8) -> bool {
+    return byte == cast<u8>(32) or byte == cast<u8>(10) or byte == cast<u8>(13) or byte == cast<u8>(9);
+}
+
+/// Writes spec to `out` with each named table written into its block. Every
+/// name must have a block and every block a name, so a table cannot be left
+/// Writes the module `name` for a table of every pair. A refusal answers
+/// false with the reason, rather than the module, in `out`.
+fn render(allocator: Allocator, name: []u8, table: &Table, out: &var string::String) -> mem::Error!bool {
+    let valid = try validate(allocator, table, out);
+    if !valid {
+        return false;
+    }
+    try append_line(allocator, out, "// GENERATED by scripts/machine-quint. Do not edit.");
+    try out.append_bytes(allocator, "module ");
+    try out.append_bytes(allocator, name);
+    try append_line(allocator, out, " {");
+    try write_sum(allocator, out, "State", &table.states);
+    try write_sum(allocator, out, "Event", &table.events);
+    try write_sum(allocator, out, "Outcome", &table.outcomes);
+    try out.append_byte(allocator, newline());
+    try write_set(allocator, out, "events", "Event", &table.events);
+    try write_set(allocator, out, "outcomes", "Outcome", &table.outcomes);
+    try write_set(allocator, out, "ends", "State", &table.ends);
+    try out.append_byte(allocator, newline());
+    try append_line(allocator, out, "  pure val moves: (State, Event) -> (State, Outcome) = Map(");
+    var index = 0;
+    while table.moves.at(index) |move_entry| {
+        index = index + 1;
+        try out.append_bytes(allocator, "    (");
+        try out.append_string(allocator, &move_entry.from);
+        try out.append_bytes(allocator, ", ");
+        try out.append_string(allocator, &move_entry.event);
+        try out.append_bytes(allocator, ") -> (");
+        try out.append_string(allocator, &move_entry.to);
+        try out.append_bytes(allocator, ", ");
+        try out.append_string(allocator, &move_entry.outcome);
+        try append_line(allocator, out, "),");
+    }
+    try append_line(allocator, out, "  )");
+    try out.append_byte(allocator, newline());
+    let vars =
+        \\  var state: State
+        \\  var previous: State
+        \\  var event: Event
+        \\  var outcome: Outcome
+        \\  var moved: bool
+        \\
+    ;
+    try append_line(allocator, out, vars);
+    try append_line(allocator, out, "  action init = all {");
+    try out.append_bytes(allocator, "    state' = ");
+    try out.append_string(allocator, &table.start);
+    try append_line(allocator, out, ",");
+    try out.append_bytes(allocator, "    previous' = ");
+    try out.append_string(allocator, &table.start);
+    try append_line(allocator, out, ",");
+    try append_line(allocator, out, "    nondet e = oneOf(events) event' = e,");
+    try append_line(allocator, out, "    nondet o = oneOf(outcomes) outcome' = o,");
+    try append_line(allocator, out, "    moved' = false,");
+    try append_line(allocator, out, "  }");
+    try out.append_byte(allocator, newline());
+    try write_step(allocator, out);
+    return true;
+}
+
+/// Writes the moves of a run. A random event at each step would mostly be a
+/// refusal, and a run would end long before the late states, so half the
+/// steps choose among the events that do not lead to an end. A search that
+/// finds nothing over runs that never got there would say nothing.
+fn write_step(allocator: Allocator, out: &var string::String) -> mem::Error!void {
+    let step =
+        \\  action take(e: Event): bool = {
+        \\    val answer = moves.get((state, e))
+        \\    all {
+        \\      state' = answer._1,
+        \\      previous' = state,
+        \\      event' = e,
+        \\      outcome' = answer._2,
+        \\      moved' = true,
+        \\    }
+        \\  }
+        \\
+        \\  action anyEvent = {
+        \\    nondet e = oneOf(events)
+        \\    take(e)
+        \\  }
+        \\
+        \\  action onward = {
+        \\    val open = events.filter(e => not(ends.contains(moves.get((state, e))._1)))
+        \\    all {
+        \\      open != Set(),
+        \\      nondet e = oneOf(open)
+        \\      take(e),
+        \\    }
+        \\  }
+        \\
+        \\  action step = any { anyEvent, onward }
+        \\}
+    ;
+    return append_line(allocator, out, step);
+}
+
+/// Writes one list of names as a Quint set.
+fn write_set(
+    allocator: Allocator,
+    out: &var string::String,
+    name: []u8,
+    element: []u8,
+    values: &array::Array<string::String>
+) -> mem::Error!void {
+    try out.append_bytes(allocator, "  pure val ");
+    try out.append_bytes(allocator, name);
+    try out.append_bytes(allocator, ": Set[");
+    try out.append_bytes(allocator, element);
+    try out.append_bytes(allocator, "] = Set(");
+    try append_joined(allocator, out, values, ", ");
+    return append_line(allocator, out, ")");
+}
+
+/// Writes one enum as a Quint sum type.
+fn write_sum(
+    allocator: Allocator,
+    out: &var string::String,
+    name: []u8,
+    variants: &array::Array<string::String>
+) -> mem::Error!void {
+    try out.append_bytes(allocator, "  type ");
+    try out.append_bytes(allocator, name);
+    try out.append_bytes(allocator, " = ");
+    try append_joined(allocator, out, variants, " | ");
+    return out.append_byte(allocator, newline());
+}
+
+/// answers false with the reason in `problem`.
+fn validate(allocator: Allocator, table: &Table, problem: &var string::String) -> mem::Error!bool {
+    var index = 0;
+    while table.moves.at(index) |move_entry| {
+        index = index + 1;
+        let from = move_entry.from.as_bytes();
+        let event = move_entry.event.as_bytes();
+        let outcome = move_entry.outcome.as_bytes();
+        let to = move_entry.to.as_bytes();
+        var unlisted = "";
+        if !contains(&table.outcomes, outcome) {
+            unlisted = "an outcome";
+        }
+        if !contains(&table.events, event) {
+            unlisted = "an event";
+        }
+        if !contains(&table.states, from) or !contains(&table.states, to) {
+            unlisted = "a state";
+        }
+        if mem::len(unlisted) > 0 {
+            try problem.append_bytes(allocator, "move {");
+            try problem.append_bytes(allocator, from);
+            try problem.append_bytes(allocator, " ");
+            try problem.append_bytes(allocator, event);
+            try problem.append_bytes(allocator, " ");
+            try problem.append_bytes(allocator, outcome);
+            try problem.append_bytes(allocator, " ");
+            try problem.append_bytes(allocator, to);
+            try problem.append_bytes(allocator, "} names ");
+            try problem.append_bytes(allocator, unlisted);
+            try problem.append_bytes(allocator, " the table does not list");
+            return false;
+        }
+        if count_moves(table, from, event, index - 1) > 0 {
+            try problem.append_bytes(allocator, "the table has two moves for ");
+            try problem.append_bytes(allocator, from);
+            try problem.append_bytes(allocator, " and ");
+            try problem.append_bytes(allocator, event);
+            return false;
+        }
+    }
+    var state_index = 0;
+    while table.states.at(state_index) |state| {
+        state_index = state_index + 1;
+        let state_bytes = state.as_bytes();
+        var event_index = 0;
+        while table.events.at(event_index) |event| {
+            event_index = event_index + 1;
+            let event_bytes = event.as_bytes();
+            if count_moves(table, state_bytes, event_bytes, table.moves.len()) == 0 {
+                try problem.append_bytes(allocator, "the table has no move for ");
+                try problem.append_bytes(allocator, state_bytes);
+                try problem.append_bytes(allocator, " and ");
+                try problem.append_bytes(allocator, event_bytes);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/// How many of the first `limit` moves leave `from` on `event`.
+fn count_moves(table: &Table, from: []u8, event: []u8, limit: i64) -> i64 {
+    var count = 0;
+    var index = 0;
+    while index < limit {
+        if table.moves.at(index) |move_entry| {
+            let move_from = move_entry.from.as_bytes();
+            let move_event = move_entry.event.as_bytes();
+            if mem::equal_bytes(move_from, from) and mem::equal_bytes(move_event, event) {
+                count = count + 1;
+            }
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+/// Whether wanted is one of values.
+fn contains(values: &array::Array<string::String>, wanted: []u8) -> bool {
+    var index = 0;
+    while values.at(index) |value| {
+        index = index + 1;
+        let bytes = value.as_bytes();
+        if mem::equal_bytes(bytes, wanted) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Appends the strings joined by separator.
+fn append_joined(
+    allocator: Allocator,
+    out: &var string::String,
+    parts: &array::Array<string::String>,
+    separator: []u8
+) -> mem::Error!void {
+    var index = 0;
+    while parts.at(index) |part| {
+        if index > 0 {
+            try out.append_bytes(allocator, separator);
+        }
+        index = index + 1;
+        try out.append_string(allocator, part);
+    }
+    return;
+}
+
+fn newline() -> u8 {
+    return cast<u8>(10);
+}
+
+/// Appends text and a newline.
+fn append_line(allocator: Allocator, out: &var string::String, text: []u8) -> mem::Error!void {
+    try out.append_bytes(allocator, text);
+    return out.append_byte(allocator, newline());
+}
+
+// The tests run with `kizu test scripts/machine-quint/main.kizu`, which
+// `go test ./cmd/kizu` does.
+
+/// Whether text holds part.
+fn holds(text: []u8, part: []u8) -> bool {
+    var start = 0;
+    while start + mem::len(part) <= mem::len(text) {
+        if mem::equal_bytes(text[start..start + mem::len(part)], part) {
+            return true;
+        }
+        start = start + 1;
+    }
+    return false;
+}
+
+/// Renders the one table of `document` as the module `name`, and answers the
+/// module or the reason it refused, and whether it rendered.
+fn try_render(allocator: Allocator, name: []u8, document: []u8, out: &var string::String) -> Failure!bool {
+    var tables = array::new<Table>(allocator);
+    defer tables.deinit(allocator);
+    try read_tables(allocator, document, &var tables);
+    if tables.at(0) |table| {
+        return render(allocator, name, table, out);
+    }
+    return false;
+}
+
+test "render writes the machine" {
+    let allocator = mem::page_allocator();
+    let door =
+        \\{"states": ["Open", "Shut"], "events": ["Close"], "outcomes": ["Applied", "Refused"],
+        \\ "start": "Open", "ends": ["Shut"], "moves": [
+        \\  {"from": "Open", "event": "Close", "outcome": "Applied", "to": "Shut"},
+        \\  {"from": "Shut", "event": "Close", "outcome": "Refused", "to": "Shut"}]}
+    ;
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    let rendered = try try_render(allocator, "door", door, &var out);
+    let text = out.as_bytes();
+    if !rendered {
+        testing::fail(text);
+    }
+    testing::expect(holds(text, "module door {"));
+    testing::expect(holds(text, "type State = Open | Shut"));
+    testing::expect(holds(text, "(Open, Close) -> (Shut, Applied),"));
+    testing::expect(holds(text, "(Shut, Close) -> (Shut, Refused),"));
+    testing::expect(holds(text, "state' = Open,"));
+}
+
+test "render refuses a partial table" {
+    let allocator = mem::page_allocator();
+    let partial =
+        \\{"states": ["A"], "events": ["B"], "outcomes": ["C"], "start": "A", "ends": [], "moves": []}
+    ;
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    let rendered = try try_render(allocator, "partial", partial, &var out);
+    let text = out.as_bytes();
+    testing::expect(!rendered);
+    testing::expect(holds(text, "no move for A and B"));
+}
