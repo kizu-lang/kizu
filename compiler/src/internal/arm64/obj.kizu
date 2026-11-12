@@ -6,9 +6,10 @@ import std::mem;
 import std::sort;
 import std::string;
 
-// The object the backend writes itself on arm64: the bytes of each section
-// the printer fills, the symbols and relocations its instructions name, and
-// the branches within a function, patched when it ends. The file the system
+// The object the backend writes itself: the bytes of each section the
+// printer fills, the symbols and relocations its instructions name, and
+// the branches within a function, patched when it ends (on x86-64, whose
+// jumps are short or near, laid out when it ends: amd64_encode.kizu). The file the system
 // linker reads is laid out from it by macho.kizu or elf.kizu, the way the
 // system assembler lays out the same code, so the object is byte for byte
 // the one the assembler would make.
@@ -97,6 +98,8 @@ struct Branch {
 /// Is the object being written.
 pub struct Obj {
     format: Format,
+    // The machine: x86-64 rather than AArch64.
+    x86: bool,
     sections: array::Array<Section>,
     current: i64,
     symbols: array::Array<Symbol>,
@@ -104,6 +107,10 @@ pub struct Obj {
     by_name: array::Array<i64>,
     block_at: array::Array<i64>,
     branches: array::Array<Branch>,
+    // x86-64: the jumps of the function being written and the places of
+    // the printer's own labels in it.
+    jumps: array::Array<X86Jump>,
+    local_at: array::Array<i64>,
     // The symbol the code being written belongs to: the last one defined
     // in the code section that is not assembler-local, or -1. Mach-O only.
     atom: i64,
@@ -115,12 +122,15 @@ pub struct Obj {
 pub fn new_obj(allocator: Allocator, format: Format) -> Obj {
     return Obj {
         format: format,
+        x86: false,
         sections: array::new<Section>(allocator),
         current: 0 - 1,
         symbols: array::new<Symbol>(allocator),
         by_name: array::new<i64>(allocator),
         block_at: array::new<i64>(allocator),
         branches: array::new<Branch>(allocator),
+        jumps: array::new<X86Jump>(allocator),
+        local_at: array::new<i64>(allocator),
         atom: 0 - 1,
         failure: string::new(allocator)
     };
@@ -134,6 +144,14 @@ fn (self: &var Obj) fail(allocator: Allocator, what: []u8, value: i64) -> !void 
     try self.failure.append_bytes(allocator, what);
     try self.failure.append_bytes(allocator, " ");
     return fmt::append_i64(allocator, &var self.failure, value);
+}
+
+/// Records the first line no encoding holds, by a message of its own.
+fn (self: &var Obj) fail_message(allocator: Allocator, message: []u8) -> !void {
+    if self.failure.len() > 0 {
+        return;
+    }
+    return self.failure.append_bytes(allocator, message);
 }
 
 /// Returns the symbol a name names, registering it on first sight: the
@@ -227,7 +245,7 @@ fn (self: &var Obj) start_symbol(allocator: Allocator, syms: &var ir::NameTable,
 /// the ELF assembler does: a mapping symbol where it changes. Mach-O has
 /// none.
 fn (self: &var Obj) mark(allocator: Allocator, code: bool) -> !void {
-    if self.format != Format::Elf {
+    if self.format != Format::Elf or self.x86 {
         return;
     }
     var kind = SymbolKind::Data;
@@ -314,6 +332,10 @@ pub fn (self: &var Obj) align(allocator: Allocator, log2: i64) -> !void {
         code = section.kind == SectionKind::Text;
     }
     let size = 1 << log2;
+    if code and self.x86 {
+        let at = self.here();
+        return self.x86_nops(allocator, (size - at % size) % size);
+    }
     while self.here() % size != 0 {
         if code {
             try self.little(allocator, enc_nop(), 4);
@@ -371,10 +393,15 @@ pub fn (self: &var Obj) call(allocator: Allocator, syms: &ir::NameTable, name: i
 /// Records a relocation of kind against name at the next word or quad.
 pub fn (self: &var Obj) relocate(allocator: Allocator, syms: &ir::NameTable, name: ir::Name, kind: i64) -> !void {
     try self.mark(allocator, self.in_code());
+    return self.relocate_addend(allocator, syms, name, kind, 0);
+}
+
+/// Records a relocation of kind against name plus addend here.
+fn (self: &var Obj) relocate_addend(allocator: Allocator, syms: &ir::NameTable, name: ir::Name, kind: i64, addend: i64) -> !void {
     let index = try self.symbol_of(allocator, syms, name);
     let at = self.here();
     if self.sections.at_mut(self.current) |section| {
-        try section.relocs.append(allocator, Reloc { address: at, symbol: index, kind: kind, addend: 0 });
+        try section.relocs.append(allocator, Reloc { address: at, symbol: index, kind: kind, addend: addend });
     }
     return;
 }
@@ -383,6 +410,8 @@ pub fn (self: &var Obj) relocate(allocator: Allocator, syms: &ir::NameTable, nam
 pub fn (self: &var Obj) begin_function(allocator: Allocator, blocks: i64) -> !void {
     self.block_at.clear(allocator);
     self.branches.clear(allocator);
+    self.jumps.clear(allocator);
+    self.local_at.clear(allocator);
     for 0..blocks |_block| {
         try self.block_at.append(allocator, 0 - 1);
     }
@@ -405,8 +434,12 @@ pub fn (self: &var Obj) branch(allocator: Allocator, word: i64, block: i64, wide
     return self.little(allocator, word, 4);
 }
 
-/// Ends a function: patches each branch with its block's offset.
+/// Ends a function: patches each branch with its block's offset, or on
+/// x86-64 lays its jumps out.
 pub fn (self: &var Obj) end_function(allocator: Allocator) -> !void {
+    if self.x86 {
+        return self.relax_jumps(allocator);
+    }
     var index = 0;
     while self.branches.get(index) |branch| {
         index = index + 1;

@@ -2454,13 +2454,19 @@ fn native_target(
                     var units = array::new<string::String>(allocator);
                     defer units.deinit(allocator);
                     if options.direct {
-                        // The assembly backend on arm64, its machine code
-                        // written as an object here: Mach-O for Darwin
-                        // arm64, ELF for Linux arm64.
+                        // The assembly backend, its machine code written as
+                        // an object here: Mach-O for Darwin arm64, ELF for
+                        // Linux arm64 and x86-64.
                         let linux = build_target == stdtarget::Target::NativeLinux;
-                        if !(darwin or linux) or arch != llvm::Arch::Arm64 {
-                            try io::write_stderr_line(io, "error: --backend direct needs a Darwin or Linux arm64 target");
+                        let arm = (darwin or linux) and arch == llvm::Arch::Arm64;
+                        let amd = linux and arch == llvm::Arch::X86_64;
+                        if !arm and !amd {
+                            try io::write_stderr_line(io, "error: --backend direct needs a Darwin or Linux arm64, or a Linux x86_64 target");
                             return 1;
+                        }
+                        var direct_arch = arm64::Arch::Arm64;
+                        if amd {
+                            direct_arch = arm64::Arch::Amd64;
                         }
                         var format = arm64::Format::MachO;
                         if linux {
@@ -2474,7 +2480,7 @@ fn native_target(
                         try units.append(allocator, string::new(allocator));
                         var failure = false;
                         if units.at_mut(0) |object| {
-                            if try arm64::emit_object(allocator, &lowerer.module, format, object) |failed| {
+                            if try arm64::emit_object(allocator, &lowerer.module, direct_arch, format, object) |failed| {
                                 defer failed.deinit(allocator);
                                 try report(io, allocator, &loader.sources, &failed);
                                 failure = true;
