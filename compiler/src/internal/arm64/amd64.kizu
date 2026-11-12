@@ -77,6 +77,13 @@ struct Amd {
     // The register whose value the zero flag tells, after the last
     // instruction printed, or -1.
     zf: i64,
+    // How the flags read: 0 as an integer comparison's (a float one's made
+    // to look like it), or as ucomisd leaves them comparing the float
+    // comparison's left operand with its right (1) or its right with its
+    // left (2); see float_orientation.
+    fcmp: i64,
+    // The orientation the float comparison printed next takes.
+    orient: i64,
 }
 
 /// Prints one allocated function.
@@ -107,7 +114,9 @@ pub fn amd64_print_function(
         saved: allocation.saved.len(),
         needed: false,
         live: 0 - 1,
-        zf: 0 - 1
+        zf: 0 - 1,
+        fcmp: 0,
+        orient: 0
     };
     if windows {
         amd.rdx = 1;
@@ -205,12 +214,14 @@ fn (self: &var Amd) print_block(
         try self.error_line(out, "amd64: flags live across a call");
     }
     self.zf = 0 - 1;
+    self.fcmp = 0;
     var inst_index = 0;
     while block.insts.at(inst_index) |inst| {
         let again = restore.get_or_panic(inst_index);
         if again >= 0 {
             if block.insts.at(again) |producer| {
                 self.live = 0 - 1;
+                self.orient = float_orientation(block, again);
                 try self.inst(out, func, producer, syms);
             }
         }
@@ -235,6 +246,9 @@ fn (self: &var Amd) print_block(
             try self.bare(out, "pushfq");
             self.pushed = self.pushed + 8;
         }
+        if inst.op == MOp::FCmp {
+            self.orient = float_orientation(block, index);
+        }
         try self.inst(out, func, inst, syms);
         if wrapped {
             self.pushed = self.pushed - 8;
@@ -246,6 +260,7 @@ fn (self: &var Amd) print_block(
     if again >= 0 {
         if block.insts.at(again) |producer| {
             self.live = 0 - 1;
+            self.orient = float_orientation(block, again);
             try self.inst(out, func, producer, syms);
         }
     }
@@ -267,12 +282,14 @@ fn (self: &var Amd) print_block(
             }
         },
         Zero => {
+            self.fcmp = 0;
             if self.zf != block.treg {
                 try self.rr(out, "testq", block.treg, block.treg, 8);
             }
             try self.test_branch(out, Cond::Eq, block.succ0, block.succ1, following);
         },
         NonZero => {
+            self.fcmp = 0;
             if self.zf != block.treg {
                 try self.rr(out, "testq", block.treg, block.treg, 8);
             }
@@ -740,6 +757,82 @@ fn x86_cc(cond: Cond) -> []u8 {
     };
 }
 
+/// Returns the condition code that reads cond from the flags as they are
+/// (see Amd.fcmp). After ucomisd the carry flag tells below (or
+/// unordered), the zero flag equal (or unordered); read the way round
+/// that leaves unordered on the side fcmp's NZCV does, each condition of
+/// a float comparison but == and != is one code.
+fn (self: &Amd) cc(cond: Cond) -> []u8 {
+    if self.fcmp == 1 {
+        return match cond {
+            Gt => "a",
+            Ge => "ae",
+            Lt => "b",
+            _ => "be",
+        };
+    }
+    if self.fcmp == 2 {
+        return match cond {
+            Mi => "a",
+            Lo => "a",
+            Ls => "ae",
+            Hi => "b",
+            _ => "be",
+        };
+    }
+    return x86_cc(cond);
+}
+
+/// Returns which way round ucomisd compares a float comparison's operands
+/// (see Amd.fcmp) so every condition read of it is one condition code:
+/// 1 when they are all of > >= and their inverses, which take unordered as
+/// less, 2 when they are all of < <= and their inverses, which take it as
+/// greater, and 0, where the flags are made to look like fcmp's, when
+/// they mix or one is == or !=.
+fn float_orientation(block: &MBlock, p: i64) -> i64 {
+    var way = 0;
+    var k = p + 1;
+    let n = block.insts.len();
+    var ended = false;
+    while k < n and !ended {
+        let inst = block.insts.get_or_panic(k);
+        k = k + 1;
+        if sets_flags(inst.op) {
+            ended = true;
+        } else if reads_flags(inst.op) {
+            way = orient_with(way, inst.cond);
+        }
+    }
+    if !ended and block.term == Term::Flags {
+        way = orient_with(way, block.cond);
+    }
+    if way < 0 {
+        return 0;
+    }
+    return way;
+}
+
+/// Adds a condition read to the orientation found so far: -1 once none
+/// serves.
+fn orient_with(way: i64, cond: Cond) -> i64 {
+    let wants = match cond {
+        Gt => 1,
+        Ge => 1,
+        Lt => 1,
+        Le => 1,
+        Eq => 0 - 1,
+        Ne => 0 - 1,
+        _ => 2,
+    };
+    if way < 0 or wants < 0 {
+        return 0 - 1;
+    }
+    if way == 0 or way == wants {
+        return wants;
+    }
+    return 0 - 1;
+}
+
 fn fits_i32(value: i64) -> bool {
     return value >= 0 - 2147483648 and value <= 2147483647;
 }
@@ -910,10 +1003,10 @@ fn (self: &Amd) jump(out: &var Out, mnemonic: []u8, block: i64) -> !void {
 
 fn (self: &Amd) jcc(out: &var Out, cond: Cond, block: i64) -> !void {
     if out.binary {
-        return out.obj.x86_jump(self.allocator, x86_cc_code(x86_cc(cond)), block, false);
+        return out.obj.x86_jump(self.allocator, x86_cc_code(self.cc(cond)), block, false);
     }
     try self.text(out, "    j");
-    try self.text(out, x86_cc(cond));
+    try self.text(out, self.cc(cond));
     try self.text(out, " ");
     try self.block_label(out, block);
     return self.nl(out);
@@ -1085,10 +1178,10 @@ fn (self: &Amd) shift_cl(out: &var Out, mnemonic: []u8, dst: i64) -> !void {
 /// Writes `set<cc> %reg`, a byte register.
 fn (self: &Amd) setcc(out: &var Out, cond: Cond, reg: i64) -> !void {
     if out.binary {
-        return out.obj.x86_setcc(self.allocator, x86_cc_code(x86_cc(cond)), self.number(reg));
+        return out.obj.x86_setcc(self.allocator, x86_cc_code(self.cc(cond)), self.number(reg));
     }
     try self.text(out, "    set");
-    try self.text(out, x86_cc(cond));
+    try self.text(out, self.cc(cond));
     try self.text(out, " ");
     try self.reg(out, reg, 1);
     return self.nl(out);
@@ -1277,9 +1370,22 @@ fn store_mnemonic(width: i64) -> []u8 {
 
 fn (self: &var Amd) inst(out: &var Out, func: &MFunction, inst: &MInst, syms: &ir::NameTable) -> !void {
     self.zf = 0 - 1;
+    if sets_flags(inst.op) {
+        self.fcmp = 0;
+    }
     match inst.op {
-        Mov => return self.mov(out, inst.rn, inst.rd),
-        MovImm => return self.mov_imm(out, inst.imm, inst.rd),
+        Mov => {
+            if is_float_reg(inst.rd) or is_float_reg(inst.rn) {
+                return self.xmm_mov(out, inst.rn, inst.rd);
+            }
+            return self.mov(out, inst.rn, inst.rd);
+        },
+        MovImm => {
+            if is_float_reg(inst.rd) {
+                return self.xmm_imm(out, inst.imm, xmm_of(inst.rd));
+            }
+            return self.mov_imm(out, inst.imm, inst.rd);
+        },
         Add => {
             if is_zr(inst.rm) {
                 return self.mov(out, inst.rn, inst.rd);
@@ -1445,10 +1551,16 @@ fn (self: &var Amd) inst(out: &var Out, func: &MFunction, inst: &MInst, syms: &i
         },
         Load => {
             let at = self.mem(func, inst.rn, inst.imm, inst.slot);
+            if is_float_reg(inst.rd) {
+                return self.xmm_load(out, inst, at);
+            }
             return self.mr(out, load_mnemonic(inst.width, inst.signed), at, inst.rd, load_size(inst.width, inst.signed));
         },
         Store => {
             let at = self.mem(func, inst.rn, inst.imm, inst.slot);
+            if is_float_reg(inst.rd) {
+                return self.xmm_store(out, inst, at);
+            }
             if is_zr(inst.rd) {
                 return self.im(out, store_mnemonic(inst.width), 0, at);
             }
@@ -1464,6 +1576,9 @@ fn (self: &var Amd) inst(out: &var Out, func: &MFunction, inst: &MInst, syms: &i
                 shift = 0;
             }
             let at = indexed(inst.rn, index, shift);
+            if is_float_reg(inst.rd) {
+                return self.xmm_load(out, inst, at);
+            }
             return self.mr(out, load_mnemonic(inst.width, inst.signed), at, inst.rd, load_size(inst.width, inst.signed));
         },
         StoreIdx => {
@@ -1479,6 +1594,9 @@ fn (self: &var Amd) inst(out: &var Out, func: &MFunction, inst: &MInst, syms: &i
                 shift = 0;
             }
             let at = indexed(inst.rn, index, shift);
+            if is_float_reg(inst.rd) {
+                return self.xmm_store(out, inst, at);
+            }
             if is_zr(inst.rd) {
                 return self.im(out, store_mnemonic(inst.width), 0, at);
             }
@@ -1520,18 +1638,29 @@ fn (self: &var Amd) inst(out: &var Out, func: &MFunction, inst: &MInst, syms: &i
         FUn => return self.float_unary(out, inst),
         FCmp => return self.float_compare(out, inst),
         FCvt => {
-            try self.float_in(out, inst.rn, 15, inst.width);
+            var cvt = "cvtss2sd";
+            var to = 8;
             if inst.width == 8 {
-                try self.xx(out, "cvtsd2ss", 15, 15);
-                return self.float_out(out, 15, inst.rd, 4);
+                cvt = "cvtsd2ss";
+                to = 4;
             }
-            try self.xx(out, "cvtss2sd", 15, 15);
-            return self.float_out(out, 15, inst.rd, 8);
+            let a = try self.xmm_source(out, inst.rn, inst.width, 15);
+            let dest = xmm_dest(inst.rd);
+            if dest != a {
+                try self.xx(out, "xorps", dest, dest);
+            }
+            try self.xx(out, cvt, a, dest);
+            return self.xmm_result(out, dest, inst.rd, to);
         },
         FToInt => return self.float_to_int(out, inst),
         IntToF => return self.int_to_float(out, inst),
-        FArg => return self.float_in(out, inst.rn, inst.imm, inst.width),
-        FRet => return self.float_out(out, inst.imm, inst.rd, inst.width),
+        FArg => return self.xmm_into(out, inst.rn, inst.imm, inst.width),
+        FRet => {
+            if is_float_reg(inst.rd) {
+                return self.xmm_copy(out, inst.imm, xmm_of(inst.rd));
+            }
+            return self.float_out(out, inst.imm, inst.rd, inst.width);
+        },
         _ => return self.error_line(out, "amd64: an instruction this printer does not lower"),
     }
 }
@@ -1620,7 +1749,9 @@ fn (self: &var Amd) store_scaled_aside(out: &var Out, inst: &MInst) -> !void {
     if !is_zr(inst.rn) {
         try self.rr(out, "addq", inst.rn, t, 8);
     }
-    if is_zr(inst.rd) {
+    if is_float_reg(inst.rd) {
+        try self.xmm_store(out, inst, based(t, 0, false));
+    } else if is_zr(inst.rd) {
         try self.im(out, store_mnemonic(inst.width), 0, based(t, 0, false));
     } else {
         try self.rm(out, store_mnemonic(inst.width), inst.rd, inst.width, based(t, 0, false));
@@ -1726,10 +1857,10 @@ fn (self: &Amd) select(out: &var Out, cond: Cond, a: i64, b: i64, rd: i64) -> !v
 
 fn (self: &Amd) cmov(out: &var Out, cond: Cond, src: i64, dst: i64) -> !void {
     if out.binary {
-        return out.obj.x86_cmov(self.allocator, x86_cc_code(x86_cc(cond)), self.number(src), self.number(dst));
+        return out.obj.x86_cmov(self.allocator, x86_cc_code(self.cc(cond)), self.number(src), self.number(dst));
     }
     try self.text(out, "    cmov");
-    try self.text(out, x86_cc(cond));
+    try self.text(out, self.cc(cond));
     try self.text(out, "q ");
     try self.reg(out, src, 8);
     try self.comma(out);
@@ -2014,6 +2145,108 @@ fn (self: &Amd) xr(out: &var Out, mnemonic: []u8, xmm: i64, reg: i64, size: i64)
     return self.nl(out);
 }
 
+/// Returns the xmm register a float register number names: 40..44 are
+/// xmm8..xmm12, 45..52 xmm0..xmm7 (see float_named_end).
+fn xmm_of(reg: i64) -> i64 {
+    let index = reg - first_float_reg();
+    if index < 5 {
+        return index + 8;
+    }
+    return index - 5;
+}
+
+/// Returns the xmm register holding operand reg: its own when allocation
+/// gave it one, otherwise scratch after moving its bits in.
+fn (self: &Amd) xmm_source(out: &var Out, reg: i64, width: i64, scratch: i64) -> !i64 {
+    if is_float_reg(reg) {
+        return xmm_of(reg);
+    }
+    try self.float_in(out, reg, scratch, width);
+    return scratch;
+}
+
+/// Returns the xmm register an instruction computes rd in: rd's own, or
+/// xmm15, from which float_result then moves it out.
+fn xmm_dest(rd: i64) -> i64 {
+    if is_float_reg(rd) {
+        return xmm_of(rd);
+    }
+    return 15;
+}
+
+/// Copies xmm a into xmm b, every bit: b is cleared, then takes a's bits
+/// by xor.
+fn (self: &Amd) xmm_copy(out: &var Out, a: i64, b: i64) -> !void {
+    if a == b {
+        return;
+    }
+    try self.xx(out, "xorps", b, b);
+    return self.xx(out, "xorps", a, b);
+}
+
+/// Puts the bits of operand reg, a general register or an xmm one, in xmm
+/// n.
+fn (self: &Amd) xmm_into(out: &var Out, reg: i64, n: i64, width: i64) -> !void {
+    if is_float_reg(reg) {
+        return self.xmm_copy(out, xmm_of(reg), n);
+    }
+    return self.float_in(out, reg, n, width);
+}
+
+/// Leaves a result computed in xmm n in rd: moved to rd's own xmm
+/// register, or its bits to a general one.
+fn (self: &Amd) xmm_result(out: &var Out, n: i64, rd: i64, width: i64) -> !void {
+    if is_float_reg(rd) {
+        return self.xmm_copy(out, n, xmm_of(rd));
+    }
+    return self.float_out(out, n, rd, width);
+}
+
+/// Copies between registers where one is an xmm register: all 8 bytes.
+fn (self: &Amd) xmm_mov(out: &var Out, src: i64, dst: i64) -> !void {
+    if is_float_reg(dst) {
+        return self.xmm_into(out, src, xmm_of(dst), 8);
+    }
+    return self.float_out(out, xmm_of(src), dst, 8);
+}
+
+/// Puts a constant's bits in xmm n: by clearing it, or through r10, which
+/// no instruction holds a value in across a constant.
+fn (self: &Amd) xmm_imm(out: &var Out, bits: i64, n: i64) -> !void {
+    if bits == 0 {
+        return self.xx(out, "xorps", n, n);
+    }
+    try self.mov_imm(out, bits, 16);
+    return self.rx(out, "movq", 16, 8, n);
+}
+
+/// Loads a float into an xmm register through r10, which takes the bits
+/// after the address is used.
+fn (self: &Amd) xmm_load(out: &var Out, inst: &MInst, at: Mem) -> !void {
+    try self.mr(out, load_mnemonic(inst.width, false), at, 16, load_size(inst.width, false));
+    return self.float_in(out, 16, xmm_of(inst.rd), inst.width);
+}
+
+/// Stores a float from an xmm register through a general register the
+/// address does not use: r10 or r11, or else rax, saved around it.
+fn (self: &var Amd) xmm_store(out: &var Out, inst: &MInst, at: Mem) -> !void {
+    var through = 16;
+    if at.base == 16 or at.index == 16 {
+        through = 17;
+    }
+    let keep = at.base == 17 or at.index == 17;
+    if through == 17 and keep {
+        through = 8;
+        try self.r1(out, "pushq", 8, 8);
+    }
+    try self.float_out(out, xmm_of(inst.rd), through, inst.width);
+    try self.rm(out, store_mnemonic(inst.width), through, inst.width, at);
+    if through == 8 {
+        try self.r1(out, "popq", 8, 8);
+    }
+    return;
+}
+
 fn (self: &Amd) float_binary(out: &var Out, inst: &MInst) -> !void {
     var mnemonic = "div";
     if inst.imm == float_add() {
@@ -2023,14 +2256,23 @@ fn (self: &Amd) float_binary(out: &var Out, inst: &MInst) -> !void {
     } else if inst.imm == float_mul() {
         mnemonic = "mul";
     }
-    try self.float_in(out, inst.rn, 15, inst.width);
-    try self.float_in(out, inst.rm, 14, inst.width);
-    try self.float_rr(out, mnemonic, inst.width, 14, 15);
-    return self.float_out(out, 15, inst.rd, inst.width);
+    let width = inst.width;
+    // Two-address: the destination register takes the left operand
+    // first, so it is the first source as the operation reads them (which
+    // NaN of two a result carries depends on it). A right operand already
+    // in the destination register is not overwritten by the left one.
+    var dest = 15;
+    if is_float_reg(inst.rd) and !(is_float_reg(inst.rm) and inst.rm == inst.rd and inst.rn != inst.rd) {
+        dest = xmm_of(inst.rd);
+    }
+    try self.xmm_into(out, inst.rn, dest, width);
+    let b = try self.xmm_source(out, inst.rm, width, 14);
+    try self.float_rr(out, mnemonic, width, b, dest);
+    return self.xmm_result(out, dest, inst.rd, width);
 }
 
 fn (self: &Amd) float_unary(out: &var Out, inst: &MInst) -> !void {
-    if inst.imm == float_neg() {
+    if inst.imm == float_neg() and !is_float_reg(inst.rd) and !is_float_reg(inst.rn) {
         // Adding the sign bit flips it and nothing else, and lea leaves the
         // flags; a 4-byte result keeps the low 32 bits.
         if inst.width == 8 {
@@ -2047,10 +2289,28 @@ fn (self: &Amd) float_unary(out: &var Out, inst: &MInst) -> !void {
         }
         return;
     }
+    if inst.imm == float_neg() {
+        // In an xmm register: xor with the sign bit.
+        var sign = 0 - 9223372036854775807 - 1;
+        if inst.width == 4 {
+            sign = 2147483648;
+        }
+        try self.float_const(out, sign, 14, inst.width);
+        let dest = xmm_dest(inst.rd);
+        try self.xmm_into(out, inst.rn, dest, inst.width);
+        try self.xx(out, "xorps", 14, dest);
+        return self.xmm_result(out, dest, inst.rd, inst.width);
+    }
     if inst.imm == float_sqrt() {
-        try self.float_in(out, inst.rn, 15, inst.width);
-        try self.float_rr(out, "sqrt", inst.width, 15, 15);
-        return self.float_out(out, 15, inst.rd, inst.width);
+        let a = try self.xmm_source(out, inst.rn, inst.width, 15);
+        let dest = xmm_dest(inst.rd);
+        if dest != a {
+            // sqrt writes the low lane only; clearing the rest first keeps
+            // it from waiting on the register's last value.
+            try self.xx(out, "xorps", dest, dest);
+        }
+        try self.float_rr(out, "sqrt", inst.width, a, dest);
+        return self.xmm_result(out, dest, inst.rd, inst.width);
     }
     return self.error_line(out, "amd64: float rounding is a C call");
 }
@@ -2060,12 +2320,20 @@ fn (self: &Amd) float_unary(out: &var Out, inst: &MInst) -> !void {
 /// and i64::MIN when unordered, whose NZCV is fcmp's in each case, so every
 /// condition reads them as it reads fcmp's.
 fn (self: &var Amd) float_compare(out: &var Out, inst: &MInst) -> !void {
-    try self.float_in(out, inst.rn, 15, inst.width);
-    try self.float_in(out, inst.rm, 14, inst.width);
+    let a = try self.xmm_source(out, inst.rn, inst.width, 15);
+    let b = try self.xmm_source(out, inst.rm, inst.width, 14);
+    var compare = "ucomiss";
     if inst.width == 8 {
-        try self.xx(out, "ucomisd", 14, 15);
+        compare = "ucomisd";
+    }
+    if self.orient == 2 {
+        try self.xx(out, compare, a, b);
     } else {
-        try self.xx(out, "ucomiss", 14, 15);
+        try self.xx(out, compare, b, a);
+    }
+    if self.orient != 0 {
+        self.fcmp = self.orient;
+        return;
     }
     let done = self.new_label();
     try self.ir(out, "movabsq", 0 - 9223372036854775807 - 1, 8, 8);
@@ -2104,7 +2372,7 @@ fn (self: &var Amd) float_to_int(out: &var Out, inst: &MInst) -> !void {
         two32 = 1333788672;
     }
     let done = self.new_label();
-    try self.float_in(out, inst.rn, 15, from);
+    try self.xmm_into(out, inst.rn, 15, from);
     if inst.signed {
         let size = inst.width;
         try self.xr(out, cvt, 15, 8, size);
@@ -2181,11 +2449,20 @@ fn (self: &var Amd) int_to_float(out: &var Out, inst: &MInst) -> !void {
         cvt = "cvtsi2ssq";
     }
     if is_zr(inst.rn) {
+        if is_float_reg(inst.rd) {
+            return self.xmm_imm(out, 0, xmm_of(inst.rd));
+        }
         return self.mov_imm(out, 0, inst.rd);
     }
     if inst.signed {
-        try self.rx(out, cvt, inst.rn, 8, 15);
-        return self.float_out(out, 15, inst.rd, inst.width);
+        let dest = xmm_dest(inst.rd);
+        if dest != 15 {
+            // The conversion writes the low lane only; clearing the rest
+            // first keeps it from waiting on the register's last value.
+            try self.xx(out, "xorps", dest, dest);
+        }
+        try self.rx(out, cvt, inst.rn, 8, dest);
+        return self.xmm_result(out, dest, inst.rd, inst.width);
     }
     let big = self.new_label();
     let done = self.new_label();
@@ -2205,5 +2482,5 @@ fn (self: &var Amd) int_to_float(out: &var Out, inst: &MInst) -> !void {
     try self.rx(out, cvt, 8, 8, 15);
     try self.float_rr(out, "add", inst.width, 15, 15);
     try self.local_label(out, done);
-    return self.float_out(out, 15, inst.rd, inst.width);
+    return self.xmm_result(out, 15, inst.rd, inst.width);
 }
