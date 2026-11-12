@@ -24,7 +24,9 @@ Go の seed を外したあとに compiler を build する経路はこれだけ
    `lib/kizu` を読む
 
 CI は同じスクリプトを `seed (ubuntu-latest)` job で回します。`compiler/` は
-host に依らないので Linux だけです。
+host に依らないので Linux だけです。PR では待ち時間を短くするため
+`--check-only` を付け、種と stage1 は check だけをします(手元では
+`just selfhost-seed-check`)。main への push では上の流れを全部回します。
 
 ## 規律: 破壊的変更は 2 リリースがかり
 
