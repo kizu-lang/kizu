@@ -32,12 +32,13 @@ import std::array;
 // behind the same test, without the bounds checks, several elements a turn,
 // each accumulator kept once per element of the turn.
 //
-// A loop whose accumulators are `f64` runs that way too, with its
-// elements and the body's `+ - * /` on them in float registers: each
-// accumulator stays one chain, combined with the elements one after another
-// in the order and with the operands the scalar loop has, so every rounding
-// is the one the scalar loop makes. Only the bounds checks and the loop's
-// own tests go.
+// A loop whose accumulators are `f64` runs in NEON lanes where
+// flanes.kizu covers it. Otherwise it runs in general registers too, with
+// its elements and the body's `+ - * /` on them in float registers. Either
+// way each accumulator stays one chain, combined with the elements one after
+// another in the order and with the operands the scalar loop has, so every
+// rounding is the one the scalar loop makes. Only the bounds checks and the
+// loop's own tests go.
 //
 // The vector registers are not allocated: the loop names v0..v7 and
 // v16..v31 directly, holds none of them across a call, and leaves v8..v15,
@@ -118,6 +119,10 @@ struct Plan {
     // its own for the values the body computes, and they run each op in
     // turn. 1 runs each copy whole, the copies sharing the temporaries.
     group: i64,
+    // The loop runs as a float lane loop (flanes.kizu), copies copies of two
+    // lanes a turn.
+    lanes: bool,
+    copies: i64,
 }
 
 /// Is one element read of the body: name = source[k], source an array or a
@@ -142,6 +147,12 @@ struct Tables {
     alias_from: array::Array<ir::Name>,
     alias_to: array::Array<ir::Name>,
     loads: array::Array<Load>,
+    // The values, ops and accumulators of a float lane loop (flanes.kizu),
+    // and its names' values, by name id, plus one.
+    fvals: array::Array<FVal>,
+    fops: array::Array<FOp>,
+    faccs: array::Array<FAcc>,
+    fnames: array::Array<i64>,
 }
 
 fn (self: Tables) deinit(allocator: Allocator) -> void {
@@ -155,6 +166,10 @@ fn (self: Tables) deinit(allocator: Allocator) -> void {
     self.alias_from.deinit(allocator);
     self.alias_to.deinit(allocator);
     self.loads.deinit(allocator);
+    self.fvals.deinit(allocator);
+    self.fops.deinit(allocator);
+    self.faccs.deinit(allocator);
+    self.fnames.deinit(allocator);
     return;
 }
 
@@ -269,7 +284,11 @@ fn (self: &var Selector) vectorize_entry(module: &ir::Module, from: ir::Name, ta
         elems: array::new<ir::Name>(self.allocator),
         alias_from: array::new<ir::Name>(self.allocator),
         alias_to: array::new<ir::Name>(self.allocator),
-        loads: array::new<Load>(self.allocator)
+        loads: array::new<Load>(self.allocator),
+        fvals: array::new<FVal>(self.allocator),
+        fops: array::new<FOp>(self.allocator),
+        faccs: array::new<FAcc>(self.allocator),
+        fnames: array::new<i64>(self.allocator)
     };
     defer tables.deinit(self.allocator);
     var plan = Plan {
@@ -290,12 +309,16 @@ fn (self: &var Selector) vectorize_entry(module: &ir::Module, from: ir::Name, ta
         multiplies: false,
         scalar: false,
         float: false,
-        group: 1
+        group: 1,
+        lanes: false,
+        copies: 1
     };
     if !try self.plan_loop(module, from, &var plan, &var tables) {
         return false;
     }
-    if plan.scalar {
+    if plan.lanes {
+        try self.emit_float_lanes(module, &plan, &var tables);
+    } else if plan.scalar {
         try self.emit_scalar_loop(module, &plan, &var tables);
     } else {
         try self.emit_vector_loop(module, &plan, &var tables);
@@ -446,6 +469,9 @@ fn (self: &var Selector) plan_loop(module: &ir::Module, from: ir::Name, plan: &v
             }
         }
         try note_use(allocator, tables, block_node.terminator.cond.name);
+    }
+    if plan.float and try self.plan_float_lanes(module, plan, tables) {
+        return true;
     }
     var body_phis = 0;
     var compares = 0;
