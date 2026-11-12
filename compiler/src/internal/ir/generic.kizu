@@ -25,10 +25,11 @@ fn (self: &var Lowerer) request_generic_instance(
     tree: &var ast::Ast,
     name: Name,
     type_args: Name,
+    resolved: bool,
     out: &var ResolvedInstance
 ) -> !?diagnostic::Diagnostic {
     var bound = self.blank_binding();
-    if try self.generic_bindings(tree, name, type_args, &var bound) |failed| {
+    if try self.generic_bindings(tree, name, type_args, resolved, &var bound) |failed| {
         return move failed;
     }
     let decl = bound.decl;
@@ -84,11 +85,14 @@ fn blank_generic_args(allocator: Allocator) -> GenericArgs {
 /// call, the Go `genericBindings`. Every reader of an instantiation -- the
 /// request that lowers its body and the caller that hands arguments to it --
 /// reads this, so they cannot disagree about what the instance is. The
-/// declaration and the bindings are written into the handles given.
+/// declaration and the bindings are written into the handles given. A
+/// resolved list (ast::TypeApplyExpr) is taken as written: nothing in it is
+/// read through the bindings in force.
 fn (self: &var Lowerer) generic_bindings(
     tree: &var ast::Ast,
     name: Name,
     type_args: Name,
+    resolved: bool,
     out: &var GenericBinding
 ) -> !?diagnostic::Diagnostic {
     let decl = self.generic_decl(name) orelse return try self.fail1(
@@ -99,7 +103,7 @@ fn (self: &var Lowerer) generic_bindings(
     let bytes = type_args_copy.as_bytes();
     if try typ::split_args_optional(self.allocator, bytes) |parts| {
         defer parts.deinit(self.allocator);
-        return self.bind_generic_args(tree, name, decl, &parts, out);
+        return self.bind_generic_args(tree, name, decl, &parts, resolved, out);
     }
     let reason_text = try self.split_args_reason(bytes);
     defer reason_text.deinit(self.allocator);
@@ -115,6 +119,7 @@ fn (self: &var Lowerer) bind_generic_args(
     name: Name,
     decl: FactsHandle,
     parts: &array::Array<string::String>,
+    resolved: bool,
     out: &var GenericBinding
 ) -> !?diagnostic::Diagnostic {
     let allocator = self.allocator;
@@ -140,13 +145,19 @@ fn (self: &var Lowerer) bind_generic_args(
         if param.is_type {
             // Resolve first: inside `fn twice<T>` a call to `wrap<T>` needs
             // the argument T is currently bound to, not the parameter name.
-            let bound = try self.resolve_bound_type(arg);
+            var bound = arg;
+            if !resolved {
+                bound = try self.resolve_bound_type(arg);
+            }
             try self.add_type_binding(args, param.name, bound);
             continue;
         }
         // A compile-time value reaches the body as a constant, or -- for a
         // `Function` parameter -- as the name of the function to forward to.
-        let text = try self.resolve_static_value(arg);
+        var text = arg;
+        if !resolved {
+            text = try self.resolve_static_value(arg);
+        }
         if self.generic_args.at_mut(args.node) |node| {
             try node.values.append(allocator, StaticValue { name: param.name, typ: param.type_name, text: text });
         }
@@ -213,10 +224,11 @@ fn (self: &var Lowerer) declared_instance_params(
     tree: &var ast::Ast,
     name: Name,
     type_args: Name,
+    resolved: bool,
     out: &var ParamsView
 ) -> !?diagnostic::Diagnostic {
     var bound = self.blank_binding();
-    if try self.generic_bindings(tree, name, type_args, &var bound) |failed| {
+    if try self.generic_bindings(tree, name, type_args, resolved, &var bound) |failed| {
         return move failed;
     }
     let signature = try self.instance_signature(bound.decl, bound.args);

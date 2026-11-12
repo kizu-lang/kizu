@@ -371,7 +371,7 @@ func (l *lowerer) markLentGenericArgs(
 	if !ok {
 		return
 	}
-	params, err := l.declaredInstanceParams(name, typeApply.TypeArg)
+	params, err := l.declaredInstanceParams(name, typeApply.TypeArg, typeApply.Resolved)
 	if err != nil {
 		params = l.primitiveInstanceParams(name, typeApply.TypeArg)
 	}

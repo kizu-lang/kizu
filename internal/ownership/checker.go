@@ -6470,6 +6470,9 @@ func (c *Checker) typeApplyTarget(expr *ast.TypeApplyExpr) (string, string, erro
 	if err := c.rejectUnknownBuiltin(name); err != nil {
 		return "", "", err
 	}
+	if expr.Resolved {
+		return name, expr.TypeArg, nil
+	}
 	return name, c.instantiateTypeArgText(expr.TypeArg), nil
 }
 
@@ -6490,7 +6493,8 @@ func (c *Checker) checkTypeApplyCallExpr(
 	if name == "ptr_from_int" || name == "int_from_ptr" {
 		return c.checkPointerIntCastBuiltin(name, typeArg, args, env)
 	}
-	typ, ok, err := c.checkGenericUserTypeApply(name, typeArg, args, env, sanctioned)
+	typ, ok, err := c.checkGenericUserTypeApply(
+		name, typeArg, expr.Resolved, args, env, sanctioned)
 	if ok || err != nil {
 		return typ, err
 	}
@@ -7215,6 +7219,7 @@ func isGenericParamName(name string) bool {
 func (c *Checker) checkGenericUserTypeApply(
 	name string,
 	typeArg string,
+	resolved bool,
 	args []ast.Expression,
 	env *scope,
 	sanctioned bool,
@@ -7240,7 +7245,7 @@ func (c *Checker) checkGenericUserTypeApply(
 	if err != nil {
 		return "", true, err
 	}
-	restore := c.bindMetaFields(c.genericCallFields(fn, typeArg))
+	restore := c.bindMetaFields(c.genericCallFields(fn, typeArg, resolved))
 	restoreFunctions := c.bindFunctionArgs(c.genericCallFunctions(fn, typeArg))
 	err = c.checkGenericInstantiation(fn, subst, values)
 	restoreFunctions()
@@ -7394,8 +7399,13 @@ func (c *Checker) bindFunctionArgs(bound map[string]string) func() {
 // genericCallFields reads the `Field` static arguments of one call. A field
 // token instantiates like a type argument, not like the other compile-time
 // values: the body reads it through the `std::meta` forms written against it,
-// so each bound field is its own instance.
-func (c *Checker) genericCallFields(fn *functionInfo, typeArg string) map[string]metaField {
+// so each bound field is its own instance. A resolved list
+// (ast.TypeApplyExpr) names a field of its owner, never a capture.
+func (c *Checker) genericCallFields(
+	fn *functionInfo,
+	typeArg string,
+	resolved bool,
+) map[string]metaField {
 	staticArgs, ok := splitGenericArgs(typeArg)
 	if !ok || len(staticArgs) != len(fn.sig.StaticParams) {
 		return nil
@@ -7411,7 +7421,7 @@ func (c *Checker) genericCallFields(fn *functionInfo, typeArg string) map[string
 			continue
 		}
 		name := strings.TrimSpace(staticArgs[idx])
-		if bound, ok := c.metaFields[name]; ok {
+		if bound, ok := c.metaFields[name]; ok && !resolved {
 			fields[param.Name] = bound
 			continue
 		}

@@ -278,8 +278,12 @@ func (l *lowerer) resolveTypeArgs(list string) string {
 // type argument, and returns the symbol it will be lowered under together with
 // the signature the caller sees. Lowering happens after the current function
 // finishes, so an instantiation never interrupts the function that asked for it.
-func (l *lowerer) requestGenericInstance(name string, typeArgs string) (string, Signature, error) {
-	decl, instance, err := l.genericBindings(name, typeArgs)
+func (l *lowerer) requestGenericInstance(
+	name string,
+	typeArgs string,
+	resolved bool,
+) (string, Signature, error) {
+	decl, instance, err := l.genericBindings(name, typeArgs, resolved)
 	if err != nil {
 		return "", Signature{}, err
 	}
@@ -313,10 +317,13 @@ type genericArguments struct {
 // genericBindings binds one generic declaration's static parameters to the
 // arguments of one call. Every reader of an instantiation -- the request that
 // lowers its body and the caller that hands arguments to it -- reads this, so
-// they cannot disagree about what the instance is.
+// they cannot disagree about what the instance is. A resolved list
+// (ast.TypeApplyExpr) is taken as written: nothing in it is read through the
+// bindings in force.
 func (l *lowerer) genericBindings(
 	name string,
 	typeArgs string,
+	resolved bool,
 ) (*ast.FunctionDecl, genericArguments, error) {
 	decl := l.genericDecl(name)
 	if decl == nil {
@@ -338,6 +345,14 @@ func (l *lowerer) genericBindings(
 	}
 	for i, param := range decl.StaticParams {
 		instance.order = append(instance.order, param.Name)
+		if resolved {
+			if param.IsType() {
+				instance.bindings[param.Name] = args[i]
+			} else {
+				instance.values[param.Name] = staticValue{typ: typ.Text(param.Type), text: args[i]}
+			}
+			continue
+		}
 		if param.IsType() {
 			// Resolve first: inside `fn twice<T>` a call to `wrap<T>` needs the
 			// argument T is currently bound to, not the parameter name.
@@ -357,8 +372,12 @@ func (l *lowerer) genericBindings(
 // these type arguments, without asking for the instance. A callee that lowers to
 // an instruction of its own never has its body called, so the caller needs the
 // types it hands over but not the instantiation.
-func (l *lowerer) declaredInstanceParams(name string, typeArgs string) ([]Param, error) {
-	decl, instance, err := l.genericBindings(name, typeArgs)
+func (l *lowerer) declaredInstanceParams(
+	name string,
+	typeArgs string,
+	resolved bool,
+) ([]Param, error) {
+	decl, instance, err := l.genericBindings(name, typeArgs, resolved)
 	if err != nil {
 		return nil, err
 	}
@@ -1925,7 +1944,7 @@ func (l *lowerer) lowerTypeApplyCall(
 		return value, err
 	}
 	if name, ok := l.functionCalleeName(typeApply.Callee); ok {
-		return l.lowerTypedNamedCallExpr(name, typeApply.TypeArg, args)
+		return l.lowerTypedNamedCallExpr(name, typeApply.TypeArg, typeApply.Resolved, args)
 	}
 	return Value{}, fmt.Errorf("ir error: unsupported callee `%s`", typeApply.String())
 }
@@ -2781,6 +2800,7 @@ func (l *lowerer) variadicBorrowParam(arg ast.Expression) Param {
 func (l *lowerer) lowerTypedNamedCallExpr(
 	name string,
 	typeArg string,
+	resolved bool,
 	rawArgs []ast.Expression,
 ) (Value, error) {
 	value, handled, err := l.lowerTypedContainerPrimitive(name, typeArg, rawArgs)
@@ -2793,7 +2813,7 @@ func (l *lowerer) lowerTypedNamedCallExpr(
 	// The f64 instance is the exception: the runtime has no spelling for a
 	// float, so the wrapper body runs and reports through `std::float`.
 	if name == "std::testing::expect_equal" && typeArg != "f64" {
-		params, err := l.declaredInstanceParams(name, typeArg)
+		params, err := l.declaredInstanceParams(name, typeArg, resolved)
 		if err != nil {
 			return Value{}, err
 		}
@@ -2813,7 +2833,7 @@ func (l *lowerer) lowerTypedNamedCallExpr(
 		}
 		return l.emit("test.expect_equal", "void", args, typeArg), nil
 	}
-	symbol, sig, err := l.requestGenericInstance(name, typeArg)
+	symbol, sig, err := l.requestGenericInstance(name, typeArg, resolved)
 	if err != nil {
 		return Value{}, err
 	}
@@ -2912,7 +2932,7 @@ func (l *lowerer) lowerPrintCall(rawArgs []ast.Expression) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	symbol, sig, err := l.requestGenericInstance(stdlib.PrintFunction, arg.Type)
+	symbol, sig, err := l.requestGenericInstance(stdlib.PrintFunction, arg.Type, false)
 	if err != nil {
 		return Value{}, err
 	}
@@ -3210,7 +3230,7 @@ func (l *lowerer) stdContainerParams(
 	method string,
 	typeArg string,
 ) ([]Param, error) {
-	_, sig, err := l.requestGenericInstance(stdmethod.MethodName(receiver, method), typeArg)
+	_, sig, err := l.requestGenericInstance(stdmethod.MethodName(receiver, method), typeArg, false)
 	if err != nil {
 		return nil, err
 	}
@@ -3251,7 +3271,7 @@ func (l *lowerer) stdContainerCallOp(
 	method string,
 	typeArg string,
 ) (string, Signature, error) {
-	symbol, sig, err := l.requestGenericInstance(stdmethod.MethodName(receiver, method), typeArg)
+	symbol, sig, err := l.requestGenericInstance(stdmethod.MethodName(receiver, method), typeArg, false)
 	if err != nil {
 		return "", Signature{}, err
 	}
