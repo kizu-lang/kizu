@@ -128,8 +128,8 @@ compiler は `comptime math::sin<f64>(x)` を `sin_with<false>` の値に畳み�
 3 点以内では表の値と多項式が打ち消し合うので、`sin` / `cos` / `sin_cos` は
 零点からの距離を直接多項式に入れます。`fused = true` の核は代わりに fused
 multiply-add で積と和の丸め誤差を厳密に拾います(分岐なし)。`sin_cos` は同じ角の両方を 1 回の縮約と
-表引きで返すので、片方とほとんど同じ費用です。`tan` は Cephes の算法(Go と同じ)で pi/4 の 8 分円に
-落とします。`sin(1e22)` も `sin(1e300)` も正しい値です。
+表引きで返すので、片方とほとんど同じ費用です。`tan` は同じ 2 通りの縮約で pi/2 の
+倍数からの距離を double-double で求め、msun の核で返します。`sin(1e22)` も `sin(1e300)` も正しい値です。
 
 - `sin` / `cos` / `sin_cos` / `tan` は radian を取り、無限大に NaN を返します。
 - `asin` / `acos` は [-1, 1] の外に NaN、`atan` は [-pi/2, pi/2] を返します。
@@ -148,17 +148,13 @@ multiply-add で積と和の丸め誤差を厳密に拾います(分岐なし)�
   正確に作り、`z` を揃えて 1 度だけ偶数丸めするので、hardware の fma と同じ bit
   です。native はその hardware の命令を使い、wasm はこのソフトウェア実装を使います。
 - `frexp` は `fraction * 2^exponent`(fraction は [1/2, 1))に、`modf` は整数部と
-  小数部(どちらも元の符号)に分け、struct で 2 つの値を返します。
+  小数部(どちらも元の符号)に分け、struct で 2 つの値を返します。`modf(±inf)` は
+  整数部 `±inf`、小数部 `±0` です。
 
 `cmd/kizu` の `TestMath` が数千の値で、真の値を 1 回だけ丸めた参照
 (`cmd/kizu/testdata/std_math.txt`、mpmath で作る)と突き合わせ、native と wasm の
 両方で同じ bit を返すことを確かめています。IEEE の演算と bit 操作、`fma`、
-`round_even`、`frexp` / `modf` は参照と一致し、残りは 1 ulp 以内(`sinh` は 2 ulp、
-`tan` は 3 ulp)です。外れる値もあります: `tan` は `x * x <= 1e-14` で `x` を返し
-(`tan(1e-7)` は 25 ulp)、pi/2 の倍数の近くでは縮約で下位の bit を落とします。
-`sinh` / `cosh` は 709.78 から 710.47 の間で有限の値を無限大にし、`atan2` は
-`y / x` が 0 に落ちる負の `x` と負の `y` で `-pi` でなく `pi` を返し、`modf` は
-無限大の小数部を `±0` でなく NaN にします。
+`round_even`、`frexp` / `modf` は参照と一致し、残りは 1 ulp 以内(`sinh` は 2 ulp)です。
 
 ## f32
 

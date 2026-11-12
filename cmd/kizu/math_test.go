@@ -27,10 +27,7 @@ var mathUnaryFunctions = []mathFunction{
 	{"sqrt", 0}, {"floor", 0}, {"ceil", 0}, {"trunc", 0}, {"round", 0}, {"abs", 0},
 	{"exp", 1}, {"exp2", 1}, {"expm1", 1}, {"log", 1}, {"log1p", 1}, {"log2", 1}, {"log10", 1},
 	{"sin", 1}, {"cos", 1}, {"sin_fused", 1}, {"cos_fused", 1}, {"exp_fused", 1}, {"log_fused", 1},
-	// tan is Cephes's, which ends in a reciprocal and reduces by pi/4 in
-	// three pieces; it is up to 3 ulp from the true value away from the
-	// places mathKnownDeviation names.
-	{"tan", 3}, {"asin", 1}, {"acos", 1}, {"atan", 1},
+	{"tan", 1}, {"asin", 1}, {"acos", 1}, {"atan", 1},
 	// sinh below 1/2 is Cephes's rational function, 2 ulp at worst on these
 	// values (sinh(0.03024484113708804)).
 	{"sinh", 2}, {"cosh", 1}, {"tanh", 1}, {"asinh", 1}, {"acosh", 1}, {"atanh", 1},
@@ -308,39 +305,6 @@ func mathAllowance(bits []uint64) []uint64 {
 	return ulps
 }
 
-// mathKnownDeviation reports the answers std::math is known to give away
-// from the true value by more than its allowance: what its algorithms --
-// the ones Go's math has too -- do there. They are listed here rather than
-// fixed because this test only checks std::math; each is a defect in it.
-// a and b are the arguments in the order the function takes them.
-func mathKnownDeviation(name string, a, b float64) bool {
-	x := a
-	switch strings.TrimSuffix(name, "_fused") {
-	case "tan":
-		// tan returns x itself once x*x <= 1e-14, which is 25 ulp off at
-		// 1e-7; and it reduces by pi/4 in three pieces that hold about 100
-		// bits, so an angle within x * 2^-46 of a multiple of pi/2 loses its
-		// low bits (tan(pi) is 7 ulp off).
-		quarter := math.Round(x / (math.Pi / 2))
-		near := quarter != 0 && math.Abs(x-quarter*(math.Pi/2)) < math.Abs(x)*0x1p-46
-		return (x != 0 && x*x <= 1e-14) || near
-	case "sinh", "cosh":
-		// Above 21 both are exp(x) / 2, so they overflow where exp does,
-		// at 709.78, though the answer is finite up to 710.47.
-		return math.Abs(x) > 709.782712893384 && math.Abs(x) < 710.4758600739439
-	case "atan2":
-		// atan2 takes atan(y / x) and moves it by pi when x is negative; when
-		// y / x underflows to +0 the answer is +pi whatever the sign of y.
-		y, x := a, b
-		return x < 0 && y < 0 && !math.IsInf(x, 0) && y/x == 0
-	case "modf_fraction":
-		// modf(+-inf) answers a NaN fraction where C99's Annex F (F.9.3.12)
-		// answers +-0.
-		return math.IsInf(x, 0)
-	}
-	return false
-}
-
 // mathMatches reports whether got is within `ulps` units in the last place
 // of want, both as bit patterns of a float `width` bits wide. Every NaN
 // matches every NaN, because which NaN comes back is not part of what any
@@ -368,30 +332,6 @@ func mathMatches(got, want uint64, width int, ulps uint64) bool {
 		distance = want - got
 	}
 	return distance <= ulps
-}
-
-// mathCase is the function and the first two arguments behind one output
-// line.
-func mathCase(bits []uint64, line int) (string, float64, float64) {
-	value := func(i int) float64 {
-		if i >= len(bits) {
-			return 0
-		}
-		return math.Float64frombits(bits[i])
-	}
-	unary := len(bits) * len(mathUnaryFunctions)
-	if line < unary {
-		return mathUnaryFunctions[line%len(mathUnaryFunctions)].name, value(line / len(mathUnaryFunctions)), 0
-	}
-	line -= unary
-	binary := (len(bits) - 1) * len(mathBinaryFunctions)
-	if line < binary {
-		i := line / len(mathBinaryFunctions)
-		return mathBinaryFunctions[line%len(mathBinaryFunctions)].name, value(i), value(i + 1)
-	}
-	line -= binary
-	i := line / len(mathTernaryFunctions)
-	return mathTernaryFunctions[line%len(mathTernaryFunctions)].name, value(i), value(i + 1)
 }
 
 // mathLabel names the case behind one output line.
@@ -432,9 +372,6 @@ func compareMathOutput(t *testing.T, ref mathReference, output string) {
 			t.Fatalf("%s: printed %q", mathLabel(ref.bits, i), lines[i])
 		}
 		if mathMatches(uint64(pattern), want, 64, ulps[i]) {
-			continue
-		}
-		if name, x, y := mathCase(ref.bits, i); mathKnownDeviation(name, x, y) {
 			continue
 		}
 		failures++
