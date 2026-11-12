@@ -1,5 +1,5 @@
-// Runs a batch of cases through one WASI module, for the replay tests in
-// internal/ir (runtime_mbt_test.go). It reads
+// Runs a batch of cases through one WASI module, for the replay test in
+// compiler/src/ir_runtime_mbt_test.kizu. It reads
 //   {"wasm": "<path>", "runs": [["arg", ...], ...]}
 // on stdin and writes one JSON array: for each run its exit code (or
 // "trap"), stdout and stderr.

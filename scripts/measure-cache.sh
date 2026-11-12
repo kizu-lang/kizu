@@ -7,11 +7,14 @@ trap 'rm -rf "$tmp"' EXIT
 export KIZU_CACHE_DIR="$tmp/cache"
 cp examples/hello.kizu "$tmp/hello.kizu"
 
-# The compiler is built once. Measuring through `go run` would put Go's own
-# build machinery in every number, which is larger than the cache difference
-# this script exists to show.
+# The compiler is built once, by the pinned seed, and copied out so the
+# numbers are not disturbed by a rebuild. It has no library tree next to it,
+# so it reads the checkout's.
+root="$(cd "$(dirname "$0")/.." && pwd)"
+"$root/scripts/bootstrap.sh" --stage1-only >&2
 kizu="$tmp/kizu"
-go build -o "$kizu" ./cmd/kizu
+cp "$root/target/seed/stage1/bin/kizu" "$kizu"
+export KIZU_LIB_DIR="$root/lib/kizu"
 
 # A cache hit is faster than `time` can resolve, so a warm measurement is the
 # average of repeats rather than one reading that would print as 0.00s. A cold
