@@ -102,7 +102,7 @@ wasi-smoke:
 
 # Check and test the Kizu compiler under compiler/ the way pre-commit does.
 selfhost:
-    go run ./scripts/gen-selfhost-version
+    scripts/gen-selfhost-version.sh
     go run ./cmd/kizu check compiler
     go run ./cmd/kizu test compiler
 

@@ -39,7 +39,7 @@ package doc にあります。
   突き合わせる oracle でもあります(ADR-0130)。片方だけに言語機能を足さない。
   `compiler/` の check / test / build は `just selfhost` から回す。`kizu version` が
   名乗る行は commit ごとに変わるので checked-in にできず、
-  `go run ./scripts/gen-selfhost-version` が先に生成する必要がある(pre-commit と
+  `scripts/gen-selfhost-version.sh` が先に生成する必要がある(pre-commit と
   `go test` は自分で走らせる)。`compiler/` の test block は
   `go test ./internal/selfhost` が走らせる。commit hook は `kizu check compiler`
   までで、test は push 時と CI に回る。
