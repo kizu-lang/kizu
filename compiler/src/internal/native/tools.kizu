@@ -7,21 +7,20 @@ import std::path;
 import std::process;
 import std::string;
 
-// The link a Darwin build of the assembly backend makes without the clang
-// driver (`--linker ld`): the system assembler turns each unit's text into an
-// object and the system linker links the objects with the runtime, both run
-// by this process with the arguments the driver would have handed them. The
-// runtime is still compiled by clang, the C compiler. What the driver works
-// out itself, the SDK and its version, is read here: SDKROOT or
-// `xcrun --show-sdk-path`, and the SDK's SDKSettings.json.
+// The link a Darwin arm64 build of the direct backend makes without the
+// clang driver (`--linker ld`): the system linker links the unit's object
+// with the runtime, run by this process with the arguments the driver would
+// have handed it. The runtime is still compiled by clang, the C compiler.
+// What the driver works out itself, the SDK and its version, is read here:
+// SDKROOT or `xcrun --show-sdk-path`, and the SDK's SDKSettings.json.
 
-/// Reports whether the build runs the assembler and the linker itself.
+/// Reports whether the build runs the linker itself.
 fn direct_tools(options: &Options) -> bool {
     let linker = options.linker.as_bytes();
     return mem::equal_bytes(linker, "ld");
 }
 
-/// Assembles the units with `as` and links them with `ld`.
+/// Links the direct backend's object with `ld`.
 fn link_with_tools(
     io: Io,
     allocator: Allocator,
@@ -34,29 +33,7 @@ fn link_with_tools(
 ) -> !?diagnostic::Diagnostic {
     var objects = array::new<string::String>(allocator);
     defer objects.deinit(allocator);
-    if options.direct {
-        try direct_inputs(io, allocator, dir, runtime_path, options, units, &var objects);
-    }
-    var index = 0;
-    if options.direct {
-        index = units.len();
-    }
-    while units.at(index) |unit| {
-        let unit_path = try unit_text_path(io, allocator, dir, index, options);
-        defer unit_path.deinit(allocator);
-        let path_bytes = unit_path.as_bytes();
-        let text = unit.as_bytes();
-        try fs::write_file(io, path_bytes, text);
-        let object = try unit_file(allocator, dir, index, ".o");
-        defer object.deinit(allocator);
-        index = index + 1;
-        let object_bytes = object.as_bytes();
-        let code = try process::spawn_wait8(6, "as", "-arch", "arm64", path_bytes, "-o", object_bytes, "", "");
-        if code != 0 {
-            return try fail_linker(allocator, "as", code);
-        }
-        try objects.append(allocator, try string::from_bytes(allocator, object_bytes));
-    }
+    try direct_inputs(io, allocator, dir, runtime_path, options, units, &var objects);
     var sdk = string::new(allocator);
     defer sdk.deinit(allocator);
     if try sdk_root(allocator, &var sdk) |failed| {
@@ -182,10 +159,10 @@ fn link_libraries(allocator: Allocator, options: &Options, out: &var array::Arra
 }
 
 /// Refuses `--linker ld` where it does not apply: it links a Darwin build of
-/// the assembly backend.
+/// the direct backend.
 fn validate_tools(allocator: Allocator, options: &Options) -> !?diagnostic::Diagnostic {
-    if options.target != stdtarget::Target::NativeDarwin or !(options.asm or options.direct) {
-        return try fail_parts(allocator, "native error: --linker ld links a Darwin build of --backend asm or direct", "", "");
+    if options.target != stdtarget::Target::NativeDarwin or !options.direct {
+        return try fail_parts(allocator, "native error: --linker ld links a Darwin build of --backend direct", "", "");
     }
     return null;
 }
