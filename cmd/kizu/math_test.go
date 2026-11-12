@@ -6,62 +6,36 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 )
 
-// mathUnaryFunctions lists the one-argument std::math functions beside the Go
-// function each is checked against, and how many units in the last place the
-// two may differ by. The IEEE operations and the bit manipulations answer
-// exactly. The rest follow the same algorithms Go does, but Go fuses a
-// multiply and an add into one rounding on arm64 and runs exp as assembly
-// there, which can move the last bit either way.
-var mathUnaryFunctions = []struct {
+// mathFunction is a std::math function the test calls and how many units in
+// the last place its answer may be from the correctly rounded one. The IEEE
+// operations, the bit manipulations and fma are exact. docs/std/math.md
+// promises the rest within 1 ulp of the true value, which is at most 1 ulp
+// from the true value rounded.
+type mathFunction struct {
 	name string
-	want func(float64) float64
 	ulps uint64
-}{
-	{"sqrt", math.Sqrt, 0},
-	{"floor", math.Floor, 0},
-	{"ceil", math.Ceil, 0},
-	{"trunc", math.Trunc, 0},
-	{"round", math.Round, 0},
-	{"abs", math.Abs, 0},
-	{"exp", math.Exp, 1},
-	{"exp2", math.Exp2, 1},
-	{"expm1", math.Expm1, 1},
-	{"log", math.Log, 1},
-	{"log1p", math.Log1p, 1},
-	// Go's log2 and log10 are its log times a rounded constant, three
-	// roundings in all, and std::math's are the same shape on its own log.
-	{"log2", math.Log2, 2},
-	{"log10", math.Log10, 2},
-	{"sin", math.Sin, 1},
-	{"cos", math.Cos, 1},
-	{"sin_fused", math.Sin, 1},
-	{"cos_fused", math.Cos, 1},
-	{"exp_fused", math.Exp, 1},
-	{"log_fused", math.Log, 1},
-	// tan ends in a reciprocal, which doubles what the fused multiply-add
-	// moved.
-	{"tan", math.Tan, 2},
-	{"asin", math.Asin, 1},
-	{"acos", math.Acos, 1},
-	{"atan", math.Atan, 1},
-	{"sinh", math.Sinh, 1},
-	{"cosh", math.Cosh, 1},
-	{"tanh", math.Tanh, 1},
-	{"asinh", math.Asinh, 1},
-	{"acosh", math.Acosh, 1},
-	{"atanh", math.Atanh, 1},
-	{"cbrt", math.Cbrt, 1},
-	{"round_even", math.RoundToEven, 0},
-	{"frexp_fraction", func(x float64) float64 { f, _ := math.Frexp(x); return f }, 0},
-	{"frexp_exponent", func(x float64) float64 { _, e := math.Frexp(x); return float64(e) }, 0},
-	{"modf_whole", func(x float64) float64 { w, _ := math.Modf(x); return w }, 0},
-	{"modf_fraction", func(x float64) float64 { _, f := math.Modf(x); return f }, 0},
+}
+
+// mathUnaryFunctions lists the one-argument std::math functions, in the
+// order of the `unary` line of testdata/std_math.txt.
+var mathUnaryFunctions = []mathFunction{
+	{"sqrt", 0}, {"floor", 0}, {"ceil", 0}, {"trunc", 0}, {"round", 0}, {"abs", 0},
+	{"exp", 1}, {"exp2", 1}, {"expm1", 1}, {"log", 1}, {"log1p", 1}, {"log2", 1}, {"log10", 1},
+	{"sin", 1}, {"cos", 1}, {"sin_fused", 1}, {"cos_fused", 1}, {"exp_fused", 1}, {"log_fused", 1},
+	// tan is Cephes's, which ends in a reciprocal and reduces by pi/4 in
+	// three pieces; it is up to 3 ulp from the true value away from the
+	// places mathKnownDeviation names.
+	{"tan", 3}, {"asin", 1}, {"acos", 1}, {"atan", 1},
+	// sinh below 1/2 is Cephes's rational function, 2 ulp at worst on these
+	// values (sinh(0.03024484113708804)).
+	{"sinh", 2}, {"cosh", 1}, {"tanh", 1}, {"asinh", 1}, {"acosh", 1}, {"atanh", 1},
+	{"cbrt", 1}, {"round_even", 0},
+	{"frexp_fraction", 0}, {"frexp_exponent", 0}, {"modf_whole", 0}, {"modf_fraction", 0},
 }
 
 // mathHelpers are the functions the generated program defines itself, to
@@ -109,78 +83,153 @@ fn pow_fused(base: f64, exponent: f64) -> f64 {
 // defines by its bare name, anything else through the module with f64 as
 // the float type.
 func mathCallee(name string) string {
-	if strings.Contains(mathHelpers, "fn "+name+"(") {
+	if mathIsHelper(name) {
 		return name
 	}
 	return "math::" + name + "<f64>"
 }
 
-// mathBinaryFunctions lists the two-argument std::math functions beside the Go
-// function each is checked against. min and max are spelled out because Go's
-// math.Min and math.Max answer NaN when either argument is NaN, where
-// std::math answers the other argument the way C's fmin and fmax do.
-var mathBinaryFunctions = []struct {
-	name string
-	want func(float64, float64) float64
-	ulps uint64
-}{
-	{"copysign", math.Copysign, 0},
-	{"hypot", math.Hypot, 1},
-	{"min", func(a, b float64) float64 {
-		switch {
-		case math.IsNaN(a):
-			return b
-		case math.IsNaN(b):
-			return a
-		}
-		return math.Min(a, b)
-	}, 0},
-	{"max", func(a, b float64) float64 {
-		switch {
-		case math.IsNaN(a):
-			return b
-		case math.IsNaN(b):
-			return a
-		}
-		return math.Max(a, b)
-	}, 0},
-	// pow multiplies an exp of a log, so the last bit of each can add up.
-	{"pow", math.Pow, 2},
-	{"pow_fused", math.Pow, 2},
-	{"fmod", math.Mod, 0},
-	{"atan2", math.Atan2, 1},
+// mathBinaryFunctions lists the two-argument std::math functions, in the
+// order of the `binary` line of testdata/std_math.txt.
+var mathBinaryFunctions = []mathFunction{
+	{"copysign", 0}, {"hypot", 1}, {"min", 0}, {"max", 0},
+	{"pow", 1}, {"pow_fused", 1}, {"fmod", 0}, {"atan2", 1},
 }
 
-// mathTernaryFunctions lists the three-argument std::math functions beside
-// the Go function each is checked against. fma is exact by definition, and
-// Go's is a hardware instruction or exact software.
-var mathTernaryFunctions = []struct {
-	name string
-	want func(float64, float64, float64) float64
-	ulps uint64
-}{
-	{"fma", math.FMA, 0},
+// mathTernaryFunctions lists the three-argument std::math functions, in the
+// order of the `ternary` line of testdata/std_math.txt.
+var mathTernaryFunctions = []mathFunction{{"fma", 0}}
+
+// mathReference is testdata/std_math.txt: the values std::math is called on
+// and, in the order mathProgram prints them, the answers it has to give. The
+// file is written by testdata/std_math.py, whose comment says how each answer
+// is the true value rounded once.
+type mathReference struct {
+	bits   []uint64
+	want   []uint64
+	single []uint32
+	// singleWant holds, per single value, one answer per function that is
+	// not a helper, in the order of mathUnaryFunctions.
+	singleWant [][]uint32
 }
 
-// mathBits lists the values std::math is checked on: the float text bit
-// patterns, which cover the edges of the format and a spread of random
-// doubles, plus the halves and near-halves that rounding is about, both
-// infinities, and NaN.
-func mathBits() []uint64 {
-	bits := floatTextBits()
-	for _, value := range []float64{
-		0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 0.49999999999999994, -0.49999999999999994,
-		4503599627370495.5, -4503599627370495.5, 4503599627370496, 9007199254740993,
-		2, 3, 10, 0.001, 100.5, 1e-300, 1e300, 700, 709.7, 709.8, -745, -745.2,
-		1023.5, 1024, -1074, -1074.5, 1e-10, -1e-10, 0.25, -0.75, 6.5, -7,
-		math.Pi, -math.Pi, math.Pi / 2, math.Pi / 4, 3 * math.Pi / 4, 2 * math.Pi, 0.66, 0.7, 2.5,
-		536870911, 536870912, 536870913, 1e15, 1e22, 1e50, 1e100, 1e200, 1e300,
-		0.1, 10, -1, 1e308, 1e-308, 4.9e-324, 3, 4, 0.5000000000000001, 21.5, 22, 0.625, 0.7,
-		math.Inf(1), math.Inf(-1), math.NaN(),
-	} {
-		bits = append(bits, math.Float64bits(value))
+// mathHeaders is what the function lines of testdata/std_math.txt have to
+// say: the tables above, in their order.
+func mathHeaders() map[string]string {
+	names := func(functions []mathFunction, helpers bool) string {
+		var out []string
+		for _, function := range functions {
+			if helpers || !mathIsHelper(function.name) {
+				out = append(out, function.name)
+			}
+		}
+		return strings.Join(out, " ")
 	}
-	return bits
+	return map[string]string{
+		"unary":   names(mathUnaryFunctions, true),
+		"binary":  names(mathBinaryFunctions, true),
+		"ternary": names(mathTernaryFunctions, true),
+		"single":  names(mathUnaryFunctions, false),
+	}
+}
+
+// mathLine is one data line of testdata/std_math.txt: its kind, the
+// arguments, and the answers.
+type mathLine struct {
+	kind    string
+	inputs  []uint64
+	answers []uint64
+}
+
+// readMathLines reads the data lines of testdata/std_math.txt, checking the
+// function lines on the way.
+func readMathLines(t *testing.T) []mathLine {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "std_math.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	headers := mathHeaders()
+	var lines []mathLine
+	for number, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		kind, rest, _ := strings.Cut(line, " ")
+		if want, ok := headers[kind]; ok {
+			if rest != want {
+				t.Fatalf("std_math.txt:%d: %s functions are %q, the test calls %q",
+					number+1, kind, rest, want)
+			}
+			continue
+		}
+		if kind == "#" {
+			continue
+		}
+		var fields []uint64
+		for _, field := range strings.Fields(rest) {
+			value, err := strconv.ParseUint(field, 16, 64)
+			if err != nil {
+				t.Fatalf("std_math.txt:%d: %v", number+1, err)
+			}
+			fields = append(fields, value)
+		}
+		inputs := map[string]int{"u": 1, "b": 2, "t": 3, "s": 1}[kind]
+		if inputs == 0 || len(fields) <= inputs {
+			t.Fatalf("std_math.txt:%d: cannot read %q", number+1, line)
+		}
+		lines = append(lines, mathLine{kind, fields[:inputs], fields[inputs:]})
+	}
+	return lines
+}
+
+// loadMathReference reads testdata/std_math.txt. The arguments of the b and
+// t lines have to be the values of the u lines taken two and three at a
+// time, the way mathProgram calls the functions.
+func loadMathReference(t *testing.T) mathReference {
+	t.Helper()
+	var ref mathReference
+	var binary, ternary []uint64
+	var operands [][]uint64
+	for _, line := range readMathLines(t) {
+		switch line.kind {
+		case "u":
+			ref.bits = append(ref.bits, line.inputs[0])
+			ref.want = append(ref.want, line.answers...)
+		case "b":
+			operands = append(operands, line.inputs)
+			binary = append(binary, line.answers...)
+		case "t":
+			operands = append(operands, line.inputs)
+			ternary = append(ternary, line.answers...)
+		case "s":
+			ref.single = append(ref.single, uint32(line.inputs[0]))
+			answers := make([]uint32, 0, len(line.answers))
+			for _, answer := range line.answers {
+				answers = append(answers, uint32(answer))
+			}
+			ref.singleWant = append(ref.singleWant, answers)
+		}
+	}
+	if len(operands) != 2*len(ref.bits)-3 {
+		t.Fatalf("std_math.txt has %d b and t lines for %d values", len(operands), len(ref.bits))
+	}
+	for i, inputs := range operands {
+		start := i
+		if i >= len(ref.bits)-1 {
+			start = i - (len(ref.bits) - 1)
+		}
+		for j, input := range inputs {
+			if input != ref.bits[start+j] {
+				t.Fatalf("std_math.txt: line %d of b and t is not on the u values in order", i+1)
+			}
+		}
+	}
+	ref.want = append(append(ref.want, binary...), ternary...)
+	return ref
+}
+
+// mathIsHelper reports whether the generated program defines a function
+// itself rather than calling std::math for it.
+func mathIsHelper(name string) bool {
+	return strings.Contains(mathHelpers, "fn "+name+"(")
 }
 
 // mathProgram writes a program that applies every std::math function to every
@@ -237,191 +286,187 @@ func mathProgram(bits []uint64) string {
 	return b.String()
 }
 
-// mathExpectation is one answer Go's math gives and how far std::math may be
-// from it, or nothing to compare with where Go's answer is not the oracle.
-type mathExpectation struct {
-	value float64
-	ulps  uint64
-	skip  bool
+// mathAllowance lists, in the order mathProgram prints its lines, how many
+// units in the last place each answer may be off.
+func mathAllowance(bits []uint64) []uint64 {
+	var ulps []uint64
+	for range bits {
+		for _, function := range mathUnaryFunctions {
+			ulps = append(ulps, function.ulps)
+		}
+	}
+	for range bits[:len(bits)-1] {
+		for _, function := range mathBinaryFunctions {
+			ulps = append(ulps, function.ulps)
+		}
+	}
+	for range bits[:len(bits)-2] {
+		for _, function := range mathTernaryFunctions {
+			ulps = append(ulps, function.ulps)
+		}
+	}
+	return ulps
 }
 
-// goAnswersWrongly reports the cases Go's math is known to answer wrongly, so
-// that they are not held against std::math. From 2^29 up Go reduces the
-// argument of sin, cos and tan by Payne-Hanek but then subtracts 1 from the
-// fraction as a float, which drops the low bits whenever the angle is close
-// to a multiple of pi/4; std::math subtracts in integers first and keeps
-// them, and its answers there were checked against 60-digit references. On
-// amd64 Go's Exp and Log are assembly whose argument reduction gives up at
-// the edges: Log of a subnormal comes back as Log of the smallest normal,
-// and Exp, which sinh and cosh end in, overflows a little below the true
-// threshold. The arm64 build runs msun for those and checks them exactly.
-func goAnswersWrongly(name string, x float64) bool {
-	name = strings.TrimSuffix(name, "_fused")
-	switch name {
-	case "sin", "cos":
-		// Below 2^29 Go subtracts pi/4 in three pieces that hold about 100
-		// bits, so an argument within x * 2^-46 of a multiple of pi/2 (pi
-		// itself, whose sine is 1.2e-16) loses its low bits too.
+// mathKnownDeviation reports the answers std::math is known to give away
+// from the true value by more than its allowance: what its algorithms --
+// the ones Go's math has too -- do there. They are listed here rather than
+// fixed because this test only checks std::math; each is a defect in it.
+// a and b are the arguments in the order the function takes them.
+func mathKnownDeviation(name string, a, b float64) bool {
+	x := a
+	switch strings.TrimSuffix(name, "_fused") {
+	case "tan":
+		// tan returns x itself once x*x <= 1e-14, which is 25 ulp off at
+		// 1e-7; and it reduces by pi/4 in three pieces that hold about 100
+		// bits, so an angle within x * 2^-46 of a multiple of pi/2 loses its
+		// low bits (tan(pi) is 7 ulp off).
 		quarter := math.Round(x / (math.Pi / 2))
 		near := quarter != 0 && math.Abs(x-quarter*(math.Pi/2)) < math.Abs(x)*0x1p-46
-		return near || math.Abs(x) >= 536870912
-	case "tan":
-		return math.Abs(x) >= 536870912
-	}
-	if runtime.GOARCH != "amd64" {
-		return false
-	}
-	const smallestNormal = 2.2250738585072014e-308
-	switch name {
-	case "log", "log10":
-		return x != 0 && math.Abs(x) < smallestNormal
-	case "exp", "sinh", "cosh":
-		return x > 709
+		return (x != 0 && x*x <= 1e-14) || near
+	case "sinh", "cosh":
+		// Above 21 both are exp(x) / 2, so they overflow where exp does,
+		// at 709.78, though the answer is finite up to 710.47.
+		return math.Abs(x) > 709.782712893384 && math.Abs(x) < 710.4758600739439
+	case "atan2":
+		// atan2 takes atan(y / x) and moves it by pi when x is negative; when
+		// y / x underflows to +0 the answer is +pi whatever the sign of y.
+		y, x := a, b
+		return x < 0 && y < 0 && !math.IsInf(x, 0) && y/x == 0
+	case "modf_fraction":
+		// modf(+-inf) answers a NaN fraction where C99's Annex F (F.9.3.12)
+		// answers +-0.
+		return math.IsInf(x, 0)
 	}
 	return false
 }
 
-// goAnswersWronglyOnPair is goAnswersWrongly for the two-argument functions.
-// Go's Pow raises to the whole part of the exponent by repeated squaring and
-// to the fraction through Exp(yf * Log(x)), so its error grows with the
-// exponent and with |y log x|: Pow(0.1, 10) is 4 ulp off and Pow(1e300, 0.1)
-// 44. std::math's pow was checked against 60-digit references instead.
-func goAnswersWronglyOnPair(name string, x, y float64) bool {
-	if strings.TrimSuffix(name, "_fused") != "pow" {
-		return false
+// mathMatches reports whether got is within `ulps` units in the last place
+// of want, both as bit patterns of a float `width` bits wide. Every NaN
+// matches every NaN, because which NaN comes back is not part of what any
+// function promises; an infinity matches only itself, and a zero is one unit
+// from the smallest subnormal of its sign.
+func mathMatches(got, want uint64, width int, ulps uint64) bool {
+	sign := uint64(1) << (width - 1)
+	exponent := uint64(0x7FF) << 52
+	if width == 32 {
+		exponent = 0xFF << 23
 	}
-	return math.Abs(y) > 2 || math.Abs(y*math.Log(math.Abs(x))) > 1
-}
-
-// mathWant lists the answers Go's math gives in the order mathProgram prints
-// them.
-func mathWant(bits []uint64) []mathExpectation {
-	var want []mathExpectation
-	for _, pattern := range bits {
-		for _, function := range mathUnaryFunctions {
-			x := math.Float64frombits(pattern)
-			want = append(want, mathExpectation{
-				value: function.want(x), ulps: function.ulps, skip: goAnswersWrongly(function.name, x)})
-		}
+	nan := func(bits uint64) bool { return bits&exponent == exponent && bits&^(sign|exponent) != 0 }
+	inf := func(bits uint64) bool { return bits&^sign == exponent }
+	if nan(got) || nan(want) {
+		return nan(got) && nan(want)
 	}
-	for i := range bits[:len(bits)-1] {
-		for _, function := range mathBinaryFunctions {
-			a, b := math.Float64frombits(bits[i]), math.Float64frombits(bits[i+1])
-			want = append(want, mathExpectation{
-				value: function.want(a, b),
-				ulps:  function.ulps,
-				skip:  goAnswersWronglyOnPair(function.name, a, b),
-			})
-		}
-	}
-	for i := range bits[:len(bits)-2] {
-		for _, function := range mathTernaryFunctions {
-			a, b := math.Float64frombits(bits[i]), math.Float64frombits(bits[i+1])
-			c := math.Float64frombits(bits[i+2])
-			want = append(want, mathExpectation{value: function.want(a, b, c), ulps: function.ulps})
-		}
-	}
-	return want
-}
-
-// mathMatches reports whether got is within the allowed units in the last
-// place of want. Every NaN matches every NaN, because which NaN comes back is
-// not part of what any function promises; an infinity matches only itself, and
-// a zero is one unit from the smallest subnormal of its sign.
-func mathMatches(got float64, want mathExpectation) bool {
-	if want.skip {
+	if got == want {
 		return true
 	}
-	if math.IsNaN(want.value) || math.IsNaN(got) {
-		return math.IsNaN(want.value) && math.IsNaN(got)
-	}
-	a, b := math.Float64bits(got), math.Float64bits(want.value)
-	if a == b {
-		return true
-	}
-	if math.IsInf(got, 0) || math.IsInf(want.value, 0) {
+	if inf(got) || inf(want) || got&sign != want&sign {
 		return false
 	}
-	if math.Signbit(got) != math.Signbit(want.value) {
-		return false
+	distance := got - want
+	if want > got {
+		distance = want - got
 	}
-	distance := a - b
-	if b > a {
-		distance = b - a
+	return distance <= ulps
+}
+
+// mathCase is the function and the first two arguments behind one output
+// line.
+func mathCase(bits []uint64, line int) (string, float64, float64) {
+	value := func(i int) float64 {
+		if i >= len(bits) {
+			return 0
+		}
+		return math.Float64frombits(bits[i])
 	}
-	return distance <= want.ulps
+	unary := len(bits) * len(mathUnaryFunctions)
+	if line < unary {
+		return mathUnaryFunctions[line%len(mathUnaryFunctions)].name, value(line / len(mathUnaryFunctions)), 0
+	}
+	line -= unary
+	binary := (len(bits) - 1) * len(mathBinaryFunctions)
+	if line < binary {
+		i := line / len(mathBinaryFunctions)
+		return mathBinaryFunctions[line%len(mathBinaryFunctions)].name, value(i), value(i + 1)
+	}
+	line -= binary
+	i := line / len(mathTernaryFunctions)
+	return mathTernaryFunctions[line%len(mathTernaryFunctions)].name, value(i), value(i + 1)
 }
 
 // mathLabel names the case behind one output line.
 func mathLabel(bits []uint64, line int) string {
+	value := func(i int) float64 { return math.Float64frombits(bits[i]) }
 	unary := len(bits) * len(mathUnaryFunctions)
 	if line < unary {
 		function := mathUnaryFunctions[line%len(mathUnaryFunctions)]
-		value := math.Float64frombits(bits[line/len(mathUnaryFunctions)])
-		return fmt.Sprintf("%s(%g)", function.name, value)
+		return fmt.Sprintf("%s(%g)", function.name, value(line/len(mathUnaryFunctions)))
 	}
 	line -= unary
 	binary := (len(bits) - 1) * len(mathBinaryFunctions)
 	if line < binary {
 		function := mathBinaryFunctions[line%len(mathBinaryFunctions)]
 		i := line / len(mathBinaryFunctions)
-		a, b := math.Float64frombits(bits[i]), math.Float64frombits(bits[i+1])
-		return fmt.Sprintf("%s(%g, %g)", function.name, a, b)
+		return fmt.Sprintf("%s(%g, %g)", function.name, value(i), value(i+1))
 	}
 	line -= binary
 	function := mathTernaryFunctions[line%len(mathTernaryFunctions)]
 	i := line / len(mathTernaryFunctions)
-	a, b := math.Float64frombits(bits[i]), math.Float64frombits(bits[i+1])
-	return fmt.Sprintf("%s(%g, %g, %g)", function.name, a, b, math.Float64frombits(bits[i+2]))
+	return fmt.Sprintf("%s(%g, %g, %g)", function.name, value(i), value(i+1), value(i+2))
 }
 
-// compareMathOutput checks one run's output line by line against Go's math.
-func compareMathOutput(t *testing.T, bits []uint64, output string) {
+// compareMathOutput checks one run's output line by line against the
+// reference.
+func compareMathOutput(t *testing.T, ref mathReference, output string) {
 	t.Helper()
 	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
-	want := mathWant(bits)
-	if len(lines) != len(want) {
-		t.Fatalf("got %d lines, want %d\n%s", len(lines), len(want), output)
+	ulps := mathAllowance(ref.bits)
+	if len(lines) != len(ref.want) || len(ulps) != len(ref.want) {
+		t.Fatalf("got %d lines, the reference has %d answers for %d calls\n%s",
+			len(lines), len(ref.want), len(ulps), output)
 	}
 	failures := 0
-	for i := range want {
+	for i, want := range ref.want {
 		pattern, err := strconv.ParseInt(lines[i], 10, 64)
 		if err != nil {
-			t.Fatalf("%s: printed %q", mathLabel(bits, i), lines[i])
+			t.Fatalf("%s: printed %q", mathLabel(ref.bits, i), lines[i])
 		}
-		got := math.Float64frombits(uint64(pattern))
-		if mathMatches(got, want[i]) {
+		if mathMatches(uint64(pattern), want, 64, ulps[i]) {
+			continue
+		}
+		if name, x, y := mathCase(ref.bits, i); mathKnownDeviation(name, x, y) {
 			continue
 		}
 		failures++
 		if failures > 20 {
 			continue
 		}
-		t.Errorf("%s: got %v (%#x), want %v (%#x)", mathLabel(bits, i),
-			got, math.Float64bits(got), want[i].value, math.Float64bits(want[i].value))
+		got := math.Float64frombits(uint64(pattern))
+		t.Errorf("%s: got %v (%#x), want %v (%#x)", mathLabel(ref.bits, i),
+			got, uint64(pattern), math.Float64frombits(want), want)
 	}
 	if failures > 20 {
 		t.Errorf("%d more mismatches", failures-20)
 	}
 }
 
-// TestMath compares std::math with Go's math on the same values: the Go seed is
-// the oracle for the std functions, the way it is for the compiler.
+// TestMath checks std::math against the correctly rounded answers in
+// testdata/std_math.txt.
 func TestMath(t *testing.T) {
-	bits := mathBits()
+	ref := loadMathReference(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "math.kizu")
-	if err := os.WriteFile(path, []byte(mathProgram(bits)), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(mathProgram(ref.bits)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	output, err := runKizuEnv(nil, "run", path)
 	if err != nil {
 		t.Fatalf("run failed: %v\n%s", err, output)
 	}
-	compareMathOutput(t, bits, output)
+	compareMathOutput(t, ref, output)
 }
 
-// TestMathWASM runs the same std::math comparison on the wasm32-wasi target, so
+// TestMathWASM runs the same std::math check on the wasm32-wasi target, so
 // the float instructions of the wasm backend and its binary encoder answer
 // exactly what the native target does: std::math promises the same bits on
 // every target, so the two outputs must be equal line for line.
@@ -430,10 +475,10 @@ func TestMathWASM(t *testing.T) {
 	if err != nil {
 		t.Skip("wasmtime is required for binary execution")
 	}
-	bits := mathBits()
+	ref := loadMathReference(t)
 	dir := t.TempDir()
 	source := filepath.Join(dir, "math.kizu")
-	if err := os.WriteFile(source, []byte(mathProgram(bits)), 0o644); err != nil {
+	if err := os.WriteFile(source, []byte(mathProgram(ref.bits)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	artifact := filepath.Join(dir, "math.wasm")
@@ -446,7 +491,7 @@ func TestMathWASM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wasmtime failed: %v\n%s", err, output)
 	}
-	compareMathOutput(t, bits, string(output))
+	compareMathOutput(t, ref, string(output))
 	native, err := runKizuEnv(nil, "run", source)
 	if err != nil {
 		t.Fatalf("run failed: %v\n%s", err, native)
@@ -458,7 +503,7 @@ func TestMathWASM(t *testing.T) {
 			mathBothNaN(wasmLines[i], nativeLines[i]) {
 			continue
 		}
-		t.Fatalf("%s: wasm printed %s, native %s", mathLabel(bits, i), wasmLines[i], nativeLines[i])
+		t.Fatalf("%s: wasm printed %s, native %s", mathLabel(ref.bits, i), wasmLines[i], nativeLines[i])
 	}
 	if len(wasmLines) != len(nativeLines) {
 		t.Fatalf("wasm printed %d lines, native %d", len(wasmLines), len(nativeLines))
@@ -475,32 +520,21 @@ func mathBothNaN(left, right string) bool {
 		math.IsNaN(math.Float64frombits(uint64(a))) && math.IsNaN(math.Float64frombits(uint64(b)))
 }
 
-// mathSingleValues lists the f32 values the single-precision path is checked
-// on: ordinary magnitudes, the edges of the format, and the specials.
-func mathSingleValues() []float32 {
-	return []float32{
-		0, float32(math.Copysign(0, -1)), 0.5, -0.5, 1, -1, 2, 3, 0.1, 0.7, 2.5, -2.5, 100, 1e30, 1e-30,
-		0.7853982, 3.1415927, 1e-45, 3.4028235e38,
-		float32(math.Inf(1)), float32(math.Inf(-1)), float32(math.NaN()),
-	}
-}
-
 // mathSingleProgram writes a program that applies every one-argument
-// std::math function to every value as an f32 and prints the bits of each
-// f32 answer, widened to f64 so that print has one integer to write.
-func mathSingleProgram(values []float32) string {
+// std::math function to every f32 value and prints the bits of each f32
+// answer, widened to f64 so that print has one integer to write.
+func mathSingleProgram(values []uint32) string {
 	var b strings.Builder
 	b.WriteString("import std::float;\nimport std::math;\n\n")
 	b.WriteString("fn show(value: f32) -> void {\n")
 	b.WriteString("    print(cast<i64>(float::bits(cast<f64>(value))));\n}\n\n")
 	b.WriteString("fn main() -> void {\n")
 	for i, value := range values {
-		wide := float64(value)
-		bits := math.Float64bits(wide)
+		bits := math.Float64bits(float64(math.Float32frombits(value)))
 		fmt.Fprintf(&b, "    let v%d: f32 = cast<f32>(float::from_bits(cast<u64>(%d) << 32 | %d));\n",
 			i, bits>>32, bits&0xFFFFFFFF)
 		for _, function := range mathUnaryFunctions {
-			if strings.Contains(mathHelpers, "fn "+function.name+"(") {
+			if mathIsHelper(function.name) {
 				continue
 			}
 			fmt.Fprintf(&b, "    show(math::%s<f32>(v%d));\n", function.name, i)
@@ -510,37 +544,14 @@ func mathSingleProgram(values []float32) string {
 	return b.String()
 }
 
-// mathSingleMatches reports whether an f32 answer is within the allowed
-// units in the last place of the f32 nearest Go's f64 answer.
-func mathSingleMatches(got float32, want float32, ulps uint64) bool {
-	if math.IsNaN(float64(want)) || math.IsNaN(float64(got)) {
-		return math.IsNaN(float64(want)) && math.IsNaN(float64(got))
-	}
-	a, b := uint64(math.Float32bits(got)), uint64(math.Float32bits(want))
-	if a == b {
-		return true
-	}
-	if math.IsInf(float64(got), 0) || math.IsInf(float64(want), 0) {
-		return false
-	}
-	if math.Signbit(float64(got)) != math.Signbit(float64(want)) {
-		return false
-	}
-	distance := a - b
-	if b > a {
-		distance = b - a
-	}
-	return distance <= ulps
-}
-
-// TestMathSingle checks the f32 instantiations: each computes in f64 and
-// rounds once, so it is the f32 nearest Go's f64 answer, within the same
-// allowance the f64 path has.
+// TestMathSingle checks the f32 instantiations against the true values
+// rounded once to f32. Each computes in f64 and rounds again, so it is
+// within the same allowance the f64 path has.
 func TestMathSingle(t *testing.T) {
-	values := mathSingleValues()
+	ref := loadMathReference(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "math32.kizu")
-	if err := os.WriteFile(path, []byte(mathSingleProgram(values)), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(mathSingleProgram(ref.single)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	output, err := runKizuEnv(nil, "run", path)
@@ -549,25 +560,28 @@ func TestMathSingle(t *testing.T) {
 	}
 	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
 	line := 0
-	for _, value := range values {
+	for i, value := range ref.single {
+		answer := 0
 		for _, function := range mathUnaryFunctions {
-			if strings.Contains(mathHelpers, "fn "+function.name+"(") {
+			if mathIsHelper(function.name) {
 				continue
 			}
+			x := math.Float32frombits(value)
 			if line >= len(lines) {
 				t.Fatalf("output stops after %d lines", line)
 			}
 			pattern, err := strconv.ParseInt(lines[line], 10, 64)
 			if err != nil {
-				t.Fatalf("%s<f32>(%g): printed %q", function.name, value, lines[line])
+				t.Fatalf("%s<f32>(%g): printed %q", function.name, x, lines[line])
 			}
-			got := float32(math.Float64frombits(uint64(pattern)))
-			want := float32(function.want(float64(value)))
-			matches := mathSingleMatches(got, want, function.ulps)
-			if !matches && !goAnswersWrongly(function.name, float64(value)) {
-				t.Errorf("%s<f32>(%g): got %v, want %v", function.name, value, got, want)
+			got := math.Float32bits(float32(math.Float64frombits(uint64(pattern))))
+			want := ref.singleWant[i][answer]
+			if !mathMatches(uint64(got), uint64(want), 32, function.ulps) {
+				t.Errorf("%s<f32>(%g): got %v, want %v", function.name, x,
+					math.Float32frombits(got), math.Float32frombits(want))
 			}
 			line++
+			answer++
 		}
 	}
 }

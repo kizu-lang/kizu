@@ -150,13 +150,15 @@ multiply-add で積と和の丸め誤差を厳密に拾います(分岐なし)�
 - `frexp` は `fraction * 2^exponent`(fraction は [1/2, 1))に、`modf` は整数部と
   小数部(どちらも元の符号)に分け、struct で 2 つの値を返します。
 
-`cmd/kizu` の `TestMath` が Go の `math` と数千の値で突き合わせ、native と wasm の
+`cmd/kizu` の `TestMath` が数千の値で、真の値を 1 回だけ丸めた参照
+(`cmd/kizu/testdata/std_math.txt`、mpmath で作る)と突き合わせ、native と wasm の
 両方で同じ bit を返すことを確かめています。IEEE の演算と bit 操作、`fma`、
-`round_even`、`frexp` / `modf` は Go と一致し、残りは 1 ulp 以内(`tan` と
-`log2` / `log10` は丸めが重なるので 2 ulp)です。Go の側が外れる値 —— 2^29 以上と
-pi/2 の倍数付近の三角関数、指数が大きい `pow` —— は照合から外し、そこは 60 桁の
-参照値で 1 ulp 未満を確かめてあります。Go は arm64 で乗算と加算を 1 回の丸めに
-融合するので、最後の bit が動くことがあります。
+`round_even`、`frexp` / `modf` は参照と一致し、残りは 1 ulp 以内(`sinh` は 2 ulp、
+`tan` は 3 ulp)です。外れる値もあります: `tan` は `x * x <= 1e-14` で `x` を返し
+(`tan(1e-7)` は 25 ulp)、pi/2 の倍数の近くでは縮約で下位の bit を落とします。
+`sinh` / `cosh` は 709.78 から 710.47 の間で有限の値を無限大にし、`atan2` は
+`y / x` が 0 に落ちる負の `x` と負の `y` で `-pi` でなく `pi` を返し、`modf` は
+無限大の小数部を `±0` でなく NaN にします。
 
 ## f32
 

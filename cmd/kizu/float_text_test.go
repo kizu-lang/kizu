@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,97 +10,52 @@ import (
 	"testing"
 )
 
-// floatTextBits lists the bit patterns std::float::append is checked on:
-// the edges of the format, the classic hard cases, and a deterministic
-// spread of pseudo-random doubles.
-func floatTextBits() []uint64 {
-	bits := []uint64{
-		0x0000000000000000, 0x8000000000000000, // ±0
-		0x0000000000000001, 0x000FFFFFFFFFFFFF, // smallest and largest subnormal
-		0x0010000000000000, 0x7FEFFFFFFFFFFFFF, // smallest normal, largest finite
-		0x3FF0000000000000, 0x4000000000000000, 0x4008000000000000, // 1, 2, 3
-		0x3FB999999999999A, 0x3FD5555555555555, // 0.1, 1/3
-		0x44B52D02C7E14AF6, 0x4415AF1D78B58C40, // 1e23, 1e20
-		0x4340000000000000, 0x4340000000000001, // 2^53, 2^53 + 2
-		0x4330000000000001, 0x3F1A36E2EB1C432D, // 2^52 + 1, 1e-4
-		0x3EB0C6F7A0B5ED8D, 0x3E7AD7F29ABCAF48, // 1e-6, 1e-7
-		0x4415AF1D78B58C40, 0x444B1AE4D6E2EF50, // 1e20, 1e21
-		0x3C9CD2B297D889BC, 0x0000000000000003, // 1e-16, 3 * 5e-324
+// floatTextReference is what std::float is checked against: the bit
+// patterns append is given with the text it has to write, and the decimal
+// spellings parse is given with the bits it has to read them to (as a signed
+// integer, or "null" for a spelling that is not a number). The file is
+// written by testdata/float_text.py from Python's repr and float, which are
+// David Gay's shortest round-trip and correctly rounded conversions; how the
+// digits are laid out is docs/std/float.md.
+type floatTextReference struct {
+	bits    []uint64
+	spelled []string
+	parses  []string
+	read    []string
+}
+
+// loadFloatTextReference reads testdata/float_text.txt.
+func loadFloatTextReference(t *testing.T) floatTextReference {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "float_text.txt"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	// A linear congruential generator keeps the spread the same on every run.
-	state := uint64(0x9E3779B97F4A7C15)
-	for len(bits) < 1200 {
-		state = state*6364136223846793005 + 1442695040888963407
-		candidate := state
-		exponent := (candidate >> 52) & 0x7FF
-		if exponent == 0x7FF {
+	var ref floatTextReference
+	for number, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		if strings.HasPrefix(line, "#") {
 			continue
 		}
-		bits = append(bits, candidate)
-	}
-	return bits
-}
-
-// floatTextParseCases lists decimal spellings whose nearest double is easy to
-// get wrong: ties, values a hair from a tie, the subnormal edge, and inputs
-// longer than any fast path.
-func floatTextParseCases() []string {
-	return []string{
-		"0.1", "1e23", "8.98846567431158e307", "2.2250738585072011e-308",
-		"2.2250738585072012e-308", "2.2250738585072014e-308",
-		"0.500000000000000166533453693773481063544750213623046875",
-		"9007199254740993", "9007199254740993.00000000000000001",
-		"9007199254740992.999999999999999", "1e-400", "4.9e-324",
-		"2.4703282292062327e-324", "2.4703282292062328e-324",
-		"1.7976931348623158e308", "1.7976931348623157e308",
-		"0.000000000000000000000000000000000000000000000000000000000000000000000001",
-		"123456789012345678901234567890123456789012345678901234567890e-30",
-		"1" + strings.Repeat("0", 300), "0." + strings.Repeat("0", 300) + "1",
-		"3.14159265358979323846264338327950288419716939937510582097494459",
-		"100", "1e21", "1E+2", "-0", "+7.5", "1_000",
-	}
-}
-
-// expectedFloatText renders a double the way std::float::append promises,
-// from the shortest digits Go's strconv produces.
-func expectedFloatText(value float64) string {
-	if math.IsNaN(value) {
-		return "NaN"
-	}
-	if math.IsInf(value, 1) {
-		return "inf"
-	}
-	if math.IsInf(value, -1) {
-		return "-inf"
-	}
-	sign := ""
-	if math.Signbit(value) {
-		sign = "-"
-		value = -value
-	}
-	if value == 0 {
-		return sign + "0.0"
-	}
-	text := strconv.FormatFloat(value, 'e', -1, 64)
-	mantissa, exponentText, _ := strings.Cut(text, "e")
-	exponent, _ := strconv.Atoi(exponentText)
-	digits := strings.ReplaceAll(mantissa, ".", "")
-	point := exponent + 1
-	switch {
-	case point > 0 && point <= 21:
-		if len(digits) <= point {
-			return sign + digits + strings.Repeat("0", point-len(digits)) + ".0"
+		fields := strings.Fields(line)
+		if len(fields) != 3 {
+			t.Fatalf("float_text.txt:%d: want three fields, got %q", number+1, line)
 		}
-		return sign + digits[:point] + "." + digits[point:]
-	case point <= 0 && point > -6:
-		return sign + "0." + strings.Repeat("0", -point) + digits
-	default:
-		out := digits[:1]
-		if len(digits) > 1 {
-			out += "." + digits[1:]
+		switch fields[0] {
+		case "append":
+			raw, err := strconv.ParseUint(fields[1], 16, 64)
+			if err != nil {
+				t.Fatalf("float_text.txt:%d: %v", number+1, err)
+			}
+			ref.bits = append(ref.bits, raw)
+			ref.spelled = append(ref.spelled, fields[2])
+		case "parse":
+			ref.parses = append(ref.parses, fields[1])
+			ref.read = append(ref.read, fields[2])
+		default:
+			t.Fatalf("float_text.txt:%d: unknown kind %q", number+1, fields[0])
 		}
-		return sign + out + "e" + strconv.Itoa(point-1)
 	}
+	return ref
 }
 
 // floatTextProgram writes the Kizu program that prints, for every bit
@@ -135,30 +89,21 @@ func floatTextProgram(bits []uint64, parses []string) string {
 	return source.String()
 }
 
-// floatTextWant lists the lines the program prints when std::float agrees
-// with strconv.
-func floatTextWant(bits []uint64, parses []string) []string {
-	want := make([]string, 0, 2*len(bits)+len(parses))
-	for _, raw := range bits {
-		want = append(want, expectedFloatText(math.Float64frombits(raw)), "true")
+// want lists the lines the program prints when std::float agrees with the
+// reference.
+func (ref floatTextReference) want() []string {
+	want := make([]string, 0, 2*len(ref.bits)+len(ref.parses))
+	for _, text := range ref.spelled {
+		want = append(want, text, "true")
 	}
-	for _, text := range parses {
-		value, parseErr := strconv.ParseFloat(text, 64)
-		if strings.Contains(text, "_") || (parseErr != nil && !math.IsInf(value, 0)) {
-			want = append(want, "null")
-			continue
-		}
-		want = append(want, strconv.FormatInt(int64(math.Float64bits(value)), 10))
-	}
-	return want
+	return append(want, ref.read...)
 }
 
-// TestFloatText compares std::float::append and std::float::parse with Go's
-// strconv on the same values: the Go seed is the oracle for the std
-// conversion, the way it is for the compiler.
+// TestFloatText checks std::float::append and std::float::parse against
+// the reference in testdata/float_text.txt.
 func TestFloatText(t *testing.T) {
-	bits := floatTextBits()
-	parses := floatTextParseCases()
+	ref := loadFloatTextReference(t)
+	bits, parses := ref.bits, ref.parses
 	dir := t.TempDir()
 	path := filepath.Join(dir, "float_text.kizu")
 	if err := os.WriteFile(path, []byte(floatTextProgram(bits, parses)), 0o644); err != nil {
@@ -169,7 +114,7 @@ func TestFloatText(t *testing.T) {
 		t.Fatalf("run failed: %v\n%s", err, output)
 	}
 	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
-	want := floatTextWant(bits, parses)
+	want := ref.want()
 	if len(lines) != len(want) {
 		t.Fatalf("got %d lines, want %d\n%s", len(lines), len(want), output)
 	}
@@ -193,16 +138,16 @@ func TestFloatText(t *testing.T) {
 	}
 }
 
-// TestFloatTextWASM runs the same std::float comparison on the wasm32-wasi
-// target, so the float instructions of the wasm backend and its binary encoder
-// answer exactly what the native target does.
+// TestFloatTextWASM runs the same std::float check on the wasm32-wasi target,
+// so the float instructions of the wasm backend and its binary encoder answer
+// exactly what the native target does.
 func TestFloatTextWASM(t *testing.T) {
 	wasmtime, err := exec.LookPath("wasmtime")
 	if err != nil {
 		t.Skip("wasmtime is required for binary execution")
 	}
-	bits := floatTextBits()
-	parses := floatTextParseCases()
+	ref := loadFloatTextReference(t)
+	bits, parses := ref.bits, ref.parses
 	dir := t.TempDir()
 	source := filepath.Join(dir, "float_text.kizu")
 	if err := os.WriteFile(source, []byte(floatTextProgram(bits, parses)), 0o644); err != nil {
@@ -219,7 +164,7 @@ func TestFloatTextWASM(t *testing.T) {
 		t.Fatalf("wasmtime failed: %v\n%s", err, output)
 	}
 	lines := strings.Split(strings.TrimRight(string(output), "\n"), "\n")
-	want := floatTextWant(bits, parses)
+	want := ref.want()
 	if len(lines) != len(want) {
 		for index := range want {
 			if index >= len(lines) || lines[index] != want[index] {
