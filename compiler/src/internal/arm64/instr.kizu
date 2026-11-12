@@ -73,6 +73,8 @@ fn (self: &var Selector) select_instr(module: &ir::Module, node: &ir::InstrNode,
         PanicFail => return self.select_panic_fail(module, node),
         TestFail => return self.select_test_fail(module, node),
         TestExpectEqual => return self.select_test_expect_equal(module, node),
+        TestBegin => return self.select_test_begin(module, node),
+        TestMark => return self.select_test_mark(module, node),
         ArrayNew => return self.select_array_new(module, node),
         ArrayLen => return self.select_array_len(module, node),
         ArrayAsBytes => return self.select_array_as_bytes(module, node),
@@ -819,6 +821,42 @@ fn (self: &var Selector) select_test_fail(module: &ir::Module, node: &ir::InstrN
     try self.report_failure("kizu_panic_test_fail", &words, node.span.start.line, node.span.start.column);
     let rest = try self.new_cold_block();
     try self.start_block(rest);
+    try self.set_val(node.result.name, no_val());
+    return null;
+}
+
+/// Selects the start of a test: the runtime keeps the test's name and the
+/// file it was written in, so a failure can name both.
+fn (self: &var Selector) select_test_begin(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let name = node.args.get(0) orelse return try self.fail_op(module, node);
+    let file = node.args.get(1) orelse return try self.fail_op(module, node);
+    if node.args.len() != 2 or !module.names.is(name.type_name, "[]u8") or !module.names.is(file.type_name, "[]u8") {
+        return try self.fail_op(module, node);
+    }
+    var words = array::new<i64>(self.allocator);
+    defer words.deinit(self.allocator);
+    if !try self.push_words(module, name, &var words) or !try self.push_words(module, file, &var words) {
+        return try self.fail_op(module, node);
+    }
+    let count = try self.place_words(&words);
+    try self.call_c("kizu_test_begin", count);
+    try self.set_val(node.result.name, no_val());
+    return null;
+}
+
+/// Selects the mark a test leaves before each statement: the runtime keeps
+/// the statement's position for the note a failure prints.
+fn (self: &var Selector) select_test_mark(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    var words = array::new<i64>(self.allocator);
+    defer words.deinit(self.allocator);
+    let line_reg = self.func.new_vreg();
+    try self.mov_imm(line_reg, node.span.start.line);
+    try words.append(self.allocator, line_reg);
+    let column_reg = self.func.new_vreg();
+    try self.mov_imm(column_reg, node.span.start.column);
+    try words.append(self.allocator, column_reg);
+    let count = try self.place_words(&words);
+    try self.call_c("kizu_test_mark", count);
     try self.set_val(node.result.name, no_val());
     return null;
 }
