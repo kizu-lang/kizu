@@ -24,8 +24,8 @@ cd "$root"
 seed="$(scripts/fetch-seed.sh)"
 echo "seed: $(KIZU_LIB_DIR='' "$seed" version)"
 
-# The version module compiler/ imports is still written by the Go generator.
-go run ./scripts/gen-selfhost-version
+# The version module compiler/ imports is generated, not checked in.
+scripts/gen-selfhost-version.sh
 
 KIZU_LIB_DIR='' "$seed" check compiler
 if [ "$tests" = 1 ]; then KIZU_LIB_DIR='' "$seed" test compiler; fi

@@ -73,7 +73,7 @@ run "single-file edit run" "$cold" "$kizu" run "$tmp/hello.kizu"
 # changes shows up here first. The copy keeps the edit out of the checkout,
 # and the generated version module is written into the checkout before it is
 # copied, since a build without it does not resolve.
-go run ./scripts/gen-selfhost-version >/dev/null
+scripts/gen-selfhost-version.sh
 cp -R compiler "$tmp/compiler"
 compiler_edit_file="$tmp/compiler/src/internal/types/body_expression_core.kizu"
 compiler_edit_from='is not an operator; logical and is written'
