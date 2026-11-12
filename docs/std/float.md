@@ -23,8 +23,9 @@ null を返します。受ける形は `append` が書くものと、人が書�
 
 どちらも桁の生成と比較は幅の制限のない整数で行い、float の丸めに頼りません。その分
 変換ごとに数回の確保が要り、代わりにどの target でも同じ答えになります。compiler の
-float literal もこの `parse` で値を決めます(Go seed は `strconv`)。両者の一致は
-`cmd/kizu` の `TestFloatText` が数千の値で確かめています。
+float literal もこの `parse` で値を決めます(Go seed は `strconv`)。`cmd/kizu` の
+`TestFloatText` が数千の値で、Python の `repr` / `float`(David Gay の最短表記と
+正しい丸め)から作った参照(`cmd/kizu/testdata/float_text.txt`)と突き合わせます。
 
 `bits` は IEEE 754 binary64 の表現をそのまま返し、`from_bits` はその逆です。
 `cast` は値を変換しますが表現には触れないので、bit を見る処理はこの 2 つの上に
