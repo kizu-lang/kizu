@@ -178,6 +178,41 @@ test "encode byte and xmm registers" {
     try expect_code(allocator, &var obj, "41ffd4"); // call *%r12
 }
 
+test "encode xmm copies, loads and stores" {
+    let allocator = mem::page_allocator();
+    var syms = try ir::new_name_table(allocator);
+    defer syms.deinit(allocator);
+    var obj = try code_object(allocator, &var syms);
+    defer obj.deinit(allocator);
+    try obj.x86_xx(allocator, "movapd", 0, 1, 0);
+    try expect_code(allocator, &var obj, "660f28c1"); // movapd %xmm1, %xmm0
+    try obj.x86_xx(allocator, "movapd", 0, 12, 3);
+    try expect_code(allocator, &var obj, "66410f28dc"); // movapd %xmm12, %xmm3
+    try obj.x86_xx(allocator, "movapd", 0, 2, 15);
+    try expect_code(allocator, &var obj, "66440f28fa"); // movapd %xmm2, %xmm15
+    try obj.x86_mx(allocator, "movsd", 7, 0, 3, 0, 8);
+    try expect_code(allocator, &var obj, "f2440f1004c7"); // movsd (%rdi,%rax,8), %xmm8
+    try obj.x86_mx(allocator, "movsd", 5, 0 - 1, 0, 0 - 24, 0);
+    try expect_code(allocator, &var obj, "f20f1045e8"); // movsd -24(%rbp), %xmm0
+    try obj.x86_mx(allocator, "movsd", 13, 0 - 1, 0, 0, 1);
+    try expect_code(allocator, &var obj, "f2410f104d00"); // movsd (%r13), %xmm1
+    try obj.x86_mx(allocator, "movsd", 4, 0 - 1, 0, 8, 12);
+    try expect_code(allocator, &var obj, "f2440f10642408"); // movsd 8(%rsp), %xmm12
+    try obj.x86_mx(allocator, "movss", 12, 9, 2, 4, 2);
+    try expect_code(allocator, &var obj, "f3430f10548c04"); // movss 4(%r12,%r9,4), %xmm2
+    try obj.x86_mx(allocator, "movsd", 0 - 1, 0, 3, 0, 3);
+    try expect_code(allocator, &var obj, "f20f101cc500000000"); // movsd (,%rax,8), %xmm3
+    try obj.x86_xm(allocator, "movsd", 8, 6, 1, 3, 0);
+    try expect_code(allocator, &var obj, "f2440f1104ce"); // movsd %xmm8, (%rsi,%rcx,8)
+    try obj.x86_xm(allocator, "movsd", 0, 5, 0 - 1, 0, 0 - 129);
+    try expect_code(allocator, &var obj, "f20f11857fffffff"); // movsd %xmm0, -129(%rbp)
+    try obj.x86_xm(allocator, "movss", 15, 4, 0 - 1, 0, 0);
+    try expect_code(allocator, &var obj, "f3440f113c24"); // movss %xmm15, (%rsp)
+    // A move of no float width is refused.
+    try obj.x86_mx(allocator, "movq", 7, 0 - 1, 0, 0, 0);
+    testing::expect(obj.failure.len() > 0);
+}
+
 // The alignment of a function padded with nops of 10, 9 and 15 bytes:
 //
 //         .p2align 4

@@ -2169,14 +2169,12 @@ fn xmm_dest(rd: i64) -> i64 {
     return 15;
 }
 
-/// Copies xmm a into xmm b, every bit: b is cleared, then takes a's bits
-/// by xor.
+/// Copies xmm a into xmm b, every bit.
 fn (self: &Amd) xmm_copy(out: &var Out, a: i64, b: i64) -> !void {
     if a == b {
         return;
     }
-    try self.xx(out, "xorps", b, b);
-    return self.xx(out, "xorps", a, b);
+    return self.xx(out, "movapd", a, b);
 }
 
 /// Puts the bits of operand reg, a general register or an xmm one, in xmm
@@ -2215,31 +2213,48 @@ fn (self: &Amd) xmm_imm(out: &var Out, bits: i64, n: i64) -> !void {
     return self.rx(out, "movq", 16, 8, n);
 }
 
-/// Loads a float into an xmm register through r10, which takes the bits
-/// after the address is used.
-fn (self: &Amd) xmm_load(out: &var Out, inst: &MInst, at: Mem) -> !void {
-    try self.mr(out, load_mnemonic(inst.width, false), at, 16, load_size(inst.width, false));
-    return self.float_in(out, 16, xmm_of(inst.rd), inst.width);
+/// Returns the scalar move of a float width: movsd for 8 bytes, movss
+/// for 4, and for any other width a name the encoder refuses.
+fn scalar_move(width: i64) -> []u8 {
+    if width == 8 {
+        return "movsd";
+    }
+    if width == 4 {
+        return "movss";
+    }
+    return "scalar move of an unknown width";
 }
 
-/// Stores a float from an xmm register through a general register the
-/// address does not use: r10 or r11, or else rax, saved around it.
-fn (self: &var Amd) xmm_store(out: &var Out, inst: &MInst, at: Mem) -> !void {
-    var through = 16;
-    if at.base == 16 or at.index == 16 {
-        through = 17;
+/// Loads a float from memory into its xmm register.
+fn (self: &Amd) xmm_load(out: &var Out, inst: &MInst, at: Mem) -> !void {
+    let xmm = xmm_of(inst.rd);
+    let mnemonic = scalar_move(inst.width);
+    if out.binary {
+        return out.obj.x86_mx(
+            self.allocator, mnemonic, self.number_or_none(at.base), self.number_or_none(at.index), at.shift, at.disp, self.xmm_number(xmm)
+        );
     }
-    let keep = at.base == 17 or at.index == 17;
-    if through == 17 and keep {
-        through = 8;
-        try self.r1(out, "pushq", 8, 8);
+    try self.op(out, mnemonic);
+    try self.mem_text(out, at);
+    try self.comma(out);
+    try self.xmm(out, xmm);
+    return self.nl(out);
+}
+
+/// Stores a float from its xmm register to memory.
+fn (self: &Amd) xmm_store(out: &var Out, inst: &MInst, at: Mem) -> !void {
+    let xmm = xmm_of(inst.rd);
+    let mnemonic = scalar_move(inst.width);
+    if out.binary {
+        return out.obj.x86_xm(
+            self.allocator, mnemonic, self.xmm_number(xmm), self.number_or_none(at.base), self.number_or_none(at.index), at.shift, at.disp
+        );
     }
-    try self.float_out(out, xmm_of(inst.rd), through, inst.width);
-    try self.rm(out, store_mnemonic(inst.width), through, inst.width, at);
-    if through == 8 {
-        try self.r1(out, "popq", 8, 8);
-    }
-    return;
+    try self.op(out, mnemonic);
+    try self.xmm(out, xmm);
+    try self.comma(out);
+    try self.mem_text(out, at);
+    return self.nl(out);
 }
 
 fn (self: &Amd) float_binary(out: &var Out, inst: &MInst) -> !void {
