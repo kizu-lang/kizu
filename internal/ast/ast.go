@@ -1184,9 +1184,16 @@ func (e *CallExpr) String() string {
 }
 
 // TypeApplyExpr represents a call target with explicit static type arguments.
+//
+// Resolved marks a list the compiler wrote with every argument already bound:
+// the types are concrete and a `Field` argument is the name of a field of the
+// type before it. Nothing in such a list is read through the type parameters
+// or captures in force where the call sits, which is what keeps a field named
+// `T` or `f` from being taken for the generic's own `T` or `f` (#1987).
 type TypeApplyExpr struct {
-	Callee  Expression
-	TypeArg string
+	Callee   Expression
+	TypeArg  string
+	Resolved bool
 }
 
 // expressionNode marks TypeApplyExpr as an expression node.

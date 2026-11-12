@@ -1,0 +1,1282 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::ownership;
+import compiler::internal::project;
+import compiler::internal::types;
+import compiler::internal::unsafecap;
+import std::array;
+import std::fmt;
+import std::fs;
+import std::io;
+import std::json;
+import std::mem;
+import std::process;
+import std::string;
+import std::testing;
+
+// The programs here come from the Quint model of the `unsafe` marker check in
+// spec/unsafecap/unsafecap.qnt (README.md there says what it covers);
+// scripts/unsafecap-mbt samples them into compiler/tests/mbt/unsafecap.json.
+// Each case is two functions, g and f, and the diagnostic classes the model
+// allows: this runner renders it to a two-file Kizu module, runs the type
+// check and then the ownership check the way `kizu check` does, and compares
+// the class of the first diagnostic. A divergence is either a checker bug or a
+// model bug, and which one is a question for SPEC.md: record it in
+// findings/unsafecap-quint-findings.md rather than adjusting either side to
+// agree. internal/unsafecap/mbt_test.go replays the same fixture against the
+// Go checker.
+//
+// A statement is written as
+//
+//     stmt  := ["$ "] form           "$ " is the `// SAFETY:` line before it
+//     form  := "print" E
+//            | ("ptr_write" | "vol_write" | "deref_set" | "field_set") M E
+//            | ("view" | "deref_borrow" | "field_borrow") M
+//            | "defer" M ("ev" | "uv" | "sv")
+//            | "bind" ("safe" | "unsafe" | "extern") ("sf" | "uf" | "ext") M
+//     M     := "-" | "!"+             the statement's own markers
+//     E     := L | "!"* "(" L "+" L ")" | "!"* "{" ["$"] L ";" ["$"] L "}"
+//     L     := "!"* atom              each "!" is one `unsafe`
+//
+// with the atoms of uc_atom_source. The fields are separated by single spaces.
+//
+// The files of compiler/src share one namespace, so the names here carry a
+// `uc_` prefix to stay clear of the other replays.
+
+/// One generated function: `fn` or `unsafe` (an `unsafe fn`), in the file
+/// that declares Buf ("home") or the other file of the module ("away").
+pub struct UcFunc {
+    pub kind: string::String,
+    pub file: string::String,
+    pub body: array::Array<string::String>,
+}
+
+/// One program of the fixture.
+pub struct UcCase {
+    pub bucket: string::String,
+    pub g: UcFunc,
+    pub f: UcFunc,
+    pub expect: array::Array<string::String>,
+}
+
+/// The fixture file. Its cases are read as JSON values and copied into
+/// UcCase by uc_case_from: json::decode of a struct with a field named `f`
+/// inside an array fails at comptime ("capture `f` belongs to UcFixture, not
+/// UcCase"), the name of the field handle std::json's decode_field takes.
+pub struct UcFixture {
+    pub note: string::String,
+    pub cases: array::Array<json::Value>,
+}
+
+/// Shapes whose verdict SPEC §12 and the examples fix, one per line as
+/// `name|g kind|g file|g body|f kind|f file|f body|classes`, statements and
+/// classes separated by `,`. They mirror spec/unsafecap/unsafecap_test.qnt, so
+/// a harness that renders or classifies wrongly fails here before it disagrees
+/// with the model anywhere else. The last ones of the plain shapes are the
+/// forms a checker that ignored markers, leaked them into a callee, or let a
+/// function be bound at a laxer pointer type would accept.
+fn uc_known_shapes() -> []u8 {
+    return
+        \\marked|fn|home||fn|home|$ ptr_write ! lit|
+        \\unmarkedRead|fn|home||fn|home|print read|Missing:ptr_read
+        \\unmarkedDeref|fn|home||fn|home|print deref|Missing:ptr_deref
+        \\unmarkedVolatile|fn|home||fn|home|print vread|Missing:volatile
+        \\unmarkedOffset|fn|home||fn|home|print offset|Missing:ptr_offset
+        \\unmarkedCast|fn|home||fn|home|print cast|Missing:ptr_cast
+        \\unmarkedIntCast|fn|home||fn|home|print intcast|Missing:ptr_int_cast
+        \\unmarkedExtern|fn|home||fn|home|print ext|Missing:extern_call
+        \\unmarkedUnsafeFn|fn|home||fn|home|print uf|Missing:unsafe_call
+        \\unmarkedUnsafeFnPtr|fn|home||fn|home|print fu|Missing:unsafe_call
+        \\unmarkedExternFnPtr|fn|home||fn|home|print fe|Missing:extern_call
+        \\unmarkedBuild|fn|home||fn|home|print build|Missing:struct_invariant
+        \\unmarkedPtrWrite|fn|home||fn|home|ptr_write - lit|Missing:ptr_write
+        \\unmarkedVolWrite|fn|home||fn|home|vol_write - lit|Missing:volatile
+        \\unmarkedDerefSet|fn|home||fn|home|deref_set - lit|Missing:ptr_deref
+        \\unmarkedFieldSet|fn|home||fn|home|field_set - lit|Missing:struct_invariant
+        \\unmarkedView|fn|home||fn|home|view -|Missing:ptr_view
+        \\unmarkedRawBorrow|fn|home||fn|home|deref_borrow -|Missing:ptr_deref
+        \\safeOperands|fn|home||fn|home|print (sf+fs),print field,print lit|
+        \\markerOnSafe|fn|home||fn|home|$ print !sf|Unused
+        \\oneMarkerCoversBoth|fn|home||fn|home|$ ptr_write ! read|
+        \\redundantNested|fn|home||fn|home|$ print !!read|Unused
+        \\outerOverInner|fn|home||fn|home|$ print !(!read+!ext)|Unused
+        \\outerAndInner|fn|home||fn|home|$ print !(!read+ext)|
+        \\assignmentValueIsSeparate|fn|home||fn|home|$ deref_set ! read|Missing:ptr_read
+        \\assignmentValueMarked|fn|home||fn|home|$ deref_set ! !read|
+        \\noSafety|fn|home||fn|home|print !read|NoSafety
+        \\safetyDoesNotReachInner|fn|home||fn|home|$ print {!read;lit}|NoSafety
+        \\innerSafety|fn|home||fn|home|print {$!read;lit}|
+        \\outerCoversInnerStatements|fn|home||fn|home|$ print !{read;ext}|
+        \\unsafeFnBodyNotCovered|fn|home||unsafe|home|print read|Missing:ptr_read
+        \\deferExtern|fn|home||fn|home|$ defer ! ev|
+        \\deferUnmarked|fn|home||fn|home|defer - uv|Missing:unsafe_call
+        \\deferSafeMarked|fn|home||fn|home|$ defer ! sv|Unused
+        \\bindSafe|fn|home||fn|home|bind safe sf -|
+        \\bindUnsafe|fn|home||fn|home|$ bind unsafe uf !|
+        \\bindExtern|fn|home||fn|home|$ bind extern ext !|
+        \\bindUnsafeUnmarked|fn|home||fn|home|bind unsafe uf -|Missing:unsafe_call
+        \\launderUnsafe|fn|home||fn|home|bind safe uf -|FnTypeMismatch
+        \\launderExtern|fn|home||fn|home|bind safe ext -|FnTypeMismatch
+        \\structInHome|fn|home||fn|home|$ field_set ! lit,$ print !build|
+        \\fieldSetAway|fn|home||fn|away|$ field_set ! lit|Boundary
+        \\buildAway|fn|home||fn|away|$ print !build|Boundary
+        \\fieldReadAway|fn|home||fn|away|print field|
+        \\fieldBorrowUnmarked|fn|home||fn|home|field_borrow -|Missing:struct_invariant
+        \\fieldBorrowMarked|fn|home||fn|home|$ field_borrow !|
+        \\fieldBorrowAway|fn|home||fn|away|$ field_borrow !|Boundary
+        \\fieldBorrowAwayUnmarked|fn|home||fn|away|field_borrow -|Boundary,Missing:struct_invariant
+        \\callUnsafeG|unsafe|home|$ print !read|fn|home|print g|Missing:unsafe_call
+        \\callUnsafeGMarked|unsafe|home|$ print !read|fn|home|$ print !g|
+        \\markerDoesNotLeakIntoSafeG|fn|home|print read|fn|home|$ print !g|Missing:ptr_read,Unused
+        \\markerDoesNotLeakIntoUnsafeG|unsafe|home|print read|fn|home|$ print !g|Missing:ptr_read
+        \\markerDoesNotLeakIntoAwayG|fn|away|$ field_set ! lit|fn|home|$ print !(g+read)|Boundary
+    ;
+}
+
+/// Shapes on which the checker and SPEC §12 are known to disagree
+/// (findings/unsafecap-quint-findings.md, F3), in the form of known_shapes
+/// with one more field: the class the checker reports ("?" for a message
+/// outside the model). The test fails if the checker stops doing what is
+/// written here, so a fix shows up as a prompt to move the shape into
+/// known_shapes. Two markers on a form the checker reads with one are a form
+/// error, not an unused marker. Both reject; the diagnostic differs.
+fn uc_known_divergences() -> []u8 {
+    return
+        \\doubleMarkedView|fn|home||fn|home|$ view !!|Unused|?
+        \\doubleMarkedRawBorrow|fn|home||fn|home|$ deref_borrow !!|Unused|Missing:ptr_deref
+        \\doubleMarkedDefer|fn|home||fn|home|$ defer !! ev|Unused|?
+    ;
+}
+
+/// The checker's answer to `let r = &var p.*;` with no marker. SPEC §12 counts
+/// that initializer as a `ptr_deref` and says a missing marker's diagnostic
+/// names the kind; the checker names the form instead, and classify maps it
+/// to Missing:ptr_deref (findings/unsafecap-quint-findings.md, F2).
+fn uc_raw_borrow_form_message() -> []u8 {
+    return "a raw pointer's value is borrowed by an `unsafe` binding";
+}
+
+/// What the generated functions call and touch. It is the frame
+/// spec/unsafecap/unsafecap.qnt describes.
+fn uc_prelude() -> []u8 {
+    return
+        \\extern "c" fn ext() -> i64
+        \\extern "c" fn ev() -> void
+        \\/// The caller keeps nothing; this exists to be called under a marker.
+        \\unsafe fn uf() -> i64 {
+        \\    return 1;
+        \\}
+        \\/// The caller keeps nothing; this exists to be called under a marker.
+        \\unsafe fn uv() -> void {
+        \\    return;
+        \\}
+        \\fn sf() -> i64 {
+        \\    return 1;
+        \\}
+        \\fn sv() -> void {
+        \\    return;
+        \\}
+        \\fn pid(q: ptr<i64>) -> i64 {
+        \\    return 0;
+        \\}
+        \\/// data points to one live i64.
+        \\unsafe struct Buf {
+        \\    data: ptr<i64>,
+        \\    n: i64,
+        \\}
+        \\fn blen(x: Buf) -> i64 {
+        \\    return x.n;
+        \\}
+        \\fn setn(x: &var i64) -> void {
+        \\    x = 7;
+        \\}
+        \\fn main() {}
+        \\
+    ;
+}
+
+/// The parameter list of g and f.
+fn uc_params() -> []u8 {
+    return
+        \\p: ptr<i64>, b: &var Buf, fu: unsafe fn() -> i64, fe: extern "c" fn() -> i64, fs: fn() -> i64
+    ;
+}
+
+fn uc_safety_line() -> []u8 {
+    return "// SAFETY: the model says this marker is the one that covers it";
+}
+
+/// The Kizu an operand stands for, or "" for one the fixture does not have.
+fn uc_atom_source(atom: []u8) -> []u8 {
+    if mem::equal_bytes(atom, "lit") { return "1"; }
+    if mem::equal_bytes(atom, "sf") { return "sf()"; }
+    if mem::equal_bytes(atom, "fs") { return "fs()"; }
+    if mem::equal_bytes(atom, "field") { return "b.n"; }
+    if mem::equal_bytes(atom, "read") { return "ptr_read(p)"; }
+    if mem::equal_bytes(atom, "deref") { return "p.*"; }
+    if mem::equal_bytes(atom, "vread") { return "volatile_read(p)"; }
+    if mem::equal_bytes(atom, "offset") { return "pid(ptr_offset(p, 0))"; }
+    if mem::equal_bytes(atom, "cast") { return "pid(cast<ptr<i64>>(p))"; }
+    if mem::equal_bytes(atom, "intcast") { return "cast<i64>(int_from_ptr<usize>(p))"; }
+    if mem::equal_bytes(atom, "ext") { return "ext()"; }
+    if mem::equal_bytes(atom, "uf") { return "uf()"; }
+    if mem::equal_bytes(atom, "fu") { return "fu()"; }
+    if mem::equal_bytes(atom, "fe") { return "fe()"; }
+    if mem::equal_bytes(atom, "build") { return "blen(Buf { data: p, n: 1 })"; }
+    if mem::equal_bytes(atom, "g") { return "g(p, b, fu, fe, fs)"; }
+    return "";
+}
+
+/// The function pointer type a binding names, or "".
+fn uc_fn_type(name: []u8) -> []u8 {
+    if mem::equal_bytes(name, "safe") { return "fn() -> i64"; }
+    if mem::equal_bytes(name, "unsafe") { return "unsafe fn() -> i64"; }
+    if mem::equal_bytes(name, "extern") {
+        return
+            \\extern "c" fn() -> i64
+        ;
+    }
+    return "";
+}
+
+/// How many fields each statement form has, or 0 for an unknown form.
+fn uc_arity(form: []u8) -> i64 {
+    if mem::equal_bytes(form, "print") { return 2; }
+    if mem::equal_bytes(form, "ptr_write") { return 3; }
+    if mem::equal_bytes(form, "vol_write") { return 3; }
+    if mem::equal_bytes(form, "deref_set") { return 3; }
+    if mem::equal_bytes(form, "field_set") { return 3; }
+    if mem::equal_bytes(form, "view") { return 2; }
+    if mem::equal_bytes(form, "deref_borrow") { return 2; }
+    if mem::equal_bytes(form, "field_borrow") { return 2; }
+    if mem::equal_bytes(form, "defer") { return 3; }
+    if mem::equal_bytes(form, "bind") { return 4; }
+    return 0;
+}
+
+/// One rendered program: the file that declares Buf, and the other file of
+/// the module, empty when no function is there.
+struct UcSources {
+    home: string::String,
+    away: string::String,
+}
+
+/// Writes a case as the two files of one module, or returns false for one
+/// that is not well formed.
+fn uc_render(allocator: Allocator, out: &var UcSources, c: &UcCase) -> !bool {
+    try out.home.append_bytes(allocator, uc_prelude());
+    if !try uc_render_func(allocator, out, "g", &c.g) {
+        return false;
+    }
+    return uc_render_func(allocator, out, "f", &c.f);
+}
+
+/// Writes one generated function with its statements into the file it is in.
+fn uc_render_func(allocator: Allocator, sources: &var UcSources, name: []u8, f: &UcFunc) -> !bool {
+    var text = string::new(allocator);
+    defer text.deinit(allocator);
+    let kind = f.kind.as_bytes();
+    if mem::equal_bytes(kind, "fn") {
+        try text.append_bytes(allocator, "fn ");
+    } else if mem::equal_bytes(kind, "unsafe") {
+        try text.append_bytes(allocator,
+            "/// The caller keeps nothing; the body states its own obligations.");
+        try text.append_byte(allocator, cast<u8>(10));
+        try text.append_bytes(allocator, "unsafe fn ");
+    } else {
+        return false;
+    }
+    try text.append_bytes(allocator, name);
+    try text.append_bytes(allocator, "(");
+    try text.append_bytes(allocator, uc_params());
+    try text.append_bytes(allocator, ") -> i64 {");
+    try text.append_byte(allocator, cast<u8>(10));
+    var index = 0;
+    while f.body.at(index) |stmt| {
+        var id = try string::from_bytes(allocator, name);
+        defer id.deinit(allocator);
+        try fmt::append_i64(allocator, &var id, index);
+        index = index + 1;
+        let stmt_bytes = stmt.as_bytes();
+        let id_bytes = id.as_bytes();
+        if !try uc_render_stmt(allocator, &var text, id_bytes, stmt_bytes) {
+            return false;
+        }
+    }
+    try uc_line(allocator, &var text, "return 0;");
+    try text.append_byte(allocator, cast<u8>(125));
+    try text.append_byte(allocator, cast<u8>(10));
+    let file = f.file.as_bytes();
+    if mem::equal_bytes(file, "away") {
+        try sources.away.append_string(allocator, &text);
+    } else {
+        try sources.home.append_string(allocator, &text);
+    }
+    return true;
+}
+
+fn uc_line(allocator: Allocator, out: &var string::String, text: []u8) -> !void {
+    try out.append_bytes(allocator, "    ");
+    try out.append_bytes(allocator, text);
+    return out.append_byte(allocator, cast<u8>(10));
+}
+
+/// Writes the SAFETY line when the statement asked for one.
+fn uc_comment(allocator: Allocator, out: &var string::String, safety: bool) -> !void {
+    if safety {
+        return uc_line(allocator, out, uc_safety_line());
+    }
+    return;
+}
+
+/// Appends n `unsafe ` prefixes.
+fn uc_markers(allocator: Allocator, out: &var string::String, n: i64) -> !void {
+    var count = 0;
+    while count < n {
+        try out.append_bytes(allocator, "unsafe ");
+        count = count + 1;
+    }
+    return;
+}
+
+/// Reads a statement's own markers: "-" for none or "!"+, or -1.
+fn uc_mark_word(word: []u8) -> i64 {
+    if mem::equal_bytes(word, "-") {
+        return 0;
+    }
+    if mem::len(word) == 0 or uc_leading_marks(word) != mem::len(word) {
+        return -1;
+    }
+    return mem::len(word);
+}
+
+/// The number of "!" a token starts with.
+fn uc_leading_marks(text: []u8) -> i64 {
+    var count = 0;
+    while mem::byte_at(text, count) |byte| {
+        if byte != cast<u8>(33) {
+            return count;
+        }
+        count = count + 1;
+    }
+    return count;
+}
+
+/// Writes one statement of the fixture syntax; id names its bindings.
+fn uc_render_stmt(allocator: Allocator, out: &var string::String, id: []u8, text: []u8) -> !bool {
+    let safety = mem::starts_with(text, "$ ");
+    var start = 0;
+    if safety {
+        start = 2;
+    }
+    var fields = array::new<string::String>(allocator);
+    defer fields.deinit(allocator);
+    try uc_split_fields(allocator, &var fields, text[start..mem::len(text)], cast<u8>(32));
+    if fields.at(0) |form| {
+        let form_bytes = form.as_bytes();
+        let want = uc_arity(form_bytes);
+        if want == 0 or fields.len() != want {
+            return false;
+        }
+        var line_text = string::new(allocator);
+        defer line_text.deinit(allocator);
+        if mem::equal_bytes(form_bytes, "print") {
+            var e = string::new(allocator);
+            defer e.deinit(allocator);
+            if !try uc_render_field_expr(allocator, &var e, &fields, 1, id) {
+                return false;
+            }
+            try uc_comment(allocator, out, safety);
+            try line_text.append_bytes(allocator, "print(");
+            try line_text.append_string(allocator, &e);
+            try line_text.append_bytes(allocator, ");");
+            let bytes = line_text.as_bytes();
+            try uc_line(allocator, out, bytes);
+            return true;
+        }
+        // The statement's own markers come right after the form, except for a
+        // binding, where they come last.
+        var at = 1;
+        if mem::equal_bytes(form_bytes, "bind") {
+            at = 3;
+        }
+        var m = -1;
+        if fields.at(at) |word| {
+            let word_bytes = word.as_bytes();
+            m = uc_mark_word(word_bytes);
+        }
+        if m < 0 {
+            return false;
+        }
+        var prefix = string::new(allocator);
+        defer prefix.deinit(allocator);
+        try uc_markers(allocator, &var prefix, m);
+        return uc_render_marked(allocator, out, id, &fields, &prefix, safety);
+    }
+    return false;
+}
+
+/// Renders the expression in field at of fields into out.
+fn uc_render_field_expr(
+    allocator: Allocator,
+    out: &var string::String,
+    fields: &array::Array<string::String>,
+    at: i64,
+    id: []u8
+) -> !bool {
+    if fields.at(at) |field| {
+        let bytes = field.as_bytes();
+        return uc_render_expr(allocator, out, id, bytes);
+    }
+    return false;
+}
+
+/// Writes a statement that carries markers: prefix is them, put where the
+/// statement's operation is.
+fn uc_render_marked(
+    allocator: Allocator,
+    out: &var string::String,
+    id: []u8,
+    fields: &array::Array<string::String>,
+    prefix: &string::String,
+    safety: bool
+) -> !bool {
+    let form = uc_field_at(fields, 0);
+    var text = string::new(allocator);
+    defer text.deinit(allocator);
+    try text.append_string(allocator, prefix);
+    if mem::equal_bytes(form, "ptr_write") or mem::equal_bytes(form, "vol_write") or
+        mem::equal_bytes(form, "deref_set") or mem::equal_bytes(form, "field_set") {
+        var e = string::new(allocator);
+        defer e.deinit(allocator);
+        if !try uc_render_field_expr(allocator, &var e, fields, 2, id) {
+            return false;
+        }
+        try uc_comment(allocator, out, safety);
+        if mem::equal_bytes(form, "ptr_write") {
+            try text.append_bytes(allocator, "ptr_write(p, ");
+            try text.append_string(allocator, &e);
+            try text.append_bytes(allocator, ");");
+        } else if mem::equal_bytes(form, "vol_write") {
+            try text.append_bytes(allocator, "volatile_write(p, ");
+            try text.append_string(allocator, &e);
+            try text.append_bytes(allocator, ");");
+        } else if mem::equal_bytes(form, "deref_set") {
+            try text.append_bytes(allocator, "p.* = ");
+            try text.append_string(allocator, &e);
+            try text.append_bytes(allocator, ";");
+        } else {
+            try text.append_bytes(allocator, "b.n = ");
+            try text.append_string(allocator, &e);
+            try text.append_bytes(allocator, ";");
+        }
+        let bytes = text.as_bytes();
+        try uc_line(allocator, out, bytes);
+        return true;
+    }
+    if mem::equal_bytes(form, "view") {
+        try uc_comment(allocator, out, safety);
+        var binding = try string::from_bytes(allocator, "let v");
+        defer binding.deinit(allocator);
+        try binding.append_bytes(allocator, id);
+        try binding.append_bytes(allocator, " = ");
+        try binding.append_string(allocator, &text);
+        try binding.append_bytes(allocator, "view_from_ptr(p, 1);");
+        let first = binding.as_bytes();
+        try uc_line(allocator, out, first);
+        var use = try string::from_bytes(allocator, "print(v");
+        defer use.deinit(allocator);
+        try use.append_bytes(allocator, id);
+        try use.append_bytes(allocator, "[0]);");
+        let second = use.as_bytes();
+        try uc_line(allocator, out, second);
+        return true;
+    }
+    if mem::equal_bytes(form, "deref_borrow") {
+        try uc_comment(allocator, out, safety);
+        var binding = try string::from_bytes(allocator, "let r");
+        defer binding.deinit(allocator);
+        try binding.append_bytes(allocator, id);
+        try binding.append_bytes(allocator, " = ");
+        try binding.append_string(allocator, &text);
+        try binding.append_bytes(allocator, "&var p.*;");
+        let first = binding.as_bytes();
+        try uc_line(allocator, out, first);
+        var use = try string::from_bytes(allocator, "print(r");
+        defer use.deinit(allocator);
+        try use.append_bytes(allocator, id);
+        try use.append_bytes(allocator, ".*);");
+        let second = use.as_bytes();
+        try uc_line(allocator, out, second);
+        return true;
+    }
+    if mem::equal_bytes(form, "field_borrow") {
+        try uc_comment(allocator, out, safety);
+        try text.append_bytes(allocator, "setn(&var b.n);");
+        let bytes = text.as_bytes();
+        try uc_line(allocator, out, bytes);
+        return true;
+    }
+    if mem::equal_bytes(form, "defer") {
+        let call = uc_field_at(fields, 2);
+        if !mem::equal_bytes(call, "ev") and !mem::equal_bytes(call, "uv") and !mem::equal_bytes(call, "sv") {
+            return false;
+        }
+        try uc_comment(allocator, out, safety);
+        var statement = try string::from_bytes(allocator, "defer ");
+        defer statement.deinit(allocator);
+        try statement.append_string(allocator, &text);
+        try statement.append_bytes(allocator, call);
+        try statement.append_bytes(allocator, "();");
+        let bytes = statement.as_bytes();
+        try uc_line(allocator, out, bytes);
+        return true;
+    }
+    if mem::equal_bytes(form, "bind") {
+        let ty = uc_fn_type(uc_field_at(fields, 1));
+        let name = uc_field_at(fields, 2);
+        if mem::len(ty) == 0 or
+            (!mem::equal_bytes(name, "sf") and !mem::equal_bytes(name, "uf") and !mem::equal_bytes(name, "ext")) {
+            return false;
+        }
+        var binding = try string::from_bytes(allocator, "let h");
+        defer binding.deinit(allocator);
+        try binding.append_bytes(allocator, id);
+        try binding.append_bytes(allocator, ": ");
+        try binding.append_bytes(allocator, ty);
+        try binding.append_bytes(allocator, " = ");
+        try binding.append_bytes(allocator, name);
+        try binding.append_bytes(allocator, ";");
+        let first = binding.as_bytes();
+        try uc_line(allocator, out, first);
+        try uc_comment(allocator, out, safety);
+        var call = try string::from_bytes(allocator, "print(");
+        defer call.deinit(allocator);
+        try call.append_string(allocator, &text);
+        try call.append_bytes(allocator, "h");
+        try call.append_bytes(allocator, id);
+        try call.append_bytes(allocator, "());");
+        let second = call.as_bytes();
+        try uc_line(allocator, out, second);
+        return true;
+    }
+    return false;
+}
+
+/// Writes one operand with its markers.
+fn uc_render_leaf(allocator: Allocator, out: &var string::String, text: []u8) -> !bool {
+    let m = uc_leading_marks(text);
+    let source = uc_atom_source(text[m..mem::len(text)]);
+    if mem::len(source) == 0 {
+        return false;
+    }
+    try uc_markers(allocator, out, m);
+    try out.append_bytes(allocator, source);
+    return true;
+}
+
+/// Writes an expression. A Block's inner statements go on lines of their own,
+/// one level in, each with its own `// SAFETY:` when the token says so.
+fn uc_render_expr(allocator: Allocator, out: &var string::String, id: []u8, text: []u8) -> !bool {
+    let m = uc_leading_marks(text);
+    let rest = text[m..mem::len(text)];
+    let length = mem::len(rest);
+    if length >= 2 and mem::starts_with(rest, "(") and uc_ends_with(rest, ")") {
+        let inner = rest[1..length - 1];
+        let cut = uc_byte_index(inner, cast<u8>(43));
+        if cut == mem::len(inner) {
+            return false;
+        }
+        try uc_markers(allocator, out, m);
+        try out.append_bytes(allocator, "((");
+        if !try uc_render_leaf(allocator, out, inner[0..cut]) {
+            return false;
+        }
+        try out.append_bytes(allocator, ") + (");
+        if !try uc_render_leaf(allocator, out, inner[cut + 1..mem::len(inner)]) {
+            return false;
+        }
+        try out.append_bytes(allocator, "))");
+        return true;
+    }
+    if length >= 2 and mem::starts_with(rest, "{") and uc_ends_with(rest, "}") {
+        let inner = rest[1..length - 1];
+        let cut = uc_byte_index(inner, cast<u8>(59));
+        if cut == mem::len(inner) {
+            return false;
+        }
+        try uc_markers(allocator, out, m);
+        try out.append_bytes(allocator, "if true {");
+        try out.append_byte(allocator, cast<u8>(10));
+        if !try uc_render_block_part(allocator, out, id, inner[0..cut], true) {
+            return false;
+        }
+        if !try uc_render_block_part(allocator, out, id, inner[cut + 1..mem::len(inner)], false) {
+            return false;
+        }
+        try out.append_bytes(allocator, "    } else {");
+        try out.append_byte(allocator, cast<u8>(10));
+        try out.append_bytes(allocator, "        0");
+        try out.append_byte(allocator, cast<u8>(10));
+        try out.append_bytes(allocator, "    }");
+        return true;
+    }
+    // A lone operand's markers are the operand's.
+    return uc_render_leaf(allocator, out, text);
+}
+
+/// Writes one of the two statements of a Block, `let t = l;` first and the
+/// value `t + (l)` second.
+fn uc_render_block_part(allocator: Allocator, out: &var string::String, id: []u8, part: []u8, first: bool) -> !bool {
+    var start = 0;
+    if mem::starts_with(part, "$") {
+        start = 1;
+        try out.append_bytes(allocator, "        ");
+        try out.append_bytes(allocator, uc_safety_line());
+        try out.append_byte(allocator, cast<u8>(10));
+    }
+    var leaf = string::new(allocator);
+    defer leaf.deinit(allocator);
+    if !try uc_render_leaf(allocator, &var leaf, part[start..mem::len(part)]) {
+        return false;
+    }
+    if first {
+        try out.append_bytes(allocator, "        let t");
+        try out.append_bytes(allocator, id);
+        try out.append_bytes(allocator, " = ");
+        try out.append_string(allocator, &leaf);
+        try out.append_bytes(allocator, ";");
+        try out.append_byte(allocator, cast<u8>(10));
+    } else {
+        try out.append_bytes(allocator, "        t");
+        try out.append_bytes(allocator, id);
+        try out.append_bytes(allocator, " + (");
+        try out.append_string(allocator, &leaf);
+        try out.append_bytes(allocator, ")");
+        try out.append_byte(allocator, cast<u8>(10));
+    }
+    return true;
+}
+
+/// Loads and checks one program the way `kizu check` does, and appends the
+/// first diagnostic, with its notes and help, to out; out stays empty when the
+/// program passes.
+fn uc_check_sources(io: Io, allocator: Allocator, sources: &UcSources, out: &var string::String) -> !void {
+    var tree = ast::new(allocator);
+    defer tree.deinit(allocator);
+    var loader = try project::new_loader(io, allocator, "lib/kizu");
+    defer loader.deinit(allocator);
+    let home = sources.home.as_bytes();
+    try loader.override_source("home.kizu", home);
+    var files = array::new<string::String>(allocator);
+    errdefer files.deinit(allocator);
+    let home_name = try string::from_bytes(allocator, "home.kizu");
+    try files.append(allocator, move home_name);
+    if sources.away.len() > 0 {
+        let away = sources.away.as_bytes();
+        try loader.override_source("away.kizu", away);
+        let away_name = try string::from_bytes(allocator, "away.kizu");
+        try files.append(allocator, move away_name);
+    }
+    var modules = array::new<project::Module>(allocator);
+    errdefer modules.deinit(allocator);
+    try modules.append(allocator, project::Module {
+        path: string::new(allocator),
+        files: move files,
+        test_files: array::new<string::String>(allocator)
+    });
+    let graph = project::Graph {
+        package_name: string::new(allocator),
+        modules: move modules
+    };
+    defer graph.deinit(allocator);
+    let loaded = try loader.load_program(&var tree, &graph);
+    match loaded {
+        Error(failed) => {
+            defer failed.deinit(allocator);
+            let text = try failed.error(allocator, &loader.sources);
+            defer text.deinit(allocator);
+            return out.append_string(allocator, &text);
+        },
+        Program(program) => {
+            defer program.deinit(allocator);
+            var diagnostics = try types::check_all(allocator, &var tree, &program);
+            defer diagnostics.deinit(allocator);
+            if diagnostics.len() == 0 {
+                var moves = try ownership::check_all(allocator, &var tree, &program);
+                defer moves.deinit(allocator);
+                return uc_append_first(allocator, out, &moves, &loader);
+            }
+            return uc_append_first(allocator, out, &diagnostics, &loader);
+        },
+    }
+}
+
+fn uc_append_first(
+    allocator: Allocator,
+    out: &var string::String,
+    diagnostics: &array::Array<diagnostic::Diagnostic>,
+    loader: &project::Loader
+) -> !void {
+    if diagnostics.at(0) |first| {
+        let text = try first.error(allocator, &loader.sources);
+        defer text.deinit(allocator);
+        if text.len() == 0 {
+            // A diagnostic always says something; one that does not still
+            // has to count as a rejection.
+            return out.append_bytes(allocator, "(empty diagnostic)");
+        }
+        return out.append_string(allocator, &text);
+    }
+    return;
+}
+
+/// Appends the diagnostic class of a checker message, as the model's Kind has
+/// them: "" for none, "?" for a message the model does not know. A missing
+/// marker is told apart by the help line, which compiler/src/internal/unsafecap
+/// writes for each kind of operation.
+fn uc_classify(allocator: Allocator, out: &var string::String, message: []u8) -> !void {
+    if mem::len(message) == 0 {
+        return;
+    }
+    if uc_contains_bytes(message, "requires `unsafe`") {
+        let infos = try unsafecap::all(allocator);
+        defer infos.deinit(allocator);
+        var index = 0;
+        while infos.at(index) |info| {
+            index = index + 1;
+            let hint = try unsafecap::hint(allocator, info);
+            defer hint.deinit(allocator);
+            let hint_bytes = hint.as_bytes();
+            if uc_contains_bytes(message, hint_bytes) {
+                try out.append_bytes(allocator, "Missing:");
+                return out.append_bytes(allocator, info.name);
+            }
+        }
+        return out.append_bytes(allocator, "?");
+    }
+    if uc_contains_bytes(message, uc_raw_borrow_form_message()) {
+        // `let r = &var p.*;` with no marker: the checker reads the form
+        // `unsafe &var p.*` as one, so it names the form instead of the
+        // missing marker (findings/unsafecap-quint-findings.md, F2).
+        return out.append_bytes(allocator, "Missing:ptr_deref");
+    }
+    if uc_contains_bytes(message, "`unsafe` covers no operation that needs it") {
+        return out.append_bytes(allocator, "Unused");
+    }
+    if uc_contains_bytes(message, "needs a `// SAFETY:` comment") {
+        return out.append_bytes(allocator, "NoSafety");
+    }
+    if uc_contains_bytes(message, "is confined to its declaration file") {
+        return out.append_bytes(allocator, "Boundary");
+    }
+    if uc_contains_bytes(message, "` is declared ") and uc_contains_bytes(message, "fn() -> i64, got ") {
+        return out.append_bytes(allocator, "FnTypeMismatch");
+    }
+    return out.append_bytes(allocator, "?");
+}
+
+/// Describes how the checker's answer got diverged from the classes expect
+/// allows, into problem; problem stays empty when it did not.
+fn uc_compare(
+    allocator: Allocator,
+    problem: &var string::String,
+    expect: &array::Array<string::String>,
+    got: []u8
+) -> !void {
+    var kind = string::new(allocator);
+    defer kind.deinit(allocator);
+    try uc_classify(allocator, &var kind, got);
+    let kind_bytes = kind.as_bytes();
+    if mem::len(got) == 0 {
+        if expect.len() > 0 {
+            try problem.append_bytes(allocator, "checker accepted");
+        }
+        return;
+    }
+    if mem::equal_bytes(kind_bytes, "?") {
+        try problem.append_bytes(allocator, "checker reported a diagnostic outside the model: ");
+        return problem.append_bytes(allocator, got);
+    }
+    if expect.len() == 0 {
+        try problem.append_bytes(allocator, "checker rejected: ");
+        return problem.append_bytes(allocator, got);
+    }
+    if uc_holds(expect, kind_bytes) {
+        return;
+    }
+    try problem.append_bytes(allocator, "checker reported ");
+    try problem.append_string(allocator, &kind);
+    try problem.append_bytes(allocator, ": ");
+    return problem.append_bytes(allocator, got);
+}
+
+/// Renders and checks one case, appending the checker's answer to got and
+/// the rendered files to sources. Returns false for a case that is not well
+/// formed.
+fn uc_run_case(io: Io, allocator: Allocator, c: &UcCase, sources: &var UcSources, got: &var string::String) -> !bool {
+    if !try uc_render(allocator, sources, c) {
+        return false;
+    }
+    try uc_check_sources(io, allocator, sources, got);
+    return true;
+}
+
+fn uc_new_sources(allocator: Allocator) -> UcSources {
+    return UcSources {
+        home: string::new(allocator),
+        away: string::new(allocator),
+    };
+}
+
+/// Checks one case against expect and reports on stderr how the checker
+/// diverged from the model. Returns whether it diverged.
+fn uc_diverges(io: Io, allocator: Allocator, c: &UcCase) -> !bool {
+    var sources = uc_new_sources(allocator);
+    defer sources.deinit(allocator);
+    var got = string::new(allocator);
+    defer got.deinit(allocator);
+    var problem = string::new(allocator);
+    defer problem.deinit(allocator);
+    if try uc_run_case(io, allocator, c, &var sources, &var got) {
+        let got_bytes = got.as_bytes();
+        try uc_compare(allocator, &var problem, &c.expect, got_bytes);
+    } else {
+        try problem.append_bytes(allocator, "the program is not well formed");
+    }
+    if problem.len() == 0 {
+        return false;
+    }
+    try uc_report(io, c, &problem, &sources);
+    return true;
+}
+
+/// Writes a divergence, the case and its rendered files to stderr.
+fn uc_report(io: Io, c: &UcCase, problem: &string::String, sources: &UcSources) -> !void {
+    let bucket = c.bucket.as_bytes();
+    try io::write_stderr(io, bucket);
+    try io::write_stderr(io, ": ");
+    let what = problem.as_bytes();
+    try io::write_stderr_line(io, what);
+    try io::write_stderr(io, "model allows [");
+    try uc_write_joined(io, &c.expect, " ");
+    try io::write_stderr_line(io, "]");
+    try uc_write_func(io, "g", &c.g);
+    try uc_write_func(io, "f", &c.f);
+    try io::write_stderr_line(io, "--- home.kizu");
+    let home = sources.home.as_bytes();
+    try io::write_stderr(io, home);
+    try io::write_stderr_line(io, "--- away.kizu");
+    let away = sources.away.as_bytes();
+    return io::write_stderr(io, away);
+}
+
+fn uc_write_func(io: Io, name: []u8, f: &UcFunc) -> !void {
+    try io::write_stderr(io, name);
+    try io::write_stderr(io, " ");
+    let kind = f.kind.as_bytes();
+    try io::write_stderr(io, kind);
+    try io::write_stderr(io, " ");
+    let file = f.file.as_bytes();
+    try io::write_stderr(io, file);
+    try io::write_stderr(io, " [");
+    try uc_write_joined(io, &f.body, " | ");
+    return io::write_stderr_line(io, "]");
+}
+
+fn uc_write_joined(io: Io, values: &array::Array<string::String>, separator: []u8) -> !void {
+    var index = 0;
+    while values.at(index) |value| {
+        if index > 0 {
+            try io::write_stderr(io, separator);
+        }
+        index = index + 1;
+        let bytes = value.as_bytes();
+        try io::write_stderr(io, bytes);
+    }
+    return;
+}
+
+fn uc_holds(values: &array::Array<string::String>, wanted: []u8) -> bool {
+    var index = 0;
+    while values.at(index) |value| {
+        index = index + 1;
+        let bytes = value.as_bytes();
+        if mem::equal_bytes(bytes, wanted) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn uc_contains_bytes(haystack: []u8, needle: []u8) -> bool {
+    let last = mem::len(haystack) - mem::len(needle);
+    var index = 0;
+    while index <= last {
+        if mem::slice(haystack, index, index + mem::len(needle)) |candidate| {
+            if mem::equal_bytes(candidate, needle) {
+                return true;
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn uc_ends_with(text: []u8, suffix: []u8) -> bool {
+    let start = mem::len(text) - mem::len(suffix);
+    if start < 0 {
+        return false;
+    }
+    return mem::equal_bytes(text[start..mem::len(text)], suffix);
+}
+
+/// The index of the first byte in text, or its length.
+fn uc_byte_index(text: []u8, byte: u8) -> i64 {
+    var index = 0;
+    while mem::byte_at(text, index) |at| {
+        if at == byte {
+            return index;
+        }
+        index = index + 1;
+    }
+    return index;
+}
+
+/// Appends each separator-delimited field of text to out; an empty text has
+/// none.
+fn uc_split_fields(allocator: Allocator, out: &var array::Array<string::String>, text: []u8, separator: u8) -> !void {
+    if mem::len(text) == 0 {
+        return;
+    }
+    var start = 0;
+    var index = 0;
+    while index <= mem::len(text) {
+        var at_end = true;
+        if mem::byte_at(text, index) |byte| {
+            at_end = byte == separator;
+        }
+        if at_end {
+            let field = try string::from_bytes(allocator, text[start..index]);
+            try out.append(allocator, move field);
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+/// The bytes of field at of fields, or "".
+fn uc_field_at(fields: &array::Array<string::String>, at: i64) -> []u8 {
+    if fields.at(at) |field| {
+        let bytes = field.as_bytes();
+        return bytes;
+    }
+    return "";
+}
+
+/// Reads one line of known_shapes or known_divergences.
+fn uc_known_case(allocator: Allocator, fields: &array::Array<string::String>) -> !UcCase {
+    var c = UcCase {
+        bucket: string::new(allocator),
+        g: uc_new_func(allocator),
+        f: uc_new_func(allocator),
+        expect: array::new<string::String>(allocator),
+    };
+    errdefer c.deinit(allocator);
+    try c.bucket.append_bytes(allocator, uc_field_at(fields, 0));
+    try c.g.kind.append_bytes(allocator, uc_field_at(fields, 1));
+    try c.g.file.append_bytes(allocator, uc_field_at(fields, 2));
+    try uc_split_fields(allocator, &var c.g.body, uc_field_at(fields, 3), cast<u8>(44));
+    try c.f.kind.append_bytes(allocator, uc_field_at(fields, 4));
+    try c.f.file.append_bytes(allocator, uc_field_at(fields, 5));
+    try uc_split_fields(allocator, &var c.f.body, uc_field_at(fields, 6), cast<u8>(44));
+    try uc_split_fields(allocator, &var c.expect, uc_field_at(fields, 7), cast<u8>(44));
+    return move c;
+}
+
+/// Copies one case of the fixture out of its JSON value. A member that is
+/// missing or of another type stays empty, and the case then fails to render
+/// or to agree.
+fn uc_case_from(allocator: Allocator, value: &json::Value) -> !UcCase {
+    var c = UcCase {
+        bucket: string::new(allocator),
+        g: uc_new_func(allocator),
+        f: uc_new_func(allocator),
+        expect: array::new<string::String>(allocator),
+    };
+    errdefer c.deinit(allocator);
+    try uc_append_text(allocator, &var c.bucket, value, "bucket");
+    try uc_func_from(allocator, &var c.g, value, "g");
+    try uc_func_from(allocator, &var c.f, value, "f");
+    try uc_append_texts(allocator, &var c.expect, value, "expect");
+    return move c;
+}
+
+fn uc_func_from(allocator: Allocator, out: &var UcFunc, value: &json::Value, key: []u8) -> !void {
+    if uc_member(value, key) |f| {
+        try uc_append_text(allocator, &var out.kind, f, "kind");
+        try uc_append_text(allocator, &var out.file, f, "file");
+        try uc_append_texts(allocator, &var out.body, f, "body");
+    }
+    return;
+}
+
+fn uc_member(value: &json::Value, key: []u8) -> ?&json::Value {
+    match value {
+        Obj(fields) => return fields.at(key),
+        _ => return null,
+    }
+}
+
+/// Appends the string member key of an object value, if it has one.
+fn uc_append_text(allocator: Allocator, out: &var string::String, value: &json::Value, key: []u8) -> !void {
+    if uc_member(value, key) |member| {
+        match member {
+            Str(text) => return out.append_string(allocator, text),
+            _ => {},
+        }
+    }
+    return;
+}
+
+/// Appends each string of the array member key of an object value.
+fn uc_append_texts(
+    allocator: Allocator,
+    out: &var array::Array<string::String>,
+    value: &json::Value,
+    key: []u8
+) -> !void {
+    if uc_member(value, key) |member| {
+        match member {
+            Arr(items) => {
+                var index = 0;
+                while items.at(index) |item| {
+                    index = index + 1;
+                    match item {
+                        Str(text) => {
+                            let bytes = text.as_bytes();
+                            let copy = try string::from_bytes(allocator, bytes);
+                            try out.append(allocator, move copy);
+                        },
+                        _ => {},
+                    }
+                }
+            },
+            _ => {},
+        }
+    }
+    return;
+}
+
+fn uc_new_func(allocator: Allocator) -> UcFunc {
+    return UcFunc {
+        kind: string::new(allocator),
+        file: string::new(allocator),
+        body: array::new<string::String>(allocator),
+    };
+}
+
+/// Splits a table of known_shapes' form into its lines, each split at `|`.
+fn uc_table_rows(allocator: Allocator, table: []u8) -> !array::Array<array::Array<string::String>> {
+    var rows = array::new<array::Array<string::String>>(allocator);
+    errdefer rows.deinit(allocator);
+    var lines = array::new<string::String>(allocator);
+    defer lines.deinit(allocator);
+    try uc_split_fields(allocator, &var lines, table, cast<u8>(10));
+    var index = 0;
+    while lines.at(index) |text| {
+        index = index + 1;
+        if text.len() == 0 {
+            continue;
+        }
+        var fields = array::new<string::String>(allocator);
+        errdefer fields.deinit(allocator);
+        let bytes = text.as_bytes();
+        try uc_split_fields(allocator, &var fields, bytes, cast<u8>(124));
+        try rows.append(allocator, move fields);
+    }
+    return move rows;
+}
+
+test "unsafe model harness agrees on the known shapes and notices each flipped verdict" {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    let rows = try uc_table_rows(allocator, uc_known_shapes());
+    defer rows.deinit(allocator);
+    var failures = 0;
+    var index = 0;
+    while rows.at(index) |fields| {
+        index = index + 1;
+        let c = try uc_known_case(allocator, fields);
+        defer c.deinit(allocator);
+        if try uc_diverges(io, allocator, &c) {
+            failures = failures + 1;
+        }
+        // The same program with the opposite verdict must diverge: a renderer
+        // whose programs all fail the same way, or a classifier that agrees
+        // with anything, would let a flipped shape through.
+        var flipped = array::new<string::String>(allocator);
+        defer flipped.deinit(allocator);
+        if c.expect.len() == 0 {
+            try flipped.append(allocator, try string::from_bytes(allocator, "Missing:ptr_read"));
+        }
+        var sources = uc_new_sources(allocator);
+        defer sources.deinit(allocator);
+        var got = string::new(allocator);
+        defer got.deinit(allocator);
+        var problem = string::new(allocator);
+        defer problem.deinit(allocator);
+        if try uc_run_case(io, allocator, &c, &var sources, &var got) {
+            let got_bytes = got.as_bytes();
+            try uc_compare(allocator, &var problem, &flipped, got_bytes);
+        }
+        if problem.len() == 0 {
+            failures = failures + 1;
+            let name = c.bucket.as_bytes();
+            try io::write_stderr(io, name);
+            try io::write_stderr_line(io, ": the harness did not notice the flipped verdict");
+        }
+    }
+    testing::expect_equal<i64>(53, rows.len());
+    testing::expect_equal<i64>(0, failures);
+}
+
+test "unsafe model known divergences still diverge the recorded way" {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    let rows = try uc_table_rows(allocator, uc_known_divergences());
+    defer rows.deinit(allocator);
+    var failures = 0;
+    var index = 0;
+    while rows.at(index) |fields| {
+        index = index + 1;
+        let c = try uc_known_case(allocator, fields);
+        defer c.deinit(allocator);
+        var sources = uc_new_sources(allocator);
+        defer sources.deinit(allocator);
+        var got = string::new(allocator);
+        defer got.deinit(allocator);
+        var problem = string::new(allocator);
+        defer problem.deinit(allocator);
+        var kind = string::new(allocator);
+        defer kind.deinit(allocator);
+        if try uc_run_case(io, allocator, &c, &var sources, &var got) {
+            let got_bytes = got.as_bytes();
+            try uc_compare(allocator, &var problem, &c.expect, got_bytes);
+            try uc_classify(allocator, &var kind, got_bytes);
+        }
+        let name = c.bucket.as_bytes();
+        let recorded = uc_field_at(fields, 8);
+        let kind_bytes = kind.as_bytes();
+        if problem.len() == 0 {
+            // The checker now agrees with the model: move the shape to
+            // known_shapes and update findings/unsafecap-quint-findings.md.
+            failures = failures + 1;
+            try io::write_stderr(io, name);
+            try io::write_stderr_line(io, ": the checker now agrees with the model");
+        } else if !mem::equal_bytes(kind_bytes, recorded) {
+            failures = failures + 1;
+            try io::write_stderr(io, name);
+            try io::write_stderr(io, ": checker reported ");
+            try io::write_stderr(io, kind_bytes);
+            try io::write_stderr(io, ", recorded ");
+            try io::write_stderr_line(io, recorded);
+        }
+    }
+    testing::expect_equal<i64>(3, rows.len());
+    testing::expect_equal<i64>(0, failures);
+}
+
+// F2, which classify hides from the other tests: once the checker reports a
+// missing marker here, the mapping in classify is no longer needed.
+test "unsafe model known raw borrow diagnostic names the form" {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    var c = UcCase {
+        bucket: try string::from_bytes(allocator, "unmarkedRawBorrow"),
+        g: uc_new_func(allocator),
+        f: uc_new_func(allocator),
+        expect: array::new<string::String>(allocator),
+    };
+    defer c.deinit(allocator);
+    try c.g.kind.append_bytes(allocator, "fn");
+    try c.g.file.append_bytes(allocator, "home");
+    try c.f.kind.append_bytes(allocator, "fn");
+    try c.f.file.append_bytes(allocator, "home");
+    try c.f.body.append(allocator, try string::from_bytes(allocator, "deref_borrow -"));
+    var sources = uc_new_sources(allocator);
+    defer sources.deinit(allocator);
+    var got = string::new(allocator);
+    defer got.deinit(allocator);
+    testing::expect(try uc_run_case(io, allocator, &c, &var sources, &var got));
+    let message = got.as_bytes();
+    // The checker accepting an unmarked raw borrow fails here too.
+    testing::expect(uc_contains_bytes(message, uc_raw_borrow_form_message()));
+    testing::expect(!uc_contains_bytes(message, "requires `unsafe`"));
+}
+
+// A kind added to the model or to compiler/src/internal/unsafecap is a kind
+// the other must learn.
+test "unsafe model known shapes cover every operation kind" {
+    let allocator = mem::page_allocator();
+    let rows = try uc_table_rows(allocator, uc_known_shapes());
+    defer rows.deinit(allocator);
+    let infos = try unsafecap::all(allocator);
+    defer infos.deinit(allocator);
+    var missing = 0;
+    var index = 0;
+    while infos.at(index) |info| {
+        index = index + 1;
+        var wanted = try string::from_bytes(allocator, "Missing:");
+        defer wanted.deinit(allocator);
+        try wanted.append_bytes(allocator, info.name);
+        let wanted_bytes = wanted.as_bytes();
+        var seen = false;
+        var row = 0;
+        while rows.at(row) |fields| {
+            row = row + 1;
+            var expect = array::new<string::String>(allocator);
+            defer expect.deinit(allocator);
+            try uc_split_fields(allocator, &var expect, uc_field_at(fields, 7), cast<u8>(44));
+            if uc_holds(&expect, wanted_bytes) {
+                seen = true;
+            }
+        }
+        if !seen {
+            missing = missing + 1;
+            try io::write_stderr(io::blocking(), "no known shape reports a missing marker for ");
+            try io::write_stderr_line(io::blocking(), info.name);
+        }
+    }
+    testing::expect(infos.len() > 0);
+    testing::expect_equal<i64>(0, missing);
+}
+
+test "unsafe marker checker agrees with the sampled model programs" {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    // KIZU_MBT_FIXTURE replays another fixture, such as a wider sample than
+    // the checked-in one.
+    var path = "compiler/tests/mbt/unsafecap.json";
+    if process::env("KIZU_MBT_FIXTURE") |other| {
+        path = other;
+    }
+    let data = try fs::read_file(io, allocator, path, mem::Limit::Unlimited);
+    defer data.deinit(allocator);
+    let bytes = data.as_bytes();
+    var fixture = try json::decode<UcFixture>(allocator, bytes);
+    defer fixture.deinit(allocator);
+    var failures = 0;
+    var index = 0;
+    while fixture.cases.at(index) |value| {
+        index = index + 1;
+        let c = try uc_case_from(allocator, value);
+        defer c.deinit(allocator);
+        if try uc_diverges(io, allocator, &c) {
+            failures = failures + 1;
+        }
+    }
+    testing::expect(fixture.cases.len() > 0);
+    testing::expect_equal<i64>(0, failures);
+}

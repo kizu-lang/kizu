@@ -484,14 +484,20 @@ pub enum Stdio {
     Pipe,
 }
 
-// A Command is the program and arguments a child will run, and where its
-// three streams go. Every stream starts as Inherit, the way a shell runs a
-// command. It is built by appending, because the number of arguments is the
-// caller's and a fixed shape would have to guess it.
+// A Command is the program and arguments a child will run, the environment
+// and directory it starts in, and where its three streams go. Every stream
+// starts as Inherit, and so do the environment and the directory, the way a
+// shell runs a command. It is built by appending, because the number of
+// arguments is the caller's and a fixed shape would have to guess it.
 pub struct Command {
     // Each argument followed by a NUL, which is the form the host's argv
     // takes and the reason an argument cannot hold one.
     argv: std::string::String,
+    // Each `NAME=value` binding followed by a NUL, laid over the inherited
+    // environment in order.
+    bindings: std::string::String,
+    // The directory the child starts in, empty for this process's.
+    dir: std::string::String,
     stdin: std::net::Stdio,
     stdout: std::net::Stdio,
     stderr: std::net::Stdio,
@@ -517,6 +523,8 @@ pub fn command(allocator: Allocator, program: []u8) -> std::net::Error!std::net:
     try append_arg(allocator, &var argv, program);
     return Command {
         argv: move argv,
+        bindings: std::string::new(allocator),
+        dir: std::string::new(allocator),
         stdin: Stdio::Inherit,
         stdout: Stdio::Inherit,
         stderr: Stdio::Inherit,
@@ -525,6 +533,54 @@ pub fn command(allocator: Allocator, program: []u8) -> std::net::Error!std::net:
 
 fn (self: &var std::net::Command) arg(allocator: Allocator, value: []u8) -> std::net::Error!void {
     try append_arg(allocator, &var self.argv, value);
+    return;
+}
+
+// env sets one variable in the child's environment, which is otherwise this
+// process's. A later binding of the same name wins. An empty name, a name
+// with `=` in it, or a NUL anywhere is InvalidLength: the host's environment
+// could not carry it.
+fn (self: &var std::net::Command) env(
+    allocator: Allocator,
+    name: []u8,
+    value: []u8
+) -> std::net::Error!void {
+    if std::mem::len(name) == 0 {
+        return std::net::Error::InvalidLength;
+    }
+    if index_of_byte(name, cast<u8>(61), 0) |_| {
+        return std::net::Error::InvalidLength;
+    }
+    if index_of_byte(name, cast<u8>(0), 0) |_| {
+        return std::net::Error::InvalidLength;
+    }
+    if index_of_byte(value, cast<u8>(0), 0) |_| {
+        return std::net::Error::InvalidLength;
+    }
+    // One reservation for the whole binding, so running out of memory leaves
+    // none of it behind.
+    let size = std::mem::len(name) + std::mem::len(value) + 2;
+    self.bindings.reserve(allocator, size) catch return std::net::Error::OutOfMemory;
+    self.bindings.append_bytes(allocator, name) catch return std::net::Error::OutOfMemory;
+    self.bindings.append_byte(allocator, cast<u8>(61)) catch return std::net::Error::OutOfMemory;
+    self.bindings.append_bytes(allocator, value) catch return std::net::Error::OutOfMemory;
+    self.bindings.append_byte(allocator, cast<u8>(0)) catch return std::net::Error::OutOfMemory;
+    return;
+}
+
+// set_dir makes the child start in `path` instead of this process's
+// directory. A program named by a relative path is found from there. An empty
+// path or one with a NUL is InvalidLength. A directory the child cannot enter
+// is not an error here: like a program that cannot run, the child exits 127.
+fn (self: &var std::net::Command) set_dir(allocator: Allocator, path: []u8) -> std::net::Error!void {
+    if std::mem::len(path) == 0 {
+        return std::net::Error::InvalidLength;
+    }
+    if index_of_byte(path, cast<u8>(0), 0) |_| {
+        return std::net::Error::InvalidLength;
+    }
+    self.dir.clear();
+    self.dir.append_bytes(allocator, path) catch return std::net::Error::OutOfMemory;
     return;
 }
 
@@ -551,12 +607,16 @@ fn (self: &std::net::Command) spawn(io: Io) -> std::net::Error!std::net::Child {
     let modes = stdio_bits(self.stdin) + stdio_bits(self.stdout) * 4 +
         stdio_bits(self.stderr) * 16;
     let argv = self.argv.as_bytes();
-    let handle = try std::internal::builtin::net_child_spawn(io, argv, modes);
+    let bindings = self.bindings.as_bytes();
+    let dir = self.dir.as_bytes();
+    let handle = try std::internal::builtin::net_child_spawn(io, argv, modes, bindings, dir);
     return Child { handle: handle };
 }
 
 fn (self: std::net::Command) deinit(allocator: Allocator) -> void {
     self.argv.deinit(allocator);
+    self.bindings.deinit(allocator);
+    self.dir.deinit(allocator);
     return;
 }
 

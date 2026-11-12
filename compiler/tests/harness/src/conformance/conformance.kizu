@@ -1,0 +1,569 @@
+import std::array;
+import std::fs;
+import std::mem;
+import std::path;
+import std::sort;
+import std::string;
+
+// The case each program declares at its end, read the way
+// internal/conformance reads it: that package's doc is the format. A case is
+// the run of comment lines a file ends with -- a directive line, then
+// `key: value` lines, with `output:` last because the lines after it are the
+// output. A package is one case, declared in src/main.kizu or, for a
+// test-only package, src/main_test.kizu.
+
+pub error Invalid {
+    BadCase,
+}
+
+pub error Failure = mem::Error or fs::Error or array::Error or Invalid;
+
+/// One program and what running it has to produce.
+pub struct Case {
+    /// The file or package, relative to the repository root. It is also the
+    /// case name.
+    pub path: string::String,
+    /// The CLI verb the case runs with.
+    pub command: string::String,
+    /// Set by the `-fails` directives, where failing is the promise.
+    pub must_fail: bool,
+    /// What the directive line passes after the path.
+    pub args: array::Array<string::String>,
+    /// `NAME=value` host bindings, one per `env:` line.
+    pub env: array::Array<string::String>,
+    /// Repository-relative directories, one per `dir:` line.
+    pub dirs: array::Array<string::String>,
+    /// Whether the block declares `output:`. A directive that produces no
+    /// output is not the same as one that prints nothing.
+    pub has_stdout: bool,
+    /// What the program prints.
+    pub stdout: string::String,
+    pub error_text: string::String,
+    pub pending: string::String,
+    pub features: array::Array<string::String>,
+}
+
+/// The trees a case can live in, the Go `Roots`.
+fn root(index: i64) -> ?[]u8 {
+    if index == 0 {
+        return "examples";
+    }
+    if index == 1 {
+        return "tests/behavior";
+    }
+    if index == 2 {
+        return "docs/tutorial";
+    }
+    return null;
+}
+
+/// Returns every case declared under the roots of the repository the process
+/// runs in, sorted by path. A case that cannot be read stops the walk, with
+/// what is wrong with it written to `problem`.
+pub fn discover(
+    io: Io,
+    allocator: Allocator,
+    problem: &var string::String
+) -> Failure!array::Array<Case> {
+    var paths = array::new<string::String>(allocator);
+    defer paths.deinit(allocator);
+    var index = 0;
+    while root(index) |name| {
+        try walk(io, allocator, name, &var paths);
+        index = index + 1;
+    }
+    try sort::strings(&var paths);
+    var cases = array::new<Case>(allocator);
+    errdefer cases.deinit(allocator);
+    var at = 0;
+    while paths.at(at) |path| {
+        at = at + 1;
+        let name = path.as_bytes();
+        problem.clear();
+        try problem.append_bytes(allocator, name);
+        try problem.append_bytes(allocator, ": ");
+        let entry = try read(io, allocator, name, problem);
+        try cases.append(allocator, move entry);
+    }
+    problem.clear();
+    return move cases;
+}
+
+/// Adds what every case under one directory is named by. A directory with a
+/// kizu.toml is one package and so one case; the modules inside it are not
+/// cases of their own.
+fn walk(
+    io: Io,
+    allocator: Allocator,
+    dir: []u8,
+    paths: &var array::Array<string::String>
+) -> Failure!void {
+    var manifest = try path::join(allocator, dir, "kizu.toml");
+    defer manifest.deinit(allocator);
+    let manifest_path = manifest.as_bytes();
+    if try fs::exists(io, manifest_path) {
+        let package = try string::from_bytes(allocator, dir);
+        try paths.append(allocator, move package);
+        return;
+    }
+    var entries = try fs::read_dir(io, allocator, dir);
+    defer entries.deinit(allocator);
+    var index = 0;
+    while entries.at(index) |entry| {
+        index = index + 1;
+        let entry_path = entry.path.as_bytes();
+        if entry.is_dir {
+            try walk(io, allocator, entry_path, paths);
+        } else {
+            let name = entry.name.as_bytes();
+            if ends_with(name, ".kizu") {
+                let file = try string::from_bytes(allocator, entry_path);
+                try paths.append(allocator, move file);
+            }
+        }
+    }
+    return;
+}
+
+/// Reads the case one program declares at the end of itself.
+fn read(
+    io: Io,
+    allocator: Allocator,
+    case_path: []u8,
+    problem: &var string::String
+) -> Failure!Case {
+    var file = try block_path(io, allocator, case_path, problem);
+    defer file.deinit(allocator);
+    let file_path = file.as_bytes();
+    let source = try fs::read_file(io, allocator, file_path, mem::Limit::Unlimited);
+    defer source.deinit(allocator);
+    let text = source.as_bytes();
+    var lines = try block(allocator, text, problem);
+    defer lines.deinit(allocator);
+    return parse(allocator, case_path, &lines, problem);
+}
+
+/// The file a case is declared in: the file itself, or a package's
+/// src/main.kizu, or src/main_test.kizu when it holds tests only.
+fn block_path(
+    io: Io,
+    allocator: Allocator,
+    case_path: []u8,
+    problem: &var string::String
+) -> Failure!string::String {
+    if ends_with(case_path, ".kizu") {
+        return string::from_bytes(allocator, case_path);
+    }
+    if try package_file(io, allocator, case_path, "src/main.kizu") {
+        return path::join(allocator, case_path, "src/main.kizu");
+    }
+    if try package_file(io, allocator, case_path, "src/main_test.kizu") {
+        return path::join(allocator, case_path, "src/main_test.kizu");
+    }
+    try problem.append_bytes(allocator, "package has no src/main.kizu or src/main_test.kizu case file");
+    return Invalid::BadCase;
+}
+
+fn package_file(io: Io, allocator: Allocator, case_path: []u8, name: []u8) -> Failure!bool {
+    var file = try path::join(allocator, case_path, name);
+    defer file.deinit(allocator);
+    let file_path = file.as_bytes();
+    return is_file(io, file_path);
+}
+
+fn is_file(io: Io, file: []u8) -> Failure!bool {
+    if !(try fs::exists(io, file)) {
+        return false;
+    }
+    let info = try fs::metadata(io, file);
+    return !info.is_dir;
+}
+
+/// The run of comment lines a program ends with, each with its `//` and one
+/// space after it dropped.
+fn block(
+    allocator: Allocator,
+    source: []u8,
+    problem: &var string::String
+) -> Failure!array::Array<string::String> {
+    var end = mem::len(source);
+    while end > 0 and source[end - 1] == cast<u8>(10) {
+        end = end - 1;
+    }
+    let text = source[0..end];
+    // Where each line starts and ends, the Go `strings.Split` on newlines.
+    var bounds = array::new<i64>(allocator);
+    defer bounds.deinit(allocator);
+    var line_start = 0;
+    var index = 0;
+    while index <= end {
+        if index == end or text[index] == cast<u8>(10) {
+            try bounds.append(allocator, line_start);
+            try bounds.append(allocator, index);
+            line_start = index + 1;
+        }
+        index = index + 1;
+    }
+    let count = bounds.len() / 2;
+    var first = count;
+    while first > 0 {
+        let from = bounds.get(2 * (first - 1)) orelse 0;
+        let to = bounds.get(2 * (first - 1) + 1) orelse 0;
+        if !mem::starts_with(text[from..to], "//") {
+            break;
+        }
+        first = first - 1;
+    }
+    var lines = array::new<string::String>(allocator);
+    errdefer lines.deinit(allocator);
+    if first == count {
+        try problem.append_bytes(
+            allocator,
+            "must end with a case block: a directive line, `features:`, and what it produces"
+        );
+        return Invalid::BadCase;
+    }
+    var line = first;
+    while line < count {
+        let from = bounds.get(2 * line) orelse 0;
+        let to = bounds.get(2 * line + 1) orelse 0;
+        var body = text[from + 2..to];
+        if mem::starts_with(body, " ") {
+            body = body[1..mem::len(body)];
+        }
+        let owned = try string::from_bytes(allocator, body);
+        try lines.append(allocator, move owned);
+        line = line + 1;
+    }
+    return move lines;
+}
+
+/// Reads one case block. The directive comes first because it decides what
+/// the rest of the block may say.
+fn parse(
+    allocator: Allocator,
+    case_path: []u8,
+    lines: &array::Array<string::String>,
+    problem: &var string::String
+) -> Failure!Case {
+    var head = array::new<string::String>(allocator);
+    defer head.deinit(allocator);
+    if lines.at(0) |head_line| {
+        let head_text = head_line.as_bytes();
+        try fields_into(allocator, head_text, &var head);
+    }
+    var directive = string::new(allocator);
+    defer directive.deinit(allocator);
+    if head.at(0) |word| {
+        try directive.append_string(allocator, word);
+    } else {
+        try problem.append_bytes(allocator, "case block must start with a directive");
+        return Invalid::BadCase;
+    }
+    let directive_text = directive.as_bytes();
+    var command = string::new(allocator);
+    errdefer command.deinit(allocator);
+    if verb(directive_text) |found| {
+        try command.append_bytes(allocator, found);
+    } else {
+        try problem.append_bytes(allocator, "unknown directive `");
+        try problem.append_bytes(allocator, directive_text);
+        try problem.append_bytes(allocator, "`");
+        return Invalid::BadCase;
+    }
+    var args = array::new<string::String>(allocator);
+    errdefer args.deinit(allocator);
+    var arg = 1;
+    while head.at(arg) |given| {
+        arg = arg + 1;
+        let given_text = given.as_bytes();
+        let copy = try string::from_bytes(allocator, given_text);
+        try args.append(allocator, move copy);
+    }
+    var env = array::new<string::String>(allocator);
+    errdefer env.deinit(allocator);
+    var dirs = array::new<string::String>(allocator);
+    errdefer dirs.deinit(allocator);
+    var features = array::new<string::String>(allocator);
+    errdefer features.deinit(allocator);
+    var pending = string::new(allocator);
+    errdefer pending.deinit(allocator);
+    var error_text = string::new(allocator);
+    errdefer error_text.deinit(allocator);
+    var output = string::new(allocator);
+    errdefer output.deinit(allocator);
+    var has_output = false;
+    var index = 1;
+    while lines.at(index) |line_owner| {
+        let line = line_owner.as_bytes();
+        var colon = 0;
+        if index_of(line, ":") |found| {
+            colon = found;
+        } else {
+            try problem.append_bytes(allocator, "expected `key: value`, got `");
+            try problem.append_bytes(allocator, line);
+            try problem.append_bytes(allocator, "`");
+            return Invalid::BadCase;
+        }
+        let key = line[0..colon];
+        let value = mem::trim_ascii(line[colon + 1..mem::len(line)]);
+        if mem::equal_bytes(key, "features") {
+            features.clear(allocator);
+            try fields_into(allocator, value, &var features);
+        } else if mem::equal_bytes(key, "env") {
+            let binding = try string::from_bytes(allocator, value);
+            try env.append(allocator, move binding);
+        } else if mem::equal_bytes(key, "dir") {
+            let dir = try string::from_bytes(allocator, value);
+            try dirs.append(allocator, move dir);
+        } else if mem::equal_bytes(key, "pending") {
+            pending.clear();
+            try pending.append_bytes(allocator, value);
+        } else if mem::equal_bytes(key, "error") {
+            error_text.clear();
+            try error_text.append_bytes(allocator, value);
+        } else if mem::equal_bytes(key, "output") {
+            // The rest of the block is the output, so nothing can follow it.
+            // A line that looks like a key is a line the program prints.
+            has_output = true;
+            var rest = index + 1;
+            while lines.at(rest) |printed| {
+                if rest > index + 1 {
+                    try output.append_byte(allocator, cast<u8>(10));
+                }
+                try output.append_string(allocator, printed);
+                rest = rest + 1;
+            }
+            if output.len() > 0 {
+                try output.append_byte(allocator, cast<u8>(10));
+            }
+            break;
+        } else {
+            try problem.append_bytes(allocator, "unknown key `");
+            try problem.append_bytes(allocator, key);
+            try problem.append_bytes(allocator, "`");
+            return Invalid::BadCase;
+        }
+        index = index + 1;
+    }
+    let entry = Case {
+        path: try string::from_bytes(allocator, case_path),
+        command: move command,
+        must_fail: ends_with(directive_text, "-fails"),
+        args: move args,
+        env: move env,
+        dirs: move dirs,
+        has_stdout: has_output,
+        stdout: move output,
+        error_text: move error_text,
+        pending: move pending,
+        features: move features,
+    };
+    errdefer entry.deinit(allocator);
+    try validate(allocator, &entry, problem);
+    return move entry;
+}
+
+/// The CLI verb a directive runs, or null for a word that is not one.
+fn verb(directive: []u8) -> ?[]u8 {
+    if mem::equal_bytes(directive, "run") or mem::equal_bytes(directive, "run-fails") {
+        return "run";
+    }
+    if mem::equal_bytes(directive, "check") or mem::equal_bytes(directive, "check-fails") {
+        return "check";
+    }
+    if mem::equal_bytes(directive, "test") or mem::equal_bytes(directive, "test-fails") {
+        return "test";
+    }
+    if mem::equal_bytes(directive, "parse-fails") {
+        return "parse";
+    }
+    return null;
+}
+
+/// Rejects a block that does not say enough to be checked.
+fn validate(allocator: Allocator, entry: &Case, problem: &var string::String) -> Failure!void {
+    try validate_env(allocator, &entry.env, problem);
+    try validate_dirs(allocator, &entry.dirs, problem);
+    return validate_promise(allocator, entry, problem);
+}
+
+fn validate_env(
+    allocator: Allocator,
+    bindings: &array::Array<string::String>,
+    problem: &var string::String
+) -> Failure!void {
+    var index = 0;
+    while bindings.at(index) |owner| {
+        let binding = owner.as_bytes();
+        let equals = index_of(binding, "=") orelse -1;
+        if equals <= 0 or contains_nul(binding) {
+            try problem.append_bytes(allocator, "`env:` must be `NAME=value`, got `");
+            try problem.append_bytes(allocator, binding);
+            try problem.append_bytes(allocator, "`");
+            return Invalid::BadCase;
+        }
+        let name = binding[0..equals];
+        var earlier = 0;
+        while bindings.at(earlier) |seen_owner| {
+            if earlier >= index {
+                break;
+            }
+            let seen = seen_owner.as_bytes();
+            let seen_equals = index_of(seen, "=") orelse 0;
+            if mem::equal_bytes(seen[0..seen_equals], name) {
+                try problem.append_bytes(allocator, "`env:` repeats `");
+                try problem.append_bytes(allocator, name);
+                try problem.append_bytes(allocator, "`");
+                return Invalid::BadCase;
+            }
+            earlier = earlier + 1;
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+/// Keeps filesystem capabilities inside the repository.
+fn validate_dirs(
+    allocator: Allocator,
+    dirs: &array::Array<string::String>,
+    problem: &var string::String
+) -> Failure!void {
+    var index = 0;
+    while dirs.at(index) |owner| {
+        let dir = owner.as_bytes();
+        var clean = try path::clean(allocator, dir);
+        defer clean.deinit(allocator);
+        let cleaned = clean.as_bytes();
+        if mem::len(dir) == 0 or contains_nul(dir) or mem::starts_with(dir, "/") or
+            mem::equal_bytes(cleaned, "..") or mem::starts_with(cleaned, "../") or
+            contains(dir, "::") {
+            try problem.append_bytes(allocator, "`dir:` must name a repository-relative directory");
+            return Invalid::BadCase;
+        }
+        var earlier = 0;
+        while dirs.at(earlier) |seen| {
+            if earlier >= index {
+                break;
+            }
+            let seen_bytes = seen.as_bytes();
+            if mem::equal_bytes(seen_bytes, dir) {
+                try problem.append_bytes(allocator, "`dir:` repeats `");
+                try problem.append_bytes(allocator, dir);
+                try problem.append_bytes(allocator, "`");
+                return Invalid::BadCase;
+            }
+            earlier = earlier + 1;
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+/// Checks what the directive promises against what the block declares.
+fn validate_promise(allocator: Allocator, entry: &Case, problem: &var string::String) -> Failure!void {
+    if entry.features.len() == 0 {
+        try problem.append_bytes(allocator, "`features:` must not be empty");
+        return Invalid::BadCase;
+    }
+    let has_output = entry.has_stdout;
+    if entry.must_fail {
+        if entry.error_text.len() == 0 {
+            try problem.append_bytes(allocator, "a `-fails` case must declare `error:`");
+            return Invalid::BadCase;
+        }
+        if has_output {
+            try problem.append_bytes(allocator, "a `-fails` case has no `output:` to declare");
+            return Invalid::BadCase;
+        }
+        return;
+    }
+    if entry.error_text.len() > 0 {
+        try problem.append_bytes(allocator, "`error:` belongs to a `-fails` case");
+        return Invalid::BadCase;
+    }
+    let command = entry.command.as_bytes();
+    if mem::equal_bytes(command, "check") {
+        if has_output {
+            try problem.append_bytes(allocator, "a `check` case runs nothing and has no `output:`");
+            return Invalid::BadCase;
+        }
+        return;
+    }
+    if !has_output {
+        try problem.append_bytes(allocator, "a `");
+        try problem.append_bytes(allocator, command);
+        try problem.append_bytes(allocator, "` case must declare `output:`");
+        return Invalid::BadCase;
+    }
+    return;
+}
+
+/// Splits on runs of ASCII white space, the Go `strings.Fields` on the text
+/// a case block holds.
+fn fields_into(
+    allocator: Allocator,
+    text: []u8,
+    out: &var array::Array<string::String>
+) -> Failure!void {
+    let length = mem::len(text);
+    var index = 0;
+    while index < length {
+        while index < length and is_space(text[index]) {
+            index = index + 1;
+        }
+        let start = index;
+        while index < length and !is_space(text[index]) {
+            index = index + 1;
+        }
+        if index > start {
+            let word = try string::from_bytes(allocator, text[start..index]);
+            try out.append(allocator, move word);
+        }
+    }
+    return;
+}
+
+fn is_space(byte: u8) -> bool {
+    return byte == cast<u8>(32) or (byte >= cast<u8>(9) and byte <= cast<u8>(13));
+}
+
+pub fn contains(bytes: []u8, needle: []u8) -> bool {
+    if index_of(bytes, needle) |_| {
+        return true;
+    }
+    return false;
+}
+
+/// The first index of `needle` in `bytes`, or null.
+pub fn index_of(bytes: []u8, needle: []u8) -> ?i64 {
+    let length = mem::len(bytes);
+    let size = mem::len(needle);
+    var index = 0;
+    while index + size <= length {
+        if mem::equal_bytes(bytes[index..index + size], needle) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+pub fn ends_with(bytes: []u8, suffix: []u8) -> bool {
+    let length = mem::len(bytes);
+    let size = mem::len(suffix);
+    return length >= size and mem::equal_bytes(bytes[length - size..length], suffix);
+}
+
+fn contains_nul(bytes: []u8) -> bool {
+    let length = mem::len(bytes);
+    var index = 0;
+    while index < length {
+        if bytes[index] == cast<u8>(0) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}

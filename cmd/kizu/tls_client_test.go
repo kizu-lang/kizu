@@ -2,7 +2,10 @@ package main
 
 import (
 	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -88,6 +91,19 @@ func selfSignedServer(t *testing.T, host string, keyBits int) ([]byte, crypto.Si
 		t.Fatal(err)
 	}
 	return der, key
+}
+
+// generateKey makes a P-256 key for `keyBits` 256, a P-384 key for 384,
+// and an RSA key of that many bits otherwise.
+func generateKey(keyBits int) (crypto.Signer, error) {
+	switch keyBits {
+	case 256:
+		return ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	case 384:
+		return ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	default:
+		return rsa.GenerateKey(rand.Reader, keyBits)
+	}
 }
 
 // serveOnce listens on a free port and, in the background, accepts one

@@ -22,7 +22,8 @@ import (
 // test renders it to a two-file Kizu module, checks it, and compares. A
 // divergence is either a checker bug or a model bug, and which one is a
 // question for SPEC.md: record it in findings/unsafecap-quint-findings.md
-// rather than adjusting either side to agree.
+// rather than adjusting either side to agree. compiler/src/unsafecap_mbt_test.kizu
+// replays the same fixture against the checker in compiler/.
 //
 // KIZU_MBT_BIN=<kizu binary> runs `<binary> check` on each program instead of
 // the in-process checker, so the same cases can be put to the compiler built
@@ -50,7 +51,7 @@ type mbtFunc struct {
 	Body []string `json:"body"`
 }
 
-// mbtCase is one program of the fixture written by scripts/unsafecap-mbt.
+// mbtCase is one program of the fixture scripts/unsafecap-mbt/main.kizu writes.
 type mbtCase struct {
 	Bucket string   `json:"bucket"`
 	G      mbtFunc  `json:"g"`
@@ -238,7 +239,7 @@ func TestUnsafeModelKnownDivergences(t *testing.T) {
 func TestUnsafeModelTraces(t *testing.T) {
 	path := os.Getenv("KIZU_MBT_FIXTURE")
 	if path == "" {
-		path = filepath.Join("testdata", "unsafecap_mbt.json")
+		path = filepath.Join("..", "..", "compiler", "tests", "mbt", "unsafecap.json")
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

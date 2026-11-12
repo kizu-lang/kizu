@@ -5473,7 +5473,10 @@ func (c *Checker) typeApplyTarget(expr *ast.TypeApplyExpr) (string, string, erro
 	if err := c.rejectUnknownBuiltin(name); err != nil {
 		return "", "", err
 	}
-	typeArg := c.instantiateTypeArgText(expr.TypeArg)
+	typeArg := expr.TypeArg
+	if !expr.Resolved {
+		typeArg = c.instantiateTypeArgText(typeArg)
+	}
 	if err := rejectOptionalStaticArgs(typeArg); err != nil {
 		return "", "", err
 	}
@@ -5524,7 +5527,7 @@ func (c *Checker) checkTypeApplyCallExpr(
 		return c.checkIntFromPtr(typeArg, expressionSpan(expr.Callee), args, env, unsafe)
 	}
 	if typ, ok, err := c.checkGenericUserTypeApply(
-		name, typeArg, args, env, unsafe, expressionSpan(expr.Callee),
+		name, typeArg, expr.Resolved, args, env, unsafe, expressionSpan(expr.Callee),
 	); ok || err != nil {
 		return typ, err
 	}
@@ -6601,6 +6604,7 @@ func (c *Checker) checkMapIndexArg(
 func (c *Checker) checkGenericUserTypeApply(
 	name string,
 	typeArg string,
+	resolved bool,
 	args []ast.Expression,
 	env *scope,
 	unsafe unsafeMark,
@@ -6615,7 +6619,7 @@ func (c *Checker) checkGenericUserTypeApply(
 		return "", true, errorf("type error: `%s` expects %d static arguments",
 			name, len(fn.sig.StaticParams))
 	}
-	typeArgsText, bindings, err := c.checkStaticArgs(name, fn, argsText)
+	typeArgsText, bindings, err := c.checkStaticArgs(name, fn, argsText, resolved)
 	if err != nil {
 		return "", true, err
 	}
@@ -6708,11 +6712,13 @@ func (c *Checker) checkGenericUserArgs(
 }
 
 // checkStaticArgs validates each `<...>` argument against what its parameter
-// declared, and returns the subset that are types, in declaration order.
+// declared, and returns the subset that are types, in declaration order. A
+// resolved list (ast.TypeApplyExpr) names its fields directly.
 func (c *Checker) checkStaticArgs(
 	name string,
 	fn *functionType,
 	argsText []string,
+	resolved bool,
 ) ([]string, staticBindings, error) {
 	typeArgs := []string{}
 	bindings := staticBindings{
@@ -6727,7 +6733,7 @@ func (c *Checker) checkStaticArgs(
 			continue
 		}
 		if Type(typ.Text(param.Type)) == typeField {
-			field, err := c.fieldStaticArg(name, param, arg, idx, argsText, fn)
+			field, err := c.fieldStaticArg(name, param, arg, idx, argsText, fn, resolved)
 			if err != nil {
 				return nil, staticBindings{}, err
 			}
@@ -6844,7 +6850,7 @@ func (c *Checker) checkStaticValueArg(
 	}
 	switch want {
 	case typeField:
-		_, err := c.fieldStaticArg(name, param, arg, idx, argsText, fn)
+		_, err := c.fieldStaticArg(name, param, arg, idx, argsText, fn, false)
 		return err
 	case typeFunction:
 		if !isIdentifierText(arg) {
@@ -6908,7 +6914,8 @@ func acceptsComptimeValue(want Type, bound comptimeValue) bool {
 // owner is the type argument written just before it: `worker<T, f>` pairs the
 // two the way `std::meta::field_type<T, f>` does, so a worker reads its field
 // out of the type it was instantiated for. A live `comptime for` capture
-// resolves the same way, which is how a loop forwards its capture on.
+// resolves the same way, which is how a loop forwards its capture on. A
+// resolved argument is a field name and never a capture.
 func (c *Checker) fieldStaticArg(
 	name string,
 	param ast.StaticParam,
@@ -6916,8 +6923,9 @@ func (c *Checker) fieldStaticArg(
 	idx int,
 	argsText []string,
 	fn *functionType,
+	resolved bool,
 ) (metaField, error) {
-	if field, ok := c.metaFields[arg]; ok {
+	if field, ok := c.metaFields[arg]; ok && !resolved {
 		return field, nil
 	}
 	if !isIdentifierText(arg) {

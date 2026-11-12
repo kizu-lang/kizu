@@ -27,4 +27,7 @@
 // after it are that output, so it goes last.
 // Package cases keep this block in src/main.kizu, or src/main_test.kizu when
 // the package contains tests only.
+//
+// The Kizu test harness in compiler/tests/harness reads the same blocks, so a
+// change to the format is made in both.
 package conformance

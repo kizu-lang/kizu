@@ -37,8 +37,9 @@ suspended だけ)です。
 
 `Tls.lean` の表は手で書きません。`-- BEGIN GENERATED` と `-- END GENERATED` の間は
 `std::tls` の `advance` と `advance_server` の全組から作るので、証明は実際に動く表に
-ついてのものです。`go test` は block が今の `std::tls` と同じことを Lean 無しで確かめ、
-定理は手で書いたままなので、性質を壊す変更は `lean` で落ちます。その代わり、RFC と
+ついてのものです。`go test` は生成器を `-check` で回し、block と Quint の機械が今の
+`std::tls` と同じことを Lean 無しで確かめ、定理は手で書いたままなので、性質を壊す
+変更は `lean` で落ちます。その代わり、RFC と
 照らす独立した表ではなくなりました。誤った変更を止めるのは定理の範囲までです。
 `examples/tls_conformance.kizu` が trace を流します。
 
