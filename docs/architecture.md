@@ -149,6 +149,7 @@ CLI のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 | Kizu 側 unit test | 同上(`kizu test compiler`) | `compiler/src/**/*_test.kizu`。`compiler/tests/` の corpus と MBT fixture の再生もここ |
 | 生成物と整形 | 同上(`scripts/check-sources.sh`) | checked-in の Kizu source が `kizu fmt` の形であること、std::tls から生成する spec の表が最新であること |
 | behavior | 同上(`kizu run compiler/tests/harness -- behavior <kizu>`) | conformance case のうち CLI 境界を越える実行の振る舞い(`tests/behavior/`、test 系と std-io / std-process の example)。harness 自身の test は `kizu test compiler/tests/harness` |
+| conformance | `just conformance`(`kizu run compiler/tests/harness -- conformance <kizu>`)。`just selfhost` には含まない | `examples/`、`tests/behavior/`、`docs/tutorial/` の全 case。behavior はこの部分集合 |
 | bootstrap | 同上(`kizu run compiler/tests/harness -- bootstrap <stage2>`) | stage1 が build した stage2 が、自分自身を空の build cache で build し直して byte 単位で同じ実行ファイルになること |
 | commit hooks | `pre-commit run --all-files` | 種と stage1 による `kizu check compiler`(`scripts/bootstrap.sh --check-only`)。数秒で終わるものだけ |
 

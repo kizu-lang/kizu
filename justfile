@@ -103,6 +103,11 @@ wasi-smoke:
 selfhost:
     scripts/bootstrap.sh
 
+# Run every conformance case in examples/, tests/behavior and docs/tutorial with
+# stage1. `just selfhost` runs only the behavior part of them.
+conformance: stage1
+    {{kizu}} run compiler/tests/harness -- conformance {{kizu}}
+
 # The form the commit hook runs: the seed and stage1 only check compiler/.
 selfhost-check:
     scripts/bootstrap.sh --check-only

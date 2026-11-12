@@ -9,12 +9,14 @@ import std::net;
 import std::process;
 import std::string;
 
-// The executable behavior that has to cross the selfhost CLI boundary: the
-// consolidated behavior package, the testing failures, and the positive
-// I/O and process examples. Frontend success and diagnostics are held by the
-// shared corpora and the focused CLI parity cases; how a runtime failure is
-// spelled is held by the byte-identical runtime source and the Go
-// conformance run of every case.
+// Runs conformance cases with a compiler binary and checks each against
+// what it declares. Two suites read the same cases:
+//
+//   behavior     the executable behavior that has to cross the CLI boundary:
+//                the consolidated behavior package, the testing failures,
+//                and the positive I/O and process examples. It is the part
+//                scripts/bootstrap.sh runs on every push.
+//   conformance  every case the tree declares (`just conformance`).
 
 pub error Failure = conformance::Failure or scratch::Failure or io::Error or net::Error or process::Error;
 
@@ -26,17 +28,19 @@ struct Outcome {
     status: i64,
 }
 
-/// Runs every selected case with `kizu` and reports each. It answers whether
-/// all of them kept their promise.
-pub fn run(handle: Io, allocator: Allocator, kizu: []u8) -> Failure!bool {
+/// Runs the cases of one suite with `kizu` and reports each: the `behavior`
+/// selection when `every` is false, every case when it is true. It answers
+/// whether all of them kept their promise.
+pub fn run(handle: Io, allocator: Allocator, kizu: []u8, every: bool) -> Failure!bool {
     var problem = string::new(allocator);
     defer problem.deinit(allocator);
     if conformance::discover(handle, allocator, &var problem) |cases| {
         defer cases.deinit(allocator);
-        return run_cases(handle, allocator, kizu, &cases);
+        return run_cases(handle, allocator, kizu, &cases, every);
     } else |failed| {
         let text = problem.as_bytes();
-        try io::write_stderr(handle, "behavior: ");
+        try io::write_stderr(handle, suite_name(every));
+        try io::write_stderr(handle, ": ");
         try io::write_stderr_line(handle, text);
         return failed;
     }
@@ -46,7 +50,8 @@ fn run_cases(
     handle: Io,
     allocator: Allocator,
     kizu: []u8,
-    cases: &array::Array<conformance::Case>
+    cases: &array::Array<conformance::Case>,
+    every: bool
 ) -> Failure!bool {
     var root = try fs::real_path(handle, allocator, ".");
     defer root.deinit(allocator);
@@ -61,7 +66,7 @@ fn run_cases(
     var index = 0;
     while cases.at(index) |entry| {
         index = index + 1;
-        if !selected(entry) {
+        if !every and !selected(entry) {
             continue;
         }
         count = count + 1;
@@ -92,7 +97,8 @@ fn run_cases(
     try fs::remove_dir(handle, scratch_path);
     var summary = string::new(allocator);
     defer summary.deinit(allocator);
-    try summary.append_bytes(allocator, "behavior: ");
+    try summary.append_bytes(allocator, suite_name(every));
+    try summary.append_bytes(allocator, ": ");
     try fmt::append_i64(allocator, &var summary, count);
     try summary.append_bytes(allocator, " cases, ");
     try fmt::append_i64(allocator, &var summary, failures);
@@ -100,6 +106,13 @@ fn run_cases(
     let summary_text = summary.as_bytes();
     try io::write_stdout_line(handle, summary_text);
     return failures == 0;
+}
+
+fn suite_name(every: bool) -> []u8 {
+    if every {
+        return "conformance";
+    }
+    return "behavior";
 }
 
 /// Keeps the cases whose behavior the shared frontend corpora cannot stand
@@ -299,6 +312,16 @@ fn run_case(
     try output.append_string(allocator, &stdout);
     let err_text = stderr.as_bytes();
     try append_without_noise(allocator, &var output, err_text);
+    // `run` and `test` end with the status of the program they ran and say
+    // nothing of it, so a program that dies without a word, a stack overflow
+    // stopped by its guard page, would leave nothing to read. The status is
+    // written after what the command printed, the line a `-fails` case can
+    // name.
+    if status != 0 and (mem::equal_bytes(verb, "run") or mem::equal_bytes(verb, "test")) {
+        try output.append_bytes(allocator, "error: exit status ");
+        try fmt::append_i64(allocator, &var output, status);
+        try output.append_byte(allocator, cast<u8>(10));
+    }
     return Outcome { output: move output, failed: status != 0, status: status };
 }
 
