@@ -3,17 +3,23 @@ import std::fs;
 import std::mem;
 import std::string;
 
-// The units of the direct backend (`--backend direct`): Mach-O objects the
-// arm64 backend wrote itself, which the link reads as they are. The only
-// thing the backend cannot know is the deployment target the toolchain
-// builds for, so each is stamped with the one of the runtime object the
-// same clang compiled for this link.
+// The units of the direct backend (`--backend direct`): Mach-O or ELF
+// objects the arm64 backend wrote itself, which the link reads as they are.
+// The only thing the backend cannot know is the deployment target a Darwin
+// toolchain builds for, so a Mach-O object is stamped with the one of the
+// runtime object the same clang compiled for this link.
 
 /// Writes the program object the direct backend made as it is linked: with
 /// the deployment target of the runtime object it is linked with, which the
 /// clang that compiled the runtime chose and would have given the program
-/// too, in place of the none the backend names.
+/// too, in place of the none the backend names. An ELF object names none
+/// and is written as it is.
 fn stamp_object(io: Io, allocator: Allocator, runtime_path: []u8, unit: &string::String, out: &var string::String) -> !void {
+    let unit_bytes = unit.as_bytes();
+    let at = build_version_at(unit_bytes);
+    if at < 0 {
+        return out.append_string(allocator, unit);
+    }
     var runtime = string::new(allocator);
     defer runtime.deinit(allocator);
     try fs::read_file_into(io, allocator, runtime_path, &var runtime);
@@ -24,11 +30,6 @@ fn stamp_object(io: Io, allocator: Allocator, runtime_path: []u8, unit: &string:
         return;
     }
     let version = read32(runtime_bytes, minos);
-    let unit_bytes = unit.as_bytes();
-    let at = build_version_at(unit_bytes);
-    if at < 0 {
-        return;
-    }
     let writable = out.as_mut_bytes();
     for 0..4 |byte| {
         writable[at + byte] = cast<u8>((version >> (8 * byte)) & 255);
