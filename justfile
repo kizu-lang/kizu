@@ -106,6 +106,10 @@ selfhost:
     go run ./cmd/kizu check compiler
     go run ./cmd/kizu test compiler
 
+# Check and test compiler/ with the pinned seed release, then with the stage1 it builds.
+selfhost-seed:
+    scripts/bootstrap.sh
+
 # Show local Kizu build cache status.
 cache-status:
     go run ./cmd/kizu cache status
