@@ -1,0 +1,743 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import compiler::internal::typ;
+import std::array;
+import std::float;
+import std::string;
+
+// Floating point: `f64` and `f32` values are their IEEE 754 bits in a
+// register like any other word, so moves, phis, spills, memory and the
+// backend's own calls need nothing of their own. On arm64 and System V
+// amd64, allocation keeps the values only float instructions compute with
+// in float registers (see float_registers), where the bits are the same;
+// elsewhere, and for a value also read as an integer, a general register
+// holds them and the instructions that read a value as a number move it
+// through a scratch float register (v16..v19, or xmm13..xmm15), which none
+// holds from one machine instruction to the next.
+//
+// The operations are the ones the LLVM backend asks of LLVM: IEEE 754
+// arithmetic rounded to nearest even, ordered comparisons except `!=`,
+// conversions to an integer that truncate toward zero and saturate with NaN
+// at 0, and conversions from an integer that round. A constant is its exact
+// bits.
+
+// ---- selection ----
+
+/// Returns the bits a float constant's literal stands for in a register of
+/// a float shape: the double's bits, or for an `f32` the bits of the value
+/// rounded to single precision, as the LLVM backend rounds it.
+fn float_literal_bits(allocator: Allocator, literal: []u8, shape: Shape) -> !?i64 {
+    let value = try typ::parse_float_literal(allocator, literal) orelse return null;
+    if shape.size == 4 {
+        return single_bits(cast<f64>(cast<f32>(value)));
+    }
+    return cast<i64>(float::bits(value));
+}
+
+/// Returns the binary32 bits of a double that a single holds exactly: a
+/// value already rounded to single precision, an infinity, or a NaN.
+fn single_bits(value: f64) -> i64 {
+    let raw = float::bits(value);
+    let sign = cast<i64>(raw >> 63) << 31;
+    let exponent = cast<i64>(raw >> 52 & 2047);
+    let fraction = cast<i64>(raw & ((cast<u64>(1) << 52) - 1));
+    if exponent == 2047 {
+        // An infinity, or a NaN keeping the top of its payload and quiet.
+        if fraction == 0 {
+            return sign | 2139095040;
+        }
+        return sign | 2143289344 | (fraction >> 29);
+    }
+    if exponent == 0 {
+        return sign;
+    }
+    let unbiased = exponent - 1023;
+    if unbiased >= 0 - 126 {
+        return sign | ((unbiased + 127) << 23) | (fraction >> 29);
+    }
+    // A subnormal single: the hidden bit joins the fraction.
+    let mantissa = fraction | (1 << 52);
+    return sign | (mantissa >> (29 + (0 - 126 - unbiased)));
+}
+
+fn (self: &var Selector) select_float_const(module: &ir::Module, node: &ir::InstrNode, shape: Shape) -> !?diagnostic::Diagnostic {
+    let text = ir::name_text(&module.names, node.immediate);
+    let bytes = text.as_bytes();
+    let held = try float_literal_bits(self.allocator, bytes, shape) orelse return try self.fail_op(module, node);
+    try self.set_val(node.result.name, const_val(held));
+    return null;
+}
+
+/// Maps a comparison of floats to the condition `fcmp` leaves: ordered for
+/// each, except `!=`, which holds for NaN as IEEE 754 says.
+fn float_comparison(module: &ir::Module, op: ir::Name) -> ?Cond {
+    if module.names.is(op, "==") {
+        return Cond::Eq;
+    }
+    if module.names.is(op, "!=") {
+        return Cond::Ne;
+    }
+    if module.names.is(op, "<") {
+        return Cond::Mi;
+    }
+    if module.names.is(op, "<=") {
+        return Cond::Ls;
+    }
+    if module.names.is(op, ">") {
+        return Cond::Gt;
+    }
+    if module.names.is(op, ">=") {
+        return Cond::Ge;
+    }
+    return null;
+}
+
+fn (self: &var Selector) float_op(op: MOp, kind: i64, width: i64, rd: i64, rn: i64, rm: i64) -> !void {
+    var inst = blank(op);
+    inst.rd = rd;
+    inst.rn = rn;
+    inst.rm = rm;
+    inst.imm = kind;
+    inst.width = width;
+    return self.inst(inst);
+}
+
+/// Selects a binary operation on floats: a comparison left in the flags
+/// like an integer one, or arithmetic.
+fn (self: &var Selector) select_float_binary(module: &ir::Module, node: &ir::InstrNode, next: ir::Value, next_op: ir::Op) -> !?diagnostic::Diagnostic {
+    let left = node.args.get_or_panic(0);
+    let right = node.args.get_or_panic(1);
+    let shape = shape_of(module, left.type_name);
+    if module.names.is(node.result.type_name, "bool") {
+        let cond = float_comparison(module, node.operand) orelse return try self.fail_op(module, node);
+        var held = no_val();
+        held.kind = ValKind::Flags;
+        held.cond = cond;
+        held.lhs = left;
+        held.rhs = right;
+        held.float = shape.size;
+        return self.bind_flags(module, node.result, held, next, next_op);
+    }
+    var kind = 0 - 1;
+    if module.names.is(node.operand, "+") {
+        kind = float_add();
+    } else if module.names.is(node.operand, "-") {
+        kind = float_sub();
+    } else if module.names.is(node.operand, "*") {
+        kind = float_mul();
+    } else if module.names.is(node.operand, "/") {
+        kind = float_div();
+    }
+    let result = shape_of(module, node.result.type_name);
+    if kind < 0 or result.class != Class::Float or result.size != shape.size {
+        return try self.fail_op(module, node);
+    }
+    let lhs = try self.reg(module, left) orelse return try self.fail_op(module, node);
+    let rhs = try self.reg(module, right) orelse return try self.fail_op(module, node);
+    let rd = self.func.new_vreg();
+    try self.float_op(MOp::FBin, kind, shape.size, rd, lhs, rhs);
+    try self.set_val(node.result.name, reg_val(rd));
+    return null;
+}
+
+/// Makes the comparison of two floats a Flags value describes.
+fn (self: &var Selector) float_compare(module: &ir::Module, held: Val) -> !?Cond {
+    let lhs = try self.reg(module, held.lhs) orelse return null;
+    let rhs = try self.reg(module, held.rhs) orelse return null;
+    try self.float_op(MOp::FCmp, 0, held.float, reg_none(), lhs, rhs);
+    return held.cond;
+}
+
+/// Selects a one-operand float operation of kind: negation or a `std::math`
+/// primitive.
+fn (self: &var Selector) select_float_unary(module: &ir::Module, node: &ir::InstrNode, kind: i64) -> !?diagnostic::Diagnostic {
+    let source = node.args.get(0) orelse return try self.fail_op(module, node);
+    let shape = shape_of(module, node.result.type_name);
+    if shape.class != Class::Float or node.args.len() != 1 {
+        return try self.fail_op(module, node);
+    }
+    let value = try self.reg(module, source) orelse return try self.fail_op(module, node);
+    let rd = self.func.new_vreg();
+    if is_x86(self.arch) and kind != float_neg() and kind != float_sqrt() {
+        // Rounding to an integral value is SSE4.1, past the x86-64
+        // baseline; C's floor, ceil and trunc compute it, as LLVM calls
+        // them for that baseline.
+        var name = "trunc";
+        if kind == float_floor() {
+            name = "floor";
+        } else if kind == float_ceil() {
+            name = "ceil";
+        }
+        try self.call_float_c(name, shape.size, rd, value, reg_none(), reg_none());
+        try self.set_val(node.result.name, reg_val(rd));
+        return null;
+    }
+    try self.float_op(MOp::FUn, kind, shape.size, rd, value, reg_none());
+    try self.set_val(node.result.name, reg_val(rd));
+    return null;
+}
+
+/// Calls the C function name of the float width (with an `f` for `f32`)
+/// over up to three float arguments and binds its float result to rd.
+fn (self: &var Selector) call_float_c(name: []u8, width: i64, rd: i64, a: i64, b: i64, c: i64) -> !void {
+    var index = 0;
+    for 0..3 |position| {
+        var reg = a;
+        if position == 1 {
+            reg = b;
+        } else if position == 2 {
+            reg = c;
+        }
+        if reg == reg_none() {
+            break;
+        }
+        var arg = blank(MOp::FArg);
+        arg.rn = reg;
+        arg.imm = index;
+        arg.width = width;
+        try self.inst(arg);
+        index = index + 1;
+    }
+    var symbol = string::new(self.allocator);
+    defer symbol.deinit(self.allocator);
+    try symbol.append_bytes(self.allocator, name);
+    if width == 4 {
+        try symbol.append_bytes(self.allocator, "f");
+    }
+    let symbol_bytes = symbol.as_bytes();
+    try self.call_c(symbol_bytes, 0);
+    var ret = blank(MOp::FRet);
+    ret.rd = rd;
+    ret.width = width;
+    return self.inst(ret);
+}
+
+/// Selects the fused multiply-add x * y + z.
+fn (self: &var Selector) select_float_fma(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let shape = shape_of(module, node.result.type_name);
+    if shape.class != Class::Float or node.args.len() != 3 {
+        return try self.fail_op(module, node);
+    }
+    let x = try self.reg(module, node.args.get_or_panic(0)) orelse return try self.fail_op(module, node);
+    let y = try self.reg(module, node.args.get_or_panic(1)) orelse return try self.fail_op(module, node);
+    let z = try self.reg(module, node.args.get_or_panic(2)) orelse return try self.fail_op(module, node);
+    let rd = self.func.new_vreg();
+    if is_x86(self.arch) {
+        // FMA3 is past the x86-64 baseline; C's fma rounds once too.
+        try self.call_float_c("fma", shape.size, rd, x, y, z);
+        try self.set_val(node.result.name, reg_val(rd));
+        return null;
+    }
+    var inst = blank(MOp::FMAdd);
+    inst.rd = rd;
+    inst.rn = x;
+    inst.rm = y;
+    inst.ra = z;
+    inst.width = shape.size;
+    try self.inst(inst);
+    try self.set_val(node.result.name, reg_val(rd));
+    return null;
+}
+
+/// Selects `std::float::bits` and `from_bits`: the register already holds
+/// the bits either way.
+fn (self: &var Selector) select_float_bits(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let source = node.args.get(0) orelse return try self.fail_op(module, node);
+    let from = shape_of(module, source.type_name);
+    let to = shape_of(module, node.result.type_name);
+    if node.args.len() != 1 or !is_word(from) or !is_word(to) or from.size != to.size {
+        return try self.fail_op(module, node);
+    }
+    try self.set_val(node.result.name, self.val(source.name));
+    return null;
+}
+
+/// Selects a cast with a float side: between the float widths, from a float
+/// to an integer, or from an integer to a float.
+fn (self: &var Selector) select_float_cast(module: &ir::Module, node: &ir::InstrNode, from: Shape, to: Shape) -> !?diagnostic::Diagnostic {
+    let source = node.args.get_or_panic(0);
+    let value = try self.reg(module, source) orelse return try self.fail_op(module, node);
+    let rd = self.func.new_vreg();
+    if from.class == Class::Float and to.class == Class::Float {
+        if from.size == to.size {
+            try self.set_val(node.result.name, reg_val(value));
+            return null;
+        }
+        try self.float_op(MOp::FCvt, 0, from.size, rd, value, reg_none());
+        try self.set_val(node.result.name, reg_val(rd));
+        return null;
+    }
+    if to.class == Class::Float {
+        if from.class != Class::Scalar or module.names.is(source.type_name, "bool") {
+            return try self.fail_op(module, node);
+        }
+        // The register holds the integer extended to 64 bits, and both
+        // conversions round the exact value once.
+        var inst = blank(MOp::IntToF);
+        inst.rd = rd;
+        inst.rn = value;
+        inst.width = to.size;
+        inst.signed = from.signed;
+        try self.inst(inst);
+        try self.set_val(node.result.name, reg_val(rd));
+        return null;
+    }
+    if to.class != Class::Scalar or module.names.is(node.result.type_name, "bool") {
+        return try self.fail_op(module, node);
+    }
+    var inst = blank(MOp::FToInt);
+    inst.rd = rd;
+    inst.rn = value;
+    inst.imm = from.size;
+    inst.signed = to.signed;
+    if to.size == 4 {
+        inst.width = 4;
+        try self.inst(inst);
+        if to.signed {
+            let out = self.func.new_vreg();
+            try self.extend(out, rd, 4, true);
+            try self.set_val(node.result.name, reg_val(out));
+            return null;
+        }
+        try self.set_val(node.result.name, reg_val(rd));
+        return null;
+    }
+    inst.width = 8;
+    try self.inst(inst);
+    if to.size == 8 {
+        try self.set_val(node.result.name, reg_val(rd));
+        return null;
+    }
+    // A narrower integer: saturate at 64 bits, then clamp to the type's
+    // range, which saturates the same as converting to it directly.
+    let bits = to.size * 8;
+    if to.signed {
+        let high = (1 << (bits - 1)) - 1;
+        let low = 0 - (1 << (bits - 1));
+        let below = try self.pick_bound(rd, high, Cond::Lt);
+        let out = try self.pick_bound(below, low, Cond::Gt);
+        try self.set_val(node.result.name, reg_val(out));
+        return null;
+    }
+    let high = (1 << bits) - 1;
+    let out = try self.pick_bound(rd, high, Cond::Lo);
+    try self.set_val(node.result.name, reg_val(out));
+    return null;
+}
+
+/// Returns value where value <cond> bound holds, and bound otherwise.
+fn (self: &var Selector) pick_bound(value: i64, bound: i64, cond: Cond) -> !i64 {
+    try self.cmp_imm_or_reg(value, bound);
+    let limit = try self.imm_reg_nz(bound);
+    let out = self.func.new_vreg();
+    var pick = blank(MOp::CSel);
+    pick.rd = out;
+    pick.rn = value;
+    pick.rm = limit;
+    pick.cond = cond;
+    try self.inst(pick);
+    return out;
+}
+
+// ---- allocation ----
+
+/// Picks the virtual registers allocation keeps in float registers:
+/// those a float instruction reads or writes as a number, and those only
+/// moved, loaded, stored or selected alongside them, while nothing reads
+/// or writes them as an integer. Such a register holds the same bits a
+/// general one would; only the instructions that touch it change, so the
+/// choice never changes a result. A select keeps its three registers in
+/// one class, as `fcsel` and `csel` do not mix them; on amd64, which has
+/// no select of xmm registers, a select keeps them in general ones.
+fn float_registers(allocator: Allocator, func: &MFunction, arch: Arch, out: &var array::Array<bool>) -> !void {
+    let nv = func.vregs;
+    var wants = array::new<bool>(allocator);
+    defer wants.deinit(allocator);
+    var forced = array::new<bool>(allocator);
+    defer forced.deinit(allocator);
+    out.clear(allocator);
+    for 0..nv |_index| {
+        try wants.append(allocator, false);
+        try forced.append(allocator, false);
+        try out.append(allocator, false);
+    }
+    var regs = array::new<i64>(allocator);
+    defer regs.deinit(allocator);
+    var block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        block_id = block_id + 1;
+        try mark_reg(&var forced, block.treg);
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            match inst.op {
+                FBin => try mark_regs(&var wants, inst.rd, inst.rn, inst.rm, inst.ra),
+                FUn => try mark_regs(&var wants, inst.rd, inst.rn, inst.rm, inst.ra),
+                FMAdd => try mark_regs(&var wants, inst.rd, inst.rn, inst.rm, inst.ra),
+                FCmp => try mark_regs(&var wants, inst.rd, inst.rn, inst.rm, inst.ra),
+                FCvt => try mark_regs(&var wants, inst.rd, inst.rn, inst.rm, inst.ra),
+                FArg => try mark_reg(&var wants, inst.rn),
+                FRet => try mark_reg(&var wants, inst.rd),
+                FToInt => {
+                    try mark_reg(&var wants, inst.rn);
+                    try mark_reg(&var forced, inst.rd);
+                },
+                IntToF => {
+                    try mark_reg(&var wants, inst.rd);
+                    try mark_reg(&var forced, inst.rn);
+                },
+                Mov => {},
+                MovImm => {},
+                CSel => {},
+                ParCopy => {},
+                Load => try mark_memory(&var forced, inst, true),
+                LoadIdx => try mark_memory(&var forced, inst, true),
+                Store => try mark_memory(&var forced, inst, false),
+                StoreIdx => try mark_memory(&var forced, inst, false),
+                _ => {
+                    try reads(inst, &var regs, allocator, &func.copies);
+                    var index = 0;
+                    while regs.get(index) |reg| {
+                        index = index + 1;
+                        try mark_reg(&var forced, reg);
+                    }
+                    if writes_rd(inst.op) {
+                        try mark_reg(&var forced, inst.rd);
+                    }
+                },
+            }
+        }
+    }
+    for 0..nv |v| {
+        try out.set(v, wants.get_or_panic(v) and !forced.get_or_panic(v));
+    }
+    // A register only copied to or from one in a float register joins it,
+    // so the copy is a float move.
+    var changed = true;
+    var rounds = 0;
+    while changed and rounds < 8 {
+        changed = false;
+        rounds = rounds + 1;
+        block_id = 0;
+        while func.blocks.at(block_id) |block| {
+            block_id = block_id + 1;
+            var inst_index = 0;
+            while block.insts.at(inst_index) |inst| {
+                inst_index = inst_index + 1;
+                if inst.op == MOp::Mov {
+                    if try join_float(out, &forced, inst.rd, inst.rn) {
+                        changed = true;
+                    }
+                }
+                if inst.op == MOp::ParCopy {
+                    for 0..inst.imm |index| {
+                        let copy = func.copies.get_or_panic(inst.slot + index);
+                        if !copy.src_imm and try join_float(out, &forced, copy.dst, copy.src) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // A select with any register outside them takes all three out.
+    changed = true;
+    while changed {
+        changed = false;
+        block_id = 0;
+        while func.blocks.at(block_id) |block| {
+            block_id = block_id + 1;
+            var inst_index = 0;
+            while block.insts.at(inst_index) |inst| {
+                inst_index = inst_index + 1;
+                if inst.op != MOp::CSel {
+                    continue;
+                }
+                if !is_x86(arch) and in_float(out, inst.rd) and in_float(out, inst.rn) and in_float(out, inst.rm) {
+                    continue;
+                }
+                if try leave_float(out, inst.rd) {
+                    changed = true;
+                }
+                if try leave_float(out, inst.rn) {
+                    changed = true;
+                }
+                if try leave_float(out, inst.rm) {
+                    changed = true;
+                }
+            }
+        }
+    }
+    return;
+}
+
+fn mark_reg(table: &var array::Array<bool>, reg: i64) -> !void {
+    if is_vreg(reg) {
+        try table.set(reg - first_vreg(), true);
+    }
+    return;
+}
+
+fn mark_regs(table: &var array::Array<bool>, a: i64, b: i64, c: i64, d: i64) -> !void {
+    try mark_reg(table, a);
+    try mark_reg(table, b);
+    try mark_reg(table, c);
+    return mark_reg(table, d);
+}
+
+/// Marks the registers of a load or store a float register cannot hold:
+/// the address operands, and the data one unless it is a whole word or a
+/// zero-extended half word, which `ldr d` and `ldr s` read.
+fn mark_memory(forced: &var array::Array<bool>, inst: &MInst, load: bool) -> !void {
+    try mark_reg(forced, inst.rn);
+    try mark_reg(forced, inst.rm);
+    let whole = inst.width == 8 or inst.width == 4 and !(load and inst.signed);
+    if !whole {
+        try mark_reg(forced, inst.rd);
+    }
+    return;
+}
+
+fn in_float(chosen: &array::Array<bool>, reg: i64) -> bool {
+    if !is_vreg(reg) {
+        return false;
+    }
+    return chosen.get_or_panic(reg - first_vreg());
+}
+
+/// Puts whichever of a copy's two registers is outside the float ones in
+/// with the other, when nothing reads or writes it as an integer.
+fn join_float(chosen: &var array::Array<bool>, forced: &array::Array<bool>, a: i64, b: i64) -> !bool {
+    if !is_vreg(a) or !is_vreg(b) {
+        return false;
+    }
+    let ia = a - first_vreg();
+    let ib = b - first_vreg();
+    if chosen.get_or_panic(ia) == chosen.get_or_panic(ib) {
+        return false;
+    }
+    if chosen.get_or_panic(ia) and !forced.get_or_panic(ib) {
+        try chosen.set(ib, true);
+        return true;
+    }
+    if chosen.get_or_panic(ib) and !forced.get_or_panic(ia) {
+        try chosen.set(ia, true);
+        return true;
+    }
+    return false;
+}
+
+fn leave_float(chosen: &var array::Array<bool>, reg: i64) -> !bool {
+    if !in_float(chosen, reg) {
+        return false;
+    }
+    try chosen.set(reg - first_vreg(), false);
+    return true;
+}
+
+// ---- printing ----
+
+/// Is what the printer knows across the float instructions of one block:
+/// which general register's value v16 still holds, at which width, or -1.
+struct FloatCache {
+    reg: i64,
+    width: i64,
+}
+
+fn empty_cache() -> FloatCache {
+    return FloatCache { reg: 0 - 1, width: 0 };
+}
+
+/// Reports whether an op is printed by print_float.
+fn is_float_op(op: MOp) -> bool {
+    return match op {
+        FBin => true,
+        FUn => true,
+        FMAdd => true,
+        FCmp => true,
+        FCvt => true,
+        FToInt => true,
+        IntToF => true,
+        FArg => true,
+        FRet => true,
+        _ => false,
+    };
+}
+
+/// Writes `fmov vd, rn`: the bits of a general register into a float one.
+fn fmov_in(allocator: Allocator, out: &var Out, v: i64, reg: i64, width: i64) -> !void {
+    return out.word(allocator, enc_fmov(true, width, reg, v), "fmov");
+}
+
+/// Writes `fmov rd, vn`: the bits of a float register into a general one.
+fn fmov_out(allocator: Allocator, out: &var Out, reg: i64, v: i64, width: i64) -> !void {
+    return out.word(allocator, enc_fmov(false, width, reg, v), "fmov");
+}
+
+/// Returns the float register holding operand reg: its own when allocation
+/// gave it one, otherwise v16 when that already holds it, or scratch after
+/// moving it in.
+fn float_operand(allocator: Allocator, out: &var Out, cache: &FloatCache, reg: i64, width: i64, scratch: i64) -> !i64 {
+    if is_float_reg(reg) {
+        return float_reg_index(reg);
+    }
+    if cache.reg >= 0 and cache.reg == reg and cache.width == width {
+        return 16;
+    }
+    try fmov_in(allocator, out, scratch, reg, width);
+    return scratch;
+}
+
+/// Returns the float register an instruction computes rd in: rd's own, or
+/// v16, from which it is then moved out.
+fn float_dest(rd: i64) -> i64 {
+    if is_float_reg(rd) {
+        return float_reg_index(rd);
+    }
+    return 16;
+}
+
+/// Moves a result computed in v16 out to the general register rd, which
+/// the cache then names; a result computed in rd's own float register
+/// needs nothing.
+fn float_result(allocator: Allocator, out: &var Out, rd: i64, width: i64, cache: &var FloatCache) -> !void {
+    if is_float_reg(rd) {
+        return;
+    }
+    try fmov_out(allocator, out, rd, 16, width);
+    cache.reg = rd;
+    cache.width = width;
+    return;
+}
+
+fn float_mnemonic(kind: i64) -> []u8 {
+    if kind == float_add() {
+        return "fadd";
+    }
+    if kind == float_sub() {
+        return "fsub";
+    }
+    if kind == float_mul() {
+        return "fmul";
+    }
+    if kind == float_div() {
+        return "fdiv";
+    }
+    if kind == float_neg() {
+        return "fneg";
+    }
+    if kind == float_sqrt() {
+        return "fsqrt";
+    }
+    if kind == float_floor() {
+        return "frintm";
+    }
+    if kind == float_ceil() {
+        return "frintp";
+    }
+    return "frintz";
+}
+
+/// Prints one float instruction. A result goes through v16, which the
+/// cache then names, so an instruction reading the result right after
+/// does not move it in again.
+fn print_float(allocator: Allocator, out: &var Out, inst: &MInst, cache: &var FloatCache) -> !void {
+    let width = inst.width;
+    match inst.op {
+        FBin => {
+            let a = try float_operand(allocator, out, cache, inst.rn, width, 17);
+            let b = try float_operand(allocator, out, cache, inst.rm, width, 18);
+            let dest = float_dest(inst.rd);
+            try out.word(allocator, enc_float(inst.imm, width, dest, a, b), float_mnemonic(inst.imm));
+        },
+        FUn => {
+            let a = try float_operand(allocator, out, cache, inst.rn, width, 17);
+            let dest = float_dest(inst.rd);
+            try out.word(allocator, enc_float(inst.imm, width, dest, a, 0 - 1), float_mnemonic(inst.imm));
+        },
+        FMAdd => {
+            let a = try float_operand(allocator, out, cache, inst.rn, width, 17);
+            let b = try float_operand(allocator, out, cache, inst.rm, width, 18);
+            let c = try float_operand(allocator, out, cache, inst.ra, width, 19);
+            let dest = float_dest(inst.rd);
+            try out.word(allocator, enc_fmadd(width, dest, a, b, c), "fmadd");
+        },
+        FCmp => {
+            let a = try float_operand(allocator, out, cache, inst.rn, width, 17);
+            let b = try float_operand(allocator, out, cache, inst.rm, width, 18);
+            return out.word(allocator, enc_fcmp(width, a, b), "fcmp");
+        },
+        FCvt => {
+            var to = 4;
+            if width == 4 {
+                to = 8;
+            }
+            let a = try float_operand(allocator, out, cache, inst.rn, width, 17);
+            let dest = float_dest(inst.rd);
+            try out.word(allocator, enc_fcvt(width, dest, a), "fcvt");
+            return float_result(allocator, out, inst.rd, to, cache);
+        },
+        FToInt => {
+            let a = try float_operand(allocator, out, cache, inst.rn, inst.imm, 17);
+            try out.word(allocator, enc_fcvtz(inst.signed, width, inst.imm, inst.rd, a), "fcvtz");
+            if cache.reg == inst.rd {
+                cache.reg = 0 - 1;
+            }
+            return;
+        },
+        IntToF => {
+            let dest = float_dest(inst.rd);
+            try out.word(allocator, enc_cvtf(inst.signed, width, dest, inst.rn), "cvtf");
+        },
+        FArg => {
+            if is_float_reg(inst.rn) {
+                return float_move(allocator, out, inst.imm, float_reg_index(inst.rn), width);
+            }
+            try fmov_in(allocator, out, inst.imm, inst.rn, width);
+            return;
+        },
+        FRet => {
+            if is_float_reg(inst.rd) {
+                return float_move(allocator, out, float_reg_index(inst.rd), inst.imm, width);
+            }
+            try fmov_out(allocator, out, inst.rd, inst.imm, width);
+            if cache.reg == inst.rd {
+                cache.reg = 0 - 1;
+            }
+            return;
+        },
+        _ => return,
+    }
+    return float_result(allocator, out, inst.rd, width, cache);
+}
+
+/// Writes `fmov vd, vn` between float registers of a width.
+fn float_move(allocator: Allocator, out: &var Out, vd: i64, vn: i64, width: i64) -> !void {
+    return out.word(allocator, enc_fmov_float(width, vd, vn), "fmov");
+}
+
+/// Puts a constant's bits in the float register rd: from the zero register,
+/// or through x16, which no instruction holds a value in across a constant.
+fn float_constant(allocator: Allocator, out: &var Out, rd: i64, imm: i64) -> !void {
+    var source = reg_zr();
+    if imm != 0 {
+        try materialize(allocator, out, scratch0(), imm);
+        source = scratch0();
+    }
+    return rr(allocator, out, "fmov", rd, source);
+}
+
+/// Prints a select over float registers as `fcsel`. A spilled operand, which
+/// allocation reloads into a general register, moves through v17 or v18,
+/// and a spilled result through v16.
+fn float_select(allocator: Allocator, out: &var Out, inst: &MInst) -> !void {
+    let cache = empty_cache();
+    let a = try float_operand(allocator, out, &cache, inst.rn, 8, 17);
+    let b = try float_operand(allocator, out, &cache, inst.rm, 8, 18);
+    let dest = float_dest(inst.rd);
+    try out.word(allocator, enc_fcsel(8, dest, a, b, inst.cond), "fcsel");
+    if !is_float_reg(inst.rd) {
+        try fmov_out(allocator, out, inst.rd, 16, 8);
+    }
+    return;
+}

@@ -1,0 +1,336 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import compiler::internal::typ;
+import std::array;
+import std::mem;
+
+// Arenas, boxes and raw pointer steps, laid out the way the LLVM backend
+// lays them out so the C runtime reads the same memory.
+//
+// An arena is an array's header -- data, length, capacity -- and a fourth
+// word: the number its handles count from, which the runtime hands out per
+// instance. A handle is that number plus the element's index, and a read
+// subtracts it back off, so a handle from another arena comes back off by a
+// multiple of 2^32 and fails the range test an index past the end fails. An
+// add that would carry the length to 2^32 - 1 stops instead, which keeps that
+// distance out of any arena's reach.
+//
+// A Box is its payload's address in a cell the runtime allocates; the
+// payload is stored and loaded here, since only the backend knows its type.
+
+/// Returns the offset of the word an arena's handles count from.
+fn arena_origin_offset() -> i64 {
+    return 24;
+}
+
+/// Returns the length an arena's add refuses to reach.
+fn arena_max_len() -> i64 {
+    return 4294967295;
+}
+
+fn (self: &var Selector) select_arena(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    match node.op {
+        ArenaNew => {
+            let shape = shape_of(module, node.result.type_name);
+            if shape.class != Class::Aggregate {
+                return try self.fail_op(module, node);
+            }
+            try self.call_c("kizu_arena_origin", 0);
+            let origin = self.func.new_vreg();
+            try self.mov(origin, 0);
+            let address = try self.new_slot(shape);
+            try self.zero_bytes(address, arena_origin_offset());
+            try self.store(origin, address, arena_origin_offset(), 8);
+            try self.set_val(node.result.name, fresh_val(address));
+            return null;
+        },
+        ArenaAdd => return self.select_arena_add(module, node),
+        ArenaAt => return self.select_arena_at(module, node),
+        ArenaAtMut => return self.select_arena_at(module, node),
+        ArenaPopOrPanic => {
+            let arena_value = node.args.get(0) orelse return try self.fail_op(module, node);
+            let header = try self.header_addr(module, arena_value) orelse return try self.fail_op(module, node);
+            let length = self.func.new_vreg();
+            try self.load(length, header, 8, 8, true);
+            let fail_block = try self.new_cold_block();
+            let take = try self.new_join();
+            try self.op_imm(MOp::CmpImm, reg_none(), length, 0);
+            self.func.end(self.current, Term::Flags, Cond::Le, reg_none(), fail_block, take);
+            try self.start_block(fail_block);
+            var none = array::new<i64>(self.allocator);
+            defer none.deinit(self.allocator);
+            try self.report_failure("kizu_panic_arena_empty", &none, node.span.start.line, node.span.start.column);
+            try self.start_block(take);
+            let shorter = self.func.new_vreg();
+            try self.op_imm(MOp::SubImm, shorter, length, 1);
+            try self.store(shorter, header, 8, 8);
+            let data = self.func.new_vreg();
+            try self.load(data, header, 0, 8, false);
+            let loaded = try self.load_element(module, data, shorter, node.result.type_name) orelse return try self.fail_op(module, node);
+            try self.set_val(node.result.name, loaded);
+            return null;
+        },
+        _ => return try self.fail_op(module, node),
+    }
+}
+
+/// Selects Arena.add(allocator, value): a full arena stops; otherwise the
+/// value is appended, and the length it went in at, offset by what this
+/// arena counts from, is the handle.
+fn (self: &var Selector) select_arena_add(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let arena_value = node.args.get(0) orelse return try self.fail_op(module, node);
+    let allocator_value = node.args.get(1) orelse return try self.fail_op(module, node);
+    let value = node.args.get(2) orelse return try self.fail_op(module, node);
+    let elem = element_shape(module, arena_value);
+    let result = shape_of(module, node.result.type_name);
+    if elem.class == Class::Unsupported or result.class != Class::Aggregate or result.size != 16 or self.oom < 0 {
+        return try self.fail_op(module, node);
+    }
+    let header = try self.header_addr(module, arena_value) orelse return try self.fail_op(module, node);
+    let allocator_reg = try self.reg(module, allocator_value) orelse return try self.fail_op(module, node);
+    let length = self.func.new_vreg();
+    try self.load(length, header, 8, 8, true);
+    let full = try self.new_cold_block();
+    let room = try self.new_join();
+    try self.cmp_imm_or_reg(length, arena_max_len());
+    self.func.end(self.current, Term::Flags, Cond::Lo, reg_none(), room, full);
+    try self.start_block(full);
+    var none = array::new<i64>(self.allocator);
+    defer none.deinit(self.allocator);
+    try self.report_failure("kizu_panic_arena_full", &none, node.span.start.line, node.span.start.column);
+    try self.start_block(room);
+    let code = try self.append_at(module, header, length, allocator_reg, value, elem) orelse return try self.fail_op(module, node);
+    let origin = self.func.new_vreg();
+    try self.load(origin, header, arena_origin_offset(), 8, true);
+    let handle = self.func.new_vreg();
+    try self.op3(MOp::Add, handle, origin, length);
+    let address = try self.new_slot(result);
+    try self.store(code, address, 0, 8);
+    try self.store(handle, address, 8, 8);
+    try self.set_val(node.result.name, fresh_val(address));
+    return null;
+}
+
+/// Selects Arena.at and Arena.at_mut. The handle less what this arena counts
+/// from is the index, tested against the length unsigned: at stops when it
+/// is out of range, at_mut is the niche optional borrow, null when it is.
+fn (self: &var Selector) select_arena_at(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let arena_value = node.args.get(0) orelse return try self.fail_op(module, node);
+    let handle_value = node.args.get(1) orelse return try self.fail_op(module, node);
+    let elem = element_shape(module, arena_value);
+    if elem.class == Class::Unsupported or elem.class == Class::Void {
+        return try self.fail_op(module, node);
+    }
+    let header = try self.header_addr(module, arena_value) orelse return try self.fail_op(module, node);
+    let handle = try self.reg_nz(module, handle_value) orelse return try self.fail_op(module, node);
+    let origin = self.func.new_vreg();
+    try self.load(origin, header, arena_origin_offset(), 8, true);
+    let index = self.func.new_vreg();
+    try self.op3(MOp::Sub, index, handle, origin);
+    let length = self.func.new_vreg();
+    try self.load(length, header, 8, 8, true);
+    if node.op == ir::Op::ArenaAtMut {
+        let optional = optional_layout(module, node.result.type_name) orelse return try self.fail_op(module, node);
+        if !optional.niche {
+            return try self.fail_op(module, node);
+        }
+        let data = self.func.new_vreg();
+        try self.load(data, header, 0, 8, false);
+        let address = try self.scaled_addr(data, index, elem.size);
+        try self.op3(MOp::Cmp, reg_none(), index, length);
+        let checked = self.func.new_vreg();
+        var pick = blank(MOp::CSel);
+        pick.rd = checked;
+        pick.rn = address;
+        pick.rm = reg_zr();
+        pick.cond = Cond::Lo;
+        try self.inst(pick);
+        try self.set_val(node.result.name, reg_val(checked));
+        return null;
+    }
+    let fail_block = try self.new_cold_block();
+    let cont = try self.new_join();
+    try self.op3(MOp::Cmp, reg_none(), index, length);
+    self.func.end(self.current, Term::Flags, Cond::Hs, reg_none(), fail_block, cont);
+    try self.start_block(fail_block);
+    var none = array::new<i64>(self.allocator);
+    defer none.deinit(self.allocator);
+    try self.report_failure("kizu_panic_arena_handle", &none, node.span.start.line, node.span.start.column);
+    try self.start_block(cont);
+    let data = self.func.new_vreg();
+    try self.load(data, header, 0, 8, false);
+    let address = try self.scaled_addr(data, index, elem.size);
+    // A borrow spelled as an address is the element's address; one spelled
+    // as a value is a copy, since the element can change behind it.
+    if module.names.starts_with(node.result.type_name, "&") {
+        try self.set_val(node.result.name, reg_val(address));
+        return null;
+    }
+    let loaded = try self.load_value(module, node.result.type_name, address, 0, true) orelse return try self.fail_op(module, node);
+    try self.set_val(node.result.name, loaded);
+    return null;
+}
+
+/// Returns the payload shape of a Box a value names, or of the Box a
+/// box.new returns.
+fn box_payload(module: &ir::Module, type_name: ir::Name) -> Shape {
+    let text = ir::name_text(&module.names, type_name);
+    let bytes = text.as_bytes();
+    if typ::error_union_success(bytes) |success| {
+        let inner = container_elem(success);
+        return shape_of_bytes(module, inner, 1);
+    }
+    let elem = container_elem(bytes);
+    return shape_of_bytes(module, elem, 1);
+}
+
+fn (self: &var Selector) select_box(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    match node.op {
+        BoxNew => return self.select_box_new(module, node),
+        BoxBorrow => return self.select_box_borrow(module, node),
+        BoxBorrowMut => return self.select_box_borrow(module, node),
+        BoxDeinit => {
+            let box_value = node.args.get(0) orelse return try self.fail_op(module, node);
+            let payload = box_payload(module, box_value.type_name);
+            if payload.class == Class::Unsupported {
+                return try self.fail_op(module, node);
+            }
+            try self.release_box(module, node, payload.size) orelse return try self.fail_op(module, node);
+            try self.set_val(node.result.name, no_val());
+            return null;
+        },
+        BoxTake => {
+            // The payload moves out before the cell is released.
+            let box_value = node.args.get(0) orelse return try self.fail_op(module, node);
+            let payload = box_payload(module, box_value.type_name);
+            if payload.class == Class::Unsupported {
+                return try self.fail_op(module, node);
+            }
+            let cell = try self.reg_nz(module, box_value) orelse return try self.fail_op(module, node);
+            let loaded = try self.load_value(module, node.result.type_name, cell, 0, true) orelse return try self.fail_op(module, node);
+            try self.release_box(module, node, payload.size) orelse return try self.fail_op(module, node);
+            try self.set_val(node.result.name, loaded);
+            return null;
+        },
+        _ => return try self.fail_op(module, node),
+    }
+}
+
+/// Selects std::mem::box(allocator, value): the runtime returns the cell or
+/// null; the value is stored into a cell it returned, and the result's code
+/// is out of memory when it returned none.
+fn (self: &var Selector) select_box_new(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let allocator_value = node.args.get(0) orelse return try self.fail_op(module, node);
+    let value = node.args.get(1) orelse return try self.fail_op(module, node);
+    let payload = box_payload(module, node.result.type_name);
+    let result = shape_of(module, node.result.type_name);
+    if payload.class == Class::Unsupported or result.class != Class::Aggregate or result.size != 16 or self.oom < 0 {
+        return try self.fail_op(module, node);
+    }
+    let allocator_reg = try self.reg(module, allocator_value) orelse return try self.fail_op(module, node);
+    var words = array::new<i64>(self.allocator);
+    defer words.deinit(self.allocator);
+    try words.append(self.allocator, allocator_reg);
+    try words.append(self.allocator, try self.imm_reg_nz(payload.size));
+    let count = try self.place_words(&words);
+    try self.call_c("kizu_box_alloc", count);
+    let cell = self.func.new_vreg();
+    try self.mov(cell, 0);
+    let fill = try self.new_join();
+    let join = try self.new_join();
+    self.func.end(self.current, Term::NonZero, Cond::Ne, cell, fill, join);
+    try self.start_block(fill);
+    if !try self.store_value(module, value, payload, cell, 0) {
+        return try self.fail_op(module, node);
+    }
+    self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), join, 0 - 1);
+    try self.start_block(join);
+    let failure = try self.imm_reg_nz(self.oom);
+    try self.op_imm(MOp::CmpImm, reg_none(), cell, 0);
+    let code = self.func.new_vreg();
+    var pick = blank(MOp::CSel);
+    pick.rd = code;
+    pick.rn = reg_zr();
+    pick.rm = failure;
+    pick.cond = Cond::Ne;
+    try self.inst(pick);
+    let address = try self.new_slot(result);
+    try self.store(code, address, 0, 8);
+    try self.store(cell, address, 8, 8);
+    try self.set_val(node.result.name, fresh_val(address));
+    return null;
+}
+
+/// Selects Box.borrow and Box.borrow_mut: a borrow spelled as an address is
+/// the cell's address, one spelled as a value a copy of the payload.
+fn (self: &var Selector) select_box_borrow(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let box_value = node.args.get(0) orelse return try self.fail_op(module, node);
+    let cell = try self.reg_nz(module, box_value) orelse return try self.fail_op(module, node);
+    if module.names.starts_with(node.result.type_name, "&") {
+        try self.set_val(node.result.name, reg_val(cell));
+        return null;
+    }
+    let loaded = try self.load_value(module, node.result.type_name, cell, 0, true) orelse return try self.fail_op(module, node);
+    try self.set_val(node.result.name, loaded);
+    return null;
+}
+
+/// Hands a Box's cell back to the runtime: the box and the allocator are the
+/// instruction's two arguments.
+fn (self: &var Selector) release_box(module: &ir::Module, node: &ir::InstrNode, size: i64) -> !?bool {
+    let box_value = node.args.get(0) orelse return null;
+    let allocator_value = node.args.get(1) orelse return null;
+    let cell = try self.reg(module, box_value) orelse return null;
+    let allocator_reg = try self.reg(module, allocator_value) orelse return null;
+    try self.release_box_cell(cell, allocator_reg, size);
+    return true;
+}
+
+/// Calls the runtime to release a Box cell of a payload size.
+fn (self: &var Selector) release_box_cell(cell: i64, allocator_reg: i64, size: i64) -> !void {
+    var words = array::new<i64>(self.allocator);
+    defer words.deinit(self.allocator);
+    try words.append(self.allocator, allocator_reg);
+    try words.append(self.allocator, cell);
+    try words.append(self.allocator, try self.imm_reg_nz(size));
+    let count = try self.place_words(&words);
+    try self.call_c("kizu_box_deinit", count);
+    return;
+}
+
+/// Returns T of `ptr<T>` or `ptr<const T>`.
+fn pointee(bytes: []u8) -> []u8 {
+    if !mem::starts_with(bytes, "ptr<") {
+        return bytes[0..0];
+    }
+    let elem = bytes[4..mem::len(bytes) - 1];
+    if mem::starts_with(elem, "const ") {
+        return elem[6..mem::len(elem)];
+    }
+    return elem;
+}
+
+/// Selects ptr.offset: the pointer stepped by a count of its elements,
+/// wrapping as the address arithmetic does.
+fn (self: &var Selector) select_ptr_offset(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let pointer = node.args.get(0) orelse return try self.fail_op(module, node);
+    let count = node.args.get(1) orelse return try self.fail_op(module, node);
+    let text = ir::name_text(&module.names, pointer.type_name);
+    let bytes = text.as_bytes();
+    let elem_bytes = pointee(bytes);
+    let elem = shape_of_bytes(module, elem_bytes, 1);
+    if elem.class != Class::Scalar and elem.class != Class::Aggregate {
+        return try self.fail_op(module, node);
+    }
+    let base = try self.reg_nz(module, pointer) orelse return try self.fail_op(module, node);
+    let held = self.val(count.name);
+    if held.kind == ValKind::Const {
+        let address = try self.add_offset(base, held.imm * elem.size);
+        try self.set_val(node.result.name, reg_val(address));
+        return null;
+    }
+    let steps = try self.reg_nz(module, count) orelse return try self.fail_op(module, node);
+    let address = try self.scaled_addr(base, steps, elem.size);
+    try self.set_val(node.result.name, reg_val(address));
+    return null;
+}

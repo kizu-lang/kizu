@@ -4,25 +4,21 @@ import std::map;
 import std::mem;
 import std::string;
 
-// Mechanical port of internal/ir/bounds.go: removing the index checks a
-// function has already answered. Go keys its facts by the Go string of a
-// value name, or by an array of two; here a name is keyed by the id of the
-// interned Name, and a pair by the two ids packed in one integer (an id stays
-// below 2^32). Go names the instructions a plan drops or rewrites by pointer;
-// here by the position of the block and of the instruction in it, which no
-// walk moves. Go clears the Array header facts in place; a std map cannot be
-// cleared cheaply, so each header fact carries the number of times the
-// headers had been forgotten when it was learned, and holds only while that
-// is still the count. Go asks whether a value has an upper bound by walking
-// every pair it knows; here the left names of those pairs are kept as a set
-// beside them, which answers the same.
+// Removing the index checks a function has already answered. A fact about one
+// value is keyed by the id of the interned Name, and a fact about a pair by
+// the two ids packed in one integer (an id stays below 2^32). The instructions
+// a plan drops or rewrites are named by the position of the block and of the
+// instruction in it, which no walk moves. A std map cannot be cleared cheaply,
+// so each Array header fact carries the number of times the headers had been
+// forgotten when it was learned, and holds only while that is still the count.
+// The left names of the known pairs are kept as a set beside them, so asking
+// whether a value has an upper bound does not walk every pair.
 
-/// Removes the index checks a function has already answered, the Go
-/// `EliminateBoundsChecks`. A check is answered when the index is known not to
-/// be negative and known to be below a value equal to the length it is
-/// checked against: the index was compared with that length on the way in, or
-/// the same index of the same Array was checked since its header last could
-/// change.
+/// Removes the index checks a function has already answered. A check is
+/// answered when the index is known not to be negative and known to be below a
+/// value equal to the length it is checked against: the index was compared
+/// with that length on the way in, or the same index of the same Array was
+/// checked since its header last could change.
 ///
 /// A check on a view is its own cond_fail and goes. An Array operation carries
 /// its check inside, so an answered one is written as the borrow its check
@@ -76,7 +72,7 @@ struct LengthFact {
     headers: i64,
 }
 
-/// Is what is known at one point of a function, the Go `boundsFacts`.
+/// Is what is known at one point of a function.
 struct BoundsFacts {
     // less holds pairs {x, y} with x < y as signed integers, and less_left
     // the x of each.
@@ -95,7 +91,7 @@ struct BoundsFacts {
     headers: i64,
 }
 
-/// Returns an empty fact set, the Go `newBoundsFacts`.
+/// Returns an empty fact set.
 fn new_bounds_facts(allocator: Allocator) -> BoundsFacts {
     return BoundsFacts {
         less: map::new<i64, bool>(allocator),
@@ -118,7 +114,7 @@ fn (self: BoundsFacts) deinit(allocator: Allocator) -> void {
     return;
 }
 
-/// Returns an independent copy of the facts, the Go `copyFacts`.
+/// Returns an independent copy of the facts.
 fn (self: &BoundsFacts) copy_facts(allocator: Allocator) -> !BoundsFacts {
     var out = new_bounds_facts(allocator);
     errdefer out.deinit(allocator);
@@ -165,7 +161,7 @@ fn (self: &BoundsFacts) copy_facts(allocator: Allocator) -> !BoundsFacts {
     return move out;
 }
 
-/// Drops what is known of Array headers, the Go `forgetHeaders`.
+/// Drops what is known of Array headers.
 fn (self: &var BoundsFacts) forget_headers() -> void {
     self.headers = self.headers + 1;
     return;
@@ -177,8 +173,7 @@ fn (self: &var BoundsFacts) add_less(allocator: Allocator, left: Name, right: Na
     return self.less_left.insert(allocator, name_id(left), true);
 }
 
-/// Returns the value known equal to an Array's length, the Go
-/// `length[container]` read with its ok flag.
+/// Returns the value known equal to an Array's length.
 fn (self: &BoundsFacts) length_of(container: Name) -> ?Value {
     let fact = self.length.get(name_id(container)) orelse return null;
     if fact.headers != self.headers {
@@ -199,13 +194,13 @@ fn (self: &BoundsFacts) is_checked(pair: i64) -> bool {
     return headers == self.headers;
 }
 
-/// Reports whether a value a step adds one to is known to be below some
-/// value, so the step cannot wrap, the Go `hasUpperBound`.
+/// Reports whether a value a step adds one to is known to be below some value,
+/// so the step cannot wrap.
 fn (self: &BoundsFacts) has_upper_bound(name: Name) -> bool {
     return self.less_left.contains(name_id(name));
 }
 
-/// Is what one walk of a function decided, the Go `boundsPlan`.
+/// Is what one walk of a function decided.
 struct BoundsPlan {
     // drops are the cond_fail instructions an answered check made.
     drops: map::Map<i64, bool>,
@@ -234,7 +229,7 @@ fn (self: BoundsPlan) deinit(allocator: Allocator) -> void {
     return;
 }
 
-/// Follows the length aliases the walk has made, the Go `resolvedName`.
+/// Follows the length aliases the walk has made.
 fn (self: &BoundsPlan) resolved_name(name: Name) -> Name {
     var current = name;
     while self.aliases.get(name_id(current)) |next| {
@@ -243,9 +238,8 @@ fn (self: &BoundsPlan) resolved_name(name: Name) -> Name {
     return current;
 }
 
-/// Is the loop counters one walk trusts and the steps that feed them, the Go
-/// `boundsWalker.counter` and `steps`. A counter dropped from the candidates
-/// stays filed as false.
+/// Is the loop counters one walk trusts and the steps that feed them. A
+/// counter dropped from the candidates stays filed as false.
 struct LoopCounters {
     counter: map::Map<i64, bool>,
     // steps maps a step's result to the counters it feeds.
@@ -263,9 +257,9 @@ fn (self: &LoopCounters) is_counter(name: Name) -> bool {
     return self.counter.get(name_id(name)) orelse false;
 }
 
-/// Carries the function-wide tables one walk reads, the Go `boundsWalker`:
-/// every definition by name, and the function's blocks, predecessors,
-/// dominator tree and reverse postorder, which no walk changes.
+/// Carries the function-wide tables one walk reads: every definition by name,
+/// and the function's blocks, predecessors, dominator tree and reverse
+/// postorder, which no walk changes.
 struct BoundsWalker {
     function: Function,
     defs: map::Map<i64, Instr>,
@@ -287,8 +281,7 @@ fn (self: BoundsWalker) deinit(allocator: Allocator) -> void {
     return;
 }
 
-/// Plans and applies the removals for one function, the Go
-/// `eliminateBoundsChecksIn`.
+/// Plans and applies the removals for one function.
 fn eliminate_bounds_checks_in(allocator: Allocator, module: &var Module, function: Function) -> !void {
     if function_block_count(module, function) == 0 {
         return;
@@ -336,8 +329,7 @@ fn eliminate_bounds_checks_in(allocator: Allocator, module: &var Module, functio
     return;
 }
 
-/// Maps every instruction result of a function to its instruction, the Go
-/// `defs` a walk and a version read.
+/// Maps every instruction result of a function to its instruction.
 fn instr_definitions(allocator: Allocator, module: &Module, function: Function) -> !map::Map<i64, Instr> {
     var defs = map::new<i64, Instr>(allocator);
     errdefer defs.deinit(allocator);
@@ -357,7 +349,7 @@ fn instr_definitions(allocator: Allocator, module: &Module, function: Function) 
 }
 
 /// Maps every i64 constant of a function to the first constant of the same
-/// number, in the order of its blocks, the Go `boundsWalker.constants`.
+/// number, in the order of its blocks.
 fn first_constants(
     allocator: Allocator,
     module: &Module,
@@ -391,9 +383,9 @@ fn first_constants(
 }
 
 /// Finds the i64 phis each of whose incoming is a constant that is not
-/// negative or a step of one from such a phi, and the steps that feed them,
-/// the Go `loopCounters`. Every phi not excluded starts as a candidate and
-/// loses its place when an incoming is neither, until none does.
+/// negative or a step of one from such a phi, and the steps that feed them.
+/// Every phi not excluded starts as a candidate and loses its place when an
+/// incoming is neither, until none does.
 fn loop_counters(
     allocator: Allocator,
     module: &Module,
@@ -445,8 +437,7 @@ fn loop_counters(
     return move counters;
 }
 
-/// Records that a step feeds a counter, the Go
-/// `steps[step] = append(steps[step], counter)`.
+/// Records that a step feeds a counter.
 fn add_step(allocator: Allocator, steps: &var map::Map<i64, array::Array<Name>>, step: Name, counter: Name) -> !void {
     if steps.at_mut(name_id(step)) |fed| {
         return fed.append(allocator, counter);
@@ -459,7 +450,7 @@ fn add_step(allocator: Allocator, steps: &var map::Map<i64, array::Array<Name>>,
 
 /// Removes each candidate with an incoming that is neither a constant that is
 /// not negative nor a step of one from a candidate, and reports whether it
-/// removed any, the Go `dropCounters`.
+/// removed any.
 fn drop_counters(
     allocator: Allocator,
     module: &Module,
@@ -485,7 +476,7 @@ fn drop_counters(
 }
 
 /// Reports whether every incoming of a phi is a constant that is not negative
-/// or a step of one from a candidate counter, the Go `countsUp`.
+/// or a step of one from a candidate counter.
 fn counts_up(module: &Module, phi: Instr, defs: &map::Map<i64, Instr>, counters: &LoopCounters) -> bool {
     let node = module.instrs.at(phi.node);
     var index = 0;
@@ -504,8 +495,7 @@ fn counts_up(module: &Module, phi: Instr, defs: &map::Map<i64, Instr>, counters:
     return true;
 }
 
-/// Reports whether a value is an i64 constant that is not negative, the Go
-/// `nonNegativeConstant`.
+/// Reports whether a value is an i64 constant that is not negative.
 fn non_negative_constant(module: &Module, value: Value, defs: &map::Map<i64, Instr>) -> bool {
     if constant_value(module, value, defs) |number| {
         return number >= 0;
@@ -513,7 +503,7 @@ fn non_negative_constant(module: &Module, value: Value, defs: &map::Map<i64, Ins
     return false;
 }
 
-/// Returns the i64 a constant value holds, the Go `constantValue`.
+/// Returns the i64 a constant value holds.
 fn constant_value(module: &Module, value: Value, defs: &map::Map<i64, Instr>) -> ?i64 {
     if !module.names.is(value.type_name, "i64") {
         return null;
@@ -532,7 +522,7 @@ fn constant_value(module: &Module, value: Value, defs: &map::Map<i64, Instr>) ->
     return parse_i64(bytes);
 }
 
-/// Returns the value a `+ 1` step adds one to, the Go `stepOf`.
+/// Returns the value a `+ 1` step adds one to.
 fn step_of(module: &Module, defs: &map::Map<i64, Instr>, value: Value) -> ?Name {
     let instr = defs.get(name_id(value.name)) orelse return null;
     let node = module.instrs.at(instr.node);
@@ -555,8 +545,7 @@ fn step_of(module: &Module, defs: &map::Map<i64, Instr>, value: Value) -> ?Name 
     return null;
 }
 
-/// Visits the blocks down the dominator tree and returns a fresh plan, the Go
-/// `boundsWalker.walk`.
+/// Visits the blocks down the dominator tree and returns a fresh plan.
 fn (self: &BoundsWalker) walk(allocator: Allocator, module: &Module, counters: &LoopCounters) -> !BoundsPlan {
     var plan = new_bounds_plan(allocator);
     errdefer plan.deinit(allocator);
@@ -615,8 +604,7 @@ fn (self: &BoundsWalker) starting_facts(
 }
 
 /// Reports whether a block on a path from idom to the block at position holds
-/// an instruction that could change an Array header, the Go
-/// `pathsMayWriteHeaders`.
+/// an instruction that could change an Array header.
 fn (self: &BoundsWalker) paths_may_write_headers(allocator: Allocator, module: &Module, position: i64, idom: i64) -> !bool {
     var stack = array::new<i64>(allocator);
     defer stack.deinit(allocator);
@@ -657,9 +645,8 @@ fn (self: &BoundsWalker) paths_may_write_headers(allocator: Allocator, module: &
     return false;
 }
 
-/// Reports whether an instruction cannot change an Array header, the Go
-/// `leavesHeaders`: it only computes its result, or it checks, reads or
-/// writes an element or a field.
+/// Reports whether an instruction cannot change an Array header: it only
+/// computes its result, or it checks, reads or writes an element or a field.
 fn leaves_headers(op: Op) -> bool {
     return match op {
         CondFail => true,
@@ -672,8 +659,7 @@ fn leaves_headers(op: Op) -> bool {
     };
 }
 
-/// Adds what taking the edge from term to target says about its condition,
-/// the Go `learnEdge`.
+/// Adds what taking the edge from term to target says about its condition.
 fn (self: &BoundsWalker) learn_edge(
     allocator: Allocator,
     module: &Module,
@@ -717,8 +703,7 @@ fn ordering_of(module: &Module, op: Op, operand: Name) -> Ordering {
     return Ordering::None;
 }
 
-/// Returns the comparison that holds when an ordering does not, the Go
-/// `negatedComparison`.
+/// Returns the comparison that holds when an ordering does not.
 fn negated_ordering(ordering: Ordering) -> Ordering {
     return match ordering {
         Less => Ordering::GreaterEqual,
@@ -729,8 +714,7 @@ fn negated_ordering(ordering: Ordering) -> Ordering {
     };
 }
 
-/// Adds what a comparison being holds or truth says, the Go
-/// `learnCondition`.
+/// Adds what a comparison being holds or truth says.
 fn (self: &BoundsWalker) learn_condition(
     allocator: Allocator,
     module: &Module,
@@ -777,8 +761,7 @@ fn (self: &BoundsWalker) learn_condition(
     return;
 }
 
-/// Records what one instruction answers and learns, the Go
-/// `boundsWalker.visit`.
+/// Records what one instruction answers and learns.
 fn (self: &BoundsWalker) visit(
     allocator: Allocator,
     module: &Module,
@@ -806,9 +789,8 @@ fn (self: &BoundsWalker) visit(
     return;
 }
 
-/// Marks the counters a `+` step feeds as unsafe when the value it adds one
-/// to has no known upper bound, the `binary.+` case of the Go
-/// `boundsWalker.visit`.
+/// Marks the counters a `+` step feeds as unsafe when the value it adds one to
+/// has no known upper bound.
 fn (self: &BoundsWalker) visit_step(
     allocator: Allocator,
     module: &Module,
@@ -839,7 +821,7 @@ fn (self: &BoundsWalker) visit_step(
 }
 
 /// Drops a bounds check whose failing condition cannot hold, and learns that
-/// it does not from one that stays, the Go `visitCondFail`.
+/// it does not from one that stays.
 fn (self: &BoundsWalker) visit_cond_fail(
     allocator: Allocator,
     module: &Module,
@@ -886,16 +868,16 @@ fn (self: &BoundsWalker) visit_cond_fail(
     return self.learn_condition(allocator, module, plan, facts, tested, false);
 }
 
-/// Names a value the way what is known files it, the Go `resolvedName`: the
-/// length aliases the walk has made followed, and a constant named by the
-/// first constant of its number.
+/// Names a value the way what is known files it: the length aliases the walk
+/// has made followed, and a constant named by the first constant of its
+/// number.
 fn (self: &BoundsWalker) fact_name(plan: &BoundsPlan, name: Name) -> Name {
     let resolved = plan.resolved_name(name);
     return self.constants.get(name_id(resolved)) orelse resolved;
 }
 
-/// Returns the i64 a cast to u64 reads, the Go `unsignedOf`. The cast keeps
-/// the bits, so the two name one number read two ways.
+/// Returns the i64 a cast to u64 reads. The cast keeps the bits, so the two
+/// name one number read two ways.
 fn unsigned_of(module: &Module, defs: &map::Map<i64, Instr>, value: Value) -> ?Value {
     let instr = defs.get(name_id(value.name)) orelse return null;
     let node = module.instrs.at(instr.node);
@@ -912,7 +894,7 @@ fn unsigned_of(module: &Module, defs: &map::Map<i64, Instr>, value: Value) -> ?V
 /// Drops an index check `u64(index) >= u64(length)` that cannot fail: the
 /// index is not negative and below the length. One that stays says, once
 /// passed, that the index is not negative and below the length, when the
-/// length is not negative. The Go `visitUnsignedCheck`.
+/// length is not negative.
 fn (self: &BoundsWalker) visit_unsigned_check(
     allocator: Allocator,
     module: &Module,
@@ -936,8 +918,7 @@ fn (self: &BoundsWalker) visit_unsigned_check(
     return;
 }
 
-/// Reports whether a value is known not to be negative, the Go
-/// `nonNegative`.
+/// Reports whether a value is known not to be negative.
 fn (self: &BoundsWalker) non_negative(
     module: &Module,
     counters: &LoopCounters,
@@ -956,7 +937,7 @@ fn (self: &BoundsWalker) non_negative(
 }
 
 /// Makes a length read stand for the equal one read before it, or the length
-/// known from now on, the Go `visitLength`.
+/// known from now on.
 fn visit_length(
     allocator: Allocator,
     module: &Module,
@@ -987,7 +968,7 @@ fn visit_length(
 }
 
 /// Answers an Array operation's check when it can, and learns that the index
-/// is in bounds from one that stays, the Go `visitArrayCheck`.
+/// is in bounds from one that stays.
 fn (self: &BoundsWalker) visit_array_check(
     allocator: Allocator,
     module: &Module,
@@ -1019,7 +1000,7 @@ fn (self: &BoundsWalker) visit_array_check(
     return;
 }
 
-/// Rewrites the function the way a walk planned, the Go `applyBoundsPlan`.
+/// Rewrites the function the way a walk planned.
 fn apply_bounds_plan(allocator: Allocator, module: &var Module, function: Function, plan: &BoundsPlan) -> !void {
     if plan.aliases.len() > 0 {
         try replace_function_values(allocator, module, function, &plan.aliases);
@@ -1076,9 +1057,9 @@ fn apply_bounds_plan(allocator: Allocator, module: &var Module, function: Functi
     return;
 }
 
-/// Returns the highest site an earlier pass already spelled into a
-/// %bce<site>. name in the function, so a later pass numbers after it rather
-/// than defining a value twice, the Go `lastBoundsSite`.
+/// Returns the highest site an earlier pass already spelled into a %bce<site>.
+/// name in the function, so a later pass numbers after it rather than defining
+/// a value twice.
 fn last_bounds_site(module: &Module, function: Function) -> i64 {
     var last = 0;
     var position = 0;
@@ -1119,8 +1100,7 @@ fn known_present(module: &Module, instr: Instr, present: &map::Map<i64, bool>) -
 }
 
 /// Appends the instructions an Array operation with an answered check becomes,
-/// and marks the borrow optionals known to be present, the Go
-/// `answeredAccess`.
+/// and marks the borrow optionals known to be present.
 fn answered_access(
     allocator: Allocator,
     module: &var Module,

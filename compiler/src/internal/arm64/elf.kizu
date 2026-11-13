@@ -1,0 +1,475 @@
+import compiler::internal::ir;
+import std::array;
+import std::mem;
+import std::string;
+
+// The ELF object of Linux arm64 or x86-64 (ELF64 AArch64 or x86-64,
+// ET_REL), written from the Obj the printer filled (obj.kizu). It lays the
+// object out the way the system assembler lays out the same lines: among
+// the section headers the string table first, then the sections in the
+// order they are first entered, each followed by its relocations, and the
+// symbol table last; the symbols in the order they are first named, the
+// locals (with the mapping symbols `$x` / `$d` and the section symbols
+// relocations name) before the globals; relocations in the order of their
+// places; one string table for the names of both, merged by common tail.
+// In the file the section contents come first, then the symbols, the
+// relocations, the strings and the section headers.
+
+// The ELF relocation of each relocation kind the printer records.
+fn elf_reloc_type(kind: i64, x86: bool) -> i64 {
+    if x86 {
+        if kind == reloc_x86_pc32() {
+            // R_X86_64_PC32
+            return 2;
+        }
+        if kind == reloc_x86_plt32() {
+            // R_X86_64_PLT32
+            return 4;
+        }
+        if kind == reloc_x86_gotpcrelx() {
+            // R_X86_64_REX_GOTPCRELX
+            return 42;
+        }
+        // R_X86_64_64
+        return 1;
+    }
+    if kind == reloc_unsigned() {
+        // R_AARCH64_ABS64
+        return 257;
+    }
+    if kind == reloc_branch26() {
+        // R_AARCH64_CALL26
+        return 283;
+    }
+    if kind == reloc_page21() {
+        // R_AARCH64_ADR_PREL_PG_HI21
+        return 275;
+    }
+    if kind == reloc_pageoff12() {
+        // R_AARCH64_ADD_ABS_LO12_NC
+        return 277;
+    }
+    if kind == reloc_got_page21() {
+        // R_AARCH64_ADR_GOT_PAGE
+        return 311;
+    }
+    // R_AARCH64_LD64_GOT_LO12_NC
+    return 312;
+}
+
+fn elf_section_name(kind: SectionKind) -> []u8 {
+    return match kind {
+        Text => ".text",
+        // The error name rows hold addresses, which a position-independent
+        // executable relocates when it is loaded.
+        DataConst => ".data.rel.ro",
+        TextConst => ".rodata",
+        Cstring => ".rodata.str1.1",
+        Note => ".note.GNU-stack",
+    };
+}
+
+fn elf_section_flags(kind: SectionKind) -> i64 {
+    return match kind {
+        // SHF_ALLOC | SHF_EXECINSTR
+        Text => 6,
+        // SHF_WRITE | SHF_ALLOC
+        DataConst => 3,
+        // SHF_ALLOC
+        TextConst => 2,
+        // SHF_ALLOC | SHF_MERGE | SHF_STRINGS
+        Cstring => 0x32,
+        Note => 0,
+    };
+}
+
+fn elf_entry_size(kind: SectionKind) -> i64 {
+    if kind == SectionKind::Cstring {
+        return 1;
+    }
+    return 0;
+}
+
+/// Writes a section header.
+fn put_section_header(
+    allocator: Allocator,
+    out: &var string::String,
+    name: i64,
+    kind: i64,
+    flags: i64,
+    offset: i64,
+    size: i64,
+    link: i64,
+    info: i64,
+    align: i64,
+    entry: i64
+) -> !void {
+    try put(allocator, out, name, 4);
+    try put(allocator, out, kind, 4);
+    try put(allocator, out, flags, 8);
+    try put(allocator, out, 0, 8);
+    try put(allocator, out, offset, 8);
+    try put(allocator, out, size, 8);
+    try put(allocator, out, link, 4);
+    try put(allocator, out, info, 4);
+    try put(allocator, out, align, 8);
+    return put(allocator, out, entry, 8);
+}
+
+/// Appends the name a symbol has in the ELF object: a C symbol without the
+/// `_` the selector put in front of it, an assembler-local label with
+/// `.L` for `L`, a mapping symbol its `$x` or `$d`.
+fn elf_symbol_name(allocator: Allocator, syms: &ir::NameTable, symbol: &Symbol, out: &var string::String) -> !void {
+    if symbol.kind == SymbolKind::Code {
+        return out.append_bytes(allocator, "$x");
+    }
+    if symbol.kind == SymbolKind::Data {
+        return out.append_bytes(allocator, "$d");
+    }
+    let text = ir::name_text(syms, symbol.name);
+    let bytes = text.as_bytes();
+    if mem::len(bytes) > 0 {
+        if bytes[0] == cast<u8>(95) {
+            return out.append_bytes(allocator, bytes[1..mem::len(bytes)]);
+        }
+        if bytes[0] == cast<u8>(76) {
+            try out.append_bytes(allocator, ".");
+        }
+    }
+    return out.append_bytes(allocator, bytes);
+}
+
+/// Resolves what the assembler resolves before it writes an ELF object: a
+/// call to a local function of its own section is patched in place (on
+/// x86-64 any reference relative to the instruction), and a relocation
+/// against a local symbol names its section's symbol with the symbol's
+/// offset as the addend, but for one through the GOT, and one with an
+/// addend into a section of merged strings, which name the symbol itself:
+/// the linker finds a merged string by where the reference points.
+fn (self: &var Obj) resolve_elf(allocator: Allocator) -> !void {
+    var starts = array::new<i64>(allocator);
+    defer starts.deinit(allocator);
+    var section_index = 0;
+    while self.sections.at(section_index) |section| {
+        section_index = section_index + 1;
+        try starts.append(allocator, section.start);
+    }
+    section_index = 0;
+    while section_index < starts.len() {
+        var relocs = try self.relocs_of(allocator, section_index);
+        defer relocs.deinit(allocator);
+        var kept = array::new<Reloc>(allocator);
+        defer kept.deinit(allocator);
+        var reloc_index = 0;
+        while relocs.get(reloc_index) |held| {
+            reloc_index = reloc_index + 1;
+            var reloc = held;
+            let symbol = self.symbols.get_or_panic(reloc.symbol);
+            let local = elf_local(&symbol);
+            if reloc.kind == reloc_branch26() and local and symbol.section == section_index {
+                let distance = (symbol.value - reloc.address) / 4;
+                if distance < 0 - (1 << 25) or distance >= (1 << 25) {
+                    try self.fail(allocator, "call out of range", distance);
+                }
+                try self.patch(section_index, reloc.address, 0x94000000 | (distance & 0x3FFFFFF), 4);
+                continue;
+            }
+            let relative = reloc.kind == reloc_x86_pc32() or reloc.kind == reloc_x86_plt32();
+            if self.x86 and relative and local and symbol.section == section_index {
+                let distance = symbol.value + reloc.addend - reloc.address;
+                if distance < 0 - 2147483648 or distance > 2147483647 {
+                    try self.fail(allocator, "reference out of range", distance);
+                }
+                try self.patch(section_index, reloc.address, distance, 4);
+                continue;
+            }
+            let got = reloc.kind == reloc_got_page21() or reloc.kind == reloc_got_pageoff12() or reloc.kind == reloc_x86_gotpcrelx();
+            var merged = false;
+            if symbol.section >= 0 {
+                if self.sections.at(symbol.section) |held| {
+                    merged = held.kind == SectionKind::Cstring and reloc.addend != 0;
+                }
+            }
+            if local and !got and !merged {
+                reloc.symbol = starts.get_or_panic(symbol.section);
+                reloc.addend = reloc.addend + symbol.value;
+            } else if symbol.section < 0 and symbol.temp {
+                try self.fail(allocator, "a relocation names an undefined label, symbol", reloc.symbol);
+            }
+            if self.symbols.at_mut(reloc.symbol) |named| {
+                named.named = true;
+            }
+            try kept.append(allocator, reloc);
+        }
+        try self.set_relocs(allocator, section_index, &kept);
+        section_index = section_index + 1;
+    }
+    return;
+}
+
+/// Reports whether a symbol goes in the ELF symbol table, and among the
+/// locals: a section symbol a relocation names, every mapping symbol, a
+/// local label that is not assembler-local or that a relocation names, a
+/// defined global, and an undefined symbol a relocation names.
+fn elf_listed(symbol: &Symbol) -> bool {
+    if symbol.kind == SymbolKind::Section {
+        return symbol.named;
+    }
+    if symbol.kind != SymbolKind::Named {
+        return true;
+    }
+    if symbol.section < 0 {
+        return symbol.named;
+    }
+    return symbol.global or !symbol.temp or symbol.named;
+}
+
+fn elf_local(symbol: &Symbol) -> bool {
+    return !symbol.global and symbol.section >= 0;
+}
+
+/// Writes the object: a 64-bit little-endian AArch64 or x86-64 ET_REL.
+pub fn (self: &var Obj) write_elf(allocator: Allocator, syms: &ir::NameTable, out: &var string::String) -> !void {
+    try self.resolve_elf(allocator);
+    // The section header table: the null section, the string table, each
+    // section followed by its relocations if it has any, the symbol table.
+    var header_of = array::new<i64>(allocator);
+    defer header_of.deinit(allocator);
+    var rela_of = array::new<i64>(allocator);
+    defer rela_of.deinit(allocator);
+    var headers = 2;
+    var section_index = 0;
+    while self.sections.at(section_index) |section| {
+        section_index = section_index + 1;
+        try header_of.append(allocator, headers);
+        headers = headers + 1;
+        if section.relocs.len() > 0 {
+            try rela_of.append(allocator, headers);
+            headers = headers + 1;
+        } else {
+            try rela_of.append(allocator, 0 - 1);
+        }
+    }
+    let symtab_header = headers;
+    headers = headers + 1;
+    // The table: the null symbol, then the locals and the globals, each in
+    // the order first named.
+    var table = array::new<i64>(allocator);
+    defer table.deinit(allocator);
+    for 0..2 |pass| {
+        var symbol_index = 0;
+        while self.symbols.at(symbol_index) |symbol| {
+            if elf_listed(symbol) and elf_local(symbol) == (pass == 0) {
+                try table.append(allocator, symbol_index);
+            }
+            symbol_index = symbol_index + 1;
+        }
+    }
+    var locals = 1;
+    var position = 0;
+    while table.get(position) |index| {
+        position = position + 1;
+        let symbol = self.symbols.get_or_panic(index);
+        if elf_local(&symbol) {
+            locals = locals + 1;
+        }
+        if self.symbols.at_mut(index) |listed| {
+            listed.index = position;
+        }
+    }
+    // The names: the sections', then the symbols' (a section symbol has
+    // none), in one table.
+    var names = array::new<string::String>(allocator);
+    defer names.deinit(allocator);
+    try names.append(allocator, try string::from_bytes(allocator, ".strtab"));
+    section_index = 0;
+    while self.sections.at(section_index) |section| {
+        section_index = section_index + 1;
+        let name = elf_section_name(section.kind);
+        try names.append(allocator, try string::from_bytes(allocator, name));
+        if section.relocs.len() > 0 {
+            var rela = try string::from_bytes(allocator, ".rela");
+            errdefer rela.deinit(allocator);
+            try rela.append_bytes(allocator, name);
+            try names.append(allocator, move rela);
+        }
+    }
+    try names.append(allocator, try string::from_bytes(allocator, ".symtab"));
+    let section_names = names.len();
+    position = 0;
+    while table.get(position) |index| {
+        position = position + 1;
+        let symbol = self.symbols.get_or_panic(index);
+        if symbol.kind != SymbolKind::Section {
+            var name = string::new(allocator);
+            errdefer name.deinit(allocator);
+            try elf_symbol_name(allocator, syms, &symbol, &var name);
+            try names.append(allocator, move name);
+        }
+    }
+    var strings = string::new(allocator);
+    defer strings.deinit(allocator);
+    var offsets = array::new<i64>(allocator);
+    defer offsets.deinit(allocator);
+    try merge_strings(allocator, &names, &var strings, &var offsets);
+    // Where everything goes.
+    var section_at = array::new<i64>(allocator);
+    defer section_at.deinit(allocator);
+    var at = 64;
+    section_index = 0;
+    while self.sections.at(section_index) |section| {
+        section_index = section_index + 1;
+        at = round_to(at, 1 << section.align);
+        try section_at.append(allocator, at);
+        at = at + section.bytes.len();
+    }
+    let symtab_at = round_to(at, 8);
+    at = symtab_at + 24 * (table.len() + 1);
+    var rela_at = array::new<i64>(allocator);
+    defer rela_at.deinit(allocator);
+    section_index = 0;
+    while self.sections.at(section_index) |section| {
+        section_index = section_index + 1;
+        if section.relocs.len() > 0 {
+            at = round_to(at, 8);
+        }
+        try rela_at.append(allocator, at);
+        at = at + 24 * section.relocs.len();
+    }
+    let strtab_at = at;
+    let headers_at = round_to(strtab_at + strings.len(), 8);
+    // Elf64_Ehdr
+    try put(allocator, out, 0x464C457F, 4);
+    // ELFCLASS64, ELFDATA2LSB, EV_CURRENT, the System V ABI
+    try put(allocator, out, 0x010102, 4);
+    try put(allocator, out, 0, 8);
+    // ET_REL, EM_X86_64 or EM_AARCH64, EV_CURRENT
+    try put(allocator, out, 1, 2);
+    if self.x86 {
+        try put(allocator, out, 62, 2);
+    } else {
+        try put(allocator, out, 183, 2);
+    }
+    try put(allocator, out, 1, 4);
+    try put(allocator, out, 0, 8);
+    try put(allocator, out, 0, 8);
+    try put(allocator, out, headers_at, 8);
+    try put(allocator, out, 0, 4);
+    try put(allocator, out, 64, 2);
+    try put(allocator, out, 0, 2);
+    try put(allocator, out, 0, 2);
+    try put(allocator, out, 64, 2);
+    try put(allocator, out, headers, 2);
+    try put(allocator, out, 1, 2);
+    // The section contents, each at its offset.
+    try self.put_contents(allocator, out, 0, &section_at);
+    // Elf64_Sym entries
+    try pad_to(allocator, out, symtab_at);
+    try put(allocator, out, 0, 24);
+    position = 0;
+    var named_position = section_names;
+    while table.get(position) |index| {
+        position = position + 1;
+        let symbol = self.symbols.get_or_panic(index);
+        var name = 0;
+        // STB_LOCAL or STB_GLOBAL, STT_NOTYPE or STT_SECTION
+        var info = 0;
+        if symbol.kind == SymbolKind::Section {
+            info = 3;
+        } else {
+            name = offsets.get_or_panic(named_position);
+            named_position = named_position + 1;
+        }
+        if !elf_local(&symbol) {
+            info = info | 0x10;
+        }
+        var shndx = 0;
+        var value = 0;
+        if symbol.section >= 0 {
+            shndx = header_of.get_or_panic(symbol.section);
+            value = symbol.value;
+        }
+        try put(allocator, out, name, 4);
+        try put(allocator, out, info, 1);
+        try put(allocator, out, 0, 1);
+        try put(allocator, out, shndx, 2);
+        try put(allocator, out, value, 8);
+        try put(allocator, out, 0, 8);
+    }
+    // Elf64_Rela entries of each section, in the order of their places.
+    section_index = 0;
+    while self.sections.at(section_index) |section| {
+        let start = rela_at.get_or_panic(section_index);
+        section_index = section_index + 1;
+        try pad_to(allocator, out, start);
+        var reloc_index = 0;
+        while section.relocs.get(reloc_index) |reloc| {
+            reloc_index = reloc_index + 1;
+            let symbol = self.symbols.get_or_panic(reloc.symbol);
+            try put(allocator, out, reloc.address, 8);
+            try put(allocator, out, elf_reloc_type(reloc.kind, self.x86), 4);
+            try put(allocator, out, symbol.index, 4);
+            try put(allocator, out, reloc.addend, 8);
+        }
+    }
+    try out.append_string(allocator, &strings);
+    try pad_to(allocator, out, headers_at);
+    // Elf64_Shdr entries
+    try put(allocator, out, 0, 64);
+    // SHT_STRTAB
+    try put_section_header(allocator, out, offsets.get_or_panic(0), 3, 0, strtab_at, strings.len(), 0, 0, 1, 0);
+    var name_position = 1;
+    section_index = 0;
+    while self.sections.at(section_index) |section| {
+        let kind = section.kind;
+        // SHT_PROGBITS
+        try put_section_header(
+            allocator,
+            out,
+            offsets.get_or_panic(name_position),
+            1,
+            elf_section_flags(kind),
+            section_at.get_or_panic(section_index),
+            section.bytes.len(),
+            0,
+            0,
+            1 << section.align,
+            elf_entry_size(kind)
+        );
+        name_position = name_position + 1;
+        let entries = section.relocs.len();
+        if entries > 0 {
+            // SHT_RELA, SHF_INFO_LINK
+            try put_section_header(
+                allocator,
+                out,
+                offsets.get_or_panic(name_position),
+                4,
+                0x40,
+                rela_at.get_or_panic(section_index),
+                24 * entries,
+                symtab_header,
+                header_of.get_or_panic(section_index),
+                8,
+                24
+            );
+            name_position = name_position + 1;
+        }
+        section_index = section_index + 1;
+    }
+    // SHT_SYMTAB: its strings in the string table, its first global after
+    // the locals.
+    return put_section_header(
+        allocator,
+        out,
+        offsets.get_or_panic(name_position),
+        2,
+        0,
+        symtab_at,
+        24 * (table.len() + 1),
+        1,
+        locals,
+        8,
+        24
+    );
+}

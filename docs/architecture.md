@@ -151,10 +151,13 @@ CLI のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 | behavior | 同上(`kizu run compiler/tests/harness -- behavior <kizu>`) | conformance case のうち CLI 境界を越える実行の振る舞い(`tests/behavior/`、test 系と std-io / std-process の example)。harness 自身の test は `kizu test compiler/tests/harness` |
 | conformance | `just conformance`(`kizu run compiler/tests/harness -- conformance <kizu>`)。`just selfhost` には含まない | `examples/`、`tests/behavior/`、`docs/tutorial/` の全 case。behavior はこの部分集合 |
 | bootstrap | 同上(`kizu run compiler/tests/harness -- bootstrap <stage2>`) | stage1 が build した stage2 が、自分自身を空の build cache で build し直して byte 単位で同じ実行ファイルになること |
+| direct backend の差分 | `scripts/difftest-direct.sh <kizu>`(CI の別 job) | `run` の example を direct backend と LLVM(`kizu build` の既定)で build して実行し、stdout・stderr・exit status が一致すること。`kizu test` は既定で direct なので、compiler/ と test 系の case は上の層で direct を通る |
 | commit hooks | `pre-commit run --all-files` | 種と stage1 による `kizu check compiler`(`scripts/bootstrap.sh --check-only`)。数秒で終わるものだけ |
 
 CI は push/PR ごとに、必須 job `test (ubuntu-latest)` と `test (macos-15)` で
-`scripts/bootstrap.sh` を全部回します。定時実行は置きません。
+`scripts/bootstrap.sh` を全部回します。並行して job `difftest-direct (ubuntu-latest)` と
+`difftest-direct (ubuntu-24.04-arm)` が stage1 だけを build して
+`scripts/difftest-direct.sh` を回します。定時実行は置きません。
 言語機能を足したら `examples/` に実例を足し、その末尾に case を書きます。
 書式は `compiler/tests/harness/src/conformance/conformance.kizu` の冒頭にあります。
 

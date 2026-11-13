@@ -7,13 +7,11 @@ import std::mem;
 import std::sort;
 import std::string;
 
-// Mechanical port of internal/ir/ir.go: Kizu's typed SSA intermediate
-// representation. Go links Function, Block and Instr by pointer and spells
-// every name and operation as a string; here the Module owns the nodes in
+// Kizu's typed SSA intermediate representation. The Module owns the nodes in
 // arenas and hands out copy handles, every text is a Name interned in the
 // Module's NameTable, and an operation is an Op tag plus the Name it carries
-// (`call.<symbol>`, `field.<name>`, `binary.<operator>`), spelled back by
-// `append_op` so the rendered module reads as the Go one does.
+// (`call.<symbol>`, `field.<name>`, `binary.<operator>`), spelled back as one
+// text by `append_op`.
 
 /// Is one lowered Kizu program, from either a package or a loose source file.
 pub struct Module {
@@ -35,23 +33,22 @@ pub struct Module {
     // program links is read off the calls that survive reachability, not off
     // the declarations (link_inputs).
     pub externs: array::Array<Extern>,
-    // cleanup_args holds the arguments of every deferred cleanup, each
-    // cleanup naming its own contiguous run: the Go `Cleanup.Args` slice,
-    // kept here so a Cleanup stays a copy value the frames and the attached
-    // instructions can carry.
+    // cleanup_args holds the arguments of every deferred cleanup, each cleanup
+    // naming its own contiguous run, kept here so a Cleanup stays a copy value
+    // the frames and the attached instructions can carry.
     pub cleanup_args: array::Array<Value>,
-    // cleanup_params holds the declared parameters of every deferred
-    // foreign call, each cleanup naming its own contiguous run: the Go
-    // `Cleanup.CallParams` slice, pooled the way cleanup_args is.
+    // cleanup_params holds the declared parameters of every deferred foreign
+    // call, each cleanup naming its own contiguous run, pooled the way
+    // cleanup_args is.
     pub cleanup_params: array::Array<Param>,
-    // modules lists the program's module paths, each before the modules
-    // that import it (ast::Program.modules), the Go `Modules`: the order of
-    // the units a native debug build compiles separately.
+    // modules lists the program's module paths, each before the modules that
+    // import it (ast::Program.modules): the order of the units a native debug
+    // build compiles separately.
     pub modules: array::Array<Name>,
 }
 
 /// Is what one `extern` declaration tells the linker: the ABI it is called
-/// through and the library or framework its symbol lives in, the Go `Extern`.
+/// through and the library or framework its symbol lives in.
 pub struct Extern {
     pub abi: Name,
     pub library: Name,
@@ -117,8 +114,8 @@ pub fn (self: &Module) cleanup_param(cleanup: Cleanup, index: i64) -> ?Param {
     return self.cleanup_params.get(cleanup.params_start + index);
 }
 
-/// Reports whether a cleanup loads its index-th argument out of a slot at
-/// the exit that runs it, the Go `Cleanup.Loads[index]`.
+/// Reports whether a cleanup loads its index-th argument out of a slot at the
+/// exit that runs it.
 pub fn cleanup_loads(cleanup: Cleanup, index: i64) -> bool {
     var bit = 1;
     var count = 0;
@@ -142,9 +139,8 @@ pub fn (self: &var Module) set_extern(allocator: Allocator, symbol: Name, declar
 }
 
 /// Appends the libraries and frameworks the module's remaining foreign calls
-/// need, each once and sorted, the Go `LinkInputs`. It is asked after
-/// reachability has been closed, so a library declared for a function the
-/// program never calls is not linked.
+/// need, each once and sorted. It is asked after reachability has been closed,
+/// so a library declared for a function the program never calls is not linked.
 pub fn link_inputs(
     allocator: Allocator,
     module: &Module,
@@ -276,13 +272,13 @@ pub struct FunctionNode {
     pub blocks: array::Array<Block>,
     pub export_abi: Name,
     pub export_name: Name,
-    /// The module path the function was declared in, the Go `Module`. A
-    /// function the compiler writes for the whole program -- the package
-    /// entry point, the test runner -- has none.
+    /// The module path the function was declared in. A function the compiler
+    /// writes for the whole program -- the package entry point, the test
+    /// runner -- has none.
     pub module: Name,
-    /// Marks a generic instance, the Go `Instance`. Its code depends on the
-    /// static arguments the caller chose, so it belongs to no one module:
-    /// every unit that reaches it carries a copy (llvm::emit_units).
+    /// Marks a generic instance. Its code depends on the static arguments the
+    /// caller chose, so it belongs to no one module: every unit that reaches
+    /// it carries a copy (llvm::emit_units).
     pub instance: bool,
 }
 
@@ -305,13 +301,12 @@ pub struct Value {
     pub type_name: Name,
 }
 
-/// Returns the zero value, the Go `Value{}`.
+/// Returns the zero value.
 pub fn empty_value() -> Value {
     return Value { name: empty_name(), type_name: empty_name() };
 }
 
-/// Reports whether two SSA value references are identical, the Go
-/// `sameValue`.
+/// Reports whether two SSA value references are identical.
 pub fn same_value(left: Value, right: Value) -> bool {
     return same_name(left.name, right.name) and same_name(left.type_name, right.type_name);
 }
@@ -367,20 +362,20 @@ pub struct Cleanup {
     pub operand: Name,
     pub args_start: i64,
     pub args_len: i64,
-    // loads marks, one bit per argument, the arguments that are slots to
-    // load at the exit that runs the cleanup: the owners the call consumes,
-    // which the frame may still use until then. Every other argument is the
-    // value it had where the defer was written, a borrow's slot included,
-    // since the callee takes the slot itself (the Go `Cleanup.Loads`).
+    // loads marks, one bit per argument, the arguments that are slots to load
+    // at the exit that runs the cleanup: the owners the call consumes, which
+    // the frame may still use until then. Every other argument is the value it
+    // had where the defer was written, a borrow's slot included, since the
+    // callee takes the slot itself.
     pub loads: i64,
     // Explicit foreign-call facts consumed by backends. A cleanup can remain
     // attached to error.try, so its boundary cannot be recovered from a
     // standalone instruction later.
     pub extern_abi: Name,
     pub extern_name: Name,
-    // The declared passing of a foreign callee, which has no body here to
-    // read it from, as a run of the module's cleanup_params pool (the Go
-    // `Cleanup.CallParams`, InstrNode.call_params).
+    // The declared passing of a foreign callee, which has no body here to read
+    // it from, as a run of the module's cleanup_params pool
+    // (InstrNode.call_params).
     pub params_start: i64,
     pub params_len: i64,
     // The declared parameter count of a C variadic callee
@@ -423,7 +418,7 @@ pub enum TermOp {
     Unreachable,
 }
 
-/// Returns the terminator a block starts with, the Go zero `Terminator`.
+/// Returns the terminator a block starts with.
 pub fn no_terminator() -> Terminator {
     return Terminator {
         op: TermOp::None,
@@ -479,8 +474,8 @@ pub fn unreachable_terminator() -> Terminator {
 }
 
 /// Returns the block at position among the ones control can reach from this
-/// terminator, the Go `Successors`: the target, then the else target, each
-/// only when named; null past the last.
+/// terminator: the target, then the else target, each only when named; null
+/// past the last.
 pub fn (self: &Terminator) successor(position: i64) -> ?Name {
     var seen = 0;
     if !is_empty(self.target) {
@@ -763,7 +758,7 @@ pub fn op_carries_operand(op: Op) -> bool {
     };
 }
 
-/// Appends the Go spelling of an op and the name it carries.
+/// Appends the spelling of an op and the name it carries.
 pub fn append_op(allocator: Allocator, out: &var string::String, names: &NameTable, op: Op, operand: Name) -> !void {
     try out.append_bytes(allocator, op_spelling(op));
     if op_carries_operand(op) {
@@ -787,11 +782,11 @@ pub struct Signature {
     pub variadic: bool,
 }
 
-/// Returns the symbol a test block lowers to, the Go `TestFunctionName`:
-/// `test.`, the test's place in declaration order, `.`, and the name with
-/// every byte outside `_ . a-z A-Z 0-9` replaced by `_`, one replacement per
-/// character. The ordinal is what keeps two tests apart whose names differ
-/// only in characters a symbol cannot carry.
+/// Returns the symbol a test block lowers to: `test.`, the test's place in
+/// declaration order, `.`, and the name with every byte outside `_ . a-z A-Z
+/// 0-9` replaced by `_`, one replacement per character. The ordinal is what
+/// keeps two tests apart whose names differ only in characters a symbol cannot
+/// carry.
 pub fn test_function_name(allocator: Allocator, ordinal: i64, name: []u8) -> !string::String {
     var out = try string::from_bytes(allocator, "test.");
     errdefer out.deinit(allocator);
@@ -808,7 +803,7 @@ pub fn test_function_name(allocator: Allocator, ordinal: i64, name: []u8) -> !st
             try out.append_byte(allocator, byte);
             continue;
         }
-        // A multi-byte character is one rune in Go, so its continuation bytes
+        // A multi-byte character is one character, so its continuation bytes
         // add no second underscore.
         if byte >= cast<u8>(128) and byte < cast<u8>(192) {
             continue;
@@ -818,8 +813,7 @@ pub fn test_function_name(allocator: Allocator, ordinal: i64, name: []u8) -> !st
     return move out;
 }
 
-/// Appends the lowered test symbols in declaration order, the Go
-/// `TestFunctionNames`.
+/// Appends the lowered test symbols in declaration order.
 pub fn test_function_names(allocator: Allocator, module: &Module, out: &var array::Array<Name>) -> !void {
     var index = 0;
     while module.functions.get(index) |function| {
@@ -845,8 +839,8 @@ pub fn (self: &Module) function_named(name: []u8) -> ?Function {
     return null;
 }
 
-/// Returns the declared type of a struct field, the Go `fieldType`:
-/// `unknown` when the struct or the field is not declared.
+/// Returns the declared type of a struct field: `unknown` when the struct or
+/// the field is not declared.
 pub fn (self: &var Module) field_type(struct_name: Name, field_name: Name) -> !Name {
     let struct_text = name_text(&self.names, struct_name);
     let struct_bytes = struct_text.as_bytes();
@@ -862,9 +856,9 @@ pub fn (self: &var Module) field_type(struct_name: Name, field_name: Name) -> !N
     return self.names.intern("unknown");
 }
 
-/// Reports whether a value of name keeps a fixed array in its own bytes, the
-/// Go `holdsFixedArray`: it is one, or a struct field is. A struct cannot
-/// hold itself by value, so the walk ends.
+/// Reports whether a value of name keeps a fixed array in its own bytes: it is
+/// one, or a struct field is. A struct cannot hold itself by value, so the
+/// walk ends.
 pub fn (self: &Module) holds_fixed_array(name: Name) -> bool {
     if self.names.is_buffer_type(name) {
         return true;
@@ -905,9 +899,8 @@ pub fn (self: &Module) has_enum_or_error_set(name: Name) -> bool {
     return self.enums.contains(bytes) or self.error_sets.contains(bytes);
 }
 
-/// Returns the integer of one enum or error set tag, or null when the type
-/// or the tag is not declared, the Go `Enums[name].Tags[tag]` read with the
-/// error set fallback.
+/// Returns the integer of one enum or error set tag, or null when the type or
+/// the tag is not declared.
 pub fn (self: &Module) enum_tag(enum_name: Name, tag: Name) -> ?i64 {
     let enum_text = name_text(&self.names, enum_name);
     let enum_bytes = enum_text.as_bytes();
@@ -1016,8 +1009,8 @@ fn tags_hold_code(tags: &map::Map<[]u8, i64>, code: i64) -> bool {
     return false;
 }
 
-/// Returns one union variant by spelling, or null, the Go
-/// `Unions[name].Variants[tag]` read for a name the caller spells itself.
+/// Returns one union variant by spelling, or null, for a name the caller
+/// spells itself.
 pub fn (self: &Module) union_variant_named(union_name: []u8, variant: []u8) -> ?UnionVariant {
     if self.unions.at(union_name) |declared| {
         return declared.variants.get(variant);
@@ -1026,7 +1019,7 @@ pub fn (self: &Module) union_variant_named(union_name: []u8, variant: []u8) -> ?
 }
 
 /// Returns one union variant, or null when the union or the variant is not
-/// declared, the Go `Unions[name].Variants[tag]` read.
+/// declared.
 pub fn (self: &Module) union_variant(union_name: Name, variant: Name) -> ?UnionVariant {
     let union_text = name_text(&self.names, union_name);
     let union_bytes = union_text.as_bytes();
@@ -1094,7 +1087,7 @@ pub fn (self: &Module) block_terminator(block: Block) -> Terminator {
     return self.blocks.at(block.node).terminator;
 }
 
-/// Reports whether a block has ended, the Go `block.Terminator.Op != ""`.
+/// Reports whether a block has ended.
 pub fn (self: &Module) block_terminated(block: Block) -> bool {
     return self.blocks.at(block.node).terminator.op != TermOp::None;
 }

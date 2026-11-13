@@ -6,28 +6,27 @@ import std::array;
 import std::mem;
 import std::string;
 
-// Mechanical port of internal/ir/slots.go. A local is an SSA value, which is
-// enough until something writes through a borrow of it: the callee stores
-// into the borrowed storage, and the caller has to read the store back. An
-// SSA value has no storage to write into, so a local that is passed as
-// `&var` gets a slot and lives in memory for the whole function. A `&var`
-// parameter arrives as such storage already, so it joins the same set:
-// either way the name means storage -- reads load, assignments store, and
-// the places that need the address take the pointer itself.
+// A local is an SSA value, which is enough until something writes through a
+// borrow of it: the callee stores into the borrowed storage, and the caller
+// has to read the store back. An SSA value has no storage to write into, so a
+// local that is passed as `&var` gets a slot and lives in memory for the whole
+// function. A `&var` parameter arrives as such storage already, so it joins
+// the same set: either way the name means storage -- reads load, assignments
+// store, and the places that need the address take the pointer itself.
 //
 // The decision is made once, before the body is lowered, because it has to
 // hold everywhere the name is used. Deciding it where the address is first
 // needed would put the slot inside whatever `if` or loop asked for it, and
 // the name would mean a value on one path and storage on another.
 //
-// The Go `map[string]bool` of names is `self.slots`, an Array<Name> kept as
-// a set: membership is a scan, and a name is added only when absent.
+// The names are `self.slots`, an Array<Name> kept as a set: membership is a
+// scan, and a name is added only when absent.
 
-/// Collects into `self.slots` the local names the function passes to a
-/// `&var` parameter, the Go `mutablyBorrowedLocals`. Parameters are left in
-/// the set: one that arrives as caller storage already has storage, which
-/// lower_function_named hands it, and one that arrives as a value is the
-/// callee's own copy, which can live in a slot like any local.
+/// Collects into `self.slots` the local names the function passes to a `&var`
+/// parameter. Parameters are left in the set: one that arrives as caller
+/// storage already has storage, which lower_function_named hands it, and one
+/// that arrives as a value is the callee's own copy, which can live in a slot
+/// like any local.
 fn (self: &var Lowerer) mutably_borrowed_locals(tree: &var ast::Ast, decl: FactsHandle) -> !?diagnostic::Diagnostic {
     while self.slots.pop() |_| {}
     while self.caller_storage_params.pop() |_| {}
@@ -46,9 +45,9 @@ fn (self: &var Lowerer) mutably_borrowed_locals(tree: &var ast::Ast, decl: Facts
     return null;
 }
 
-/// Records the names element writes and element reads start from, the Go
-/// `indexRoots.collectStmt`. The walk only reads names, so a node it does
-/// not know costs a local its slot, never its meaning.
+/// Records the names element writes and element reads start from. The walk
+/// only reads names, so a node it does not know costs a local its slot, never
+/// its meaning.
 fn (self: &var Lowerer) collect_index_writes(tree: &var ast::Ast, statement: ast::Statement) -> !void {
     if ownership::assign_stmt(tree, statement) |assign| {
         // `a[i].f = x` writes the element a[i], so it starts from a as well.
@@ -98,9 +97,8 @@ fn (self: &var Lowerer) collect_index_writes(tree: &var ast::Ast, statement: ast
     return;
 }
 
-/// Walks an expression for the element reads it holds, and the statements
-/// an `if` or `match` in value position holds, the Go
-/// `indexRoots.collectExpr`.
+/// Walks an expression for the element reads it holds, and the statements an
+/// `if` or `match` in value position holds.
 fn (self: &var Lowerer) collect_index_writes_expr(tree: &var ast::Ast, expression: ast::Expression) -> !void {
     if ownership::index_expr(tree, expression) |index| {
         if !index.slice {
@@ -153,12 +151,11 @@ fn (self: &Lowerer) is_index_read(name: Name) -> bool {
 }
 
 /// Writes an array a local holds by value into a slot of its own when the
-/// local is bound and something reads its elements, the Go
-/// `bindReadStorage`, so every read takes the element out of that one slot
-/// instead of writing the whole array into a fresh one first -- which in a
-/// loop is the array stored once per iteration. The name keeps meaning the
-/// value: a read of the whole array, or the array handed on, is the value
-/// as before, and nothing writes the slot.
+/// local is bound and something reads its elements, so every read takes the
+/// element out of that one slot instead of writing the whole array into a
+/// fresh one first -- which in a loop is the array stored once per iteration.
+/// The name keeps meaning the value: a read of the whole array, or the array
+/// handed on, is the value as before, and nothing writes the slot.
 ///
 /// The slot is made in the block the value is made in, right after it, so
 /// it is there wherever the value is: a value made earlier, bound again to
@@ -180,7 +177,7 @@ fn (self: &var Lowerer) bind_read_storage(name: Name, value: Value) -> !void {
 }
 
 /// Reports whether value is the result of an instruction of the block being
-/// lowered, the Go `madeInBlock`.
+/// lowered.
 fn (self: &Lowerer) made_in_block(value: Value) -> bool {
     let node = self.module.blocks.at(self.block.node);
     var index = 0;
@@ -206,7 +203,7 @@ fn (self: &Lowerer) read_storage_of(value: Name) -> ?Value {
 }
 
 /// Returns the slot bind_read_storage gave the array the name expression
-/// holds, the Go `boundReadStorage`.
+/// holds.
 fn (self: &var Lowerer) bound_read_storage(tree: &ast::Ast, expression: ast::Expression) -> !?Value {
     let ident = ownership::ident_expr(tree, expression) orelse return null;
     let name = try self.text_name(tree, ident.name);
@@ -238,9 +235,8 @@ fn (self: &Lowerer) is_lent_place_value(value: Name) -> bool {
     return false;
 }
 
-/// Reports whether name is bound to a borrowed place's address (`let v =
-/// &var x`), which `v.*` names the way a `&var` parameter's does, the Go
-/// `isLentPlace`.
+/// Reports whether name is bound to a borrowed place's address (`let v = &var
+/// x`), which `v.*` names the way a `&var` parameter's does.
 fn (self: &Lowerer) is_lent_place(name: Name) -> bool {
     let value = self.envs.get(self.env, name) orelse return false;
     return self.is_lent_place_value(value.name);
@@ -271,14 +267,13 @@ fn (self: &Lowerer) is_place_slot(value: Name) -> bool {
 }
 
 /// Reports whether a value of type_name is written by index in its own
-/// storage, the Go `holdsArrayPlace`: anything but a view, which writes
-/// through to what it views, and a borrow, which already is storage.
+/// storage: anything but a view, which writes through to what it views, and a
+/// borrow, which already is storage.
 fn (self: &Lowerer) holds_array_place(type_name: Name) -> bool {
     return !self.module.names.starts_with(type_name, "[]") and !self.is_reference_type(type_name);
 }
 
-/// Reports whether name is a parameter that arrived as the caller's storage,
-/// the Go `l.callerStorageParams[name]`.
+/// Reports whether name is a parameter that arrived as the caller's storage.
 fn (self: &Lowerer) is_caller_storage_param(name: Name) -> bool {
     var index = 0;
     while self.caller_storage_params.get(index) |param| {
@@ -290,7 +285,7 @@ fn (self: &Lowerer) is_caller_storage_param(name: Name) -> bool {
     return false;
 }
 
-/// Reports whether name is in the slot set, the Go `l.slots[name]`.
+/// Reports whether name is in the slot set.
 fn (self: &Lowerer) has_slot(name: Name) -> bool {
     var index = 0;
     while self.slots.get(index) |slot| {
@@ -302,7 +297,7 @@ fn (self: &Lowerer) has_slot(name: Name) -> bool {
     return false;
 }
 
-/// Adds name to the slot set, the Go `found[name] = true`.
+/// Adds name to the slot set.
 fn (self: &var Lowerer) add_slot(name: Name) -> !void {
     if self.has_slot(name) {
         return;
@@ -310,8 +305,7 @@ fn (self: &var Lowerer) add_slot(name: Name) -> !void {
     return self.slots.append(self.allocator, name);
 }
 
-/// Reports whether any arm of a match names its payload, the Go
-/// `matchBindsPayload`.
+/// Reports whether any arm of a match names its payload.
 fn match_binds_payload(tree: &ast::Ast, arms: &array::Array<ast::MatchArm>) -> bool {
     var index = 0;
     while arms.get(index) |arm| {
@@ -323,8 +317,7 @@ fn match_binds_payload(tree: &ast::Ast, arms: &array::Array<ast::MatchArm>) -> b
     return false;
 }
 
-/// Walks one statement for names passed as `&var`, the Go
-/// `collectMutBorrowsStmt`.
+/// Walks one statement for names passed as `&var`.
 fn (self: &var Lowerer) collect_mut_borrows_stmt(tree: &var ast::Ast, statement: ast::Statement) -> !?diagnostic::Diagnostic {
     // A cleanup runs on the value its receiver holds when the block exits,
     // not the one the name held when the `defer` was written (SPEC §6.3.1),
@@ -362,8 +355,7 @@ fn (self: &var Lowerer) collect_mut_borrows_stmt(tree: &var ast::Ast, statement:
     return self.collect_mut_borrows_children(tree, &exprs, &stmts);
 }
 
-/// Walks the expressions and then the statements one node holds, the two
-/// loops of the Go `collectMutBorrowsStmt`.
+/// Walks the expressions and then the statements one node holds.
 fn (self: &var Lowerer) collect_mut_borrows_children(
     tree: &var ast::Ast,
     exprs: &array::Array<ast::Expression>,
@@ -386,12 +378,10 @@ fn (self: &var Lowerer) collect_mut_borrows_children(
     return null;
 }
 
-/// Appends the expressions and statements written inside stmt, the Go
-/// `statementChildren` (with `flatStatementExprs` and
-/// `nestingStatementChildren` folded in), and reports whether the node is
-/// one this walk knows. An unknown node is an error rather than an empty
-/// answer: a name missed here is a local that keeps its value while the
-/// callee writes into storage nobody reads.
+/// Appends the expressions and statements written inside stmt, and reports
+/// whether the node is one this walk knows. An unknown node is an error rather
+/// than an empty answer: a name missed here is a local that keeps its value
+/// while the callee writes into storage nobody reads.
 fn statement_children(
     allocator: Allocator,
     tree: &ast::Ast,
@@ -459,9 +449,8 @@ fn statement_children(
     return true;
 }
 
-/// Appends the children of an `if`, the `IfStmt` arm of the Go
-/// `nestingStatementChildren`: the condition, then the blocks that are
-/// present (the Go `blocks`).
+/// Appends the children of an `if`: the condition, then the blocks that are
+/// present.
 fn if_children(
     allocator: Allocator,
     branch: ast::IfStmt,
@@ -476,9 +465,8 @@ fn if_children(
     return;
 }
 
-/// Appends the children of a `match`, the `MatchStmt` arm of the Go
-/// `nestingStatementChildren`: the value, then the statement each arm runs
-/// (the Go `matchArmBodies`).
+/// Appends the children of a `match`: the value, then the statement each arm
+/// runs.
 fn match_children(
     allocator: Allocator,
     value: &ast::MatchStmt,
@@ -494,8 +482,7 @@ fn match_children(
     return;
 }
 
-/// Walks one expression for names passed as `&var`, the Go
-/// `collectMutBorrowsExpr`.
+/// Walks one expression for names passed as `&var`.
 fn (self: &var Lowerer) collect_mut_borrows_expr(tree: &var ast::Ast, expression: ast::Expression) -> !?diagnostic::Diagnostic {
     if self.function_pointer_mutably_borrows(expression) {
         try self.mark_if_name(tree, expression);
@@ -546,9 +533,8 @@ fn (self: &Lowerer) function_pointer_mutably_borrows(expression: ast::Expression
     return false;
 }
 
-/// Walks an `if` or `match` written in value position as the statement it
-/// also is, the `collectMutBorrowsStmt(expr.(ast.Statement), found)` arm of
-/// the Go `collectMutBorrowsExpr`.
+/// Walks an `if` or `match` written in value position as the statement it also
+/// is.
 fn (self: &var Lowerer) collect_mut_borrows_value_stmt(tree: &var ast::Ast, expression: ast::Expression) -> !?diagnostic::Diagnostic {
     var exprs = array::new<ast::Expression>(self.allocator);
     defer exprs.deinit(self.allocator);
@@ -562,9 +548,8 @@ fn (self: &var Lowerer) collect_mut_borrows_value_stmt(tree: &var ast::Ast, expr
     return self.collect_mut_borrows_children(tree, &exprs, &stmts);
 }
 
-/// Appends the expressions written inside expr, the Go `expressionChildren`
-/// (with `structLiteralValues` and `guardExpressionChildren` folded in), and
-/// reports whether the node is one this walk knows.
+/// Appends the expressions written inside expr, and reports whether the node
+/// is one this walk knows.
 fn expression_children(
     allocator: Allocator,
     tree: &ast::Ast,
@@ -657,10 +642,10 @@ fn expression_children(
     return true;
 }
 
-/// Records the names this call hands over as the caller's storage, the Go
-/// `markLentArgs`. It reads the answer lower_param gave rather than deciding
-/// again from the type, so a parameter that starts being passed this way is
-/// marked here by having been passed this way.
+/// Records the names this call hands over as the caller's storage. It reads
+/// the answer lower_param gave rather than deciding again from the type, so a
+/// parameter that starts being passed this way is marked here by having been
+/// passed this way.
 fn (self: &var Lowerer) mark_lent_args(tree: &var ast::Ast, call: ast::CallExpr) -> !void {
     if ownership::field_expr(tree, call.callee) |field| {
         if !field.namespace {
@@ -683,16 +668,15 @@ fn (self: &var Lowerer) mark_lent_args(tree: &var ast::Ast, call: ast::CallExpr)
     return;
 }
 
-/// Records the names a method call hands over as storage, the Go
-/// `markLentMethodArgs`. The receiver's type is unknown before lowering, so
-/// the walk reads the methods the call can reach and marks a position when
-/// any of them receives it as the caller's storage. Which methods those are
-/// is the ownership checker's answer where it resolved the call: one method
-/// per receiver type the call was checked with, one per instantiation in a
-/// generic body. A name alone is not enough to pick them, because a name
-/// marked for another type's `&var` parameter loses more than its SSA form
-/// -- a match through it moves the payload out instead of binding it where
-/// it lies.
+/// Records the names a method call hands over as storage. The receiver's type
+/// is unknown before lowering, so the walk reads the methods the call can
+/// reach and marks a position when any of them receives it as the caller's
+/// storage. Which methods those are is the ownership checker's answer where it
+/// resolved the call: one method per receiver type the call was checked with,
+/// one per instantiation in a generic body. A name alone is not enough to pick
+/// them, because a name marked for another type's `&var` parameter loses more
+/// than its SSA form -- a match through it moves the payload out instead of
+/// binding it where it lies.
 ///
 /// A call the checker never dispatches as a method -- one in a `comptime`
 /// branch its instantiation does not take, a view initializer, a std body it
@@ -749,9 +733,8 @@ fn (self: &var Lowerer) mark_lent_method_signature(
     return;
 }
 
-/// Reports whether the ownership checker resolved the method call whose
-/// callee is callee, the `resolved` half of the Go `MethodCallees`. key is
-/// the call's ownership::method_call_key.
+/// Reports whether the ownership checker resolved the method call whose callee
+/// is callee. key is the call's ownership::method_call_key.
 fn (self: &Lowerer) resolved_method_call(callee: ast::Expression, key: i64) -> bool {
     if self.method_call_buckets.at(key) |bucket| {
         var position = 0;
@@ -767,9 +750,9 @@ fn (self: &Lowerer) resolved_method_call(callee: ast::Expression, key: i64) -> b
 }
 
 /// Returns the position-th signature among the declarations the method call
-/// resolved to, read the way index_method_signatures reads them, the Go
-/// `calleeSignatures`; null past the last. A generic method whose receiver is
-/// not handed over as storage has nothing to read and is skipped.
+/// resolved to, read the way index_method_signatures reads them; null past the
+/// last. A generic method whose receiver is not handed over as storage has
+/// nothing to read and is skipped.
 fn (self: &Lowerer) resolved_method_signature_at(
     callee: ast::Expression,
     key: i64,
@@ -808,11 +791,11 @@ fn (self: &Lowerer) callee_signature(name: Name) -> ?SignatureHandle {
     return null;
 }
 
-/// Records the names a generic call lends, the Go `markLentGenericArgs`.
-/// Like the direct arms above it reads the answer lower_param gave rather
-/// than deciding again from the declaration: declared_instance_params binds
-/// the type arguments without asking for the instance, so the passing is the
-/// one the call will use. A callee this cannot resolve lends nothing.
+/// Records the names a generic call lends. Like the direct arms above it reads
+/// the answer lower_param gave rather than deciding again from the
+/// declaration: declared_instance_params binds the type arguments without
+/// asking for the instance, so the passing is the one the call will use. A
+/// callee this cannot resolve lends nothing.
 fn (self: &var Lowerer) mark_lent_generic_args(
     tree: &var ast::Ast,
     type_apply: ast::TypeApplyExpr,
@@ -855,10 +838,9 @@ fn (self: &Lowerer) lends_container_storage(name: Name) -> bool {
     return arena_primitive_writes_header(bytes) or map_mutating_primitive(bytes);
 }
 
-/// Records the local whose storage expr would hand over, the Go
-/// `markIfName`: the name itself, or the root of a field path -- a
-/// `field.addr` projection needs the root owner in memory, so the root is
-/// the local that loses SSA form.
+/// Records the local whose storage expr would hand over: the name itself, or
+/// the root of a field path -- a `field.addr` projection needs the root owner
+/// in memory, so the root is the local that loses SSA form.
 fn (self: &var Lowerer) mark_if_name(tree: &ast::Ast, expression: ast::Expression) -> !void {
     var current = expression;
     while ownership::field_expr(tree, current) |field| {
@@ -872,10 +854,10 @@ fn (self: &var Lowerer) mark_if_name(tree: &ast::Ast, expression: ast::Expressio
     return self.add_slot(name);
 }
 
-/// Binds a declaration, the Go `bindLocal`. A local the function mutably
-/// borrows gets its storage here, once, so every later use of the name means
-/// the same place. A declaration that binds a `&var` borrow is an address
-/// already, and one address is all it needs: it is the local's storage.
+/// Binds a declaration. A local the function mutably borrows gets its storage
+/// here, once, so every later use of the name means the same place. A
+/// declaration that binds a `&var` borrow is an address already, and one
+/// address is all it needs: it is the local's storage.
 fn (self: &var Lowerer) bind_local(name: Name, value: Value) -> !void {
     if !self.has_slot(name) and self.is_index_written(name) and self.holds_array_place(value.type_name) {
         let place_type = try self.module.names.prefixed("&var ", value.type_name);
@@ -896,11 +878,11 @@ fn (self: &var Lowerer) bind_local(name: Name, value: Value) -> !void {
     return self.envs.bind(self.allocator, self.env, name, slot);
 }
 
-/// Binds a capture the same way bind_local binds a declaration, the Go
-/// `bindCapture`. A name the function mutably borrows needs storage of its
-/// own, and a capture is a local like any other -- `if build() |parts|` then
-/// `parts.append(..)` writes through the header it was handed. A capture that
-/// already binds a borrow is an address, and one address is all it needs.
+/// Binds a capture the same way bind_local binds a declaration. A name the
+/// function mutably borrows needs storage of its own, and a capture is a local
+/// like any other -- `if build() |parts|` then `parts.append(..)` writes
+/// through the header it was handed. A capture that already binds a borrow is
+/// an address, and one address is all it needs.
 fn (self: &var Lowerer) bind_capture(name: Name, value: Value) -> !void {
     if !self.has_slot(name) and self.is_index_written(name) and self.holds_array_place(value.type_name) {
         return self.bind_local(name, value);
@@ -915,8 +897,8 @@ fn (self: &var Lowerer) bind_capture(name: Name, value: Value) -> !void {
 }
 
 /// Unwraps explicit `&var x` call-site syntax to the name whose storage the
-/// callee is lent, the Go `borrowTargetExpr`. Caller storage only ever comes
-/// from a `&var` parameter, so `&` needs no arm here.
+/// callee is lent. Caller storage only ever comes from a `&var` parameter, so
+/// `&` needs no arm here.
 fn borrow_target_expr(tree: &ast::Ast, expression: ast::Expression) -> ast::Expression {
     if ownership::prefix_expr(tree, expression) |prefix| {
         if text_is(tree, prefix.operator, "&var") {
@@ -927,7 +909,7 @@ fn borrow_target_expr(tree: &ast::Ast, expression: ast::Expression) -> ast::Expr
 }
 
 /// Unwraps explicit `&x` call-site syntax to the place a `&T` parameter that
-/// travels as an address is handed, the Go `sharedBorrowTarget`.
+/// travels as an address is handed.
 fn shared_borrow_target(tree: &ast::Ast, expression: ast::Expression) -> ast::Expression {
     if ownership::prefix_expr(tree, expression) |prefix| {
         if text_is(tree, prefix.operator, "&") {
@@ -937,10 +919,9 @@ fn shared_borrow_target(tree: &ast::Ast, expression: ast::Expression) -> ast::Ex
     return expression;
 }
 
-/// Reports whether name is a parameter whose storage is the borrow the
-/// source names, the Go `isStorageParam`. For such a name `n.*` dereferences
-/// the slot itself; a lent local's slot holds the binding's value instead,
-/// which `.*` first reads out.
+/// Reports whether name is a parameter whose storage is the borrow the source
+/// names. For such a name `n.*` dereferences the slot itself; a lent local's
+/// slot holds the binding's value instead, which `.*` first reads out.
 fn (self: &Lowerer) is_storage_param(name: Name) -> bool {
     let wanted_text = name_text(&self.module.names, name);
     let wanted = wanted_text.as_bytes();
@@ -961,19 +942,19 @@ fn (self: &Lowerer) is_storage_param(name: Name) -> bool {
     return false;
 }
 
-/// Returns the storage behind a name, the Go `slotPointer`, for the places
-/// that need the address rather than the value; null for an expression that
-/// is not a slot-backed name. A name bound to a borrowed place's address has
-/// that address as its storage.
+/// Returns the storage behind a name, for the places that need the address
+/// rather than the value; null for an expression that is not a slot-backed
+/// name. A name bound to a borrowed place's address has that address as its
+/// storage.
 fn (self: &var Lowerer) slot_pointer(tree: &ast::Ast, expression: ast::Expression) -> !?Value {
     let ident = ownership::ident_expr(tree, expression) orelse return null;
     let name = try self.text_name(tree, ident.name);
     return self.named_storage(name);
 }
 
-/// Returns the storage name is bound to, when it is bound to storage, the Go
-/// `namedStorage`: an assignment to such a name stores into it, so the
-/// binding itself never changes while the name is in scope.
+/// Returns the storage name is bound to, when it is bound to storage: an
+/// assignment to such a name stores into it, so the binding itself never
+/// changes while the name is in scope.
 fn (self: &Lowerer) named_storage(name: Name) -> ?Value {
     let value = self.envs.get(self.env, name) orelse return null;
     if self.is_for_index(value.name) {
@@ -986,9 +967,9 @@ fn (self: &Lowerer) named_storage(name: Name) -> ?Value {
     return value;
 }
 
-/// Lowers the receiver of a field write, the Go `lowerReceiverAddress`. A
-/// local with storage keeps its address, so the write lands in the local
-/// rather than in a value loaded out of it.
+/// Lowers the receiver of a field write. A local with storage keeps its
+/// address, so the write lands in the local rather than in a value loaded out
+/// of it.
 fn (self: &var Lowerer) lower_receiver_address(tree: &var ast::Ast, expression: ast::Expression, out: &var Value) -> !?diagnostic::Diagnostic {
     if try self.slot_pointer(tree, expression) |slot| {
         out.* = slot;
@@ -997,12 +978,12 @@ fn (self: &var Lowerer) lower_receiver_address(tree: &var ast::Ast, expression: 
     return self.lower_expr(tree, expression, out);
 }
 
-/// Lowers `base.field` to the field's own storage, the Go
-/// `lowerFieldStorage`: a `field.addr` projection out of the base's storage.
-/// A nested path chains one projection per hop. null when the path is not
-/// rooted in a storage name -- a slot-backed local, a `&var` parameter, or a
-/// name bound to a shared borrow's address. The projection keeps the root's
-/// mutability: a field of a `&T` is read through, never written.
+/// Lowers `base.field` to the field's own storage: a `field.addr` projection
+/// out of the base's storage. A nested path chains one projection per hop.
+/// null when the path is not rooted in a storage name -- a slot-backed local,
+/// a `&var` parameter, or a name bound to a shared borrow's address. The
+/// projection keeps the root's mutability: a field of a `&T` is read through,
+/// never written.
 fn (self: &var Lowerer) lower_field_storage(tree: &var ast::Ast, expression: ast::Expression) -> !?Value {
     let field = ownership::field_expr(tree, expression) orelse return null;
     if field.namespace {
@@ -1030,11 +1011,10 @@ fn (self: &var Lowerer) lower_field_storage(tree: &var ast::Ast, expression: ast
     return try self.emit_op1(Op::FieldAddr, field_name, addr_type, found);
 }
 
-/// Returns the address a name bound to a `&T` holds, the Go
-/// `sharedBorrowAddress`: a parameter the call handed a copy's or the
-/// caller's address, or a capture of a shared borrow. A view taken from its
-/// fields has to point there, into the storage the borrow names, rather than
-/// into a copy the callee loads out.
+/// Returns the address a name bound to a `&T` holds: a parameter the call
+/// handed a copy's or the caller's address, or a capture of a shared borrow. A
+/// view taken from its fields has to point there, into the storage the borrow
+/// names, rather than into a copy the callee loads out.
 fn (self: &var Lowerer) shared_borrow_address(tree: &ast::Ast, expression: ast::Expression) -> !?Value {
     let ident = ownership::ident_expr(tree, expression) orelse return null;
     let name = try self.text_name(tree, ident.name);
@@ -1045,7 +1025,7 @@ fn (self: &var Lowerer) shared_borrow_address(tree: &ast::Ast, expression: ast::
     return value;
 }
 
-/// Lowers the arguments of a call to name, the Go `lowerCallArgs`.
+/// Lowers the arguments of a call to name.
 fn (self: &var Lowerer) lower_call_args(tree: &var ast::Ast, name: Name, args: ast::ExpressionList, out: &var array::Array<Value>) -> !?diagnostic::Diagnostic {
     if self.signature_named(name) |signature| {
         let passed = try self.variadic_call_signature(tree, signature, args);
@@ -1055,11 +1035,10 @@ fn (self: &var Lowerer) lower_call_args(tree: &var ast::Ast, name: Name, args: a
 }
 
 /// Lowers the arguments of a std::internal::builtin the lowerer has no
-/// declared signature for, the Go `corePrimitiveParams` plus
-/// `lowerCallArgsAs`. Only the destinations matter: a primitive that appends
-/// into the caller's String receives that String's storage, at whatever
-/// position it takes it, so the growth the runtime does is visible to the
-/// caller. The other argument kinds carry their own types to the call
+/// declared signature for. Only the destinations matter: a primitive that
+/// appends into the caller's String receives that String's storage, at
+/// whatever position it takes it, so the growth the runtime does is visible to
+/// the caller. The other argument kinds carry their own types to the call
 /// already.
 fn (self: &var Lowerer) lower_core_primitive_args(
     tree: &var ast::Ast,
@@ -1122,13 +1101,13 @@ fn (self: &var Lowerer) lower_call_args_named(
     return null;
 }
 
-/// Lowers call arguments at the types the callee declares for them, the Go
-/// `lowerCallArgsAs`, which is the one place a call decides what it hands
-/// over. An argument the callee receives as the caller's storage is passed
-/// as the local itself: its declared `&var T` type is a borrow context, and
-/// lower_contextual_expr hands over the storage. Params the lowerer cannot
-/// name -- a callee it has no signature for, or a variadic tail -- leave
-/// those arguments with the types they carry themselves.
+/// Lowers call arguments at the types the callee declares for them, which is
+/// the one place a call decides what it hands over. An argument the callee
+/// receives as the caller's storage is passed as the local itself: its
+/// declared `&var T` type is a borrow context, and lower_contextual_expr hands
+/// over the storage. Params the lowerer cannot name -- a callee it has no
+/// signature for, or a variadic tail -- leave those arguments with the types
+/// they carry themselves.
 fn (self: &var Lowerer) lower_call_args_as(tree: &var ast::Ast, params: ParamsView, args: ast::ExpressionList, out: &var array::Array<Value>) -> !?diagnostic::Diagnostic {
     var index = 0;
     while ownership::arg_at(tree, args, index) |arg| {

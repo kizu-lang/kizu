@@ -1,3 +1,4 @@
+import compiler::internal::arm64;
 import compiler::internal::ast;
 import compiler::internal::buildcache;
 import compiler::internal::cimport;
@@ -1902,6 +1903,8 @@ fn default_native_options(allocator: Allocator) -> !native::Options {
         linker: move linker,
         opt: false,
         thinlto: false,
+        direct: false,
+        own_backend: false,
         libraries: array::new<string::String>(allocator),
         frameworks: array::new<string::String>(allocator),
         library_search: array::new<string::String>(allocator),
@@ -2014,10 +2017,13 @@ fn run_command(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, next: 
 /// §14.5). With -o the test executable is built for the machine --triple
 /// names and written there instead of being run, so it takes no program args,
 /// and --triple needs -o since an executable for another machine cannot run
-/// here.
+/// here. The tests are built with the direct backend where the target has
+/// it; `--backend llvm` builds them through LLVM instead, and `--backend`
+/// takes `direct` as build does.
 fn test_command(io: Io, allocator: Allocator, lib_dir: []u8, next: i64, count: i64) -> !i64 {
     var options = try default_native_options(allocator);
     defer options.deinit(allocator);
+    options.own_backend = true;
     var seed: ?i64 = null;
     var path_index = next + 1;
     while path_index < count {
@@ -2042,6 +2048,19 @@ fn test_command(io: Io, allocator: Allocator, lib_dir: []u8, next: i64, count: i
             let text = message.as_bytes();
             try io::write_stderr_line(io, text);
             return 1;
+        }
+        if mem::equal_bytes(flag, "--backend") {
+            var backend = string::new(allocator);
+            defer backend.deinit(allocator);
+            path_index = try take_flag_value(io, allocator, path_index + 1, count, "--backend", &var backend);
+            if path_index < 0 {
+                return 1;
+            }
+            let backend_bytes = backend.as_bytes();
+            if !try select_backend(io, allocator, backend_bytes, true, &var options) {
+                return 1;
+            }
+            continue;
         }
         if mem::equal_bytes(flag, "--triple") {
             path_index = try take_flag_value(io, allocator, path_index + 1, count, "--triple", &var options.triple);
@@ -2150,6 +2169,19 @@ fn parse_native_build_args(
             options.thinlto = true;
             continue;
         }
+        if mem::equal_bytes(arg, "--backend") {
+            var backend = string::new(allocator);
+            defer backend.deinit(allocator);
+            index = try take_flag_value(io, allocator, index, count, "--backend", &var backend);
+            if index < 0 {
+                return 1;
+            }
+            let backend_bytes = backend.as_bytes();
+            if !try select_backend(io, allocator, backend_bytes, false, options) {
+                return 1;
+            }
+            continue;
+        }
         if mem::equal_bytes(arg, "-o") {
             index = try take_flag_value(io, allocator, index, count, "-o", &var options.output);
             if index < 0 {
@@ -2226,6 +2258,37 @@ fn parse_native_build_args(
     return 0;
 }
 
+/// Sets the backend `--backend` named, reporting false after printing why
+/// for a name it does not take. `llvm` is a name only where the command's
+/// default is another backend, as `kizu test`'s is.
+fn select_backend(io: Io, allocator: Allocator, name: []u8, llvm: bool, options: &var native::Options) -> !bool {
+    options.own_backend = false;
+    if mem::equal_bytes(name, "direct") {
+        options.direct = true;
+        return true;
+    }
+    if llvm and mem::equal_bytes(name, "llvm") {
+        options.direct = false;
+        return true;
+    }
+    if mem::equal_bytes(name, "asm") {
+        // The backend writes no assembly text: each target it takes
+        // gets its object directly, and Darwin x86_64 none at all.
+        try io::write_stderr_line(
+            io, "error: --backend asm (assembly text) was removed; --backend direct takes a Darwin or Linux arm64, or a Linux or Windows x86_64 target"
+        );
+        return false;
+    }
+    try usage(io);
+    var message = try string::from_bytes(allocator, "error: unknown backend `");
+    defer message.deinit(allocator);
+    try message.append_bytes(allocator, name);
+    try message.append_bytes(allocator, "`");
+    let message_bytes = message.as_bytes();
+    try io::write_stderr_line(io, message_bytes);
+    return false;
+}
+
 /// Reads the value following a flag into one option and returns the next
 /// argument index, the Go `nextNativeArg`; a missing value prints the
 /// usage and reports -1.
@@ -2266,6 +2329,9 @@ fn default_native_output(allocator: Allocator, path: []u8, emit: []u8, out: &var
     }
     if mem::equal_bytes(emit, "llvm") {
         try out.append_bytes(allocator, ".ll");
+    }
+    if mem::equal_bytes(emit, "unit-obj") {
+        try out.append_bytes(allocator, ".o");
     }
     return;
 }
@@ -2417,7 +2483,48 @@ fn native_target(
                     }
                     var units = array::new<string::String>(allocator);
                     defer units.deinit(allocator);
-                    if try emit_unit_texts(allocator, &var lowerer.module, darwin, arch, split, &var units) |failed| {
+                    // The targets the backend of internal/arm64 writes an
+                    // object for: Mach-O for Darwin arm64, ELF for Linux
+                    // arm64 and x86-64, COFF for Windows x86-64.
+                    let linux = build_target == stdtarget::Target::NativeLinux;
+                    let windows = build_target == stdtarget::Target::NativeWindows;
+                    let arm = (darwin or linux) and arch == llvm::Arch::Arm64;
+                    let amd = linux and arch == llvm::Arch::X86_64;
+                    let amd_windows = windows and arch == llvm::Arch::X86_64Windows;
+                    if options.own_backend and (arm or amd or amd_windows) {
+                        options.direct = true;
+                    }
+                    if options.direct {
+                        // Its machine code, written as an object here.
+                        if !arm and !amd and !amd_windows {
+                            try io::write_stderr_line(io, "error: --backend direct needs a Darwin or Linux arm64, or a Linux or Windows x86_64 target");
+                            return 1;
+                        }
+                        var direct_arch = arm64::Arch::Arm64;
+                        if amd {
+                            direct_arch = arm64::Arch::Amd64;
+                        } else if amd_windows {
+                            direct_arch = arm64::Arch::Amd64Windows;
+                        }
+                        var format = arm64::Format::MachO;
+                        if linux {
+                            format = arm64::Format::Elf;
+                        } else if windows {
+                            format = arm64::Format::Coff;
+                        }
+                        try units.append(allocator, string::new(allocator));
+                        var failure = false;
+                        if units.at_mut(0) |object| {
+                            if try arm64::emit_object(allocator, &lowerer.module, direct_arch, format, object) |failed| {
+                                defer failed.deinit(allocator);
+                                try report(io, allocator, &loader.sources, &failed);
+                                failure = true;
+                            }
+                        }
+                        if failure {
+                            return 1;
+                        }
+                    } else if try emit_unit_texts(allocator, &var lowerer.module, darwin, arch, split, &var units) |failed| {
                         defer failed.deinit(allocator);
                         try report(io, allocator, &loader.sources, &failed);
                         return 1;

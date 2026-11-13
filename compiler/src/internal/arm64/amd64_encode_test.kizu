@@ -1,0 +1,376 @@
+import compiler::internal::ir;
+import std::mem;
+import std::string;
+import std::testing;
+
+// The bytes below are what the system assembler makes of the line beside
+// each (`clang -c` for x86_64-linux, read back with `llvm-objdump -d`), for
+// forms no example reaches. The printer writes no assembly of its own, so a
+// new instruction form it writes gets its lines here, written by hand and
+// taken the same way.
+
+/// Returns an empty x86-64 ELF object in its code section.
+fn code_object(allocator: Allocator, syms: &var ir::NameTable) -> !Obj {
+    var obj = new_obj(allocator, Format::Elf);
+    errdefer obj.deinit(allocator);
+    obj.x86 = true;
+    try obj.enter(allocator, syms, SectionKind::Text);
+    return move obj;
+}
+
+/// Returns the bytes hex spells.
+fn hex_bytes(allocator: Allocator, hex: []u8) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    var at = 0;
+    while at + 1 < mem::len(hex) {
+        let high = hex_digit(hex[at]) orelse 0;
+        let low = hex_digit(hex[at + 1]) orelse 0;
+        try out.append_byte(allocator, cast<u8>(high * 16 + low));
+        at = at + 2;
+    }
+    return move out;
+}
+
+/// Expects the code written since the last check to be hex, and starts
+/// the next check empty.
+fn expect_code(allocator: Allocator, obj: &var Obj, hex: []u8) -> !void {
+    let want = try hex_bytes(allocator, hex);
+    defer want.deinit(allocator);
+    testing::expect(obj.failure.len() == 0);
+    if obj.sections.at_mut(0) |section| {
+        let written = section.bytes.as_bytes();
+        let want_bytes = want.as_bytes();
+        testing::expect(mem::equal_bytes(written, want_bytes));
+        try section.bytes.truncate(0);
+    }
+    return;
+}
+
+/// Appends count one-byte nops, filler between jumps.
+fn fill(allocator: Allocator, obj: &var Obj, count: i64) -> !void {
+    var filler = string::new(allocator);
+    defer filler.deinit(allocator);
+    for 0..count |_byte| {
+        try filler.append_byte(allocator, cast<u8>(0x90));
+    }
+    let bytes = filler.as_bytes();
+    return obj.bytes(allocator, bytes);
+}
+
+/// Appends the hex of count one-byte nops.
+fn fill_hex(allocator: Allocator, out: &var string::String, count: i64) -> !void {
+    for 0..count |_byte| {
+        try out.append_bytes(allocator, "90");
+    }
+    return;
+}
+
+test "encode memory operands" {
+    let allocator = mem::page_allocator();
+    var syms = try ir::new_name_table(allocator);
+    defer syms.deinit(allocator);
+    var obj = try code_object(allocator, &var syms);
+    defer obj.deinit(allocator);
+    try obj.x86_mr(allocator, "movq", 5, 0 - 1, 0, 0, 7);
+    try expect_code(allocator, &var obj, "488b7d00"); // movq (%rbp), %rdi
+    try obj.x86_mr(allocator, "movq", 13, 0 - 1, 0, 0, 7);
+    try expect_code(allocator, &var obj, "498b7d00"); // movq (%r13), %rdi
+    try obj.x86_mr(allocator, "movq", 12, 0 - 1, 0, 0, 7);
+    try expect_code(allocator, &var obj, "498b3c24"); // movq (%r12), %rdi
+    try obj.x86_mr(allocator, "movq", 6, 0 - 1, 0, 0 - 129, 0);
+    try expect_code(allocator, &var obj, "488b867fffffff"); // movq -129(%rsi), %rax
+    try obj.x86_mr(allocator, "movq", 5, 0, 3, 0, 7);
+    try expect_code(allocator, &var obj, "488b7cc500"); // movq (%rbp,%rax,8), %rdi
+    try obj.x86_mr(allocator, "movq", 12, 12, 3, 0, 7);
+    try expect_code(allocator, &var obj, "4b8b3ce4"); // movq (%r12,%r12,8), %rdi
+    try obj.x86_mr(allocator, "movq", 0 - 1, 0, 3, 0, 7);
+    try expect_code(allocator, &var obj, "488b3cc500000000"); // movq (,%rax,8), %rdi
+    try obj.x86_mr(allocator, "leaq", 7, 0 - 1, 0, 0 - 2147483648, 0);
+    try expect_code(allocator, &var obj, "488d8700000080"); // leaq -2147483648(%rdi), %rax
+    try obj.x86_mr(allocator, "movsbq", 4, 0 - 1, 0, 3, 7);
+    try expect_code(allocator, &var obj, "480fbe7c2403"); // movsbq 3(%rsp), %rdi
+    try obj.x86_mr(allocator, "movswq", 4, 0 - 1, 0, 56, 7);
+    try expect_code(allocator, &var obj, "480fbf7c2438"); // movswq 56(%rsp), %rdi
+    try obj.x86_rm(allocator, "movb", 6, 4, 0 - 1, 0, 3);
+    try expect_code(allocator, &var obj, "4088742403"); // movb %sil, 3(%rsp)
+    try obj.x86_rm(allocator, "movb", 0, 4, 0 - 1, 0, 3);
+    try expect_code(allocator, &var obj, "88442403"); // movb %al, 3(%rsp)
+    try obj.x86_im(allocator, "movw", 0, 4, 0 - 1, 0, 2);
+    try expect_code(allocator, &var obj, "66c74424020000"); // movw $0, 2(%rsp)
+    try obj.x86_im(allocator, "movb", 0, 14, 6, 0, 0);
+    try expect_code(allocator, &var obj, "41c6043600"); // movb $0, (%r14,%rsi,1)
+    try obj.x86_m1(allocator, "imulq", 4, 0 - 1, 0, 0);
+    try expect_code(allocator, &var obj, "48f72c24"); // imulq (%rsp)
+    // rsp is no index.
+    try obj.x86_mr(allocator, "movq", 0, 4, 0, 0, 7);
+    testing::expect(obj.failure.len() > 0);
+}
+
+test "encode immediates the assembler shortens" {
+    let allocator = mem::page_allocator();
+    var syms = try ir::new_name_table(allocator);
+    defer syms.deinit(allocator);
+    var obj = try code_object(allocator, &var syms);
+    defer obj.deinit(allocator);
+    try obj.x86_ir(allocator, "andq", 255, 0, 8);
+    try expect_code(allocator, &var obj, "4825ff000000"); // andq $255, %rax
+    try obj.x86_ir(allocator, "andq", 255, 7, 8);
+    try expect_code(allocator, &var obj, "4881e7ff000000"); // andq $255, %rdi
+    try obj.x86_ir(allocator, "andq", 0 - 128, 0, 8);
+    try expect_code(allocator, &var obj, "4883e080"); // andq $-128, %rax
+    try obj.x86_ir(allocator, "cmpq", 128, 0, 8);
+    try expect_code(allocator, &var obj, "483d80000000"); // cmpq $128, %rax
+    try obj.x86_ir(allocator, "orq", 1000, 0, 8);
+    try expect_code(allocator, &var obj, "480de8030000"); // orq $1000, %rax
+    try obj.x86_ir(allocator, "testq", 1, 0, 8);
+    try expect_code(allocator, &var obj, "48a901000000"); // testq $1, %rax
+    try obj.x86_ir(allocator, "testq", 1, 12, 8);
+    try expect_code(allocator, &var obj, "49f7c401000000"); // testq $1, %r12
+    try obj.x86_ir(allocator, "shlq", 1, 10, 8);
+    try expect_code(allocator, &var obj, "49d1e2"); // shlq $1, %r10
+    try obj.x86_ir(allocator, "sarq", 2, 15, 8);
+    try expect_code(allocator, &var obj, "49c1ff02"); // sarq $2, %r15
+    try obj.x86_ir(allocator, "cmp", 1, 0, 4);
+    try expect_code(allocator, &var obj, "83f801"); // cmp $1, %eax
+    try obj.x86_ir(allocator, "movq", 0 - 2147483648, 12, 8);
+    try expect_code(allocator, &var obj, "49c7c400000080"); // movq $-2147483648, %r12
+    try obj.x86_ir(allocator, "movabsq", 1, 9, 8);
+    try expect_code(allocator, &var obj, "49b90100000000000000"); // movabsq $1, %r9
+    try obj.x86_ir(allocator, "movl", 72, 10, 4);
+    try expect_code(allocator, &var obj, "41ba48000000"); // movl $72, %r10d
+    try obj.x86_r1(allocator, "not", 0, 4);
+    try expect_code(allocator, &var obj, "f7d0"); // not %eax
+    try obj.x86_r1(allocator, "divl", 13, 4);
+    try expect_code(allocator, &var obj, "41f7f5"); // divl %r13d
+    try obj.x86_r1(allocator, "pushq", 12, 8);
+    try obj.x86_r1(allocator, "popq", 12, 8);
+    try expect_code(allocator, &var obj, "4154415c"); // pushq %r12; popq %r12
+}
+
+test "encode byte and xmm registers" {
+    let allocator = mem::page_allocator();
+    var syms = try ir::new_name_table(allocator);
+    defer syms.deinit(allocator);
+    var obj = try code_object(allocator, &var syms);
+    defer obj.deinit(allocator);
+    try obj.x86_setcc(allocator, 12, 5);
+    try expect_code(allocator, &var obj, "400f9cc5"); // setl %bpl
+    try obj.x86_setcc(allocator, 3, 15);
+    try expect_code(allocator, &var obj, "410f93c7"); // setae %r15b
+    try obj.x86_setcc(allocator, 8, 0);
+    try expect_code(allocator, &var obj, "0f98c0"); // sets %al
+    try obj.x86_rr(allocator, "movzbl", 3, 1, 12, 4);
+    try expect_code(allocator, &var obj, "440fb6e3"); // movzbl %bl, %r12d
+    try obj.x86_rr(allocator, "movsbq", 0, 1, 0, 8);
+    try expect_code(allocator, &var obj, "480fbec0"); // movsbq %al, %rax
+    try obj.x86_rr(allocator, "movslq", 0, 4, 0, 8);
+    try expect_code(allocator, &var obj, "4863c0"); // movslq %eax, %rax
+    try obj.x86_xr(allocator, "movd", 15, 10, 4);
+    try expect_code(allocator, &var obj, "66450f7efa"); // movd %xmm15, %r10d
+    try obj.x86_xr(allocator, "cvttss2si", 15, 0, 4);
+    try expect_code(allocator, &var obj, "f3410f2cc7"); // cvttss2si %xmm15, %eax
+    try obj.x86_xx(allocator, "sqrt", 4, 15, 15);
+    try expect_code(allocator, &var obj, "f3450f51ff"); // sqrtss %xmm15, %xmm15
+    try obj.x86_xx(allocator, "xorps", 0, 1, 1);
+    try expect_code(allocator, &var obj, "0f57c9"); // xorps %xmm1, %xmm1
+    try obj.x86_call_reg(allocator, 12);
+    try expect_code(allocator, &var obj, "41ffd4"); // call *%r12
+}
+
+test "encode xmm copies, loads and stores" {
+    let allocator = mem::page_allocator();
+    var syms = try ir::new_name_table(allocator);
+    defer syms.deinit(allocator);
+    var obj = try code_object(allocator, &var syms);
+    defer obj.deinit(allocator);
+    try obj.x86_xx(allocator, "movapd", 0, 1, 0);
+    try expect_code(allocator, &var obj, "660f28c1"); // movapd %xmm1, %xmm0
+    try obj.x86_xx(allocator, "movapd", 0, 12, 3);
+    try expect_code(allocator, &var obj, "66410f28dc"); // movapd %xmm12, %xmm3
+    try obj.x86_xx(allocator, "movapd", 0, 2, 15);
+    try expect_code(allocator, &var obj, "66440f28fa"); // movapd %xmm2, %xmm15
+    try obj.x86_mx(allocator, "movsd", 7, 0, 3, 0, 8);
+    try expect_code(allocator, &var obj, "f2440f1004c7"); // movsd (%rdi,%rax,8), %xmm8
+    try obj.x86_mx(allocator, "movsd", 5, 0 - 1, 0, 0 - 24, 0);
+    try expect_code(allocator, &var obj, "f20f1045e8"); // movsd -24(%rbp), %xmm0
+    try obj.x86_mx(allocator, "movsd", 13, 0 - 1, 0, 0, 1);
+    try expect_code(allocator, &var obj, "f2410f104d00"); // movsd (%r13), %xmm1
+    try obj.x86_mx(allocator, "movsd", 4, 0 - 1, 0, 8, 12);
+    try expect_code(allocator, &var obj, "f2440f10642408"); // movsd 8(%rsp), %xmm12
+    try obj.x86_mx(allocator, "movss", 12, 9, 2, 4, 2);
+    try expect_code(allocator, &var obj, "f3430f10548c04"); // movss 4(%r12,%r9,4), %xmm2
+    try obj.x86_mx(allocator, "movsd", 0 - 1, 0, 3, 0, 3);
+    try expect_code(allocator, &var obj, "f20f101cc500000000"); // movsd (,%rax,8), %xmm3
+    try obj.x86_xm(allocator, "movsd", 8, 6, 1, 3, 0);
+    try expect_code(allocator, &var obj, "f2440f1104ce"); // movsd %xmm8, (%rsi,%rcx,8)
+    try obj.x86_xm(allocator, "movsd", 0, 5, 0 - 1, 0, 0 - 129);
+    try expect_code(allocator, &var obj, "f20f11857fffffff"); // movsd %xmm0, -129(%rbp)
+    try obj.x86_xm(allocator, "movss", 15, 4, 0 - 1, 0, 0);
+    try expect_code(allocator, &var obj, "f3440f113c24"); // movss %xmm15, (%rsp)
+    try obj.x86_xm(allocator, "movups", 6, 5, 0 - 1, 0, 0 - 96);
+    try expect_code(allocator, &var obj, "0f1175a0"); // movups %xmm6, -96(%rbp)
+    try obj.x86_mx(allocator, "movups", 5, 0 - 1, 0, 0 - 96, 6);
+    try expect_code(allocator, &var obj, "0f1075a0"); // movups -96(%rbp), %xmm6
+    try obj.x86_xm(allocator, "movups", 12, 5, 0 - 1, 0, 0 - 200);
+    try expect_code(allocator, &var obj, "440f11a538ffffff"); // movups %xmm12, -200(%rbp)
+    try obj.x86_mx(allocator, "movups", 5, 0 - 1, 0, 0 - 200, 12);
+    try expect_code(allocator, &var obj, "440f10a538ffffff"); // movups -200(%rbp), %xmm12
+    // A move of no float width is refused.
+    try obj.x86_mx(allocator, "movq", 7, 0 - 1, 0, 0, 0);
+    testing::expect(obj.failure.len() > 0);
+}
+
+// The alignment of a function padded with nops of 10, 9 and 15 bytes:
+//
+//         .p2align 4
+//     g1: .space 10, 0xc3
+//         .p2align 4
+//     g2: .space 9, 0xc3
+//         .p2align 4
+//     g3: .space 1, 0xc3
+//         .p2align 4
+test "pad code with the assembler's nops" {
+    let allocator = mem::page_allocator();
+    var syms = try ir::new_name_table(allocator);
+    defer syms.deinit(allocator);
+    var obj = try code_object(allocator, &var syms);
+    defer obj.deinit(allocator);
+    try obj.x86_nops(allocator, 6);
+    try obj.x86_nops(allocator, 7);
+    try obj.x86_nops(allocator, 15);
+    try expect_code(allocator, &var obj, "660f1f4400000f1f8000000000662e0f1f8400000000000f1f440000");
+}
+
+// Jumps relaxed as the assembler relaxes them: short while the target is
+// a byte away (+127 and -128 are, +128 and -129 are not), and a jump made
+// near by another growing between it and its target.
+//
+//         jmp .La
+//         .space 127, 0x90
+//     .La: je .Lb
+//         .space 128, 0x90
+//     .Lb: jne .Lc
+//         .space 123, 0x90
+//         jmp .Ld
+//         .space 128, 0x90
+//     .Lc:
+//     .Ld: .space 126, 0x90
+//         jmp .Lc
+//         .space 127, 0x90
+//         jl .Ld
+//         ret
+test "relax jumps" {
+    let allocator = mem::page_allocator();
+    var syms = try ir::new_name_table(allocator);
+    defer syms.deinit(allocator);
+    var obj = try code_object(allocator, &var syms);
+    defer obj.deinit(allocator);
+    try obj.begin_function(allocator, 0);
+    try obj.x86_jump(allocator, 0 - 1, 1, true);
+    try fill(allocator, &var obj, 127);
+    try obj.place_local(allocator, 1);
+    try obj.x86_jump(allocator, 4, 2, true);
+    try fill(allocator, &var obj, 128);
+    try obj.place_local(allocator, 2);
+    try obj.x86_jump(allocator, 5, 3, true);
+    try fill(allocator, &var obj, 123);
+    try obj.x86_jump(allocator, 0 - 1, 4, true);
+    try fill(allocator, &var obj, 128);
+    try obj.place_local(allocator, 3);
+    try obj.place_local(allocator, 4);
+    try fill(allocator, &var obj, 126);
+    try obj.x86_jump(allocator, 0 - 1, 3, true);
+    try fill(allocator, &var obj, 127);
+    try obj.x86_jump(allocator, 12, 4, true);
+    try obj.x86_bare(allocator, "ret");
+    try obj.end_function(allocator);
+    var want = string::new(allocator);
+    defer want.deinit(allocator);
+    try want.append_bytes(allocator, "eb7f");
+    try fill_hex(allocator, &var want, 127);
+    try want.append_bytes(allocator, "0f8480000000");
+    try fill_hex(allocator, &var want, 128);
+    try want.append_bytes(allocator, "0f8500010000");
+    try fill_hex(allocator, &var want, 123);
+    try want.append_bytes(allocator, "e980000000");
+    try fill_hex(allocator, &var want, 254);
+    try want.append_bytes(allocator, "eb80");
+    try fill_hex(allocator, &var want, 127);
+    try want.append_bytes(allocator, "0f8cfbfeffffc3");
+    let want_hex = want.as_bytes();
+    try expect_code(allocator, &var obj, want_hex);
+}
+
+// The object of calls the assembler resolves and relocates: a call to the
+// global the object defines stays a relocation (through the PLT, as one to
+// an undefined symbol), while a call to and the address of a local function
+// of the section, defined later, are resolved in place.
+//
+//         .text
+//         .globl main
+//         .p2align 4
+//     main:
+//         call main
+//         call kz_f
+//         call ext@PLT
+//         leaq kz_f(%rip), %rax
+//         ret
+//         .p2align 4
+//     kz_f:
+//         ret
+//         .section .note.GNU-stack,"",%progbits
+
+fn assembled_x86_calls(allocator: Allocator) -> !string::String {
+    var hex = string::new(allocator);
+    defer hex.deinit(allocator);
+    try hex.append_bytes(allocator, "7f454c4602010100000000000000000001003e0001000000000000000000000000000000000000003001000000000000");
+    try hex.append_bytes(allocator, "00000000400000000000400006000100e800000000e816000000e800000000488d050a000000c3660f1f840000000000");
+    try hex.append_bytes(allocator, "c30000000000000000000000000000000000000000000000000000000000000021000000000002002000000000000000");
+    try hex.append_bytes(allocator, "00000000000000000c000000100002000000000000000000000000000000000008000000100000000000000000000000");
+    try hex.append_bytes(allocator, "000000000000000001000000000000000400000002000000fcffffffffffffff0b000000000000000400000003000000");
+    try hex.append_bytes(allocator, "fcffffffffffffff002e72656c612e74657874006d61696e002e6e6f74652e474e552d737461636b006b7a5f66002e73");
+    try hex.append_bytes(allocator, "7472746162002e73796d7461620000000000000000000000000000000000000000000000000000000000000000000000");
+    try hex.append_bytes(allocator, "000000000000000000000000000000000000000000000000000000000000000026000000030000000000000000000000");
+    try hex.append_bytes(allocator, "0000000000000000f8000000000000003600000000000000000000000000000001000000000000000000000000000000");
+    try hex.append_bytes(allocator, "060000000100000006000000000000000000000000000000400000000000000021000000000000000000000000000000");
+    try hex.append_bytes(allocator, "10000000000000000000000000000000010000000400000040000000000000000000000000000000c800000000000000");
+    try hex.append_bytes(allocator, "300000000000000005000000020000000800000000000000180000000000000011000000010000000000000000000000");
+    try hex.append_bytes(allocator, "000000000000000061000000000000000000000000000000000000000000000001000000000000000000000000000000");
+    try hex.append_bytes(allocator, "2e0000000200000000000000000000000000000000000000680000000000000060000000000000000100000002000000");
+    try hex.append_bytes(allocator, "08000000000000001800000000000000");
+    let text = hex.as_bytes();
+    return hex_bytes(allocator, text);
+}
+
+test "write the x86-64 ELF object of calls resolved in place and relocated" {
+    let allocator = mem::page_allocator();
+    var syms = try ir::new_name_table(allocator);
+    defer syms.deinit(allocator);
+    var obj = try code_object(allocator, &var syms);
+    defer obj.deinit(allocator);
+    let main = try syms.intern("_main");
+    let local = try syms.intern("kz_f");
+    let external = try syms.intern("_ext");
+    try obj.global(allocator, &syms, main);
+    try obj.align(allocator, 4);
+    try obj.define(allocator, &syms, main);
+    try obj.x86_call(allocator, &syms, main);
+    try obj.x86_call(allocator, &syms, local);
+    try obj.x86_call(allocator, &syms, external);
+    try obj.x86_rip(allocator, &syms, local, 0, false);
+    try obj.x86_bare(allocator, "ret");
+    try obj.align(allocator, 4);
+    try obj.define(allocator, &syms, local);
+    try obj.x86_bare(allocator, "ret");
+    try obj.enter(allocator, &var syms, SectionKind::Note);
+    var written = string::new(allocator);
+    defer written.deinit(allocator);
+    try obj.write_elf(allocator, &syms, &var written);
+    let want = try assembled_x86_calls(allocator);
+    defer want.deinit(allocator);
+    let want_bytes = want.as_bytes();
+    let written_bytes = written.as_bytes();
+    testing::expect(obj.failure.len() == 0);
+    testing::expect(mem::equal_bytes(written_bytes, want_bytes));
+}

@@ -50,6 +50,14 @@ pub struct Options {
     /// each compiled to bitcode the cache keeps, and optimizes across them
     /// when they are linked.
     pub thinlto: bool,
+    /// direct marks units that are Mach-O or ELF objects the arm64 backend
+    /// (and for x86-64 its amd64 printer) wrote itself: each is linked as it
+    /// is, with nothing to assemble.
+    pub direct: bool,
+    /// own_backend asks for direct wherever the target has it and leaves
+    /// the units LLVM IR elsewhere. It is what `kizu test` runs on unless
+    /// `--backend` names one, so running the tests runs the direct backend.
+    pub own_backend: bool,
     /// libraries and frameworks are what the program's reached extern
     /// declarations named with `@link_library` / `@link_framework`; the search
     /// paths are what its manifest's `[native]` section says about where
@@ -162,6 +170,19 @@ pub fn build(
     var command = array::new<string::String>(allocator);
     defer command.deinit(allocator);
     let runtime_bytes = runtime_path.as_bytes();
+    let emit = options.emit.as_bytes();
+    if mem::equal_bytes(emit, "unit-obj") {
+        // The program's own object, as the link would read it.
+        if units.at(0) |unit| {
+            var object = string::new(allocator);
+            defer object.deinit(allocator);
+            try stamp_object(io, allocator, runtime_bytes, unit, &var object);
+            let object_bytes = object.as_bytes();
+            try fs::write_file(io, output, object_bytes);
+        }
+        try clean_build_dir(io, allocator, dir_bytes);
+        return null;
+    }
     if try link(io, allocator, &var cache, dir_bytes, runtime_bytes, output, options, host, version_bytes, units, &var command) |failed| {
         errdefer failed.deinit(allocator);
         try clean_build_dir(io, allocator, dir_bytes);
@@ -511,6 +532,11 @@ fn driver(allocator: Allocator, options: &Options, arm64: bool) -> !string::Stri
             try out.append_bytes(allocator, "x86_64-w64-mingw32-");
         }
     }
+    if direct_tools(options) {
+        // `--linker ld` still compiles the runtime with clang, the C compiler.
+        try out.append_bytes(allocator, "clang");
+        return move out;
+    }
     try out.append_string(allocator, &options.linker);
     return move out;
 }
@@ -595,6 +621,9 @@ fn append_toolchain_key(allocator: Allocator,
         try out.append_bytes(allocator, "/-target/");
         try out.append_string(allocator, &options.triple);
     }
+    if direct_tools(options) {
+        try out.append_bytes(allocator, "/as+ld");
+    }
     var flags = array::new<string::String>(allocator);
     defer flags.deinit(allocator);
     try clang_optimization_flags(allocator, options.opt, target_is_arm64(options, host), &var flags);
@@ -670,10 +699,19 @@ fn link(
     units: &array::Array<string::String>,
     command: &var array::Array<string::String>
 ) -> !?diagnostic::Diagnostic {
+    if direct_tools(options) {
+        if try link_with_tools(io, allocator, dir, runtime_path, output, options, units, command) |failed| {
+            errdefer failed.deinit(allocator);
+            try remove_unit_files(io, allocator, dir, units.len());
+            return move failed;
+        }
+        try remove_unit_files(io, allocator, dir, units.len());
+        return null;
+    }
     let arm64 = target_is_arm64(options, host);
     var inputs = array::new<string::String>(allocator);
     defer inputs.deinit(allocator);
-    if try unit_inputs(io, allocator, cache, dir, options, host, version, units, &var inputs) |failed| {
+    if try unit_inputs(io, allocator, cache, dir, runtime_path, options, host, version, units, &var inputs) |failed| {
         errdefer failed.deinit(allocator);
         try remove_unit_files(io, allocator, dir, units.len());
         return move failed;
@@ -702,6 +740,7 @@ fn unit_inputs(
     allocator: Allocator,
     cache: &var buildcache::Cache,
     dir: []u8,
+    runtime_path: []u8,
     options: &Options,
     host: &string::String,
     version: []u8,
@@ -709,9 +748,14 @@ fn unit_inputs(
     inputs: &var array::Array<string::String>
 ) -> !?diagnostic::Diagnostic {
     var index = 0;
+    if options.direct {
+        // The units are objects already: nothing to compile or keep.
+        try direct_inputs(io, allocator, dir, runtime_path, options, units, inputs);
+        return null;
+    }
     if options.opt and !options.thinlto {
         while units.at(index) |unit| {
-            let unit_path = try unit_text_path(io, allocator, dir, index);
+            let unit_path = try unit_text_path(io, allocator, dir, index, options);
             defer unit_path.deinit(allocator);
             index = index + 1;
             var module = string::new(allocator);
@@ -861,12 +905,21 @@ fn unit_file(allocator: Allocator, dir: []u8, index: i64, extension: []u8) -> !s
 
 /// Creates the index-th unit's directory and returns where its text is
 /// written, the Go `unitPath`.
-fn unit_text_path(io: Io, allocator: Allocator, dir: []u8, index: i64) -> !string::String {
+fn unit_text_path(io: Io, allocator: Allocator, dir: []u8, index: i64, options: &Options) -> !string::String {
     let unit = try unit_dir(allocator, dir, index);
     defer unit.deinit(allocator);
     let unit_bytes = unit.as_bytes();
     try fs::create_dir(io, unit_bytes);
-    return unit_file(allocator, dir, index, ".ll");
+    return unit_file(allocator, dir, index, unit_extension(options));
+}
+
+/// Returns the extension a unit's text is written with, which is what tells
+/// clang how to read it.
+fn unit_extension(options: &Options) -> []u8 {
+    if options.direct {
+        return ".o";
+    }
+    return ".ll";
 }
 
 /// Removes the unit texts a link wrote, the part of the Go `defer
@@ -876,6 +929,7 @@ fn remove_unit_files(io: Io, allocator: Allocator, dir: []u8, count: i64) -> !vo
     while index < count {
         try remove_temp_unit_file(io, allocator, dir, index, ".ll");
         try remove_temp_unit_file(io, allocator, dir, index, ".args");
+        try remove_temp_unit_file(io, allocator, dir, index, ".o");
         let unit = try unit_dir(allocator, dir, index);
         defer unit.deinit(allocator);
         let unit_bytes = unit.as_bytes();
@@ -912,7 +966,7 @@ fn prepare_unit(
     options: &Options,
     arm64: bool
 ) -> !UnitJob {
-    let unit_path = try unit_text_path(io, allocator, dir, index);
+    let unit_path = try unit_text_path(io, allocator, dir, index, options);
     defer unit_path.deinit(allocator);
     let path_bytes = unit_path.as_bytes();
     let text_bytes = text.as_bytes();
@@ -1203,7 +1257,11 @@ fn validate_options(
         return try fail_parts(allocator, "native error: --runtime ", runtime_mode, " is not implemented yet");
     }
     let emit = options.emit.as_bytes();
-    if !mem::equal_bytes(emit, "exe") and !mem::equal_bytes(emit, "obj") {
+    if mem::equal_bytes(emit, "unit-obj") {
+        if !options.direct {
+            return try fail_parts(allocator, "native error: --emit unit-obj writes the object of --backend direct", "", "");
+        }
+    } else if !mem::equal_bytes(emit, "exe") and !mem::equal_bytes(emit, "obj") {
         return try fail_parts(allocator, "native error: --emit ", emit, " is not implemented yet");
     }
     if options.cpu.len() != 0 {
@@ -1213,7 +1271,11 @@ fn validate_options(
         return try fail_parts(allocator, "native error: --abi is not implemented yet", "", "");
     }
     let linker = options.linker.as_bytes();
-    if !mem::equal_bytes(linker, "clang") {
+    if direct_tools(options) {
+        if try validate_tools(allocator, options) |failed| {
+            return move failed;
+        }
+    } else if !mem::equal_bytes(linker, "clang") {
         return try fail_parts(allocator, "native error: --linker ", linker, " is not implemented yet");
     }
     if options.frameworks.at(0) |framework| {

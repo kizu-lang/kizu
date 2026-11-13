@@ -3,20 +3,8 @@ import std::map;
 import std::mem;
 import std::string;
 
-// Mechanical port of internal/ir/reachable.go: dropping the functions no
-// root reaches through direct calls. Go keys its function map and reachable
-// set by the Go string of a function name; here they are keyed by the bytes
-// of the interned Name.
-
-/// Removes module functions that cannot be reached from the supplied roots
-/// through direct calls or a function address taken on a reachable path, the
-/// Go `KeepReachableFunctions`. Calls to symbols outside the module do not add
-/// an edge.
-pub fn keep_reachable_functions(allocator: Allocator, module: &var Module, roots: &array::Array<string::String>) -> !void {
-    return keep_reachable(
-        allocator, module, roots, "", true
-    );
-}
+// Dropping the functions no root reaches through direct calls. The function
+// map and the reachable set are keyed by the bytes of the interned Name.
 
 /// Removes functions outside one target's entry closure. Only exports for
 /// export_abi become additional host roots; empty means no explicit exports.
@@ -25,18 +13,6 @@ pub fn keep_target_reachable_functions(
     module: &var Module,
     roots: &array::Array<string::String>,
     export_abi: []u8
-) -> !void {
-    return keep_reachable(
-        allocator, module, roots, export_abi, false
-    );
-}
-
-fn keep_reachable(
-    allocator: Allocator,
-    module: &var Module,
-    roots: &array::Array<string::String>,
-    export_abi: []u8,
-    all_exports: bool
 ) -> !void {
     var functions = map::new<[]u8, Function>(allocator);
     defer functions.deinit(allocator);
@@ -70,12 +46,10 @@ fn keep_reachable(
         if is_empty(node.export_abi) {
             continue;
         }
-        if !all_exports {
-            let retained_abi = name_text(&module.names, node.export_abi);
-            let abi_bytes = retained_abi.as_bytes();
-            if !mem::equal_bytes(abi_bytes, export_abi) {
-                continue;
-            }
+        let retained_abi = name_text(&module.names, node.export_abi);
+        let abi_bytes = retained_abi.as_bytes();
+        if !mem::equal_bytes(abi_bytes, export_abi) {
+            continue;
         }
         let retained = name_text(&module.names, node.name);
         let bytes = retained.as_bytes();
@@ -119,12 +93,12 @@ fn keep_reachable(
     return keep_referenced_error_sets(allocator, module);
 }
 
-/// Removes the error sets no kept function names in a type, the Go
-/// `KeepReferencedErrorSets`. std comes with every program (SPEC §14.1) and
-/// declares its sets in modules the program may never call into; a set no
-/// reachable code can carry has no spelling to report, so it leaves with the
-/// code that would have carried it. A combined set keeps the sets it takes
-/// its members from, since a value of the combined type holds their codes.
+/// Removes the error sets no kept function names in a type. std comes with
+/// every program (SPEC §14.1) and declares its sets in modules the program may
+/// never call into; a set no reachable code can carry has no spelling to
+/// report, so it leaves with the code that would have carried it. A combined
+/// set keeps the sets it takes its members from, since a value of the combined
+/// type holds their codes.
 pub fn keep_referenced_error_sets(allocator: Allocator, module: &var Module) -> !void {
     var referenced = map::new<[]u8, bool>(allocator);
     defer referenced.deinit(allocator);
@@ -208,9 +182,9 @@ pub fn keep_referenced_error_sets(allocator: Allocator, module: &var Module) -> 
     return;
 }
 
-/// Marks every error set a type spelling is built from, the Go `typeNames`
-/// walk: the spelling is split on anything that is not a name byte, so a set
-/// is found inside `std::mem::Error!void` and not inside a longer name.
+/// Marks every error set a type spelling is built from: the spelling is split
+/// on anything that is not a name byte, so a set is found inside
+/// `std::mem::Error!void` and not inside a longer name.
 fn note_error_sets(
     allocator: Allocator,
     module: &Module,
@@ -259,9 +233,8 @@ fn is_type_name_byte(byte: u8) -> bool {
     return byte >= cast<u8>(65) and byte <= cast<u8>(90);
 }
 
-/// Queues one callee the first time a reachable function names it, the body
-/// of the Go work-list loop: a symbol the module does not define adds
-/// nothing.
+/// Queues one callee the first time a reachable function names it: a symbol
+/// the module does not define adds nothing.
 fn mark_reachable(
     allocator: Allocator,
     module: &Module,
@@ -281,8 +254,8 @@ fn mark_reachable(
 }
 
 /// Returns direct call targets from a function body and its deferred cleanup
-/// paths, the Go `DirectCallees`: the functions it calls directly, takes the
-/// address of, or has a cleanup call, in the order its instructions name them.
+/// paths: the functions it calls directly, takes the address of, or has a
+/// cleanup call, in the order its instructions name them.
 pub fn direct_callees(allocator: Allocator, module: &Module, function: Function) -> !array::Array<Name> {
     var callees = array::new<Name>(allocator);
     errdefer callees.deinit(allocator);
@@ -314,9 +287,9 @@ pub fn direct_callees(allocator: Allocator, module: &Module, function: Function)
     return move callees;
 }
 
-/// Decodes one operation that makes a function reachable, the Go
-/// `directCallee`: a direct call and taking a function's address both name the
-/// symbol whose body the module must keep.
+/// Decodes one operation that makes a function reachable: a direct call and
+/// taking a function's address both name the symbol whose body the module must
+/// keep.
 fn direct_callee(op: Op, operand: Name) -> ?Name {
     if op == Op::Call or op == Op::FuncAddr {
         return operand;

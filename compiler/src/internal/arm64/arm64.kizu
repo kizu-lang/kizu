@@ -1,0 +1,977 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::array;
+import std::fmt;
+import std::mem;
+import std::string;
+
+// The arm64 backend: a lowered module straight to an AArch64 object,
+// Mach-O for Darwin or ELF for Linux, which the system linker turns into
+// the executable. The printer encodes each instruction itself
+// (encode.kizu) into the object (obj.kizu, macho.kizu, elf.kizu), laid
+// out byte for byte as the system assembler lays out the same code.
+// Every function is selected into machine IR, given registers, and printed;
+// an op or a type the backend does not lower stops the build with a
+// diagnostic naming it rather than being handed to another backend. The
+// same machine IR, allocated, is also printed as x86-64 by the amd64
+// printer, for Linux and Windows as an ELF or COFF object
+// (amd64_encode.kizu, elf.kizu, coff.kizu), laid out as the system
+// assembler would lay out the same code.
+
+/// Is the object format the code is written for. Selection names symbols
+/// the Mach-O way; the ELF and COFF writers spell them their own.
+pub enum Format {
+    MachO,
+    Elf,
+    Coff,
+}
+
+/// Emits a lowered module as an object in format: for arm64 Mach-O for
+/// Darwin or ELF for Linux, for x86-64 ELF for Linux or COFF for Windows.
+/// Each instruction is
+/// encoded here, laid out the way the system assembler would lay it out.
+/// An operand no encoding takes stops the build. A Mach-O object's
+/// LC_BUILD_VERSION names no version; the link stamps the one of the
+/// runtime it links with.
+pub fn emit_object(allocator: Allocator, module: &ir::Module, arch: Arch, format: Format, out: &var string::String) -> !?diagnostic::Diagnostic {
+    var sink = new_out(allocator, format);
+    defer sink.deinit(allocator);
+    let x86 = is_x86(arch);
+    sink.obj.x86 = x86;
+    if try emit_into(allocator, module, arch, format, &var sink) |failed| {
+        return move failed;
+    }
+    if sink.obj.failure.len() > 0 {
+        var prefix = "arm64 error: no encoding for ";
+        if x86 {
+            prefix = "amd64 error: no encoding for ";
+        }
+        var message = try string::from_bytes(allocator, prefix);
+        defer message.deinit(allocator);
+        try message.append_string(allocator, &sink.obj.failure);
+        let bytes = message.as_bytes();
+        return try diagnostic::from_text(allocator, diagnostic::Severity::Error, ast::zero_span(), bytes);
+    }
+    try out.append_string(allocator, &sink.file);
+    return null;
+}
+
+/// Is where the printer writes: the machine code of each instruction into
+/// obj, and then the object file into file.
+pub struct Out {
+    file: string::String,
+    obj: Obj,
+}
+
+fn new_out(allocator: Allocator, format: Format) -> Out {
+    return Out { file: string::new(allocator), obj: new_obj(allocator, format) };
+}
+
+/// Appends one instruction word to the object.
+fn (self: &var Out) word(allocator: Allocator, value: i64, what: []u8) -> !void {
+    return self.obj.word(allocator, value, what);
+}
+
+fn emit_into(allocator: Allocator, module: &ir::Module, arch: Arch, format: Format, out: &var Out) -> !?diagnostic::Diagnostic {
+    var selector = try new_selector(allocator, arch);
+    defer selector.deinit(allocator);
+    try selector.index_functions(module);
+    selector.stacks_variadics = format == Format::MachO;
+    if arch == Arch::Amd64Windows {
+        // The stack probe a frame of a page or more calls, spelled the
+        // Mach-O way like every name the selector makes.
+        let _ = try selector.syms.intern("____chkstk_ms");
+    }
+    if module.error_sets.at("std::mem::Error") |declared| {
+        selector.oom = declared.tags.get("OutOfMemory") orelse 0 - 1;
+    }
+    if module.error_sets.at("std::array::Error") |declared| {
+        selector.oob = declared.tags.get("OutOfBounds") orelse 0 - 1;
+    }
+    var main_ret = ir::empty_name();
+    if module.function_named("main") |main_function| {
+        let ret = module.function_return(main_function);
+        if !module.names.is(ret, "void") {
+            selector.main_wraps = true;
+            main_ret = ret;
+        }
+    }
+    try out.obj.enter(allocator, &var selector.syms, SectionKind::Text);
+    // Select every function first, so a call can take a copy of its
+    // callee's body; then allocate and print each.
+    var functions = array::new<MFunction>(allocator);
+    defer functions.deinit(allocator);
+    var symbols = array::new<ir::Name>(allocator);
+    defer symbols.deinit(allocator);
+    // The C symbol of each `export "c"` function, a second label on the
+    // same code, or the empty name.
+    var exports = array::new<ir::Name>(allocator);
+    defer exports.deinit(allocator);
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let function_node = module.function_nodes.at(function.node);
+        let name = function_node.name;
+        let symbol = try selector.function_symbol(module, name);
+        try exports.append(allocator, try selector.export_symbol(module, function_node));
+        if try selector.select_function(module, function) |failed| {
+            return move failed;
+        }
+        selector.mark_cold_blocks();
+        try functions.append(allocator, try clone_function(allocator, &selector.func));
+        try symbols.append(allocator, symbol);
+    }
+    if selector.main_wraps {
+        if try selector.select_main_wrapper(module, main_ret) |failed| {
+            return move failed;
+        }
+        selector.mark_cold_blocks();
+        try functions.append(allocator, try clone_function(allocator, &selector.func));
+        try symbols.append(allocator, try selector.syms.intern("_main"));
+        try exports.append(allocator, ir::empty_name());
+    }
+    for 0..2 |kind| {
+        let states = kind == 1;
+        if (states and selector.state_invokes) or (!states and selector.invokes) {
+            try selector.select_thread_invoke(states);
+            selector.mark_cold_blocks();
+            try functions.append(allocator, try clone_function(allocator, &selector.func));
+            try symbols.append(allocator, try selector.invoke_symbol(states));
+            try exports.append(allocator, ir::empty_name());
+        }
+    }
+    var task_index = 0;
+    while selector.task_invokes.get(task_index) |state_type| {
+        task_index = task_index + 1;
+        if try selector.select_task_invoke(module, state_type) |failed| {
+            return move failed;
+        }
+        selector.mark_cold_blocks();
+        try functions.append(allocator, try clone_function(allocator, &selector.func));
+        try symbols.append(allocator, try selector.task_invoke_symbol(module, state_type));
+        try exports.append(allocator, ir::empty_name());
+    }
+    try inline_calls(allocator, &var functions, &symbols);
+    var ordinal = 0;
+    while functions.at_mut(ordinal) |func| {
+        let symbol = symbols.get_or_panic(ordinal);
+        let allocation = try allocate(allocator, func, arch);
+        defer allocation.deinit(allocator);
+        let exported = exports.get_or_panic(ordinal);
+        if is_x86(arch) {
+            try amd64_print_function(allocator, out, func, &allocation, symbol, exported, &selector.syms, arch, format);
+            ordinal = ordinal + 1;
+            continue;
+        }
+        if !ir::is_empty(exported) {
+            try out.obj.global(allocator, &selector.syms, exported);
+            try out.obj.align(allocator, 4);
+            try out.obj.define(allocator, &selector.syms, exported);
+        }
+        try print_function(allocator, out, func, &allocation, symbol, &selector.syms);
+        ordinal = ordinal + 1;
+    }
+    if selector.main_wraps {
+        try write_error_names(allocator, module, &var selector, out);
+    }
+    if selector.table_starts.len() > 0 {
+        try write_tables(allocator, &var selector, out);
+    }
+    if selector.literals.len() > 0 {
+        try write_literal_bytes(allocator, &var selector, &var out.obj);
+    }
+    if format == Format::Elf {
+        // The stack is not executable.
+        try out.obj.enter(allocator, &var selector.syms, SectionKind::Note);
+        try out.obj.write_elf(allocator, &selector.syms, &var out.file);
+    } else if format == Format::Coff {
+        try out.obj.write_coff(allocator, &selector.syms, &var out.file);
+    } else {
+        try out.obj.write_macho(allocator, &selector.syms, 0, &var out.file);
+    }
+    return null;
+}
+
+/// Writes the string literals into the object's C string section.
+fn write_literal_bytes(allocator: Allocator, selector: &var Selector, obj: &var Obj) -> !void {
+    try obj.enter(allocator, &var selector.syms, SectionKind::Cstring);
+    var literal_index = 0;
+    while selector.literals.get(literal_index) |literal| {
+        let label = try local_label(allocator, &var selector.syms, "Lkz_str.", literal_index);
+        literal_index = literal_index + 1;
+        try obj.define(allocator, &selector.syms, label);
+        let text = ir::name_text(&selector.syms, literal);
+        let bytes = text.as_bytes();
+        try obj.bytes(allocator, bytes);
+        try obj.datum(allocator, 0, 1);
+    }
+    return;
+}
+
+/// Returns the name of the local label prefix followed by index.
+fn local_label(allocator: Allocator, syms: &var ir::NameTable, prefix: []u8, index: i64) -> !ir::Name {
+    var label = try string::from_bytes(allocator, prefix);
+    defer label.deinit(allocator);
+    try fmt::append_i64(allocator, &var label, index);
+    let bytes = label.as_bytes();
+    return syms.intern(bytes);
+}
+
+/// Writes the read-only tables of table.get, eight bytes an entry.
+fn write_tables(allocator: Allocator, selector: &var Selector, sink: &var Out) -> !void {
+    try sink.obj.enter(allocator, &var selector.syms, SectionKind::TextConst);
+    var table = 0;
+    while selector.table_starts.get(table) |start| {
+        var end = selector.table_words.len();
+        if selector.table_starts.get(table + 1) |next| {
+            end = next;
+        }
+        try sink.obj.align(allocator, 3);
+        let label = try local_label(allocator, &var selector.syms, "Lkz_table.", table);
+        try sink.obj.define(allocator, &selector.syms, label);
+        table = table + 1;
+        for start..end |at| {
+            try sink.obj.datum(allocator, selector.table_words.get_or_panic(at), 8);
+        }
+    }
+    return;
+}
+
+/// Is where a function's frame puts things, from the stack pointer after
+/// the prologue: the outgoing arguments and slots from 0, then the
+/// callee-saved registers, then the frame record (x29, x30) at the top.
+struct Frame {
+    needed: bool,
+    total: i64,
+    saved_at: i64,
+}
+
+fn plan_frame(func: &var MFunction, allocation: &Allocation) -> Frame {
+    var uses_inarg = false;
+    var block_index = 0;
+    while func.blocks.at(block_index) |block| {
+        block_index = block_index + 1;
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            if inst.rn == reg_inarg() {
+                uses_inarg = true;
+            }
+        }
+    }
+    var offset = func.out_words * 8;
+    var slot_index = 0;
+    while func.slots.at_mut(slot_index) |slot| {
+        slot_index = slot_index + 1;
+        offset = round_up(offset, slot.align);
+        slot.offset = offset;
+        offset = offset + slot.size;
+    }
+    offset = round_up(offset, 8);
+    let saved_at = offset;
+    offset = offset + allocation.saved.len() * 8;
+    let total = round_up(offset + 16, 16);
+    let needed = func.calls or uses_inarg or offset > 0;
+    return Frame { needed: needed, total: total, saved_at: saved_at };
+}
+
+/// Writes `op xa, xb, [base, #offset]` for a register pair, or two single
+/// accesses when the offset does not fit the pair form.
+fn print_pair(allocator: Allocator, out: &var Out, load: bool, a: i64, b: i64, base: i64, offset: i64) -> !void {
+    if offset >= 0 and offset <= 504 and offset % 8 == 0 {
+        return out.word(allocator, enc_pair(load, a, b, base, offset), "ldp/stp");
+    }
+    try print_mem(allocator, out, load, a, base, offset, 8, false);
+    return print_mem(allocator, out, load, b, base, offset + 8, 8, false);
+}
+
+/// Saves or restores the callee-saved registers, two at a time.
+fn print_saved(allocator: Allocator, out: &var Out, load: bool, saved: &array::Array<i64>, at: i64) -> !void {
+    var index = 0;
+    while index < saved.len() {
+        let first = saved.get_or_panic(index);
+        if index + 1 < saved.len() {
+            let second = saved.get_or_panic(index + 1);
+            if is_float_reg(first) == is_float_reg(second) {
+                try print_pair(allocator, out, load, first, second, reg_sp(), at + index * 8);
+                index = index + 2;
+                continue;
+            }
+        }
+        try print_mem(allocator, out, load, first, reg_sp(), at + index * 8, 8, false);
+        index = index + 1;
+    }
+    return;
+}
+
+fn print_prologue(allocator: Allocator, out: &var Out, frame: Frame, saved: &array::Array<i64>) -> !void {
+    if frame.total < 4096 {
+        try rri(allocator, out, "sub", reg_sp(), reg_sp(), frame.total);
+    } else {
+        try materialize(allocator, out, scratch_addr(), frame.total);
+        try rrr(allocator, out, "sub", reg_sp(), reg_sp(), scratch_addr());
+    }
+    let record = frame.total - 16;
+    if record <= 504 {
+        try print_pair(allocator, out, false, 29, 30, reg_sp(), record);
+        try add_imm(allocator, out, 29, reg_sp(), record);
+    } else {
+        try add_imm(allocator, out, scratch_addr(), reg_sp(), record);
+        try print_pair(allocator, out, false, 29, 30, scratch_addr(), 0);
+        try rr(allocator, out, "mov", 29, scratch_addr());
+    }
+    return print_saved(allocator, out, false, saved, frame.saved_at);
+}
+
+fn print_epilogue(allocator: Allocator, out: &var Out, frame: Frame, saved: &array::Array<i64>) -> !void {
+    try print_saved(allocator, out, true, saved, frame.saved_at);
+    let record = frame.total - 16;
+    if record <= 504 {
+        try print_pair(allocator, out, true, 29, 30, reg_sp(), record);
+    } else {
+        try add_imm(allocator, out, scratch_addr(), reg_sp(), record);
+        try print_pair(allocator, out, true, 29, 30, scratch_addr(), 0);
+    }
+    if frame.total < 4096 {
+        return rri(allocator, out, "add", reg_sp(), reg_sp(), frame.total);
+    }
+    try materialize(allocator, out, scratch_addr(), frame.total);
+    return rrr(allocator, out, "add", reg_sp(), reg_sp(), scratch_addr());
+}
+
+/// Is the printer's state for one function.
+struct Printer {
+    allocator: Allocator,
+    ordinal: i64,
+}
+
+/// Writes `op xd, xn, xm`.
+fn rrr(allocator: Allocator, out: &var Out, op: []u8, rd: i64, rn: i64, rm: i64) -> !void {
+    return out.word(allocator, enc_rrr(op, rd, rn, rm), op);
+}
+
+/// Writes `op xd, xn, xm, <shift> #imm`.
+fn rrr_shifted(allocator: Allocator, out: &var Out, op: []u8, inst: &MInst, shift: []u8) -> !void {
+    let sub = mem::equal_bytes(op, "sub");
+    let lsr = mem::equal_bytes(shift, ", lsr ");
+    return out.word(allocator, enc_shifted(sub, lsr, inst.rd, inst.rn, inst.rm, inst.imm), op);
+}
+
+/// Writes `op xd, xn, #imm`.
+fn rri(allocator: Allocator, out: &var Out, op: []u8, rd: i64, rn: i64, imm: i64) -> !void {
+    return out.word(allocator, enc_rri(op, rd, rn, imm), op);
+}
+
+/// Writes `op xd, xn`.
+fn rr(allocator: Allocator, out: &var Out, op: []u8, rd: i64, rn: i64) -> !void {
+    return out.word(allocator, enc_rr(op, rd, rn), op);
+}
+
+/// Writes a 16-bit move op into rd: base is movz, movn or movk, chunk the
+/// 16 bits it encodes, shift where they go.
+fn move_wide(allocator: Allocator, out: &var Out, op: []u8, rd: i64, base: i64, chunk: i64, shift: i64) -> !void {
+    return out.word(allocator, enc_move_wide(base, rd, chunk, shift), op);
+}
+
+/// Puts a 64-bit constant in a register with the fewest moves.
+fn materialize(allocator: Allocator, out: &var Out, rd: i64, imm: i64) -> !void {
+    if imm >= 0 and imm < 65536 {
+        return move_wide(allocator, out, "mov", rd, movz(), imm, 0);
+    }
+    if imm < 0 and imm >= 0 - 65536 {
+        return move_wide(allocator, out, "mov", rd, movn(), ~imm, 0);
+    }
+    // Count the chunks that are all ones: with three or more, start from
+    // movn and patch the others.
+    var ones = 0;
+    var zeros = 0;
+    for 0..4 |chunk| {
+        let part = (imm >> (chunk * 16)) & 65535;
+        if part == 65535 {
+            ones = ones + 1;
+        }
+        if part == 0 {
+            zeros = zeros + 1;
+        }
+    }
+    let inverted = ones > zeros;
+    var first = true;
+    for 0..4 |chunk| {
+        let part = (imm >> (chunk * 16)) & 65535;
+        if inverted and part == 65535 {
+            continue;
+        }
+        if !inverted and part == 0 {
+            continue;
+        }
+        if first {
+            first = false;
+            if inverted {
+                let printed = (~part) & 65535;
+                try move_wide(allocator, out, "movn", rd, movn(), printed, chunk * 16);
+            } else {
+                try move_wide(allocator, out, "movz", rd, movz(), part, chunk * 16);
+            }
+        } else {
+            try move_wide(allocator, out, "movk", rd, movk(), part, chunk * 16);
+        }
+    }
+    if first {
+        // Every chunk was the skipped value: all ones.
+        return move_wide(allocator, out, "movn", rd, movn(), 0, 0);
+    }
+    return;
+}
+
+/// Returns the memory mnemonic for a load or store of width bytes.
+fn mem_op(load: bool, width: i64, signed: bool, unscaled: bool) -> []u8 {
+    if load {
+        if width == 8 {
+            if unscaled {
+                return "ldur";
+            }
+            return "ldr";
+        }
+        if width == 4 {
+            if signed {
+                if unscaled {
+                    return "ldursw";
+                }
+                return "ldrsw";
+            }
+            if unscaled {
+                return "ldur";
+            }
+            return "ldr";
+        }
+        if width == 2 {
+            if signed {
+                if unscaled {
+                    return "ldursh";
+                }
+                return "ldrsh";
+            }
+            if unscaled {
+                return "ldurh";
+            }
+            return "ldrh";
+        }
+        if signed {
+            if unscaled {
+                return "ldursb";
+            }
+            return "ldrsb";
+        }
+        if unscaled {
+            return "ldurb";
+        }
+        return "ldrb";
+    }
+    if width == 8 or width == 4 {
+        if unscaled {
+            return "stur";
+        }
+        return "str";
+    }
+    if width == 2 {
+        if unscaled {
+            return "sturh";
+        }
+        return "strh";
+    }
+    if unscaled {
+        return "sturb";
+    }
+    return "strb";
+}
+
+/// Writes one load or store of width bytes at base + offset, forming an
+/// address that does not fit the instruction in x15 first.
+fn print_mem(allocator: Allocator, out: &var Out, load: bool, data: i64, base: i64, offset: i64, width: i64, signed: bool) -> !void {
+    var at_base = base;
+    var at_offset = offset;
+    let scaled = offset >= 0 and offset % width == 0 and offset / width < 4096;
+    let unscaled = offset >= 0 - 256 and offset < 256;
+    if !scaled and !unscaled {
+        try materialize(allocator, out, scratch_addr(), offset);
+        try rrr(allocator, out, "add", scratch_addr(), base, scratch_addr());
+        at_base = scratch_addr();
+        at_offset = 0;
+    }
+    let use_unscaled = !(at_offset >= 0 and at_offset % width == 0 and at_offset / width < 4096);
+    let op = mem_op(load, width, signed, use_unscaled);
+    return out.word(allocator, enc_mem(load, width, signed, use_unscaled, data, at_base, at_offset), op);
+}
+
+/// Writes a branch to a block: word is what `b` or `b.<cond>` encodes
+/// with the offset zero.
+fn branch(allocator: Allocator, out: &var Out, word: i64, block: i64) -> !void {
+    return out.obj.branch(allocator, word, block, word == enc_b());
+}
+
+/// Writes `b.<cond>` to a block.
+fn branch_if(allocator: Allocator, out: &var Out, cond: Cond, block: i64) -> !void {
+    return branch(allocator, out, 0x54000000 | cond_field(cond), block);
+}
+
+fn enc_b() -> i64 { return 0x14000000; }
+
+/// Adds or subtracts an immediate from a register into another, through x15
+/// when it does not fit one instruction.
+fn add_imm(allocator: Allocator, out: &var Out, rd: i64, rn: i64, imm: i64) -> !void {
+    if imm >= 0 and imm < 4096 {
+        return rri(allocator, out, "add", rd, rn, imm);
+    }
+    if imm < 0 and imm > 0 - 4096 {
+        return rri(allocator, out, "sub", rd, rn, 0 - imm);
+    }
+    try materialize(allocator, out, scratch_addr(), imm);
+    return rrr(allocator, out, "add", rd, rn, scratch_addr());
+}
+
+/// Writes an instruction with no operands to choose: ret or brk #1.
+fn bare(allocator: Allocator, out: &var Out, op: []u8, word: i64) -> !void {
+    return out.word(allocator, word, op);
+}
+
+fn print_function(
+    allocator: Allocator,
+    out: &var Out,
+    func: &var MFunction,
+    allocation: &Allocation,
+    name: ir::Name,
+    syms: &ir::NameTable
+) -> !void {
+    let frame = plan_frame(func, allocation);
+    if func.is_main {
+        try out.obj.global(allocator, syms, name);
+    }
+    try out.obj.align(allocator, 4);
+    try out.obj.define(allocator, syms, name);
+    try out.obj.begin_function(allocator, func.blocks.len());
+    if frame.needed {
+        try print_prologue(allocator, out, frame, &allocation.saved);
+    }
+    var order_index = 0;
+    while allocation.order.get(order_index) |block_id| {
+        order_index = order_index + 1;
+        var following = 0 - 1;
+        if allocation.order.get(order_index) |next| {
+            following = next;
+        }
+        try out.obj.place_block(block_id);
+        if func.blocks.at(block_id) |block| {
+            var cache = empty_cache();
+            var inst_index = 0;
+            while block.insts.at(inst_index) |inst| {
+                inst_index = inst_index + 1;
+                if is_float_op(inst.op) {
+                    try print_float(allocator, out, inst, &var cache);
+                    continue;
+                }
+                cache = empty_cache();
+                if block.insts.at(inst_index) |second| {
+                    if load_pair(func, inst, second) {
+                        let place = resolve_base(func, inst);
+                        try print_pair(allocator, out, true, inst.rd, second.rd, place.total, place.saved_at);
+                        inst_index = inst_index + 1;
+                        continue;
+                    }
+                }
+                try print_inst(allocator, out, func, inst, syms);
+            }
+            match block.term {
+                Open => try bare(allocator, out, "brk", enc_brk()),
+                Jump => {
+                    if block.succ0 != following {
+                        try branch(allocator, out, enc_b(), block.succ0);
+                    }
+                },
+                Flags => {
+                    if block.succ0 == following {
+                        try branch_if(allocator, out, invert(block.cond), block.succ1);
+                    } else {
+                        try branch_if(allocator, out, block.cond, block.succ0);
+                        if block.succ1 != following {
+                            try branch(allocator, out, enc_b(), block.succ1);
+                        }
+                    }
+                },
+                Zero => try print_test_branch(allocator, out, false, block.treg, block.succ0, block.succ1, following),
+                NonZero => try print_test_branch(allocator, out, true, block.treg, block.succ0, block.succ1, following),
+                Return => {
+                    if frame.needed {
+                        try print_epilogue(allocator, out, frame, &allocation.saved);
+                    }
+                    try bare(allocator, out, "ret", enc_ret());
+                },
+                Stop => {},
+            }
+        }
+    }
+    try out.obj.end_function(allocator);
+    return;
+}
+
+/// Writes the cbz or cbnz (nonzero) of a block that tests reg, and the
+/// jump after it when the other successor does not follow.
+fn print_test_branch(
+    allocator: Allocator,
+    out: &var Out,
+    nonzero: bool,
+    reg: i64,
+    taken: i64,
+    other: i64,
+    following: i64
+) -> !void {
+    if taken == following {
+        try test_branch(allocator, out, !nonzero, reg, other);
+        return;
+    }
+    try test_branch(allocator, out, nonzero, reg, taken);
+    if other != following {
+        try branch(allocator, out, enc_b(), other);
+    }
+    return;
+}
+
+/// Writes `cbz` or `cbnz reg, block`.
+fn test_branch(allocator: Allocator, out: &var Out, nonzero: bool, reg: i64, block: i64) -> !void {
+    var word = 0xB4000000 | field(reg);
+    if nonzero {
+        word = 0xB5000000 | field(reg);
+    }
+    return out.obj.branch(allocator, word, block, false);
+}
+
+/// Resolves a memory base and offset: a frame slot to the stack pointer and
+/// the slot's offset, an incoming argument to the frame pointer.
+fn resolve_base(func: &MFunction, inst: &MInst) -> Frame {
+    if inst.rn == reg_frame() {
+        let slot = func.slots.get_or_panic(inst.slot);
+        return Frame { needed: true, total: reg_sp(), saved_at: slot.offset + inst.imm };
+    }
+    if inst.rn == reg_inarg() {
+        return Frame { needed: true, total: 29, saved_at: 16 + inst.imm };
+    }
+    return Frame { needed: true, total: inst.rn, saved_at: inst.imm };
+}
+
+/// Reports whether two loads read one 8-byte word and the next from one
+/// base into two registers, the first not the base, so one ldp does both:
+/// it reads the base before writing either register.
+fn load_pair(func: &MFunction, first: &MInst, second: &MInst) -> bool {
+    if first.op != MOp::Load or second.op != MOp::Load or first.width != 8 or second.width != 8 {
+        return false;
+    }
+    if first.rd < 0 or first.rd >= 31 or second.rd < 0 or second.rd >= 31 or first.rd == second.rd {
+        return false;
+    }
+    let a = resolve_base(func, first);
+    let b = resolve_base(func, second);
+    if a.total != b.total or first.rd == a.total {
+        return false;
+    }
+    return b.saved_at == a.saved_at + 8 and a.saved_at >= 0 and a.saved_at <= 504 and a.saved_at % 8 == 0;
+}
+
+/// Writes `op xd, xn, xm, xa`: madd or msub.
+fn rrrr(allocator: Allocator, out: &var Out, op: []u8, inst: &MInst) -> !void {
+    let sub = mem::equal_bytes(op, "msub");
+    return out.word(allocator, enc_madd(sub, inst.rd, inst.rn, inst.rm, inst.ra), op);
+}
+
+/// Writes `op xn, #imm` that only sets the flags: tst, cmp or cmn.
+fn flags_imm(allocator: Allocator, out: &var Out, op: []u8, rn: i64, imm: i64) -> !void {
+    if mem::equal_bytes(op, "tst") {
+        return out.word(allocator, enc_logical_imm(0xF2000000, reg_zr(), rn, imm), op);
+    }
+    let sub = mem::equal_bytes(op, "cmp");
+    return out.word(allocator, enc_add_imm(sub, true, reg_zr(), rn, imm), op);
+}
+
+/// Writes `csel` or `csinc xd, xn, xm, cond`.
+fn conditional(allocator: Allocator, out: &var Out, increment: bool, inst: &MInst) -> !void {
+    var word = 0x9A800000;
+    if increment {
+        word = 0x9A800400;
+    }
+    return out.word(allocator, word | (field(inst.rm) << 16) | (cond_field(inst.cond) << 12) | (field(inst.rn) << 5) | field(inst.rd), "csel");
+}
+
+/// Writes the address of a symbol into rd: adrp and add of the page
+/// offset, or with got the adrp and load of its global offset table slot.
+fn symbol_address(allocator: Allocator, out: &var Out, inst: &MInst, got: bool, syms: &ir::NameTable) -> !void {
+    let rd = field(inst.rd);
+    if got {
+        try out.obj.relocate(allocator, syms, inst.sym, reloc_got_page21());
+        try out.word(allocator, 0x90000000 | rd, "adrp");
+        try out.obj.relocate(allocator, syms, inst.sym, reloc_got_pageoff12());
+        return out.word(allocator, 0xF9400000 | (rd << 5) | rd, "ldr");
+    }
+    try out.obj.relocate(allocator, syms, inst.sym, reloc_page21());
+    try out.word(allocator, 0x90000000 | rd, "adrp");
+    try out.obj.relocate(allocator, syms, inst.sym, reloc_pageoff12());
+    return out.word(allocator, 0x91000000 | (rd << 5) | rd, "add");
+}
+
+fn print_inst(allocator: Allocator, out: &var Out, func: &MFunction, inst: &MInst, syms: &ir::NameTable) -> !void {
+    match inst.op {
+        Mov => {
+            if inst.rd == inst.rn {
+                return;
+            }
+            if is_float_reg(inst.rd) or is_float_reg(inst.rn) {
+                return rr(allocator, out, "fmov", inst.rd, inst.rn);
+            }
+            return rr(allocator, out, "mov", inst.rd, inst.rn);
+        },
+        MovImm => {
+            if is_float_reg(inst.rd) {
+                return float_constant(allocator, out, inst.rd, inst.imm);
+            }
+            return materialize(allocator, out, inst.rd, inst.imm);
+        },
+        Add => return rrr(allocator, out, "add", inst.rd, inst.rn, inst.rm),
+        Sub => return rrr(allocator, out, "sub", inst.rd, inst.rn, inst.rm),
+        Mul => return rrr(allocator, out, "mul", inst.rd, inst.rn, inst.rm),
+        SDiv => return rrr(allocator, out, "sdiv", inst.rd, inst.rn, inst.rm),
+        UDiv => return rrr(allocator, out, "udiv", inst.rd, inst.rn, inst.rm),
+        And => return rrr(allocator, out, "and", inst.rd, inst.rn, inst.rm),
+        Orr => return rrr(allocator, out, "orr", inst.rd, inst.rn, inst.rm),
+        Eor => return rrr(allocator, out, "eor", inst.rd, inst.rn, inst.rm),
+        Lsl => return rrr(allocator, out, "lsl", inst.rd, inst.rn, inst.rm),
+        Lsr => return rrr(allocator, out, "lsr", inst.rd, inst.rn, inst.rm),
+        Asr => return rrr(allocator, out, "asr", inst.rd, inst.rn, inst.rm),
+        AddImm => return add_imm(allocator, out, inst.rd, inst.rn, inst.imm),
+        SubImm => return add_imm(allocator, out, inst.rd, inst.rn, 0 - inst.imm),
+        LslImm => return rri(allocator, out, "lsl", inst.rd, inst.rn, inst.imm),
+        LsrImm => return rri(allocator, out, "lsr", inst.rd, inst.rn, inst.imm),
+        AsrImm => return rri(allocator, out, "asr", inst.rd, inst.rn, inst.imm),
+        MSub => return rrrr(allocator, out, "msub", inst),
+        MAdd => return rrrr(allocator, out, "madd", inst),
+        AddShift => return rrr_shifted(allocator, out, "add", inst, ", lsl "),
+        SubShift => return rrr_shifted(allocator, out, "sub", inst, ", lsl "),
+        AddLsr => return rrr_shifted(allocator, out, "add", inst, ", lsr "),
+        SMulH => return rrr(allocator, out, "smulh", inst.rd, inst.rn, inst.rm),
+        UMulH => return rrr(allocator, out, "umulh", inst.rd, inst.rn, inst.rm),
+        AndImm => return rri(allocator, out, "and", inst.rd, inst.rn, inst.imm),
+        TstImm => return flags_imm(allocator, out, "tst", inst.rn, inst.imm),
+        Neg => return rr(allocator, out, "neg", inst.rd, inst.rn),
+        Mvn => return rr(allocator, out, "mvn", inst.rd, inst.rn),
+        Extend => {
+            return out.word(allocator, enc_extend(inst.width, inst.signed, inst.rd, inst.rn), "extend");
+        },
+        Cmp => {
+            var word = 0xEB00001F;
+            if inst.rn == reg_sp() {
+                word = 0xEB20601F;
+            }
+            return out.word(allocator, word | (field(inst.rm) << 16) | (field(inst.rn) << 5), "cmp");
+        },
+        CmpImm => return flags_imm(allocator, out, "cmp", inst.rn, inst.imm),
+        CmnImm => return flags_imm(allocator, out, "cmn", inst.rn, inst.imm),
+        CSet => {
+            return out.word(allocator, 0x9A9F07E0 | (cond_field(invert(inst.cond)) << 12) | field(inst.rd), "cset");
+        },
+        CSInc => return conditional(allocator, out, true, inst),
+        CSel => {
+            if is_float_reg(inst.rd) or is_float_reg(inst.rn) or is_float_reg(inst.rm) {
+                return float_select(allocator, out, inst);
+            }
+            return conditional(allocator, out, false, inst);
+        },
+        Load => {
+            let place = resolve_base(func, inst);
+            return print_mem(allocator, out, true, inst.rd, place.total, place.saved_at, inst.width, inst.signed);
+        },
+        Store => {
+            let place = resolve_base(func, inst);
+            return print_mem(allocator, out, false, inst.rd, place.total, place.saved_at, inst.width, false);
+        },
+        LoadIdx => return print_indexed(allocator, out, true, inst),
+        StoreIdx => return print_indexed(allocator, out, false, inst),
+        FrameAddr => {
+            let slot = func.slots.get_or_panic(inst.slot);
+            return add_imm(allocator, out, inst.rd, reg_sp(), slot.offset + inst.imm);
+        },
+        SymAddr => return symbol_address(allocator, out, inst, false, syms),
+        GotAddr => return symbol_address(allocator, out, inst, true, syms),
+        Call => {
+            return out.obj.call(allocator, syms, inst.sym);
+        },
+        CallReg => {
+            return out.word(allocator, 0xD63F0000 | (field(inst.rn) << 5), "blr");
+        },
+        Trap => return bare(allocator, out, "brk", enc_brk()),
+        ParCopy => return,
+        _ => return print_vector(allocator, out, inst),
+    }
+}
+
+/// Writes `op vd.T, vn.T[, vm.T]`: base is the encoding, sized whether it
+/// takes the lane width.
+fn vvv(allocator: Allocator, out: &var Out, op: []u8, inst: &MInst, base: i64, sized: bool) -> !void {
+    return out.word(allocator, enc_vvv(base, sized, inst.width, inst.vec % 256, (inst.vec / 256) % 256, inst.vec / 65536), op);
+}
+
+/// Writes `op vd.T, vn.T, #imm`: shl, sshr or ushr.
+fn vshift(allocator: Allocator, out: &var Out, op: []u8, inst: &MInst, base: i64, left: bool) -> !void {
+    let vd = inst.vec % 256;
+    let vn = (inst.vec / 256) % 256;
+    return out.word(allocator, enc_vshift(base, left, inst.width, vd, vn, inst.imm), op);
+}
+
+fn print_vector(allocator: Allocator, out: &var Out, inst: &MInst) -> !void {
+    let vd = inst.vec % 256;
+    let vn = (inst.vec / 256) % 256;
+    match inst.op {
+        VZero => {
+            return out.word(allocator, 0x6F00E400 | vd, "movi");
+        },
+        VOnes => {
+            return out.word(allocator, 0x6F07E7E0 | vd, "movi");
+        },
+        VDup => {
+            return out.word(allocator, 0x4E000C00 | (lane_imm5(inst.width, 0) << 16) | (field(inst.rn) << 5) | vd, "dup");
+        },
+        VIns => {
+            return out.word(allocator, 0x4E001C00 | (lane_imm5(inst.width, inst.imm) << 16) | (field(inst.rn) << 5) | vd, "ins");
+        },
+        VLdp => {
+            return out.word(allocator, 0xAD400000 | (((inst.imm / 16) & 127) << 15) | (vn << 10) | (field(inst.rn) << 5) | vd, "ldp q");
+        },
+        VAdd => return vvv(allocator, out, "add", inst, 0x4E208400, true),
+        VSub => return vvv(allocator, out, "sub", inst, 0x6E208400, true),
+        VAnd => return vvv(allocator, out, "and", inst, 0x4E201C00, false),
+        VOrr => return vvv(allocator, out, "orr", inst, 0x4EA01C00, false),
+        VEor => return vvv(allocator, out, "eor", inst, 0x6E201C00, false),
+        VSMax => return vvv(allocator, out, "smax", inst, 0x4E206400, true),
+        VSMin => return vvv(allocator, out, "smin", inst, 0x4E206C00, true),
+        VUMax => return vvv(allocator, out, "umax", inst, 0x6E206400, true),
+        VUMin => return vvv(allocator, out, "umin", inst, 0x6E206C00, true),
+        VCmGt => return vvv(allocator, out, "cmgt", inst, 0x4E203400, true),
+        VCmHi => return vvv(allocator, out, "cmhi", inst, 0x6E203400, true),
+        VCmEq => return vvv(allocator, out, "cmeq", inst, 0x6E208C00, true),
+        VCmGe => return vvv(allocator, out, "cmge", inst, 0x4E203C00, true),
+        VCmHs => return vvv(allocator, out, "cmhs", inst, 0x6E203C00, true),
+        VBic => return vvv(allocator, out, "bic", inst, 0x4E601C00, false),
+        VLdr => {
+            var word = 0x3DC00000;
+            if inst.imm == 8 {
+                word = 0xFD400000;
+            }
+            return out.word(allocator, word | (field(inst.rn) << 5) | vd, "ldr");
+        },
+        VXtl => {
+            return out.word(allocator, enc_vxtl(inst.signed, false, inst.width, vd, vn), "xtl");
+        },
+        VXtl2 => {
+            return out.word(allocator, enc_vxtl(inst.signed, true, inst.width, vd, vn), "xtl2");
+        },
+        VBit => return vvv(allocator, out, "bit", inst, 0x6EA01C00, false),
+        VShl => return vshift(allocator, out, "shl", inst, 0x4F005400, true),
+        VSShr => return vshift(allocator, out, "sshr", inst, 0x4F000400, false),
+        VUShr => return vshift(allocator, out, "ushr", inst, 0x6F000400, false),
+        VExt => {
+            return out.word(allocator, 0x6E000000 | (vn << 16) | ((inst.imm & 15) << 11) | (vn << 5) | vd, "ext");
+        },
+        VToGpr => {
+            if inst.width == 8 {
+                return out.word(allocator, 0x9E660000 | (vn << 5) | field(inst.rd), "fmov");
+            }
+            var word = 0x0E003C00;
+            if inst.signed {
+                word = 0x4E002C00;
+            }
+            return out.word(allocator, word | (lane_imm5(inst.width, 0) << 16) | (vn << 5) | field(inst.rd), "mov");
+        },
+        VFBin => {
+            return out.word(allocator, enc_vfloat(inst.imm, vd, vn, inst.vec / 65536), "f.2d");
+        },
+        VFScalar => {
+            return out.word(allocator, enc_float(inst.imm, 8, vd, vn, inst.vec / 65536), "f");
+        },
+        VSCvtF => {
+            return out.word(allocator, enc_vscvtf(vd, vn), "scvtf");
+        },
+        VDupLane => {
+            return out.word(allocator, enc_dup_lane(inst.width, vd, vn, inst.imm), "dup");
+        },
+        _ => return,
+    }
+}
+
+fn print_indexed(allocator: Allocator, out: &var Out, load: bool, inst: &MInst) -> !void {
+    var signed = inst.signed;
+    if !load {
+        signed = false;
+    }
+    let op = mem_op(load, inst.width, signed, false);
+    return out.word(allocator, enc_mem_indexed(load, inst.width, signed, inst.rd, inst.rn, inst.rm, inst.imm > 0), op);
+}
+
+/// Writes the table the entry point reads a failure's name from: one
+/// (pointer, length) row per error code, row 0 and codes no set declares
+/// empty, each name a string literal.
+fn write_error_names(allocator: Allocator, module: &ir::Module, selector: &var Selector, sink: &var Out) -> !void {
+    var rows = 1;
+    var set_index = 0;
+    while module.error_sets.key_at(set_index) |set_name| {
+        set_index = set_index + 1;
+        if module.error_sets.at(set_name) |declared| {
+            var tag_index = 0;
+            while declared.tags.key_at(tag_index) |member| {
+                tag_index = tag_index + 1;
+                let code = declared.tags.get(member) orelse 0;
+                if code + 1 > rows {
+                    rows = code + 1;
+                }
+            }
+        }
+    }
+    var labels = array::new<i64>(allocator);
+    defer labels.deinit(allocator);
+    var lengths = array::new<i64>(allocator);
+    defer lengths.deinit(allocator);
+    for 0..rows |_row| {
+        try labels.append(allocator, 0 - 1);
+        try lengths.append(allocator, 0);
+    }
+    set_index = 0;
+    while module.error_sets.key_at(set_index) |set_name| {
+        set_index = set_index + 1;
+        if module.error_sets.at(set_name) |declared| {
+            var tag_index = 0;
+            while declared.tags.key_at(tag_index) |member| {
+                tag_index = tag_index + 1;
+                let code = declared.tags.get(member) orelse continue;
+                var spelled = try string::from_bytes(allocator, set_name);
+                defer spelled.deinit(allocator);
+                try spelled.append_bytes(allocator, "::");
+                try spelled.append_bytes(allocator, member);
+                let spelled_bytes = spelled.as_bytes();
+                let held = try selector.syms.intern(spelled_bytes);
+                try labels.set(code, selector.literals.len());
+                try lengths.set(code, mem::len(spelled_bytes));
+                try selector.literals.append(allocator, held);
+            }
+        }
+    }
+    let obj = &var sink.obj;
+    try obj.enter(allocator, &var selector.syms, SectionKind::DataConst);
+    try obj.align(allocator, 3);
+    let table = try selector.syms.intern("Lkz_error_names");
+    try obj.define(allocator, &selector.syms, table);
+    for 0..rows |row| {
+        let label = labels.get_or_panic(row);
+        if label >= 0 {
+            let literal = try local_label(allocator, &var selector.syms, "Lkz_str.", label);
+            try obj.relocate(allocator, &selector.syms, literal, reloc_unsigned());
+        }
+        try obj.datum(allocator, 0, 8);
+        try obj.datum(allocator, lengths.get_or_panic(row), 8);
+    }
+    return;
+}

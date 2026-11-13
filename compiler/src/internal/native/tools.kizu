@@ -1,0 +1,168 @@
+import compiler::internal::diagnostic;
+import compiler::internal::stdtarget;
+import std::array;
+import std::fs;
+import std::mem;
+import std::path;
+import std::process;
+import std::string;
+
+// The link a Darwin arm64 build of the direct backend makes without the
+// clang driver (`--linker ld`): the system linker links the unit's object
+// with the runtime, run by this process with the arguments the driver would
+// have handed it. The runtime is still compiled by clang, the C compiler.
+// What the driver works out itself, the SDK and its version, is read here:
+// SDKROOT or `xcrun --show-sdk-path`, and the SDK's SDKSettings.json.
+
+/// Reports whether the build runs the linker itself.
+fn direct_tools(options: &Options) -> bool {
+    let linker = options.linker.as_bytes();
+    return mem::equal_bytes(linker, "ld");
+}
+
+/// Links the direct backend's object with `ld`.
+fn link_with_tools(
+    io: Io,
+    allocator: Allocator,
+    dir: []u8,
+    runtime_path: []u8,
+    output: []u8,
+    options: &Options,
+    units: &array::Array<string::String>,
+    command: &var array::Array<string::String>
+) -> !?diagnostic::Diagnostic {
+    var objects = array::new<string::String>(allocator);
+    defer objects.deinit(allocator);
+    try direct_inputs(io, allocator, dir, runtime_path, options, units, &var objects);
+    var sdk = string::new(allocator);
+    defer sdk.deinit(allocator);
+    if try sdk_root(allocator, &var sdk) |failed| {
+        return move failed;
+    }
+    var version = string::new(allocator);
+    defer version.deinit(allocator);
+    if try sdk_version(io, allocator, &sdk, &var version) |failed| {
+        return move failed;
+    }
+    try append_copy(allocator, command, "ld");
+    let emit = options.emit.as_bytes();
+    let relocatable = mem::equal_bytes(emit, "obj");
+    if !relocatable and !options.opt {
+        try append_copy(allocator, command, "-no_deduplicate");
+    }
+    try append_copy(allocator, command, "-dynamic");
+    try append_copy(allocator, command, "-arch");
+    try append_copy(allocator, command, "arm64");
+    try append_copy(allocator, command, "-platform_version");
+    try append_copy(allocator, command, "macos");
+    let version_bytes = version.as_bytes();
+    try append_copy(allocator, command, version_bytes);
+    try append_copy(allocator, command, version_bytes);
+    try append_copy(allocator, command, "-syslibroot");
+    let sdk_bytes = sdk.as_bytes();
+    try append_copy(allocator, command, sdk_bytes);
+    if options.opt {
+        try append_copy(allocator, command, "-O3");
+    } else {
+        try append_copy(allocator, command, "-O0");
+    }
+    try append_copy(allocator, command, "-o");
+    try append_copy(allocator, command, output);
+    try append_copy(allocator, command, "-L/usr/local/lib");
+    if relocatable {
+        try append_copy(allocator, command, "-r");
+    }
+    var object_index = 0;
+    while objects.at(object_index) |object| {
+        object_index = object_index + 1;
+        let object_bytes = object.as_bytes();
+        try append_copy(allocator, command, object_bytes);
+    }
+    try append_copy(allocator, command, runtime_path);
+    if !relocatable {
+        try append_copy(allocator, command, "-reproducible");
+        try link_libraries(allocator, options, command);
+        try append_copy(allocator, command, "-lSystem");
+    }
+    return spawn_clang(io, allocator, dir, command);
+}
+
+/// Writes the SDK the link reads the system libraries from: SDKROOT when it
+/// is set, which xcrun sets for what it runs, or what xcrun answers.
+fn sdk_root(allocator: Allocator, out: &var string::String) -> !?diagnostic::Diagnostic {
+    if process::env("SDKROOT") |root| {
+        if mem::len(root) > 0 {
+            try out.append_bytes(allocator, root);
+            return null;
+        }
+    }
+    var answer = string::new(allocator);
+    defer answer.deinit(allocator);
+    let code = try process::spawn_output8(allocator, &var answer, 2, "xcrun", "--show-sdk-path", "", "", "", "", "", "");
+    if code != 0 {
+        return try fail_linker(allocator, "xcrun --show-sdk-path", code);
+    }
+    let text = answer.as_bytes();
+    var end = mem::len(text);
+    while end > 0 and is_space_end(text[end - 1]) {
+        end = end - 1;
+    }
+    try out.append_bytes(allocator, text[0..end]);
+    return null;
+}
+
+fn is_space_end(byte: u8) -> bool {
+    return byte == cast<u8>(10) or byte == cast<u8>(13) or byte == cast<u8>(32);
+}
+
+/// Writes the SDK's version, the `"Version"` its SDKSettings.json names: the
+/// driver links for the SDK it builds against, and so does this.
+fn sdk_version(io: Io, allocator: Allocator, sdk: &string::String, out: &var string::String) -> !?diagnostic::Diagnostic {
+    let sdk_bytes = sdk.as_bytes();
+    let settings = try path::join(allocator, sdk_bytes, "SDKSettings.json");
+    defer settings.deinit(allocator);
+    let settings_bytes = settings.as_bytes();
+    var text = string::new(allocator);
+    defer text.deinit(allocator);
+    try fs::read_file_into(io, allocator, settings_bytes, &var text);
+    let bytes = text.as_bytes();
+    let key =
+        \\"Version":"
+    ;
+    let at = index_of(bytes, key) orelse
+        return try fail_parts(allocator, "native error: no SDK version in ", settings_bytes, "");
+    var end = at + mem::len(key);
+    let start = end;
+    while end < mem::len(bytes) and bytes[end] != cast<u8>(34) {
+        end = end + 1;
+    }
+    try out.append_bytes(allocator, bytes[start..end]);
+    return null;
+}
+
+/// Appends the libraries and frameworks of link_flags as ld reads them:
+/// the same flags without the driver's `-Wl,` ones.
+fn link_libraries(allocator: Allocator, options: &Options, out: &var array::Array<string::String>) -> !void {
+    var flags = array::new<string::String>(allocator);
+    defer flags.deinit(allocator);
+    try link_flags(allocator, options, &var flags);
+    var index = 0;
+    while flags.at(index) |flag| {
+        index = index + 1;
+        let bytes = flag.as_bytes();
+        if mem::starts_with(bytes, "-Wl,") {
+            continue;
+        }
+        try append_copy(allocator, out, bytes);
+    }
+    return;
+}
+
+/// Refuses `--linker ld` where it does not apply: it links a Darwin build of
+/// the direct backend.
+fn validate_tools(allocator: Allocator, options: &Options) -> !?diagnostic::Diagnostic {
+    if options.target != stdtarget::Target::NativeDarwin or !options.direct {
+        return try fail_parts(allocator, "native error: --linker ld links a Darwin build of --backend direct", "", "");
+    }
+    return null;
+}

@@ -1,0 +1,89 @@
+import std::testing;
+
+// The words below are what the system assembler makes of the line beside
+// each (`clang -c` of the line, read back with `llvm-objdump -d`). A new
+// instruction form the printer writes gets its lines here, taken the same
+// way, including an operand the encoding refuses; what the examples reach
+// is checked by running them against the LLVM build.
+
+test "encode unscaled loads and stores" {
+    testing::expect_equal<i64>(0xF85F8041, enc_mem(true, 8, false, true, 1, 2, 0 - 8)); // ldur x1, [x2, #-8]
+    testing::expect_equal<i64>(0xB85FC041, enc_mem(true, 4, false, true, 1, 2, 0 - 4)); // ldur w1, [x2, #-4]
+    testing::expect_equal<i64>(0xB89FC041, enc_mem(true, 4, true, true, 1, 2, 0 - 4)); // ldursw x1, [x2, #-4]
+    testing::expect_equal<i64>(0x78803041, enc_mem(true, 2, true, true, 1, 2, 3)); // ldursh x1, [x2, #3]
+    testing::expect_equal<i64>(0x389FF041, enc_mem(true, 1, true, true, 1, 2, 0 - 1)); // ldursb x1, [x2, #-1]
+    testing::expect_equal<i64>(0x785FE041, enc_mem(true, 2, false, true, 1, 2, 0 - 2)); // ldurh w1, [x2, #-2]
+    testing::expect_equal<i64>(0x38501041, enc_mem(true, 1, false, true, 1, 2, 0 - 255)); // ldurb w1, [x2, #-255]
+    testing::expect_equal<i64>(0x380FF041, enc_mem(false, 1, false, true, 1, 2, 255)); // sturb w1, [x2, #255]
+    testing::expect_equal<i64>(0 - 1, enc_mem(true, 8, false, true, 1, 2, 256));
+}
+
+test "encode immediates the assembler rewrites" {
+    testing::expect_equal<i64>(0xB13FFC7F, enc_add_imm(false, true, reg_zr(), 3, 4095)); // cmn x3, #4095
+    testing::expect_equal<i64>(0xF140047F, enc_add_imm(true, true, reg_zr(), 3, 4096)); // cmp x3, #4096
+    testing::expect_equal<i64>(0xD1001CC5, enc_rri("add", 5, 6, 0 - 7)); // add x5, x6, #-7
+    testing::expect_equal<i64>(0 - 1, enc_add_imm(false, false, 1, 2, 4097));
+    testing::expect_equal<i64>(0xEB2463FF, 0xEB20601F | (field(4) << 16) | (field(reg_sp()) << 5)); // cmp sp, x4
+}
+
+test "encode bitmask immediates" {
+    testing::expect_equal<i64>(0x9200F041, enc_rri("and", 1, 2, 0x5555555555555555));
+    testing::expect_equal<i64>(0x927FF841, enc_rri("and", 1, 2, 0 - 2)); // #0xfffffffffffffffe
+    testing::expect_equal<i64>(0x9240F841, enc_rri("and", 1, 2, 0x7FFFFFFFFFFFFFFF));
+    testing::expect_equal<i64>(0xF2781C3F, enc_logical_imm(0xF2000000, reg_zr(), 1, 0xFF00)); // tst x1, #0xff00
+    testing::expect_equal<i64>(0 - 1, bitmask_fields(0));
+    testing::expect_equal<i64>(0 - 1, bitmask_fields(0 - 1));
+    testing::expect_equal<i64>(0 - 1, bitmask_fields(5));
+}
+
+test "encode moves and shifts" {
+    testing::expect_equal<i64>(0x910003BF, enc_rr("mov", reg_sp(), 29)); // mov sp, x29
+    testing::expect_equal<i64>(0x910003FD, enc_rr("mov", 29, reg_sp())); // mov x29, sp
+    testing::expect_equal<i64>(0x92800001, enc_move_wide(movn(), 1, 0, 0)); // movn x1, #0
+    testing::expect_equal<i64>(0xF2F7DDE1, enc_move_wide(movk(), 1, 0xBEEF, 48)); // movk x1, #0xbeef, lsl #48
+    testing::expect_equal<i64>(0xD340FC41, enc_rri("lsl", 1, 2, 0)); // lsl x1, x2, #0
+    testing::expect_equal<i64>(0xD3410041, enc_rri("lsl", 1, 2, 63)); // lsl x1, x2, #63
+    testing::expect_equal<i64>(0xA91FD3F3, enc_pair(false, 19, 20, reg_sp(), 504)); // stp x19, x20, [sp, #504]
+}
+
+test "encode lane inserts" {
+    testing::expect_equal<i64>(0x4E181C83, 0x4E001C00 | (lane_imm5(8, 1) << 16) | (4 << 5) | 3); // mov v3.d[1], x4
+    testing::expect_equal<i64>(0x4E1F1C83, 0x4E001C00 | (lane_imm5(1, 15) << 16) | (4 << 5) | 3); // mov v3.b[15], w4
+}
+
+test "encode float registers" {
+    // d8..d31 are allocation's 40..63.
+    testing::expect_equal<i64>(0xFC5F8056, enc_mem(true, 8, false, true, 54, 2, 0 - 8)); // ldur d22, [x2, #-8]
+    testing::expect_equal<i64>(0xFC1F8056, enc_mem(false, 8, false, true, 54, 2, 0 - 8)); // stur d22, [x2, #-8]
+    testing::expect_equal<i64>(0xBC5FC056, enc_mem(true, 4, false, true, 54, 2, 0 - 4)); // ldur s22, [x2, #-4]
+    testing::expect_equal<i64>(0xBC0FF056, enc_mem(false, 4, false, true, 54, 2, 255)); // stur s22, [x2, #255]
+    testing::expect_equal<i64>(0xBD7FFC56, enc_mem(true, 4, false, false, 54, 2, 16380)); // ldr s22, [x2, #16380]
+    testing::expect_equal<i64>(0xFC637856, enc_mem_indexed(true, 8, false, 54, 2, 3, true)); // ldr d22, [x2, x3, lsl #3]
+    testing::expect_equal<i64>(0xBC236856, enc_mem_indexed(false, 4, false, 54, 2, 3, false)); // str s22, [x2, x3]
+    testing::expect_equal<i64>(0 - 1, enc_mem(true, 4, true, false, 54, 2, 0));
+    testing::expect_equal<i64>(0x6D1FBFEE, enc_pair(false, 46, 47, reg_sp(), 504)); // stp d14, d15, [sp, #504]
+    testing::expect_equal<i64>(0x6D4127E8, enc_pair(true, 40, 41, reg_sp(), 16)); // ldp d8, d9, [sp, #16]
+    testing::expect_equal<i64>(0 - 1, enc_pair(false, 19, 40, reg_sp(), 0));
+    testing::expect_equal<i64>(0x1E6042F6, enc_rr("fmov", 54, 55)); // fmov d22, d23
+    testing::expect_equal<i64>(0x1E2042F6, enc_fmov_float(4, 22, 23)); // fmov s22, s23
+    testing::expect_equal<i64>(0x9E670216, enc_rr("fmov", 54, 16)); // fmov d22, x16
+    testing::expect_equal<i64>(0x9E6602C1, enc_rr("fmov", 1, 54)); // fmov x1, d22
+    testing::expect_equal<i64>(0x9E6703F6, enc_rr("fmov", 54, reg_zr())); // fmov d22, xzr
+    testing::expect_equal<i64>(0x1E78BEF6, enc_fcsel(8, 22, 23, 24, Cond::Lt)); // fcsel d22, d23, d24, lt
+    testing::expect_equal<i64>(0x1E721E30, enc_fcsel(8, 16, 17, 18, Cond::Ne)); // fcsel d16, d17, d18, ne
+}
+
+test "encode float lanes" {
+    testing::expect_equal<i64>(0x4E63D441, enc_vfloat(float_add(), 1, 2, 3)); // fadd v1.2d, v2.2d, v3.2d
+    testing::expect_equal<i64>(0x4EE3D441, enc_vfloat(float_sub(), 1, 2, 3)); // fsub v1.2d, v2.2d, v3.2d
+    testing::expect_equal<i64>(0x6E63DC41, enc_vfloat(float_mul(), 1, 2, 3)); // fmul v1.2d, v2.2d, v3.2d
+    testing::expect_equal<i64>(0x6E63FC41, enc_vfloat(float_div(), 1, 2, 3)); // fdiv v1.2d, v2.2d, v3.2d
+    testing::expect_equal<i64>(0x4E71D41F, enc_vfloat(float_add(), 31, 0, 17)); // fadd v31.2d, v0.2d, v17.2d
+    testing::expect_equal<i64>(0x1E71281F, enc_float(float_add(), 8, 31, 0, 17)); // fadd d31, d0, d17
+    testing::expect_equal<i64>(0x1E631841, enc_float(float_div(), 8, 1, 2, 3)); // fdiv d1, d2, d3
+    testing::expect_equal<i64>(0x4E61D841, enc_vscvtf(1, 2)); // scvtf v1.2d, v2.2d
+    testing::expect_equal<i64>(0x4E61DA1F, enc_vscvtf(31, 16)); // scvtf v31.2d, v16.2d
+    testing::expect_equal<i64>(0x5E180425, enc_dup_lane(8, 5, 1, 1)); // mov d5, v1.d[1]
+    testing::expect_equal<i64>(0x5E18061F, enc_dup_lane(8, 31, 16, 1)); // mov d31, v16.d[1]
+    testing::expect_equal<i64>(0x5E080425, enc_dup_lane(8, 5, 1, 0)); // mov d5, v1.d[0]
+}

@@ -1,0 +1,277 @@
+import compiler::internal::ir;
+import compiler::internal::typ;
+import std::array;
+import std::mem;
+
+// The C signature of a call into the hosted runtime, the one place every
+// native backend reads it from. A builtin `std::internal::builtin::f` is
+// the C function `std__internal__builtin__f` in the runtime the native
+// driver links, and the parameters that function takes are declared here,
+// typed, in the order C takes them. Where the parameters go -- which
+// register, which stack slot -- is the target's to say: each backend
+// classifies the declared types by its own target's rules.
+//
+// Most builtins take the operands of the call as they are, so their
+// declaration follows from the call by one rule (`declare`). A builtin whose
+// runtime needs what the call does not carry -- an address the backend
+// makes, a size it measures -- declares those parameters here; a backend
+// that cannot supply one of them refuses the call rather than calling C
+// with a signature it does not take.
+//
+// The size of a type, which the backends spell as the constant it is
+// without calling C, is not declared here.
+
+/// Says what a backend hands C for one parameter.
+pub enum Source {
+    // The address of memory the result is written to.
+    Out,
+    // The operand as the value it is.
+    Value,
+    // The address of a copy of the operand.
+    Address,
+    // The address of the function a task set starts a worker through: C
+    // calls it as `void invoke(void *entry, void *io, void *allocator, void
+    // *state)` and it calls `entry`, a Kizu `fn(Io, Allocator, S) -> void`
+    // where S is the operand's type, with a copy of the S at `state`.
+    TaskInvoke,
+    // The size in bytes of the operand's type.
+    SizeOf,
+    // The size in bytes of one element the operand holds: T of a `[]T`, S
+    // of a `&var std::array::Array<S>` (element_type).
+    ElementSize,
+    // Nothing: a null pointer or a zero, for a parameter the call has no
+    // operand for.
+    Zero,
+    // The address of the function a pool round calls a worker through: C
+    // calls it as `int64_t invoke(void *worker, void *state, KizuSliceU8
+    // *part, int64_t index)` and it calls the worker, the operand, a Kizu
+    // `fn(&var []T, i64) -> E!void`, with the chunk part points at, and
+    // answers the failure code of the E!void, zero for success. state is
+    // unused.
+    PoolInvoke,
+    // The same for a worker `fn(&var S, &var []T, i64) -> E!void`, handed
+    // state first.
+    PoolStateInvoke,
+}
+
+/// Is the C type of one parameter.
+pub enum CType {
+    // An address, `void *`.
+    Pointer,
+    // `int64_t`.
+    I64,
+    // The C scalar the operand's own type is.
+    Operand,
+}
+
+/// Is one C parameter: where it comes from and its type.
+pub struct Param {
+    pub source: Source,
+    // The call operand the parameter is made from; -1 for Out.
+    pub arg: i64,
+    pub c_type: CType,
+}
+
+/// Is the C signature of one call. With out set, the first parameter is
+/// Out and the C function returns void; otherwise it returns the C scalar
+/// the call's result type is.
+pub struct Signature {
+    pub out: bool,
+    pub params: array::Array<Param>,
+}
+
+pub fn (self: Signature) deinit(allocator: Allocator) -> void {
+    self.params.deinit(allocator);
+    return;
+}
+
+/// Reports whether a call goes to the hosted runtime: its callee is a
+/// builtin.
+pub fn is_builtin(module: &ir::Module, name: ir::Name) -> bool {
+    return module.names.starts_with(name, "std::internal::builtin::");
+}
+
+/// Reports whether a builtin call writes its result through an Out address
+/// and takes aggregates behind addresses: its result is an error union or an
+/// optional, both aggregates in C, or one of its operands is an aggregate.
+/// How C passes an aggregate by value is the platform's to say -- two
+/// registers on System V and AAPCS64 for a slice, a hidden address on
+/// Windows -- and an address is the one spelling every platform agrees on.
+pub fn uses_out(module: &ir::Module, name: ir::Name, node: &ir::InstrNode) -> bool {
+    if !is_builtin(module, name) {
+        return false;
+    }
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_bytes = result_text.as_bytes();
+    if typ::error_union_success(result_bytes) |_| {
+        return true;
+    }
+    if typ::optional_elem(result_bytes) |_| {
+        return true;
+    }
+    var index = 0;
+    while node.args.get(index) |arg| {
+        index = index + 1;
+        if is_aggregate(module, arg.type_name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Reports whether a type crosses into the runtime behind an address: a
+/// slice, a struct or a union.
+pub fn is_aggregate(module: &ir::Module, type_name: ir::Name) -> bool {
+    if module.names.starts_with(type_name, "[]") {
+        return true;
+    }
+    let text = ir::name_text(&module.names, type_name);
+    let bytes = text.as_bytes();
+    return module.structs.contains(bytes) or module.unions.contains(bytes);
+}
+
+/// Returns the C signature of a call to a builtin, name being its callee.
+pub fn declare(allocator: Allocator, module: &ir::Module, name: ir::Name, node: &ir::InstrNode) -> !Signature {
+    var params = array::new<Param>(allocator);
+    errdefer params.deinit(allocator);
+    if module.names.is(name, "std::internal::builtin::task_set_spawn") {
+        // void task_set_spawn(KizuErrorVoid *out, int64_t set, void *io,
+        //     void *allocator, void *entry, void *invoke, void *state,
+        //     int64_t state_bytes, int64_t stack_bytes)
+        // The runtime does not know the state's type: the worker comes with
+        // the function that calls it with one, and the state with its size.
+        try params.append(allocator, param(Source::Out, 0 - 1, CType::Pointer));
+        try params.append(allocator, param(Source::Value, 0, CType::I64));
+        try params.append(allocator, param(Source::Value, 1, CType::Pointer));
+        try params.append(allocator, param(Source::Value, 2, CType::Pointer));
+        try params.append(allocator, param(Source::Value, 3, CType::Pointer));
+        try params.append(allocator, param(Source::TaskInvoke, 4, CType::Pointer));
+        try params.append(allocator, param(Source::Address, 4, CType::Pointer));
+        try params.append(allocator, param(Source::SizeOf, 4, CType::I64));
+        try params.append(allocator, param(Source::Value, 5, CType::I64));
+        return Signature { out: true, params: move params };
+    }
+    if module.names.is(name, "std::internal::builtin::thread_pool_each") {
+        // void thread_pool_each(KizuErrorVoid *out, int64_t handle,
+        //     KizuSliceU8 *data, int64_t elem_size, int64_t chunk,
+        //     KizuArray *states, int64_t state_size, void *worker,
+        //     void *invoke)
+        try params.append(allocator, param(Source::Out, 0 - 1, CType::Pointer));
+        try params.append(allocator, param(Source::Value, 0, CType::I64));
+        try append_data(allocator, &var params, 1);
+        try params.append(allocator, param(Source::Value, 2, CType::I64));
+        try append_round_worker(allocator, &var params, node, 3);
+        return Signature { out: true, params: move params };
+    }
+    if module.names.is(name, "std::internal::builtin::thread_pool_each_lane") {
+        // void thread_pool_each_lane(KizuErrorVoid *out, int64_t handle,
+        //     void *allocator, KizuSliceU8 *data, int64_t elem_size,
+        //     int64_t length, int64_t stride, KizuArray *states,
+        //     int64_t state_size, void *worker, void *invoke)
+        try params.append(allocator, param(Source::Out, 0 - 1, CType::Pointer));
+        try params.append(allocator, param(Source::Value, 0, CType::I64));
+        try params.append(allocator, param(Source::Value, 1, CType::Pointer));
+        try append_data(allocator, &var params, 2);
+        try params.append(allocator, param(Source::Value, 3, CType::I64));
+        try params.append(allocator, param(Source::Value, 4, CType::I64));
+        try append_round_worker(allocator, &var params, node, 5);
+        return Signature { out: true, params: move params };
+    }
+    // Every other builtin takes its operands in order: an aggregate behind
+    // an address when the call goes through Out, any other as its value.
+    let out = uses_out(module, name, node);
+    if out {
+        try params.append(allocator, param(Source::Out, 0 - 1, CType::Pointer));
+    }
+    var index = 0;
+    while node.args.get(index) |arg| {
+        if out and is_aggregate(module, arg.type_name) {
+            try params.append(allocator, param(Source::Address, index, CType::Pointer));
+        } else {
+            try params.append(allocator, param(Source::Value, index, CType::Operand));
+        }
+        index = index + 1;
+    }
+    return Signature { out: out, params: move params };
+}
+
+/// Appends a round's data: the runtime does not know T, so the `[]T` comes
+/// behind an address and followed by what T measures.
+fn append_data(allocator: Allocator, params: &var array::Array<Param>, data: i64) -> !void {
+    try params.append(allocator, param(Source::Address, data, CType::Pointer));
+    try params.append(allocator, param(Source::ElementSize, data, CType::I64));
+    return;
+}
+
+/// Appends the rest of a round, whose operands from `states` on are its
+/// states, when it has them, and its worker: the states' Array and what S
+/// measures, or a null and a zero, then the worker and the function the
+/// runtime calls it through.
+fn append_round_worker(allocator: Allocator, params: &var array::Array<Param>, node: &ir::InstrNode, states: i64) -> !void {
+    let worker = node.args.len() - 1;
+    var invoke = Source::PoolInvoke;
+    if worker > states {
+        try params.append(allocator, param(Source::Value, states, CType::Pointer));
+        try params.append(allocator, param(Source::ElementSize, states, CType::I64));
+        invoke = Source::PoolStateInvoke;
+    } else {
+        try params.append(allocator, param(Source::Zero, 0 - 1, CType::Pointer));
+        try params.append(allocator, param(Source::Zero, 0 - 1, CType::I64));
+    }
+    try params.append(allocator, param(Source::Value, worker, CType::Pointer));
+    try params.append(allocator, param(invoke, worker, CType::Pointer));
+    return;
+}
+
+/// Is where in the spelling of a type the type of one element it holds is.
+pub struct Span {
+    pub start: i64,
+    pub end: i64,
+}
+
+/// Returns where the type of one element a type holds is spelled, for
+/// ElementSize: T of a `[]T`, S of a `&var std::array::Array<S>`, or null
+/// for any other type.
+pub fn element_type(type_name: []u8) -> ?Span {
+    let size = mem::len(type_name);
+    if mem::starts_with(type_name, "[]") {
+        return Span { start: 2, end: size };
+    }
+    let array = "&var std::array::Array<";
+    let prefix = mem::len(array);
+    if size > prefix + 1 and mem::starts_with(type_name, array) and type_name[size - 1] == cast<u8>(62) {
+        return Span { start: prefix, end: size - 1 };
+    }
+    return null;
+}
+
+/// Reports whether a builtin hands C a worker through PoolInvoke or
+/// PoolStateInvoke, a pool round, without declaring it: for a backend that
+/// spells such a call its own way and asks for every call.
+pub fn hands_worker(module: &ir::Module, name: ir::Name) -> bool {
+    return module.names.is(name, "std::internal::builtin::thread_pool_each") or
+        module.names.is(name, "std::internal::builtin::thread_pool_each_lane");
+}
+
+fn param(source: Source, arg: i64, c_type: CType) -> Param {
+    return Param { source: source, arg: arg, c_type: c_type };
+}
+
+/// Returns the operand a call hands a source for, or null when its
+/// declaration has none: for TaskInvoke the state whose type the invoke
+/// function is made for, for PoolInvoke and PoolStateInvoke the worker.
+pub fn source_arg(allocator: Allocator, module: &ir::Module, node: &ir::InstrNode, source: Source) -> !?i64 {
+    if !is_builtin(module, node.operand) {
+        return null;
+    }
+    let signature = try declare(allocator, module, node.operand, node);
+    defer signature.deinit(allocator);
+    var index = 0;
+    while signature.params.get(index) |param| {
+        index = index + 1;
+        if param.source == source {
+            return param.arg;
+        }
+    }
+    return null;
+}

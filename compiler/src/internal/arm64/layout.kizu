@@ -1,0 +1,336 @@
+import compiler::internal::ir;
+import compiler::internal::llvm;
+import compiler::internal::typ;
+import std::mem;
+
+// How the arm64 backend holds a value of each IR type: a scalar lives in one
+// general register, normalized to its width (sign- or zero-extended to 64
+// bits, a bool 0 or 1); a float lives in one general register too, as its
+// IEEE 754 bits (an `f32` zero-extended), and only the float instructions
+// move it through a float register; an aggregate lives in memory and the
+// backend handles its address. Aggregates are laid out the way the LLVM backend's types are,
+// field after field with C alignment, so memory the C runtime writes reads
+// the same here.
+
+/// Is where a value of one type lives.
+pub enum Class {
+    Void,
+    Scalar,
+    // An `f64` or `f32`: a word of bits wherever a scalar would be, except
+    // that arithmetic, comparison, casts and C calls treat it as a float.
+    Float,
+    Aggregate,
+    Unsupported,
+}
+
+/// Is what the backend needs to know about one type.
+pub struct Shape {
+    pub class: Class,
+    pub size: i64,
+    pub align: i64,
+    // For a scalar: the bytes it occupies in memory and whether it is
+    // sign-extended in a register.
+    pub signed: bool,
+}
+
+fn void_shape() -> Shape {
+    return Shape { class: Class::Void, size: 0, align: 1, signed: false };
+}
+
+fn scalar(size: i64, signed: bool) -> Shape {
+    return Shape { class: Class::Scalar, size: size, align: size, signed: signed };
+}
+
+fn float_shape(size: i64) -> Shape {
+    return Shape { class: Class::Float, size: size, align: size, signed: false };
+}
+
+fn aggregate(size: i64, align: i64) -> Shape {
+    return Shape { class: Class::Aggregate, size: size, align: align, signed: false };
+}
+
+fn unsupported() -> Shape {
+    return Shape { class: Class::Unsupported, size: 0, align: 1, signed: false };
+}
+
+/// Rounds n up to a multiple of align.
+pub fn round_up(n: i64, align: i64) -> i64 {
+    if align <= 1 {
+        return n;
+    }
+    return ((n + align - 1) / align) * align;
+}
+
+/// Returns the shape of a type the module names.
+pub fn shape_of(module: &ir::Module, type_name: ir::Name) -> Shape {
+    let text = ir::name_text(&module.names, type_name);
+    let bytes = text.as_bytes();
+    return shape_of_bytes(module, bytes, 0);
+}
+
+/// Returns the shape of a type spelling. depth bounds a by-value cycle, which
+/// the checker rejects before it gets here.
+pub fn shape_of_bytes(module: &ir::Module, name: []u8, depth: i64) -> Shape {
+    if depth > 64 {
+        return unsupported();
+    }
+    if mem::len(name) == 0 or mem::equal_bytes(name, "void") {
+        return void_shape();
+    }
+    if mem::equal_bytes(name, "bool") or mem::equal_bytes(name, "u8") {
+        return scalar(1, false);
+    }
+    if mem::equal_bytes(name, "i8") {
+        return scalar(1, true);
+    }
+    if mem::equal_bytes(name, "u16") {
+        return scalar(2, false);
+    }
+    if mem::equal_bytes(name, "i16") {
+        return scalar(2, true);
+    }
+    if mem::equal_bytes(name, "u32") {
+        return scalar(4, false);
+    }
+    if mem::equal_bytes(name, "i32") {
+        return scalar(4, true);
+    }
+    if mem::equal_bytes(name, "i64") or mem::equal_bytes(name, "isize") {
+        return scalar(8, true);
+    }
+    if mem::equal_bytes(name, "u64") or mem::equal_bytes(name, "usize") {
+        return scalar(8, false);
+    }
+    if mem::equal_bytes(name, "f64") {
+        return float_shape(8);
+    }
+    if mem::equal_bytes(name, "f32") {
+        return float_shape(4);
+    }
+    // A vector is 128 bits of lanes, the LLVM backend's in-memory layout.
+    if typ::is_vector(name) {
+        return aggregate(16, 16);
+    }
+    if mem::equal_bytes(name, "Allocator") or mem::equal_bytes(name, "Io") {
+        return scalar(8, false);
+    }
+    if typ::is_func_spelling(name) {
+        return scalar(8, false);
+    }
+    if mem::starts_with(name, "&") or mem::starts_with(name, "ptr<") or mem::starts_with(name, "?ptr<") {
+        return scalar(8, false);
+    }
+    if mem::starts_with(name, "[]") {
+        return aggregate(16, 8);
+    }
+    if has_prefix_generic(name, "std::mem::Box<") {
+        return scalar(8, false);
+    }
+    if has_prefix_generic(name, "std::arena::Handle<") {
+        return scalar(8, true);
+    }
+    if has_prefix_generic(name, "std::array::Array<") {
+        return aggregate(24, 8);
+    }
+    if has_prefix_generic(name, "std::map::Map<") {
+        return aggregate(map_header_size(), 8);
+    }
+    // An arena is an array's three words and the number its handles count
+    // from.
+    if has_prefix_generic(name, "std::arena::Arena<") {
+        return aggregate(32, 8);
+    }
+    if module.enums.contains(name) or module.error_sets.contains(name) {
+        return scalar(8, true);
+    }
+    // An error union is a code word and then the success value, `{ i64, T }`.
+    if typ::error_union_success(name) |success| {
+        let inner = shape_of_bytes(module, success, depth + 1);
+        if inner.class == Class::Unsupported {
+            return unsupported();
+        }
+        if inner.class == Class::Void {
+            return aggregate(8, 8);
+        }
+        var align = 8;
+        if inner.align > align {
+            align = inner.align;
+        }
+        return aggregate(round_up(round_up(8, inner.align) + inner.size, align), align);
+    }
+    if llvm::niche_optional_elem(module, name) |elem| {
+        return shape_of_bytes(module, elem, depth + 1);
+    }
+    // Every other optional is `{ i8, T }`.
+    if typ::optional_elem(name) |elem| {
+        let inner = shape_of_bytes(module, elem, depth + 1);
+        if inner.class == Class::Unsupported or inner.class == Class::Void {
+            return unsupported();
+        }
+        return aggregate(round_up(round_up(1, inner.align) + inner.size, inner.align), inner.align);
+    }
+    if module.structs.at(name) |declared| {
+        var size = 0;
+        var align = 1;
+        var index = 0;
+        while declared.fields.get(index) |field| {
+            index = index + 1;
+            let field_text = ir::name_text(&module.names, field.type_name);
+            let field_bytes = field_text.as_bytes();
+            let inner = shape_of_bytes(module, field_bytes, depth + 1);
+            if inner.class == Class::Unsupported {
+                return unsupported();
+            }
+            if inner.class == Class::Void {
+                continue;
+            }
+            size = round_up(size, inner.align) + inner.size;
+            if inner.align > align {
+                align = inner.align;
+            }
+        }
+        return aggregate(round_up(size, align), align);
+    }
+    if buffer_count(name) |count| {
+        let elem = buffer_elem(name);
+        let inner = shape_of_bytes(module, elem, depth + 1);
+        if inner.class == Class::Unsupported or inner.class == Class::Void {
+            return unsupported();
+        }
+        return aggregate(count * inner.size, inner.align);
+    }
+    // A tagged union is the tag word and then the largest payload,
+    // `{ i64, [N x i8] }` with N rounded to the word.
+    if module.unions.at(name) |declared| {
+        var capacity = 0;
+        var index = 0;
+        while declared.variants.key_at(index) |variant_name| {
+            index = index + 1;
+            let variant = declared.variants.get(variant_name) orelse continue;
+            if ir::is_empty(variant.payload) {
+                continue;
+            }
+            let payload_text = ir::name_text(&module.names, variant.payload);
+            let payload_bytes = payload_text.as_bytes();
+            let inner = shape_of_bytes(module, payload_bytes, depth + 1);
+            if inner.class == Class::Unsupported or inner.align > 8 {
+                return unsupported();
+            }
+            if inner.size > capacity {
+                capacity = inner.size;
+            }
+        }
+        return aggregate(round_up(8 + capacity, 8), 8);
+    }
+    return unsupported();
+}
+
+/// Returns the byte offset of a struct field and its shape, or null when the
+/// struct or field is not declared.
+pub fn field_offset(module: &ir::Module, struct_name: []u8, field_name: ir::Name) -> ?FieldPlace {
+    if module.structs.at(struct_name) |declared| {
+        var offset = 0;
+        var index = 0;
+        while declared.fields.get(index) |field| {
+            index = index + 1;
+            let field_text = ir::name_text(&module.names, field.type_name);
+            let field_bytes = field_text.as_bytes();
+            let inner = shape_of_bytes(module, field_bytes, 1);
+            if inner.class == Class::Unsupported {
+                return null;
+            }
+            if inner.class != Class::Void {
+                offset = round_up(offset, inner.align);
+            }
+            if ir::same_name(field.name, field_name) {
+                return FieldPlace { offset: offset, shape: inner, type_name: field.type_name };
+            }
+            offset = offset + inner.size;
+        }
+    }
+    return null;
+}
+
+/// Is where one struct field sits.
+pub struct FieldPlace {
+    pub offset: i64,
+    pub shape: Shape,
+    pub type_name: ir::Name,
+}
+
+/// Returns the offset of the success value inside an error union of a
+/// success shape.
+pub fn error_payload_offset(success: Shape) -> i64 {
+    return round_up(8, success.align);
+}
+
+fn has_prefix_generic(name: []u8, prefix: []u8) -> bool {
+    return mem::starts_with(name, prefix) and ir::ends_with_bytes(name, ">");
+}
+
+/// Returns N of `[N]T`, or null for any other spelling.
+pub fn buffer_count(name: []u8) -> ?i64 {
+    let length = mem::len(name);
+    if length < 3 or name[0] != cast<u8>(91) {
+        return null;
+    }
+    var at = 1;
+    var count = 0;
+    while at < length and name[at] >= cast<u8>(48) and name[at] <= cast<u8>(57) {
+        count = count * 10 + cast<i64>(name[at] - cast<u8>(48));
+        at = at + 1;
+    }
+    if at == 1 or at >= length or name[at] != cast<u8>(93) {
+        return null;
+    }
+    return count;
+}
+
+/// Returns T of `[N]T`; the caller has checked the spelling.
+pub fn buffer_elem(name: []u8) -> []u8 {
+    var at = 1;
+    while at < mem::len(name) and name[at] != cast<u8>(93) {
+        at = at + 1;
+    }
+    return name[at + 1..mem::len(name)];
+}
+
+/// Returns T of `[]T`, `&[]T` or `&var []T`.
+pub fn view_elem(name: []u8) -> []u8 {
+    var at = 0;
+    if mem::starts_with(name, "&var ") {
+        at = 5;
+    } else if mem::starts_with(name, "&") {
+        at = 1;
+    }
+    let rest = name[at..mem::len(name)];
+    if mem::starts_with(rest, "[]") {
+        return rest[2..mem::len(rest)];
+    }
+    return rest;
+}
+
+/// Returns T of a container `std::array::Array<T>` behind any borrow.
+pub fn container_elem(name: []u8) -> []u8 {
+    var at = 0;
+    if mem::starts_with(name, "&var ") {
+        at = 5;
+    } else if mem::starts_with(name, "&") {
+        at = 1;
+    }
+    let rest = name[at..mem::len(name)];
+    var open = 0;
+    while open < mem::len(rest) and rest[open] != cast<u8>(60) {
+        open = open + 1;
+    }
+    if open + 1 >= mem::len(rest) {
+        return rest[0..0];
+    }
+    return rest[open + 1..mem::len(rest) - 1];
+}
+
+/// Reports whether a shape is one word in a general register: a scalar or
+/// the bits of a float.
+pub fn is_word(shape: Shape) -> bool {
+    return shape.class == Class::Scalar or shape.class == Class::Float;
+}

@@ -1,0 +1,525 @@
+import compiler::internal::ir;
+import std::array;
+import std::map;
+
+// Inlining at the machine level: a call to a small function that calls
+// nothing is replaced by a copy of the callee's selected blocks. The
+// convention makes the seams fit without renaming any physical register:
+// the caller has already moved the arguments into x0..x7 (and x8) and reads
+// the result from x0 (and x1) after the call, which is where the callee's
+// entry reads them and its returns write them. The callee's virtual
+// registers, frame slots and copies are renumbered into the caller's.
+
+/// Returns an independent copy of a function.
+pub fn clone_function(allocator: Allocator, source: &MFunction) -> !MFunction {
+    var copy = new_function(allocator);
+    errdefer copy.deinit(allocator);
+    var index = 0;
+    while source.blocks.at(index) |block| {
+        index = index + 1;
+        var insts = array::new<MInst>(allocator);
+        errdefer insts.deinit(allocator);
+        var inst_index = 0;
+        while block.insts.get(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            try insts.append(allocator, inst);
+        }
+        try copy.blocks.append(allocator, MBlock {
+            insts: move insts,
+            term: block.term,
+            cond: block.cond,
+            treg: block.treg,
+            succ0: block.succ0,
+            succ1: block.succ1,
+            cold: block.cold
+        });
+    }
+    index = 0;
+    while source.copies.get(index) |item| {
+        index = index + 1;
+        try copy.copies.append(allocator, item);
+    }
+    index = 0;
+    while source.slots.get(index) |slot| {
+        index = index + 1;
+        try copy.slots.append(allocator, slot);
+    }
+    copy.vregs = source.vregs;
+    copy.out_words = source.out_words;
+    copy.calls = source.calls;
+    copy.is_main = source.is_main;
+    return move copy;
+}
+
+/// Reports whether a function may be copied into its callers: it calls
+/// nothing, reads no stack argument, and is small.
+fn inlinable(func: &MFunction) -> bool {
+    if func.is_main or func.calls {
+        return false;
+    }
+    var size = 0;
+    var index = 0;
+    while func.blocks.at(index) |block| {
+        index = index + 1;
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            size = size + 1;
+            if inst.op == MOp::Call or inst.op == MOp::CallReg or inst.rn == reg_inarg() {
+                return false;
+            }
+        }
+    }
+    return size <= 48 and func.blocks.len() <= 16;
+}
+
+/// Replaces the calls each function makes to inlinable functions by copies
+/// of their bodies. symbols[i] names functions[i].
+pub fn inline_calls(allocator: Allocator, functions: &var array::Array<MFunction>, symbols: &array::Array<ir::Name>) -> !void {
+    var by_symbol = map::new<i64, i64>(allocator);
+    defer by_symbol.deinit(allocator);
+    var eligible = array::new<bool>(allocator);
+    defer eligible.deinit(allocator);
+    var index = 0;
+    while functions.at(index) |func| {
+        try by_symbol.insert(allocator, ir::name_id(symbols.get_or_panic(index)), index);
+        try eligible.append(allocator, inlinable(func));
+        index = index + 1;
+    }
+    var caller = 0;
+    while caller < functions.len() {
+        var budget = 16;
+        while budget > 0 {
+            // Find one call to an inlinable callee.
+            var found_block = 0 - 1;
+            var found_inst = 0 - 1;
+            var callee = 0 - 1;
+            if functions.at(caller) |func| {
+                var block_id = 0;
+                while func.blocks.at(block_id) |block| {
+                    var inst_index = 0;
+                    while block.insts.at(inst_index) |inst| {
+                        if inst.op == MOp::Call and found_block < 0 {
+                            if by_symbol.get(ir::name_id(inst.sym)) |target| {
+                                if target != caller and eligible.get_or_panic(target) {
+                                    found_block = block_id;
+                                    found_inst = inst_index;
+                                    callee = target;
+                                }
+                            }
+                        }
+                        inst_index = inst_index + 1;
+                    }
+                    block_id = block_id + 1;
+                }
+            }
+            if callee < 0 {
+                break;
+            }
+            budget = budget - 1;
+            let body = try clone_at(allocator, functions, callee);
+            defer body.deinit(allocator);
+            if functions.at_mut(caller) |func| {
+                try splice(allocator, func, found_block, found_inst, &body);
+            }
+        }
+        caller = caller + 1;
+    }
+    return;
+}
+
+fn clone_at(allocator: Allocator, functions: &array::Array<MFunction>, index: i64) -> !MFunction {
+    if functions.at(index) |source| {
+        return clone_function(allocator, source);
+    }
+    return new_function(allocator);
+}
+
+/// Splits block at the call at index at and puts the callee's blocks
+/// between the two halves.
+fn splice(allocator: Allocator, func: &var MFunction, block: i64, at: i64, callee: &MFunction) -> !void {
+    let vreg_base = func.vregs;
+    let slot_base = func.slots.len();
+    let copy_base = func.copies.len();
+    let block_base = func.blocks.len();
+    // The continuation: what followed the call, ending as the block did.
+    var rest = array::new<MInst>(allocator);
+    errdefer rest.deinit(allocator);
+    var term = Term::Open;
+    var cond = Cond::Eq;
+    var treg = reg_none();
+    var succ0 = 0 - 1;
+    var succ1 = 0 - 1;
+    var cold = false;
+    if func.blocks.at_mut(block) |node| {
+        var index = at + 1;
+        while node.insts.get(index) |inst| {
+            index = index + 1;
+            try rest.append(allocator, inst);
+        }
+        try node.insts.truncate(allocator, at);
+        term = node.term;
+        cond = node.cond;
+        treg = node.treg;
+        succ0 = node.succ0;
+        succ1 = node.succ1;
+        cold = node.cold;
+        node.term = Term::Jump;
+        node.succ0 = block_base;
+        node.succ1 = 0 - 1;
+        node.treg = reg_none();
+    }
+    let continuation = block_base + callee.blocks.len();
+    // The callee's blocks, renumbered; a return jumps to the continuation.
+    var index = 0;
+    while callee.blocks.at(index) |source| {
+        index = index + 1;
+        var insts = array::new<MInst>(allocator);
+        errdefer insts.deinit(allocator);
+        var inst_index = 0;
+        while source.insts.get(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            try insts.append(allocator, renumber(inst, vreg_base, slot_base, copy_base));
+        }
+        var block_term = source.term;
+        var block_succ0 = shift_block(source.succ0, block_base);
+        var block_succ1 = shift_block(source.succ1, block_base);
+        if block_term == Term::Return {
+            block_term = Term::Jump;
+            block_succ0 = continuation;
+            block_succ1 = 0 - 1;
+        }
+        try func.blocks.append(allocator, MBlock {
+            insts: move insts,
+            term: block_term,
+            cond: source.cond,
+            treg: shift_reg(source.treg, vreg_base),
+            succ0: block_succ0,
+            succ1: block_succ1,
+            cold: source.cold or cold
+        });
+    }
+    try func.blocks.append(allocator, MBlock {
+        insts: move rest,
+        term: term,
+        cond: cond,
+        treg: treg,
+        succ0: succ0,
+        succ1: succ1,
+        cold: cold
+    });
+    index = 0;
+    while callee.copies.get(index) |item| {
+        index = index + 1;
+        var moved = item;
+        moved.dst = shift_reg(item.dst, vreg_base);
+        if !item.src_imm {
+            moved.src = shift_reg(item.src, vreg_base);
+        }
+        try func.copies.append(allocator, moved);
+    }
+    index = 0;
+    while callee.slots.get(index) |slot| {
+        index = index + 1;
+        try func.slots.append(allocator, slot);
+    }
+    func.vregs = func.vregs + callee.vregs;
+    if callee.out_words > func.out_words {
+        func.out_words = callee.out_words;
+    }
+    try untie_seams(allocator, func, block, block_base, continuation);
+    // The call is gone: the function calls only if another call remains.
+    var calls = false;
+    index = 0;
+    while func.blocks.at(index) |node| {
+        index = index + 1;
+        var inst_index = 0;
+        while node.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            if inst.op == MOp::Call or inst.op == MOp::CallReg {
+                calls = true;
+            }
+        }
+    }
+    func.calls = calls;
+    return;
+}
+
+fn shift_reg(reg: i64, base: i64) -> i64 {
+    if is_vreg(reg) {
+        return reg + base;
+    }
+    return reg;
+}
+
+fn shift_block(block: i64, base: i64) -> i64 {
+    if block < 0 {
+        return block;
+    }
+    return block + base;
+}
+
+fn renumber(inst: MInst, vreg_base: i64, slot_base: i64, copy_base: i64) -> MInst {
+    var out = inst;
+    out.rd = shift_reg(inst.rd, vreg_base);
+    out.rn = shift_reg(inst.rn, vreg_base);
+    out.rm = shift_reg(inst.rm, vreg_base);
+    out.ra = shift_reg(inst.ra, vreg_base);
+    if inst.slot >= 0 and (inst.op == MOp::FrameAddr or inst.rn == reg_frame()) {
+        out.slot = inst.slot + slot_base;
+    }
+    if inst.op == MOp::ParCopy {
+        out.slot = inst.slot + copy_base;
+    }
+    return out;
+}
+
+/// Replaces the argument and result registers at the seams of an inlined
+/// body by virtual registers where that is safe: the caller's last write of
+/// an argument register before the call, the callee's every use of it, and
+/// the caller's reads of a result register before it is written again in
+/// the continuation. Values then flow through copies the allocator can
+/// coalesce instead of through a fixed register.
+fn untie_seams(allocator: Allocator, func: &var MFunction, caller: i64, first: i64, continuation: i64) -> !void {
+    var buf = array::new<i64>(allocator);
+    defer buf.deinit(allocator);
+    var reads_mask = 0;
+    var writes_mask = 0;
+    // Reads of a register the callee may already have written: outside its
+    // entry block, or after a write there. Such a register keeps one name.
+    var late_mask = 0;
+    var block_id = first;
+    while block_id < continuation {
+        if func.blocks.at(block_id) |block| {
+            var inst_index = 0;
+            while block.insts.at(inst_index) |inst| {
+                inst_index = inst_index + 1;
+                try reads(inst, &var buf, allocator, &func.copies);
+                let read_now = seam_mask(&buf);
+                if block_id != first {
+                    late_mask = late_mask | read_now;
+                } else {
+                    late_mask = late_mask | (read_now & writes_mask);
+                }
+                reads_mask = reads_mask | read_now;
+                if inst.op == MOp::ParCopy {
+                    var index = 0;
+                    while index < inst.imm {
+                        let copy = func.copies.get_or_panic(inst.slot + index);
+                        index = index + 1;
+                        if copy.dst >= 0 and copy.dst < 9 {
+                            writes_mask = writes_mask | (1 << copy.dst);
+                        }
+                    }
+                } else if writes_rd(inst.op) and inst.rd >= 0 and inst.rd < 9 {
+                    writes_mask = writes_mask | (1 << inst.rd);
+                }
+            }
+            if block.treg >= 0 and block.treg < 9 {
+                reads_mask = reads_mask | (1 << block.treg);
+                late_mask = late_mask | (1 << block.treg);
+            }
+        }
+        block_id = block_id + 1;
+    }
+    // The caller's argument writes, back from the call.
+    var def_at = array::new<i64>(allocator);
+    defer def_at.deinit(allocator);
+    var after_reads = array::new<i64>(allocator);
+    defer after_reads.deinit(allocator);
+    for 0..9 |_r| {
+        try def_at.append(allocator, 0 - 1);
+    }
+    if func.blocks.at(caller) |block| {
+        var index = block.insts.len() - 1;
+        while index >= 0 {
+            let inst = block.insts.get_or_panic(index);
+            if inst.op == MOp::ParCopy or inst.op == MOp::Call or inst.op == MOp::CallReg {
+                break;
+            }
+            try reads(&inst, &var buf, allocator, &func.copies);
+            if seam_mask(&buf) != 0 {
+                break;
+            }
+            if writes_rd(inst.op) and inst.rd >= 0 and inst.rd < 9 and def_at.get_or_panic(inst.rd) < 0 {
+                try def_at.set(inst.rd, index);
+            }
+            index = index - 1;
+        }
+    }
+    // The caller's result reads, on from the call; a result register read
+    // past the continuation stays fixed.
+    var settled = 0;
+    var open = writes_mask;
+    if func.blocks.at(continuation) |block| {
+        var index = 0;
+        var stopped = false;
+        while block.insts.at(index) |inst| {
+            if inst.op == MOp::ParCopy and parcopy_touches(&func.copies, inst, open) {
+                stopped = true;
+                break;
+            }
+            try reads(inst, &var buf, allocator, &func.copies);
+            var read_index = 0;
+            while buf.get(read_index) |reg| {
+                read_index = read_index + 1;
+                if reg >= 0 and reg < 9 and (open & (1 << reg)) != 0 {
+                    try after_reads.append(allocator, index);
+                }
+            }
+            if inst.op == MOp::Call or inst.op == MOp::CallReg {
+                settled = settled | open;
+                open = 0;
+                break;
+            }
+            if writes_rd(inst.op) and inst.rd >= 0 and inst.rd < 9 and (open & (1 << inst.rd)) != 0 {
+                settled = settled | (1 << inst.rd);
+                open = open & ~(1 << inst.rd);
+            }
+            index = index + 1;
+        }
+        // Past the block an argument register carries nothing: values
+        // cross blocks in virtual registers, and a return writes its
+        // result first.
+        if !stopped and block.term != Term::Return and !(block.treg >= 0 and block.treg < 9) {
+            settled = settled | open;
+        }
+    }
+    for 0..9 |r| {
+        let bit = 1 << r;
+        if (reads_mask & bit) == 0 and (writes_mask & bit) == 0 {
+            continue;
+        }
+        if (reads_mask & bit) != 0 and def_at.get_or_panic(r) < 0 {
+            continue;
+        }
+        if (writes_mask & bit) != 0 and (settled & bit) == 0 {
+            continue;
+        }
+        if (late_mask & bit) != 0 and (writes_mask & bit) != 0 {
+            continue;
+        }
+        // The argument and the result each get their own register, so each
+        // is one copy the allocator can share a register with.
+        let fresh = func.new_vreg();
+        var result = fresh;
+        if (reads_mask & bit) != 0 and (writes_mask & bit) != 0 {
+            result = func.new_vreg();
+        }
+        if (reads_mask & bit) != 0 {
+            if func.blocks.at_mut(caller) |block| {
+                let at = def_at.get_or_panic(r);
+                var inst = block.insts.get_or_panic(at);
+                inst.rd = fresh;
+                try block.insts.set(at, inst);
+            }
+        }
+        block_id = first;
+        while block_id < continuation {
+            try rename_in_block(allocator, func, block_id, r, fresh, result);
+            block_id = block_id + 1;
+        }
+        if (writes_mask & bit) != 0 {
+            if func.blocks.at_mut(continuation) |block| {
+                var index = 0;
+                while after_reads.get(index) |at| {
+                    index = index + 1;
+                    var inst = block.insts.get_or_panic(at);
+                    if (inst.op == MOp::Store or inst.op == MOp::StoreIdx) and inst.rd == r {
+                        inst.rd = result;
+                    }
+                    if inst.rn == r {
+                        inst.rn = result;
+                    }
+                    if inst.rm == r {
+                        inst.rm = result;
+                    }
+                    if inst.ra == r {
+                        inst.ra = result;
+                    }
+                    try block.insts.set(at, inst);
+                }
+            }
+        }
+    }
+    return;
+}
+
+fn seam_mask(regs: &array::Array<i64>) -> i64 {
+    var mask = 0;
+    var index = 0;
+    while regs.get(index) |reg| {
+        index = index + 1;
+        if reg >= 0 and reg < 9 {
+            mask = mask | (1 << reg);
+        }
+    }
+    return mask;
+}
+
+/// Renames register from in a block: reads to read_as, writes to write_as.
+fn rename_in_block(allocator: Allocator, func: &var MFunction, block_id: i64, from: i64, read_as: i64, write_as: i64) -> !void {
+    var copy_slots = array::new<i64>(allocator);
+    defer copy_slots.deinit(allocator);
+    if func.blocks.at_mut(block_id) |block| {
+        var index = 0;
+        while index < block.insts.len() {
+            var inst = block.insts.get_or_panic(index);
+            let stores = inst.op == MOp::Store or inst.op == MOp::StoreIdx;
+            if inst.rd == from {
+                if stores {
+                    inst.rd = read_as;
+                } else {
+                    inst.rd = write_as;
+                }
+            }
+            if inst.rn == from {
+                inst.rn = read_as;
+            }
+            if inst.rm == from {
+                inst.rm = read_as;
+            }
+            if inst.ra == from {
+                inst.ra = read_as;
+            }
+            try block.insts.set(index, inst);
+            if inst.op == MOp::ParCopy {
+                for 0..inst.imm |offset| {
+                    try copy_slots.append(allocator, inst.slot + offset);
+                }
+            }
+            index = index + 1;
+        }
+        if block.treg == from {
+            block.treg = read_as;
+        }
+    }
+    var index = 0;
+    while copy_slots.get(index) |slot| {
+        index = index + 1;
+        var copy = func.copies.get_or_panic(slot);
+        if copy.dst == from {
+            copy.dst = write_as;
+        }
+        if !copy.src_imm and copy.src == from {
+            copy.src = read_as;
+        }
+        try func.copies.set(slot, copy);
+    }
+    return;
+}
+
+fn parcopy_touches(copies: &array::Array<Copy>, inst: &MInst, mask: i64) -> bool {
+    var index = 0;
+    while index < inst.imm {
+        let copy = copies.get_or_panic(inst.slot + index);
+        index = index + 1;
+        if copy.dst >= 0 and copy.dst < 9 and (mask & (1 << copy.dst)) != 0 {
+            return true;
+        }
+        if !copy.src_imm and copy.src >= 0 and copy.src < 9 and (mask & (1 << copy.src)) != 0 {
+            return true;
+        }
+    }
+    return false;
+}

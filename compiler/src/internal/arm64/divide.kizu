@@ -1,0 +1,296 @@
+// Division and remainder by a constant without a divide instruction: a
+// power of two by shifts that round toward zero, any other divisor by a
+// multiply by its magic reciprocal (Hacker's Delight, chapter 10). The
+// quotient is the one `sdiv` / `udiv` give, so the remainder `n - q * d`
+// keeps the sign of the dividend as the IR's `%` does.
+
+/// Is the reciprocal of a divisor: the multiplier, the shift after the high
+/// half of the product, and for an unsigned divisor whether the multiplier
+/// needed a 65th bit.
+struct Magic {
+    multiplier: i64,
+    shift: i64,
+    add: bool,
+}
+
+/// Returns the signed magic of d, |d| >= 2 and not a power of two.
+fn signed_magic(d: i64) -> Magic {
+    let two63 = cast<u64>(1) << 63;
+    var ad = cast<u64>(d);
+    if d < 0 {
+        ad = cast<u64>(0 - d);
+    }
+    let t = two63 + (cast<u64>(d) >> 63);
+    let anc = t - 1 - t % ad;
+    var p = 63;
+    var q1 = two63 / anc;
+    var r1 = two63 - q1 * anc;
+    var q2 = two63 / ad;
+    var r2 = two63 - q2 * ad;
+    var delta = cast<u64>(0);
+    var more = true;
+    while more {
+        p = p + 1;
+        q1 = q1 * cast<u64>(2);
+        r1 = r1 * cast<u64>(2);
+        if r1 >= anc {
+            q1 = q1 + cast<u64>(1);
+            r1 = r1 - anc;
+        }
+        q2 = q2 * cast<u64>(2);
+        r2 = r2 * cast<u64>(2);
+        if r2 >= ad {
+            q2 = q2 + cast<u64>(1);
+            r2 = r2 - ad;
+        }
+        delta = ad - r2;
+        more = q1 < delta or (q1 == delta and r1 == cast<u64>(0));
+    }
+    var multiplier = cast<i64>(q2 + cast<u64>(1));
+    if d < 0 {
+        multiplier = 0 - multiplier;
+    }
+    return Magic { multiplier: multiplier, shift: p - 64, add: false };
+}
+
+/// Returns the unsigned magic of d, 2 <= d < 2^63 and not a power of two.
+fn unsigned_magic(d: i64) -> Magic {
+    let ud = cast<u64>(d);
+    let two63 = cast<u64>(1) << 63;
+    let all = ~cast<u64>(0);
+    let nc = all - (cast<u64>(0) - ud) % ud;
+    var p = 63;
+    var q1 = two63 / nc;
+    var r1 = two63 - q1 * nc;
+    var q2 = (two63 - cast<u64>(1)) / ud;
+    var r2 = (two63 - cast<u64>(1)) - q2 * ud;
+    var add = false;
+    var more = true;
+    while more {
+        p = p + 1;
+        if r1 >= nc - r1 {
+            q1 = q1 * cast<u64>(2) + cast<u64>(1);
+            r1 = r1 * cast<u64>(2) - nc;
+        } else {
+            q1 = q1 * cast<u64>(2);
+            r1 = r1 * cast<u64>(2);
+        }
+        if r2 + cast<u64>(1) >= ud - r2 {
+            if q2 >= two63 - cast<u64>(1) {
+                add = true;
+            }
+            q2 = q2 * cast<u64>(2) + cast<u64>(1);
+            r2 = r2 * cast<u64>(2) + cast<u64>(1) - ud;
+        } else {
+            if q2 >= two63 {
+                add = true;
+            }
+            q2 = q2 * cast<u64>(2);
+            r2 = r2 * cast<u64>(2) + cast<u64>(1);
+        }
+        let delta = ud - cast<u64>(1) - r2;
+        more = p < 128 and (q1 < delta or (q1 == delta and r1 == cast<u64>(0)));
+    }
+    return Magic { multiplier: cast<i64>(q2 + cast<u64>(1)), shift: p - 64, add: add };
+}
+
+/// Reports whether value is a run of ones, the shape an AArch64 logical
+/// immediate spells without rotation.
+pub fn logical_imm_ok(value: i64) -> bool {
+    if value == 0 or value == 0 - 1 {
+        return false;
+    }
+    var bits = cast<u64>(value);
+    while (bits & cast<u64>(1)) == cast<u64>(0) {
+        bits = bits >> 1;
+    }
+    let next = bits + cast<u64>(1);
+    return (next & bits) == cast<u64>(0);
+}
+
+/// Selects n / d or n % d for a constant d into rd. Reports false when d is
+/// zero: that division stays the machine's.
+fn (self: &var Selector) divide_by_constant(rd: i64, n: i64, d: i64, signed: bool, remainder: bool) -> !bool {
+    if d == 0 {
+        return false;
+    }
+    if d == 1 or (signed and d == 0 - 1) {
+        if remainder {
+            try self.mov_imm(rd, 0);
+        } else if d == 1 {
+            try self.mov(rd, n);
+        } else {
+            try self.op3(MOp::Neg, rd, n, reg_none());
+        }
+        return true;
+    }
+    if !signed and d < 0 {
+        // A divisor of 2^63 or more goes into n at most once.
+        let d_reg = try self.imm_reg_nz(d);
+        try self.op3(MOp::Cmp, reg_none(), n, d_reg);
+        if remainder {
+            let reduced = self.func.new_vreg();
+            try self.op3(MOp::Sub, reduced, n, d_reg);
+            var pick = blank(MOp::CSel);
+            pick.rd = rd;
+            pick.rn = reduced;
+            pick.rm = n;
+            pick.cond = Cond::Hs;
+            try self.inst(pick);
+        } else {
+            var set = blank(MOp::CSet);
+            set.rd = rd;
+            set.cond = Cond::Hs;
+            try self.inst(set);
+        }
+        return true;
+    }
+    var magnitude = d;
+    if d < 0 {
+        magnitude = 0 - d;
+    }
+    let shift = power_of_two(magnitude);
+    let quotient = self.func.new_vreg();
+    if shift >= 0 and !signed {
+        if remainder {
+            try self.op_imm(MOp::AndImm, rd, n, magnitude - 1);
+        } else {
+            try self.op_imm(MOp::LsrImm, rd, n, shift);
+        }
+        return true;
+    }
+    if shift >= 0 and self.known_clear(n, magnitude - 1) {
+        // The dividend is a multiple of d here: the shift is exact.
+        if remainder {
+            try self.mov_imm(rd, 0);
+        } else if d < 0 {
+            try self.op_imm(MOp::AsrImm, quotient, n, shift);
+            try self.op3(MOp::Neg, rd, quotient, reg_none());
+        } else {
+            try self.op_imm(MOp::AsrImm, rd, n, shift);
+        }
+        return true;
+    }
+    if shift >= 0 {
+        // Bias a negative dividend by d - 1 so the shift rounds toward zero.
+        let biased = self.func.new_vreg();
+        if shift == 1 {
+            var add = blank(MOp::AddLsr);
+            add.rd = biased;
+            add.rn = n;
+            add.rm = n;
+            add.imm = 63;
+            try self.inst(add);
+        } else {
+            let sign = self.func.new_vreg();
+            try self.op_imm(MOp::AsrImm, sign, n, 63);
+            var add = blank(MOp::AddLsr);
+            add.rd = biased;
+            add.rn = n;
+            add.rm = sign;
+            add.imm = 64 - shift;
+            try self.inst(add);
+        }
+        if remainder {
+            let rounded = self.func.new_vreg();
+            try self.op_imm(MOp::AndImm, rounded, biased, 0 - magnitude);
+            try self.op3(MOp::Sub, rd, n, rounded);
+            return true;
+        }
+        if d < 0 {
+            try self.op_imm(MOp::AsrImm, quotient, biased, shift);
+            try self.op3(MOp::Neg, rd, quotient, reg_none());
+        } else {
+            try self.op_imm(MOp::AsrImm, rd, biased, shift);
+        }
+        return true;
+    }
+    if signed {
+        let magic = signed_magic(d);
+        let m_reg = try self.imm_reg_nz(magic.multiplier);
+        var high = self.func.new_vreg();
+        try self.op3(MOp::SMulH, high, n, m_reg);
+        if d > 0 and magic.multiplier < 0 {
+            let fixed = self.func.new_vreg();
+            try self.op3(MOp::Add, fixed, high, n);
+            high = fixed;
+        }
+        if d < 0 and magic.multiplier > 0 {
+            let fixed = self.func.new_vreg();
+            try self.op3(MOp::Sub, fixed, high, n);
+            high = fixed;
+        }
+        if magic.shift > 0 {
+            let shifted = self.func.new_vreg();
+            try self.op_imm(MOp::AsrImm, shifted, high, magic.shift);
+            high = shifted;
+        }
+        var round = blank(MOp::AddLsr);
+        round.rd = quotient;
+        round.rn = high;
+        round.rm = high;
+        round.imm = 63;
+        try self.inst(round);
+    } else {
+        let magic = unsigned_magic(d);
+        let m_reg = try self.imm_reg_nz(magic.multiplier);
+        let high = self.func.new_vreg();
+        try self.op3(MOp::UMulH, high, n, m_reg);
+        if magic.add {
+            let diff = self.func.new_vreg();
+            try self.op3(MOp::Sub, diff, n, high);
+            let half = self.func.new_vreg();
+            var add = blank(MOp::AddLsr);
+            add.rd = half;
+            add.rn = high;
+            add.rm = diff;
+            add.imm = 1;
+            try self.inst(add);
+            try self.op_imm(MOp::LsrImm, quotient, half, magic.shift - 1);
+        } else if magic.shift > 0 {
+            try self.op_imm(MOp::LsrImm, quotient, high, magic.shift);
+        } else {
+            try self.mov(quotient, high);
+        }
+    }
+    if !remainder {
+        try self.mov(rd, quotient);
+        return true;
+    }
+    try self.multiply_subtract(rd, n, quotient, d);
+    return true;
+}
+
+/// Selects rd = n - q * d. A d of 2^k + 1 or 2^k - 1 is a shifted add and a
+/// subtract, which keep off the multiplier.
+fn (self: &var Selector) multiply_subtract(rd: i64, n: i64, q: i64, d: i64) -> !void {
+    if d > 2 and power_of_two(d - 1) >= 1 {
+        // n - (q + (q << k))
+        let product = self.func.new_vreg();
+        var add = blank(MOp::AddShift);
+        add.rd = product;
+        add.rn = q;
+        add.rm = q;
+        add.imm = power_of_two(d - 1);
+        try self.inst(add);
+        return self.op3(MOp::Sub, rd, n, product);
+    }
+    if d > 2 and power_of_two(d + 1) >= 2 {
+        // (n + q) - (q << k)
+        let sum = self.func.new_vreg();
+        try self.op3(MOp::Add, sum, n, q);
+        var sub = blank(MOp::SubShift);
+        sub.rd = rd;
+        sub.rn = sum;
+        sub.rm = q;
+        sub.imm = power_of_two(d + 1);
+        return self.inst(sub);
+    }
+    let d_reg = try self.imm_reg_nz(d);
+    var inst = blank(MOp::MSub);
+    inst.rd = rd;
+    inst.rn = q;
+    inst.rm = d_reg;
+    inst.ra = n;
+    return self.inst(inst);
+}
