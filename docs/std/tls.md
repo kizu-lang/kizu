@@ -161,6 +161,50 @@ var client = try tls::connect_with(
 2 回張って両方向の record が全部一致することを `tests/behavior/src/tls_entropy/` が
 P-256 と RSA の鍵で確かめます。
 
+## 他の実装と録った接続の再生
+
+Kizu 以外の TLS 実装との相互運用は、node の `tls` / `https` と一度だけ接続して録った
+fixture(`examples/fixtures/tls/*.trace`、1 接続 1 本、1 行 1 record)を
+`tests/behavior/src/tls_replay/` が再生して確かめます。node は再生に要りません。
+Kizu 側は case 名から決まる seed の `predictable_entropy` で動き、送る record が
+録ったものと byte 単位で一致すること、node の record を受け入れることを見ます。
+fixture の Kizu の bytes は node が受け入れた bytes なので、一致は「node がもう一度
+受け入れる」と同じ意味です。各 fixture は 2 回続けて再生し、seed 以外に依る bytes が
+混ざっていないことも見ます。録った相手(node と OpenSSL の version)は fixture の
+`# peer:` を見てください。全 fixture の `# peer:` が同じことを再生が確かめます。
+
+録り直しは `nix develop -c just tls-fixtures` の 1 経路で、引数を取らず全 case を毎回
+録ります。録る道具(`scripts/record-tls-fixtures/record.mjs`)は devShell の node
+(`flake.lock` の nixpkgs が version を決める)でしか録らず、`process.execPath` が
+`/nix/store/` の下にあることを確かめます。node が期待どおりに受け入れなかった case が
+あれば何も書きません。Kizu が送る bytes を変える変更(message の書式、拡張の集合や
+順序、offer する suite や scheme、alert の選び方、record の切り方、`Entropy` から引く
+量と順序)では再生が「fixture 名・行番号・向き・最初に食い違う byte」を出して落ちる
+ので、意図した変更なら録り直し、別 commit で同じ PR に入れます。seed が case 名で
+固定なので、diff では平文の record(ClientHello / ServerHello)と注釈の差分を読みます。
+node の乱数で決まる行と暗号化された行は録るたびに全部変わります。
+
+https server の case は server の 1 回の実行を録り、受けた接続ごとに 1 本の fixture を
+書きます。server は受けた順に seed を `split` して各接続に渡すので、1 run の fixture は
+すべて run 名の seed を持ち、受けた順に再生したときにしか同じ bytes になりません。
+run は 2 つです。
+
+- `https-server-accept-*`: `accept` は 1 接続 1 要求で、答えたら閉じるので、`/one`
+  `/two` `/three` に 1 接続ずつ使います。
+- `https-server-keepalive` / `-stranger` / `-fresh`: `first` / `next` で、1 本の
+  keep-alive 接続に `/one` `/two`、新しい接続に `/three`。
+
+どちらも別 root を信じる client(stranger)を間に置きます。`accept` も `first` /
+`next` も handshake に失敗した接続を捨てて次を待つので、最後に置くと来ない要求を
+待ち続けます。
+
+再生は evented Io の上で再生役の task と Kizu 側を同じ process で動かします。
+`first` / `next` の run だけは例外で、blocking Io の単一 thread で再生します。
+`first` / `next` は次に届くものを kevent / epoll で待って thread ごと止まるので、
+同じ loop の上の再生役が動けないためです。node の record は fixture で決まっている
+ので、呼ぶ前にその時点までに node が送っていた分を socket へ書き、server が終わって
+から Kizu の record を読んで比べます。
+
 ## 状態機械
 
 client の接続は ClientHello を送った `WaitServerHello` から始まり、server の message を
