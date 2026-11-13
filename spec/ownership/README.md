@@ -1,7 +1,8 @@
 # ownership モデル
 
-`internal/ownership` の borrow / move / deinit 検査を Quint で書いたモデルと、
-そのモデルから作ったプログラムを checker に当てるモデルベーステストです。
+`internal/ownership`(`compiler/src/internal/ownership/`)の borrow / move / deinit
+検査を Quint で書いたモデルと、そのモデルから作ったプログラムを checker に当てる
+モデルベーステストです。
 
 ```
 spec/ownership/ownership.qnt        モデル: checker の判定、実行時の意味、プログラムの生成器、性質
@@ -9,7 +10,6 @@ spec/ownership/ownership_test.qnt   既知の形に対するモデルの判定(q
 scripts/ownership-mbt/main.kizu     quint run の trace を層化して fixture に書く(Kizu)
 compiler/tests/mbt/ownership.json   その fixture(checked in)
 compiler/src/ownership_mbt_test.kizu  fixture を Kizu にして compiler/ の checker に当て、モデルの予測と比べる
-internal/ownership/mbt_test.go      同じ fixture を Go 実装の checker に当てる
 ```
 
 ## 範囲
@@ -126,9 +126,8 @@ seed は 32 bit に散らして渡します。rust backend では隣り合う se
 使い切るので、広げるときは `-seeds` を増やします。trace は 1 回の実行ごとに読んで
 消します。
 
-replay は 2 つあり、同じ fixture を読みます。`compiler/src/ownership_mbt_test.kizu` は
-`compiler/` の checker を、`internal/ownership/mbt_test.go` は Go 実装の checker を
-見ます。どちらも各プログラムを Kizu にし、`kizu check` と同じ type check → ownership
+replay は `compiler/src/ownership_mbt_test.kizu` で、`compiler/` の checker を見ます。
+各プログラムを Kizu にし、`kizu check` と同じ type check → ownership
 check を in-process で走らせ、最初の診断の文面をクラスに分類して比べます。不一致は
 
 * モデルが受理なのに拒否 / 拒否なのに受理
@@ -136,8 +135,7 @@ check を in-process で走らせ、最初の診断の文面をクラスに分�
 * モデルの知らない診断(生成器か renderer の不備)
 
 のどれかで、プログラムと Kizu ソースを添えて落ちます。`KIZU_MBT_FIXTURE=<file>` で
-別の fixture に当てられます(両方)。Go 側は `KIZU_MBT_BIN=<kizu>` で外部の binary にも
-当てられます。
+別の fixture に当てられます。
 
 ### 規模と結果(2026-11-08)
 
@@ -167,7 +165,7 @@ check を in-process で走らせ、最初の診断の文面をクラスに分�
   広いスイープで 230 本、checked-in fixture で 20 本、既知形で 5 本(#1913 の 4 形と
   入れ子の 1 形)が食い違います。どれもループ内の読みの後の `deinit` / `move` /
   `append` を借用中と誤って拒否するもので、#1913 そのものです。修正前の selfhost
-  binary(3f3bbd7a)に `KIZU_MBT_BIN` で当てても同じ 20 本と 5 本です。
+  binary(3f3bbd7a)に当てても同じ 20 本と 5 本でした。
 
 モデル側の訂正 1 件と、その根拠は `findings/ownership-quint-findings.md` にあります。
 
@@ -176,16 +174,14 @@ check を in-process で走らせ、最初の診断の文面をクラスに分�
 ```sh
 just spec-ownership                                  # quint test、健全性の探索、fixture の再生成
 just selfhost                                        # compiler/ の checker に当てる(kizu test compiler に含まれる)
-go test ./internal/ownership -run TestOwnershipModel # Go 実装の checker に当てる(go test に含まれる)
-KIZU_MBT_BIN=path/to/kizu go test ./internal/ownership -run TestOwnershipModel
 ```
 
-生成器は `go run ./cmd/kizu run scripts/ownership-mbt/main.kizu -- -seeds 10 -per 1000000`
-のように `--` の後に `-model` / `-out` / `-samples` / `-seeds` / `-per` / `-modes` を取ります。
+生成器は `kizu run scripts/ownership-mbt/main.kizu -- -seeds 10 -per 1000000`(`kizu` は
+`just stage1` で build したもの)のように `--` の後に `-model` / `-out` / `-samples` / `-seeds` / `-per` / `-modes` を取ります。
 
-`quint`(0.33、rust backend)が PATH に要ります。Java は要りません。`go test` と
-`kizu test compiler` は Quint を動かさず、checked-in の fixture だけを読みます。モデルを
-変えたら `just spec-ownership` で fixture を作り直してください。
+`quint`(0.33、rust backend)が PATH に要ります。Java は要りません。`kizu test compiler`
+は Quint を動かさず、checked-in の fixture だけを読みます。モデルを変えたら
+`just spec-ownership` で fixture を作り直してください。
 
 ## 残課題
 

@@ -1,8 +1,7 @@
 # std の境界
 
 std は Kizu で書かれた package です(`lib/kizu/std/src/`)。compiler は利用者の
-package と同じ loader でそれを読み、`internal/stdlib` が持つのは「ツリーがどこに
-あるか」だけです。
+package と同じ loader でそれを読みます。
 
 この文書が持つのは 2 つだけです —— **どこまでが trusted primitive か**と、
 **新しい std API を足すときに何が要るか**。各 module の API は
@@ -12,7 +11,7 @@ package と同じ loader でそれを読み、`internal/stdlib` が持つのは�
 
 public な `std::...` は Kizu source で書きます。Kizu で書けないもの —— OS、process、
 file、allocator、backend の境界 —— だけが `std::internal::builtin::*` の primitive に
-なり、Go 実装(および `compiler/` の対応する module)が提供します。primitive は
+なり、compiler(`compiler/src/internal/stdprim` ほか)が提供します。primitive は
 std からしか届かず、user code からの直接呼び出しは拒否されます。
 
 | 領域 | trusted primitive | 上に載る Kizu API |
@@ -32,7 +31,7 @@ std からしか届かず、user code からの直接呼び出しは拒否され
   capability の可視性は Kizu 側の wrapper が持つ。
 - Kizu で書けるようになった primitive は消す。消すときは example と conformance で
   挙動が変わらないことを見せる。
-- Go 側の分岐は `std::internal::builtin::*` の名前を使う。public な `std::...` の
+- compiler 側の分岐は `std::internal::builtin::*` の名前を使う。public な `std::...` の
   名前で分岐しない。
 - hidden な global allocator / global runtime / 暗黙の blocking I/O / 無言の
   fallback を持たない(`docs/principles.md` 原理 4)。

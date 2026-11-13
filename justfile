@@ -1,19 +1,17 @@
 set shell := ["sh", "-eu", "-c"]
 
+# The compiler the recipes below run: compiler/ built by the pinned seed
+# (scripts/bootstrap.sh). It has no library tree next to it, so it reads the
+# checkout's.
+kizu := "target/seed/stage1/bin/kizu"
+export KIZU_LIB_DIR := justfile_directory() / "lib/kizu"
+
 default:
     @just --list
 
-# Format Go sources.
-fmt:
-    gofmt -w cmd internal
-
-# Run all Go tests.
-test:
-    go test ./...
-
-# Run static analysis.
-lint:
-    golangci-lint run
+# Build compiler/ with the pinned seed into target/seed/stage1/bin/kizu.
+stage1:
+    scripts/bootstrap.sh --stage1-only
 
 # Run the full commit gate.
 check:
@@ -40,92 +38,92 @@ hooks:
     pre-commit install
 
 # Parse a Kizu file.
-parse file="examples/hello.kizu":
-    go run ./cmd/kizu parse {{file}}
+parse file="examples/hello.kizu": stage1
+    {{kizu}} parse {{file}}
 
 # Type, ownership, and borrow check a Kizu file.
-kizu-check file="examples/hello.kizu":
-    go run ./cmd/kizu check {{file}}
+kizu-check file="examples/hello.kizu": stage1
+    {{kizu}} check {{file}}
 
 # Print stable formatted Kizu source.
-kizu-fmt file="examples/hello.kizu":
-    go run ./cmd/kizu fmt {{file}}
+kizu-fmt file="examples/hello.kizu": stage1
+    {{kizu}} fmt {{file}}
 
 # Run a Kizu file through the native build path.
-run file="examples/hello.kizu":
-    go run ./cmd/kizu run {{file}}
+run file="examples/hello.kizu": stage1
+    {{kizu}} run {{file}}
 
 # Run a Kizu file with one prototype process argument.
-run-arg file="examples/std_io_process.kizu" arg="input.kizu":
-    KIZU_TEST_ENV=env-ok go run ./cmd/kizu run {{file}} -- {{arg}}
+run-arg file="examples/std_io_process.kizu" arg="input.kizu": stage1
+    KIZU_TEST_ENV=env-ok {{kizu}} run {{file}} -- {{arg}}
 
 # Run a single Kizu test source.
-kizu-test file="examples/std_testing.kizu":
-    go run ./cmd/kizu test {{file}}
+kizu-test file="examples/std_testing.kizu": stage1
+    {{kizu}} test {{file}}
 
 # Dump typed SSA IR for a Kizu file.
-ir file="examples/hello.kizu":
-    go run ./cmd/kizu ir {{file}}
+ir file="examples/hello.kizu": stage1
+    {{kizu}} ir {{file}}
 
 # Dump optimized typed SSA IR for a Kizu file.
-ir-opt file="examples/hello.kizu":
-    go run ./cmd/kizu ir --opt {{file}}
+ir-opt file="examples/hello.kizu": stage1
+    {{kizu}} ir --opt {{file}}
 
 # Emit LLVM IR for a Kizu file.
-llvm file="examples/hello.kizu":
-    go run ./cmd/kizu build --emit-llvm {{file}}
+llvm file="examples/hello.kizu": stage1
+    {{kizu}} build --emit-llvm {{file}}
 
 # Emit LLVM IR from optimized typed SSA IR.
-llvm-opt file="examples/hello.kizu":
-    go run ./cmd/kizu build --emit-llvm --opt {{file}}
+llvm-opt file="examples/hello.kizu": stage1
+    {{kizu}} build --emit-llvm --opt {{file}}
 
 # Emit WASI WebAssembly text for a Kizu file.
-wasm file="examples/hello.kizu":
-    go run ./cmd/kizu build --target wasm32-wasi {{file}}
+wasm file="examples/hello.kizu": stage1
+    {{kizu}} build --target wasm32-wasi {{file}}
 
 # Emit WASI WebAssembly text from optimized typed SSA IR.
-wasm-opt file="examples/hello.kizu":
-    go run ./cmd/kizu build --target wasm32-wasi --opt {{file}}
+wasm-opt file="examples/hello.kizu": stage1
+    {{kizu}} build --target wasm32-wasi --opt {{file}}
 
 # Build a native executable through LLVM IR and clang.
-native file="examples/hello.kizu":
-    go run ./cmd/kizu build --target native --libc on --runtime hosted --linker clang {{file}}
+native file="examples/hello.kizu": stage1
+    {{kizu}} build --target native --libc on --runtime hosted --linker clang {{file}}
 
 # Build and run the default native hello artifact.
-native-smoke:
-    go run ./cmd/kizu build --target native --libc on --runtime hosted --linker clang examples/hello.kizu
+native-smoke: stage1
+    {{kizu}} build --target native --libc on --runtime hosted --linker clang examples/hello.kizu
     ./target/native/hello
 
 # Build and run Phase 2 examples with wasmtime.
 wasi-smoke:
     scripts/run-wasi-smoke.sh
 
-# Check and test the Kizu compiler under compiler/ the way pre-commit does.
+# The gate CI and pre-push run: the pinned seed and the stage1 it builds check
+# and test compiler/, then the harness and the self-rebuild (scripts/bootstrap.sh).
 selfhost:
-    go run ./scripts/gen-selfhost-version
-    go run ./cmd/kizu check compiler
-    go run ./cmd/kizu test compiler
+    scripts/bootstrap.sh
+
+# Run every conformance case in examples/, tests/behavior and docs/tutorial with
+# stage1. `just selfhost` runs only the behavior part of them.
+conformance: stage1
+    {{kizu}} run compiler/tests/harness -- conformance {{kizu}}
+
+# The form the commit hook runs: the seed and stage1 only check compiler/.
+selfhost-check:
+    scripts/bootstrap.sh --check-only
 
 # Show local Kizu build cache status.
-cache-status:
-    go run ./cmd/kizu cache status
+cache-status: stage1
+    {{kizu}} cache status
 
 # Prune the local Kizu build cache.
-cache-prune:
-    go run ./cmd/kizu cache prune
-
-# Report which backends accept each conformance example.
-backend-matrix:
-    go run ./scripts/backend-matrix
-
-# Regenerate the deflate / gzip / zlib streams the std::compress tests read.
-compress-fixtures:
-    go run ./scripts/gen-compress-fixtures
+cache-prune: stage1
+    {{kizu}} cache prune
 
 # Regenerate the tables of the TLS specification from std::tls, then check them (spec/README.md).
-spec-table: && spec-verify
-    go run ./cmd/kizu run spec/tls_machine.kizu | go run ./cmd/kizu run scripts/machine-lean/main.kizu -- spec/Tls.lean client server
-    go run ./cmd/kizu run spec/tls_machine.kizu | go run ./cmd/kizu run scripts/machine-quint/main.kizu -- spec/tls_client.qnt spec/tls_server.qnt
+spec-table: stage1 && spec-verify
+    {{kizu}} run spec/tls_machine.kizu | {{kizu}} run scripts/machine-lean/main.kizu -- spec/Tls.lean client server
+    {{kizu}} run spec/tls_machine.kizu | {{kizu}} run scripts/machine-quint/main.kizu -- spec/tls_client.qnt spec/tls_server.qnt
 
 # Check every reachable state of the Quint machines with TLC (spec/README.md).
 spec-verify:
@@ -138,7 +136,7 @@ spec-quint:
 # Test the internal/ir models, search them for a broken property, and resample the
 # programs compiler/ and internal/ir replay against the lowerer and the optimizer
 # (spec/ir/README.md).
-spec-ir:
+spec-ir: stage1
     cd spec/ir && quint test slots_test.qnt && quint test bounds_test.qnt && quint test defer_test.qnt
     cd spec/ir && quint run slots.qnt --backend rust --seed 0x1 --max-samples 2000 --max-steps 20 \
         --invariant soundness
@@ -146,24 +144,24 @@ spec-ir:
         --invariant soundness
     cd spec/ir && quint run defer.qnt --backend rust --seed 0x1 --max-samples 1000 --max-steps 20 \
         --invariant soundness
-    go run ./cmd/kizu run scripts/ir-mbt/main.kizu
+    {{kizu}} run scripts/ir-mbt/main.kizu
 # Test the ownership model, search it for an unsound acceptance, and resample the
 # programs compiler/ and internal/ownership replay against their checkers
 # (spec/ownership/README.md).
-spec-ownership:
+spec-ownership: stage1
     cd spec/ownership && quint test ownership_test.qnt
     cd spec/ownership && for init in initGuided initOneMistake initFree initTargeted; do \
         quint run ownership.qnt --init $init --backend rust --seed 0x1 --max-samples 3000 \
             --max-steps 25 --invariant soundness --witnesses reachedAccept reachedAcceptNested \
             reachedBorrowed reachedLoopConsume reachedDoubleDefer reachedOnlyBorrowed \
             reachedOnlyDoubleDefer reachedOnlyLoopConsume || exit 1; done
-    go run ./cmd/kizu run scripts/ownership-mbt/main.kizu
+    {{kizu}} run scripts/ownership-mbt/main.kizu
 
 # Test the unsafe marker model, search it for an unsound acceptance, require each
 # mutant (one rule broken) to fail the search, and resample the programs
 # compiler/ and internal/unsafecap replay against their checkers
 # (spec/unsafecap/README.md).
-spec-unsafecap:
+spec-unsafecap: stage1
     cd spec/unsafecap && quint test unsafecap_test.qnt
     cd spec/unsafecap && for init in initGuided initOneMistake initFree; do \
         quint run unsafecap.qnt --main spec --init $init --backend rust --seed 0x1 --max-samples 2000 \
@@ -174,13 +172,13 @@ spec-unsafecap:
         if quint run unsafecap.qnt --main $mutant --init initFree --backend rust --seed 0x2 \
             --max-samples 3000 --max-steps 12 --invariant soundness > /dev/null; then \
             echo "$mutant: no counterexample"; exit 1; fi; done
-    go run ./cmd/kizu run scripts/unsafecap-mbt/main.kizu
+    {{kizu}} run scripts/unsafecap-mbt/main.kizu
 
 # Test the C header import model, search it for an unsound acceptance, require
 # the importer as it is and each mutant (one rule broken) to fail the search, and
 # resample the programs compiler/ and internal/cimport replay against their
 # importers and checkers (spec/cimport/README.md).
-spec-cimport:
+spec-cimport: stage1
     cd spec/cimport && quint test cimport_test.qnt --main cimport_test --backend typescript
     cd spec/cimport && for init in initGuided initOneMistake initFree initReadonly; do \
         quint run cimport.qnt --main spec --init $init --backend typescript --seed 0x1 --max-samples 3000 \
@@ -192,7 +190,7 @@ spec-cimport:
         if quint run cimport.qnt --main $mutant --init initFree --backend typescript --seed 0x2 \
             --max-samples 3000 --max-steps 1 --invariant soundness > /dev/null; then \
             echo "$mutant: no counterexample"; exit 1; fi; done
-    go run ./cmd/kizu run scripts/cimport-mbt/main.kizu
+    {{kizu}} run scripts/cimport-mbt/main.kizu
 
 # Regenerate the traces from the Lean specifications (spec/README.md).
 spec-trace:
@@ -215,14 +213,14 @@ perf-cache-isolated:
     KIZU_CACHE_DIR="$tmp/cache" scripts/measure-cache.sh
 
 # Exercise opt-in IR optimization through IR and build commands.
-opt-smoke file="examples/arithmetic.kizu":
-    go run ./cmd/kizu ir --opt {{file}} >/dev/null
-    go run ./cmd/kizu build --emit-llvm --opt {{file}} >/dev/null
-    go run ./cmd/kizu build --target wasm32-wasi --opt {{file}} >/dev/null
-    go run ./cmd/kizu build --target native --opt --libc on --runtime hosted --linker clang {{file}} >/dev/null
+opt-smoke file="examples/arithmetic.kizu": stage1
+    {{kizu}} ir --opt {{file}} >/dev/null
+    {{kizu}} build --emit-llvm --opt {{file}} >/dev/null
+    {{kizu}} build --target wasm32-wasi --opt {{file}} >/dev/null
+    {{kizu}} build --target native --opt --libc on --runtime hosted --linker clang {{file}} >/dev/null
 
 # Run the everyday local validation sequence.
-verify: fmt test lint
+verify: check selfhost
 
 # Cut a release: tag main and push the tag. CI builds and attaches binaries.
 release version:

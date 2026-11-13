@@ -74,13 +74,11 @@ raw pointer runtime operations
 option<T> runtime helper
 full stdlib
 kizu lint
-self-hosting compiler
 async fn / await syntax
 thread handle / channel / mutex / atomic API
 Rust 同等以上の runtime performance guarantee
 ```
 
-self-host は Go の構造に沿って `compiler/` へ移植中で、shipping 実装は Go 一本です。
 thread は `std::thread::Pool` の 1 つの形だけを持ちます(§15.3、ADR-0025)。
 
 ## 1. 目標
@@ -227,9 +225,9 @@ std::arena::Handle<T>
 
 ## 5. 実装方針
 
-利用者が受け取る実装は 1 つ、`compiler/` の Kizu 製 compiler です。Go 実装
-(`internal/` + `cmd/kizu`)はそれを build する seed であり、両実装の出力を
-突き合わせる oracle でもあります(ADR-0130)。利用者が通る経路を 2 つにはしません。
+利用者が受け取る実装は 1 つ、`compiler/` の Kizu 製 compiler です。それを build する
+のは pin した前のリリース(種)です(`docs/bootstrap.md`)。利用者が通る経路を 2 つには
+しません。
 
 `run` と `test` は生成した実行ファイルを走らせます。経路は 1 本で、interpreter は
 ありません(ADR-0083)。native code は LLVM IR backend が生成します。
@@ -1133,6 +1131,36 @@ let label = match color {
     Blue => "blue",
 };
 ```
+
+### 6.13 builtin 呼び出し
+
+式の位置の `@name(...)` は builtin 呼び出しです。名前は compiler が予約していて、
+program が宣言することはできません。compiler が知らない名前は compile error です。
+builtin は `@embed_file` だけです。
+
+```text
+@embed_file(path) -> []u8
+```
+
+`@embed_file` は file の中身を compile 時に program へ埋め込みます。
+
+```kizu
+fn usage() -> []u8 {
+    return @embed_file("text/help.txt");
+}
+```
+
+* 引数は文字列 literal 1 つだけです。変数や comptime の式は書けません。
+* path は呼び出しのある package の `kizu.toml` がある directory からの相対 path
+  です。`/` で始まる path と、package に属さない file での呼び出しは compile error
+  です。
+* 値は file の bytes そのものの `[]u8` 定数で、文字列 literal と同じに扱います。
+  escape も文字コードも解釈せず、実行時に file を読み直しません。
+* file が無い、または読めない場合は compile error です。
+* 同じ中身の定数は実行ファイルの中で 1 つにまとまるので、同じ path を何度
+  埋め込んでもデータは 1 つです。
+* build cache は埋め込んだ file の中身を追跡します(§17)。file を書き換えると、
+  source が同じでも build し直します。
 
 ## 7. 型
 
@@ -2907,7 +2935,7 @@ package 名は、その package の中では import なしに束縛されてい�
 `std` package の module なので、この file は `std::` で始まる完全パスをそのまま
 書けます。
 
-戻り値の型が完全パスなのは、`std::array::Array` が Go 実装の持つ型で、この file が
+戻り値の型が完全パスなのは、`std::array::Array` が compiler の持つ型で、この file が
 宣言したものではないからです。compiler が提供する storage type は完全パスでだけ
 名前を持ちます。自分の file が宣言した型は短い名前で書けます —— `std::string::String`
 は `string.kizu` の `pub struct String` なので、同じ file の中では `String { ... }`
@@ -4058,8 +4086,8 @@ native build は生成物の隣に `<output>.kizu-build.json` を書き、実際
 ABI、libc、runtime、emit mode、linker command を記録します。
 
 build cache key には、compiler version、manifest hash、resolved module graph hash、
-source hash、public interface hash、target、backend、optimization mode、stdlib hash
-を含めます。
+source hash、`@embed_file` が埋め込んだ file の中身、public interface hash、target、
+backend、optimization mode、stdlib hash を含めます。
 
 `kizu test` は top-level `test` block runner として実装済みです。
 `kizu lint` は未実装です。

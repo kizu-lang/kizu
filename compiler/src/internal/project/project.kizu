@@ -6,6 +6,7 @@ import compiler::internal::parser;
 import compiler::internal::source;
 import std::arena;
 import std::array;
+import std::fmt;
 import std::fs;
 import std::map;
 import std::mem;
@@ -39,6 +40,9 @@ pub struct Module {
 pub struct Graph {
     pub package_name: string::String,
     pub modules: array::Array<Module>,
+    /// Is the directory the manifest is in, what an `@embed_file` path is
+    /// relative to. A program outside any package has none: it is empty.
+    pub root: string::String,
 }
 
 /// Is one resolved graph or the reason it could not be resolved.
@@ -178,9 +182,12 @@ pub fn resolve_modules(
         }
     }
     try sort_modules(&var modules);
+    var root = try string::from_bytes(allocator, base_dir);
+    errdefer root.deinit(allocator);
     return GraphResult::Graph(Graph {
         package_name: try copy_string(allocator, &parsed.package_name),
-        modules: move modules
+        modules: move modules,
+        root: move root
     });
 }
 
@@ -562,7 +569,8 @@ pub fn (self: &var Loader) load_source(
     });
     let graph = Graph {
         package_name: string::new(self.allocator),
-        modules: move modules
+        modules: move modules,
+        root: string::new(self.allocator)
     };
     defer graph.deinit(self.allocator);
     try self.override_source(file, text);
@@ -653,7 +661,8 @@ fn (self: &var Loader) load_package(
         while files.at(file_index) |file| {
             file_index = file_index + 1;
             let file_bytes = file.as_bytes();
-            let outcome_1 = try self.parse_module_file(tree, file_bytes);
+            let root = graph.root.as_bytes();
+            let outcome_1 = try self.parse_module_file(tree, file_bytes, root);
             match outcome_1 {
                 Program(program) => {
                     errdefer program.deinit(allocator);
@@ -684,27 +693,32 @@ fn (self: &var Loader) load_package(
     return null;
 }
 
-/// Parses one module source file from an override or disk.
+/// Parses one module source file from an override or disk. `root` is the
+/// directory of the manifest the file's package has, empty for a file outside
+/// any package.
 fn (self: &var Loader) parse_module_file(
     tree: &var ast::Ast,
-    file: []u8
+    file: []u8,
+    root: []u8
 ) -> !LoadResult {
     let cleaned = try path::clean(self.allocator, file);
     defer cleaned.deinit(self.allocator);
     let cleaned_bytes = cleaned.as_bytes();
     if self.source_overrides.at(cleaned_bytes) |text| {
         let copied = try copy_string(self.allocator, text);
-        return self.parse_module_source(tree, file, move copied);
+        return self.parse_module_source(tree, file, move copied, root);
     }
     let text = try fs::read_file(self.io, self.allocator, file, mem::Limit::Unlimited);
-    return self.parse_module_source(tree, file, move text);
+    return self.parse_module_source(tree, file, move text, root);
 }
 
-/// Parses one graph module source string into the shared syntax graph.
+/// Parses one graph module source string into the shared syntax graph and
+/// fills in the files its `@embed_file` calls name.
 fn (self: &var Loader) parse_module_source(
     tree: &var ast::Ast,
     file: []u8,
-    text: string::String
+    text: string::String,
+    root: []u8
 ) -> !LoadResult {
     errdefer text.deinit(self.allocator);
     let path_copy = try string::from_bytes(self.allocator, file);
@@ -721,9 +735,85 @@ fn (self: &var Loader) parse_module_source(
             program.deinit(self.allocator);
             return LoadResult::Error(move copied);
         }
+        var embed_index = 0;
+        while source_parser.embeds.at(embed_index) |embed| {
+            embed_index = embed_index + 1;
+            if try self.embed_file(tree, embed.*, root) |failed| {
+                program.deinit(self.allocator);
+                return LoadResult::Error(move failed);
+            }
+        }
         return LoadResult::Program(move program);
     }
     // The map just received the file, so the lookup cannot miss; the empty
     // program is only the shape the optional forces here.
     return LoadResult::Program(ast::new_program(self.allocator));
+}
+
+/// Reads the file an `@embed_file` call names into the literal the call
+/// stands for. The path is relative to the package's kizu.toml, so the bytes
+/// do not depend on the directory the compiler is run from, and a file outside
+/// any package has nothing to resolve it against. The text is read on every
+/// load: what the program holds is what the file holds now, and the build
+/// cache, keyed by the code the literal ends up in, follows it.
+fn (self: &Loader) embed_file(
+    tree: &var ast::Ast,
+    expression: ast::Expression,
+    root: []u8
+) -> !?diagnostic::Diagnostic {
+    let embed = embedded_file(tree, expression) orelse return null;
+    let span = tree.spans.at(embed.span).*;
+    // A copy, because filling the literal in adds to the texts the path is in.
+    let path_text = try copy_string(self.allocator, tree.texts.at(embed.path.node));
+    defer path_text.deinit(self.allocator);
+    let path_bytes = path_text.as_bytes();
+    if mem::len(root) == 0 {
+        return try self.embed_error(path_bytes, span,
+            "module error: @embed_file(", ") needs a package: the path is relative to its kizu.toml");
+    }
+    if mem::len(path_bytes) > 0 and path_bytes[0] == cast<u8>(47) {
+        return try self.embed_error(path_bytes, span,
+            "module error: @embed_file path ", " is absolute; write it relative to kizu.toml");
+    }
+    let joined = try path::join(self.allocator, root, path_bytes);
+    defer joined.deinit(self.allocator);
+    let joined_bytes = joined.as_bytes();
+    if fs::read_file(self.io, self.allocator, joined_bytes, mem::Limit::Unlimited) |data| {
+        let value = try tree.add_text(move data);
+        if tree.expressions.at_mut(expression.node) |node| {
+            node.* = ast::ExpressionNode::String(ast::StringExpr { value: value, embed: embed });
+        }
+        return null;
+    } else |err| {
+        match err {
+            _ => return try self.embed_error(path_bytes, span,
+                "module error: @embed_file cannot read ", ""),
+        }
+    }
+}
+
+/// Returns the file an expression the parser listed as an `@embed_file` call
+/// names.
+fn embedded_file(tree: &ast::Ast, expression: ast::Expression) -> ?ast::EmbedFile {
+    match tree.expressions.at(expression.node) {
+        String(value) => return value.embed,
+        _ => return null,
+    }
+}
+
+/// Builds the located `<prefix>"<path>"<suffix>` diagnostic for an
+/// `@embed_file` the loader could not fill in.
+fn (self: &Loader) embed_error(
+    path_bytes: []u8,
+    span: ast::Span,
+    prefix: []u8,
+    suffix: []u8
+) -> !?diagnostic::Diagnostic {
+    var text = string::new(self.allocator);
+    defer text.deinit(self.allocator);
+    try text.append_bytes(self.allocator, prefix);
+    try fmt::append_bytes_literal(self.allocator, &var text, path_bytes);
+    try text.append_bytes(self.allocator, suffix);
+    let bytes = text.as_bytes();
+    return try diagnostic::from_text(self.allocator, diagnostic::Severity::Error, span, bytes);
 }

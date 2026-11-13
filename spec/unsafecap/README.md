@@ -10,14 +10,12 @@ spec/unsafecap/unsafecap_test.qnt   既知の形に対するモデルの判定(q
 scripts/unsafecap-mbt/main.kizu     quint run の trace を層化して fixture に書く(Kizu)
 compiler/tests/mbt/unsafecap.json   その fixture(checked in)
 compiler/src/unsafecap_mbt_test.kizu  fixture を 2 file の Kizu module にして compiler/ の checker に当て、モデルの予測と比べる
-internal/unsafecap/mbt_test.go      同じ fixture を Go 実装の checker に当てる
 ```
 
 ## 範囲
 
-`internal/unsafecap` 自体は操作の種類名と help 文の表です。判定は `internal/types`
-(`unsafe.go` と `checker.go` の `underMark` / `requireUnsafeCapabilityAt` /
-`requireUnsafeStructInvariant`)と `compiler/src/internal/types/body_unsafe.kizu` 他に
+`internal/unsafecap`(`compiler/src/internal/unsafecap/`)自体は操作の種類名と help 文の
+表です。判定は `internal/types`(`compiler/src/internal/types/body_unsafe.kizu` 他)に
 あります。モデルが扱うのはその判定の入力全体で、SPEC §12 から次を洗い出しました。
 
 | 入力 | SPEC §12 の規則 | モデル |
@@ -45,7 +43,7 @@ internal/unsafecap/mbt_test.go      同じ fixture を Go 実装の checker に�
   marker の状態は関数本体の検査に入るたびに空から始まる(`checkBlock(.., nil)`)ので
   本体の種類で変わらず、関数 `g` / `f` の 2 つで代表させました。
 * **`unsafe` の中でも残る型 / move / borrow の検査**(§12 末尾)。ownership 側のモデルの
-  範囲で、`internal/ownership` の `TestCheckUnsafeDoesNotDisableMoveAndBorrowRules` が
+  範囲で、`examples/negative/unsafe_moved_value.kizu` と `unsafe_borrow_escape.kizu` が
   押さえています。
 
 ## モデルの形
@@ -112,29 +110,29 @@ checker 層が受理したプログラムについて、義務層が次を守る
 うち最も珍しいもの(`calls-g` / `fnptr` / `block` / `away` / `unsafe-fn` /
 `covering-op` / `sum` / `plain`)」の bucket に分け、bucket ごとに 2 本残します。
 
-replay は 2 つあり、同じ fixture を読みます。`compiler/src/unsafecap_mbt_test.kizu` は
-`compiler/` の checker を、`internal/unsafecap/mbt_test.go` は Go 実装の checker を
-見ます。どちらも各プログラムを `home.kizu`(prelude と `unsafe struct Buf`、Home の関数)と
+replay は `compiler/src/unsafecap_mbt_test.kizu` で、`compiler/` の checker を見ます。
+各プログラムを `home.kizu`(prelude と `unsafe struct Buf`、Home の関数)と
 `away.kizu`(Away の関数)の 2 file の module にし、`kizu check` と同じ type check →
 ownership check を in-process で走らせます。missing marker は help 行
-(`unsafecap.Hint` / `unsafecap::hint`)で種類まで分類します。test は次のとおりで、
-`compiler/` 側にも同じものがあります(test 名は文で書いています)。
+(`unsafecap::hint`)で種類まで分類します。test は次のとおりです。
 
-* `TestUnsafeModelKnownShapes`: `unsafecap_test.qnt` と同じ既知形 53 本。11 種すべての
-  無印の操作が、その種類を名指す missing marker として拒否されること(`許可なしの
-  unsafe 操作は必ず拒否として検出される`)を含みます。さらに各形を判定を反転させて
+* `unsafe model harness agrees on the known shapes and notices each flipped verdict`:
+  `unsafecap_test.qnt` と同じ既知形 53 本。11 種すべての無印の操作が、その種類を名指す
+  missing marker として拒否されること(`許可なしの unsafe 操作は必ず拒否として
+  検出される`)を含みます。さらに各形を判定を反転させて
   もう一度当て、必ず食い違いとして出ることを確かめます。どの形も同じ理由で落ちる
   renderer や、何にでも一致する分類器はここで落ちます。
-* `TestUnsafeModelKnownDivergences`: findings の F3 の形を、checker の今の答え
-  ごと固定します。checker が直ってモデルと一致すると落ち、既知形へ移すよう促します。
-* `TestUnsafeModelKnownRawBorrowDiagnostic`: findings の F2 を固定します。F2 の文面は
-  `mbtClassify` が `Missing:ptr_deref` に読み替えているので、他の test では見えません。
+* `unsafe model known divergences still diverge the recorded way`: findings の F3 の形を、
+  checker の今の答えごと固定します。checker が直ってモデルと一致すると落ち、既知形へ移すよう促します。
+* `unsafe model known raw borrow diagnostic names the form`: findings の F2 を固定します。
+  F2 の文面は `uc_classify` が `Missing:ptr_deref` に読み替えているので、他の test では
+  見えません。
   checker が missing marker を報告するようになると落ち、読み替えを消すよう促します。
-* `TestUnsafeModelCoversEveryKind`: 既知形が 11 種すべての missing marker を含むこと。
-* `TestUnsafeModelTraces`: fixture の再生。
+* `unsafe model known shapes cover every operation kind`: 既知形が 11 種すべての
+  missing marker を含むこと。
+* `unsafe marker checker agrees with the sampled model programs`: fixture の再生。
 
-`KIZU_MBT_FIXTURE=<file>` で別の fixture に当てられます(両方)。Go 側は
-`KIZU_MBT_BIN=<kizu>` で外部の binary にも当てられます。
+`KIZU_MBT_FIXTURE=<file>` で別の fixture に当てられます。
 
 ### 規模と結果(2026-11-08)
 
@@ -152,11 +150,11 @@ ownership check を in-process で走らせます。missing marker は help 行
   76 本が「モデルは拒否、checker は受理」、438 本が marker を書いた形の拒否 / 未使用。
   F1 以外に checker が許してしまう食い違いは無い。
 * checker への変異注入(手元で 1 か所ずつ書き換えて戻す、checked-in ではない)24 種が
-  すべて `TestUnsafeModelTraces` 単独で落ちる。同じ 24 種を `compiler/src/internal/types`
+  すべて Go 実装の fixture の再生単独で落ちた。同じ 24 種を `compiler/src/internal/types`
   に入れても、`compiler/` 側の fixture の再生だけですべて落ちる(2026-11-11)。内訳は
   findings の「変異による確認」。
 * モデル側の変異(2026-11-11): mutant module から `-main <mutant> -invariant none` で
-  fixture を作って両方の replay に当てると、食い違いの本数は Go と `compiler/` で同じ。
+  fixture を作って Go と `compiler/` の replay に当てると、食い違いの本数は両者で同じだった。
 
   | fixture の元 | 本数 | 食い違い |
   | --- | --- | --- |
@@ -173,17 +171,15 @@ ownership check を in-process で走らせます。missing marker は help 行
 ```sh
 just spec-unsafecap                                   # quint test、健全性と mutant の探索、fixture の再生成
 just selfhost                                         # compiler/ の checker に当てる(kizu test compiler に含まれる)
-go test ./internal/unsafecap -run TestUnsafeModel     # Go 実装の checker に当てる(go test に含まれる)
-KIZU_MBT_BIN=path/to/kizu go test ./internal/unsafecap -run TestUnsafeModel
 ```
 
-生成器は `go run ./cmd/kizu run scripts/unsafecap-mbt/main.kizu -- -main mutantInherit -invariant none`
-のように `--` の後に `-model` / `-main` / `-out` / `-samples` / `-seeds` / `-per` /
-`-invariant`(`none` で検査なし)を取ります。
+生成器は `kizu run scripts/unsafecap-mbt/main.kizu -- -main mutantInherit -invariant none`
+(`kizu` は `just stage1` で build したもの)のように `--` の後に `-model` / `-main` /
+`-out` / `-samples` / `-seeds` / `-per` / `-invariant`(`none` で検査なし)を取ります。
 
-`quint`(0.33、rust backend)が PATH に要ります。Java は要りません。`go test` と
-`kizu test compiler` は Quint を動かさず、checked-in の fixture だけを読みます。モデルを
-変えたら `just spec-unsafecap` で fixture を作り直してください(2 分ほど)。
+`quint`(0.33、rust backend)が PATH に要ります。Java は要りません。`kizu test compiler`
+は Quint を動かさず、checked-in の fixture だけを読みます。モデルを変えたら
+`just spec-unsafecap` で fixture を作り直してください(2 分ほど)。
 
 ## 残課題
 

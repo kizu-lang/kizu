@@ -204,7 +204,11 @@ fn (self: &var Checker) type_apply_target(
             return move failed;
         }
         out.name = name;
-        out.type_arg = try self.instantiate_type_arg_text(raw);
+        if apply.resolved {
+            out.type_arg = raw;
+        } else {
+            out.type_arg = try self.instantiate_type_arg_text(raw);
+        }
         return null;
     }
     let callee = try self.names.intern_expression(tree, apply.callee);
@@ -240,7 +244,9 @@ fn (self: &var Checker) check_type_apply_call_expr(
     if self.names.is(name, "ptr_from_int") or self.names.is(name, "int_from_ptr") {
         return self.check_pointer_int_cast_builtin(tree, env, type_arg, args, out);
     }
-    if try self.check_generic_user_type_apply(tree, env, name, type_arg, args, sanctioned, &var handled, out) |failed| {
+    if try self.check_generic_user_type_apply(
+        tree, env, name, type_arg, apply.resolved, args, sanctioned, &var handled, out
+    ) |failed| {
         return move failed;
     }
     if handled {
@@ -1139,6 +1145,7 @@ fn (self: &var Checker) check_generic_user_type_apply(
     env: ScopeHandle,
     name: Name,
     type_arg: Name,
+    resolved: bool,
     args: ast::ExpressionList,
     sanctioned: bool,
     handled: &var bool,
@@ -1174,7 +1181,7 @@ fn (self: &var Checker) check_generic_user_type_apply(
         subst.deinit(self.allocator);
         return move failed;
     }
-    let restore = try self.bind_generic_call_fields(tree, function, type_arg);
+    let restore = try self.bind_generic_call_fields(tree, function, type_arg, resolved);
     let restore_functions = try self.bind_generic_call_functions(function, type_arg);
     if try self.check_generic_instantiation(tree, function, move subst, &values) |failed| {
         self.function_bindings.restore(restore_functions);
@@ -1578,10 +1585,13 @@ fn (self: &Checker) bind_subst_param(out: &var Subst, param: Name, replacement: 
 /// the other compile-time values: the body reads it through the `std::meta`
 /// forms written against it, so each bound field is its own instance. The
 /// result is the binding to restore once the instantiation has been checked.
+/// A resolved list (ast::TypeApplyExpr) names a field of its owner, never a
+/// capture.
 fn (self: &var Checker) bind_generic_call_fields(
     tree: &ast::Ast,
     function: FunctionHandle,
-    type_arg: Name
+    type_arg: Name,
+    resolved: bool
 ) -> !?arena::Handle<MetaBinding> {
     let previous = self.meta_fields.current;
     let static_count = self.static_param_count(function);
@@ -1608,10 +1618,12 @@ fn (self: &var Checker) bind_generic_call_fields(
         if !self.names.is(param.type_name, "Field") {
             continue;
         }
-        if self.bound_meta_field(arg) |bound| {
-            try names.append(self.allocator, param.name);
-            try fields.append(self.allocator, bound);
-            continue;
+        if !resolved {
+            if self.bound_meta_field(arg) |bound| {
+                try names.append(self.allocator, param.name);
+                try fields.append(self.allocator, bound);
+                continue;
+            }
         }
         var owned = array::new<MetaField>(self.allocator);
         defer owned.deinit(self.allocator);

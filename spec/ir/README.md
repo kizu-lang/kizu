@@ -1,20 +1,18 @@
 # internal/ir の安全関連モデル
 
-`internal/ir` のうち安全性に効く 3 つの判断を Quint で書いたモデルと、モデルから
-作ったプログラムを lowerer / optimizer に当てるモデルベーステストです。構成は
-ownership checker の検証(`spec/ownership/`)に揃えています。
+`internal/ir`(`compiler/src/internal/ir/`)のうち安全性に効く 3 つの判断を Quint で
+書いたモデルと、モデルから作ったプログラムを lowerer / optimizer に当てるモデルベース
+テストです。構成は ownership checker の検証(`spec/ownership/`)に揃えています。
 
 ```
-spec/ir/slots.qnt, slots_test.qnt    local に storage を与える判定(slots.go)
-spec/ir/bounds.qnt, bounds_test.qnt  index check の挿入 / 省略(bounds.go)
-spec/ir/defer.qnt, defer_test.qnt    defer / errdefer の実行位置(defer.go, control.go)
+spec/ir/slots.qnt, slots_test.qnt    local に storage を与える判定(slots.kizu)
+spec/ir/bounds.qnt, bounds_test.qnt  index check の挿入 / 省略(bounds.kizu)
+spec/ir/defer.qnt, defer_test.qnt    defer / errdefer の実行位置(defer.kizu, control.kizu)
 scripts/ir-mbt/main.kizu             quint run の trace を層化して fixture に書く(Kizu)
 compiler/tests/mbt/ir_*.json         その fixture(checked in。slots / bounds / defer)
 compiler/src/ir_slots_mbt_test.kizu    slots: compiler/ で lower した IR の local.slot をモデルと比べる
-internal/ir/slots_mbt_test.go          slots: 同じ fixture を Go 実装の lowerer に当てる
 compiler/src/ir_runtime_mbt_test.kizu  bounds / defer: compiler/ で wasm に build して実行し、出力をモデルと比べる
-internal/ir/runtime_mbt_test.go        bounds / defer: 同じ fixture を Go 実装で build して同じように比べる
-internal/ir/testdata/wasi_runs.mjs     両方の実行に使う node の WASI driver
+compiler/tests/mbt/wasi_runs.mjs       その実行に使う node の WASI driver
 ```
 
 ## 範囲と観測手段
@@ -31,15 +29,15 @@ internal/ir/testdata/wasi_runs.mjs     両方の実行に使う node の WASI dr
   main の各 local の初期値を一意な定数にして、`local.slot` の引数から local を引きます。
 * **bounds と defer は IR の形では決まりません**。消去が正しいかは「範囲外で止まるか」、
   cleanup が正しいかは「何がどの順で走るか」で、どちらも実行して初めて分かります。
-  この環境には clang が無く native では走らないので、Go 実装の wasm backend
-  (`ir.Optimize` → `wasm.LowerTarget`)まで in-process で通し、node の WASI で走らせます。
-  wasm 経路は `ReshapeForEngine` で `EliminateBoundsChecks` を 2 回走らせ、
-  `VersionLoopsForBounds` / `RotateLoops` も通るので、native より optimizer の面が広い
+  この環境には clang が無く native では走らないので、`compiler/` の wasm backend
+  (ir の `optimize` → `internal/wasm`)まで in-process で通し、node の WASI で走らせます。
+  wasm 経路は `reshape_for_engine` で `eliminate_bounds_checks` を 2 回走らせ、
+  `version_loops_for_bounds` / `rotate_loops` も通るので、native より optimizer の面が広い
   一方、**native 固有の LLVM 側の振る舞いは見えません**。backend のバグも食い違いとして
   出ますが、それは IR と区別できません(今回は出ていません)。
 * 入力は `process::arg` から 10 進で読みます。定数にすると `ConstantFold` / `Inline` が
   消去の判断より先に答えを出してしまうためです。
-* `verify.go` は optimizer の後に毎回走るので、IR の不整合は build 失敗として観測されます
+* `verify.kizu` は optimizer の後に毎回走るので、IR の不整合は build 失敗として観測されます
   (F1 はこれで見つかりました)。
 
 入れなかったもの: slots の field path・generic・`match` の payload binding、bounds の
@@ -54,7 +52,7 @@ retire される errdefer(ADR-0114、ownership の判定と一緒にモデル化
 型 A/B/C がそれぞれ同名のメソッド `poke` / `note` を、receiver と引数の受け方
 (`&` / `&var` / 値、`i64` / `&var i64`)を変えて宣言し、main が呼びます。
 `Rule` で判定の仕方を切り替えます: `Identity` は呼び出しが届く宣言(#1914 以降の
-slots.go)、`ByName` は同名の宣言すべて(#1914 以前)。
+slots.kizu)、`ByName` は同名の宣言すべて(#1914 以前)。
 
 | 性質 | 意味 |
 | --- | --- |
@@ -106,41 +104,33 @@ SPEC に書かれていないので、生成するプログラムは `let n = a.
 slots / defer は 2 本、bounds は 1 本残します(bounds は 1 本あたり 20 入力で、停止する
 入力ごとに wasm instance を作り直すので重い)。
 
-* slots の replay は 2 つあり、同じ fixture を読みます。`compiler/src/ir_slots_mbt_test.kizu` は
-  `compiler/` の lowerer を、`internal/ir/slots_mbt_test.go` は Go 実装の lowerer を見ます。
-  どちらも各プログラムを type check → ownership check → lower の順に in-process で通し、
+* slots の replay は `compiler/src/ir_slots_mbt_test.kizu` で、`compiler/` の lowerer を見ます。
+  各プログラムを type check → ownership check → lower の順に in-process で通し、
   main の `local.slot` の集合をモデルと比べます。既知形 4 本(`slots_test.qnt` と同じ)も
-  両方にあります。
-* bounds / defer の replay も 2 つあり、同じ fixture と同じ driver(`wasi_runs.mjs`)を使います。
-  `compiler/src/ir_runtime_mbt_test.kizu` は `compiler/` の front end・optimizer・wasm backend を、
-  `internal/ir/runtime_mbt_test.go` は Go 実装を in-process で通します。どちらも fixture 全体を
-  1 つの Kizu プログラム(case ごとに 1 関数)にして `build --target wasm32-wasi --emit wasm --opt`
-  と同じ手順で 1 回 build し、node の 1 プロセスで全入力を走らせます。1 instance が停止するまで
+  あります。
+* bounds / defer の replay は `compiler/src/ir_runtime_mbt_test.kizu` で、driver
+  (`compiler/tests/mbt/wasi_runs.mjs`)を使い、`compiler/` の front end・optimizer・wasm backend を
+  in-process で通します。fixture 全体を 1 つの Kizu プログラム(case ごとに 1 関数)にして
+  `build --target wasm32-wasi --emit wasm --opt` と同じ手順で 1 回 build し、node の 1 プロセスで全入力を走らせます。1 instance が停止するまで
   順に回し、停止した run だけ記録して次の instance で続けます。全体の build が落ちたら
   二分して build できない case を特定し、残りを走らせます。既知形(bounds 9 本 / defer 4 本)も
-  両方にあります。PATH に node が無ければ、Go 版は skip し、`compiler/` 版は stderr にそう書いて
-  何も確かめずに通ります(`std::testing` に skip が無いため)。
+  あります。PATH に node が無ければ、stderr にそう書いて何も確かめずに通ります
+  (`std::testing` に skip が無いため)。
 
-Go の test は `KIZU_MBT_BIN=<kizu>` で外部の binary(`compiler/` から build したもの)を
-使います(slots は `<bin> ir`、bounds / defer は `<bin> build --target wasm32-wasi --emit wasm --opt`)。
-`KIZU_MBT_FIXTURE=<file>` で別の fixture を当てます(`compiler/` 側の replay も読みます。
-`kizu test compiler` は slots / bounds / defer の replay を全部回すので、当てた fixture の
+`KIZU_MBT_FIXTURE=<file>` で別の fixture を当てます(`kizu test compiler` は
+slots / bounds / defer の replay を全部回すので、当てた fixture の
 モデル以外の replay はそれを読んで落ちます)。
 
 ### 結果(2026-11-08、基点 24b0b09a)
 
 * checked-in fixture: slots 283 本、bounds 252 本(4,980 回実行)、defer 187 本(2,992 回)。
   bounds では optimizer が case 関数のアクセスを 113 個答えています。
-  `go test ./internal/ir -run 'Model|KnownDivergences'` で約 25 秒(この環境。
-  `TestIRCorpus` 単独で 38 秒かかる環境です)。
 * 一回限りの広いスイープ(8 seed、bucket の上限なし): slots 772 本、bounds 413 本
   (8,160 回)、defer 589 本(9,424 回)。
 * **食い違い**: bounds で **F1**(wasm `--opt` で build が `ir verify error` になる。
   `findings/ir-safety-quint-findings.md`)。checked-in で 3 本、スイープで 5 本。
   実行結果の食い違い(範囲外で止まらない、cleanup の列が違う)は **0** です。
-  F1 は findings に記録したまま判断していないので、テストは同じ署名の build 失敗を
-  `knownDivergences` としてログに出し、`TestKnownDivergencesReproduce` が最小再現が
-  まだ再現することを確かめます(直ったらそこが落ちるので、一覧から消します)。
+  F1 は findings に記録したまま判断していません。
 
 ### ハーネスの自己検証
 
@@ -153,7 +143,7 @@ Go の test は `KIZU_MBT_BIN=<kizu>` で外部の binary(`compiler/` から bui
 S1 / S2 は同じ変異を `compiler/src/internal/ir/slots.kizu` に入れて
 `compiler/src/ir_slots_mbt_test.kizu` を回した本数も載せています(2026-11-11、同じ 283 本)。
 fixture の予測を 2 本書き換えたもの(受理 1 本に storage を足し、1 本から 1 つ消す)を
-`KIZU_MBT_FIXTURE` で当てると、両方の replay がちょうど 2 本食い違います。
+`KIZU_MBT_FIXTURE` で当てると、両方の replay がちょうど 2 本食い違いました。
 
 B1〜D4 は 2026-11-12(基点 91f7dc81、bounds 252 本 / defer 187 本)に同じ変異を
 `compiler/src/internal/ir/{bounds,control,defer}.kizu` と Go 実装の両方に入れて回した本数です。
@@ -161,7 +151,7 @@ B1〜D4 は 2026-11-12(基点 91f7dc81、bounds 252 本 / defer 187 本)に同�
 違うのは測った時点の差で、2026-11-08 の後に fixture の再生成(36ab65c4)と bounds.go の変更が
 入っています。同じ基点では Go 版も B1 は 25 本 + 既知形 2、B4 は 5 本 + 既知形 1 です。
 fixture の予測を bounds / defer それぞれ 2 本書き換えて `KIZU_MBT_FIXTURE` で当てても、
-両方の replay が同じ 2 本で食い違います。
+両方の replay が同じ 2 本で食い違いました。
 
 | 変異 | 内容 | 食い違うプログラム | `compiler/` |
 | --- | --- | --- | --- |
@@ -180,9 +170,7 @@ fixture の予測を bounds / defer それぞれ 2 本書き換えて `KIZU_MBT_
 
 ```sh
 just spec-ir                                   # quint test、性質の探索、fixture の再生成
-go test ./internal/ir -run 'Model|KnownDivergences'
-just selfhost                                  # compiler/ 側の slots / bounds / defer の replay を含む
-KIZU_MBT_BIN=path/to/kizu go test ./internal/ir -run 'Model'
+just selfhost                                  # slots / bounds / defer の replay を含む
 
 # 性質が空振りしていないこと(どれも violation が出るのが正しい)
 cd spec/ir
@@ -193,8 +181,9 @@ quint run defer.qnt  --init initErrDeferAlways  --backend rust --max-samples 200
 ```
 
 `quint`(0.33、rust backend)と、runtime の test には `node`(WASI preview1)が要ります。
-Java は要りません。`go test` は Quint を動かさず、checked-in の fixture だけを読みます。
-生成器は `go run ./cmd/kizu run scripts/ir-mbt/main.kizu -- -model bounds -samples 300`
+Java は要りません。`just selfhost` は Quint を動かさず、checked-in の fixture だけを読みます。
+生成器は `kizu run scripts/ir-mbt/main.kizu -- -model bounds -samples 300`(`kizu` は
+`just stage1` で build したもの)
 のように `--` の後に `-model`(`slots` / `bounds` / `defer` / `all`)/ `-out`(`-model` を
 1 つ選んだときだけ)/ `-samples` / `-seeds` / `-steps` / `-per` を取ります。
 

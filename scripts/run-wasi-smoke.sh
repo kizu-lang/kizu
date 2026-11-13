@@ -10,6 +10,13 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 export KIZU_CACHE_DIR="$tmp/cache"
 
+# compiler/ built by the pinned seed. It has no library tree next to it, so it
+# reads the checkout's.
+root="$(cd "$(dirname "$0")/.." && pwd)"
+"$root/scripts/bootstrap.sh" --stage1-only >&2
+kizu="$root/target/seed/stage1/bin/kizu"
+export KIZU_LIB_DIR="$root/lib/kizu"
+
 run_example() {
   name="$1"
   file="$2"
@@ -17,7 +24,7 @@ run_example() {
   preopen="${4-}"
   wat="$tmp/$name.wat"
 
-  go run ./cmd/kizu build --target wasm32-wasi "$file" > "$wat"
+  "$kizu" build --target wasm32-wasi "$file" > "$wat"
   if [ -n "$preopen" ]; then
     got="$(wasmtime run --dir "$preopen" "$wat")"
   else
@@ -39,7 +46,7 @@ run_failure() {
   stdout="$tmp/$name.stdout"
   stderr="$tmp/$name.stderr"
 
-  go run ./cmd/kizu build --target wasm32-wasi "$file" > "$wat"
+  "$kizu" build --target wasm32-wasi "$file" > "$wat"
   set +e
   if [ -n "$preopen" ]; then
     wasmtime run --dir "$preopen" "$wat" > "$stdout" 2> "$stderr"
@@ -66,7 +73,7 @@ run_status() {
   stdout="$tmp/$name.stdout"
   stderr="$tmp/$name.stderr"
 
-  go run ./cmd/kizu build --target wasm32-wasi "$file" > "$wat"
+  "$kizu" build --target wasm32-wasi "$file" > "$wat"
   set +e
   wasmtime run "$wat" "$@" > "$stdout" 2> "$stderr"
   actual_code="$?"
@@ -88,7 +95,7 @@ run_stderr() {
   stdout="$tmp/$name.stdout"
   stderr="$tmp/$name.stderr"
 
-  go run ./cmd/kizu build --target wasm32-wasi "$file" > "$wat"
+  "$kizu" build --target wasm32-wasi "$file" > "$wat"
   wasmtime run "$wat" > "$stdout" 2> "$stderr"
   got_stdout="$(cat "$stdout")"
   got_stderr="$(cat "$stderr")"
@@ -109,7 +116,7 @@ input.kizu
 env-ok
 7"
 
-  go run ./cmd/kizu build --target wasm32-wasi examples/std_io_process.kizu > "$wat"
+  "$kizu" build --target wasm32-wasi examples/std_io_process.kizu > "$wat"
   wasmtime run --env KIZU_TEST_ENV=env-ok "$wat" input.kizu > "$stdout" 2> "$stderr"
   got_stdout="$(cat "$stdout")"
   got_stderr="$(cat "$stderr")"

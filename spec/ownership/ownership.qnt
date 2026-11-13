@@ -6,8 +6,8 @@
 // invariants say that every program the model accepts runs without a use after
 // free, a double free, a leak or a write through a live shared borrow.
 //
-// The programs are rendered to Kizu by internal/ownership/mbt_test.go; the
-// fixed frame around them is
+// The programs are rendered to Kizu by compiler/src/ownership_mbt_test.kizu;
+// the fixed frame around them is
 //
 //   fn main() -> !void {
 //       let allocator = mem::page_allocator();

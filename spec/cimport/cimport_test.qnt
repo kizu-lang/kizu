@@ -4,7 +4,8 @@
 // importer as it is, and which property each divergence breaks.
 // `quint test cimport_test.qnt --main cimport_test`.
 //
-// internal/cimport/mbt_test.go puts the same shapes to the importer and the checker.
+// compiler/src/cimport_mbt_test.kizu puts the same shapes to the importer and
+// the checker.
 module cimport_test {
   import cimport(POL = { constCollapse: false, dropVolatile: false, retNonNull: false,
     unmarkedCall: false, signLoose: false }).* from "./cimport"
