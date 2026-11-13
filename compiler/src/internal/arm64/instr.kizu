@@ -2154,6 +2154,7 @@ fn (self: &var Selector) if_convert(module: &ir::Module, block_name: ir::Name, t
         return false;
     }
     // Select the sides here, where both run.
+    let sides_from = self.selected_count();
     var taken_from = block_name;
     var other_from = block_name;
     // A side runs only where its edge's test holds; its values are kept
@@ -2211,18 +2212,38 @@ fn (self: &var Selector) if_convert(module: &ir::Module, block_name: ir::Name, t
     } else {
         try self.op_imm(MOp::CmpImm, reg_none(), cond_held.reg, 0);
     }
+    // A phi taking `b op x` from one side and b from the other takes
+    // `b op (x or 0)` instead, with op one of `+ - ^ |`: the same value,
+    // but an accumulator's chain through the loop is one op, not the op
+    // and the select. The selects go first, while the flags hold, then the
+    // ops; the side's own `b op x` is left to die.
+    var updates = array::new<MInst>(self.allocator);
+    defer updates.deinit(self.allocator);
     let start = self.func.copies.len();
     index = 0;
     while picks_dst.get(index) |dst| {
+        let a = picks_a.get_or_panic(index);
+        let b = picks_b.get_or_panic(index);
         let picked = self.func.new_vreg();
-        var pick = blank(MOp::CSel);
-        pick.rd = picked;
-        pick.rn = picks_a.get_or_panic(index);
-        pick.rm = picks_b.get_or_panic(index);
-        pick.cond = cond;
-        try self.inst(pick);
+        if self.update_of(sides_from, a, b) |update| {
+            try self.conditional_update(update, b, cond, true, picked, &var updates);
+        } else if self.update_of(sides_from, b, a) |update| {
+            try self.conditional_update(update, a, cond, false, picked, &var updates);
+        } else {
+            var pick = blank(MOp::CSel);
+            pick.rd = picked;
+            pick.rn = a;
+            pick.rm = b;
+            pick.cond = cond;
+            try self.inst(pick);
+        }
         try self.func.copies.append(self.allocator, Copy { dst: dst, src: picked, imm: 0, src_imm: false });
         index = index + 1;
+    }
+    index = 0;
+    while updates.get(index) |update| {
+        index = index + 1;
+        try self.inst(update);
     }
     let count = self.func.copies.len() - start;
     if count > 0 {
@@ -2239,6 +2260,102 @@ fn (self: &var Selector) if_convert(module: &ir::Module, block_name: ir::Name, t
         try self.absorbed.set(side_other, true);
     }
     return true;
+}
+
+/// Returns how many instructions the current block holds.
+fn (self: &Selector) selected_count() -> i64 {
+    if self.func.blocks.at(self.current) |block| {
+        return block.insts.len();
+    }
+    return 0;
+}
+
+/// Finds, among the current block's instructions from `from` on, the one
+/// that sets rd to `base op x` with op one of `+ - ^ |`, base read first
+/// where the op does not commute.
+fn (self: &Selector) update_of(from: i64, rd: i64, base: i64) -> ?MInst {
+    if self.func.blocks.at(self.current) |block| {
+        return update_in(&block.insts, from, rd, base);
+    }
+    return null;
+}
+
+fn update_in(insts: &array::Array<MInst>, from: i64, rd: i64, base: i64) -> ?MInst {
+    var index = from;
+    while insts.get(index) |inst| {
+        index = index + 1;
+        if inst.rd != rd {
+            continue;
+        }
+        let fits = match inst.op {
+            Add => inst.rn == base or inst.rm == base,
+            Eor => inst.rn == base or inst.rm == base,
+            Orr => inst.rn == base or inst.rm == base,
+            Sub => inst.rn == base,
+            AddImm => inst.rn == base,
+            SubImm => inst.rn == base,
+            _ => false,
+        };
+        let imm = inst.op == MOp::AddImm or inst.op == MOp::SubImm;
+        if fits and inst.rn != reg_zr() and (imm or inst.rm != reg_zr()) {
+            return inst;
+        }
+        return null;
+    }
+    return null;
+}
+
+/// Selects x where the side of `update` (`base op x`) runs and 0 where
+/// the other does, and queues `picked = base op that` in ops. on_taken
+/// tells that the update's side is the one cond picks.
+fn (self: &var Selector) conditional_update(
+    update: MInst,
+    base: i64,
+    cond: Cond,
+    on_taken: bool,
+    picked: i64,
+    ops: &var array::Array<MInst>
+) -> !void {
+    var x = update.rn;
+    if update.rn == base {
+        x = update.rm;
+    }
+    var op = update.op;
+    if update.op == MOp::AddImm {
+        op = MOp::Add;
+        x = reg_none();
+    } else if update.op == MOp::SubImm {
+        op = MOp::Sub;
+        x = reg_none();
+    }
+    let chosen = self.func.new_vreg();
+    if x == reg_none() and update.imm == 1 and on_taken {
+        var set = blank(MOp::CSet);
+        set.rd = chosen;
+        set.cond = cond;
+        try self.inst(set);
+    } else {
+        if x == reg_none() {
+            x = self.func.new_vreg();
+            try self.mov_imm(x, update.imm);
+        }
+        // cond picks the taken side; the other side's x goes where it fails.
+        var pick = blank(MOp::CSel);
+        pick.rd = chosen;
+        pick.rn = x;
+        pick.rm = reg_zr();
+        if !on_taken {
+            pick.rn = reg_zr();
+            pick.rm = x;
+        }
+        pick.cond = cond;
+        try self.inst(pick);
+    }
+    var combine = blank(op);
+    combine.rd = picked;
+    combine.rn = base;
+    combine.rm = chosen;
+    return ops.append(self.allocator, combine);
 }
 
 /// Selects the instructions of a side block into the current block and

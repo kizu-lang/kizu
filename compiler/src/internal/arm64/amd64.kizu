@@ -374,7 +374,15 @@ fn (self: &var Amd) allocate_frame(out: &var Out, syms: &ir::NameTable) -> !void
 
 fn (self: &var Amd) epilogue(out: &var Out, saved: &array::Array<i64>) -> !void {
     try self.move_saved_xmm(out, saved, false);
-    try self.mr(out, "leaq", based(29, 0 - 8 * self.saved), reg_sp());
+    // rsp is known here, so it moves by a constant rather than being set
+    // from rbp: a core that follows rsp through pushes and pops keeps
+    // following it, and the pops below read what the pushes wrote without
+    // waiting on memory (a recursive call restores its caller's registers
+    // on the caller's critical path).
+    let above = self.frame_size + self.pushed;
+    if above > 0 {
+        try self.ir(out, "addq", above, reg_sp(), 8);
+    }
     var index = saved.len() - 1;
     while index >= 0 {
         let reg = saved.get_or_panic(index);
