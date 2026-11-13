@@ -177,6 +177,10 @@ pub struct Selector {
     // stack, as Darwin's does, rather than as it takes a named one.
     pub stacks_variadics: bool,
     fn_name: ir::Name,
+    // By name id: 1 + where module.functions holds the function of that
+    // name, or 0 for a name no function has (index_functions). A call
+    // looks its callee up here rather than walking every function.
+    callees: array::Array<i64>,
     // The machine the module is selected for.
     pub arch: Arch,
 }
@@ -223,8 +227,35 @@ pub fn new_selector(allocator: Allocator, arch: Arch) -> !Selector {
         exports_c: false,
         stacks_variadics: true,
         fn_name: ir::empty_name(),
+        callees: array::new<i64>(allocator),
         arch: arch
     };
+}
+
+/// Indexes the module's functions by name for callee, the first one of a
+/// name winning as it does for ir::Module.function_named.
+pub fn (self: &var Selector) index_functions(module: &ir::Module) -> !void {
+    self.callees.clear(self.allocator);
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let id = ir::name_id(module.function_name(function));
+        try grow_to(self.allocator, &var self.callees, id);
+        if self.callees.get_or_panic(id) == 0 {
+            try self.callees.set(id, index);
+        }
+    }
+    return;
+}
+
+/// Returns the module's function named name, or null: what
+/// ir::Module.function_named answers, from the index_functions table.
+fn (self: &Selector) callee(module: &ir::Module, name: ir::Name) -> ?ir::Function {
+    let at = self.callees.get(ir::name_id(name)) orelse return null;
+    if at == 0 {
+        return null;
+    }
+    return module.functions.get(at - 1);
 }
 
 /// Builds the failure the backend reports for what it does not lower.
@@ -1483,9 +1514,7 @@ fn (self: &var Selector) select_builtin_call(module: &ir::Module, node: &ir::Ins
     if signature.out {
         return self.select_hosted_call(module, node, &signature);
     }
-    let text = ir::name_text(&module.names, node.operand);
-    let bytes = text.as_bytes();
-    if module.function_named(bytes) |callee| {
+    if self.callee(module, node.operand) |callee| {
         return self.select_internal_call(module, node, callee);
     }
     var index = 0;
@@ -1516,9 +1545,7 @@ fn (self: &var Selector) select_call(module: &ir::Module, node: &ir::InstrNode) 
     if hostabi::is_builtin(module, node.operand) {
         return self.select_builtin_call(module, node);
     }
-    let text = ir::name_text(&module.names, node.operand);
-    let bytes = text.as_bytes();
-    if module.function_named(bytes) |callee| {
+    if self.callee(module, node.operand) |callee| {
         return self.select_internal_call(module, node, callee);
     }
     return self.select_c_call(module, node, node.operand);
@@ -1571,7 +1598,7 @@ fn (self: &var Selector) select_func_addr(module: &ir::Module, node: &ir::InstrN
         let text = ir::name_text(&module.names, node.operand);
         let bytes = text.as_bytes();
         var defined = false;
-        if module.function_named(bytes) |_| {
+        if self.callee(module, node.operand) |_| {
             defined = true;
         }
         if !defined or (mem::equal_bytes(bytes, "main") and !self.main_wraps) {
