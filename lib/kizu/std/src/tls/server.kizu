@@ -24,7 +24,7 @@ pub fn accept(
     chain: &std::array::Array<std::string::String>,
     key: &std::crypto::x509::PrivateKey
 ) -> std::tls::Failure!std::tls::Connection {
-    var connection = accepting(allocator, move stream);
+    var connection = accepting_with(allocator, move stream, system_entropy());
     errdefer connection.deinit(allocator);
     try connection.accept_wait(io, allocator, chain, key);
     return move connection;
@@ -34,7 +34,17 @@ pub fn accept(
 // begun, for a caller that must not wait: `accept_ready` moves it on by
 // what has arrived, and the caller's poller says when to call again.
 pub fn accepting(allocator: Allocator, stream: std::net::TcpStream) -> std::tls::Connection {
-    return new_connection(allocator, move stream, Role::Server);
+    return accepting_with(allocator, move stream, system_entropy());
+}
+
+// accepting_with is `accepting` drawing the handshake's randomness from
+// `entropy` rather than the host's source.
+pub fn accepting_with(
+    allocator: Allocator,
+    stream: std::net::TcpStream,
+    entropy: std::tls::Entropy
+) -> std::tls::Connection {
+    return new_connection(allocator, move stream, Role::Server, move entropy);
 }
 
 // accept_wait runs the handshake of an accepting connection to the end,
@@ -109,7 +119,7 @@ fn (self: &var std::tls::Connection) take_client_hello(
     try self.transcript.append_bytes(allocator, hello_bytes);
 
     // 64 random bytes: the hello's random and the x25519 private key.
-    let random = try std::crypto::random_bytes(io, allocator, 64);
+    let random = try self.entropy.draw(io, allocator, 64);
     defer random.deinit(allocator);
     let drawn = random.as_bytes();
     try self.send_server_hello(io, allocator, hello_bytes, &offered, drawn);
@@ -281,7 +291,8 @@ fn (self: &var std::tls::Connection) send_certificate_verify(
     let digest = digest_buffer.as_mut_bytes();
     try self.certificate_verify_digest(allocator, kind, digest);
     let digest_bytes = digest[0..std::crypto::digest_length(kind)];
-    let salt = try std::crypto::random_bytes(io, allocator, std::crypto::digest_length(kind));
+    // Drawn whatever the key: x509::sign reads it for RSA-PSS only.
+    let salt = try self.entropy.draw(io, allocator, std::crypto::digest_length(kind));
     defer salt.deinit(allocator);
     let salt_bytes = salt.as_bytes();
     let signature = try std::crypto::x509::sign(allocator, key, kind, digest_bytes, salt_bytes);

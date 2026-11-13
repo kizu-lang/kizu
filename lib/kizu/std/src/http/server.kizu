@@ -22,6 +22,9 @@ pub struct Server {
     // exchange.
     chain: std::array::Array<std::string::String>,
     key: std::string::String,
+    // What each TLS connection's handshake draws from: a `split` of this
+    // per connection, in the order they were accepted.
+    entropy: std::tls::Entropy,
     // Every connection this server holds. The one the caller is answering is
     // not in here: it was handed out, and `next` is the only way to get
     // another, so handing it back is the only way forward. A caller cannot
@@ -98,6 +101,23 @@ pub fn listen_secure(
     key: []u8,
     limits: std::http::Limits
 ) -> std::http::Failure!std::http::Server {
+    return listen_secure_with(io, allocator, address, chain, key, limits, std::tls::system_entropy());
+}
+
+// listen_secure_with is `listen_secure` whose handshakes draw from
+// `entropy`: each accepted connection gets the next `split` of it, so
+// connections accepted one after another draw what the seed fixes.
+pub fn listen_secure_with(
+    io: Io,
+    allocator: Allocator,
+    address: []u8,
+    chain: &std::array::Array<std::string::String>,
+    key: []u8,
+    limits: std::http::Limits,
+    entropy: std::tls::Entropy
+) -> std::http::Failure!std::http::Server {
+    var source = move entropy;
+    errdefer source.deinit();
     if std::mem::len(key) > 0 {
         let parsed = try std::crypto::x509::parse_private_key(key);
         let _ = parsed.algorithm;
@@ -119,6 +139,7 @@ pub fn listen_secure(
         limits: limits,
         chain: move own_chain,
         key: move own_key,
+        entropy: move source,
         open: std::array::new<std::http::Exchange>(allocator),
         poller: move poller,
         slot_of: std::array::new<i64>(allocator),
@@ -155,6 +176,7 @@ fn (self: &std::http::Server) local_port() -> std::http::Failure!i64 {
 fn (self: std::http::Server) deinit(allocator: Allocator) -> void {
     self.chain.deinit(allocator);
     self.key.deinit(allocator);
+    self.entropy.deinit();
     self.slot_of.deinit(allocator);
     self.spare.deinit(allocator);
     self.retiring.deinit(allocator);
@@ -878,7 +900,7 @@ fn (self: &var std::http::Server) drop_at(
 // opening builds an exchange that has a connection and nothing else yet.
 // On a TLS server the connection is still to shake hands, which the first
 // read does: `take_head` waiting, `advance` not.
-fn (self: &std::http::Server) opening(
+fn (self: &var std::http::Server) opening(
     allocator: Allocator,
     stream: std::net::TcpStream
 ) -> std::http::Failure!std::http::Exchange {
@@ -895,7 +917,7 @@ fn (self: &std::http::Server) opening(
         try key.append_bytes(allocator, key_bytes);
     }
     let wrapped = if secure {
-        std::http::Stream::Secure(std::tls::accepting(allocator, move socket))
+        std::http::Stream::Secure(std::tls::accepting_with(allocator, move socket, self.entropy.split()))
     } else {
         std::http::Stream::Plain(move socket)
     };

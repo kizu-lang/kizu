@@ -13,6 +13,8 @@ key schedule、record layer、handshake message の codec です。証明書の�
 std::tls::connect(io: Io, allocator, address: []u8, host: []u8, roots: &Array<String>, now: i64) -> Failure!Connection
 std::tls::accept(io: Io, allocator, stream: std::net::TcpStream, chain: &Array<String>, key: &x509::PrivateKey) -> Failure!Connection
 std::tls::accepting(allocator, stream: std::net::TcpStream) -> Connection
+std::tls::connect_with(io: Io, allocator, address: []u8, host: []u8, roots: &Array<String>, now: i64, entropy: Entropy) -> Failure!Connection
+std::tls::accepting_with(allocator, stream: std::net::TcpStream, entropy: Entropy) -> Connection
 Connection.accept_ready(io, allocator, chain: &Array<String>, key: &x509::PrivateKey) -> Failure!bool
 Connection.accept_wait(io, allocator, chain: &Array<String>, key: &x509::PrivateKey) -> Failure!void
 Connection.write(io, allocator, bytes: []u8) -> Failure!void
@@ -22,6 +24,12 @@ Connection.close(io, allocator) -> Failure!void
 Connection.cipher_suite() -> CipherSuite
 Connection.server_name() -> []u8        // server 側: client が server_name で求めた host
 Connection.deinit(allocator)
+
+std::tls::Entropy                                     // 接続が乱数を引く源。複製できない
+std::tls::system_entropy() -> Entropy                 // OS の乱数
+std::tls::predictable_entropy(seed: []u8) -> Entropy  // seed から決定的に出す。テストの再生用
+Entropy.split() -> Entropy                            // 1 接続分の子
+Entropy.deinit()
 
 std::tls::advance(state: State, event: Event) -> Transition
 std::tls::advance_server(state: ServerState, event: ServerEvent) -> ServerTransition
@@ -114,8 +122,44 @@ ServerHello、change_cipher_spec(§D.4)、EncryptedExtensions(空)、Certificate
 `accepting` で接続を作り、届いた分だけ `accept_ready` で進めます(true で完了)。
 `accept` は `accepting` に `accept_wait` を続けたものです。
 
-乱数は `std::crypto::random_bytes` から取得し、時刻は呼び手の `now` を使います。
-`std::tls` 自身は現在時刻も乱数も取得しません。
+時刻は呼び手の `now` を使い、`std::tls` 自身は現在時刻を読みません。乱数は
+接続が持つ `Entropy` から引きます(次節)。
+
+## 乱数
+
+接続は handshake の乱数をすべて自分の `Entropy` から引きます。client は ClientHello
+を送る前に 96 byte(hello の random、session_id、x25519 の秘密鍵)、server は
+ClientHello を受けたとき 64 byte(hello の random、x25519 の秘密鍵)と
+CertificateVerify の salt(scheme の hash の長さ。読むのは RSA-PSS だけですが、鍵の
+種類によらず引きます)を、この順に引きます。`std::tls` の中で OS の乱数に届くのは
+`system_entropy` だけで、今後足す乱数の消費も `Entropy` から引きます。
+
+- `connect` / `accept` / `accepting` は `system_entropy()` を渡した `connect_with` /
+  `accepting_with` です。
+- `predictable_entropy(seed)` は seed(長さは問わない)の SHA-256 を鍵にした
+  HMAC-SHA256 の counter mode です。block `n` は 0 の 1 byte と `n` の big-endian
+  8 byte の HMAC で、block を並べた列の続きを引くたびに渡します。上限はありません。
+- `split` は 1 接続分の子を作ります。子 `n` は 1 の 1 byte と `n` の big-endian 8 byte
+  の HMAC を seed にした `predictable_entropy` で、親の seed と split した順で決まります。
+  `system_entropy` の子は `system_entropy` です。
+- `Entropy` は複製できません。同じ列を 2 つの接続が使うと鍵共有と nonce の再利用に
+  なるためです。field が全部 copy の data なので、明示の `deinit`(解放するものは
+  ありません)で move-only にしています。`connect_with` / `accepting_with` に渡せば
+  接続が持ち、接続の `deinit` で消えます。
+
+**`predictable_entropy` の接続は秘密を守りません。** seed を知る人には鍵共有の秘密鍵も
+traffic の鍵も分かります。テストの再生以外で使わないでください。
+
+```kizu
+let seed = "replay";
+var client = try tls::connect_with(
+    io, allocator, address, "localhost", &roots, 1893456000,
+    tls::predictable_entropy(seed));
+```
+
+同じ seed の接続は同じ bytes を送ります。両端を `predictable_entropy` にした接続を
+2 回張って両方向の record が全部一致することを `tests/behavior/src/tls_entropy/` が
+P-256 と RSA の鍵で確かめます。
 
 ## 状態機械
 

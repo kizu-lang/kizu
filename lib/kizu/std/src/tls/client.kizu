@@ -17,8 +17,24 @@ pub fn connect(
     roots: &std::array::Array<std::string::String>,
     now: i64
 ) -> std::tls::Failure!std::tls::Connection {
+    return connect_with(io, allocator, address, host, roots, now, system_entropy());
+}
+
+// connect_with is `connect` drawing the handshake's randomness from
+// `entropy` rather than the host's source.
+pub fn connect_with(
+    io: Io,
+    allocator: Allocator,
+    address: []u8,
+    host: []u8,
+    roots: &std::array::Array<std::string::String>,
+    now: i64,
+    entropy: std::tls::Entropy
+) -> std::tls::Failure!std::tls::Connection {
+    var source = move entropy;
+    errdefer source.deinit();
     var stream = try std::net::tcp_connect(io, address);
-    var client = new_connection(allocator, move stream, Role::Client);
+    var client = new_connection(allocator, move stream, Role::Client, move source);
     errdefer client.deinit(allocator);
     try client.handshake(io, allocator, host, roots, now);
     return move client;
@@ -35,7 +51,7 @@ fn (self: &var std::tls::Connection) handshake(
 ) -> std::tls::Failure!void {
     // 96 random bytes: the hello's random, the session id, and the
     // x25519 private key.
-    let random = try std::crypto::random_bytes(io, allocator, 96);
+    let random = try self.entropy.draw(io, allocator, 96);
     defer random.deinit(allocator);
     let drawn = random.as_bytes();
     var share_buffer = [32]u8{};
