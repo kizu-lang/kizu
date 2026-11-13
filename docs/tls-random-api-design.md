@@ -13,10 +13,11 @@
 | 項目 | 推奨 |
 | --- | --- |
 | 録る相手 | devShell の node(`pkgs.nodejs`、v20.18.1 / OpenSSL 3.0.14。flake.lock で固定) |
-| 録り方 | node の script が相手の TLS 端点と TCP relay を兼ね、両方向の record を順に記録する |
+| 録り方 | node の script が相手の TLS 端点と TCP relay を兼ね、両方向の record を順に記録する。録り直しは `nix develop -c just tls-fixtures` の 1 経路(§2.4) |
 | 形式 | 1 接続 1 ファイルの text。1 行 1 record(向き + hex)、先頭に metadata と sha256 |
 | 置き場 | `examples/fixtures/tls/`(`compress` と同じ流儀)。録る道具は `scripts/record-tls-fixtures/` |
 | 乱数の口 | `std::tls::Entropy` を接続に持たせる。既定は今と同じ OS の乱数、再生用は seed から決定的に出す `predictable_entropy` |
+| 乱数の網羅 | handshake の乱数 3 箇所すべてを `Entropy` から引く。OS の乱数を直接引く経路は残さない(§3.3) |
 | 再生の場所 | `tests/behavior/src/tls_replay/`。evented Io 上で再生役の task と Kizu 側を同じ process で動かす |
 | 判定 | Kizu が送った record が録ったものと byte 単位で一致すること、および Kizu 側の結果(出力・error 名) |
 | PR | (A) std の口だけ足す (B) 録る道具・fixture・再生 module を足し、Go のテスト 3 本を消す |
@@ -34,7 +35,7 @@ bytes そのものなので、「再生で一致した」は「node がもう一
 | --- | --- | --- | --- | --- |
 | 1 | client の乱数 96 byte(hello random 32、session_id 32、x25519 秘密鍵 32) | `lib/kizu/std/src/tls/client.kizu:38` | 効く | `Entropy`(§3) |
 | 2 | server の乱数 64 byte(hello random 32、x25519 秘密鍵 32) | `server.kizu:112` | 効く | `Entropy` |
-| 3 | server の RSA-PSS salt(digest と同じ長さ) | `server.kizu:284` | 効く | `Entropy`。ECDSA は RFC 6979 の決定的 nonce なので乱数を引かない(`crypto/ecdsa.kizu:176`) |
+| 3 | server の CertificateVerify の salt(scheme の digest 長) | `server.kizu:284` | RSA-PSS で効く | `Entropy`。鍵の種類によらず引き、読むのは RSA だけ。ECDSA の署名自体は RFC 6979 の決定的 nonce で乱数を使わない(`crypto/ecdsa.kizu:176`) |
 | 4 | 時刻 `now` | `tls::connect` の引数。`http::connect_secure` は `process::unix_millis()` を自分で読む(`http/client.kizu:77`) | 検証の結果を通して効く(alert か Finished か) | `tls_client` は定数を渡す。http client は実時計なので、証明書の有効期間を 9999-12-31 まで取る |
 | 5 | host(SNI)、roots、server の chain と鍵 | 呼び手の引数 | 効く | 固定の証明書と鍵(§2.3) |
 | 6 | Kizu 側が書く application data とその分割(16384 byte ごと、`connection.kizu:881`) | テストのプログラム | 効く | プログラムで固定 |
@@ -78,8 +79,8 @@ Kizu コードだけの変更で済み、Go 実装と `compiler/` の両方に�
 | `openssl s_server` / `s_client` | devShell に無い。macOS の `/usr/bin/openssl` は LibreSSL 3.3.6 で CI と別物 | 足せば固定できるが devShell が増える | echo を大文字にする等の振る舞いが書けない。http は `-WWW` 程度 | OpenSSL のみ `-keylogfile`(LibreSSL は無い) | 不採用 |
 | Go `crypto/tls` | ある | ある | 自由 | ある | 外すのが目的なので不可 |
 
-node は PR #1996 でも鍵 file の writer として使っている。録るのは一度きりで、録り直しも
-`nix develop` の中で同じ version が手に入る。
+node は PR #1996 でも鍵 file の writer として使っている。録り直しも `nix develop` の中で
+同じ version が手に入る(固定の仕方と録り直しの運用は §2.4)。
 
 ### 2.2 録る接続の構成
 
@@ -130,22 +131,39 @@ fixture は要らない。両端 Kizu の case も fixture を持たない(§4.2
 | Kizu の seed | case 名から決める(`SHA-256("kizu tls fixture " + case)`)。録り直しても Kizu の最初の flight が変わらないので、diff に意図した変更だけが出る |
 | Kizu が書く data | 現行と同じ `hello over tls`、route `/greeting` `/one` `/two` `/three` |
 
-### 2.4 録り直しが要るとき
+### 2.4 再生成の経路
 
-要る: Kizu が送る bytes が変わる変更。message の書式・拡張の集合や順序・offer する
-suite や scheme・alert の選び方・record の切り方・`Entropy` から引く量と順序。fixture の
-証明書や鍵を替えたとき、case を足したとき。
+fixture は一度録って終わりにせず、std::tls の wire が変わるたびに同じ手順で録り直す。
+Go の `crypto/tls` が `-update` flag で testdata を書き直すのに当たる運用を、Go の外で
+1 本の経路として持つ。
 
-要らない: bytes を変えないリファクタ、node の version 更新(fixture は録った時点で
-凍結されている)。
+| 項目 | 決め方 |
+| --- | --- |
+| 道具 | `scripts/record-tls-fixtures/record.mjs` と Kizu 側のプログラム(§2.6)。冒頭のコメントに目的・実行方法・録る case の一覧を書く |
+| 実行 | `nix develop -c just tls-fixtures`。引数を取らず、§2.2 の 15 本を毎回全部録り直す(1 本だけ録り直す経路は持たない。fixture ごとに相手の version が混ざらない) |
+| 相手の version の固定 | node は devShell の `pkgs.nodejs` で、version は `flake.lock` の nixpkgs の rev が決める。record.mjs は起動時に `process.versions.node` と `process.versions.openssl` を読み、`process.execPath` が `/nix/store/` の下にあることを確かめる(devShell の外の node では録らない) |
+| version の記録先 | 各 fixture の `# peer:`(node と OpenSSL の version)と `# recorder:`(§2.5)。この文書と `docs/std/tls.md` には「録った相手は fixture の `# peer:` を見る」とだけ書き、version の数字を二重に持たない。再生テストは全 fixture の `# peer:` が同じ 1 つであることを確かめる |
+| 同じ相手を再現する | fixture を足した commit を checkout して `nix develop` に入れば、その `flake.lock` が同じ node を返す |
+| CI | 録らない。再生は node を必要とせず、`go test` も CI も fixture を読むだけ |
 
-手順:
+録り直しが要るとき: Kizu が送る bytes が変わる変更。message の書式・拡張の集合や順序・
+offer する suite や scheme・alert の選び方・record の切り方・`Entropy` から引く量と順序。
+fixture の証明書や鍵を替えたとき、case を足したとき。
 
-1. 再生テストが「`client-echo-p256` の 0 番目の `>` record が違う」の形で落ちる。
-2. 変更が意図したものなら `just tls-fixtures` で全 fixture を録り直す(`nix develop` の中)。
+要らないとき: bytes を変えないリファクタ、`flake.lock` の更新で node の version が
+変わったとき(fixture は録った時点で凍結されている)。次に録り直すときは新しい version で
+15 本全部が録られ、`# peer:` の diff に version の変化が出る。
+
+std::tls の wire 形式を変える PR の手順:
+
+1. 再生テストが「`client-echo-p256` の 0 番目の `>` record が違う」の形で落ち、
+   「意図した変更なら `nix develop -c just tls-fixtures` で録り直す」と出す。
+2. 変更が意図したものなら、`nix develop` の中で `just tls-fixtures` を実行する。
    録る道具は相手が受け入れなければ書かないので、node に拒まれる変更はここで止まる。
-3. Kizu の変更と同じ PR に、別 commit で fixture を入れる。
-4. review では fixture の diff を読む。seed が case 名で固定なので、平文の record
+3. 再生テストを流して通ることを確かめる。
+4. Kizu の変更と同じ PR に、別 commit で fixture を入れる。commit message に録り直した
+   理由を書く。
+5. review では fixture の diff を読む。seed が case 名で固定なので、平文の record
    (ClientHello / ServerHello)の行の差分と、各 record に付く注釈(§2.5、復号した
    handshake message の種類と長さ)の差分が、意図した変更と対応しているかを見る。
    相手の乱数は録るたびに変わるので、相手の行と暗号化された行が全部変わるのは正常。
@@ -163,6 +181,7 @@ suite や scheme・alert の選び方・record の切り方・`Entropy` から�
 # kizu tls trace 1
 # case: client-echo-p256
 # peer: node v20.18.1 OpenSSL 3.0.14, tls server, echo upper
+# recorder: scripts/record-tls-fixtures/record.mjs (regenerate: nix develop -c just tls-fixtures)
 # kizu: client host=localhost roots=localhost-p256 now=1893456000
 # seed: 5f2c…(64 hex)
 # suite: TLS_AES_128_GCM_SHA256
@@ -179,6 +198,8 @@ suite や scheme・alert の選び方・record の切り方・`Entropy` から�
 > 1703030025 …                      ; application_data 14
 ```
 
+- `# peer:` と `# recorder:` は生成元。この 2 行で、誰が何の version で録り、どう録り直すかが
+  ファイル単体で分かる。
 - `>` は Kizu が送った record、`<` は相手が送った record。hex は record header 込みの全体。
 - `;` 以降は注釈。録る道具が keylog の secret で復号して(node の `crypto` の HKDF と
   AEAD で、Kizu とは独立に)内側の種類と長さを書く。再生は注釈を読まない。
@@ -238,7 +259,7 @@ std::http::listen_secure_with(io, allocator, address, chain, key, limits, entrop
 ```
 
 - `Connection` が `Entropy` を持ち、client は handshake で 96 byte、server は ClientHello
-  を受けたとき 64 byte と(RSA-PSS なら)salt を、そこから引く。`accept_ready` /
+  を受けたとき 64 byte と CertificateVerify の salt を、そこから引く(§3.3)。`accept_ready` /
   `accept_wait` の引数は変わらない。
 - 既存の `connect` / `accept` / `accepting` / `http::connect_secure` / `listen_secure` は
   `system_entropy()` を渡す `_with` を呼ぶだけになる。経路は 1 本のまま(原理 9)。
@@ -274,6 +295,50 @@ var connection = tls::accepting_with(allocator, move stream, tls::predictable_en
 defer connection.deinit(allocator);
 try connection.accept_wait(io, allocator, &chain, &key);
 ```
+
+### 3.3 Entropy が賄う範囲
+
+Go の `tls.Config.Rand` は非推奨になった。差し替えた源が handshake の乱数消費を全部
+賄う保証が無く、源を差しても決定的にならない経路が残ったのが理由です。同じ穴を作らない
+ため、`Entropy` は std::tls が引く乱数を **全部** 賄うことを設計の条件にする。
+
+現在の消費箇所(`lib/kizu/std/src/` で `std::crypto::random_bytes` / `random_into`、
+その下の builtin `crypto_random_into` を呼ぶ所を全部見た結果):
+
+| # | 箇所 | 量 | 用途 |
+| --- | --- | --- | --- |
+| 1 | `tls/client.kizu:38` `handshake` | 96 byte | ClientHello.random 32、legacy_session_id 32、x25519 秘密鍵 32 |
+| 2 | `tls/server.kizu:112` ClientHello 受信後 | 64 byte | ServerHello.random 32、x25519 秘密鍵 32 |
+| 3 | `tls/server.kizu:284` `send_certificate_verify` | scheme の digest 長(32 / 48) | RSA-PSS の salt。EC 鍵でも引く(`x509::sign` は RSA でしか読まない) |
+
+std::tls と std::http の中で乱数を引くのはこの 3 箇所だけで、OS の乱数を直接引く
+フォールバックは無い。消費箇所が無いことを確かめたもの: ECDSA 署名(RFC 6979)、
+x509 の検証、HelloRetryRequest(client は受けたら `handshake_failure` で閉じ、key share を
+引き直さない。server は送らない)、session ticket(発行しない。受けたものは読み捨てる)、
+resumption / PSK / 0-RTT(無い)、KeyUpdate(相手への応答だけで乱数は要らない)、
+record の padding(付けない)、alert、http client / server(boundary や nonce を作らない)。
+
+設計の条件:
+
+- PR A で 3 箇所とも `Connection` が持つ `Entropy` から引く形に替え、tls / http の中に
+  `std::crypto::random_bytes` を直接呼ぶ所を残さない。OS の乱数に届くのは
+  `system_entropy` の実装 1 箇所だけになる。
+- 今後 std::tls に乱数の消費(ticket の発行、resumption、HRR の送信、padding など)を
+  足すときも同じ `Entropy` から引く。`Entropy` を差したのに OS の乱数を引く経路は、
+  動いていても設計上の欠陥として扱う。
+- 引く量と順序は今と変えない(上の 3 箇所を上から順)。salt を EC 鍵で引かないように
+  するのは wire に効かないが、PR A は振る舞いを変えない PR なので別の判断にする。
+
+確かめ方:
+
+- PR A の behavior test で、同じ seed の `predictable_entropy` を差した接続を同じ process の
+  中で 2 回張り、両方向の全 record が byte で一致することを見る。相手も Kizu にして
+  相手側も同じ seed にすれば、どちらかに OS の乱数が 1 byte でも混ざると 2 回目が違う。
+  server は P-256 と RSA の鍵の両方で張る(#3 は鍵の種類で読まれ方が違う)。
+- PR B の再生は、fixture と byte で一致した時点で同じことを全 case について示す。
+  さらに各 fixture を 2 回続けて再生し、2 回とも一致することを見る。
+- grep で「`random_bytes` を呼ぶ所が無い」ことを固定する構造 pin は足さない
+  (AGENTS.md)。上の実行結果で検出する。
 
 ## 4. 再生
 
@@ -326,13 +391,21 @@ case は 16 のまま全部残る。http client の fetch / wrong root / wrong h
 
 - `std::tls::Entropy` と §3.2 の関数、`http` の `_with` 2 つ。既存関数は `_with` を呼ぶ形に。
 - `docs/std/tls.md` と `docs/std/http.md` に API を足す。
+- 乱数の消費 3 箇所(§3.3)を全部 `Entropy` から引く形にする。
 - behavior test: 同じ seed なら ClientHello と server の flight が同じ bytes、違う seed なら
-  違う、`split` の子どうしが違う。
+  違う、`split` の子どうしが違う。同じ seed で 2 回張った接続の全 record が一致する(§3.3)。
 - 完了条件: 既存の Go の TLS テスト 3 本がそのまま通る(既定の振る舞いが変わらない)、
   `just spec-table` の生成物が変わらない(状態機械は触らない)、`go test ./...` と
   `just selfhost`、`pre-commit run --all-files`。
 
 ### PR B: fixture と再生、Go のテストの削除
+
+最初に確かめること: 有効期間 9999-12-31 の証明書(§2.3)を Kizu 自前の x509 が受け入れる
+こと。`der.kizu` の `read_time` / `time_value` は GeneralizedTime(4 桁の年)を読む形を
+持つが、year 9999 の `notAfter` を実際に通した test はまだ無い。作った証明書を
+`std::crypto::x509` で読み、`notAfter` が 9999-12-31T23:59:59Z の秒になることと、
+実時計で検証が通ることを behavior test で確かめる。通らなければ、parser を直すか
+有効期間を縮めるかを決める論点として、先へ進まずに止めて報告する。
 
 commit を分ける: 証明書と鍵 → 録る道具と just → fixture 15 本 → 再生 module → Go の
 テスト 3 本と helper(`selfSignedServer` / `generateKey` / `serveOnce` /
@@ -361,3 +434,6 @@ commit を分ける: 証明書と鍵 → 録る道具と just → fixture 15 本
 | 5 | http client の case を `connect_secure_with` で書くこと | 書き換える | `fetch_with` に `_with` を足すと引数がさらに増える。URL から https を選ぶ部分は `no roots` の case と `http_client` の behavior が見ている |
 | 6 | 両端 Kizu の case(tls_server の「Kizu client」) | 残す(fixture なし、`system_entropy`) | 比較相手は自分だが、OS の乱数で通る経路を見る唯一の case で、安い |
 | 7 | 証明書の有効期間を 9999-12-31 まで取ること | 取る | http client が実時計を読むので、期限で fixture が腐らないようにする。期限切れの判定は `x509_vectors` が見ている |
+
+7 は Kizu の x509 が year 9999 の GeneralizedTime を扱えることが前提で、PR B の最初に
+確かめる(§5)。扱えなければそこで止めて報告する。
