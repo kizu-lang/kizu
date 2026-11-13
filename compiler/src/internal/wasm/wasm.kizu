@@ -8,28 +8,25 @@ import std::map;
 import std::mem;
 import std::string;
 
-// Mechanical port of internal/wasm/emit.go: the module header, the WASI
-// runtime helpers, and the per-function walk that formats a typed SSA IR
-// module as WebAssembly text. Go holds the module by pointer and spells every
-// value, type and generated expression as a string; here the module is
-// borrowed by every method, a value the module names is read through the
-// module's NameTable, and every text the emitter spells itself is interned in
-// its own NameTable and handed on as a Name. Go's `fmt.Fprintf` lines are kept
-// as their format strings with `%s` / `%d` interpolated by `line*`, so the
-// text stays the Go text. The per-block writers live in control.kizu and the
-// type and escaping helpers in types.kizu, the files their Go originals are.
+// The module header, the WASI runtime helpers, and the per-function walk that
+// formats a typed SSA IR module as WebAssembly text. The module is borrowed by
+// every method, a value the module names is read through the module's
+// NameTable, and every text the emitter spells itself is interned in its own
+// NameTable and handed on as a Name. Output lines are format strings with `%s`
+// / `%d` interpolated by `line*`. The per-block writers live in control.kizu
+// and the type and escaping helpers in types.kizu.
 
-/// The Go `scratchOffset`: where the fd_write iovec and its result are built.
+/// Where the fd_write iovec and its result are built.
 fn scratch_offset() -> i64 {
     return 0;
 }
 
-/// The Go `intBufferEnd`: one past the last byte of the decimal scratch area.
+/// One past the last byte of the decimal scratch area.
 fn int_buffer_end() -> i64 {
     return 192;
 }
 
-/// The Go `dataOffset`: where the first data segment is placed.
+/// Where the first data segment is placed.
 fn data_offset() -> i64 {
     return 4096;
 }
@@ -44,8 +41,8 @@ enum WasmTarget {
     Browser,
 }
 
-/// Lowers typed SSA IR once and renders its WASI-compatible WAT, the Go
-/// `Emit`: the text goes to out, and a failure comes back as one diagnostic.
+/// Lowers typed SSA IR once and renders its WASI-compatible WAT: the text goes
+/// to out, and a failure comes back as one diagnostic.
 pub fn emit(
     allocator: Allocator,
     module: &ir::Module,
@@ -153,29 +150,27 @@ fn emit_format(
     }
 }
 
-/// Reports whether the last byte of a text is byte, the Go `strings.TrimRight`
-/// test.
+/// Reports whether the last byte of a text is byte.
 fn last_byte_is(text: &string::String, byte: i64) -> bool {
     let bytes = text.as_bytes();
     return bytes[mem::len(bytes) - 1] == cast<u8>(byte);
 }
 
-/// Is where one data segment lives and how long it is, the Go `dataRef`.
+/// Is where one data segment lives and how long it is.
 struct DataRef {
     offset: i64,
     length: i64,
 }
 
-/// Returns the zero data reference, what a missing Go map key reads as.
+/// Returns the zero data reference, what a missing key reads as.
 fn empty_data_ref() -> DataRef {
     return DataRef { offset: 0, length: 0 };
 }
 
-/// Is what the emitter knows about one SSA value, the Go `valueInfo`: the
-/// WebAssembly expression that stands for it. Go gives every function a fresh
-/// values map; a Map cannot be emptied, so an entry carries the generation
-/// (the function count) it was written in and one from an earlier function is
-/// not found.
+/// Is what the emitter knows about one SSA value: the WebAssembly expression
+/// that stands for it. A Map cannot be emptied, so an entry carries the
+/// generation (the function count) it was written in and one from an earlier
+/// function is not found.
 struct ValueInfo {
     expr: ir::Name,
     generation: i64,
@@ -189,19 +184,18 @@ struct ValueInfo {
     payload: ir::Name,
 }
 
-/// Is a read held back for the cleanups of a failing error.try, the Go
-/// `pendingLoads` entry, filed under the generation it was met in.
+/// Is a read held back for the cleanups of a failing error.try, filed under
+/// the generation it was met in.
 struct PendingLoad {
     result: ir::Value,
     reference: ir::Value,
     generation: i64,
 }
 
-/// Holds the state one emission walks with, the Go `emitter`. names owns every
-/// text the emitter spells itself; strings files each data segment under the
-/// bytes of its quoted literal or one of the three helper keys, and data_order
-/// keeps the order collectStrings assigned them, which is the ascending offset
-/// order Go re-derives by sorting the map.
+/// Holds the state one emission walks with. names owns every text the emitter
+/// spells itself; strings files each data segment under the bytes of its
+/// quoted literal or one of the three helper keys, and data_order keeps the
+/// order `collect_strings` assigned them, which is ascending offset order.
 struct Emitter {
     allocator: Allocator,
     target: WasmTarget,
@@ -267,9 +261,9 @@ struct Emitter {
     hoisted: map::Map<i64, LoopHoist>,
 }
 
-/// Is one value a format interpolates, the argument of a Go `fmt.Fprintf`:
-/// `%s` takes a Str (a name the emitter spelled), a Lit (a static text) or an
-/// Owned (a text built for this one line), `%d` an Int.
+/// Is one value a format interpolates: `%s` takes a Str (a name the emitter
+/// spelled), a Lit (a static text) or an Owned (a text built for this one
+/// line), `%d` an Int.
 union Arg {
     Str(ir::Name),
     Lit([]u8),
@@ -297,9 +291,8 @@ fn append_arg(
     }
 }
 
-/// Appends format with `%s` / `%d` replaced in order by the arguments and
-/// `%%` by `%`, the Go `fmt.Fprintf` / `fmt.Sprintf`; an argument the format
-/// does not place is released.
+/// Appends format with `%s` / `%d` replaced in order by the arguments and `%%`
+/// by `%`; an argument the format does not place is released.
 fn format_args(
     allocator: Allocator,
     out: &var string::String,
@@ -372,14 +365,13 @@ fn append_format_rest(allocator: Allocator, out: &var string::String, format: []
     return;
 }
 
-/// Writes one line of WAT with no interpolation, the Go
-/// `e.out.WriteString("...\n")`.
+/// Writes one line of WAT with no interpolation.
 fn (self: &var Emitter) line(text: []u8) -> !void {
     try self.out.append_bytes(self.allocator, text);
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
-/// Writes one formatted line, the Go `fmt.Fprintf(&e.out, "...\n", a)`.
+/// Writes one formatted line.
 fn (self: &var Emitter) line1(format: []u8, a: Arg) -> !void {
     let allocator = self.allocator;
     let names = &self.names;
@@ -411,9 +403,9 @@ fn (self: &var Emitter) line4(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg) -> !
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
-/// Builds one failure, the Go `fmt.Errorf("wasm error: ...")`: the format with
-/// its argument interpolated becomes a diagnostic without a span, which the
-/// CLI prints as `error: wasm error: ...`.
+/// Builds one failure: the format with its argument interpolated becomes a
+/// diagnostic without a span, which the CLI prints as `error: wasm error:
+/// ...`.
 fn (self: &Emitter) fail(format: []u8, a: Arg) -> !diagnostic::Diagnostic {
     var out = string::new(self.allocator);
     defer out.deinit(self.allocator);
@@ -438,7 +430,8 @@ fn (self: &Emitter) fail0(format: []u8) -> !diagnostic::Diagnostic {
     return self.fail(format, Arg::None);
 }
 
-/// Wraps an inner failure the Go `fmt.Errorf("...: %w", err)` way.
+/// Wraps an inner failure: the formatted text, `: `, then the inner category
+/// and message.
 fn (self: &Emitter) wrap(format: []u8, a: Arg, inner: diagnostic::Diagnostic) -> !diagnostic::Diagnostic {
     defer inner.deinit(self.allocator);
     var out = string::new(self.allocator);
@@ -480,7 +473,7 @@ fn (self: &var Emitter) local_expr(name: []u8) -> !ir::Name {
     return self.names.intern_owned(move out);
 }
 
-/// Writes the module, runtime helpers, and user functions, the Go `emit`.
+/// Writes the module, runtime helpers, and user functions.
 fn (self: &var Emitter) emit_module(module: &ir::Module) -> !?diagnostic::Diagnostic {
     if try self.validate_target(module) |failed| {
         return move failed;
@@ -510,8 +503,7 @@ fn (self: &var Emitter) emit_module(module: &ir::Module) -> !?diagnostic::Diagno
     return self.write_start(module);
 }
 
-/// Collects the string constants in deterministic IR order, the Go
-/// `sortedStringLiteralsByDiscovery`.
+/// Collects the string constants in deterministic IR order.
 fn (self: &Emitter) collect_literals(
     allocator: Allocator,
     module: &ir::Module,
@@ -548,7 +540,7 @@ fn (self: &Emitter) collect_literals(
     return;
 }
 
-/// Assigns stable memory offsets to literal data, the Go `collectStrings`.
+/// Assigns stable memory offsets to literal data.
 fn (self: &var Emitter) collect_strings(module: &ir::Module) -> !void {
     var literals = array::new<ir::Name>(self.allocator);
     defer literals.deinit(self.allocator);
@@ -575,7 +567,7 @@ fn (self: &var Emitter) collect_strings(module: &ir::Module) -> !void {
 }
 
 /// Places the values of each table.get after the strings, eight bytes each,
-/// and returns the offset after the last, the Go `collectTables`.
+/// and returns the offset after the last.
 fn (self: &var Emitter) collect_tables(module: &ir::Module, start: i64) -> !i64 {
     var offset = start;
     var index = 0;
@@ -605,8 +597,7 @@ fn (self: &var Emitter) collect_tables(module: &ir::Module, start: i64) -> !i64 
     return offset;
 }
 
-/// Writes the data segment of each table.get, little-endian, the Go
-/// `writeTables`.
+/// Writes the data segment of each table.get, little-endian.
 fn (self: &var Emitter) write_tables(module: &ir::Module) -> !void {
     var index = 0;
     while self.table_order.get(index) |instr| {
@@ -659,7 +650,7 @@ fn (self: &var Emitter) record_data(key: []u8, offset: i64, length: i64) -> !voi
     return self.data_order.append(self.allocator, name);
 }
 
-/// Returns the data entry filed under a key, the Go `e.strings[key]`.
+/// Returns the data entry filed under a key.
 fn (self: &Emitter) data_ref(key: []u8) -> DataRef {
     return self.strings.get(key) orelse empty_data_ref();
 }
@@ -802,8 +793,8 @@ fn (self: &var Emitter) write_function_table(module: &ir::Module) -> !void {
     return self.line1("%s", Arg::Owned(move elem));
 }
 
-/// Writes imports, memory, and data segments, the Go `writeHeader`. Both
-/// emitters retain assignment order so zero-length segments have a stable tie.
+/// Writes imports, memory, and data segments. Both emitters retain assignment
+/// order so zero-length segments have a stable tie.
 fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
     try self.line("(module");
     if self.is_browser() {
@@ -864,8 +855,7 @@ fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
-/// Converts a data key to WAT data text and returns its offset, the Go
-/// `dataLiteral` and the offset writeHeader reads beside it.
+/// Converts a data key to WAT data text and returns its offset.
 fn (self: &Emitter) append_data_literal(out: &var string::String, key: ir::Name) -> !i64 {
     let retained = ir::name_text(&self.names, key);
     let bytes = retained.as_bytes();
@@ -899,8 +889,7 @@ fn (self: &Emitter) append_data_literal(out: &var string::String, key: ir::Name)
     return found.offset;
 }
 
-/// Writes target output and checked-failure helpers, the Go
-/// `writeRuntime`.
+/// Writes target output and checked-failure helpers.
 fn (self: &var Emitter) write_runtime(module: &ir::Module) -> !?diagnostic::Diagnostic {
     if self.uses_allocator_runtime(module) {
         try self.write_allocator_runtime(module);
@@ -939,14 +928,14 @@ fn (self: &var Emitter) write_runtime(module: &ir::Module) -> !?diagnostic::Diag
     return self.write_process_runtime(module);
 }
 
-/// Is the linear memory set aside for function frames, the Go `stackSize`:
-/// the 8 MB a native thread's stack has by default.
+/// Is the linear memory set aside for function frames: the 8 MB a native
+/// thread's stack has by default.
 fn stack_size() -> i64 {
     return 8388608;
 }
 
 /// Reserves one recursive-safe linear-memory frame and traps when the frames
-/// would run past the stack's end, the Go `writeStackAllocHelper`.
+/// would run past the stack's end.
 fn (self: &var Emitter) write_stack_alloc_helper() -> !void {
     try self.line("  (func $__stack_alloc (param $size i32) (result i32)");
     try self.line("    (local $base i32) (local $end i32)");
@@ -961,8 +950,7 @@ fn (self: &var Emitter) write_stack_alloc_helper() -> !void {
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
-/// Writes one byte range to the selected host stream, the Go
-/// `writeBytesHelper`.
+/// Writes one byte range to the selected host stream.
 fn (self: &var Emitter) write_bytes_helper() -> !void {
     try self.line("  (func $__write_bytes (param $fd i32) (param $ptr i32) (param $len i32)");
     if self.is_browser() {
@@ -984,8 +972,7 @@ fn (self: &var Emitter) write_bytes_helper() -> !void {
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
-/// Writes a buffer and a trailing newline to stdout, the Go
-/// `writeLineHelper`.
+/// Writes a buffer and a trailing newline to stdout.
 fn (self: &var Emitter) write_line_helper() -> !void {
     let newline = self.data_ref("newline");
     try self.line("  (func $__write_line (param $ptr i32) (param $len i32)");
@@ -998,8 +985,7 @@ fn (self: &var Emitter) write_line_helper() -> !void {
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
-/// Writes one signed i64 without a trailing newline, the Go
-/// `writeIntValueHelper`.
+/// Writes one signed i64 without a trailing newline.
 fn (self: &var Emitter) write_int_value_helper() -> !void {
     try self.line("  (func $__write_i64 (param $fd i32) (param $value i64)");
     try self.line("    (local $n i64) (local $pos i32) (local $negative i32)");
@@ -1019,7 +1005,6 @@ fn (self: &var Emitter) write_int_value_helper() -> !void {
     try self.line("      (then");
     try self.line("        (local.set $pos (i32.sub (local.get $pos) (i32.const 1)))");
     try self.line("        (i32.store8 (local.get $pos) (i32.const 45))))");
-    // Go writes this line with three calls, around the buffer end constant.
     try self.line1(
         "    (call $__write_bytes (local.get $fd) (local.get $pos) (i32.sub (i32.const %d) (local.get $pos)))",
         Arg::Int(int_buffer_end())
@@ -1028,8 +1013,7 @@ fn (self: &var Emitter) write_int_value_helper() -> !void {
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
-/// Writes decimal digits into memory from right to left, the Go
-/// `writeIntLoop`.
+/// Writes decimal digits into memory from right to left.
 fn (self: &var Emitter) write_int_loop() -> !void {
     try self.line("    (loop $digits");
     try self.line("      (local.set $pos (i32.sub (local.get $pos) (i32.const 1)))");
@@ -1041,9 +1025,8 @@ fn (self: &var Emitter) write_int_loop() -> !void {
     return self.line("      (br_if $digits (i64.ne (local.get $n) (i64.const 0))))");
 }
 
-/// Writes one user function with a dispatch loop for blocks, the Go
-/// `writeFunction`. Go gives the function a fresh values map; the generation
-/// this bumps hides the entries of the previous one.
+/// Writes one user function with a dispatch loop for blocks. The generation
+/// this bumps hides the value entries of the previous one.
 fn (self: &var Emitter) write_function(
     module: &ir::Module,
     function: ir::Function
@@ -1106,12 +1089,11 @@ fn (self: &var Emitter) write_function(
     return null;
 }
 
-/// Bumps the stack pointer past one invocation's frame in the function
-/// itself, the Go `writeFrameReserve`: a call to $__stack_alloc from every
-/// function that has a frame costs more than the three instructions it
-/// performs. A frame is a few hundred bytes and the stack ends far below the
-/// top of memory, so the bump cannot wrap and one comparison with the stack's
-/// end is the whole check.
+/// Bumps the stack pointer past one invocation's frame in the function itself:
+/// a call to $__stack_alloc from every function that has a frame costs more
+/// than the three instructions it performs. A frame is a few hundred bytes and
+/// the stack ends far below the top of memory, so the bump cannot wrap and one
+/// comparison with the stack's end is the whole check.
 fn (self: &var Emitter) write_frame_reserve(size: i64) -> !void {
     try self.line("    (local.set $__kizu_frame (global.get $__stack_pointer))");
     try self.line1(
@@ -1124,8 +1106,7 @@ fn (self: &var Emitter) write_frame_reserve(size: i64) -> !void {
     );
 }
 
-/// Writes WebAssembly parameters and records their values, the Go
-/// `functionParams`.
+/// Writes WebAssembly parameters and records their values.
 fn (self: &var Emitter) append_function_params(
     module: &ir::Module,
     node: &ir::FunctionNode,
@@ -1156,7 +1137,7 @@ fn (self: &var Emitter) append_function_params(
     return;
 }
 
-/// Writes the WebAssembly result declaration, the Go `functionResult`.
+/// Writes the WebAssembly result declaration.
 fn (self: &var Emitter) append_function_result(
     module: &ir::Module,
     out: &var string::String,
@@ -1170,7 +1151,7 @@ fn (self: &var Emitter) append_function_result(
     return out.append_bytes(self.allocator, ")");
 }
 
-/// Declares SSA locals that must live across blocks, the Go `writeLocals`.
+/// Declares SSA locals that must live across blocks.
 fn (self: &var Emitter) write_locals(module: &ir::Module, node: &ir::FunctionNode) -> !void {
     var block_index = 0;
     while node.blocks.get(block_index) |block| {
@@ -1193,8 +1174,7 @@ fn (self: &var Emitter) write_locals(module: &ir::Module, node: &ir::FunctionNod
     return;
 }
 
-/// Reports whether an instruction result needs a WebAssembly local, the Go
-/// `needsLocal`.
+/// Reports whether an instruction result needs a WebAssembly local.
 fn needs_local(module: &ir::Module, node: &ir::InstrNode) -> bool {
     if ir::is_empty(node.result.type_name) or module.names.is(node.result.type_name, "void") {
         return false;
@@ -1202,8 +1182,7 @@ fn needs_local(module: &ir::Module, node: &ir::InstrNode) -> bool {
     return node.op != ir::Op::Const or !module.names.is(node.result.type_name, "[]u8");
 }
 
-/// Records the expression that stands for a result, the Go
-/// `e.values[instr.Result.Name] = valueInfo{...}`.
+/// Records the expression that stands for a result.
 fn (self: &var Emitter) set_value(
     module: &ir::Module,
     result: ir::Value,
@@ -1220,9 +1199,9 @@ fn (self: &var Emitter) set_value(
     });
 }
 
-/// Resolves a typed IR value to a WebAssembly expression, the Go `value`: a
-/// value the walk recorded, a decimal name as an i64 constant, anything else
-/// as the local of that name.
+/// Resolves a typed IR value to a WebAssembly expression: a value the walk
+/// recorded, a decimal name as an i64 constant, anything else as the local of
+/// that name.
 fn (self: &var Emitter) value_of(module: &ir::Module, value: ir::Value) -> !ValueInfo {
     let retained = ir::name_text(&module.names, value.name);
     let bytes = retained.as_bytes();
@@ -1255,9 +1234,8 @@ fn (self: &var Emitter) value_of(module: &ir::Module, value: ir::Value) -> !Valu
     };
 }
 
-/// Reports whether a name is a decimal integer, the Go `strconv.Atoi` reading
-/// it without an error: an optional sign, at least one digit, nothing else,
-/// and a value an int64 holds.
+/// Reports whether a name is a decimal integer: an optional sign, at least one
+/// digit, nothing else, and a value an int64 holds.
 fn is_decimal(name: []u8) -> bool {
     var start = 0;
     if mem::len(name) > 0 and (name[0] == cast<u8>(43) or name[0] == cast<u8>(45)) {
@@ -1299,10 +1277,9 @@ fn exceeds(left: []u8, right: []u8) -> bool {
     return false;
 }
 
-/// Appends the bytes a quoted IR string literal spells, the Go
-/// `strconv.Unquote` over the form `internal/quote.Bytes` writes: `"` ... `"`
-/// with `\\`, `\"`, `\n`, `\r`, `\t` and `\xNN`. Go drops the result of a
-/// malformed literal; here the output stays empty for one.
+/// Appends the bytes a quoted IR string literal spells, the form `"` ... `"`
+/// with `\\`, `\"`, `\n`, `\r`, `\t` and `\xNN`. The output stays empty for a
+/// malformed literal.
 fn append_unquoted(allocator: Allocator, out: &var string::String, literal: []u8) -> !void {
     let length = mem::len(literal);
     if length < 2 or literal[0] != cast<u8>(34) or literal[length - 1] != cast<u8>(34) {

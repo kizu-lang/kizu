@@ -2,14 +2,12 @@ import compiler::internal::diagnostic;
 import compiler::internal::ir;
 import std::string;
 
-// Mechanical port of internal/llvm/test.go: the std::testing intrinsics and
-// the one runtime declaration they add. Go builds the failure report of an
-// assertion as a string and writes it after the branch; here it is an owned
-// String handed to write_reported_failure, which releases it.
+// The std::testing intrinsics and the one runtime declaration they add. An
+// assertion's failure report is an owned String handed to
+// write_reported_failure, which writes it after the branch and releases it.
 
-/// Declares helpers used by test intrinsics, the Go `writeTestRuntimeDecls`.
-/// The failure reporting entries are declared with every other failure by
-/// writePanicDecls.
+/// Declares helpers used by test intrinsics. The failure reporting entries are
+/// declared with every other failure by write_panic_decls.
 fn (self: &var Emitter) write_test_runtime_decls(module: &ir::Module) -> !void {
     if self.uses_byte_equality_runtime(module) {
         try self.line("declare i1 @kizu_bytes_equal(ptr, i64, ptr, i64)");
@@ -23,8 +21,7 @@ fn (self: &var Emitter) write_test_runtime_decls(module: &ir::Module) -> !void {
     return;
 }
 
-/// Reports whether a test body tells the runtime where it is, the Go
-/// `usesTestContext`.
+/// Reports whether a test body tells the runtime where it is.
 fn (self: &Emitter) uses_test_context(module: &ir::Module) -> bool {
     var index = 0;
     while module.functions.get(index) |function| {
@@ -47,7 +44,7 @@ fn (self: &Emitter) uses_test_context(module: &ir::Module) -> bool {
     return false;
 }
 
-/// Reports whether []u8 equality is needed, the Go `usesByteEqualityRuntime`.
+/// Reports whether []u8 equality is needed.
 fn (self: &Emitter) uses_byte_equality_runtime(module: &ir::Module) -> bool {
     var index = 0;
     while module.functions.get(index) |function| {
@@ -75,7 +72,7 @@ fn (self: &Emitter) uses_byte_equality_runtime(module: &ir::Module) -> bool {
     return false;
 }
 
-/// Dispatches std::testing intrinsics, the Go `writeTestInstr`.
+/// Dispatches std::testing intrinsics.
 fn (self: &var Emitter) write_test_instr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     match node.op {
         TestFail => return self.write_test_fail(module, node),
@@ -89,8 +86,8 @@ fn (self: &var Emitter) write_test_instr(module: &ir::Module, node: &ir::InstrNo
     }
 }
 
-/// Hands the runtime the name of the test that is starting and the file it
-/// was written in, the Go `writeTestBegin`, so a failure can name both.
+/// Hands the runtime the name of the test that is starting and the file it was
+/// written in, so a failure can name both.
 fn (self: &var Emitter) write_test_begin(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 2 or !module.names.is(node.args.get_or_panic(0).type_name, "[]u8") or
         !module.names.is(node.args.get_or_panic(1).type_name, "[]u8") {
@@ -112,8 +109,7 @@ fn (self: &var Emitter) write_test_begin(module: &ir::Module, node: &ir::InstrNo
     return null;
 }
 
-/// Hands the runtime the position of the statement about to run, the Go
-/// `writeTestMark`.
+/// Hands the runtime the position of the statement about to run.
 fn (self: &var Emitter) write_test_mark(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let position = try self.panic_position(node.span);
     try self.line1("  call void @kizu_test_mark(%s)", Arg::Str(position));
@@ -121,8 +117,7 @@ fn (self: &var Emitter) write_test_mark(module: &ir::Module, node: &ir::InstrNod
     return null;
 }
 
-/// Reports an explicit std::testing failure and stops, the Go
-/// `writeTestFail`.
+/// Reports an explicit std::testing failure and stops.
 fn (self: &var Emitter) write_test_fail(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 or !module.names.is(node.args.get_or_panic(0).type_name, "[]u8") {
         return try self.fail0("llvm error: test.fail expects one []u8 message");
@@ -142,9 +137,8 @@ fn (self: &var Emitter) write_test_fail(module: &ir::Module, node: &ir::InstrNod
     return null;
 }
 
-/// Reports the expected and actual values when they differ, the Go
-/// `writeTestExpectEqual`. The report Go formats with a trailing newline is
-/// built here without one and given its newline before it is handed on.
+/// Reports the expected and actual values when they differ. The report is
+/// built without its trailing newline and given it before it is handed on.
 fn (self: &var Emitter) write_test_expect_equal(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 2 or !module.names.is(node.result.type_name, "void") {
         return try self.fail0("llvm error: test.expect_equal expects two args");
@@ -199,8 +193,8 @@ fn (self: &var Emitter) write_test_expect_equal(module: &ir::Module, node: &ir::
     return null;
 }
 
-/// Branches to a reporting block unless ok_operand holds, the Go
-/// `writeReportedFailure`; the report is written as it is and released.
+/// Branches to a reporting block unless ok_operand holds; the report is
+/// written as it is and released.
 fn (self: &var Emitter) write_reported_failure(module: &ir::Module, ok_operand: ir::Name, report: string::String) -> !void {
     defer report.deinit(self.allocator);
     let fail_label = try self.helper_label_local(ok_operand, "fail");
@@ -213,9 +207,8 @@ fn (self: &var Emitter) write_reported_failure(module: &ir::Module, ok_operand: 
     return self.line1("%s:", Arg::Str(ok_label));
 }
 
-/// Builds one text the Go `fmt.Sprintf` way with five arguments, for a text
-/// kept as its own String rather than named; the shape of llvm.kizu's
-/// `sprint2`.
+/// Builds one text from a format with five arguments, for a text kept as its
+/// own String rather than named; the shape of llvm.kizu's `sprint2`.
 fn (self: &Emitter) sprint5(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg, e: Arg) -> !string::String {
     var out = string::new(self.allocator);
     errdefer out.deinit(self.allocator);

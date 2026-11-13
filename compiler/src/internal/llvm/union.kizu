@@ -1,14 +1,12 @@
 import compiler::internal::diagnostic;
 import compiler::internal::ir;
 
-// Mechanical port of internal/llvm/union.go: the `union.*` instructions
-// under the #991 `tag + inline payload storage` layout. Go resolves a
-// variant with its own `unionVariant`, which hands back the union as well;
-// here the lookup is `ir::Module.union_variant`, and the union Go quotes by
-// `unionType.Name` is quoted by the type name the instruction carries,
-// which is the key the union was declared under.
+// The `union.*` instructions under the #991 `tag + inline payload storage`
+// layout. A variant is looked up with `ir::Module.union_variant`, and a
+// failure quotes the union by the type name the instruction carries, which is
+// the key the union was declared under.
 
-/// Dispatches tagged union operations, the Go `writeUnionInstr`.
+/// Dispatches tagged union operations.
 fn (self: &var Emitter) write_union_instr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     match node.op {
         UnionNew => return self.write_union_new(module, node),
@@ -23,10 +21,9 @@ fn (self: &var Emitter) write_union_instr(module: &ir::Module, node: &ir::InstrN
     }
 }
 
-/// Lowers a tagged union constructor to the #991 inline layout, the Go
-/// `writeUnionNew`: it initializes the tag and only the active variant's
-/// inline payload. Go's nullable payload pointer is the optional first
-/// argument: null for a constructor with no argument.
+/// Lowers a tagged union constructor to the #991 inline layout: it initializes
+/// the tag and only the active variant's inline payload. The payload is the
+/// optional first argument, absent for a constructor with no argument.
 fn (self: &var Emitter) write_union_new(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if module.union_variant(node.result.type_name, node.immediate) |variant| {
         if node.args.len() > 1 {
@@ -40,11 +37,10 @@ fn (self: &var Emitter) write_union_new(module: &ir::Module, node: &ir::InstrNod
 }
 
 /// Materializes the `tag + inline payload storage` union value a union.new
-/// makes, the Go `writeInlineUnion`. It writes the active tag and, when
-/// present, stores only the active variant's payload into the inline
-/// storage, leaving the inactive bytes uninitialized per the #991 ABI. A
-/// union kept in memory (memory.kizu) is the slot it is built in, and any
-/// other is loaded out of it.
+/// makes. It writes the active tag and, when present, stores only the active
+/// variant's payload into the inline storage, leaving the inactive bytes
+/// uninitialized per the #991 ABI. A union kept in memory (memory.kizu) is the
+/// slot it is built in, and any other is loaded out of it.
 fn (self: &var Emitter) write_inline_union(
     module: &ir::Module,
     node: &ir::InstrNode,
@@ -125,8 +121,7 @@ fn (self: &var Emitter) write_inline_union(
     return null;
 }
 
-/// Materializes a borrowed union value for tag/payload matching, the Go
-/// `writeUnionLoad`.
+/// Materializes a borrowed union value for tag/payload matching.
 fn (self: &var Emitter) write_union_load(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 {
         return try self.fail0("llvm error: union.load expects one borrowed union argument");
@@ -158,8 +153,7 @@ fn (self: &var Emitter) write_union_load(module: &ir::Module, node: &ir::InstrNo
     return null;
 }
 
-/// Extracts the integer discriminant from a union value, the Go
-/// `writeUnionTag`.
+/// Extracts the integer discriminant from a union value.
 fn (self: &var Emitter) write_union_tag(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 or !module.names.is(node.result.type_name, "i64") {
         return try self.fail0("llvm error: union.tag expects union -> i64");
@@ -177,11 +171,10 @@ fn (self: &var Emitter) write_union_tag(module: &ir::Module, node: &ir::InstrNod
     return null;
 }
 
-/// Reads the active variant's payload from the inline storage, the Go
 /// Projects the address of the checked active variant's payload out of a
-/// `&var` union, the Go `writeUnionPayloadRef`: for a match that binds the
-/// payload as a `&var` borrow of where it lies. The tag was dispatched on
-/// before this runs; the address is into the caller's storage, not a copy.
+/// `&var` union: for a match that binds the payload as a `&var` borrow of
+/// where it lies. The tag was dispatched on before this runs; the address is
+/// into the caller's storage, not a copy.
 fn (self: &var Emitter) write_union_payload_ref(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 {
         return try self.fail0("llvm error: union.payload_ref expects one `&var` union argument");
@@ -218,9 +211,9 @@ fn (self: &var Emitter) write_union_payload_ref(module: &ir::Module, node: &ir::
     return try self.fail0("llvm error: unknown union type");
 }
 
-/// `writeUnionPayload`. The tag dispatch happens in match before this runs,
-/// so only the active payload bytes are read; inactive storage is never
-/// touched.
+/// Reads the active variant's payload from the inline storage. The tag
+/// dispatch happens in match before this runs, so only the active payload
+/// bytes are read; inactive storage is never touched.
 fn (self: &var Emitter) write_union_payload(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 {
         return try self.fail0("llvm error: union.payload expects one union argument");

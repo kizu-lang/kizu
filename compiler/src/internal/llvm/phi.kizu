@@ -5,16 +5,14 @@ import std::map;
 import std::mem;
 import std::string;
 
-// Mechanical port of internal/llvm/phi.go: the passes over one function's
-// body text that keep an optional or an error union from reaching LLVM as a
-// phi of the whole aggregate. Go splits the body into a slice of lines and
-// joins them back; here the lines are offsets into the body, the pieces of a
-// line are offsets too, and the result is written straight to the caller's
-// String through a LineWriter that puts the newline Go's join would.
+// The passes over one function's body text that keep an optional or an error
+// union from reaching LLVM as a phi of the whole aggregate. The lines are
+// offsets into the body, the pieces of a line are offsets too, and the result
+// is written straight to the caller's String through a LineWriter, so no line
+// is copied.
 
-/// Writes lines the way Go's `strings.Join(lines, "\n")` joins them: a newline
-/// before every line but the first. A text holding newlines of its own is
-/// several lines written at once.
+/// Writes lines joined by newlines: a newline before every line but the first.
+/// A text holding newlines of its own is several lines written at once.
 struct LineWriter {
     wrote: bool,
 }
@@ -28,7 +26,7 @@ fn (self: &var LineWriter) line(allocator: Allocator, out: &var string::String, 
 }
 
 /// Is one `[ value, %block ]` arm of a phi, as offsets into the line it was
-/// read from, the Go `phiArm`.
+/// read from.
 struct PhiArm {
     value_start: i64,
     value_end: i64,
@@ -36,8 +34,7 @@ struct PhiArm {
     block_end: i64,
 }
 
-/// Is a phi line taken apart, the Go `phiParts` results, as offsets into the
-/// line.
+/// Is a phi line taken apart, as offsets into the line.
 struct PhiParts {
     result_end: i64,
     type_start: i64,
@@ -46,14 +43,14 @@ struct PhiParts {
 }
 
 /// The longest body whose returns are gathered when more than one place names
-/// the function, the Go `inlinableBodyLines`: LLVM copies a function one
-/// place calls into that caller whatever its size.
+/// the function: LLVM copies a function one place calls into that caller
+/// whatever its size.
 fn inlinable_body_lines() -> i64 {
     return 100;
 }
 
-/// Counts the places in the module that name each function, the Go
-/// `countReferences`: a call, a call a cleanup makes, or taking its address.
+/// Counts the places in the module that name each function: a call, a call a
+/// cleanup makes, or taking its address.
 fn (self: &var Emitter) count_references(module: &ir::Module) -> !void {
     var index = 0;
     while module.functions.get(index) |function| {
@@ -83,8 +80,7 @@ fn (self: &var Emitter) count_references(module: &ir::Module) -> !void {
     return;
 }
 
-/// Counts the function one operation names, if it names one, the Go
-/// `countReference`.
+/// Counts the function one operation names, if it names one.
 fn (self: &var Emitter) count_reference(module: &ir::Module, op: ir::Op, operand: ir::Name) -> !void {
     if op != ir::Op::Call and op != ir::Op::FuncAddr {
         return;
@@ -99,14 +95,14 @@ fn (self: &var Emitter) count_reference(module: &ir::Module, op: ir::Op, operand
 }
 
 /// The block every return of an aggregate goes through once the returns are
-/// gathered into one, the Go `returnJoinLabel`.
+/// gathered into one.
 fn return_join_label() -> []u8 {
     return "kizu.return.join";
 }
 
-/// Returns the offset of needle in text at or after from, the Go
-/// `strings.Index` on a suffix. A body is tens of kilobytes and is searched
-/// once per function, so the first byte is what rules a position out.
+/// Returns the offset of needle in text at or after from. A body is tens of
+/// kilobytes and is searched once per function, so the first byte is what
+/// rules a position out.
 fn find_bytes(text: []u8, needle: []u8, from: i64) -> ?i64 {
     let length = mem::len(needle);
     let size = mem::len(text);
@@ -126,8 +122,8 @@ fn find_bytes(text: []u8, needle: []u8, from: i64) -> ?i64 {
     return null;
 }
 
-/// Reports whether text holds more than limit newlines, the Go
-/// `strings.Count(text, "\n") > limit`, stopping at the first one past it.
+/// Reports whether text holds more than limit newlines, stopping at the first
+/// one past it.
 fn more_lines_than(text: []u8, limit: i64) -> bool {
     var count = 0;
     var index = 0;
@@ -144,7 +140,7 @@ fn more_lines_than(text: []u8, limit: i64) -> bool {
     return false;
 }
 
-/// Reports whether a body line is a phi, the Go `phiParts` ok result.
+/// Reports whether a body line is a phi.
 fn is_phi_line(line: []u8) -> bool {
     if phi_parts(line) |_| {
         return true;
@@ -152,9 +148,8 @@ fn is_phi_line(line: []u8) -> bool {
     return false;
 }
 
-/// Counts the lines past the first that start with prefix, the Go
-/// `strings.Count(text, "\n"+prefix)`: a line past the first is what follows
-/// a newline.
+/// Counts the lines past the first that start with prefix: a line past the
+/// first is what follows a newline.
 fn count_lines_after_first_starting_with(text: []u8, prefix: []u8) -> i64 {
     var count = 0;
     var start = line_end(text, 0) + 1;
@@ -168,22 +163,21 @@ fn count_lines_after_first_starting_with(text: []u8, prefix: []u8) -> i64 {
     return count;
 }
 
-/// Reports whether a body line opens a block, the Go `isBlockLabel`.
+/// Reports whether a body line opens a block.
 fn is_label_line(line: []u8) -> bool {
     let length = mem::len(line);
     return length > 0 and line[length - 1] == cast<u8>(58) and !mem::starts_with(line, " ");
 }
 
-/// Reports whether a body line is the instruction a block ends with, the Go
-/// `isBlockTerminator`.
+/// Reports whether a body line is the instruction a block ends with.
 fn is_terminator_line(line: []u8) -> bool {
     return mem::starts_with(line, "  br ") or mem::starts_with(line, "  ret ") or
         mem::starts_with(line, "  switch ") or mem::starts_with(line, "  indirectbr ") or
         mem::equal_bytes(line, "  unreachable");
 }
 
-/// Splits a phi line into its result, its type and the text of its arms, the
-/// Go `phiParts`; null for a line that is not a phi.
+/// Splits a phi line into its result, its type and the text of its arms; null
+/// for a line that is not a phi.
 fn phi_parts(line: []u8) -> ?PhiParts {
     if !mem::starts_with(line, "  %") {
         return null;
@@ -194,8 +188,8 @@ fn phi_parts(line: []u8) -> ?PhiParts {
     return PhiParts { result_end: marker, type_start: type_start, type_end: space, arms_start: space + 1 };
 }
 
-/// Reads the arms of a phi from the text after its type, the Go
-/// `parsePhiArms`. The offsets are into line.
+/// Reads the arms of a phi from the text after its type. The offsets are into
+/// line.
 fn parse_phi_arms(allocator: Allocator, line: []u8, start: i64, arms: &var array::Array<PhiArm>) -> !void {
     var at = start;
     while true {
@@ -217,7 +211,7 @@ fn parse_phi_arms(allocator: Allocator, line: []u8, start: i64, arms: &var array
     return;
 }
 
-/// Collects the lines of a body, the Go `strings.Split(body, "\n")`.
+/// Collects the lines of a body.
 fn body_lines(allocator: Allocator, body: []u8, lines: &var array::Array<LineSpan>) -> !void {
     var start = 0;
     while start <= mem::len(body) {
@@ -228,12 +222,11 @@ fn body_lines(allocator: Allocator, body: []u8, lines: &var array::Array<LineSpa
     return;
 }
 
-/// Reports whether some block goes on after it has trapped, the Go
-/// `hasUnreachableTail`.
+/// Reports whether some block goes on after it has trapped.
 fn has_unreachable_tail(body: []u8) -> bool {
-    // Go searches for the trap between two newlines; the line after it is
-    // what says whether the block went on. No instruction but the trap starts
-    // with `u`, so a line is ruled out by its third byte.
+    // The trap is searched for between two newlines; the line after it is what
+    // says whether the block went on. No instruction but the trap starts with
+    // `u`, so a line is ruled out by its third byte.
     let size = mem::len(body);
     var index = 0;
     while index < size {
@@ -252,11 +245,10 @@ fn has_unreachable_tail(body: []u8) -> bool {
     return false;
 }
 
-/// Removes what a block says after it has trapped, and the phi arms that
-/// named it, the Go `dropUnreachableTails`. A trap ends the block -- the
-/// instructions the source wrote after a panic cannot run, and a jump that
-/// cannot be taken is not an edge -- so a phi that still names the block
-/// claims a predecessor the block no longer is.
+/// Removes what a block says after it has trapped, and the phi arms that named
+/// it. A trap ends the block -- the instructions the source wrote after a
+/// panic cannot run, and a jump that cannot be taken is not an edge -- so a
+/// phi that still names the block claims a predecessor the block no longer is.
 fn drop_unreachable_tails(allocator: Allocator, body: []u8, out: &var string::String) -> !void {
     if !has_unreachable_tail(body) {
         return out.append_bytes(allocator, body);
@@ -351,10 +343,10 @@ fn drop_unreachable_tails(allocator: Allocator, body: []u8, out: &var string::St
     return;
 }
 
-/// Reports whether a payload type has no bytes, the Go `occupiesNothing`. A
-/// phi of a type with no bytes is one the code generator at -O0 does not
-/// lower, and a field that carries nothing is no reason to split the value it
-/// is in, so an aggregate holding one is left whole.
+/// Reports whether a payload type has no bytes. A phi of a type with no bytes
+/// is one the code generator at -O0 does not lower, and a field that carries
+/// nothing is no reason to split the value it is in, so an aggregate holding
+/// one is left whole.
 fn (self: &Emitter) occupies_nothing(module: &ir::Module, typ_name: []u8) -> !bool {
     if try self.type_layout(module, typ_name) |layout| {
         return layout.size == 0;
@@ -362,10 +354,10 @@ fn (self: &Emitter) occupies_nothing(module: &ir::Module, typ_name: []u8) -> !bo
     return false;
 }
 
-/// Records the field types one declared aggregate holds, the Go
-/// `rememberAggregate`: a tag, then a payload when middle is not empty, then
-/// last when it is not empty. They are kept as the text between the braces of
-/// the declaration, which is what splitting it along ", " gives back.
+/// Records the field types one declared aggregate holds: a tag, then a payload
+/// when middle is not empty, then last when it is not empty. They are kept as
+/// the text between the braces of the declaration, which is what splitting it
+/// along ", " gives back.
 fn (self: &var Emitter) remember_aggregate_name(name: ir::Name, first: []u8, middle: ir::Name, last: []u8) -> !void {
     var key = try self.names.copy(name);
     defer key.deinit(self.allocator);
@@ -391,8 +383,8 @@ fn (self: &var Emitter) remember_aggregate_name(name: ir::Name, first: []u8, mid
     return self.aggregates.insert(self.allocator, key_bytes, interned);
 }
 
-/// Appends the field types of a declared aggregate to fields, the Go
-/// `aggregateFields`; false when the type is not one.
+/// Appends the field types of a declared aggregate to fields; false when the
+/// type is not one.
 fn (self: &Emitter) aggregate_fields(name: []u8, fields: &var array::Array<LineSpan>, text: &var string::String) -> !bool {
     let interned = self.aggregates.get(name) orelse return false;
     let retained = ir::name_text(&self.names, interned);
@@ -411,8 +403,7 @@ fn (self: &Emitter) aggregate_fields(name: []u8, fields: &var array::Array<LineS
 }
 
 /// Gathers the returns of a function that answers an optional or error union
-/// from more than one place into one return, built from one phi per field,
-/// the Go `unifyAggregateReturns`.
+/// from more than one place into one return, built from one phi per field.
 fn (self: &var Emitter) unify_aggregate_returns(
     body: []u8,
     name: []u8,
@@ -445,8 +436,8 @@ fn (self: &var Emitter) unify_aggregate_returns(
     var lines = array::new<LineSpan>(allocator);
     defer lines.deinit(allocator);
     try body_lines(allocator, body, &var lines);
-    // Go drops a last empty line before the join is written; the lines are
-    // written as they come, so the one that would be dropped is held back.
+    // A last empty line is not written; the lines are written as they come, so
+    // that one is held back.
     var last = lines.len();
     if lines.get(last - 1) |span| {
         if span.start == span.end {
@@ -579,9 +570,9 @@ fn (self: &var Emitter) unify_aggregate_returns(
     return writer.line(allocator, out, "");
 }
 
-/// Is what one phi of an aggregate becomes, the Go `splitPhi`: the line it was
-/// on, the phis per field and the instructions that put the fields back
-/// together after the block's phis, both as spans of the pass's shared text.
+/// Is what one phi of an aggregate becomes: the line it was on, the phis per
+/// field and the instructions that put the fields back together after the
+/// block's phis, both as spans of the pass's shared text.
 struct SplitPhi {
     line: i64,
     phis: LineSpan,
@@ -589,20 +580,19 @@ struct SplitPhi {
 }
 
 /// Is one field read an arm of a split phi needs at the end of the block it
-/// arrives from, the Go `reads[block]` entries: the block as a span of the
-/// body and the instruction as a span of the pass's shared text.
+/// arrives from: the block as a span of the body and the instruction as a span
+/// of the pass's shared text.
 struct FieldRead {
     block: LineSpan,
     text: LineSpan,
 }
 
-/// Rewrites every phi of an optional or error union in one function body
-/// into one phi per field and an assembly of the result, the Go
-/// `splitAggregatePhis`.
+/// Rewrites every phi of an optional or error union in one function body into
+/// one phi per field and an assembly of the result.
 fn (self: &var Emitter) split_aggregate_phis(body: []u8, out: &var string::String) -> !void {
     let allocator = self.allocator;
-    // Go searches the body for a phi of either; the emitter records writing
-    // one, which answers the same question without the search.
+    // The emitter records writing a phi of either, which answers whether the
+    // body holds one without searching it.
     if !self.wrote_aggregate_phi {
         return out.append_bytes(allocator, body);
     }
@@ -701,8 +691,8 @@ fn (self: &var Emitter) split_aggregate_phis(body: []u8, out: &var string::Strin
             field = field + 1;
         }
         let builds_end = text.len();
-        // The reads follow the order Go appends them in: every arm of the
-        // first field, then every arm of the next.
+        // The reads are written in this order: every arm of the first field,
+        // then every arm of the next.
         field = 0;
         while fields.get(field) |_| {
             var arm = 0;
@@ -800,7 +790,7 @@ fn append_arm_name(allocator: Allocator, text: &var string::String, split: i64, 
 }
 
 /// Records that the phi about to be written is of an optional or error union,
-/// the question splitAggregatePhis asks of the body in Go.
+/// so split_aggregate_phis need not search the body for one.
 fn (self: &var Emitter) note_phi_type(phi_type: ir::Name) -> !void {
     var spelled = try self.names.copy(phi_type);
     defer spelled.deinit(self.allocator);
