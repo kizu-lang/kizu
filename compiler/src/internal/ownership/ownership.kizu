@@ -10,31 +10,29 @@ import std::map;
 import std::mem;
 import std::string;
 
-// Mechanical port of internal/ownership: the checker that validates Kizu move
-// semantics after type checking. The Go Checker keeps maps keyed by type
-// spelling and shares `*binding` / `*functionInfo` pointers; here the records
-// live in arenas and maps of the Checker and are passed as copy handles, and
-// every spelling is a Name retained by the NameTable (names.kizu). The Go
-// files map onto this module as follows: checker.go is split by topic across
-// block / let / control / expression / call / type_apply / access / method /
-// container / provenance / uses, comptime.go and meta.go keep their names.
+// The checker that validates Kizu move semantics after type checking. The
+// records live in arenas and maps of the Checker and are passed as copy
+// handles, and every spelling is a Name retained by the NameTable
+// (names.kizu). The checks are split by topic across block / let / control /
+// expression / call / type_apply / access / method / container / provenance /
+// uses / comptime / meta.
 
 /// Lists the active errdefer cleanups one exit must skip because an earlier
-/// move retired them; the Go `Result` maps keyed by return statement and
-/// try expression. A cleanup is named by the receiver expression its
-/// `errdefer` statement was written with: one node per registration, so two
-/// registrations on one name stay apart.
+/// move retired them, keyed by return statement and try expression. A cleanup
+/// is named by the receiver expression its `errdefer` statement was written
+/// with: one node per registration, so two registrations on one name stay
+/// apart.
 pub struct RetiredErrDefers {
     pub node: arena::Handle<ast::StatementNode>,
     pub receivers: array::Array<ast::Expression>,
 }
 
-/// Carries ownership facts consumed by later compiler phases, the Go
-/// `Result`. The statement and expression arena handles of the Ast identify
-/// the return statements and try expressions. A Kizu method cannot hand a
-/// borrow of a field back, so the Go `Result()` accessor is the pair of
-/// `retired_err_defer_for_return` / `retired_err_defer_for_try` queries on
-/// the Checker, read only after a check succeeded.
+/// Carries ownership facts consumed by later compiler phases. The statement
+/// and expression arena handles of the Ast identify the return statements and
+/// try expressions. A Kizu method cannot hand a borrow of a field back, so
+/// reading it is the pair of `retired_err_defer_for_return` /
+/// `retired_err_defer_for_try` queries on the Checker, read only after a check
+/// succeeded.
 pub struct Result {
     pub return_retired_err_defers: array::Array<RetiredErrDefers>,
     pub try_retired_err_defers: array::Array<RetiredTry>,
@@ -43,15 +41,15 @@ pub struct Result {
     // that checked fact forward.
     pub function_pointer_mut_borrows: array::Array<ast::Expression>,
     // The declarations each method call resolved to, one entry per receiver
-    // type a generic instantiation gave it, the Go `methodCallees`. Which
-    // `&var` parameter a call lends is a fact of the method it reaches, and
-    // only the checked receiver type says which method that is: two types may
-    // declare the same method name with `&var` at different positions.
+    // type a generic instantiation gave it. Which `&var` parameter a call
+    // lends is a fact of the method it reaches, and only the checked receiver
+    // type says which method that is: two types may declare the same method
+    // name with `&var` at different positions.
     pub method_callees: array::Array<MethodCallee>,
-    // method_callee_buckets indexes method_callees by method_call_key, the
-    // lookup the Go map keyed by `*ast.FieldExpr` makes: a handle is not a
-    // map key, so a bucket holds the entry indexes whose callee spans hash
-    // alike, in recording order, and the callee node decides within it.
+    // method_callee_buckets indexes method_callees by method_call_key: a
+    // handle is not a map key, so a bucket holds the entry indexes whose
+    // callee spans hash alike, in recording order, and the callee node decides
+    // within it.
     pub method_callee_buckets: map::Map<i64, array::Array<i64>>,
 }
 
@@ -119,10 +117,10 @@ pub struct ParamInfo {
     pub mut_borrow: bool,
 }
 
-/// Is the ownership-facing view of a function, the Go `functionInfo`: what a
-/// caller hands over, plus the body this checker walks. name is the
-/// registered (qualified) name; the signature facts the checker reads are
-/// copied here so no borrow into the Ast is retained.
+/// Is the ownership-facing view of a function: what a caller hands over, plus
+/// the body this checker walks. name is the registered (qualified) name; the
+/// signature facts the checker reads are copied here so no borrow into the Ast
+/// is retained.
 pub struct FunctionInfo {
     pub name: Name,
     pub receiver: bool,
@@ -205,17 +203,16 @@ pub struct ErrDeferEntry {
     pub id: i64,
 }
 
-/// Is one loop the statement being checked sits in, the Go `loopStart`:
-/// its label, and the binding id its body's locals start after. A `break`
-/// or `continue` leaves that body early, so everything declared past the
-/// watermark must already be released.
+/// Is one loop the statement being checked sits in: its label, and the binding
+/// id its body's locals start after. A `break` or `continue` leaves that body
+/// early, so everything declared past the watermark must already be released.
 pub struct LoopStart {
     pub label: Name,
     pub since_id: i64,
 }
 
 /// Is the field or variant a comptime capture names for the length of one
-/// expansion, the Go `metaField`. A variant without payload has no type.
+/// expansion. A variant without payload has no type.
 pub struct MetaField {
     pub owner: Name,
     pub name: Name,
@@ -227,7 +224,7 @@ pub struct MetaField {
 }
 
 /// Names the declaration a variant is built from: the declaring set for an
-/// error member, the type itself otherwise, the Go `variantOwner`.
+/// error member, the type itself otherwise.
 pub fn variant_owner(field: MetaField) -> Name {
     if is_empty(field.origin) {
         return field.owner;
@@ -235,8 +232,7 @@ pub fn variant_owner(field: MetaField) -> Name {
     return field.origin;
 }
 
-/// Is one member of an error set with the set that declared it, the Go
-/// `errorMember`.
+/// Is one member of an error set with the set that declared it.
 pub struct ErrorMember {
     pub origin: Name,
     pub name: Name,
@@ -298,10 +294,10 @@ fn (self: &MetaBindingStore) get(name: []u8) -> ?MetaField {
     return null;
 }
 
-/// Names one value a comptime condition may read, the Go `comptimeValues`
-/// entry: an integer or bool static parameter of the instance being checked,
-/// or an integer-range `comptime for` capture, spelled as a static argument
-/// is. Bindings form the same lexical stack the field captures do.
+/// Names one value a comptime condition may read: an integer or bool static
+/// parameter of the instance being checked, or an integer-range `comptime for`
+/// capture, spelled as a static argument is. Bindings form the same lexical
+/// stack the field captures do.
 struct ComptimeValueBinding {
     parent: ?arena::Handle<ComptimeValueBinding>,
     name: string::String,
@@ -432,9 +428,9 @@ fn (self: &FunctionBindingStore) copy_target(
     return false;
 }
 
-/// Owns one generic instantiation's type-parameter substitution, the Go
-/// `typeArgValues` / `subst` map: the replacement by parameter name, and the
-/// same pairs as parallel owned texts for the type parser.
+/// Owns one generic instantiation's type-parameter substitution: the
+/// replacement by parameter name, and the same pairs as parallel owned texts
+/// for the type parser.
 pub struct Subst {
     by_name: map::Map<[]u8, Name>,
     names: array::Array<string::String>,
@@ -480,8 +476,7 @@ fn (self: SubstStore) deinit(allocator: Allocator) -> void {
 }
 
 /// Selects a substitution for the body about to be checked and returns the
-/// previous selection. An empty substitution selects none, the Go
-/// `c.typeArgValues = nil`.
+/// previous selection. An empty substitution selects none.
 fn (self: &var SubstStore) enter(values: Subst) -> !?arena::Handle<Subst> {
     let previous = self.current;
     if values.by_name.len() == 0 {
@@ -512,8 +507,7 @@ fn (self: &SubstStore) contains(name: []u8) -> bool {
     return false;
 }
 
-/// Validates ownership and move rules for a parsed program, the Go
-/// `Checker`.
+/// Validates ownership and move rules for a parsed program.
 pub struct Checker {
     allocator: Allocator,
     target: stdtarget::Target,
@@ -606,11 +600,10 @@ pub struct Checker {
     view_capture_call: ?ast::Expression,
     borrow_return: bool,
     // method_call is the callee of the method call whose dispatch is being
-    // checked and has not resolved yet, the Go `methodCall`. The method
-    // check that settles which declaration the receiver reaches claims it
-    // (claim_method_callee); every other call clears it for its own
-    // duration, so a call nested in the receiver or the arguments never
-    // resolves the outer one.
+    // checked and has not resolved yet. The method check that settles which
+    // declaration the receiver reaches claims it (claim_method_callee); every
+    // other call clears it for its own duration, so a call nested in the
+    // receiver or the arguments never resolves the outer one.
     method_call: ?ast::Expression,
     // method_call_key is method_call's method_call_key.
     method_call_key: i64,
@@ -631,8 +624,8 @@ pub struct Checker {
     result: Result,
 }
 
-/// Creates a checker for one program, the Go `New` plus the owner tables
-/// `Check` seeds per program (ast.DeinitOwners / DeclaredDeinits).
+/// Creates a checker for one program, with the owner tables seeded per program
+/// (ast.DeinitOwners / DeclaredDeinits).
 pub fn new_checker(allocator: Allocator, tree: &ast::Ast, program: &ast::Program) -> !Checker {
     return new_checker_for_target(
         allocator, tree, program, stdtarget::host()
@@ -747,8 +740,8 @@ fn (self: Checker) deinit(allocator: Allocator) -> void {
 }
 
 /// Validates ownership like `check` but accumulates one diagnostic per
-/// top-level declaration instead of stopping at the first, the Go
-/// `CheckAll`. Setup phases still fail fast.
+/// top-level declaration instead of stopping at the first. Setup phases still
+/// fail fast.
 pub fn check_all(
     allocator: Allocator,
     tree: &var ast::Ast,
@@ -772,13 +765,12 @@ pub fn check_all(
     return move out;
 }
 
-/// Reports every place that needs a `move` marker, the Go
-/// `MissingMoveMarkers`: `check` stops at the first one because it is an
-/// error there; the formatter writes them all, so this records them and
-/// keeps checking. One span can be reached by several generic
+/// Reports every place that needs a `move` marker: `check` stops at the first
+/// one because it is an error there; the formatter writes them all, so this
+/// records them and keeps checking. One span can be reached by several generic
 /// instantiations, so the list is deduplicated by start position. The
-/// program's first other error, if any, comes back with the markers so
-/// callers do not rewrite source the checker rejects.
+/// program's first other error, if any, comes back with the markers so callers
+/// do not rewrite source the checker rejects.
 pub fn missing_move_markers(
     allocator: Allocator,
     tree: &var ast::Ast,
@@ -843,8 +835,8 @@ pub fn (self: &Checker) retired_try_receiver_at(index: i64, position: i64) -> ?a
 }
 
 /// Returns the return statement at index among the ones the check recorded
-/// retired errdefers for, null past the last; the Go `Result` map keys, read
-/// by the IR lowering after a check succeeded.
+/// retired errdefers for, null past the last; read by the IR lowering after a
+/// check succeeded.
 pub fn (self: &Checker) retired_return_at(index: i64) -> ?ast::Statement {
     if self.result.return_retired_err_defers.at(index) |entry| {
         return ast::Statement { node: entry.node, span: null };
@@ -867,7 +859,7 @@ pub fn (self: &Checker) function_pointer_mut_borrow_at(index: i64) -> ?ast::Expr
 }
 
 /// Returns the method call callee at index among the resolved method calls,
-/// null past the last, the Go `Result.MethodCallees` read one entry at a time.
+/// null past the last.
 pub fn (self: &Checker) method_callee_at(index: i64) -> ?ast::Expression {
     if self.result.method_callees.get(index) |entry| {
         return entry.callee;
@@ -915,9 +907,9 @@ pub fn (self: &Checker) append_method_callee_name(index: i64, out: &var string::
     return out.append_bytes(self.allocator, bytes);
 }
 
-/// Runs the setup phases and then every body, stopping at the first error,
-/// the Go `Check` on a checker the caller keeps, so the Result it recorded
-/// can be read afterwards.
+/// Runs the setup phases and then every body, stopping at the first error, on
+/// a checker the caller keeps, so the Result it recorded can be read
+/// afterwards.
 pub fn (self: &var Checker) check_program(tree: &var ast::Ast, program: &ast::Program) -> !?diagnostic::Diagnostic {
     if try self.check_setup(tree, program) |failed| {
         return move failed;
@@ -987,8 +979,7 @@ fn signature_has_type_params(signature: &ast::FunctionSignature) -> bool {
     return false;
 }
 
-/// Records tag enum declarations for enum value reads, the Go
-/// `collectEnums`.
+/// Records tag enum declarations for enum value reads.
 fn (self: &var Checker) collect_enums(tree: &ast::Ast, program: &ast::Program) -> !void {
     var index = 0;
     while program.declarations.get(index) |declaration| {
@@ -1041,8 +1032,8 @@ fn put_enum(
     return values.insert(allocator, key, move info);
 }
 
-/// Records error set declarations for error value reads, the Go
-/// `collectErrorSets`. An error carries nothing, so reading one moves nothing.
+/// Records error set declarations for error value reads. An error carries
+/// nothing, so reading one moves nothing.
 fn (self: &var Checker) collect_error_sets(allocator: Allocator, tree: &ast::Ast, program: &ast::Program) -> !void {
     var combined = array::new<ast::Declaration>(self.allocator);
     defer combined.deinit(self.allocator);
@@ -1198,8 +1189,7 @@ fn put_flags(
     return values.insert(allocator, key, move flags);
 }
 
-/// Records tagged union declarations for variant construction and matches,
-/// the Go `collectUnions`.
+/// Records tagged union declarations for variant construction and matches.
 fn (self: &var Checker) collect_unions(tree: &ast::Ast, program: &ast::Program) -> !void {
     var index = 0;
     while program.declarations.get(index) |declaration| {
@@ -1254,8 +1244,8 @@ fn put_union(
     return values.insert(allocator, key, move info);
 }
 
-/// Names a declared type with its `element<T>` forms resolved, the Go
-/// `stdmeta.ResolveElementTypeForms(typ.Text(x))`; absent is the empty name.
+/// Names a declared type with its `element<T>` forms resolved; absent is the
+/// empty name.
 fn (self: &var Checker) resolved_optional_type(tree: &ast::Ast, value: ?typ::Type) -> !Name {
     let present = value orelse return empty_name();
     let resolved = try stdmeta::resolve_element_type_forms(self.allocator, &tree.types, present);
@@ -1263,12 +1253,10 @@ fn (self: &var Checker) resolved_optional_type(tree: &ast::Ast, value: ?typ::Typ
 }
 
 /// Rejects struct fields that would store a local borrow and records every
-/// struct's fields, the Go `checkStructs`.
-/// Rejects a union payload that is an error union around an owner, the Go
-/// `checkUnionPayloads`. An owner inside `E!T` is released only by the `if`
-/// that opens it, and a union's cleanup arm is one direct call (SPEC §6.12):
-/// there is no place to open the payload, so the value could never be
-/// released.
+/// struct's fields. Rejects a union payload that is an error union around an
+/// owner. An owner inside `E!T` is released only by the `if` that opens it,
+/// and a union's cleanup arm is one direct call (SPEC §6.12): there is no
+/// place to open the payload, so the value could never be released.
 fn (self: &var Checker) check_union_payloads(
     tree: &ast::Ast,
     program: &ast::Program
@@ -1396,9 +1384,8 @@ fn put_struct(
     return values.insert(allocator, key, move info);
 }
 
-/// Names the full field type, including borrow prefixes and with element
-/// forms resolved, the Go `fieldOwnershipType` under
-/// `stdmeta.ResolveElementTypeForms`.
+/// Names the full field type, including borrow prefixes and with element forms
+/// resolved by `stdmeta::resolve_element_type_forms`.
 fn (self: &var Checker) field_ownership_type(tree: &ast::Ast, field: &ast::Field) -> !Name {
     var prefix = "";
     if field.borrow {
@@ -1419,8 +1406,7 @@ fn (self: &var Checker) field_ownership_type(tree: &ast::Ast, field: &ast::Field
     return self.names.intern_owned(move out);
 }
 
-/// Registers top-level signatures before body checks, the Go
-/// `collectFunctions`.
+/// Registers top-level signatures before body checks.
 fn (self: &var Checker) collect_functions(tree: &ast::Ast, program: &ast::Program) -> !?diagnostic::Diagnostic {
     var index = 0;
     while program.declarations.get(index) |declaration| {
@@ -1451,8 +1437,8 @@ fn (self: &var Checker) register_function(tree: &ast::Ast, name: ast::Text, hand
     return self.functions_by_name.insert(self.allocator, bytes, handle);
 }
 
-/// Files a `fn (self: T) name(...)` declaration under the type it is a
-/// method on, the Go `collectReceiverMethod`. Its name already says which.
+/// Files a `fn (self: T) name(...)` declaration under the type it is a method
+/// on. Its name already says which.
 fn (self: &var Checker) collect_receiver_method(tree: &ast::Ast, handle: FunctionHandle) -> !?diagnostic::Diagnostic {
     let info = self.functions.at(handle.index);
     if !info.receiver {
@@ -1497,8 +1483,7 @@ fn (self: &var Checker) register_method(allocator: Allocator, receiver: Name, me
     return self.impls.insert(allocator, receiver_bytes, move methods);
 }
 
-/// Extracts the ownership-facing signature for a function, the Go
-/// `functionInfoFromDecl`.
+/// Extracts the ownership-facing signature for a function.
 fn (self: &var Checker) function_info_from_decl(
     tree: &ast::Ast,
     name: Name,
@@ -1546,7 +1531,7 @@ fn (self: &var Checker) function_info_from_decl(
     };
 }
 
-/// Validates one function body, the Go `checkFunction`.
+/// Validates one function body.
 fn (self: &var Checker) check_function(tree: &var ast::Ast, handle: FunctionHandle) -> !?diagnostic::Diagnostic {
     if self.functions.at(handle.index).has_extern_abi {
         return null;
@@ -1571,8 +1556,8 @@ fn (self: &var Checker) check_function(tree: &var ast::Ast, handle: FunctionHand
     return null;
 }
 
-// Saves the per-function state and selects fn, the prologue of the Go
-// `checkFunction` / `checkGenericInstantiation`.
+// Saves the per-function state and selects fn, the prologue of
+// `check_function` / `check_generic_instantiation`.
 fn (self: &var Checker) enter_function(handle: FunctionHandle, subst: Subst) -> !FunctionRestore {
     let previous = FunctionRestore {
         loop_base: self.loop_base,
@@ -1625,9 +1610,8 @@ fn (self: &var Checker) check_function_body(
 }
 
 /// Enforces ADR-0091: a struct deinit must consume every owner field of its
-/// receiver, the Go `checkDeinitCompleteness`. A union deinit is covered by
-/// the match dispatch rules, and a body that moves self on has handed the
-/// obligation elsewhere.
+/// receiver. A union deinit is covered by the match dispatch rules, and a body
+/// that moves self on has handed the obligation elsewhere.
 fn (self: &var Checker) check_deinit_completeness(
     tree: &ast::Ast,
     handle: FunctionHandle,
@@ -1676,7 +1660,7 @@ fn (self: &var Checker) method_receiver_name(handle: FunctionHandle) -> !?Name {
 }
 
 /// Binds a function's params into env, substituting generic type spellings
-/// when an instantiation is active, the Go `defineParams`.
+/// when an instantiation is active.
 fn (self: &var Checker) define_params(
     tree: &ast::Ast,
     handle: FunctionHandle,
@@ -1745,8 +1729,7 @@ fn (self: &Checker) param_at(handle: FunctionHandle, index: i64) -> ?ParamInfo {
     return info.params.get(index);
 }
 
-/// Names the static entries that declare types, the Go
-/// `FunctionSignature.TypeParamNames`.
+/// Names the static entries that declare types.
 fn (self: &Checker) type_param_names(handle: FunctionHandle) -> !array::Array<Name> {
     var names = array::new<Name>(self.allocator);
     errdefer names.deinit(self.allocator);
@@ -1771,8 +1754,7 @@ fn (self: &Checker) has_type_params(handle: FunctionHandle) -> bool {
     return false;
 }
 
-/// Validates a top-level test block as an errorable, parameterless body,
-/// the Go `checkTestDecl`.
+/// Validates a top-level test block as an errorable, parameterless body.
 fn (self: &var Checker) check_test_decl(tree: &var ast::Ast, test: &ast::TestDecl) -> !?diagnostic::Diagnostic {
     let retained_name = tree.texts.at(test.name.node);
     let source_name = retained_name.as_bytes();
@@ -1807,8 +1789,7 @@ fn (self: &var Checker) check_test_decl(tree: &var ast::Ast, test: &ast::TestDec
     return self.check_function(tree, handle);
 }
 
-/// Returns void for functions without an explicit return type, the Go
-/// `returnTypeName`.
+/// Returns void for functions without an explicit return type.
 fn (self: &Checker) return_type_name(handle: FunctionHandle) -> Name {
     let declared = self.functions.at(handle.index).return_type;
     if is_empty(declared) {

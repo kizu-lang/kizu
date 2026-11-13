@@ -7,16 +7,13 @@ import std::map;
 import std::mem;
 import std::string;
 
-// Mechanical port of the per-instruction half of internal/llvm/emit.go: the
-// writers for scalar, aggregate and memory instructions -- constants,
+// The writers for scalar, aggregate and memory instructions -- constants,
 // arithmetic, casts, phi, struct literals and field access, borrow loads and
 // stores, byte slices, stack buffers, checked failures and print. Each one
-// reads its operands through the module's NameTable, spells what it emits
-// into the emitter's own table, and writes the Go `fmt.Fprintf` lines as
-// their format strings.
+// reads its operands through the module's NameTable, spells what it emits into
+// the emitter's own table, and writes each line through a format string.
 
-/// Builds a failure whose one argument is a name the module spells, the Go
-/// `fmt.Errorf("...%s...", irString)`.
+/// Builds a failure whose one argument is a name the module spells.
 fn (self: &var Emitter) fail_name1(module: &ir::Module, format: []u8, a: ir::Name) -> !diagnostic::Diagnostic {
     let shown_a = try self.own(module, a);
     return self.fail1(format, Arg::Str(shown_a));
@@ -46,7 +43,7 @@ fn (self: &var Emitter) fail_name4(
     return self.fail4(format, Arg::Str(shown_a), Arg::Str(shown_b), Arg::Str(shown_c), Arg::Str(shown_d));
 }
 
-/// Writes scalar and string constants, the Go `writeConst`.
+/// Writes scalar and string constants.
 fn (self: &var Emitter) write_const(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if try self.scalar_const_operand(module, node) |operand| {
         try self.set_value(module, node.result, operand);
@@ -80,7 +77,7 @@ fn (self: &var Emitter) write_const(module: &ir::Module, node: &ir::InstrNode) -
     return try self.fail_name1(module, "llvm error: unsupported const type `%s`", node.result.type_name);
 }
 
-/// Writes arithmetic and comparison instructions, the Go `writeBinary`.
+/// Writes arithmetic and comparison instructions.
 fn (self: &var Emitter) write_binary(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 2 {
         return try self.fail0("llvm error: binary expects 2 args");
@@ -143,11 +140,11 @@ fn (self: &var Emitter) write_binary(module: &ir::Module, node: &ir::InstrNode) 
     return null;
 }
 
-/// Writes `<<` and `>>` with the width rule of SPEC §6.9.2, the Go
-/// `writeShift`: an amount at or past the width leaves 0, or the sign for a
-/// signed `>>`. LLVM makes such a shift poison, so the amount is clamped
-/// before the shift and the result chosen after it; both are selects, not
-/// branches. A negative amount never reaches here: the IR traps on it first.
+/// Writes `<<` and `>>` with the width rule of SPEC §6.9.2: an amount at or
+/// past the width leaves 0, or the sign for a signed `>>`. LLVM makes such a
+/// shift poison, so the amount is clamped before the shift and the result
+/// chosen after it; both are selects, not branches. A negative amount never
+/// reaches here: the IR traps on it first.
 fn (self: &var Emitter) write_shift(
     module: &ir::Module,
     node: &ir::InstrNode,
@@ -192,7 +189,7 @@ fn (self: &var Emitter) write_shift(
     return null;
 }
 
-/// Writes boolean and integer unary operations, the Go `writeUnary`.
+/// Writes boolean and integer unary operations.
 fn (self: &var Emitter) write_unary(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 {
         return try self.fail0("llvm error: unary expects 1 arg");
@@ -232,8 +229,7 @@ fn (self: &var Emitter) write_unary(module: &ir::Module, node: &ir::InstrNode) -
     return null;
 }
 
-/// Emits scalar no-op casts and explicit error-union ABI adaptation, the Go
-/// `writeCast`.
+/// Emits scalar no-op casts and explicit error-union ABI adaptation.
 fn (self: &var Emitter) write_cast(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 {
         return try self.fail0("llvm error: cast expects 1 arg");
@@ -272,11 +268,10 @@ fn (self: &var Emitter) write_cast(module: &ir::Module, node: &ir::InstrNode) ->
     return self.write_pointer_integer_cast(module, node, "ptrtoint");
 }
 
-/// Writes a cast with a floating-point side, the Go `writeFloatCast`. An
-/// integer widens to a float by rounding; a float narrows to an integer by
-/// truncating toward zero and saturating, with NaN going to 0, through
-/// LLVM's saturating intrinsics so no value is poison (SPEC §6.9.3); `f32`
-/// and `f64` convert by rounding.
+/// Writes a cast with a floating-point side. An integer widens to a float by
+/// rounding; a float narrows to an integer by truncating toward zero and
+/// saturating, with NaN going to 0, through LLVM's saturating intrinsics so no
+/// value is poison (SPEC §6.9.3); `f32` and `f64` convert by rounding.
 fn (self: &var Emitter) write_float_cast(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let source = node.args.get_or_panic(0);
     let source_text = ir::name_text(&module.names, source.type_name);
@@ -326,7 +321,7 @@ fn (self: &var Emitter) write_float_cast(module: &ir::Module, node: &ir::InstrNo
 }
 
 /// Appends the name of the saturating conversion from one float type to one
-/// integer type, as `llvm.fptosi.sat.i64.f64`, the Go `floatToIntIntrinsic`.
+/// integer type, as `llvm.fptosi.sat.i64.f64`.
 fn append_float_to_int_intrinsic(
     allocator: Allocator,
     out: &var string::String,
@@ -348,9 +343,8 @@ fn append_float_to_int_intrinsic(
     return;
 }
 
-/// Reinterprets a float as its bits or bits as a float, the
-/// `std::float::bits` and `std::float::from_bits` primitives; the Go
-/// `writeFloatBits`.
+/// Reinterprets a float as its bits or bits as a float, the `std::float::bits`
+/// and `std::float::from_bits` primitives.
 fn (self: &var Emitter) write_float_bits(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 {
         if node.op == ir::Op::FloatBits {
@@ -370,9 +364,9 @@ fn (self: &var Emitter) write_float_bits(module: &ir::Module, node: &ir::InstrNo
 }
 
 /// Names the LLVM intrinsic behind a one-operand float instruction of
-/// `std::math`, the Go `floatUnaryIntrinsics`; each is one IEEE 754
-/// operation, so the backend gives the correctly rounded answer as one
-/// machine instruction. Null for any other instruction.
+/// `std::math`; each is one IEEE 754 operation, so the backend gives the
+/// correctly rounded answer as one machine instruction. Null for any other
+/// instruction.
 pub fn float_unary_intrinsic(op: ir::Op) -> ?[]u8 {
     if op == ir::Op::FloatSqrt {
         return "llvm.sqrt.f64";
@@ -389,10 +383,9 @@ pub fn float_unary_intrinsic(op: ir::Op) -> ?[]u8 {
     return null;
 }
 
-/// Calls llvm.fma.f64, the `std::math` fused multiply-add: one rounding of
-/// x * y + z, which the arm64 and x86-64 (with FMA) targets have as one
-/// instruction and which libm supplies where they do not; the Go
-/// `writeFloatFma`.
+/// Calls llvm.fma.f64, the `std::math` fused multiply-add: one rounding of x *
+/// y + z, which the arm64 and x86-64 (with FMA) targets have as one
+/// instruction and which libm supplies where they do not.
 fn (self: &var Emitter) write_float_fma(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 3 {
         let op = try self.op_name(module, node);
@@ -408,8 +401,7 @@ fn (self: &var Emitter) write_float_fma(module: &ir::Module, node: &ir::InstrNod
     return null;
 }
 
-/// Calls the intrinsic behind a one-operand float instruction, the Go
-/// `writeFloatUnary`.
+/// Calls the intrinsic behind a one-operand float instruction.
 fn (self: &var Emitter) write_float_unary(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let intrinsic = float_unary_intrinsic(node.op) orelse "";
     if mem::len(intrinsic) == 0 {
@@ -430,9 +422,9 @@ fn (self: &var Emitter) write_float_unary(module: &ir::Module, node: &ir::InstrN
     return null;
 }
 
-/// Emits the address conversion between a raw pointer and an integer, the
-/// Go `writePointerIntegerCast`. Width changes ride the conversion itself:
-/// inttoptr and ptrtoint extend and truncate to the target on their own.
+/// Emits the address conversion between a raw pointer and an integer. Width
+/// changes ride the conversion itself: inttoptr and ptrtoint extend and
+/// truncate to the target on their own.
 fn (self: &var Emitter) write_pointer_integer_cast(
     module: &ir::Module,
     node: &ir::InstrNode,
@@ -451,9 +443,8 @@ fn (self: &var Emitter) write_pointer_integer_cast(
     return null;
 }
 
-/// Emits explicit truncate/extend casts between scalar integer widths, the
-/// Go `writeIntegerCast`. Same-width casts never reach here:
-/// cast_forwards_operand claims them.
+/// Emits explicit truncate/extend casts between scalar integer widths.
+/// Same-width casts never reach here: cast_forwards_operand claims them.
 fn (self: &var Emitter) write_integer_cast(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let source = node.args.get_or_panic(0);
     let source_text = ir::name_text(&module.names, source.type_name);
@@ -485,8 +476,8 @@ fn (self: &var Emitter) write_integer_cast(module: &ir::Module, node: &ir::Instr
     return null;
 }
 
-/// Lowers a checked struct literal to an LLVM aggregate value, or builds it
-/// in a slot when it is kept in memory, the Go `writeStructNew`.
+/// Lowers a checked struct literal to an LLVM aggregate value, or builds it in
+/// a slot when it is kept in memory.
 fn (self: &var Emitter) write_struct_new(allocator: Allocator, module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let result_text = ir::name_text(&module.names, node.result.type_name);
     let result_type = result_text.as_bytes();
@@ -561,8 +552,7 @@ fn (self: &var Emitter) write_struct_new(allocator: Allocator, module: &ir::Modu
     return try self.fail_name1(module, "llvm error: unknown struct type `%s`", node.result.type_name);
 }
 
-/// Lowers a checked struct field read to an LLVM aggregate extraction, the
-/// Go `writeField`.
+/// Lowers a checked struct field read to an LLVM aggregate extraction.
 fn (self: &var Emitter) write_field(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 {
         return try self.fail0("llvm error: field read expects 1 arg");
@@ -598,8 +588,7 @@ fn (self: &var Emitter) write_field(module: &ir::Module, node: &ir::InstrNode) -
     return try self.fail_name1(module, "llvm error: unknown struct type `%s`", receiver.type_name);
 }
 
-/// Lowers a field read through a borrowed struct pointer, the Go
-/// `writeFieldRef`.
+/// Lowers a field read through a borrowed struct pointer.
 fn (self: &var Emitter) write_field_ref(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 {
         return try self.fail0("llvm error: borrowed field read expects 1 arg");
@@ -641,9 +630,8 @@ fn (self: &var Emitter) write_field_ref(module: &ir::Module, node: &ir::InstrNod
     return try self.fail_name1(module, "llvm error: unknown borrowed struct type `%s`", receiver.type_name);
 }
 
-/// Lowers a field borrow out of a borrowed struct pointer, the Go
-/// `writeFieldAddr`: the projection is the GEP alone, and the result is the
-/// field's own storage.
+/// Lowers a field borrow out of a borrowed struct pointer: the projection is
+/// the GEP alone, and the result is the field's own storage.
 fn (self: &var Emitter) write_field_addr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 {
         return try self.fail0("llvm error: field address expects 1 arg");
@@ -680,9 +668,8 @@ fn (self: &var Emitter) write_field_addr(module: &ir::Module, node: &ir::InstrNo
 }
 
 /// Lowers a struct field write on a value receiver to an LLVM aggregate
-/// insertion, the Go `writeFieldSet`. The receiver is SSA, so the write
-/// produces a new struct value that the lowerer has already bound in place
-/// of the old one.
+/// insertion. The receiver is SSA, so the write produces a new struct value
+/// that the lowerer has already bound in place of the old one.
 fn (self: &var Emitter) write_field_set(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 2 {
         return try self.fail0("llvm error: field write expects 2 args");
@@ -729,8 +716,8 @@ fn (self: &var Emitter) write_field_set(module: &ir::Module, node: &ir::InstrNod
 }
 
 /// Lowers a struct field write through a borrowed struct pointer to an
-/// addressed store, the Go `writeFieldRefSet`, so the write lands in the
-/// borrowed storage rather than in a copy of it.
+/// addressed store, so the write lands in the borrowed storage rather than in
+/// a copy of it.
 fn (self: &var Emitter) write_field_ref_set(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 2 {
         return try self.fail0("llvm error: borrowed field write expects 2 args");
@@ -779,8 +766,8 @@ fn (self: &var Emitter) write_field_ref_set(module: &ir::Module, node: &ir::Inst
     return try self.fail_name1(module, "llvm error: unknown borrowed struct type `%s`", receiver.type_name);
 }
 
-/// Lowers `receiver.* = value` to a store through the borrow, the Go
-/// `writeRefStore`; a `volatile.store` is the same store marked volatile.
+/// Lowers `receiver.* = value` to a store through the borrow; a
+/// `volatile.store` is the same store marked volatile.
 fn (self: &var Emitter) write_ref_store(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 2 {
         return try self.fail0("llvm error: dereference write expects 2 args");
@@ -820,9 +807,9 @@ fn (self: &var Emitter) write_ref_store(module: &ir::Module, node: &ir::InstrNod
     return null;
 }
 
-/// Marks the memory accesses no pass may drop, merge, or reorder against
-/// other volatile accesses, the Go `volatileKeyword`: device registers
-/// change state on access, so each one the source wrote has to happen.
+/// Marks the memory accesses no pass may drop, merge, or reorder against other
+/// volatile accesses: device registers change state on access, so each one the
+/// source wrote has to happen.
 fn volatile_keyword(op: ir::Op) -> []u8 {
     if op == ir::Op::VolatileStore or op == ir::Op::VolatileLoad {
         return "volatile ";
@@ -830,9 +817,9 @@ fn volatile_keyword(op: ir::Op) -> []u8 {
     return "";
 }
 
-/// Gives a local storage and puts its first value there, the Go
-/// `writeLocalSlot`. A local only reaches here when the function mutably
-/// borrows it, so the address it yields is what the callee writes through.
+/// Gives a local storage and puts its first value there. A local only reaches
+/// here when the function mutably borrows it, so the address it yields is what
+/// the callee writes through.
 fn (self: &var Emitter) write_local_slot(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 {
         return try self.fail0("llvm error: local slot expects 1 arg");
@@ -863,8 +850,8 @@ fn (self: &var Emitter) write_local_slot(module: &ir::Module, node: &ir::InstrNo
     return null;
 }
 
-/// Reads the value currently behind a borrow, the Go `writeRefLoad`; a
-/// `volatile.load` is the same load marked volatile.
+/// Reads the value currently behind a borrow; a `volatile.load` is the same
+/// load marked volatile.
 fn (self: &var Emitter) write_ref_load(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 {
         return try self.fail0("llvm error: borrow read expects 1 arg");
@@ -900,7 +887,7 @@ fn (self: &var Emitter) write_ref_load(module: &ir::Module, node: &ir::InstrNode
     return null;
 }
 
-/// Dispatches checked byte-slice operations, the Go `writeSliceInstr`.
+/// Dispatches checked byte-slice operations.
 fn (self: &var Emitter) write_slice_instr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     match node.op {
         SliceLen => return self.write_slice_len(module, node),
@@ -917,8 +904,7 @@ fn (self: &var Emitter) write_slice_instr(module: &ir::Module, node: &ir::InstrN
     }
 }
 
-/// Builds a vector from one value per lane, in lane order, the Go
-/// `writeVectorNew`.
+/// Builds a vector from one value per lane, in lane order.
 fn (self: &var Emitter) write_vector_new(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let result_text = ir::name_text(&module.names, node.result.type_name);
     let result_bytes = result_text.as_bytes();
@@ -961,8 +947,7 @@ fn (self: &var Emitter) write_vector_new(module: &ir::Module, node: &ir::InstrNo
     return null;
 }
 
-/// Reads one lane of a vector, the Go `writeVectorLane`; the lane index is
-/// the instruction's immediate.
+/// Reads one lane of a vector; the lane index is the instruction's immediate.
 fn (self: &var Emitter) write_vector_lane(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 {
         return try self.fail0("llvm error: vector.lane expects one vector");
@@ -990,9 +975,8 @@ fn (self: &var Emitter) write_vector_lane(module: &ir::Module, node: &ir::InstrN
     return null;
 }
 
-/// Writes one element through a writable view, the Go `writeSliceStore`. The
-/// bounds test reaches the backend as preceding cond_fail instructions, so
-/// no check is generated here.
+/// Writes one element through a writable view. The bounds test reaches the
+/// backend as preceding cond_fail instructions, so no check is generated here.
 fn (self: &var Emitter) write_slice_store(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let view_text = ir::name_text(&module.names, node.args.get_or_panic(0).type_name);
     let view_bytes = view_text.as_bytes();
@@ -1024,7 +1008,7 @@ fn (self: &var Emitter) write_slice_store(module: &ir::Module, node: &ir::InstrN
     return null;
 }
 
-/// Extracts the byte length from a []u8 value, the Go `writeSliceLen`.
+/// Extracts the byte length from a []u8 value.
 fn (self: &var Emitter) write_slice_len(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 or
         !module.names.starts_with(node.args.get_or_panic(0).type_name, "[]") or
@@ -1038,7 +1022,7 @@ fn (self: &var Emitter) write_slice_len(module: &ir::Module, node: &ir::InstrNod
     return null;
 }
 
-/// Extracts the element pointer from a view value, the Go `writeSlicePtr`.
+/// Extracts the element pointer from a view value.
 fn (self: &var Emitter) write_slice_ptr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 or
         !module.names.starts_with(node.args.get_or_panic(0).type_name, "[]") or
@@ -1052,8 +1036,7 @@ fn (self: &var Emitter) write_slice_ptr(module: &ir::Module, node: &ir::InstrNod
     return null;
 }
 
-/// Builds a view value from a raw pointer and a count, the Go
-/// `writeSliceFromPtr`.
+/// Builds a view value from a raw pointer and a count.
 fn (self: &var Emitter) write_slice_from_ptr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 2 or
         !module.names.starts_with(node.result.type_name, "[]") or
@@ -1074,7 +1057,7 @@ fn (self: &var Emitter) write_slice_from_ptr(module: &ir::Module, node: &ir::Ins
     return null;
 }
 
-/// Steps a raw pointer by a count of its elements, the Go `writePtrOffset`.
+/// Steps a raw pointer by a count of its elements.
 fn (self: &var Emitter) write_ptr_offset(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let pointer_text = ir::name_text(&module.names, node.args.get_or_panic(0).type_name);
     let pointer_bytes = pointer_text.as_bytes();
@@ -1096,8 +1079,8 @@ fn (self: &var Emitter) write_ptr_offset(module: &ir::Module, node: &ir::InstrNo
     return null;
 }
 
-/// Tests a nullable raw pointer for null, the Go `writePtrHas`: the pointer
-/// is its own tag, so there is no payload to unpack.
+/// Tests a nullable raw pointer for null: the pointer is its own tag, so there
+/// is no payload to unpack.
 fn (self: &var Emitter) write_ptr_has(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let pointer = node.args.get(0) orelse ir::empty_value();
     let pointer_text = ir::name_text(&module.names, pointer.type_name);
@@ -1112,9 +1095,8 @@ fn (self: &var Emitter) write_ptr_has(module: &ir::Module, node: &ir::InstrNode)
     return null;
 }
 
-/// Opens a nullable raw pointer where ptr.has was true, the Go
-/// `writePtrValue`. The non-null pointer is the same machine value, so
-/// nothing is emitted.
+/// Opens a nullable raw pointer where ptr.has was true. The non-null pointer
+/// is the same machine value, so nothing is emitted.
 fn (self: &var Emitter) write_ptr_value(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let pointer = node.args.get(0) orelse ir::empty_value();
     let pointer_text = ir::name_text(&module.names, pointer.type_name);
@@ -1127,9 +1109,8 @@ fn (self: &var Emitter) write_ptr_value(module: &ir::Module, node: &ir::InstrNod
     return null;
 }
 
-/// Loads one element, the Go `writeSliceIndex`. The bounds test reaches the
-/// backend as a preceding cond_fail instruction, so no check is generated
-/// here.
+/// Loads one element. The bounds test reaches the backend as a preceding
+/// cond_fail instruction, so no check is generated here.
 fn (self: &var Emitter) write_slice_index(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let view_text = ir::name_text(&module.names, node.args.get_or_panic(0).type_name);
     let view_bytes = view_text.as_bytes();
@@ -1161,9 +1142,8 @@ fn (self: &var Emitter) write_slice_index(module: &ir::Module, node: &ir::InstrN
     return null;
 }
 
-/// Builds a sub-slice, the Go `writeSliceSlice`. The bounds test reaches the
-/// backend as preceding cond_fail instructions, so no check is generated
-/// here.
+/// Builds a sub-slice. The bounds test reaches the backend as preceding
+/// cond_fail instructions, so no check is generated here.
 fn (self: &var Emitter) write_slice_slice(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let view_text = ir::name_text(&module.names, node.args.get_or_panic(0).type_name);
     let view_bytes = view_text.as_bytes();
@@ -1201,10 +1181,9 @@ fn (self: &var Emitter) write_slice_slice(module: &ir::Module, node: &ir::InstrN
     return null;
 }
 
-/// Makes a zero-filled fixed-length array, the Go `writeBufferNew`. The
-/// array is a value like a struct, so the result is the constant itself; a
-/// place that needs its address -- a view, an indexed write -- stores it into
-/// a slot.
+/// Makes a zero-filled fixed-length array. The array is a value like a struct,
+/// so the result is the constant itself; a place that needs its address -- a
+/// view, an indexed write -- stores it into a slot.
 fn (self: &var Emitter) write_buffer_new(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let result_text = ir::name_text(&module.names, node.result.type_name);
     let result_type = result_text.as_bytes();
@@ -1216,8 +1195,7 @@ fn (self: &var Emitter) write_buffer_new(module: &ir::Module, node: &ir::InstrNo
     return try self.fail_name1(module, "llvm error: buffer.new expects `[N]T` result, got %s", node.result.type_name);
 }
 
-/// Builds the {ptr, len} view of an array from its storage, the Go
-/// `writeBufferAsBytes`.
+/// Builds the {ptr, len} view of an array from its storage.
 fn (self: &var Emitter) write_buffer_as_bytes(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 or !module.names.starts_with(node.result.type_name, "[]") {
         return try self.fail0("llvm error: buffer.as_bytes expects `&var [N]T` -> `[]T`");
@@ -1241,8 +1219,8 @@ fn (self: &var Emitter) write_buffer_as_bytes(module: &ir::Module, node: &ir::In
     return try self.fail_name1(module, "llvm error: buffer.as_bytes expects the storage of `[N]T`, got %s", storage_arg.type_name);
 }
 
-/// Projects the address of one element out of an array's storage, the Go
-/// `writeBufferAddr`. The index was bounds-checked when it was lowered.
+/// Projects the address of one element out of an array's storage. The index
+/// was bounds-checked when it was lowered.
 fn (self: &var Emitter) write_buffer_addr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 2 {
         return try self.fail0("llvm error: buffer.addr expects the storage of `[N]T` and an index");
@@ -1290,9 +1268,8 @@ fn (self: &var Emitter) buffer_elem(typ_name: []u8) -> !?string::String {
     }
 }
 
-/// Parses N from a `[N]u8` spelling, the Go `bufferSize`; null for any other
-/// spelling. Go answers false for a spelling that does not parse; an empty
-/// spelling is the one such case a lowered module holds, and is answered
+/// Parses N from a `[N]u8` spelling; null for any other spelling. An empty
+/// spelling is the one unparsable case a lowered module holds, and is answered
 /// here before parsing.
 fn (self: &var Emitter) buffer_size(typ_name: []u8) -> !?i64 {
     if mem::len(typ_name) == 0 {
@@ -1305,8 +1282,7 @@ fn (self: &var Emitter) buffer_size(typ_name: []u8) -> !?i64 {
     }
 }
 
-/// Reports the named failure when the tested condition holds, the Go
-/// `writeCondFail`.
+/// Reports the named failure when the tested condition holds.
 fn (self: &var Emitter) write_cond_fail(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let imm = ir::name_text(&module.names, node.immediate);
     let imm_bytes = imm.as_bytes();
@@ -1356,8 +1332,7 @@ fn (self: &var Emitter) write_cond_fail(module: &ir::Module, node: &ir::InstrNod
     return try self.fail_name1(module, "llvm error: unknown cond_fail kind `%s`", node.immediate);
 }
 
-/// Reports an unconditional runtime failure with a message and stops, the Go
-/// `writePanicFail`.
+/// Reports an unconditional runtime failure with a message and stops.
 fn (self: &var Emitter) write_panic_fail(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 or !module.names.is(node.args.get_or_panic(0).type_name, "[]u8") {
         return try self.fail0("llvm error: panic.fail expects one []u8 message");
@@ -1376,7 +1351,7 @@ fn (self: &var Emitter) write_panic_fail(module: &ir::Module, node: &ir::InstrNo
     return null;
 }
 
-/// Writes an LLVM phi instruction, the Go `writePhi`.
+/// Writes an LLVM phi instruction.
 fn (self: &var Emitter) write_phi(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     var parts = array::new<string::String>(self.allocator);
     defer parts.deinit(self.allocator);
@@ -1410,8 +1385,8 @@ fn (self: &var Emitter) write_phi(module: &ir::Module, node: &ir::InstrNode) -> 
     return null;
 }
 
-/// Writes one byte string and a newline to stdout, the Go `writePrintLine`:
-/// the one print primitive std::fmt::print is built on (SPEC §14.1).
+/// Writes one byte string and a newline to stdout: the one print primitive
+/// std::fmt::print is built on (SPEC §14.1).
 fn (self: &var Emitter) write_print_line(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 or !module.names.is(node.args.get_or_panic(0).type_name, "[]u8") {
         return try self.fail0("llvm error: print.line expects []u8");

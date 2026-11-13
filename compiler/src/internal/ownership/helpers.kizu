@@ -7,18 +7,17 @@ import std::map;
 import std::mem;
 import std::string;
 
-// Port of the binding, arena-provenance, and type helpers at the end of
-// internal/ownership/checker.go (newBinding through splitGenericArgs), plus
-// the small shared readers the other files lean on.
+// The binding, arena-provenance, and type helpers (new_binding through
+// split_generic_args), plus the small shared readers the other files lean on.
 
 /// Returns no binding; `var x = none_binding()` declares an optional local.
 pub fn none_binding() -> ?BindingHandle {
     return null;
 }
 
-/// Is the field path used as a method receiver, the Go
-/// `directFieldReceiver`: the root binding, the dotted path of the field the
-/// method runs on, that field's type, and `root.path` for diagnostics.
+/// Is the field path used as a method receiver: the root binding, the dotted
+/// path of the field the method runs on, that field's type, and `root.path`
+/// for diagnostics.
 pub struct DirectFieldReceiver {
     pub owner: BindingHandle,
     pub field: Name,
@@ -37,17 +36,17 @@ fn (self: &Checker) empty_direct_field_receiver() -> DirectFieldReceiver {
     };
 }
 
-/// Is the root binding and dotted field path of a local field-path
-/// assignment or read target, the Go `directFieldRoot` result.
+/// Is the root binding and dotted field path of a local field-path assignment
+/// or read target, the `direct_field_root` result.
 pub struct DirectFieldRoot {
     pub root: BindingHandle,
     pub path: Name,
 }
 
-/// Returns a local field-path assignment or read target: the root binding
-/// and the dotted field path relative to it (empty for a bare identifier),
-/// the Go `directFieldRoot`; null when the root is unbound or the expression
-/// is neither an identifier nor a field path.
+/// Returns a local field-path assignment or read target: the root binding and
+/// the dotted field path relative to it (empty for a bare identifier); null
+/// when the root is unbound or the expression is neither an identifier nor a
+/// field path.
 fn (self: &var Checker) direct_field_root(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -64,22 +63,21 @@ fn (self: &var Checker) direct_field_root(
 }
 
 /// Reports whether a path has handed the value's cleanup obligation on, by
-/// move or by explicit cleanup, the Go `bindingConsumed`.
+/// move or by explicit cleanup.
 fn (self: &Checker) binding_consumed(value: BindingHandle) -> bool {
     let record = self.binding(value);
     return record.moved or record.deinitialized;
 }
 
-/// Reports whether a binding is a place a mutable borrow may come from, the
-/// Go `mutablePlace`: a `var` local or a `&var` borrow.
+/// Reports whether a binding is a place a mutable borrow may come from: a
+/// `var` local or a `&var` borrow.
 fn (self: &Checker) mutable_place(value: BindingHandle) -> bool {
     let record = self.binding(value);
     return record.mutable or record.mut_borrow;
 }
 
-/// Reports an owner allocated from a frame-tied allocator, the Go
-/// `binding.allocTied`: it keeps its owner obligations (deinit) but cannot
-/// escape the frame.
+/// Reports an owner allocated from a frame-tied allocator: it keeps its owner
+/// obligations (deinit) but cannot escape the frame.
 fn (self: &Checker) alloc_tied(value: BindingHandle) -> bool {
     if self.binding(value).borrowed_param {
         return false;
@@ -87,11 +85,11 @@ fn (self: &Checker) alloc_tied(value: BindingHandle) -> bool {
     return self.has_tied_allocator_source(value);
 }
 
-/// Reports whether this value was built from a tied allocator, the Go
-/// `binding.tiedAllocatorSources`. A value can hold borrow targets for another
-/// reason -- an aggregate that keeps a source view holds one too -- and that
-/// one escapes under the view rules, not this one, so the allocators are read
-/// out by type rather than taken to be every source.
+/// Reports whether this value was built from a tied allocator. A value can
+/// hold borrow targets for another reason -- an aggregate that keeps a source
+/// view holds one too -- and that one escapes under the view rules, not this
+/// one, so the allocators are read out by type rather than taken to be every
+/// source.
 fn (self: &Checker) has_tied_allocator_source(value: BindingHandle) -> bool {
     var index = 0;
     while self.borrow_target_at(value, index) |source| {
@@ -103,16 +101,14 @@ fn (self: &Checker) has_tied_allocator_source(value: BindingHandle) -> bool {
     return false;
 }
 
-/// Reports whether the binding is itself a `&var` parameter, the Go
-/// `binding.isMutBorrowParam`: the caller's storage, which assigning the
-/// binding stores into.
+/// Reports whether the binding is itself a `&var` parameter: the caller's
+/// storage, which assigning the binding stores into.
 fn (self: &Checker) is_mut_borrow_param(value: BindingHandle) -> bool {
     let record = self.binding(value);
     return record.borrowed_param and !record.local_borrow and record.mut_borrow;
 }
 
-/// Records arena and handle origins for local bindings, the Go
-/// `setArenaProvenance`.
+/// Records arena and handle origins for local bindings.
 fn (self: &var Checker) set_arena_provenance(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -142,8 +138,7 @@ fn (self: &var Checker) set_arena_provenance(
     return;
 }
 
-/// Reports the public std::arena::new<T>(allocator) constructor, the Go
-/// `isArenaConstructorExpr`.
+/// Reports the public std::arena::new<T>(allocator) constructor.
 fn (self: &var Checker) is_arena_constructor_expr(tree: &ast::Ast, expression: ast::Expression) -> !bool {
     let call = call_expr(tree, expression) orelse return false;
     let apply = type_apply_expr(tree, call.callee) orelse return false;
@@ -152,14 +147,13 @@ fn (self: &var Checker) is_arena_constructor_expr(tree: &ast::Ast, expression: a
 }
 
 /// Reports whether the arena with this provenance id is storage the caller
-/// keeps, the Go `arenaOutlivesFrame`: a field arena of a borrowed parameter.
+/// keeps: a field arena of a borrowed parameter.
 fn (self: &Checker) arena_outlives_frame(arena_id: i64, env: ScopeHandle) -> bool {
     let owner = self.store.field_arena_owner(env, arena_id) orelse return false;
     return self.binding(owner).borrowed_param;
 }
 
-/// Returns a stable arena identity for one owner field, the Go
-/// `directFieldArenaID`.
+/// Returns a stable arena identity for one owner field.
 fn (self: &var Checker) direct_field_arena_id(receiver: DirectFieldReceiver) -> !i64 {
     let known = self.field_arena_id(receiver.owner, receiver.field);
     if known != 0 {
@@ -170,19 +164,17 @@ fn (self: &var Checker) direct_field_arena_id(receiver: DirectFieldReceiver) -> 
     return id;
 }
 
-/// Reports whether field.deinit is inside owner deinit, the Go
-/// `allowsDirectFieldCleanup`.
+/// Reports whether field.deinit is inside owner deinit.
 fn (self: &Checker) allows_direct_field_cleanup(receiver: DirectFieldReceiver) -> bool {
     return self.allows_owner_field_cleanup(receiver.owner);
 }
 
-/// Reports whether a field of this binding may be consumed here, the Go
-/// `allowsOwnerFieldCleanup`. The value has to be one the frame holds -- a
-/// borrow is someone else's and taking it apart would free what the lender
-/// still has -- and its type has to be one whose obligation is its fields'
-/// obligations. A type that declares its own deinit is taken whole everywhere
-/// but inside that deinit, which is where the declared obligation is being
-/// discharged.
+/// Reports whether a field of this binding may be consumed here. The value has
+/// to be one the frame holds -- a borrow is someone else's and taking it apart
+/// would free what the lender still has -- and its type has to be one whose
+/// obligation is its fields' obligations. A type that declares its own deinit
+/// is taken whole everywhere but inside that deinit, which is where the
+/// declared obligation is being discharged.
 fn (self: &Checker) allows_owner_field_cleanup(owner: BindingHandle) -> bool {
     let record = self.binding(owner);
     if record.borrowed_param or record.local_borrow {
@@ -194,8 +186,7 @@ fn (self: &Checker) allows_owner_field_cleanup(owner: BindingHandle) -> bool {
     return self.inside_deinit_of(owner);
 }
 
-/// Reports whether the current function is this binding's own declared
-/// deinit, the Go `insideDeinitOf`.
+/// Reports whether the current function is this binding's own declared deinit.
 fn (self: &Checker) inside_deinit_of(owner: BindingHandle) -> bool {
     let function = self.current_function orelse return false;
     if !self.current_is_void_deinit(function) {
@@ -220,12 +211,11 @@ fn (self: &Checker) current_is_void_deinit(function: FunctionHandle) -> bool {
     return is_empty(info.return_type) or self.names.is(info.return_type, "void");
 }
 
-/// Reports whether a method takes its receiver over, the Go
-/// `functionConsumesReceiver`: `deinit` by contract (SPEC §8), and a std
-/// method written with a by-value receiver whose result is not a borrow of it
-/// -- `Box.take` hands the payload out and releases the cell -- by its
-/// compiler-known signature (SPEC §14.4). Every other by-value receiver is
-/// read in place.
+/// Reports whether a method takes its receiver over: `deinit` by contract
+/// (SPEC §8), and a std method written with a by-value receiver whose result
+/// is not a borrow of it -- `Box.take` hands the payload out and releases the
+/// cell -- by its compiler-known signature (SPEC §14.4). Every other by-value
+/// receiver is read in place.
 fn (self: &Checker) function_consumes_receiver(function: FunctionHandle) -> bool {
     let info = self.functions.at(function.index);
     if !info.receiver {
@@ -241,9 +231,8 @@ fn (self: &Checker) function_consumes_receiver(function: FunctionHandle) -> bool
     return info.std and !self.names.starts_with(info.return_type, "&");
 }
 
-/// Reports whether the name a call spells for a declared function is want,
-/// the Go `stdmethod.CallName(name) == want`: the part after the last `.`,
-/// or the whole name without one.
+/// Reports whether the name a call spells for a declared function is want: the
+/// part after the last `.`, or the whole name without one.
 fn (self: &Checker) call_name_is(name: Name, want: []u8) -> bool {
     let retained = name_text(&self.names, name);
     let bytes = retained.as_bytes();
@@ -252,9 +241,8 @@ fn (self: &Checker) call_name_is(name: Name, want: []u8) -> bool {
 }
 
 /// Reports whether a `match` consumes the active variant of a union inside
-/// that union's own `deinit(self: T) -> void`, the Go
-/// `matchesOwnerUnionDeinit`. Only there is the active payload owned and
-/// cleanable; everywhere else it stays a borrow.
+/// that union's own `deinit(self: T) -> void`. Only there is the active
+/// payload owned and cleanable; everywhere else it stays a borrow.
 fn (self: &Checker) matches_owner_union_deinit(
     tree: &ast::Ast,
     value: ast::Expression,
@@ -278,8 +266,7 @@ fn (self: &Checker) matches_owner_union_deinit(
     return self.is_union(value_type);
 }
 
-/// Returns the arena binding for arena.add(value) expressions, the Go
-/// `arenaAddReceiver`.
+/// Returns the arena binding for arena.add(value) expressions.
 fn (self: &var Checker) arena_add_receiver(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -315,7 +302,7 @@ fn (self: &var Checker) arena_add_receiver(
     return try self.binding_for_direct_field_receiver(direct);
 }
 
-/// Reports whether expr is an arena.at call, the Go `isArenaAtExpr`.
+/// Reports whether expr is an arena.at call.
 fn (self: &var Checker) is_arena_at_expr(tree: &var ast::Ast, env: ScopeHandle, expression: ast::Expression) -> !bool {
     let call = call_expr(tree, expression) orelse return false;
     let field = field_expr(tree, call.callee) orelse return false;
@@ -330,8 +317,7 @@ fn (self: &var Checker) is_arena_at_expr(tree: &var ast::Ast, env: ScopeHandle, 
     return self.names.generic_base_is(receiver, "std::arena::Arena");
 }
 
-/// Reports whether an expression reads through arena.at, the Go
-/// `containsArenaAt`.
+/// Reports whether an expression reads through arena.at.
 fn (self: &var Checker) contains_arena_at(tree: &var ast::Ast, env: ScopeHandle, expression: ast::Expression) -> !bool {
     if transparent_expr_value(tree, expression) |inner| {
         return self.contains_arena_at(tree, env, inner);
@@ -370,7 +356,7 @@ fn (self: &var Checker) contains_arena_at(tree: &var ast::Ast, env: ScopeHandle,
     return false;
 }
 
-/// Resolves a variable reference without moving it, the Go `readIdent`.
+/// Resolves a variable reference without moving it.
 fn (self: &var Checker) read_ident(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -380,11 +366,10 @@ fn (self: &var Checker) read_ident(
     return self.read_ident_aliasing(tree, env, ident, empty_name(), out);
 }
 
-/// Reads a binding on behalf of the field path under it that the read
-/// touches, empty for the whole value, the Go `readIdentAliasing`. A mutable
-/// borrow of the whole value blocks every read; a field borrow blocks the
-/// whole value and the paths that alias the borrowed one, and leaves
-/// disjoint fields readable.
+/// Reads a binding on behalf of the field path under it that the read touches,
+/// empty for the whole value. A mutable borrow of the whole value blocks every
+/// read; a field borrow blocks the whole value and the paths that alias the
+/// borrowed one, and leaves disjoint fields readable.
 fn (self: &var Checker) read_ident_aliasing(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -540,8 +525,7 @@ fn (self: &var Checker) function_pointer_name(name: Name) -> !?Name {
     return try self.names.intern(text_bytes);
 }
 
-/// Rejects arenas and known handles after arena cleanup, the Go
-/// `checkDeinitializedUse`.
+/// Rejects arenas and known handles after arena cleanup.
 fn (self: &Checker) check_deinitialized_use(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -566,7 +550,7 @@ fn (self: &Checker) check_deinitialized_use(
     return null;
 }
 
-/// Rejects borrowing an arena after cleanup, the Go `checkDeinitializedBorrow`.
+/// Rejects borrowing an arena after cleanup.
 fn (self: &Checker) check_deinitialized_borrow(
     tree: &ast::Ast,
     name: ast::Text,
@@ -579,8 +563,7 @@ fn (self: &Checker) check_deinitialized_borrow(
     return null;
 }
 
-/// Reports whether values of a type can be reused after move contexts, the
-/// Go `isCopyType`.
+/// Reports whether values of a type can be reused after move contexts.
 fn (self: &var Checker) is_copy_type(type_name: Name) -> !bool {
     if self.names.is_view_type(type_name) {
         return true;
@@ -607,20 +590,19 @@ fn (self: &var Checker) is_copy_type(type_name: Name) -> !bool {
     return self.is_plain_data_type(type_name);
 }
 
-/// Reports whether a type is plain copy data from a fresh recursion path, the
-/// Go `isPlainDataType(typeName, nil)`.
+/// Reports whether a type is plain copy data from a fresh recursion path.
 fn (self: &var Checker) is_plain_data_type(type_name: Name) -> !bool {
     var seen = map::new<[]u8, bool>(self.allocator);
     defer seen.deinit(self.allocator);
     return self.is_plain_data(type_name, &var seen);
 }
 
-/// Reports whether a type is plain copy data, the Go `isPlainDataType`: a
-/// scalar, enum, error set, arena handle, or a declared struct / union whose
-/// fields and payloads are all plain copy data. Views, capabilities, and
-/// owners are not plain data, and a type that declares an explicit deinit
-/// stays move-only. seen holds the current recursion path only: a revisit is
-/// a recursive aggregate, which needs indirection and is never plain data.
+/// Reports whether a type is plain copy data: a scalar, enum, error set, arena
+/// handle, or a declared struct / union whose fields and payloads are all
+/// plain copy data. Views, capabilities, and owners are not plain data, and a
+/// type that declares an explicit deinit stays move-only. seen holds the
+/// current recursion path only: a revisit is a recursive aggregate, which
+/// needs indirection and is never plain data.
 fn (self: &var Checker) is_plain_data(type_name: Name, seen: &var map::Map<[]u8, bool>) -> !bool {
     if try self.names.optional_elem(type_name) |inner| {
         return self.is_plain_data(inner, seen);
@@ -670,11 +652,11 @@ fn (self: &Checker) mark_seen(allocator: Allocator, seen: &var map::Map<[]u8, bo
 }
 
 /// Walks a declared struct / union for is_plain_data, remembering the answer
-/// once declarations are complete, the Go `isPlainDataAggregate`. A type
-/// reached twice through different fields is walked once, not once per path.
-/// A true answer met no cut on seen, and a false one from the root of a walk
-/// had no path above it, so both hold anywhere; a false one inside a walk may
-/// come from that walk's path and is not kept.
+/// once declarations are complete. A type reached twice through different
+/// fields is walked once, not once per path. A true answer met no cut on seen,
+/// and a false one from the root of a walk had no path above it, so both hold
+/// anywhere; a false one inside a walk may come from that walk's path and is
+/// not kept.
 fn (self: &var Checker) is_plain_data_aggregate(type_name: Name, seen: &var map::Map<[]u8, bool>) -> !bool {
     if self.known_plain_data(type_name) |known| {
         return known;
@@ -697,9 +679,8 @@ fn (self: &Checker) known_plain_data(type_name: Name) -> ?bool {
     return self.plain_data.get(bytes);
 }
 
-/// Checks the fields or payloads of a declared struct / union, the Go
-/// `walkPlainDataAggregate`. A declared deinit keeps the type move-only
-/// regardless of its fields.
+/// Checks the fields or payloads of a declared struct / union. A declared
+/// deinit keeps the type move-only regardless of its fields.
 fn (self: &var Checker) walk_plain_data_aggregate(type_name: Name, seen: &var map::Map<[]u8, bool>) -> !bool {
     let is_struct = self.is_struct(type_name);
     let is_union = self.is_union(type_name);
@@ -744,8 +725,7 @@ fn (self: &Checker) union_variant_payload_name(union_name: Name, variant: Name) 
     return self.union_variant_payload(union_name, bytes);
 }
 
-/// Validates a zero-argument builtin constructor, the Go
-/// `checkNoArgOwnershipCall`.
+/// Validates a zero-argument builtin constructor.
 fn (self: &var Checker) check_no_arg_ownership_call(
     tree: &ast::Ast,
     name: Name,
@@ -761,8 +741,8 @@ fn (self: &var Checker) check_no_arg_ownership_call(
     return null;
 }
 
-/// Renders a namespace chain as an internal key such as std::task::Group,
-/// the Go `qualifiedName`; null for any other expression shape.
+/// Renders a namespace chain as an internal key such as std::task::Group; null
+/// for any other expression shape.
 fn (self: &var Checker) qualified_name(tree: &ast::Ast, expression: ast::Expression) -> !?Name {
     if !qualified_name_shape(tree, expression) {
         return null;
@@ -797,8 +777,7 @@ fn (self: &Checker) map_key_type_error() -> !diagnostic::Diagnostic {
     return self.error_message(ast::zero_span(), move message);
 }
 
-/// Validates and returns Map key/value static type arguments, the Go
-/// `checkedMapArgs`.
+/// Validates and returns Map key/value static type arguments.
 fn (self: &var Checker) checked_map_args(
     tree: &ast::Ast,
     arg: Name,
@@ -819,7 +798,7 @@ fn (self: &var Checker) checked_map_args(
 }
 
 /// Instantiates simple generic wrapper type spellings against the active
-/// instantiation, the Go `substituteOwnershipType(name, c.typeArgValues)`.
+/// instantiation.
 fn (self: &var Checker) substitute_ownership_type(type_name: Name) -> !Name {
     let handle = self.type_arg_values.current orelse return type_name;
     if self.subst_replacement(handle, type_name) |replacement| {
@@ -836,8 +815,8 @@ fn (self: &Checker) subst_replacement(handle: arena::Handle<Subst>, type_name: N
     return frame.by_name.get(bytes);
 }
 
-/// Instantiates a spelling against an explicit substitution, the Go
-/// `substituteOwnershipType(name, subst)` for a callee's own substitution.
+/// Instantiates a spelling against an explicit substitution, the
+/// `substitute_ownership_type` of a callee's own substitution.
 fn (self: &var Checker) substitute_with(type_name: Name, subst: &Subst) -> !Name {
     if self.subst_lookup(subst, type_name) |replacement| {
         return replacement;
@@ -851,8 +830,7 @@ fn (self: &Checker) subst_lookup(subst: &Subst, type_name: Name) -> ?Name {
     return subst.by_name.get(bytes);
 }
 
-/// Replaces in-scope generic type parameters in a static list, the Go
-/// `instantiateTypeArgText`.
+/// Replaces in-scope generic type parameters in a static list.
 fn (self: &var Checker) instantiate_type_arg_text(type_arg: Name) -> !Name {
     let args = try self.names.split_generic_args(type_arg) orelse return self.instantiate_one_type_arg(type_arg);
     defer args.deinit(self.allocator);
@@ -870,8 +848,7 @@ fn (self: &var Checker) instantiate_type_arg_text(type_arg: Name) -> !Name {
     return self.names.intern_owned(move out);
 }
 
-/// Instantiates and resolves one static argument, the Go
-/// `c.resolveMetaTypeText(substituteOwnershipType(arg, c.typeArgValues))`.
+/// Instantiates and resolves one static argument.
 fn (self: &var Checker) instantiate_one_type_arg(arg: Name) -> !Name {
     let substituted = try self.substitute_ownership_type(arg);
     return self.resolve_meta_type_text(substituted);

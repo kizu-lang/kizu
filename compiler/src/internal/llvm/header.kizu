@@ -9,13 +9,13 @@ import std::mem;
 import std::sort;
 import std::string;
 
-// Mechanical port of the module-level half of internal/llvm/emit.go: the
-// header every emitted module starts with -- named types, string and name
+// The header every emitted module starts with -- named types, string and name
 // tables, runtime declarations -- and the walks over the module that decide
-// which of them it needs. Go sorts map keys with sort.Strings; here the
-// names are copied into an Array of Strings and sorted with std::sort.
+// which of them it needs. Names collected in a map are copied into an Array of
+// Strings and sorted with std::sort, so the header does not depend on the
+// map's order.
 
-/// Writes globals and runtime declarations, the Go `writeHeader`.
+/// Writes globals and runtime declarations.
 fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
     try self.line("; Kizu LLVM IR");
     if self.uses_slice_abi(module) {
@@ -84,8 +84,7 @@ fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
     return self.line("");
 }
 
-/// Returns the concrete struct types moved into TaskSet workers, the Go
-/// `taskInvokeStateTypes`.
+/// Returns the concrete struct types moved into TaskSet workers.
 fn (self: &var Emitter) task_invoke_state_types(
     module: &ir::Module
 ) -> !array::Array<string::String> {
@@ -117,11 +116,11 @@ fn (self: &var Emitter) task_invoke_state_types(
     return sorted_keys(self.allocator, &seen);
 }
 
-/// Emits the typed side of the TaskSet callback ABI, the Go
-/// `writeTaskInvokeThunks`. The runtime keeps a C-shaped pointer call while
-/// this thunk calls the worker with Kizu's declared struct ABI. The worker's
-/// parameter promises no one else touches the slot while it runs, and the
-/// state is the runtime's, so the thunk hands over a copy of its own.
+/// Emits the typed side of the TaskSet callback ABI. The runtime keeps a
+/// C-shaped pointer call while this thunk calls the worker with Kizu's
+/// declared struct ABI. The worker's parameter promises no one else touches
+/// the slot while it runs, and the state is the runtime's, so the thunk hands
+/// over a copy of its own.
 fn (self: &var Emitter) write_task_invoke_thunks(module: &ir::Module) -> !void {
     var types = try self.task_invoke_state_types(module);
     defer types.deinit(self.allocator);
@@ -159,10 +158,9 @@ fn (self: &var Emitter) write_task_invoke_thunks(module: &ir::Module) -> !void {
     return;
 }
 
-/// Appends the bytes a quoted IR string literal spells, the Go
-/// `strconv.Unquote` over the form `internal/quote.Bytes` writes: `"` ... `"`
-/// with `\\`, `\"`, `\n`, `\r`, `\t` and `\xNN`. Go drops the result of a
-/// malformed literal; here the output stays empty for one.
+/// Appends the bytes a quoted IR string literal spells: `"` ... `"` with `\\`,
+/// `\"`, `\n`, `\r`, `\t` and `\xNN`. The output stays empty for a malformed
+/// literal.
 fn append_unquoted(allocator: Allocator, out: &var string::String, literal: []u8) -> !void {
     let length = mem::len(literal);
     if length < 2 or literal[0] != cast<u8>(34) or literal[length - 1] != cast<u8>(34) {
@@ -226,10 +224,9 @@ fn hex_value(ch: u8) -> ?i64 {
     return null;
 }
 
-/// Defines the spelling of every error code this module can carry, indexed
-/// by the code itself, the Go `writeErrorNameTable`. Codes are global, so
-/// one table serves all sets; row 0 is the reserved "no error" entry and
-/// stays empty.
+/// Defines the spelling of every error code this module can carry, indexed by
+/// the code itself. Codes are global, so one table serves all sets; row 0 is
+/// the reserved "no error" entry and stays empty.
 fn (self: &var Emitter) write_error_name_table(allocator: Allocator, module: &ir::Module) -> !void {
     if !try self.writes_error_name_table(module) {
         return;
@@ -288,8 +285,7 @@ fn (self: &var Emitter) write_error_name_table(allocator: Allocator, module: &ir
     return self.line("");
 }
 
-/// Declares the failure entries this module reports through, the Go
-/// `writePanicDecls`.
+/// Declares the failure entries this module reports through.
 fn (self: &var Emitter) write_panic_decls(module: &ir::Module) -> !void {
     var keys = try self.used_panic_entries(self.allocator, module);
     defer keys.deinit(self.allocator);
@@ -309,8 +305,7 @@ fn (self: &var Emitter) write_panic_decls(module: &ir::Module) -> !void {
     return;
 }
 
-/// Returns the failure keys the module reports, sorted, the Go
-/// `usedPanicEntries`.
+/// Returns the failure keys the module reports, sorted.
 fn (self: &var Emitter) used_panic_entries(allocator: Allocator, module: &ir::Module) -> !array::Array<string::String> {
     var seen = map::new<[]u8, bool>(self.allocator);
     defer seen.deinit(self.allocator);
@@ -335,10 +330,9 @@ fn (self: &var Emitter) used_panic_entries(allocator: Allocator, module: &ir::Mo
     return sorted_keys(self.allocator, &seen);
 }
 
-/// Returns the failure key one instruction can report, the Go
-/// `instrPanicEntries`; null for an instruction that reports none. A
-/// `cond_fail` whose kind is not a known entry reports none here; writing
-/// it fails the same way Go's does.
+/// Returns the failure key one instruction can report; null for an instruction
+/// that reports none. A `cond_fail` whose kind is not a known entry reports
+/// none here; writing it fails in write_cond_fail.
 fn instr_panic_entry(module: &ir::Module, node: &ir::InstrNode) -> ?PanicKey {
     match node.op {
         CondFail => {
@@ -359,8 +353,7 @@ fn instr_panic_entry(module: &ir::Module, node: &ir::InstrNode) -> ?PanicKey {
     }
 }
 
-/// Selects the reporting entry for one equality assertion, the Go
-/// `expectEntryKey`.
+/// Selects the reporting entry for one equality assertion.
 fn expect_entry_key(module: &ir::Module, node: &ir::InstrNode) -> PanicKey {
     if node.args.len() == 0 {
         return PanicKey::ExpectInt;
@@ -375,8 +368,7 @@ fn expect_entry_key(module: &ir::Module, node: &ir::InstrNode) -> PanicKey {
     return PanicKey::ExpectInt;
 }
 
-/// Writes named recoverable-result ABI definitions, the Go
-/// `writeErrorUnionTypes`.
+/// Writes named recoverable-result ABI definitions.
 fn (self: &var Emitter) write_error_union_types(module: &ir::Module) -> !void {
     var names = try self.sorted_error_union_names(module);
     defer names.deinit(self.allocator);
@@ -405,9 +397,8 @@ fn (self: &var Emitter) write_error_union_types(module: &ir::Module) -> !void {
     return;
 }
 
-/// Writes named optional-value ABI definitions, the Go
-/// `writeOptionalTypes`: a presence tag and the payload, the layout `!T`
-/// success already uses.
+/// Writes named optional-value ABI definitions: a presence tag and the
+/// payload, the layout `!T` success already uses.
 fn (self: &var Emitter) write_optional_types(module: &ir::Module) -> !void {
     var names = try self.sorted_optional_names(module);
     defer names.deinit(self.allocator);
@@ -435,27 +426,23 @@ fn (self: &var Emitter) write_optional_types(module: &ir::Module) -> !void {
     return;
 }
 
-/// Names what one type-name collector records, the two callbacks the Go
-/// `collectModuleTypeNames` is handed.
+/// Names what one type-name collector records.
 enum TypeCollector {
     Optional,
     ErrorUnion,
 }
 
-/// Returns every optional type this module spells, the Go
-/// `sortedOptionalNames`.
+/// Returns every optional type this module spells.
 fn (self: &var Emitter) sorted_optional_names(module: &ir::Module) -> !array::Array<string::String> {
     return self.collect_module_type_names(module, TypeCollector::Optional);
 }
 
-/// Returns all error-union types referenced by this module, the Go
-/// `sortedErrorUnionNames`.
+/// Returns all error-union types referenced by this module.
 fn (self: &var Emitter) sorted_error_union_names(module: &ir::Module) -> !array::Array<string::String> {
     return self.collect_module_type_names(module, TypeCollector::ErrorUnion);
 }
 
-/// Hands a type spelling to one collector, the Go callbacks
-/// `collectOptionalName` and `collectErrorUnionName`.
+/// Hands a type spelling to one collector.
 fn (self: &var Emitter) collect_type_name(collector: TypeCollector, seen: &var map::Map<[]u8, bool>, name: []u8) -> !void {
     match collector {
         Optional => return self.collect_optional_name(self.allocator, seen, name),
@@ -464,8 +451,7 @@ fn (self: &var Emitter) collect_type_name(collector: TypeCollector, seen: &var m
 }
 
 /// Records name when it is an optional value type, or an error union whose
-/// success is one (`E!?T` defines `?T`'s aggregate too), the Go
-/// `collectOptionalName`.
+/// success is one (`E!?T` defines `?T`'s aggregate too).
 fn (self: &var Emitter) collect_optional_name(allocator: Allocator, seen: &var map::Map<[]u8, bool>, name: []u8) -> !void {
     if is_optional_type(name) {
         return seen.insert(allocator, name, true);
@@ -484,10 +470,10 @@ fn (self: &var Emitter) collect_optional_name(allocator: Allocator, seen: &var m
     return;
 }
 
-/// Records concrete !T / Error!T type names, the Go `collectErrorUnionName`:
-/// an error union nested in a static argument needs its named type too
-/// (`std::array::Array<!i64>` stores `!i64`, so the element has to be
-/// sized), which is what the walk over the parsed type finds.
+/// Records concrete !T / Error!T type names: an error union nested in a static
+/// argument needs its named type too (`std::array::Array<!i64>` stores `!i64`,
+/// so the element has to be sized), which is what the walk over the parsed
+/// type finds.
 fn (self: &var Emitter) collect_error_union_name(seen: &var map::Map<[]u8, bool>, name: []u8) -> !void {
     if mem::len(name) == 0 {
         return;
@@ -496,8 +482,7 @@ fn (self: &var Emitter) collect_error_union_name(seen: &var map::Map<[]u8, bool>
     return collect_error_union_nodes(self.allocator, &self.types, parsed, seen);
 }
 
-/// Records the spelling of every error-union node of a parsed type, the Go
-/// `typ.Walk` with its ErrorUnion visitor.
+/// Records the spelling of every error-union node of a parsed type.
 fn collect_error_union_nodes(
     allocator: Allocator,
     types: &typ::Table,
@@ -539,10 +524,9 @@ fn collect_error_union_nodes(
     }
 }
 
-/// Hands every type spelling the module holds to one collector, then
-/// returns the recorded names sorted, the Go `collectModuleTypeNames`. One
-/// walk serves every named-type collector, so none of them can drop a
-/// position the others scan.
+/// Hands every type spelling the module holds to one collector, then returns
+/// the recorded names sorted. One walk serves every named-type collector, so
+/// none of them can drop a position the others scan.
 fn (self: &var Emitter) collect_module_type_names(module: &ir::Module, collector: TypeCollector) -> !array::Array<string::String> {
     var seen = map::new<[]u8, bool>(self.allocator);
     defer seen.deinit(self.allocator);
@@ -614,8 +598,7 @@ fn (self: &var Emitter) collect_module_name(
     return self.collect_type_name(collector, seen, bytes);
 }
 
-/// Copies the keys of a set into a sorted list, the Go `sort.Strings` over
-/// a map's keys.
+/// Copies the keys of a set into a sorted list.
 fn sorted_keys(allocator: Allocator, seen: &map::Map<[]u8, bool>) -> !array::Array<string::String> {
     var names = array::new<string::String>(allocator);
     errdefer names.deinit(allocator);
@@ -630,8 +613,7 @@ fn sorted_keys(allocator: Allocator, seen: &map::Map<[]u8, bool>) -> !array::Arr
     return move names;
 }
 
-/// Rejects unsupported ABI shapes before header emission, the Go
-/// `validateModuleTypes`.
+/// Rejects unsupported ABI shapes before header emission.
 fn (self: &var Emitter) validate_module_types(module: &ir::Module) -> !?diagnostic::Diagnostic {
     var names = try self.sorted_error_union_names(module);
     defer names.deinit(self.allocator);
@@ -666,8 +648,7 @@ union CapacityResult {
 }
 
 /// Returns the inline payload byte capacity for a declared union, or a #991
-/// diagnostic when a variant payload is an unsupported shape, the Go
-/// `unionPayloadCapacity`.
+/// diagnostic when a variant payload is an unsupported shape.
 fn (self: &var Emitter) union_payload_capacity(module: &ir::Module, name: []u8) -> !CapacityResult {
     let shown = try self.names.intern(name);
     if module.unions.at(name) |declared| {
@@ -690,8 +671,7 @@ fn (self: &var Emitter) union_payload_capacity(module: &ir::Module, name: []u8) 
     return CapacityResult::Error(try self.fail1("llvm error: unknown union `%s`", Arg::Str(shown)));
 }
 
-/// Declares runtime calls that are not defined in the module, the Go
-/// `writeExternalCallDecls`.
+/// Declares runtime calls that are not defined in the module.
 fn (self: &var Emitter) write_external_call_decls(module: &ir::Module) -> !void {
     var decls = try self.external_call_decls(self.allocator, module);
     defer decls.deinit(self.allocator);
@@ -707,10 +687,9 @@ fn (self: &var Emitter) write_external_call_decls(module: &ir::Module) -> !void 
     return;
 }
 
-/// Returns stable declarations for external call instructions, the Go
-/// `externalCallDecls`: one per callee, in name order, the last call to a
-/// callee deciding its declaration. Go keeps the declaration text in a map
-/// it overwrites; here the text is named so the map holds a copy handle.
+/// Returns stable declarations for external call instructions: one per callee,
+/// in name order, the last call to a callee deciding its declaration. The
+/// declaration text is named, so the map holds a copy handle.
 fn (self: &var Emitter) external_call_decls(allocator: Allocator, module: &ir::Module) -> !array::Array<string::String> {
     var seen = map::new<[]u8, ir::Name>(self.allocator);
     defer seen.deinit(self.allocator);
@@ -816,8 +795,7 @@ fn (self: &var Emitter) external_call_decls(allocator: Allocator, module: &ir::M
     return move decls;
 }
 
-/// Writes named LLVM aggregate definitions for declared structs, the Go
-/// `writeStructTypes`.
+/// Writes named LLVM aggregate definitions for declared structs.
 fn (self: &var Emitter) write_struct_types(module: &ir::Module) -> !void {
     var names = try self.sorted_struct_names(module);
     defer names.deinit(self.allocator);
@@ -846,13 +824,12 @@ fn (self: &var Emitter) write_struct_types(module: &ir::Module) -> !void {
 }
 
 /// Writes the #991 `tag + inline payload storage` layout for each declared
-/// tagged union, the Go `writeUnionTypes`: `{ i64, [W x i64] }`, where W is
-/// the number of words the largest variant payload fills. A payload aligns to
-/// at most 8, so words hold it at the size and alignment bytes would; an
-/// optimizer that splits a union copy into its elements then moves the
-/// payload as words, where bytes would have it rebuilt one byte at a time.
-/// Payload shapes are validated in validate_module_types, so the capacity is
-/// known here.
+/// tagged union: `{ i64, [W x i64] }`, where W is the number of words the
+/// largest variant payload fills. A payload aligns to at most 8, so words hold
+/// it at the size and alignment bytes would; an optimizer that splits a union
+/// copy into its elements then moves the payload as words, where bytes would
+/// have it rebuilt one byte at a time. Payload shapes are validated in
+/// validate_module_types, so the capacity is known here.
 fn (self: &var Emitter) write_union_types(module: &ir::Module) -> !void {
     var names = try self.sorted_union_names(module);
     defer names.deinit(self.allocator);
@@ -878,8 +855,7 @@ fn (self: &var Emitter) write_union_types(module: &ir::Module) -> !void {
     return;
 }
 
-/// Returns string constants in global-name order, the Go
-/// `sortedStringLiterals`: the globals sorted as text.
+/// Returns string constants in global-name order: the globals sorted as text.
 fn (self: &Emitter) sorted_string_literals() -> !array::Array<string::String> {
     var globals = array::new<string::String>(self.allocator);
     errdefer globals.deinit(self.allocator);
@@ -894,8 +870,8 @@ fn (self: &Emitter) sorted_string_literals() -> !array::Array<string::String> {
     return move globals;
 }
 
-/// Returns declared structs in stable order, the Go `sortedStructNames`.
-/// A split unit lists the ones it writes (in_type_scope).
+/// Returns declared structs in stable order. A split unit lists the ones it
+/// writes (in_type_scope).
 fn (self: &Emitter) sorted_struct_names(module: &ir::Module) -> !array::Array<string::String> {
     let allocator = self.allocator;
     var names = array::new<string::String>(allocator);
@@ -914,8 +890,8 @@ fn (self: &Emitter) sorted_struct_names(module: &ir::Module) -> !array::Array<st
     return move names;
 }
 
-/// Returns declared unions in stable order, the Go `sortedUnionNames`.
-/// A split unit lists the ones it writes (in_type_scope).
+/// Returns declared unions in stable order. A split unit lists the ones it
+/// writes (in_type_scope).
 fn (self: &Emitter) sorted_union_names(module: &ir::Module) -> !array::Array<string::String> {
     let allocator = self.allocator;
     var names = array::new<string::String>(allocator);
@@ -934,14 +910,12 @@ fn (self: &Emitter) sorted_union_names(module: &ir::Module) -> !array::Array<str
     return move names;
 }
 
-/// Reports whether this module needs the byte-slice value ABI, the Go
-/// `usesSliceABI`.
+/// Reports whether this module needs the byte-slice value ABI.
 fn (self: &Emitter) uses_slice_abi(module: &ir::Module) -> bool {
     return self.module_has_slice_type(module);
 }
 
-/// Reports whether any non-error-union value uses []u8, the Go
-/// `moduleHasSliceType`.
+/// Reports whether any non-error-union value uses []u8.
 fn (self: &Emitter) module_has_slice_type(module: &ir::Module) -> bool {
     var struct_index = 0;
     while module.structs.key_at(struct_index) |struct_name| {
@@ -969,8 +943,7 @@ fn (self: &Emitter) module_has_slice_type(module: &ir::Module) -> bool {
     return false;
 }
 
-/// Reports whether a function body/signature mentions []u8, the Go
-/// `functionHasSliceType`.
+/// Reports whether a function body/signature mentions []u8.
 fn function_has_slice_type(module: &ir::Module, function: ir::Function) -> bool {
     let node = module.function_nodes.at(function.node);
     if is_slice_type(module, node.return_type) {
@@ -993,7 +966,7 @@ fn function_has_slice_type(module: &ir::Module, function: ir::Function) -> bool 
     return false;
 }
 
-/// Reports whether a block uses a []u8 value, the Go `blockHasSliceType`.
+/// Reports whether a block uses a []u8 value.
 fn block_has_slice_type(module: &ir::Module, block: ir::Block) -> bool {
     let node = module.blocks.at(block.node);
     var index = 0;
@@ -1007,8 +980,7 @@ fn block_has_slice_type(module: &ir::Module, block: ir::Block) -> bool {
         is_slice_type(module, node.terminator.cond.type_name);
 }
 
-/// Reports whether one instruction uses a []u8 value, the Go
-/// `instrHasSliceType`.
+/// Reports whether one instruction uses a []u8 value.
 fn instr_has_slice_type(module: &ir::Module, node: &ir::InstrNode) -> bool {
     if is_slice_type(module, node.result.type_name) {
         return true;
@@ -1038,16 +1010,16 @@ fn instr_has_slice_type(module: &ir::Module, node: &ir::InstrNode) -> bool {
 }
 
 /// Reports whether a lowered IR type mentions the byte-slice value type,
-/// itself or inside a wrapper, the Go `isSliceType`: `?[]u8` and `![]u8`
-/// aggregates embed %kizu.slice.u8, so a module whose only slice sits
-/// inside one still needs the declaration.
+/// itself or inside a wrapper: `?[]u8` and `![]u8` aggregates embed
+/// %kizu.slice.u8, so a module whose only slice sits inside one still needs
+/// the declaration.
 fn is_slice_type(module: &ir::Module, typ_name: ir::Name) -> bool {
     let retained = ir::name_text(&module.names, typ_name);
     let bytes = retained.as_bytes();
     return contains_bytes(bytes, "[]");
 }
 
-/// Reports whether needle occurs in haystack, the Go `strings.Contains`.
+/// Reports whether needle occurs in haystack.
 fn contains_bytes(haystack: []u8, needle: []u8) -> bool {
     let needle_len = mem::len(needle);
     var start = 0;
@@ -1063,7 +1035,7 @@ fn contains_bytes(haystack: []u8, needle: []u8) -> bool {
 }
 
 /// Declares the float intrinsics the module calls, in the order of their
-/// instruction names, the Go `writeFloatMathDecls`.
+/// instruction names.
 fn (self: &var Emitter) write_float_math_decls(module: &ir::Module) -> !void {
     var written = 0;
     var index = 0;
@@ -1088,9 +1060,8 @@ fn (self: &var Emitter) write_float_math_decls(module: &ir::Module) -> !void {
     return;
 }
 
-/// Lists the float instructions with an intrinsic behind them in the order
-/// of their names, which is the order the Go emitter sorts their
-/// declarations into.
+/// Lists the float instructions with an intrinsic behind them in the order of
+/// their names, which is the order their declarations are written in.
 fn float_unary_ops_by_name(index: i64) -> ?ir::Op {
     if index == 0 { return ir::Op::FloatCeil; }
     if index == 1 { return ir::Op::FloatFloor; }
@@ -1101,7 +1072,7 @@ fn float_unary_ops_by_name(index: i64) -> ?ir::Op {
 }
 
 /// Declares every saturating float-to-integer intrinsic the module calls,
-/// sorted, so each is declared once; the Go `writeFloatCastDecls`.
+/// sorted, so each is declared once.
 fn (self: &var Emitter) write_float_cast_decls(module: &ir::Module) -> !void {
     var decls = array::new<string::String>(self.allocator);
     defer decls.deinit(self.allocator);
