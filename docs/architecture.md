@@ -23,7 +23,8 @@ compiler/            shipping する Kizu 製 compiler(pin した種が build �
     source, token, lexer, parser, ast   入力 text・字句・構文・AST
     typ                           型の綴りを 1 度だけ parse した形(文字列手術の代わり)
     types, ownership              型検査・所有権/借用検査
-    ir, llvm, wasm, native        typed SSA IR と各 backend
+    ir, arm64, llvm, wasm, native typed SSA IR と各 backend(arm64 は direct backend。x86-64 も持つ)
+    hostabi                       runtime を呼ぶ C 署名(native backend 共通)
     project, manifest             パッケージ/モジュール解決(std も含む)、kizu.toml
     stdmethod, stdprim, stdmeta, stdtarget
                                   std の method / primitive と compiler-defined form
@@ -53,7 +54,9 @@ source.kizu   (module は compiler/src/internal/ 以下)
   → build target を types / ownership / IR の comptime evaluator へ渡す
   → types(型)→ ownership(所有権)
   → ir(typed SSA)→ target の entry / export から到達可能性を閉じる
-                  → llvm → clang(native)
+                  → arm64(direct)→ Mach-O / ELF / COFF の object → clang driver で link
+                                    (darwin-arm64 / linux-amd64 / windows-amd64)
+                  → llvm → clang(他の native target と `--backend llvm`)
                   → wasm → 共通 WebAssembly module
                                            → WAT / binary `.wasm`
                                              (wasm32-wasi / wasm32-browser)
@@ -63,6 +66,17 @@ source.kizu   (module は compiler/src/internal/ 以下)
 
 `run` と `test` は生成した実行ファイルを走らせます。経路は 1 本で、interpreter は
 ありません(ADR-0083)。挙動の正は例そのものが末尾に書いた case が持ちます。
+
+native の backend は target ごとに 1 つです(SPEC §5)。direct backend(`arm64`)は
+IR から命令を選んで仮想レジスタの機械 IR にし(arm64 / amd64)、ループのベクトル化と
+線形スキャンのレジスタ割り当てをして、arch ごとに 1 つのエンコーダが byte 列を
+共有の object バッファに書きます。形式で変わるのは書き出し層(Mach-O / ELF / COFF)
+だけです。assembly text は経由しません。扱えない形は `arm64 error:` / `amd64 error:` で
+止まり、LLVM へは切り替えません。program は 1 unit の object で、runtime の C は clang が
+compile し、link は LLVM と同じ clang driver が行います。`--backend llvm` は direct の
+target でも LLVM で build し、bootstrap(stage2 とその self-rebuild)と release の
+build はこれを明示して LLVM のままです。linux-arm64 は `--backend direct` で受けますが
+既定は LLVM です。
 
 `llvm` は出した text を自分で検査します(`verify.kizu`)。読む register が
 その関数の中で定義されていること、`alloca` が entry block にあることの 2 つで、
@@ -121,7 +135,7 @@ browser は `main` と `export "browser"` から到達できる関数だけを b
 
 CLI のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 `build`(`--emit-llvm` / `--target native|wasm32-wasi|wasm32-browser`、nativeの
-`--emit obj`、browserの`--emit esm`)`cache` `import-c-header`
+`--emit obj`、browserの`--emit esm`。native の `build` / `run` / `test` は `--backend direct|llvm`)`cache` `import-c-header`
 `version`。基本の実行経路は `kizu run examples/hello.kizu`。どのコマンドがどこへ
 流れるかは `compiler/src/main.kizu` が全てです。
 
@@ -151,13 +165,14 @@ CLI のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 | behavior | 同上(`kizu run compiler/tests/harness -- behavior <kizu>`) | conformance case のうち CLI 境界を越える実行の振る舞い(`tests/behavior/`、test 系と std-io / std-process の example)。harness 自身の test は `kizu test compiler/tests/harness` |
 | conformance | `just conformance`(`kizu run compiler/tests/harness -- conformance <kizu>`)。`just selfhost` には含まない | `examples/`、`tests/behavior/`、`docs/tutorial/` の全 case。behavior はこの部分集合 |
 | bootstrap | 同上(`kizu run compiler/tests/harness -- bootstrap <stage2>`) | stage1 が build した stage2 が、自分自身を空の build cache で build し直して byte 単位で同じ実行ファイルになること |
-| direct backend の差分 | `scripts/difftest-direct.sh <kizu>`(CI の別 job) | `run` の example を direct backend と LLVM(`kizu build` の既定)で build して実行し、stdout・stderr・exit status が一致すること。`kizu test` は既定で direct なので、compiler/ と test 系の case は上の層で direct を通る |
+| direct backend の差分 | `scripts/difftest-direct.sh <kizu>`(CI の別 job) | `run` の example を `--backend direct` と `--backend llvm` で build して実行し、stdout・stderr・exit status が一致すること。build / run / test の既定が direct なので、compiler/ の test と behavior の case は上の層で direct を通る |
 | commit hooks | `pre-commit run --all-files` | 種と stage1 による `kizu check compiler`(`scripts/bootstrap.sh --check-only`)。数秒で終わるものだけ |
 
 CI は push/PR ごとに、必須 job `test (ubuntu-latest)` と `test (macos-15)` で
-`scripts/bootstrap.sh` を全部回します。並行して job `difftest-direct (ubuntu-latest)` と
-`difftest-direct (ubuntu-24.04-arm)` が stage1 だけを build して
-`scripts/difftest-direct.sh` を回します。定時実行は置きません。
+`scripts/bootstrap.sh` を全部回します。並行して必須でない job
+`difftest-direct (ubuntu-latest)` が stage1 だけを build して
+`scripts/difftest-direct.sh` を回します。`--opt` と windows-amd64 の差分は CI に無く、
+手元で回します。定時実行は置きません。
 言語機能を足したら `examples/` に実例を足し、その末尾に case を書きます。
 書式は `compiler/tests/harness/src/conformance/conformance.kizu` の冒頭にあります。
 
