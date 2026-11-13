@@ -160,12 +160,18 @@ pub fn amd64_print_function(
     try machine_liveness(allocator, func, &var live_in, &var reads_buf);
     var after = array::new<i64>(allocator);
     defer after.deinit(allocator);
+    var heads = array::new<bool>(allocator);
+    defer heads.deinit(allocator);
+    try loop_heads(allocator, func, &allocation.order, &var heads);
     var order_index = 0;
     while allocation.order.get(order_index) |block_id| {
         order_index = order_index + 1;
         var following = 0 - 1;
         if allocation.order.get(order_index) |next| {
             following = next;
+        }
+        if heads.get_or_panic(block_id) {
+            try out.obj.x86_loop_head(allocator, block_id);
         }
         try amd.place_block(out, block_id);
         if func.blocks.at(block_id) |block| {
@@ -175,6 +181,45 @@ pub fn amd64_print_function(
         }
     }
     try out.obj.end_function(allocator);
+    return;
+}
+
+/// Marks the heads of the loops worth padding out: a block that dominates
+/// a block jumping to it heads a loop. It is left alone when the block
+/// before it in the layout is one it dominates, which could fall into the
+/// nops each time round; otherwise they run once on the way in.
+fn loop_heads(allocator: Allocator, func: &MFunction, layout: &array::Array<i64>, heads: &var array::Array<bool>) -> !void {
+    var order = array::new<i64>(allocator);
+    defer order.deinit(allocator);
+    try reverse_postorder(allocator, func, &var order);
+    var place = array::new<i64>(allocator);
+    defer place.deinit(allocator);
+    var idom = array::new<i64>(allocator);
+    defer idom.deinit(allocator);
+    var looped = array::new<bool>(allocator);
+    defer looped.deinit(allocator);
+    try dominators(allocator, func, &order, &var place, &var idom, &var looped);
+    for 0..func.blocks.len() |_index| {
+        try heads.append(allocator, false);
+    }
+    let entry = order.get(0) orelse return;
+    for 0..func.blocks.len() |block| {
+        for 0..2 |position| {
+            let head = func.successor(block, position);
+            if head >= 0 and place.get_or_panic(block) >= 0 and dominates(&idom, entry, head, block) {
+                try heads.set(head, true);
+            }
+        }
+    }
+    var before = 0 - 1;
+    var index = 0;
+    while layout.get(index) |block| {
+        index = index + 1;
+        if heads.get_or_panic(block) and before >= 0 and dominates(&idom, entry, block, before) {
+            try heads.set(block, false);
+        }
+        before = block;
+    }
     return;
 }
 
