@@ -1,0 +1,1745 @@
+import std::array;
+import std::crypto;
+import std::crypto::x509;
+import std::fmt;
+import std::fs;
+import std::http;
+import std::io;
+import std::mem;
+import std::net;
+import std::string;
+import std::testing;
+import std::tls;
+
+// std::tls against another implementation, without that implementation
+// running. Each fixture under examples/fixtures/tls/ is one connection between
+// a Kizu program and node's TLS, recorded once by
+// scripts/record-tls-fixtures/record.mjs (`nix develop -c just tls-fixtures`):
+// every record each side sent, in order, `>` for Kizu's and `<` for node's.
+// The fixture's `# peer:` says which node and OpenSSL wrote the other side.
+//
+// A replay runs the Kizu side again, with the fixture's seed, against a
+// replayer that writes node's records and reads Kizu's. What Kizu sends must
+// be what it sent then, byte for byte: those are bytes node accepted, so the
+// same bytes are bytes node accepts. What node sent is sealed under keys only
+// that handshake had, so Kizu taking it again is Kizu checking node's
+// records, signature and Finished included. The one exception is the https
+// client's request, whose Host field has the port the client dialled: those
+// records are opened with the client's traffic secret, which node logged,
+// and compared with the recorded port put back to this run's.
+//
+// Each fixture is replayed twice in a row. A connection whose bytes depend on
+// anything but the seed -- a draw from the host's source, the clock -- would
+// fail the second time if not the first.
+
+error Broken {
+    Malformed,
+    Digest,
+}
+
+error Failure = Broken or http::Failure or tls::Failure or x509::Failure or fs::Error or io::Error or mem::Error;
+
+// --- the fixtures ---------------------------------------------------------
+
+// A Line is one record of a trace: who sent it, where its bytes are in
+// `Trace.records`, which line of the file it was, and where its note is in
+// `Trace.text`.
+struct Line {
+    kizu: bool,
+    start: i64,
+    end: i64,
+    number: i64,
+    note_start: i64,
+    note_end: i64,
+}
+
+// A Trace is one fixture read and checked: its digest matches, every line
+// is a record whose header gives its own length.
+struct Trace {
+    name: string::String,
+    text: string::String,
+    records: string::String,
+    lines: array::Array<Line>,
+    seed: string::String,
+    peer: string::String,
+    // CLIENT_TRAFFIC_SECRET_0 from node's keylog, read for `# port:` only.
+    secret: string::String,
+    suite: tls::CipherSuite,
+    // The port the Kizu client dialled when it was recorded, or -1.
+    port: i64,
+}
+
+fn (self: Trace) deinit(allocator: Allocator) -> void {
+    self.name.deinit(allocator);
+    self.text.deinit(allocator);
+    self.records.deinit(allocator);
+    self.lines.deinit(allocator);
+    self.seed.deinit(allocator);
+    self.peer.deinit(allocator);
+    self.secret.deinit(allocator);
+    return;
+}
+
+fn fixture_path(allocator: Allocator, name: []u8, suffix: []u8) -> mem::Error!string::String {
+    var path = string::new(allocator);
+    errdefer path.deinit(allocator);
+    try path.append_bytes(allocator, "examples/fixtures/tls/");
+    try path.append_bytes(allocator, name);
+    try path.append_bytes(allocator, suffix);
+    return move path;
+}
+
+fn read_fixture(allocator: Allocator, name: []u8, suffix: []u8) -> Failure!string::String {
+    let path = try fixture_path(allocator, name, suffix);
+    defer path.deinit(allocator);
+    let view = path.as_bytes();
+    let text = try fs::read_file(io::blocking(), allocator, &view, mem::Limit::Unlimited);
+    return move text;
+}
+
+fn starts_with(bytes: []u8, prefix: []u8) -> bool {
+    let length = mem::len(prefix);
+    if mem::len(bytes) < length {
+        return false;
+    }
+    return mem::equal_bytes(bytes[0..length], prefix);
+}
+
+fn hex_value(byte: u8) -> i64 {
+    let value = cast<i64>(byte);
+    if value >= 48 and value <= 57 {
+        return value - 48;
+    }
+    if value >= 97 and value <= 102 {
+        return value - 87;
+    }
+    return -1;
+}
+
+// append_unhex appends the bytes `hex` spells, two lowercase digits each.
+fn append_unhex(allocator: Allocator, hex: []u8, out: &var string::String) -> Failure!void {
+    let length = mem::len(hex);
+    if length % 2 != 0 {
+        return Broken::Malformed;
+    }
+    var at = 0;
+    while at < length {
+        let high = hex_value(hex[at]);
+        let low = hex_value(hex[at + 1]);
+        if high < 0 or low < 0 {
+            return Broken::Malformed;
+        }
+        try out.append_byte(allocator, cast<u8>(high * 16 + low));
+        at = at + 2;
+    }
+    return;
+}
+
+fn append_hex(allocator: Allocator, bytes: []u8, out: &var string::String) -> mem::Error!void {
+    let digits = "0123456789abcdef";
+    for 0..mem::len(bytes) |index| {
+        let value = cast<i64>(bytes[index]);
+        try out.append_byte(allocator, digits[value / 16]);
+        try out.append_byte(allocator, digits[value % 16]);
+    }
+    return;
+}
+
+fn number_of(text: []u8) -> Failure!i64 {
+    if mem::len(text) == 0 {
+        return Broken::Malformed;
+    }
+    var value = 0;
+    for 0..mem::len(text) |index| {
+        let digit = cast<i64>(text[index]) - 48;
+        if digit < 0 or digit > 9 {
+            return Broken::Malformed;
+        }
+        value = value * 10 + digit;
+    }
+    return value;
+}
+
+// A Header is what the lines starting with `#` said.
+struct Header {
+    seed: string::String,
+    peer: string::String,
+    secret: string::String,
+    digest: string::String,
+    suite: tls::CipherSuite,
+    port: i64,
+    named: bool,
+}
+
+fn (self: Header) deinit(allocator: Allocator) -> void {
+    self.seed.deinit(allocator);
+    self.peer.deinit(allocator);
+    self.secret.deinit(allocator);
+    self.digest.deinit(allocator);
+    return;
+}
+
+fn read_header_line(allocator: Allocator, name: []u8, line: []u8, header: &var Header) -> Failure!void {
+    let length = mem::len(line);
+    if starts_with(line, "# case: ") {
+        header.named = mem::equal_bytes(line[8..length], name);
+    } else if starts_with(line, "# seed: ") {
+        try append_unhex(allocator, line[8..length], &var header.seed);
+    } else if starts_with(line, "# peer: ") {
+        try header.peer.append_bytes(allocator, line[8..length]);
+    } else if starts_with(line, "# suite: ") {
+        let suite = line[9..length];
+        if mem::equal_bytes(suite, "TLS_CHACHA20_POLY1305_SHA256") {
+            header.suite = tls::CipherSuite::Chacha20Poly1305Sha256;
+        } else if !mem::equal_bytes(suite, "TLS_AES_128_GCM_SHA256") {
+            return Broken::Malformed;
+        }
+    } else if starts_with(line, "# keylog: CLIENT_TRAFFIC_SECRET_0 ") {
+        try append_unhex(allocator, line[34..length], &var header.secret);
+    } else if starts_with(line, "# port: ") {
+        header.port = try number_of(line[8..length]);
+    } else if starts_with(line, "# sha256: ") {
+        try append_unhex(allocator, line[10..length], &var header.digest);
+    }
+    return;
+}
+
+// read_record_line reads `> 16030300b2...  ; note` into `records` and
+// `lines`. The record's header must give the length the hex has.
+fn read_record_line(
+    allocator: Allocator,
+    text: []u8,
+    from: i64,
+    to: i64,
+    number: i64,
+    records: &var string::String,
+    lines: &var array::Array<Line>
+) -> Failure!void {
+    if to - from < 2 or text[from + 1] != 32 or (text[from] != 62 and text[from] != 60) {
+        return Broken::Malformed;
+    }
+    var hex_end = from + 2;
+    while hex_end < to and text[hex_end] != 32 {
+        hex_end = hex_end + 1;
+    }
+    var note_start = hex_end;
+    while note_start < to and (text[note_start] == 32 or text[note_start] == 59) {
+        note_start = note_start + 1;
+    }
+    let start = records.len();
+    try append_unhex(allocator, text[from + 2..hex_end], records);
+    let end = records.len();
+    let bytes = records.as_bytes();
+    if end - start < 5 {
+        return Broken::Malformed;
+    }
+    let length = cast<i64>(bytes[start + 3]) * 256 + cast<i64>(bytes[start + 4]);
+    if end - start != 5 + length {
+        return Broken::Malformed;
+    }
+    try lines.append(allocator, Line {
+        kizu: text[from] == 62,
+        start: start,
+        end: end,
+        number: number,
+        note_start: note_start,
+        note_end: to,
+    });
+    return;
+}
+
+// read_trace reads examples/fixtures/tls/<name>.trace and checks it: the
+// `# sha256:` line is the SHA-256 of the file without that line, and every
+// record line is whole.
+fn read_trace(allocator: Allocator, name: []u8) -> Failure!Trace {
+    let text = try read_fixture(allocator, name, ".trace");
+    defer text.deinit(allocator);
+    var header = Header {
+        seed: string::new(allocator),
+        peer: string::new(allocator),
+        secret: string::new(allocator),
+        digest: string::new(allocator),
+        suite: tls::CipherSuite::Aes128GcmSha256,
+        port: -1,
+        named: false,
+    };
+    defer header.deinit(allocator);
+    var records = string::new(allocator);
+    errdefer records.deinit(allocator);
+    var lines = array::new<Line>(allocator);
+    errdefer lines.deinit(allocator);
+    var hashed = string::new(allocator);
+    defer hashed.deinit(allocator);
+    let bytes = text.as_bytes();
+    let total = mem::len(bytes);
+    if !starts_with(bytes, "# kizu tls trace 1") or total < 19 or bytes[18] != 10 or bytes[total - 1] != 10 {
+        return Broken::Malformed;
+    }
+    var from = 0;
+    var number = 1;
+    while from < total {
+        var to = from;
+        while bytes[to] != 10 {
+            to = to + 1;
+        }
+        let line = bytes[from..to];
+        if !starts_with(line, "# sha256: ") {
+            try hashed.append_bytes(allocator, bytes[from..to + 1]);
+        }
+        if starts_with(line, "#") {
+            try read_header_line(allocator, name, line, &var header);
+        } else {
+            try read_record_line(allocator, bytes, from, to, number, &var records, &var lines);
+        }
+        from = to + 1;
+        number = number + 1;
+    }
+    var digest = [32]u8{};
+    var digest_view = digest.as_mut_bytes();
+    let hashed_bytes = hashed.as_bytes();
+    crypto::sha256(hashed_bytes, &var digest_view);
+    let want = header.digest.as_bytes();
+    let got = digest.as_bytes();
+    if !mem::equal_bytes(want, got) {
+        return Broken::Digest;
+    }
+    if !header.named or header.seed.len() != 32 or header.peer.len() == 0 or lines.len() == 0 {
+        return Broken::Malformed;
+    }
+    if header.port >= 0 and header.secret.len() != 32 {
+        return Broken::Malformed;
+    }
+    let seed_view = header.seed.as_bytes();
+    let peer_view = header.peer.as_bytes();
+    let secret_view = header.secret.as_bytes();
+    let own_name = try string::from_bytes(allocator, name);
+    errdefer own_name.deinit(allocator);
+    let own_text = try string::from_bytes(allocator, bytes);
+    errdefer own_text.deinit(allocator);
+    let seed = try string::from_bytes(allocator, seed_view);
+    errdefer seed.deinit(allocator);
+    let peer = try string::from_bytes(allocator, peer_view);
+    errdefer peer.deinit(allocator);
+    let secret = try string::from_bytes(allocator, secret_view);
+    return Trace {
+        name: move own_name,
+        text: move own_text,
+        records: move records,
+        lines: move lines,
+        seed: move seed,
+        peer: move peer,
+        secret: move secret,
+        suite: header.suite,
+        port: header.port,
+    };
+}
+
+fn chain_of(allocator: Allocator, name: []u8) -> Failure!array::Array<string::String> {
+    let text = try read_fixture(allocator, name, ".pem");
+    defer text.deinit(allocator);
+    let text_bytes = text.as_bytes();
+    var chain = array::new<string::String>(allocator);
+    errdefer chain.deinit(allocator);
+    let der = try x509::decode_pem(allocator, text_bytes, "CERTIFICATE");
+    try chain.append(allocator, move der);
+    return move chain;
+}
+
+fn key_der_of(allocator: Allocator, name: []u8) -> Failure!string::String {
+    let text = try read_fixture(allocator, name, ".key.pem");
+    defer text.deinit(allocator);
+    let text_bytes = text.as_bytes();
+    let der = try x509::decode_pem(allocator, text_bytes, "PRIVATE KEY");
+    return move der;
+}
+
+fn loopback(allocator: Allocator, port: i64) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    try out.append_bytes(allocator, "127.0.0.1:");
+    try fmt::append_i64(allocator, &var out, port);
+    return move out;
+}
+
+// in_a_while is a deadline no replay comes near; reaching it is a hang
+// reported as a failure rather than a test that never ends.
+fn in_a_while() -> i64 {
+    return net::deadline_in_millis(20000);
+}
+
+// --- the replayer -----------------------------------------------------------
+
+// A Replay is the replayer's side of one fixture: it writes node's records
+// and reads Kizu's, and says in `failure` where they parted, if they did.
+struct Replay {
+    trace: Trace,
+    // This run's port, which the https client's request names.
+    port: i64,
+    progress: Progress,
+}
+
+// Progress is how far a replay got: the lines done, and what went wrong.
+struct Progress {
+    lines_done: i64,
+    failure: string::String,
+}
+
+fn (self: Replay) deinit(allocator: Allocator) -> void {
+    self.trace.deinit(allocator);
+    self.progress.deinit(allocator);
+    return;
+}
+
+fn (self: Progress) deinit(allocator: Allocator) -> void {
+    self.failure.deinit(allocator);
+    return;
+}
+
+fn replay_new(allocator: Allocator, trace: Trace) -> Replay {
+    return Replay {
+        trace: move trace,
+        port: -1,
+        progress: Progress { lines_done: 0, failure: string::new(allocator) },
+    };
+}
+
+// first_apart is the first offset where `a` and `b` differ, or the
+// shorter one's length when one begins the other.
+fn first_apart(a: []u8, b: []u8) -> i64 {
+    var at = 0;
+    while at < mem::len(a) and at < mem::len(b) and a[at] == b[at] {
+        at = at + 1;
+    }
+    return at;
+}
+
+fn at_most_32(length: i64) -> i64 {
+    if length < 32 {
+        return length;
+    }
+    return 32;
+}
+
+// note_parting writes where Kizu and the fixture parted: the fixture, the
+// line, its direction and note, and the first 32 bytes of each side.
+fn note_parting(
+    allocator: Allocator,
+    trace: &Trace,
+    line: Line,
+    what: []u8,
+    got: []u8,
+    progress: &var Progress
+) -> mem::Error!void {
+    let name = trace.name.as_bytes();
+    let text = trace.text.as_bytes();
+    let records = trace.records.as_bytes();
+    let want = records[line.start..line.end];
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    try out.append_bytes(allocator, "tls replay: ");
+    try out.append_bytes(allocator, name);
+    try out.append_bytes(allocator, " line ");
+    try fmt::append_i64(allocator, &var out, line.number);
+    if line.kizu {
+        try out.append_bytes(allocator, " (> ");
+    } else {
+        try out.append_bytes(allocator, " (< ");
+    }
+    try out.append_bytes(allocator, text[line.note_start..line.note_end]);
+    try out.append_bytes(allocator, "): ");
+    try out.append_bytes(allocator, what);
+    try out.append_bytes(allocator, ", first apart at byte ");
+    try fmt::append_i64(allocator, &var out, first_apart(want, got));
+    try out.append_byte(allocator, 10);
+    try out.append_bytes(allocator, "  fixture: ");
+    try append_hex(allocator, want[0..at_most_32(mem::len(want))], &var out);
+    try out.append_byte(allocator, 10);
+    try out.append_bytes(allocator, "  kizu:    ");
+    try append_hex(allocator, got[0..at_most_32(mem::len(got))], &var out);
+    try out.append_byte(allocator, 10);
+    try out.append_bytes(allocator, "If the change is intended, record the fixtures again: nix develop -c just tls-fixtures");
+    let message = out.as_bytes();
+    try progress.failure.append_bytes(allocator, message);
+    return;
+}
+
+// fill reads from `stream` until `pending` holds `want` bytes past `at`,
+// and answers false when Kizu closed first.
+fn fill(
+    handle: Io,
+    allocator: Allocator,
+    stream: &var net::TcpStream,
+    pending: &var string::String,
+    at: i64,
+    want: i64
+) -> Failure!bool {
+    while pending.len() - at < want {
+        let got = try stream.read_into(handle, allocator, pending, 65536);
+        if got == 0 {
+            return false;
+        }
+    }
+    return true;
+}
+
+// open_client_record opens what the client sealed under its traffic secret.
+fn open_client_record(
+    allocator: Allocator,
+    trace: &Trace,
+    sequence: i64,
+    record: []u8,
+    out: &var string::String
+) -> tls::Failure!u8 {
+    let secret = trace.secret.as_bytes();
+    if trace.suite == tls::CipherSuite::Aes128GcmSha256 {
+        var key = [16]u8{};
+        var key_view = key.as_mut_bytes();
+        return open_under(allocator, trace.suite, secret, &var key_view, sequence, record, out);
+    }
+    var key = [32]u8{};
+    var key_view = key.as_mut_bytes();
+    return open_under(allocator, trace.suite, secret, &var key_view, sequence, record, out);
+}
+
+// open_under opens `record` under the key and IV `secret` gives, the key
+// as long as `key` is.
+fn open_under(
+    allocator: Allocator,
+    suite: tls::CipherSuite,
+    secret: []u8,
+    key: &var []u8,
+    sequence: i64,
+    record: []u8,
+    out: &var string::String
+) -> tls::Failure!u8 {
+    var iv = [12]u8{};
+    var iv_view = iv.as_mut_bytes();
+    tls::traffic_key(secret, key, &var iv_view);
+    let iv_bytes = iv.as_bytes();
+    let key_bytes = key[0..mem::len(key)];
+    return tls::open_record(allocator, suite, key_bytes, iv_bytes, sequence, record, out);
+}
+
+// same_request says whether the client record `got` is the recorded `want`
+// once the recorded port in it is this run's: both opened under the client's
+// traffic secret at `sequence`, the first ":<port>" of the recorded plaintext
+// replaced.
+fn same_request(
+    allocator: Allocator,
+    trace: &Trace,
+    port: i64,
+    sequence: i64,
+    want: []u8,
+    got: []u8
+) -> Failure!bool {
+    var recorded = string::new(allocator);
+    defer recorded.deinit(allocator);
+    let recorded_type = try open_client_record(allocator, trace, sequence, want, &var recorded);
+    var sent = string::new(allocator);
+    defer sent.deinit(allocator);
+    if open_client_record(allocator, trace, sequence, got, &var sent) |sent_type| {
+        if sent_type != recorded_type {
+            return false;
+        }
+    } else |_| {
+        return false;
+    }
+    var old_port = string::new(allocator);
+    defer old_port.deinit(allocator);
+    try old_port.append_bytes(allocator, ":");
+    try fmt::append_i64(allocator, &var old_port, trace.port);
+    let old_bytes = old_port.as_bytes();
+    let plain = recorded.as_bytes();
+    let length = mem::len(plain);
+    let old_length = mem::len(old_bytes);
+    var expected = string::new(allocator);
+    defer expected.deinit(allocator);
+    var at = 0;
+    var replaced = false;
+    while at < length {
+        if !replaced and at + old_length <= length and mem::equal_bytes(plain[at..at + old_length], old_bytes) {
+            try expected.append_bytes(allocator, ":");
+            try fmt::append_i64(allocator, &var expected, port);
+            at = at + old_length;
+            replaced = true;
+        } else {
+            try expected.append_byte(allocator, plain[at]);
+            at = at + 1;
+        }
+    }
+    let expected_bytes = expected.as_bytes();
+    let sent_bytes = sent.as_bytes();
+    return replaced and mem::equal_bytes(expected_bytes, sent_bytes);
+}
+
+// replay_over runs the trace over `stream`: node's records written, Kizu's
+// read one record at a time and compared. Then it closes its side and reads
+// until Kizu closes, which must come with no more bytes. With `fed`, node's
+// records are already on the stream (`feed`) and its side is already as
+// closed as it is going to be, so only Kizu's are read.
+fn replay_over(
+    handle: Io,
+    allocator: Allocator,
+    stream: &var net::TcpStream,
+    trace: &Trace,
+    port: i64,
+    fed: bool,
+    progress: &var Progress
+) -> Failure!void {
+    stream.set_read_deadline(in_a_while());
+    var pending = string::new(allocator);
+    defer pending.deinit(allocator);
+    var at = 0;
+    // Kizu's sealed records so far. The first is its Finished; the client's
+    // application data after it counts from sequence 0.
+    var sealed = 0;
+    let records = trace.records.as_bytes();
+    let count = trace.lines.len();
+    for 0..count |index| {
+        let line = trace.lines.get(index) orelse return Broken::Malformed;
+        let want = records[line.start..line.end];
+        if !line.kizu {
+            if !fed {
+                try stream.write_all(handle, want);
+            }
+            progress.lines_done = progress.lines_done + 1;
+            continue;
+        }
+        if !try fill(handle, allocator, stream, &var pending, at, 5) {
+            let rest = pending.as_bytes();
+            try note_parting(allocator, trace, line, "Kizu closed before sending this record", rest[at..mem::len(rest)], progress);
+            return;
+        }
+        let head = pending.as_bytes();
+        let length = cast<i64>(head[at + 3]) * 256 + cast<i64>(head[at + 4]);
+        if !try fill(handle, allocator, stream, &var pending, at, 5 + length) {
+            let rest = pending.as_bytes();
+            try note_parting(allocator, trace, line, "Kizu closed in the middle of this record", rest[at..mem::len(rest)], progress);
+            return;
+        }
+        let bytes = pending.as_bytes();
+        let got = bytes[at..at + 5 + length];
+        if want[0] == tls::content_application_data() {
+            sealed = sealed + 1;
+        }
+        if !mem::equal_bytes(want, got) {
+            var same = false;
+            if trace.port >= 0 and want[0] == tls::content_application_data() and sealed >= 2 {
+                same = try same_request(allocator, trace, port, sealed - 2, want, got);
+            }
+            if !same {
+                try note_parting(allocator, trace, line, "Kizu sent another record", got, progress);
+                return;
+            }
+        }
+        at = at + 5 + length;
+        progress.lines_done = progress.lines_done + 1;
+    }
+    if !fed {
+        stream.close_write();
+    }
+    // Kizu's close is the end of what it sent. A Kizu end that gave up on the
+    // handshake closes with node's later records unread, and the kernel says
+    // so with a reset instead of an orderly end.
+    while true {
+        if stream.read_into(handle, allocator, &var pending, 65536) |got| {
+            if got == 0 {
+                break;
+            }
+        } else |err| {
+            if err == net::Error::ConnectionReset {
+                break;
+            }
+            return err;
+        }
+    }
+    if pending.len() > at {
+        let bytes = pending.as_bytes();
+        if trace.lines.get(count - 1) |last| {
+            try note_parting(allocator, trace, last, "Kizu sent more after the last line", bytes[at..mem::len(bytes)], progress);
+        }
+    }
+    return;
+}
+
+// feed_runs writes node's records of `trace` from line `from` on, without
+// waiting for Kizu's, for a Kizu end run after them on this thread. It writes
+// `runs` runs -- a run is what node sent before it waited for Kizu again --
+// and answers the line it stopped at.
+fn feed_runs(handle: Io, stream: &var net::TcpStream, trace: &Trace, from: i64, runs: i64) -> Failure!i64 {
+    let records = trace.records.as_bytes();
+    var at = from;
+    var left = runs;
+    var in_run = false;
+    while at < trace.lines.len() {
+        let line = trace.lines.get(at) orelse return Broken::Malformed;
+        if line.kizu {
+            if in_run {
+                in_run = false;
+                left = left - 1;
+                if left == 0 {
+                    return at;
+                }
+            }
+        } else {
+            try stream.write_all(handle, records[line.start..line.end]);
+            in_run = true;
+        }
+        at = at + 1;
+    }
+    return at;
+}
+
+fn feed_runs_at(
+    handle: Io,
+    stream: &var net::TcpStream,
+    replays: &array::Array<Replay>,
+    index: i64,
+    from: i64,
+    runs: i64
+) -> Failure!i64 {
+    if replays.at(index) |replay| {
+        return feed_runs(handle, stream, &replay.trace, from, runs);
+    }
+    return Broken::Malformed;
+}
+
+// note_failure records that the replayer's own connection failed.
+fn note_failure(allocator: Allocator, trace: &Trace, progress: &var Progress) -> void {
+    if progress.failure.len() > 0 {
+        return;
+    }
+    let name = trace.name.as_bytes();
+    progress.failure.append_bytes(allocator, "tls replay: the replayer's connection failed in ") catch return;
+    progress.failure.append_bytes(allocator, name) catch return;
+    progress.failure.append_bytes(allocator, " after line ") catch return;
+    fmt::append_i64(allocator, &var progress.failure, progress.lines_done) catch return;
+    return;
+}
+
+// The replayer as the server, for a Kizu client: it takes the one
+// connection on its listener.
+struct ServingReplay {
+    listener: net::TcpListener,
+    replay: Replay,
+}
+
+fn (self: ServingReplay) deinit(allocator: Allocator) -> void {
+    self.listener.deinit();
+    self.replay.deinit(allocator);
+    return;
+}
+
+fn serve_replay(handle: Io, allocator: Allocator, job: &var ServingReplay) -> void {
+    if serve_replay_once(handle, allocator, job) {
+        return;
+    } else |_| {
+        note_failure(allocator, &job.replay.trace, &var job.replay.progress);
+    }
+    return;
+}
+
+fn serve_replay_once(handle: Io, allocator: Allocator, job: &var ServingReplay) -> Failure!void {
+    var stream = try job.listener.accept(handle);
+    defer stream.deinit();
+    try replay_over(handle, allocator, &var stream, &job.replay.trace, job.replay.port, false, &var job.replay.progress);
+    return;
+}
+
+// The replayer as the client, for a Kizu server: it dials the server.
+struct DiallingReplay {
+    address: string::String,
+    replay: Replay,
+}
+
+fn (self: DiallingReplay) deinit(allocator: Allocator) -> void {
+    self.address.deinit(allocator);
+    self.replay.deinit(allocator);
+    return;
+}
+
+fn dial_replay(handle: Io, allocator: Allocator, job: &var DiallingReplay) -> void {
+    if dial_replay_once(handle, allocator, job) {
+        return;
+    } else |_| {
+        note_failure(allocator, &job.replay.trace, &var job.replay.progress);
+    }
+    return;
+}
+
+fn dial_replay_once(handle: Io, allocator: Allocator, job: &var DiallingReplay) -> Failure!void {
+    let address = job.address.as_bytes();
+    var stream = try net::tcp_connect(handle, address);
+    defer stream.deinit();
+    try replay_over(handle, allocator, &var stream, &job.replay.trace, job.replay.port, false, &var job.replay.progress);
+    return;
+}
+
+// The replayer as the clients of one https server run: it dials the server
+// once a fixture, in the order the run took them, each connection replayed
+// to its end before the next is dialled. It stops at the first that parts.
+struct DiallingRun {
+    address: string::String,
+    replays: array::Array<Replay>,
+}
+
+fn (self: DiallingRun) deinit(allocator: Allocator) -> void {
+    self.address.deinit(allocator);
+    self.replays.deinit(allocator);
+    return;
+}
+
+fn dial_run(handle: Io, allocator: Allocator, job: &var DiallingRun) -> void {
+    let address = job.address.as_bytes();
+    var index = 0;
+    while job.replays.at_mut(index) |replay| {
+        index = index + 1;
+        if dial_one(handle, allocator, address, replay) {} else |_| {
+            note_failure(allocator, &replay.trace, &var replay.progress);
+        }
+        if replay.progress.failure.len() > 0 {
+            return;
+        }
+    }
+    return;
+}
+
+fn dial_one(handle: Io, allocator: Allocator, address: []u8, replay: &var Replay) -> Failure!void {
+    var stream = try net::tcp_connect(handle, address);
+    defer stream.deinit();
+    try replay_over(handle, allocator, &var stream, &replay.trace, replay.port, false, &var replay.progress);
+    return;
+}
+
+// --- the Kizu side ----------------------------------------------------------
+
+// failure_name is how the Kizu programs that recorded the fixtures print a
+// failure, so a replay is held to the same words.
+fn failure_name(failure: Failure) -> []u8 {
+    return match failure {
+        NameMismatch => "NameMismatch",
+        UnknownIssuer => "UnknownIssuer",
+        Expired => "Expired",
+        NoTrustedRoots => "NoTrustedRoots",
+        Alert => "Alert",
+        BadRecord => "BadRecord",
+        tls::Error::Closed => "Closed",
+        ConnectionReset => "ConnectionReset",
+        _ => "other",
+    };
+}
+
+fn print_line(allocator: Allocator, out: &var string::String, line: []u8) -> mem::Error!void {
+    if out.len() > 0 {
+        try out.append_byte(allocator, 10);
+    }
+    try out.append_bytes(allocator, line);
+    return;
+}
+
+fn suite_name(suite: tls::CipherSuite) -> []u8 {
+    if suite == tls::CipherSuite::Aes128GcmSha256 {
+        return "AES-128-GCM";
+    }
+    return "ChaCha20-Poly1305";
+}
+
+// Where a Kizu end draws from: the fixture's seed, or the host's source
+// for the case with Kizu at both ends.
+struct Seed {
+    system: bool,
+    bytes: string::String,
+}
+
+fn (self: Seed) deinit(allocator: Allocator) -> void {
+    self.bytes.deinit(allocator);
+    return;
+}
+
+fn seed_new(allocator: Allocator, system: bool, bytes: []u8) -> mem::Error!Seed {
+    return Seed { system: system, bytes: try string::from_bytes(allocator, bytes) };
+}
+
+fn entropy_of(seed: &Seed) -> tls::Entropy {
+    if seed.system {
+        return tls::system_entropy();
+    }
+    let bytes = seed.bytes.as_bytes();
+    return tls::predictable_entropy(bytes);
+}
+
+// The Kizu tls client of client.kizu: say "hello over tls", read until the
+// server closes, close.
+struct TlsClient {
+    address: string::String,
+    roots: string::String,
+    host: string::String,
+    seed: Seed,
+    printed: string::String,
+}
+
+fn (self: TlsClient) deinit(allocator: Allocator) -> void {
+    self.address.deinit(allocator);
+    self.roots.deinit(allocator);
+    self.host.deinit(allocator);
+    self.seed.deinit(allocator);
+    self.printed.deinit(allocator);
+    return;
+}
+
+fn tls_client_new(
+    allocator: Allocator,
+    port: i64,
+    roots: []u8,
+    host: []u8,
+    system: bool,
+    seed: []u8
+) -> mem::Error!TlsClient {
+    let address = try loopback(allocator, port);
+    errdefer address.deinit(allocator);
+    let own_roots = try string::from_bytes(allocator, roots);
+    errdefer own_roots.deinit(allocator);
+    let own_host = try string::from_bytes(allocator, host);
+    errdefer own_host.deinit(allocator);
+    let own_seed = try seed_new(allocator, system, seed);
+    return TlsClient {
+        address: move address,
+        roots: move own_roots,
+        host: move own_host,
+        seed: move own_seed,
+        printed: string::new(allocator),
+    };
+}
+
+fn tls_client(handle: Io, allocator: Allocator, job: &var TlsClient) -> void {
+    if tls_client_once(handle, allocator, job) {
+        return;
+    } else |err| {
+        print_line(allocator, &var job.printed, failure_name(err)) catch return;
+    }
+    return;
+}
+
+fn tls_client_once(handle: Io, allocator: Allocator, job: &var TlsClient) -> Failure!void {
+    let roots_name = job.roots.as_bytes();
+    var roots = try chain_of(allocator, roots_name);
+    defer roots.deinit(allocator);
+    let address = job.address.as_bytes();
+    let host = job.host.as_bytes();
+    var client = try tls::connect_with(handle, allocator, address, host, &roots, 1893456000,
+        entropy_of(&job.seed));
+    defer client.deinit(allocator);
+    client.set_read_deadline(in_a_while());
+    var line = string::new(allocator);
+    defer line.deinit(allocator);
+    try line.append_bytes(allocator, "connected with ");
+    try line.append_bytes(allocator, suite_name(client.cipher_suite()));
+    let line_bytes = line.as_bytes();
+    try print_line(allocator, &var job.printed, line_bytes);
+    try client.write(handle, allocator, "hello over tls");
+    var reply = string::new(allocator);
+    defer reply.deinit(allocator);
+    while true {
+        let got = try client.read_into(handle, allocator, &var reply, 4096);
+        if got == 0 {
+            break;
+        }
+    }
+    let reply_bytes = reply.as_bytes();
+    try print_line(allocator, &var job.printed, reply_bytes);
+    try client.close(handle, allocator);
+    try print_line(allocator, &var job.printed, "closed");
+    return;
+}
+
+// The Kizu tls server of server.kizu: read once, send it back in upper
+// case, close.
+struct TlsServer {
+    listener: net::TcpListener,
+    chain: string::String,
+    seed: Seed,
+    printed: string::String,
+}
+
+fn (self: TlsServer) deinit(allocator: Allocator) -> void {
+    self.listener.deinit();
+    self.chain.deinit(allocator);
+    self.seed.deinit(allocator);
+    self.printed.deinit(allocator);
+    return;
+}
+
+// tls_server_new listens on a free port for the server to take its one
+// connection from.
+fn tls_server_new(handle: Io, allocator: Allocator, chain: []u8, system: bool, seed: []u8) -> Failure!TlsServer {
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    errdefer listener.deinit();
+    let own_chain = try string::from_bytes(allocator, chain);
+    errdefer own_chain.deinit(allocator);
+    let own_seed = try seed_new(allocator, system, seed);
+    return TlsServer {
+        listener: move listener,
+        chain: move own_chain,
+        seed: move own_seed,
+        printed: string::new(allocator),
+    };
+}
+
+fn tls_server(handle: Io, allocator: Allocator, job: &var TlsServer) -> void {
+    if tls_server_once(handle, allocator, job) {
+        return;
+    } else |err| {
+        print_line(allocator, &var job.printed, failure_name(err)) catch return;
+    }
+    return;
+}
+
+fn upper(bytes: &var string::String) -> void {
+    let view = bytes.as_mut_bytes();
+    for 0..mem::len(view) |index| {
+        if view[index] >= 97 and view[index] <= 122 {
+            view[index] = view[index] - 32;
+        }
+    }
+    return;
+}
+
+fn tls_server_once(handle: Io, allocator: Allocator, job: &var TlsServer) -> Failure!void {
+    let chain_name = job.chain.as_bytes();
+    var chain = try chain_of(allocator, chain_name);
+    defer chain.deinit(allocator);
+    let key_der = try key_der_of(allocator, chain_name);
+    defer key_der.deinit(allocator);
+    let key_bytes = key_der.as_bytes();
+    let key = try x509::parse_private_key(key_bytes);
+    var stream = try job.listener.accept(handle);
+    stream.set_read_deadline(in_a_while());
+    var connection = tls::accepting_with(allocator, move stream, entropy_of(&job.seed));
+    defer connection.deinit(allocator);
+    try connection.accept_wait(handle, allocator, &chain, &key);
+    var line = string::new(allocator);
+    defer line.deinit(allocator);
+    try line.append_bytes(allocator, "served ");
+    let host = connection.server_name();
+    try line.append_bytes(allocator, host);
+    try line.append_bytes(allocator, " with ");
+    try line.append_bytes(allocator, suite_name(connection.cipher_suite()));
+    let line_bytes = line.as_bytes();
+    try print_line(allocator, &var job.printed, line_bytes);
+    var request = string::new(allocator);
+    defer request.deinit(allocator);
+    let got = try connection.read_into(handle, allocator, &var request, 4096);
+    let _ = got;
+    let request_bytes = request.as_bytes();
+    try print_line(allocator, &var job.printed, request_bytes);
+    upper(&var request);
+    let reply = request.as_bytes();
+    try connection.write(handle, allocator, reply);
+    try connection.close(handle, allocator);
+    try print_line(allocator, &var job.printed, "closed");
+    return;
+}
+
+// The Kizu https client of https_client.kizu: GET /greeting through
+// http::connect_secure_with, then the status and the body.
+struct HttpsClient {
+    port: i64,
+    roots: string::String,
+    host: string::String,
+    seed: Seed,
+    printed: string::String,
+}
+
+fn (self: HttpsClient) deinit(allocator: Allocator) -> void {
+    self.roots.deinit(allocator);
+    self.host.deinit(allocator);
+    self.seed.deinit(allocator);
+    self.printed.deinit(allocator);
+    return;
+}
+
+fn https_client_new(allocator: Allocator, port: i64, roots: []u8, host: []u8, seed: []u8) -> mem::Error!HttpsClient {
+    let own_roots = try string::from_bytes(allocator, roots);
+    errdefer own_roots.deinit(allocator);
+    let own_host = try string::from_bytes(allocator, host);
+    errdefer own_host.deinit(allocator);
+    let own_seed = try seed_new(allocator, false, seed);
+    return HttpsClient {
+        port: port,
+        roots: move own_roots,
+        host: move own_host,
+        seed: move own_seed,
+        printed: string::new(allocator),
+    };
+}
+
+fn https_client(handle: Io, allocator: Allocator, job: &var HttpsClient) -> void {
+    if https_client_once(handle, allocator, job) {
+        return;
+    } else |err| {
+        print_line(allocator, &var job.printed, failure_name(err)) catch return;
+    }
+    return;
+}
+
+fn https_client_once(handle: Io, allocator: Allocator, job: &var HttpsClient) -> Failure!void {
+    let roots_name = job.roots.as_bytes();
+    var roots = try chain_of(allocator, roots_name);
+    defer roots.deinit(allocator);
+    let address = try loopback(allocator, job.port);
+    defer address.deinit(allocator);
+    let host = job.host.as_bytes();
+    var url_text = string::new(allocator);
+    defer url_text.deinit(allocator);
+    try url_text.append_bytes(allocator, "https://");
+    try url_text.append_bytes(allocator, host);
+    try url_text.append_bytes(allocator, ":");
+    try fmt::append_i64(allocator, &var url_text, job.port);
+    try url_text.append_bytes(allocator, "/greeting");
+    let address_bytes = address.as_bytes();
+    var client = try http::connect_secure_with(handle, allocator, address_bytes, host, &roots,
+        http::default_limits(), entropy_of(&job.seed));
+    defer client.deinit(allocator);
+    let url_bytes = url_text.as_bytes();
+    var url = try http::parse_url(allocator, url_bytes);
+    defer url.deinit(allocator);
+    try client.send(handle, allocator, "GET", &url, "", "", 20000);
+    var response = try client.receive(handle, allocator, "GET", http::default_limits());
+    defer response.deinit(allocator);
+    try client.read_body(handle, allocator, &var response, 1 << 20);
+    var status = string::new(allocator);
+    defer status.deinit(allocator);
+    try fmt::append_i64(allocator, &var status, response.status);
+    let status_bytes = status.as_bytes();
+    try print_line(allocator, &var job.printed, status_bytes);
+    let body = response.body.as_bytes();
+    try print_line(allocator, &var job.printed, body);
+    return;
+}
+
+// The Kizu https server of https_server.kizu through `accept`: answer
+// `count` requests with "hello over tls from " and the path, printing
+// "served " and the path for each.
+struct HttpsServer {
+    server: http::Server,
+    count: i64,
+    printed: string::String,
+}
+
+fn (self: HttpsServer) deinit(allocator: Allocator) -> void {
+    self.server.deinit(allocator);
+    self.printed.deinit(allocator);
+    return;
+}
+
+fn https_server(handle: Io, allocator: Allocator, job: &var HttpsServer) -> void {
+    if https_server_once(handle, allocator, job) {
+        return;
+    } else |err| {
+        print_line(allocator, &var job.printed, failure_name(err)) catch return;
+    }
+    return;
+}
+
+fn https_server_once(handle: Io, allocator: Allocator, job: &var HttpsServer) -> Failure!void {
+    var served = 0;
+    while served < job.count {
+        // A connection whose handshake failed is not a request; accept
+        // waits for the next one, as https_server.kizu does.
+        if job.server.accept(handle, allocator, 1 << 16) |taken| {
+            var exchange = move taken;
+            defer exchange.deinit(allocator);
+            try answer(handle, allocator, &var exchange, &var job.printed);
+            served = served + 1;
+        } else |err| {
+            let _ = err;
+        }
+    }
+    return;
+}
+
+fn answer(handle: Io, allocator: Allocator, exchange: &var http::Exchange, printed: &var string::String) -> Failure!void {
+    let target = exchange.request.target.as_bytes();
+    var text = string::new(allocator);
+    defer text.deinit(allocator);
+    try text.append_bytes(allocator, "hello over tls from ");
+    try text.append_bytes(allocator, target);
+    var line = string::new(allocator);
+    defer line.deinit(allocator);
+    try line.append_bytes(allocator, "served ");
+    try line.append_bytes(allocator, target);
+    let text_bytes = text.as_bytes();
+    try exchange.respond_text(handle, allocator, 200, "text/plain", text_bytes);
+    let line_bytes = line.as_bytes();
+    try print_line(allocator, printed, line_bytes);
+    return;
+}
+
+// --- one replay -------------------------------------------------------------
+
+fn expect_replayed(allocator: Allocator, replay: &Replay, printed: &string::String, want: []u8) -> mem::Error!void {
+    let printed_bytes = printed.as_bytes();
+    if replay.progress.failure.len() > 0 {
+        var message = string::new(allocator);
+        defer message.deinit(allocator);
+        let failure = replay.progress.failure.as_bytes();
+        try message.append_bytes(allocator, failure);
+        try message.append_byte(allocator, 10);
+        try message.append_bytes(allocator, "The Kizu end printed: ");
+        try message.append_bytes(allocator, printed_bytes);
+        let message_bytes = message.as_bytes();
+        testing::fail(message_bytes);
+    }
+    testing::expect(replay.progress.lines_done == replay.trace.lines.len());
+    testing::expect_equal<[]u8>(want, printed_bytes);
+    return;
+}
+
+// replay_client replays a `client-*` fixture against the Kizu tls client.
+fn replay_client(allocator: Allocator, name: []u8, roots: []u8, host: []u8, want: []u8) -> Failure!void {
+    var loop = try io::loop_new();
+    defer loop.deinit();
+    let handle = io::evented(&var loop);
+    let trace = try read_trace(allocator, name);
+    var replay = replay_new(allocator, move trace);
+    errdefer replay.deinit(allocator);
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    errdefer listener.deinit();
+    let port = try listener.local_port();
+    let seed = replay.trace.seed.as_bytes();
+    var client = try tls_client_new(allocator, port, roots, host, false, seed);
+    defer client.deinit(allocator);
+    var replayer = ServingReplay { listener: move listener, replay: move replay };
+    defer replayer.deinit(allocator);
+    var replayed = try io::async<ServingReplay>(handle, allocator, serve_replay, &var replayer);
+    errdefer replayed.deinit(allocator);
+    var talked = try io::async<TlsClient>(handle, allocator, tls_client, &var client);
+    talked.await();
+    talked.deinit(allocator);
+    replayed.await();
+    replayed.deinit(allocator);
+    try expect_replayed(allocator, &replayer.replay, &client.printed, want);
+    return;
+}
+
+// replay_server replays a `server-*` fixture against the Kizu tls server.
+fn replay_server(allocator: Allocator, name: []u8, chain: []u8, want: []u8) -> Failure!void {
+    var loop = try io::loop_new();
+    defer loop.deinit();
+    let handle = io::evented(&var loop);
+    let trace = try read_trace(allocator, name);
+    var replay = replay_new(allocator, move trace);
+    errdefer replay.deinit(allocator);
+    let seed = replay.trace.seed.as_bytes();
+    var server = try tls_server_new(handle, allocator, chain, false, seed);
+    defer server.deinit(allocator);
+    let port = try server.listener.local_port();
+    let address = try loopback(allocator, port);
+    var replayer = DiallingReplay { address: move address, replay: move replay };
+    defer replayer.deinit(allocator);
+    var served = try io::async<TlsServer>(handle, allocator, tls_server, &var server);
+    errdefer served.deinit(allocator);
+    var replayed = try io::async<DiallingReplay>(handle, allocator, dial_replay, &var replayer);
+    replayed.await();
+    replayed.deinit(allocator);
+    served.await();
+    served.deinit(allocator);
+    try expect_replayed(allocator, &replayer.replay, &server.printed, want);
+    return;
+}
+
+// replay_https_client replays an `https-client-*` fixture against the Kizu
+// https client, which names this run's port in its request.
+fn replay_https_client(allocator: Allocator, name: []u8, roots: []u8, host: []u8, want: []u8) -> Failure!void {
+    var loop = try io::loop_new();
+    defer loop.deinit();
+    let handle = io::evented(&var loop);
+    let trace = try read_trace(allocator, name);
+    var replay = replay_new(allocator, move trace);
+    errdefer replay.deinit(allocator);
+    var listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    errdefer listener.deinit();
+    let port = try listener.local_port();
+    let seed = replay.trace.seed.as_bytes();
+    var client = try https_client_new(allocator, port, roots, host, seed);
+    defer client.deinit(allocator);
+    replay.port = port;
+    var replayer = ServingReplay { listener: move listener, replay: move replay };
+    defer replayer.deinit(allocator);
+    var replayed = try io::async<ServingReplay>(handle, allocator, serve_replay, &var replayer);
+    errdefer replayed.deinit(allocator);
+    var fetched = try io::async<HttpsClient>(handle, allocator, https_client, &var client);
+    fetched.await();
+    fetched.deinit(allocator);
+    replayed.await();
+    replayed.deinit(allocator);
+    try expect_replayed(allocator, &replayer.replay, &client.printed, want);
+    return;
+}
+
+// run_fixture is the `index`th connection of an https server run, in the
+// order the run took them, or "" past the last. The order is the recorded
+// one: each connection the server accepts draws from the next split of the
+// run's seed, so the replay has to come in that order to meet the same bytes.
+//
+// `accept` takes one request off a connection and closes it after the
+// answer, so its run has a connection per request. Both runs put the client
+// that refuses the server between the others: `accept` and `first` / `next`
+// take a failed handshake silently and wait for the next connection, so with
+// the stranger last they would be waiting for a request that never comes.
+fn run_fixture(run: []u8, index: i64) -> []u8 {
+    if mem::equal_bytes(run, "https-server-accept") {
+        if index == 0 {
+            return "https-server-accept-one";
+        }
+        if index == 1 {
+            return "https-server-accept-two";
+        }
+        if index == 2 {
+            return "https-server-accept-stranger";
+        }
+        if index == 3 {
+            return "https-server-accept-three";
+        }
+        return "";
+    }
+    if index == 0 {
+        return "https-server-keepalive";
+    }
+    if index == 1 {
+        return "https-server-stranger";
+    }
+    if index == 2 {
+        return "https-server-fresh";
+    }
+    return "";
+}
+
+// run_replays reads the fixtures of an https server run, in its order, into
+// `seed` the run's seed, which every fixture of the run carries.
+fn run_replays(allocator: Allocator, run: []u8, seed: &var string::String) -> Failure!array::Array<Replay> {
+    var replays = array::new<Replay>(allocator);
+    errdefer replays.deinit(allocator);
+    var index = 0;
+    while mem::len(run_fixture(run, index)) > 0 {
+        let trace = try read_trace(allocator, run_fixture(run, index));
+        index = index + 1;
+        var replay = replay_new(allocator, move trace);
+        errdefer replay.deinit(allocator);
+        let trace_seed = replay.trace.seed.as_bytes();
+        if seed.len() == 0 {
+            try seed.append_bytes(allocator, trace_seed);
+        }
+        let seed_bytes = seed.as_bytes();
+        testing::expect(mem::equal_bytes(seed_bytes, trace_seed));
+        try replays.append(allocator, move replay);
+    }
+    return move replays;
+}
+
+// listen_run is the Kizu https server of a run, over localhost-p256 and
+// seeded with the run's seed.
+fn listen_run(handle: Io, allocator: Allocator, seed: []u8) -> Failure!http::Server {
+    var chain = try chain_of(allocator, "localhost-p256");
+    defer chain.deinit(allocator);
+    let key_der = try key_der_of(allocator, "localhost-p256");
+    defer key_der.deinit(allocator);
+    let key_bytes = key_der.as_bytes();
+    let server = try http::listen_secure_with(handle, allocator, "127.0.0.1:0", &chain, key_bytes,
+        http::default_limits(), tls::predictable_entropy(seed));
+    return move server;
+}
+
+// replay_https_accept replays the accept run against the Kizu https server's
+// `accept`, the replayer a task beside it on an evented loop.
+fn replay_https_accept(allocator: Allocator, want: []u8) -> Failure!void {
+    var loop = try io::loop_new();
+    defer loop.deinit();
+    let handle = io::evented(&var loop);
+    var seed = string::new(allocator);
+    defer seed.deinit(allocator);
+    var replays = try run_replays(allocator, "https-server-accept", &var seed);
+    errdefer replays.deinit(allocator);
+    let seed_bytes = seed.as_bytes();
+    var server = try listen_run(handle, allocator, seed_bytes);
+    errdefer server.deinit(allocator);
+    let port = try server.local_port();
+    let address = try loopback(allocator, port);
+    var job = HttpsServer { server: move server, count: 3, printed: string::new(allocator) };
+    defer job.deinit(allocator);
+    var replayer = DiallingRun { address: move address, replays: move replays };
+    defer replayer.deinit(allocator);
+    var served_task = try io::async<HttpsServer>(handle, allocator, https_server, &var job);
+    errdefer served_task.deinit(allocator);
+    var replayed = try io::async<DiallingRun>(handle, allocator, dial_run, &var replayer);
+    replayed.await();
+    replayed.deinit(allocator);
+    // A run that parted leaves the server waiting for a request that will not
+    // come, so the parting is reported before the server is waited for.
+    try expect_run(allocator, &replayer.replays);
+    served_task.await();
+    served_task.deinit(allocator);
+    let printed = job.printed.as_bytes();
+    testing::expect_equal<[]u8>(want, printed);
+    return;
+}
+
+fn expect_run(allocator: Allocator, replays: &array::Array<Replay>) -> mem::Error!void {
+    var nothing = string::new(allocator);
+    defer nothing.deinit(allocator);
+    var at = 0;
+    while replays.at(at) |replay| {
+        at = at + 1;
+        try expect_replayed(allocator, replay, &nothing, "");
+    }
+    return;
+}
+
+// The client ends of the loop run, one connection a fixture.
+struct LoopClients {
+    keepalive: net::TcpStream,
+    stranger: net::TcpStream,
+    fresh: net::TcpStream,
+}
+
+fn (self: LoopClients) deinit() -> void {
+    self.keepalive.deinit();
+    self.stranger.deinit();
+    self.fresh.deinit();
+    return;
+}
+
+// replay_https_loop replays the loop run against `first` / `next`. Unlike
+// every other replay, it runs on the blocking Io in this one thread: `first`
+// and `next` wait in the kernel (kevent / epoll) for whatever arrives next,
+// which stops the whole thread, so a replayer task beside them on an evented
+// loop would never run. node's records do not depend on Kizu's -- they are
+// fixed in the fixture -- so they are written before the call that reads
+// them, and Kizu's are read and compared after the server is done.
+//
+// The three clients connect at the start and sit in the backlog: `first`
+// accepts them in that order, which is the order the server splits the run's
+// seed in. Each is fed only what node had sent by the time of the call: /two
+// after /one was answered, the stranger and the fresh client after /two was.
+fn replay_https_loop(allocator: Allocator, want: []u8) -> Failure!void {
+    let handle = io::blocking();
+    var seed = string::new(allocator);
+    defer seed.deinit(allocator);
+    var replays = try run_replays(allocator, "https-server-loop", &var seed);
+    defer replays.deinit(allocator);
+    let seed_bytes = seed.as_bytes();
+    var server = try listen_run(handle, allocator, seed_bytes);
+    errdefer server.deinit(allocator);
+    let port = try server.local_port();
+    let address = try loopback(allocator, port);
+    defer address.deinit(allocator);
+    let address_bytes = address.as_bytes();
+    var keepalive = try net::tcp_connect(handle, address_bytes);
+    errdefer keepalive.deinit();
+    var stranger = try net::tcp_connect(handle, address_bytes);
+    errdefer stranger.deinit();
+    let fresh = try net::tcp_connect(handle, address_bytes);
+    var clients = LoopClients { keepalive: move keepalive, stranger: move stranger, fresh: move fresh };
+    defer clients.deinit();
+    clients.keepalive.set_read_deadline(in_a_while());
+    clients.stranger.set_read_deadline(in_a_while());
+    clients.fresh.set_read_deadline(in_a_while());
+    var printed = string::new(allocator);
+    defer printed.deinit(allocator);
+    try serve_loop(handle, allocator, move server, &var clients, &replays, &var printed);
+    check_fed(handle, allocator, &var clients.keepalive, &var replays, 0);
+    check_fed(handle, allocator, &var clients.stranger, &var replays, 1);
+    check_fed(handle, allocator, &var clients.fresh, &var replays, 2);
+    try expect_run(allocator, &replays);
+    let printed_bytes = printed.as_bytes();
+    testing::expect_equal<[]u8>(want, printed_bytes);
+    return;
+}
+
+// check_fed reads what Kizu sent on a fed connection and compares it with the
+// `index`th fixture of the run.
+fn check_fed(
+    handle: Io,
+    allocator: Allocator,
+    stream: &var net::TcpStream,
+    replays: &var array::Array<Replay>,
+    index: i64
+) -> void {
+    if replays.at_mut(index) |replay| {
+        if replay_over(handle, allocator, stream, &replay.trace, replay.port, true, &var replay.progress) {} else |_| {
+            note_failure(allocator, &replay.trace, &var replay.progress);
+        }
+    }
+    return;
+}
+
+// serve_loop is the Kizu end of the loop run: /one and /two down the
+// kept-alive connection, then the stranger refused and /three on a fresh
+// one. The server is gone when it returns, so every connection is closed.
+fn serve_loop(
+    handle: Io,
+    allocator: Allocator,
+    taken: http::Server,
+    clients: &var LoopClients,
+    replays: &array::Array<Replay>,
+    printed: &var string::String
+) -> Failure!void {
+    var server = move taken;
+    defer server.deinit(allocator);
+    // The ClientHello, then the Finished and /one.
+    let kept = try feed_runs_at(handle, &var clients.keepalive, replays, 0, 0, 2);
+    let one = try server.first(handle, allocator, 1 << 16);
+    var current = move one;
+    errdefer current.deinit(allocator);
+    try answer(handle, allocator, &var current, printed);
+    // /two once /one was answered, as node sent it. Written before, it would
+    // be a pipelined request, which this run did not have.
+    let _ = try feed_runs_at(handle, &var clients.keepalive, replays, 0, kept, 1);
+    let two = try server.next(handle, allocator, move current, 1 << 16);
+    var second = move two;
+    errdefer second.deinit(allocator);
+    try answer(handle, allocator, &var second, printed);
+    // node read the answer to /two and closed; the stranger came next and
+    // left after the server's flight, and then the fresh client.
+    clients.keepalive.close_write();
+    let _ = try feed_runs_at(handle, &var clients.stranger, replays, 1, 0, 1);
+    clients.stranger.close_write();
+    let _ = try feed_runs_at(handle, &var clients.fresh, replays, 2, 0, 2);
+    let three = try server.next(handle, allocator, move second, 1 << 16);
+    var last = move three;
+    defer last.deinit(allocator);
+    try answer(handle, allocator, &var last, printed);
+    return;
+}
+
+fn echoed() -> []u8 {
+    return
+        \\connected with AES-128-GCM
+        \\HELLO OVER TLS
+        \\closed
+    ;
+}
+
+fn served() -> []u8 {
+    return
+        \\served localhost with AES-128-GCM
+        \\hello over tls
+        \\closed
+    ;
+}
+
+fn fetched() -> []u8 {
+    return
+        \\200
+        \\hello over tls from /greeting
+    ;
+}
+
+// --- the cases --------------------------------------------------------------
+
+test "the tls client replays its echo over P-256, P-384 and RSA, twice each" {
+    let allocator = mem::page_allocator();
+    for 0..2 |_| {
+        try replay_client(allocator, "client-echo-p256", "localhost-p256", "localhost", echoed());
+        try replay_client(allocator, "client-echo-p384", "localhost-p384", "localhost", echoed());
+        try replay_client(allocator, "client-echo-rsa", "localhost-rsa2048", "localhost", echoed());
+    }
+}
+
+test "the tls client refuses the wrong host and the wrong root with the alert it sent" {
+    let allocator = mem::page_allocator();
+    for 0..2 |_| {
+        try replay_client(allocator, "client-wrong-host", "localhost-p256", "example.test", "NameMismatch");
+        try replay_client(allocator, "client-wrong-root", "other-p256", "localhost", "UnknownIssuer");
+    }
+}
+
+test "the tls server replays its echo over P-256, P-384 and RSA, twice each" {
+    let allocator = mem::page_allocator();
+    for 0..2 |_| {
+        try replay_server(allocator, "server-echo-p256", "localhost-p256", served());
+        try replay_server(allocator, "server-echo-p384", "localhost-p384", served());
+        try replay_server(allocator, "server-echo-rsa", "localhost-rsa2048", served());
+    }
+}
+
+// node checks the certificate after its handshake and, finding it under no
+// root it trusts, closes without its Finished and without an alert: the
+// server's handshake ends on the close.
+test "the tls server sees a client that trusts another root leave" {
+    let allocator = mem::page_allocator();
+    for 0..2 |_| {
+        try replay_server(allocator, "server-wrong-root", "localhost-p256", "Closed");
+    }
+}
+
+test "the https client fetches, and refuses the wrong root and the wrong host" {
+    let allocator = mem::page_allocator();
+    for 0..2 |_| {
+        try replay_https_client(allocator, "https-client-fetch", "localhost-p256", "localhost", fetched());
+        try replay_https_client(allocator, "https-client-wrong-root", "other-p256", "localhost", "UnknownIssuer");
+        try replay_https_client(allocator, "https-client-wrong-host", "localhost-p256", "127.0.0.1", "NameMismatch");
+    }
+}
+
+test "an https fetch with no roots is refused before it connects" {
+    let allocator = mem::page_allocator();
+    var headers = http::headers_new(allocator);
+    defer headers.deinit(allocator);
+    var roots = array::new<string::String>(allocator);
+    defer roots.deinit(allocator);
+    if http::fetch_with(io::blocking(), allocator, "GET", "https://localhost:1/", &headers, "", &roots,
+        http::default_limits(), 1024) |response| {
+        response.deinit(allocator);
+        testing::expect(false);
+    } else |err| {
+        testing::expect(err == http::Error::NoTrustedRoots);
+    }
+}
+
+fn routes_served() -> []u8 {
+    return
+        \\served /one
+        \\served /two
+        \\served /three
+    ;
+}
+
+test "the https server answers through accept, a connection a request, and refuses a stranger" {
+    let allocator = mem::page_allocator();
+    for 0..2 |_| {
+        try replay_https_accept(allocator, routes_served());
+    }
+}
+
+test "the https server answers through first and next, two down a kept-alive connection, and refuses a stranger" {
+    let allocator = mem::page_allocator();
+    for 0..2 |_| {
+        try replay_https_loop(allocator, routes_served());
+    }
+}
+
+// Kizu at both ends, each drawing from the host's source: the one case that
+// has no fixture, since its bytes are new every time.
+test "the tls server talks to the tls client over the host's source" {
+    let allocator = mem::page_allocator();
+    var loop = try io::loop_new();
+    defer loop.deinit();
+    let handle = io::evented(&var loop);
+    var server = try tls_server_new(handle, allocator, "localhost-p256", true, "");
+    defer server.deinit(allocator);
+    let port = try server.listener.local_port();
+    var client = try tls_client_new(allocator, port, "localhost-p256", "localhost", true, "");
+    defer client.deinit(allocator);
+    var served_task = try io::async<TlsServer>(handle, allocator, tls_server, &var server);
+    errdefer served_task.deinit(allocator);
+    var talked = try io::async<TlsClient>(handle, allocator, tls_client, &var client);
+    talked.await();
+    talked.deinit(allocator);
+    served_task.await();
+    served_task.deinit(allocator);
+    let client_printed = client.printed.as_bytes();
+    testing::expect_equal<[]u8>(echoed(), client_printed);
+    let server_printed = server.printed.as_bytes();
+    testing::expect_equal<[]u8>(served(), server_printed);
+}
+
+// fixture_name is the `index`th fixture, or "" past the last.
+fn fixture_name(index: i64) -> []u8 {
+    if index == 0 {
+        return "client-echo-p256";
+    }
+    if index == 1 {
+        return "client-echo-p384";
+    }
+    if index == 2 {
+        return "client-echo-rsa";
+    }
+    if index == 3 {
+        return "client-wrong-host";
+    }
+    if index == 4 {
+        return "client-wrong-root";
+    }
+    if index == 5 {
+        return "server-echo-p256";
+    }
+    if index == 6 {
+        return "server-echo-p384";
+    }
+    if index == 7 {
+        return "server-echo-rsa";
+    }
+    if index == 8 {
+        return "server-wrong-root";
+    }
+    if index == 9 {
+        return "https-client-fetch";
+    }
+    if index == 10 {
+        return "https-client-wrong-root";
+    }
+    if index == 11 {
+        return "https-client-wrong-host";
+    }
+    return "";
+}
+
+test "every fixture was recorded against the same peer, with the seed its name gives" {
+    let allocator = mem::page_allocator();
+    var first = string::new(allocator);
+    defer first.deinit(allocator);
+    var index = 0;
+    while mem::len(fixture_name(index)) > 0 {
+        let name = fixture_name(index);
+        index = index + 1;
+        let trace = try read_trace(allocator, name);
+        defer trace.deinit(allocator);
+        let peer = trace.peer.as_bytes();
+        if first.len() == 0 {
+            try first.append_bytes(allocator, peer);
+        }
+        let first_bytes = first.as_bytes();
+        testing::expect_equal<[]u8>(first_bytes, peer);
+        var text = string::new(allocator);
+        defer text.deinit(allocator);
+        try text.append_bytes(allocator, "kizu tls fixture ");
+        try text.append_bytes(allocator, name);
+        var digest = [32]u8{};
+        var digest_view = digest.as_mut_bytes();
+        let text_bytes = text.as_bytes();
+        crypto::sha256(text_bytes, &var digest_view);
+        let digest_bytes = digest.as_bytes();
+        let seed = trace.seed.as_bytes();
+        testing::expect(mem::equal_bytes(digest_bytes, seed));
+    }
+    testing::expect(index == 12);
+    // An https server run's fixtures carry the seed of the run's name.
+    try expect_run_seeds(allocator, "https-server-accept", &first);
+    try expect_run_seeds(allocator, "https-server-loop", &first);
+}
+
+fn expect_run_seeds(allocator: Allocator, run: []u8, peer: &string::String) -> Failure!void {
+    var text = string::new(allocator);
+    defer text.deinit(allocator);
+    try text.append_bytes(allocator, "kizu tls fixture ");
+    try text.append_bytes(allocator, run);
+    var digest = [32]u8{};
+    var digest_view = digest.as_mut_bytes();
+    let text_bytes = text.as_bytes();
+    crypto::sha256(text_bytes, &var digest_view);
+    let digest_bytes = digest.as_bytes();
+    let peer_bytes = peer.as_bytes();
+    var index = 0;
+    while mem::len(run_fixture(run, index)) > 0 {
+        let trace = try read_trace(allocator, run_fixture(run, index));
+        defer trace.deinit(allocator);
+        index = index + 1;
+        let trace_peer = trace.peer.as_bytes();
+        testing::expect_equal<[]u8>(peer_bytes, trace_peer);
+        let seed = trace.seed.as_bytes();
+        testing::expect(mem::equal_bytes(digest_bytes, seed));
+    }
+    testing::expect(index > 0);
+    return;
+}
