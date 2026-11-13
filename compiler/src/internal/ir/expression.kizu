@@ -8,13 +8,11 @@ import std::fmt;
 import std::mem;
 import std::string;
 
-// Mechanical port of the expression half of internal/ir/lower.go:
-// expression dispatch, contextual lowering, literals, identifiers, casts,
-// unary and binary operators, struct literals, field reads, union and enum
-// spellings, and checked byte-slice indexing.
+// The expression half of lowering: expression dispatch, contextual lowering,
+// literals, identifiers, casts, unary and binary operators, struct literals,
+// field reads, union and enum spellings, and checked byte-slice indexing.
 
-/// Lowers an expression and returns its typed SSA value, the Go
-/// `lowerExpr`.
+/// Lowers an expression and returns its typed SSA value.
 fn (self: &var Lowerer) lower_expr(
     tree: &var ast::Ast,
     expression: ast::Expression,
@@ -113,11 +111,10 @@ fn is_null_expr(tree: &ast::Ast, expression: ast::Expression) -> bool {
     }
 }
 
-/// Lowers an array literal, the Go `lowerArrayLiteral`. `{}` is the zero
-/// value; a list is written element by element into a slot holding the zero
-/// value, and the array is what the slot holds after the last one. Each
-/// element is lowered under the element type, the way an argument is under
-/// its parameter.
+/// Lowers an array literal. `{}` is the zero value; a list is written element
+/// by element into a slot holding the zero value, and the array is what the
+/// slot holds after the last one. Each element is lowered under the element
+/// type, the way an argument is under its parameter.
 fn (self: &var Lowerer) lower_array_literal(
     tree: &var ast::Ast,
     literal: &ast::BufferLiteralExpr,
@@ -163,9 +160,8 @@ fn (self: &var Lowerer) lower_array_literal(
     return null;
 }
 
-/// Lowers `f64x2{a, b}` to `vector.new` with one lane value per operand,
-/// each lowered under the lane type the way an argument is under its
-/// parameter, the Go `VectorLiteralExpr` arm of `lowerExpr`.
+/// Lowers `f64x2{a, b}` to `vector.new` with one lane value per operand, each
+/// lowered under the lane type the way an argument is under its parameter.
 fn (self: &var Lowerer) lower_vector_literal_expr(
     tree: &var ast::Ast,
     literal: &ast::VectorLiteralExpr,
@@ -195,7 +191,7 @@ fn (self: &var Lowerer) lower_vector_literal_expr(
     return null;
 }
 
-/// Reads what a borrow or raw pointer points at, the Go `lowerDerefExpr`.
+/// Reads what a borrow or raw pointer points at.
 fn (self: &var Lowerer) lower_deref_expr(
     tree: &var ast::Ast,
     deref: ast::DerefExpr,
@@ -218,8 +214,8 @@ fn (self: &var Lowerer) lower_deref_expr(
     return null;
 }
 
-/// Returns the storage a borrow context is handed, the Go `lendStorage`,
-/// when the expression names a place that has some.
+/// Returns the storage a borrow context is handed, when the expression names a
+/// place that has some.
 ///
 /// A `&var` context wants the storage itself, not the value read out of it:
 /// a `&var` argument and a returned `&var self` both hand over the same
@@ -264,11 +260,11 @@ fn (self: &var Lowerer) lend_storage(
     return self.lower_field_storage(tree, target);
 }
 
-/// Lowers an expression whose type the position it appears in already
-/// fixes, the Go `lowerContextualExpr`: a function return, a struct field, a
-/// union payload, a parameter. An integer literal takes that type there, the
-/// way the checker already read it. want may be empty or any non-integer
-/// type; the expression then lowers with the type it carries itself.
+/// Lowers an expression whose type the position it appears in already fixes: a
+/// function return, a struct field, a union payload, a parameter. An integer
+/// literal takes that type there, the way the checker already read it. want
+/// may be empty or any non-integer type; the expression then lowers with the
+/// type it carries itself.
 fn (self: &var Lowerer) lower_contextual_expr(
     tree: &var ast::Ast,
     expression: ast::Expression,
@@ -335,13 +331,12 @@ fn (self: &var Lowerer) lower_contextual_expr(
     return self.lower_expr(tree, expression, out);
 }
 
-/// Reads a borrow's value where the position wants the value itself, the Go
-/// `readBorrowForContext`. A borrow-capture binding is a raw reference
-/// value, and a `&T` parameter travels as a copy, so handing the capture to
-/// such a parameter needs the read a slot-backed borrow gets in
-/// lowerIdentExpr. A union's `&T` spelling wants the copy's address; the
-/// read produces the value that address is taken of, so a mutable capture
-/// degrades through the same load.
+/// Reads a borrow's value where the position wants the value itself. A
+/// borrow-capture binding is a raw reference value, and a `&T` parameter
+/// travels as a copy, so handing the capture to such a parameter needs the
+/// read a slot-backed borrow gets in lower_ident_expr. A union's `&T` spelling
+/// wants the copy's address; the read produces the value that address is taken
+/// of, so a mutable capture degrades through the same load.
 fn (self: &var Lowerer) read_borrow_for_context(value: Value, want: Name) -> !Value {
     if is_empty(want) or !self.is_reference_type(value.type_name) or
         self.is_mutable_reference_type(want) {
@@ -362,19 +357,19 @@ fn (self: &var Lowerer) read_borrow_for_context(value: Value, want: Name) -> !Va
     return self.emit1(Op::RefLoad, want_deref, value);
 }
 
-/// Lowers `null` written where a nullable raw pointer is expected, the Go
-/// `lowerNullPointer`: address zero as the non-null spelling, widened to the
-/// nullable one. That is what `ptr_from_int<ptr<T>>(0)` handed to a `?ptr<T>`
-/// lowers to, so a backend sees nothing it did not already read.
+/// Lowers `null` written where a nullable raw pointer is expected: address
+/// zero as the non-null spelling, widened to the nullable one. That is what
+/// `ptr_from_int<ptr<T>>(0)` handed to a `?ptr<T>` lowers to, so a backend
+/// sees nothing it did not already read.
 fn (self: &var Lowerer) lower_null_pointer(want: Name, elem: Name) -> !Value {
     let zero = try self.emit_const_text(self.common.i64_type, "0");
     let address = try self.emit_imm1(Op::Cast, elem, elem, zero);
     return try self.emit_imm1(Op::Cast, want, want, address);
 }
 
-/// Lowers an expression written where a `?T` is expected, the Go
-/// `lowerOptionalContextExpr`: `null` becomes the empty optional, a plain T
-/// wraps, and a value that is already optional passes through.
+/// Lowers an expression written where a `?T` is expected: `null` becomes the
+/// empty optional, a plain T wraps, and a value that is already optional
+/// passes through.
 fn (self: &var Lowerer) lower_optional_context_expr(
     tree: &var ast::Ast,
     expression: ast::Expression,
@@ -401,8 +396,8 @@ fn (self: &var Lowerer) lower_optional_context_expr(
 }
 
 /// Reports whether an integer literal written in a position of this type
-/// lowers as that type, the Go `narrowsIntegerLiteral`. i64 is what a
-/// literal lowers as on its own, so it needs no contextual form.
+/// lowers as that type. i64 is what a literal lowers as on its own, so it
+/// needs no contextual form.
 fn (self: &Lowerer) narrows_integer_literal(type_name: Name) -> bool {
     let retained = name_text(&self.module.names, type_name);
     let bytes = retained.as_bytes();
@@ -413,12 +408,11 @@ fn (self: &Lowerer) narrows_integer_literal(type_name: Name) -> bool {
         mem::equal_bytes(bytes, "isize");
 }
 
-/// Lowers an expression under a marker, the Go `lowerMarkedExpr`. A marker
-/// is a claim about the expression, not an operation, so it lowers to
-/// whatever it covers -- except that a float comptime expression is folded
-/// here, not left to the optimizer: sin and cos are calls into std, which no
-/// backend folds, and the literal is the bits the call computes on this
-/// target (stdmath).
+/// Lowers an expression under a marker. A marker is a claim about the
+/// expression, not an operation, so it lowers to whatever it covers -- except
+/// that a float comptime expression is folded here, not left to the optimizer:
+/// sin and cos are calls into std, which no backend folds, and the literal is
+/// the bits the call computes on this target (stdmath).
 fn (self: &var Lowerer) lower_marked_expr(
     tree: &var ast::Ast,
     marked: ast::Expression,
@@ -437,7 +431,7 @@ fn (self: &var Lowerer) lower_marked_expr(
     return self.lower_expr(tree, inner, out);
 }
 
-/// Lowers scalar literals, the Go `lowerLiteralExpr`.
+/// Lowers scalar literals.
 fn (self: &var Lowerer) lower_literal_expr(
     tree: &var ast::Ast,
     expression: ast::Expression,
@@ -507,16 +501,15 @@ fn c_string_literal_text(tree: &ast::Ast, expression: ast::Expression) -> ?ast::
     }
 }
 
-/// Names the quoted spelling of one string literal's text, the Go
-/// `quote.Bytes`: the deterministic ASCII form the whole compiler quotes
-/// bytes in.
+/// Names the quoted spelling of one string literal's text: the deterministic
+/// ASCII form the whole compiler quotes bytes in.
 fn (self: &var Lowerer) quoted_name(tree: &ast::Ast, text: ast::Text) -> !Name {
     let retained = tree.texts.at(text.node);
     let bytes = retained.as_bytes();
     return self.quoted_bytes(bytes);
 }
 
-/// Names the quoted spelling of bytes, the Go `quote.Bytes`.
+/// Names the quoted spelling of bytes.
 fn (self: &var Lowerer) quoted_bytes(bytes: []u8) -> !Name {
     var quoted = string::new(self.allocator);
     errdefer quoted.deinit(self.allocator);
@@ -524,7 +517,8 @@ fn (self: &var Lowerer) quoted_bytes(bytes: []u8) -> !Name {
     return self.module.names.intern_owned(move quoted);
 }
 
-/// Spells the Go node type of an expression, what `%T` printed for it.
+/// Spells the node type an unsupported-expression failure names, in the
+/// `*ast.<Kind>` form those messages carry.
 fn expression_go_type(tree: &ast::Ast, expression: ast::Expression) -> []u8 {
     match tree.expressions.at(expression.node) {
         Ident(_) => return "*ast.IdentExpr",
@@ -558,8 +552,7 @@ fn expression_go_type(tree: &ast::Ast, expression: ast::Expression) -> []u8 {
     }
 }
 
-/// Lowers a local binding, a static value, or the built-in void, the Go
-/// `lowerIdentExpr`.
+/// Lowers a local binding, a static value, or the built-in void.
 fn (self: &var Lowerer) lower_ident_expr(
     tree: &var ast::Ast,
     expression: ast::Expression,
@@ -609,8 +602,7 @@ fn (self: &var Lowerer) lower_ident_expr(
     return try self.fail1(tree, "ir error: undefined value `%s`", Arg::Str(name));
 }
 
-/// Lowers an explicit cast as a typed conversion instruction, the Go
-/// `lowerCastExpr`.
+/// Lowers an explicit cast as a typed conversion instruction.
 fn (self: &var Lowerer) lower_cast_expr(
     tree: &var ast::Ast,
     cast: ast::CastExpr,
@@ -625,9 +617,8 @@ fn (self: &var Lowerer) lower_cast_expr(
     return null;
 }
 
-/// Lowers unary operators, the Go `lowerPrefixExpr`. A borrow marker
-/// preserves the current value-level ABI for checked borrow arguments (the
-/// Go `lowerBorrowExpr`).
+/// Lowers unary operators. A borrow marker preserves the current value-level
+/// ABI for checked borrow arguments.
 fn (self: &var Lowerer) lower_prefix_expr(
     tree: &var ast::Ast,
     prefix: ast::PrefixExpr,
@@ -648,10 +639,9 @@ fn (self: &var Lowerer) lower_prefix_expr(
     return null;
 }
 
-/// Lowers `&var target`, the `&var` half of the Go `lowerBorrowExpr`.
-/// `&var p.*` is the one borrow whose storage is already an address: the raw
-/// pointer is the `&var T` itself, so writes through the binding reach the
-/// pointee rather than a copy of it.
+/// Lowers `&var target`. `&var p.*` is the one borrow whose storage is already
+/// an address: the raw pointer is the `&var T` itself, so writes through the
+/// binding reach the pointee rather than a copy of it.
 fn (self: &var Lowerer) lower_mutable_borrow_expr(
     tree: &var ast::Ast,
     target: ast::Expression,
@@ -687,7 +677,7 @@ fn (self: &var Lowerer) lower_mutable_borrow_expr(
     return null;
 }
 
-/// Lowers binary operators, the Go `lowerBinaryExpr`.
+/// Lowers binary operators.
 fn (self: &var Lowerer) lower_binary_expr(
     tree: &var ast::Ast,
     binary: ast::BinaryExpr,
@@ -716,9 +706,9 @@ fn (self: &var Lowerer) lower_binary_expr(
     return null;
 }
 
-/// Lowers both sides of an operator, the Go `lowerBinaryOperands`. An
-/// integer literal on one side takes the integer type of the other, as the
-/// checker typed it, so `flags & 0x0F` with `flags: u8` is a u8 operation.
+/// Lowers both sides of an operator. An integer literal on one side takes the
+/// integer type of the other, as the checker typed it, so `flags & 0x0F` with
+/// `flags: u8` is a u8 operation.
 fn (self: &var Lowerer) lower_binary_operands(
     tree: &var ast::Ast,
     binary: ast::BinaryExpr,
@@ -745,9 +735,8 @@ fn (self: &var Lowerer) lower_binary_operands(
     return self.lower_expr(tree, binary.right, right);
 }
 
-/// Lowers a literal in the type of the operand it meets when that type is
-/// one the literal can take, or as itself otherwise, the Go
-/// `lowerLiteralOperand`.
+/// Lowers a literal in the type of the operand it meets when that type is one
+/// the literal can take, or as itself otherwise.
 fn (self: &var Lowerer) lower_literal_operand(
     tree: &var ast::Ast,
     expression: ast::Expression,
@@ -763,8 +752,7 @@ fn (self: &var Lowerer) lower_literal_operand(
     return self.lower_expr(tree, expression, out);
 }
 
-/// Reports whether expression is a floating-point literal, possibly negated,
-/// the Go `isFloatLiteral`.
+/// Reports whether expression is a floating-point literal, possibly negated.
 fn is_float_literal(tree: &ast::Ast, expression: ast::Expression) -> bool {
     if ownership::float_expr(tree, expression) |_| {
         return true;
@@ -781,26 +769,24 @@ fn is_float_literal(tree: &ast::Ast, expression: ast::Expression) -> bool {
 }
 
 /// Reports whether expression is an integer or floating-point literal,
-/// possibly negated, the Go `isScalarLiteral`.
+/// possibly negated.
 fn is_scalar_literal(tree: &ast::Ast, expression: ast::Expression) -> bool {
     return is_integer_literal(tree, expression) or is_float_literal(tree, expression);
 }
 
-/// Reports whether type_name is one of the floating-point types, the Go
-/// `isFloatTypeName`.
+/// Reports whether type_name is one of the floating-point types.
 fn (self: &Lowerer) is_float_type_name(type_name: Name) -> bool {
     return self.module.names.is(type_name, "f32") or self.module.names.is(type_name, "f64");
 }
 
-/// Reports whether a floating-point literal written in a position of this
-/// type lowers as that type, the Go `narrowsFloatLiteral`. f64 is what a
-/// literal lowers as on its own.
+/// Reports whether a floating-point literal written in a position of this type
+/// lowers as that type. f64 is what a literal lowers as on its own.
 fn (self: &Lowerer) narrows_float_literal(type_name: Name) -> bool {
     return self.module.names.is(type_name, "f32");
 }
 
 /// Reports whether expression is an integer literal, possibly negated: the
-/// shapes the checker types contextually, the Go `isIntegerLiteral`.
+/// shapes the checker types contextually.
 fn is_integer_literal(tree: &ast::Ast, expression: ast::Expression) -> bool {
     if ownership::int_expr(tree, expression) |_| {
         return true;
@@ -816,14 +802,12 @@ fn is_integer_literal(tree: &ast::Ast, expression: ast::Expression) -> bool {
     return false;
 }
 
-/// Reports whether type_name is one of the fixed-width integers, the Go
-/// `isIntegerTypeName`.
+/// Reports whether type_name is one of the fixed-width integers.
 fn (self: &Lowerer) is_integer_type_name(type_name: Name) -> bool {
     return self.module.names.is(type_name, "i64") or self.narrows_integer_literal(type_name);
 }
 
-/// Reports whether type_name is an integer that can hold a negative value,
-/// the Go `isSignedIntegerTypeName`.
+/// Reports whether type_name is an integer that can hold a negative value.
 fn (self: &Lowerer) is_signed_integer_type_name(type_name: Name) -> bool {
     let retained = name_text(&self.module.names, type_name);
     let bytes = retained.as_bytes();
@@ -832,11 +816,10 @@ fn (self: &Lowerer) is_signed_integer_type_name(type_name: Name) -> bool {
         mem::equal_bytes(bytes, "isize");
 }
 
-/// Traps a negative shift amount at run time, the Go `checkShiftAmount`.
-/// Only a signed amount can be negative, and a literal one was already
-/// refused by the checker; amounts at or past the width are answered by the
-/// backend with 0 or the sign (SPEC §6.9.2), so this is the one case with
-/// no value.
+/// Traps a negative shift amount at run time. Only a signed amount can be
+/// negative, and a literal one was already refused by the checker; amounts at
+/// or past the width are answered by the backend with 0 or the sign (SPEC
+/// §6.9.2), so this is the one case with no value.
 fn (self: &var Lowerer) check_shift_amount(
     tree: &var ast::Ast,
     binary: ast::BinaryExpr,
@@ -851,7 +834,7 @@ fn (self: &var Lowerer) check_shift_amount(
     return self.cond_fail0(binary.operator_span, "<", amount, zero, kind);
 }
 
-/// Lowers struct construction, the Go `lowerStructLiteralExpr`.
+/// Lowers struct construction.
 fn (self: &var Lowerer) lower_struct_literal_expr(
     tree: &var ast::Ast,
     expression: ast::Expression,
@@ -885,7 +868,7 @@ fn (self: &var Lowerer) lower_struct_literal_expr(
     return null;
 }
 
-/// Lowers struct field reads, the Go `lowerFieldExpr`.
+/// Lowers struct field reads.
 fn (self: &var Lowerer) lower_field_expr(
     tree: &var ast::Ast,
     field: ast::FieldExpr,
@@ -918,9 +901,9 @@ fn (self: &var Lowerer) lower_field_expr(
     return null;
 }
 
-/// Lowers `Union::Variant(payload)` expressions, the Go
-/// `lowerUnionConstructor`; handled reports whether the callee was a union
-/// variant at all, leaving every other call to the ordinary paths.
+/// Lowers `Union::Variant(payload)` expressions; handled reports whether the
+/// callee was a union variant at all, leaving every other call to the ordinary
+/// paths.
 fn (self: &var Lowerer) lower_union_constructor(
     tree: &var ast::Ast,
     field: ast::FieldExpr,
@@ -963,8 +946,7 @@ pub struct ResolvedVariant {
     pub variant: UnionVariant,
 }
 
-/// Resolves a namespace field as a known union variant, the Go
-/// `unionVariant`.
+/// Resolves a namespace field as a known union variant.
 fn (self: &var Lowerer) union_variant_of(tree: &ast::Ast, field: ast::FieldExpr) -> !?ResolvedVariant {
     let union_name = try self.expression_name(tree, field.receiver);
     let variant_name = try self.text_name(tree, field.name);
@@ -972,8 +954,7 @@ fn (self: &var Lowerer) union_variant_of(tree: &ast::Ast, field: ast::FieldExpr)
     return ResolvedVariant { union_name: union_name, variant: variant };
 }
 
-/// Lowers `Union::Variant` without a payload, the Go
-/// `lowerPayloadFreeUnionExpr`; null for any other spelling.
+/// Lowers `Union::Variant` without a payload; null for any other spelling.
 fn (self: &var Lowerer) lower_payload_free_union_expr(tree: &ast::Ast, field: ast::FieldExpr) -> !?Value {
     let found = try self.union_variant_of(tree, field) orelse return null;
     if !is_empty(found.variant.payload) {
@@ -982,9 +963,8 @@ fn (self: &var Lowerer) lower_payload_free_union_expr(tree: &ast::Ast, field: as
     return try self.emit_imm0(Op::UnionNew, found.union_name, found.variant.name);
 }
 
-/// Lowers `Enum::Tag` namespace expressions to integer tags, the Go
-/// `lowerEnumTagExpr`; error set members resolve the same way. null for any
-/// other spelling.
+/// Lowers `Enum::Tag` namespace expressions to integer tags; error set members
+/// resolve the same way. null for any other spelling.
 fn (self: &var Lowerer) lower_enum_tag_expr(tree: &ast::Ast, field: ast::FieldExpr) -> !?Value {
     let enum_name = try self.expression_name(tree, field.receiver);
     let tag = try self.text_name(tree, field.name);
@@ -993,9 +973,9 @@ fn (self: &var Lowerer) lower_enum_tag_expr(tree: &ast::Ast, field: ast::FieldEx
     return try self.emit_const(enum_name, immediate);
 }
 
-/// Lowers checked byte-slice indexing and slicing, the Go `lowerIndexExpr`.
-/// The bounds test lives here rather than in a backend, so every backend
-/// inherits the same check and the same message from one place.
+/// Lowers checked byte-slice indexing and slicing. The bounds test lives here
+/// rather than in a backend, so every backend inherits the same check and the
+/// same message from one place.
 fn (self: &var Lowerer) lower_index_expr(
     tree: &var ast::Ast,
     index: ast::IndexExpr,
@@ -1090,8 +1070,8 @@ fn (self: &var Lowerer) lower_index_expr(
     return null;
 }
 
-/// Emits a comparison and aborts with the named failure when it holds, the
-/// Go `condFail` with no reported value.
+/// Emits a comparison and aborts with the named failure when it holds,
+/// reporting no value.
 fn (self: &var Lowerer) cond_fail0(
     span: ast::Span,
     operator: []u8,
@@ -1108,19 +1088,11 @@ fn (self: &var Lowerer) cond_fail0(
     return;
 }
 
-/// Emits a comparison and aborts with the named failure when it holds, the
-/// Go `condFail` with two reported values. The values a failure reports
-/// travel with it, so the wording lives in the runtime rather than here.
-/// Traps an index that does not name an element, the Go `checkIndexInRange`.
-/// Read unsigned, a negative index is past every length, so one comparison
-/// answers both halves of the question -- which is what an Array element
-/// access has always done, and what lets an index walk cost one branch rather
-/// than two.
-/// Stores into one element of an array, the Go `lowerArrayElementAssign`. An
-/// array whose place has storage -- a slot, a `&var` parameter, a field of
-/// one -- is written where it lies. One held as a value is written into a
-/// copy of itself in a slot and the place is then assigned the copy, the way
-/// a field write on a value rebuilds the struct.
+/// Stores into one element of an array. An array whose place has storage -- a
+/// slot, a `&var` parameter, a field of one -- is written where it lies. One
+/// held as a value is written into a copy of itself in a slot and the place is
+/// then assigned the copy, the way a field write on a value rebuilds the
+/// struct.
 fn (self: &var Lowerer) lower_array_element_assign(
     tree: &var ast::Ast,
     target: ast::Expression,
@@ -1152,10 +1124,10 @@ fn (self: &var Lowerer) lower_array_element_assign(
     return self.lower_assign_target(tree, base, updated);
 }
 
-/// Returns the array place a chain of element indexes starts from, the Go
-/// `arrayPlaceRoot`: `s.m` for `s.m[i][j]`. The chain stops where an index
-/// reads a view: `rows[k]` of a `[][2]f64` is an element value, not array
-/// storage, so `rows[k][j]` starts from it.
+/// Returns the array place a chain of element indexes starts from: `s.m` for
+/// `s.m[i][j]`. The chain stops where an index reads a view: `rows[k]` of a
+/// `[][2]f64` is an element value, not array storage, so `rows[k][j]` starts
+/// from it.
 fn (self: &var Lowerer) array_place_root(tree: &var ast::Ast, expression: ast::Expression) -> !ast::Expression {
     var root = expression;
     while ownership::index_expr(tree, root) |index| {
@@ -1168,8 +1140,8 @@ fn (self: &var Lowerer) array_place_root(tree: &var ast::Ast, expression: ast::E
     return root;
 }
 
-/// Returns the storage a place already has, the Go `placeStorage`: the slot
-/// of a local, a `&var` parameter, or a field projected out of one.
+/// Returns the storage a place already has: the slot of a local, a `&var`
+/// parameter, or a field projected out of one.
 fn (self: &var Lowerer) place_storage(tree: &var ast::Ast, expression: ast::Expression) -> !?Value {
     if try self.slot_pointer(tree, expression) |slot| {
         return slot;
@@ -1178,7 +1150,7 @@ fn (self: &var Lowerer) place_storage(tree: &var ast::Ast, expression: ast::Expr
 }
 
 /// Projects the element a chain of indexes names out of storage holding the
-/// chain's root, the Go `arrayElementAddressIn`.
+/// chain's root.
 fn (self: &var Lowerer) array_element_address_in(
     tree: &var ast::Ast,
     expression: ast::Expression,
@@ -1202,9 +1174,9 @@ fn (self: &var Lowerer) array_element_address_in(
 }
 
 /// Lowers `a[i]` on an array to the element's address inside the array's
-/// storage, the Go `lowerArrayElementAddress`, so a read loads it and a
-/// write stores through it. Nested elements chain one projection per index:
-/// `m[i][j]` is the j-th cell of the i-th row's storage.
+/// storage, so a read loads it and a write stores through it. Nested elements
+/// chain one projection per index: `m[i][j]` is the j-th cell of the i-th
+/// row's storage.
 fn (self: &var Lowerer) lower_array_element_address(
     tree: &var ast::Ast,
     index: ast::IndexExpr,
@@ -1231,8 +1203,8 @@ fn (self: &var Lowerer) lower_array_element_address(
     return self.index_array_storage(tree, index, storage, out);
 }
 
-/// Bounds-checks the index against N and projects the element's address out
-/// of an array's storage, the Go `indexArrayStorage`.
+/// Bounds-checks the index against N and projects the element's address out of
+/// an array's storage.
 fn (self: &var Lowerer) index_array_storage(
     tree: &var ast::Ast,
     index: ast::IndexExpr,
@@ -1255,6 +1227,10 @@ fn (self: &var Lowerer) index_array_storage(
     return null;
 }
 
+/// Traps an index that does not name an element. Read unsigned, a negative
+/// index is past every length, so one comparison answers both halves of the
+/// question -- which is what an Array element access has always done, and what
+/// lets an index walk cost one branch rather than two.
 fn (self: &var Lowerer) check_index_in_range(
     span: ast::Span,
     index: Value,
@@ -1266,9 +1242,9 @@ fn (self: &var Lowerer) check_index_in_range(
     return self.cond_fail2(span, ">=", unsigned_index, unsigned_length, kind, index, length);
 }
 
-/// Reads a signed index or length as the unsigned number of the same bits, the
-/// Go `unsigned`. The two are the same register, so the cast is a name rather
-/// than an instruction, and only the comparison that reads it changes.
+/// Reads a signed index or length as the unsigned number of the same bits. The
+/// two are the same register, so the cast is a name rather than an
+/// instruction, and only the comparison that reads it changes.
 fn (self: &var Lowerer) unsigned(value: Value) -> !Value {
     if !self.is_signed_integer_type_name(value.type_name) {
         return value;
@@ -1277,6 +1253,9 @@ fn (self: &var Lowerer) unsigned(value: Value) -> !Value {
     return self.emit_imm1(Op::Cast, u64_type, u64_type, value);
 }
 
+/// Emits a comparison and aborts with the named failure when it holds,
+/// reporting two values. The values a failure reports travel with it, so the
+/// wording lives in the runtime rather than here.
 fn (self: &var Lowerer) cond_fail2(
     span: ast::Span,
     operator: []u8,
@@ -1297,8 +1276,8 @@ fn (self: &var Lowerer) cond_fail2(
     return;
 }
 
-/// Emits a comparison and aborts with the named failure when it holds, the
-/// Go `condFail` with three reported values.
+/// Emits a comparison and aborts with the named failure when it holds,
+/// reporting three values.
 fn (self: &var Lowerer) cond_fail3(
     span: ast::Span,
     operator: []u8,
