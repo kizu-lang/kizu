@@ -26,7 +26,10 @@ import std::mem;
 // below the stack arguments, which a backend's own call leaves too, so
 // both conventions find the stack arguments in the same place. The
 // convention has a callee keep xmm6..15 too, so the float scratch
-// registers are xmm3..5 there rather than xmm13..15; and a frame of a page
+// registers are xmm3..5 there rather than xmm13..15, and the float
+// registers allocation hands out xmm6..15, which the prologue stores
+// whole (all 16 bytes, as the convention keeps them) above the slots and
+// the epilogue loads back, and xmm0..2; and a frame of a page
 // or more is probed page by page, as Windows grows the stack only into the
 // page below the one touched last.
 //
@@ -63,7 +66,11 @@ struct Amd {
     // displacement from rsp adds.
     pushed: i64,
     frame_size: i64,
+    // The general registers the prologue pushes, and the xmm ones it
+    // stores at xmm_area, an offset from rsp after the prologue.
     saved: i64,
+    xmm_saved: i64,
+    xmm_area: i64,
     needed: bool,
     // The machine registers live after the instruction being printed, one
     // bit each: rdx and rcx, which division and shifts borrow, are saved
@@ -104,7 +111,9 @@ pub fn amd64_print_function(
         labels: 0,
         pushed: 0,
         frame_size: 0,
-        saved: allocation.saved.len(),
+        saved: 0,
+        xmm_saved: 0,
+        xmm_area: 0,
         needed: false,
         live: 0 - 1,
         zf: 0 - 1,
@@ -115,6 +124,15 @@ pub fn amd64_print_function(
         amd.rdx = 1;
         amd.rcx = 0;
         amd.shadow = 32;
+    }
+    var saved_index = 0;
+    while allocation.saved.get(saved_index) |reg| {
+        saved_index = saved_index + 1;
+        if is_float_reg(reg) {
+            amd.xmm_saved = amd.xmm_saved + 1;
+        } else {
+            amd.saved = amd.saved + 1;
+        }
     }
     amd.plan_frame(func);
     if !ir::is_empty(exported) {
@@ -303,6 +321,11 @@ fn (self: &var Amd) plan_frame(func: &var MFunction) -> void {
         slot.offset = offset;
         offset = offset + slot.size;
     }
+    if self.xmm_saved > 0 {
+        offset = round_up(offset, 16);
+        self.xmm_area = offset;
+        offset = offset + 16 * self.xmm_saved;
+    }
     var size = round_up(offset, 8);
     if (size + self.saved * 8) % 16 != 0 {
         size = size + 8;
@@ -318,8 +341,16 @@ fn (self: &var Amd) prologue(out: &var Out, saved: &array::Array<i64>, syms: &ir
     var index = 0;
     while saved.get(index) |reg| {
         index = index + 1;
-        try self.r1(out, "pushq", reg, 8);
+        if !is_float_reg(reg) {
+            try self.r1(out, "pushq", reg, 8);
+        }
     }
+    try self.allocate_frame(out, syms);
+    return self.move_saved_xmm(out, saved, true);
+}
+
+/// Moves rsp down past the frame below the pushed registers.
+fn (self: &var Amd) allocate_frame(out: &var Out, syms: &ir::NameTable) -> !void {
     if self.windows and self.frame_size >= 4096 {
         // ___chkstk_ms touches each page of rax bytes below rsp and keeps
         // every register; rax is x8, live at the entry, kept in r11.
@@ -342,13 +373,41 @@ fn (self: &var Amd) prologue(out: &var Out, saved: &array::Array<i64>, syms: &ir
 }
 
 fn (self: &var Amd) epilogue(out: &var Out, saved: &array::Array<i64>) -> !void {
-    try self.mr(out, "leaq", based(29, 0 - 8 * saved.len()), reg_sp());
+    try self.move_saved_xmm(out, saved, false);
+    try self.mr(out, "leaq", based(29, 0 - 8 * self.saved), reg_sp());
     var index = saved.len() - 1;
     while index >= 0 {
-        try self.r1(out, "popq", saved.get_or_panic(index), 8);
+        let reg = saved.get_or_panic(index);
+        if !is_float_reg(reg) {
+            try self.r1(out, "popq", reg, 8);
+        }
         index = index - 1;
     }
     return self.r1(out, "popq", 29, 8);
+}
+
+/// Stores the xmm registers the function saves to their place in the
+/// frame (store), or loads them back: every bit, by movups, addressed
+/// from rbp, which the frame keeps whatever rsp is at a return.
+fn (self: &var Amd) move_saved_xmm(out: &var Out, saved: &array::Array<i64>, store: bool) -> !void {
+    let area = self.xmm_area - self.frame_size - 8 * self.saved;
+    var at = 0;
+    var index = 0;
+    while saved.get(index) |reg| {
+        index = index + 1;
+        if !is_float_reg(reg) {
+            continue;
+        }
+        let xmm = self.xmm_number(self.xmm_of(reg));
+        let disp = area + 16 * at;
+        at = at + 1;
+        if store {
+            try out.obj.x86_xm(self.allocator, "movups", xmm, self.number(29), 0 - 1, 0, disp);
+        } else {
+            try out.obj.x86_mx(self.allocator, "movups", self.number(29), 0 - 1, 0, disp, xmm);
+        }
+    }
+    return;
 }
 
 // ---- machine liveness ----
@@ -1058,7 +1117,7 @@ fn (self: &var Amd) inst(out: &var Out, func: &MFunction, inst: &MInst, syms: &i
         },
         MovImm => {
             if is_float_reg(inst.rd) {
-                return self.xmm_imm(out, inst.imm, xmm_of(inst.rd));
+                return self.xmm_imm(out, inst.imm, self.xmm_of(inst.rd));
             }
             return self.mov_imm(out, inst.imm, inst.rd);
         },
@@ -1321,7 +1380,7 @@ fn (self: &var Amd) inst(out: &var Out, func: &MFunction, inst: &MInst, syms: &i
                 to = 4;
             }
             let a = try self.xmm_source(out, inst.rn, inst.width, 15);
-            let dest = xmm_dest(inst.rd);
+            let dest = self.xmm_dest(inst.rd);
             if dest != a {
                 try self.xx(out, "xorps", dest, dest);
             }
@@ -1333,7 +1392,7 @@ fn (self: &var Amd) inst(out: &var Out, func: &MFunction, inst: &MInst, syms: &i
         FArg => return self.xmm_into(out, inst.rn, inst.imm, inst.width),
         FRet => {
             if is_float_reg(inst.rd) {
-                return self.xmm_copy(out, inst.imm, xmm_of(inst.rd));
+                return self.xmm_copy(out, inst.imm, self.xmm_of(inst.rd));
             }
             return self.float_out(out, inst.imm, inst.rd, inst.width);
         },
@@ -1744,8 +1803,12 @@ fn (self: &Amd) float_out(out: &var Out, xmm: i64, reg: i64, width: i64) -> !voi
 }
 
 /// Returns the number of xmm n; under Windows the scratch xmm13..15 are
-/// xmm3..5, which a callee need not keep there.
+/// xmm3..5, which a callee need not keep there, and 16..31 name xmm0..15
+/// themselves (see xmm_of).
 fn (self: &Amd) xmm_number(n: i64) -> i64 {
+    if self.windows and n >= 16 {
+        return n - 16;
+    }
     if self.windows and n >= 13 {
         return n - 10;
     }
@@ -1772,10 +1835,22 @@ fn (self: &Amd) xr(out: &var Out, mnemonic: []u8, xmm: i64, reg: i64, size: i64)
     return out.obj.x86_xr(self.allocator, mnemonic, self.xmm_number(xmm), self.number(reg), size);
 }
 
-/// Returns the xmm register a float register number names: 40..44 are
-/// xmm8..xmm12, 45..52 xmm0..xmm7 (see float_named_end).
-fn xmm_of(reg: i64) -> i64 {
+/// Returns the xmm register a float register number names: under System V
+/// 40..44 are xmm8..xmm12 and 45..52 xmm0..xmm7; under Windows 40..49 are
+/// xmm6..xmm15, which a callee keeps, and 50..52 xmm0..xmm2 (see
+/// float_named_end). Under Windows xmm13..xmm15 come out as 29..31, as 13..15
+/// there name the float scratch (see xmm_number).
+fn (self: &Amd) xmm_of(reg: i64) -> i64 {
     let index = reg - first_float_reg();
+    if self.windows {
+        if index >= 10 {
+            return index - 10;
+        }
+        if index >= 7 {
+            return index + 22;
+        }
+        return index + 6;
+    }
     if index < 5 {
         return index + 8;
     }
@@ -1786,7 +1861,7 @@ fn xmm_of(reg: i64) -> i64 {
 /// gave it one, otherwise scratch after moving its bits in.
 fn (self: &Amd) xmm_source(out: &var Out, reg: i64, width: i64, scratch: i64) -> !i64 {
     if is_float_reg(reg) {
-        return xmm_of(reg);
+        return self.xmm_of(reg);
     }
     try self.float_in(out, reg, scratch, width);
     return scratch;
@@ -1794,9 +1869,9 @@ fn (self: &Amd) xmm_source(out: &var Out, reg: i64, width: i64, scratch: i64) ->
 
 /// Returns the xmm register an instruction computes rd in: rd's own, or
 /// xmm15, from which float_result then moves it out.
-fn xmm_dest(rd: i64) -> i64 {
+fn (self: &Amd) xmm_dest(rd: i64) -> i64 {
     if is_float_reg(rd) {
-        return xmm_of(rd);
+        return self.xmm_of(rd);
     }
     return 15;
 }
@@ -1813,7 +1888,7 @@ fn (self: &Amd) xmm_copy(out: &var Out, a: i64, b: i64) -> !void {
 /// n.
 fn (self: &Amd) xmm_into(out: &var Out, reg: i64, n: i64, width: i64) -> !void {
     if is_float_reg(reg) {
-        return self.xmm_copy(out, xmm_of(reg), n);
+        return self.xmm_copy(out, self.xmm_of(reg), n);
     }
     return self.float_in(out, reg, n, width);
 }
@@ -1822,7 +1897,7 @@ fn (self: &Amd) xmm_into(out: &var Out, reg: i64, n: i64, width: i64) -> !void {
 /// register, or its bits to a general one.
 fn (self: &Amd) xmm_result(out: &var Out, n: i64, rd: i64, width: i64) -> !void {
     if is_float_reg(rd) {
-        return self.xmm_copy(out, n, xmm_of(rd));
+        return self.xmm_copy(out, n, self.xmm_of(rd));
     }
     return self.float_out(out, n, rd, width);
 }
@@ -1830,9 +1905,9 @@ fn (self: &Amd) xmm_result(out: &var Out, n: i64, rd: i64, width: i64) -> !void 
 /// Copies between registers where one is an xmm register: all 8 bytes.
 fn (self: &Amd) xmm_mov(out: &var Out, src: i64, dst: i64) -> !void {
     if is_float_reg(dst) {
-        return self.xmm_into(out, src, xmm_of(dst), 8);
+        return self.xmm_into(out, src, self.xmm_of(dst), 8);
     }
-    return self.float_out(out, xmm_of(src), dst, 8);
+    return self.float_out(out, self.xmm_of(src), dst, 8);
 }
 
 /// Puts a constant's bits in xmm n: by clearing it, or through r10, which
@@ -1860,14 +1935,14 @@ fn scalar_move(width: i64) -> []u8 {
 /// Loads a float from memory into its xmm register.
 fn (self: &Amd) xmm_load(out: &var Out, inst: &MInst, at: Mem) -> !void {
     return out.obj.x86_mx(
-        self.allocator, scalar_move(inst.width), self.number_or_none(at.base), self.number_or_none(at.index), at.shift, at.disp, self.xmm_number(xmm_of(inst.rd))
+        self.allocator, scalar_move(inst.width), self.number_or_none(at.base), self.number_or_none(at.index), at.shift, at.disp, self.xmm_number(self.xmm_of(inst.rd))
     );
 }
 
 /// Stores a float from its xmm register to memory.
 fn (self: &Amd) xmm_store(out: &var Out, inst: &MInst, at: Mem) -> !void {
     return out.obj.x86_xm(
-        self.allocator, scalar_move(inst.width), self.xmm_number(xmm_of(inst.rd)), self.number_or_none(at.base), self.number_or_none(at.index), at.shift, at.disp
+        self.allocator, scalar_move(inst.width), self.xmm_number(self.xmm_of(inst.rd)), self.number_or_none(at.base), self.number_or_none(at.index), at.shift, at.disp
     );
 }
 
@@ -1887,7 +1962,7 @@ fn (self: &Amd) float_binary(out: &var Out, inst: &MInst) -> !void {
     // in the destination register is not overwritten by the left one.
     var dest = 15;
     if is_float_reg(inst.rd) and !(is_float_reg(inst.rm) and inst.rm == inst.rd and inst.rn != inst.rd) {
-        dest = xmm_of(inst.rd);
+        dest = self.xmm_of(inst.rd);
     }
     try self.xmm_into(out, inst.rn, dest, width);
     let b = try self.xmm_source(out, inst.rm, width, 14);
@@ -1920,14 +1995,14 @@ fn (self: &Amd) float_unary(out: &var Out, inst: &MInst) -> !void {
             sign = 2147483648;
         }
         try self.float_const(out, sign, 14, inst.width);
-        let dest = xmm_dest(inst.rd);
+        let dest = self.xmm_dest(inst.rd);
         try self.xmm_into(out, inst.rn, dest, inst.width);
         try self.xx(out, "xorps", 14, dest);
         return self.xmm_result(out, dest, inst.rd, inst.width);
     }
     if inst.imm == float_sqrt() {
         let a = try self.xmm_source(out, inst.rn, inst.width, 15);
-        let dest = xmm_dest(inst.rd);
+        let dest = self.xmm_dest(inst.rd);
         if dest != a {
             // sqrt writes the low lane only; clearing the rest first keeps
             // it from waiting on the register's last value.
@@ -2074,12 +2149,12 @@ fn (self: &var Amd) int_to_float(out: &var Out, inst: &MInst) -> !void {
     }
     if is_zr(inst.rn) {
         if is_float_reg(inst.rd) {
-            return self.xmm_imm(out, 0, xmm_of(inst.rd));
+            return self.xmm_imm(out, 0, self.xmm_of(inst.rd));
         }
         return self.mov_imm(out, 0, inst.rd);
     }
     if inst.signed {
-        let dest = xmm_dest(inst.rd);
+        let dest = self.xmm_dest(inst.rd);
         if dest != 15 {
             // The conversion writes the low lane only; clearing the rest
             // first keeps it from waiting on the register's last value.

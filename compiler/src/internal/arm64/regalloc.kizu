@@ -21,7 +21,8 @@ import std::array;
 // vector registers no range tracks. On amd64 under System V they take
 // xmm8..xmm12, or xmm0..xmm7 where nothing inside the range names those,
 // and none across a hot call, as the convention has a callee keep no xmm
-// register; under Windows they stay in general registers. A
+// register. Under Windows they take xmm6..xmm15, which a callee keeps, so
+// across a call too, or xmm0..xmm2 where nothing inside names those. A
 // spilled one is reloaded into a general scratch register like any other;
 // the printer moves it across.
 //
@@ -63,8 +64,12 @@ fn caller_saved_last(arch: Arch) -> i64 {
 
 /// Returns the end of the float registers a callee keeps, d8..d15 (their
 /// low 64 bits, all a float register holds here). System V has a callee
-/// keep no xmm register, so on amd64 there are none.
+/// keep no xmm register, so on amd64 there are none; Windows has it keep
+/// xmm6..xmm15 (whole, which the printer's prologue saves).
 fn float_callee_saved_end(arch: Arch) -> i64 {
+    if arch == Arch::Amd64Windows {
+        return first_float_reg() + 10;
+    }
     if is_x86(arch) {
         return first_float_reg();
     }
@@ -74,8 +79,12 @@ fn float_callee_saved_end(arch: Arch) -> i64 {
 /// Returns the first float register a call may clobber that allocation
 /// hands out: d20..d31 on arm64, where d16..d19 are the printer's float
 /// scratch; xmm8..xmm12 on amd64, where xmm0..xmm7 carry C's float
-/// arguments and xmm13..xmm15 are the printer's float scratch.
+/// arguments and xmm13..xmm15 are the printer's float scratch. Windows
+/// has none past xmm0..xmm2: xmm3..xmm5 are the scratch there.
 fn float_caller_saved_first(arch: Arch) -> i64 {
+    if arch == Arch::Amd64Windows {
+        return float_callee_saved_end(arch);
+    }
     if is_x86(arch) {
         return first_float_reg();
     }
@@ -85,6 +94,9 @@ fn float_caller_saved_first(arch: Arch) -> i64 {
 /// Returns the end of the float registers a call may clobber that
 /// allocation hands out.
 fn float_caller_saved_end(arch: Arch) -> i64 {
+    if arch == Arch::Amd64Windows {
+        return float_callee_saved_end(arch);
+    }
     if is_x86(arch) {
         return first_float_reg() + 5;
     }
@@ -93,8 +105,12 @@ fn float_caller_saved_end(arch: Arch) -> i64 {
 
 /// Returns the end of the float registers a range may take only where no
 /// call, float argument or float result is inside it: on amd64 xmm0..xmm7,
-/// numbered after xmm8..xmm12; none on arm64.
+/// numbered after xmm8..xmm12, and under Windows xmm0..xmm2, after
+/// xmm6..xmm15; none on arm64.
 fn float_named_end(arch: Arch) -> i64 {
+    if arch == Arch::Amd64Windows {
+        return float_caller_saved_end(arch) + 3;
+    }
     if is_x86(arch) {
         return float_caller_saved_end(arch) + 8;
     }
@@ -1573,13 +1589,7 @@ pub fn allocate(allocator: Allocator, func: &var MFunction, arch: Arch) -> !Allo
     try layout(allocator, func, cold, &var order);
     var float = array::new<bool>(allocator);
     defer float.deinit(allocator);
-    if arch != Arch::Amd64Windows {
-        try float_registers(allocator, func, arch, &var float);
-    } else {
-        for 0..func.vregs |_index| {
-            try float.append(allocator, false);
-        }
-    }
+    try float_registers(allocator, func, arch, &var float);
     return allocate_laid_out(allocator, func, cold, move order, &float, arch);
 }
 
