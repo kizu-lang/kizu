@@ -38,6 +38,10 @@ pub fn listen_with(io: Io, allocator: Allocator, address: []u8, limits: Limits)
 pub fn listen_secure(
     io: Io, allocator: Allocator, address: []u8, chain: &Array<String>, key: []u8, limits: Limits,
 ) -> std::http::Failure!std::http::Server
+pub fn listen_secure_with(
+    io: Io, allocator: Allocator, address: []u8, chain: &Array<String>, key: []u8, limits: Limits,
+    entropy: std::tls::Entropy,
+) -> std::http::Failure!std::http::Server
 
 fn (self: &Server) local_port() -> std::http::Failure!i64
 fn (self: &var Server) accept(io: Io, allocator: Allocator, max: i64)
@@ -971,6 +975,8 @@ pub fn connect(io, allocator, address, limits)
     -> std::http::Failure!std::http::Connection
 pub fn connect_secure(io, allocator, address, host, roots: &Array<String>, limits)
     -> std::http::Failure!std::http::Connection
+pub fn connect_secure_with(io, allocator, address, host, roots: &Array<String>, limits, entropy: std::tls::Entropy)
+    -> std::http::Failure!std::http::Connection
 pub fn take(allocator, stream: std::net::TcpStream, limits) -> std::http::Connection
 fn (self: &var Connection) send(io, allocator, method, url: &Url, content_type, body, write_millis)
     -> std::http::Failure!void
@@ -1039,6 +1045,8 @@ var response = try http::fetch_with(
 の上に開き、あとは `connect` で開いたものと同じに使えます。`std::http::Failure` は
 `std::tls::Failure` を含むので、chain の検証が失敗した理由(`UnknownIssuer`、
 `NameMismatch`、`Expired`)はそのまま呼び手に届きます。
+`connect_secure_with` は handshake の乱数を `entropy` から引く `connect_secure` です
+(`std::tls::connect_with`、`docs/std/tls.md` の「乱数」)。
 
 `Host` / `Content-Length` / `Transfer-Encoding` / `Connection` は caller が入れて
 も落とします。message が実際に何であるかから client が書くもので、`Response.encode`
@@ -1070,6 +1078,11 @@ var server = try http::listen_secure(handle, allocator, "0.0.0.0:443", &chain, k
 各接続は chain と鍵の copy を持ちます。handshake を進めるのは exchange を持っている
 側(server の loop でも、`accept_ready` で受け取った呼び手の loop でも)で、そこに
 鍵が要るからです。
+
+`listen_secure_with` は handshake の乱数を `entropy` から引く `listen_secure` です。
+server は `entropy` を持ち、接続を受けるたびにその `split` を接続に渡します。
+`predictable_entropy` を渡せば、接続を 1 本ずつ順に受ける限り、各接続の乱数は seed と
+受けた順で決まります。`listen_secure` は `std::tls::system_entropy()` を渡したものです。
 
 ### `Connection` —— 答えを保持しないで読む
 

@@ -103,6 +103,11 @@ wasi-smoke:
 selfhost:
     scripts/bootstrap.sh
 
+# Run every conformance case in examples/, tests/behavior and docs/tutorial with
+# stage1. `just selfhost` runs only the behavior part of them.
+conformance: stage1
+    {{kizu}} run compiler/tests/harness -- conformance {{kizu}}
+
 # The form the commit hook runs: the seed and stage1 only check compiler/.
 selfhost-check:
     scripts/bootstrap.sh --check-only
@@ -192,6 +197,11 @@ spec-trace:
     cd spec && lean --run Ledger.lean > ../examples/fixtures/ledger_trace.json
     cd spec && lean --run Agreement.lean > ../examples/fixtures/agreement_trace.json
     cd spec && lean --run Tls.lean > ../examples/fixtures/tls_trace.json
+
+# Record the TLS fixtures under examples/fixtures/tls/ again, every one of
+# them, against the devShell's node (scripts/record-tls-fixtures/record.mjs).
+tls-fixtures: stage1
+    node scripts/record-tls-fixtures/record.mjs {{kizu}}
 
 # Run the broad baseline timing script.
 perf:

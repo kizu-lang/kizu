@@ -1,7 +1,10 @@
 import std::array;
 import std::crypto;
 import std::crypto::x509;
+import std::fs;
+import std::io;
 import std::mem;
+import std::process;
 import std::string;
 import std::testing;
 
@@ -631,4 +634,52 @@ test "PEM blocks are found one after another and a broken body is malformed" {
         let _ = stray;
         testing::expect(false);
     }
+}
+
+// The certificates under examples/fixtures/tls/ are valid until
+// 9999-12-31T23:59:59Z, a GeneralizedTime, so that the https fixtures
+// recorded against them can be replayed by a client that reads the real
+// clock for as long as anyone runs them.
+fn tls_fixture_roots(allocator: Allocator, name: []u8) -> !array::Array<string::String> {
+    var path = string::new(allocator);
+    defer path.deinit(allocator);
+    try path.append_bytes(allocator, "examples/fixtures/tls/");
+    try path.append_bytes(allocator, name);
+    try path.append_bytes(allocator, ".pem");
+    let view = path.as_bytes();
+    let text = try fs::read_file(io::blocking(), allocator, view, mem::Limit::Unlimited);
+    defer text.deinit(allocator);
+    let text_bytes = text.as_bytes();
+    var roots = array::new<string::String>(allocator);
+    errdefer roots.deinit(allocator);
+    let der = try x509::decode_pem(allocator, text_bytes, "CERTIFICATE");
+    try roots.append(allocator, move der);
+    return move roots;
+}
+
+fn expect_until_year_9999(allocator: Allocator, name: []u8, host: []u8) -> !void {
+    var roots = try tls_fixture_roots(allocator, name);
+    defer roots.deinit(allocator);
+    if roots.at(0) |item| {
+        let der = item.as_bytes();
+        let certificate = try x509::parse(der);
+        // 2026-01-01T00:00:00Z and 9999-12-31T23:59:59Z.
+        testing::expect(certificate.not_before == 1767225600);
+        testing::expect(certificate.not_after == 253402300799);
+        testing::expect(certificate.valid_at(253402300799));
+        testing::expect(!certificate.valid_at(253402300800));
+    } else {
+        testing::expect(false);
+    }
+    let now = process::unix_millis() / 1000;
+    try x509::verify_chain(&roots, &roots, host, now);
+    return;
+}
+
+test "the tls fixture certificates read until 9999 and verify on the real clock" {
+    let allocator = mem::page_allocator();
+    try expect_until_year_9999(allocator, "localhost-p256", "localhost");
+    try expect_until_year_9999(allocator, "localhost-p384", "localhost");
+    try expect_until_year_9999(allocator, "localhost-rsa2048", "localhost");
+    try expect_until_year_9999(allocator, "other-p256", "localhost");
 }

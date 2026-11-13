@@ -13,6 +13,8 @@ key schedule、record layer、handshake message の codec です。証明書の�
 std::tls::connect(io: Io, allocator, address: []u8, host: []u8, roots: &Array<String>, now: i64) -> Failure!Connection
 std::tls::accept(io: Io, allocator, stream: std::net::TcpStream, chain: &Array<String>, key: &x509::PrivateKey) -> Failure!Connection
 std::tls::accepting(allocator, stream: std::net::TcpStream) -> Connection
+std::tls::connect_with(io: Io, allocator, address: []u8, host: []u8, roots: &Array<String>, now: i64, entropy: Entropy) -> Failure!Connection
+std::tls::accepting_with(allocator, stream: std::net::TcpStream, entropy: Entropy) -> Connection
 Connection.accept_ready(io, allocator, chain: &Array<String>, key: &x509::PrivateKey) -> Failure!bool
 Connection.accept_wait(io, allocator, chain: &Array<String>, key: &x509::PrivateKey) -> Failure!void
 Connection.write(io, allocator, bytes: []u8) -> Failure!void
@@ -22,6 +24,12 @@ Connection.close(io, allocator) -> Failure!void
 Connection.cipher_suite() -> CipherSuite
 Connection.server_name() -> []u8        // server 側: client が server_name で求めた host
 Connection.deinit(allocator)
+
+std::tls::Entropy                                     // 接続が乱数を引く源。複製できない
+std::tls::system_entropy() -> Entropy                 // OS の乱数
+std::tls::predictable_entropy(seed: []u8) -> Entropy  // seed から決定的に出す。テストの再生用
+Entropy.split() -> Entropy                            // 1 接続分の子
+Entropy.deinit()
 
 std::tls::advance(state: State, event: Event) -> Transition
 std::tls::advance_server(state: ServerState, event: ServerEvent) -> ServerTransition
@@ -114,8 +122,88 @@ ServerHello、change_cipher_spec(§D.4)、EncryptedExtensions(空)、Certificate
 `accepting` で接続を作り、届いた分だけ `accept_ready` で進めます(true で完了)。
 `accept` は `accepting` に `accept_wait` を続けたものです。
 
-乱数は `std::crypto::random_bytes` から取得し、時刻は呼び手の `now` を使います。
-`std::tls` 自身は現在時刻も乱数も取得しません。
+時刻は呼び手の `now` を使い、`std::tls` 自身は現在時刻を読みません。乱数は
+接続が持つ `Entropy` から引きます(次節)。
+
+## 乱数
+
+接続は handshake の乱数をすべて自分の `Entropy` から引きます。client は ClientHello
+を送る前に 96 byte(hello の random、session_id、x25519 の秘密鍵)、server は
+ClientHello を受けたとき 64 byte(hello の random、x25519 の秘密鍵)と
+CertificateVerify の salt(scheme の hash の長さ。読むのは RSA-PSS だけですが、鍵の
+種類によらず引きます)を、この順に引きます。`std::tls` の中で OS の乱数に届くのは
+`system_entropy` だけで、今後足す乱数の消費も `Entropy` から引きます。
+
+- `connect` / `accept` / `accepting` は `system_entropy()` を渡した `connect_with` /
+  `accepting_with` です。
+- `predictable_entropy(seed)` は seed(長さは問わない)の SHA-256 を鍵にした
+  HMAC-SHA256 の counter mode です。block `n` は 0 の 1 byte と `n` の big-endian
+  8 byte の HMAC で、block を並べた列の続きを引くたびに渡します。上限はありません。
+- `split` は 1 接続分の子を作ります。子 `n` は 1 の 1 byte と `n` の big-endian 8 byte
+  の HMAC を seed にした `predictable_entropy` で、親の seed と split した順で決まります。
+  `system_entropy` の子は `system_entropy` です。
+- `Entropy` は複製できません。同じ列を 2 つの接続が使うと鍵共有と nonce の再利用に
+  なるためです。field が全部 copy の data なので、明示の `deinit`(解放するものは
+  ありません)で move-only にしています。`connect_with` / `accepting_with` に渡せば
+  接続が持ち、接続の `deinit` で消えます。
+
+**`predictable_entropy` の接続は秘密を守りません。** seed を知る人には鍵共有の秘密鍵も
+traffic の鍵も分かります。テストの再生以外で使わないでください。
+
+```kizu
+let seed = "replay";
+var client = try tls::connect_with(
+    io, allocator, address, "localhost", &roots, 1893456000,
+    tls::predictable_entropy(seed));
+```
+
+同じ seed の接続は同じ bytes を送ります。両端を `predictable_entropy` にした接続を
+2 回張って両方向の record が全部一致することを `tests/behavior/src/tls_entropy/` が
+P-256 と RSA の鍵で確かめます。
+
+## 他の実装と録った接続の再生
+
+Kizu 以外の TLS 実装との相互運用は、node の `tls` / `https` と一度だけ接続して録った
+fixture(`examples/fixtures/tls/*.trace`、1 接続 1 本、1 行 1 record)を
+`tests/behavior/src/tls_replay/` が再生して確かめます。node は再生に要りません。
+Kizu 側は case 名から決まる seed の `predictable_entropy` で動き、送る record が
+録ったものと byte 単位で一致すること、node の record を受け入れることを見ます。
+fixture の Kizu の bytes は node が受け入れた bytes なので、一致は「node がもう一度
+受け入れる」と同じ意味です。各 fixture は 2 回続けて再生し、seed 以外に依る bytes が
+混ざっていないことも見ます。録った相手(node と OpenSSL の version)は fixture の
+`# peer:` を見てください。全 fixture の `# peer:` が同じことを再生が確かめます。
+
+録り直しは `nix develop -c just tls-fixtures` の 1 経路で、引数を取らず全 case を毎回
+録ります。録る道具(`scripts/record-tls-fixtures/record.mjs`)は devShell の node
+(`flake.lock` の nixpkgs が version を決める)でしか録らず、`process.execPath` が
+`/nix/store/` の下にあることを確かめます。node が期待どおりに受け入れなかった case が
+あれば何も書きません。Kizu が送る bytes を変える変更(message の書式、拡張の集合や
+順序、offer する suite や scheme、alert の選び方、record の切り方、`Entropy` から引く
+量と順序)では再生が「fixture 名・行番号・向き・最初に食い違う byte」を出して落ちる
+ので、意図した変更なら録り直し、別 commit で同じ PR に入れます。seed が case 名で
+固定なので、diff では平文の record(ClientHello / ServerHello)と注釈の差分を読みます。
+node の乱数で決まる行と暗号化された行は録るたびに全部変わります。
+
+https server の case は server の 1 回の実行を録り、受けた接続ごとに 1 本の fixture を
+書きます。server は受けた順に seed を `split` して各接続に渡すので、1 run の fixture は
+すべて run 名の seed を持ち、受けた順に再生したときにしか同じ bytes になりません。
+run は 2 つです。
+
+- `https-server-accept-*`: `accept` は 1 接続 1 要求で、答えたら閉じるので、`/one`
+  `/two` `/three` に 1 接続ずつ使います。
+- `https-server-keepalive` / `-stranger` / `-fresh`: `first` / `next` で、1 本の
+  keep-alive 接続に `/one` `/two`、新しい接続に `/three`。
+
+どちらも別 root を信じる client(stranger)を間に置きます。`accept` も `first` /
+`next` も handshake に失敗した接続を捨てて次を待つので、最後に置くと来ない要求を
+待ち続けます。
+
+再生は evented Io の上で再生役の task と Kizu 側を同じ process で動かします。
+`first` / `next` の run だけは例外で、blocking Io の単一 thread で再生します。
+`first` / `next` は次に届くものを kevent / epoll で待って thread ごと止まるので、
+同じ loop の上の再生役が動けないためです。node の record は fixture で決まっている
+ので、呼ぶ前にその時点までに node が送っていた分を socket へ書き、server が終わって
+から Kizu の record を読んで比べます。
 
 ## 状態機械
 

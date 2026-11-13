@@ -1,0 +1,855 @@
+import std::array;
+import std::crypto::x509;
+import std::fmt;
+import std::http;
+import std::io;
+import std::mem;
+import std::net;
+import std::string;
+import std::testing;
+import std::tls;
+
+// A connection draws every random byte of its handshake from its
+// `tls::Entropy`, so two connections over the same predictable seed send
+// the same bytes. Both ends are Kizu here, each with its own seed, and a
+// relay between them keeps what each direction sent. If either end drew one
+// byte from the host's source instead -- the hello's random, a key share, the
+// RSA-PSS salt -- the second connection would differ from the first.
+//
+// The certificates are self-signed for localhost, one over a P-256 key and
+// one over a 2048-bit RSA key, valid from 2026-11-13 to 2049-11-12, written
+// by LibreSSL 3.3.6's `openssl req -x509`; the keys are PKCS #8. The RSA
+// one matters on its own: the CertificateVerify's salt is drawn for every
+// key but read only by RSA-PSS.
+
+error Failure = tls::Failure or http::Failure or io::Error or mem::Error;
+
+enum KeyKind {
+    P256,
+    Rsa,
+}
+
+fn certificate_pem(kind: KeyKind) -> []u8 {
+    if kind == KeyKind::P256 {
+        return p256_certificate();
+    }
+    return rsa_certificate();
+}
+
+// The keys are their PKCS #8 DER in hex.
+fn key_hex(kind: KeyKind) -> []u8 {
+    if kind == KeyKind::P256 {
+        return p256_key();
+    }
+    return rsa_key();
+}
+
+fn p256_certificate() -> []u8 {
+    return
+        \\-----BEGIN CERTIFICATE-----
+        \\MIIBSDCB7qADAgECAgkA2Ht0hfSrKEIwCgYIKoZIzj0EAwIwFDESMBAGA1UEAwwJ
+        \\bG9jYWxob3N0MB4XDTI2MTExMzAxMjQ1MVoXDTQ5MTExMjAxMjQ1MVowFDESMBAG
+        \\A1UEAwwJbG9jYWxob3N0MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEFN+WV9cD
+        \\+cajIxQxARAnS/JRkOzMMExxtroxHV0SuNrjUoRi14vWCv/UbaxNg1b1frHbxta3
+        \\0Qeitp8J3hL97KMpMCcwFAYDVR0RBA0wC4IJbG9jYWxob3N0MA8GA1UdEwEB/wQF
+        \\MAMBAf8wCgYIKoZIzj0EAwIDSQAwRgIhAIKcxEfqhaJIyulLz/U9hFBUyjB2PWGa
+        \\yGs6jciqJZXFAiEAsNry7wEeM3XFDAIvk9IrJkSyjIs7Nel6axAt2WT967U=
+        \\-----END CERTIFICATE-----
+    ;
+}
+
+fn p256_key() -> []u8 {
+    return
+        \\308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b02
+        \\010104203d10564b8d4b644354aa0484ea75debdce8b8c37fe9e82c814c32340
+        \\8470a6c9a1440342000414df9657d703f9c6a32314310110274bf25190eccc30
+        \\4c71b6ba311d5d12b8dae3528462d78bd60affd46dac4d8356f57eb1dbc6d6b7
+        \\d107a2b69f09de12fdec
+    ;
+}
+
+fn rsa_certificate() -> []u8 {
+    return
+        \\-----BEGIN CERTIFICATE-----
+        \\MIIC1DCCAbygAwIBAgIJAMAFvJhvpUJhMA0GCSqGSIb3DQEBCwUAMBQxEjAQBgNV
+        \\BAMMCWxvY2FsaG9zdDAeFw0yNjExMTMwMTI0NTFaFw00OTExMTIwMTI0NTFaMBQx
+        \\EjAQBgNVBAMMCWxvY2FsaG9zdDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoC
+        \\ggEBAK490FSRghs/5wyg4MpKOHdWhILXx4+rZEIYemkimxJxV5/WSHTX7oxhBCDV
+        \\3o629+kX3vQZSP/9PlIXG901WkWLqZZvb9U50+ocLreM+Aqb24QH52DOI5sIdnmm
+        \\7DlpMwpuqsSuL6H1pXTFSJ266YYUZsbWtHduCkj0fZPKP7hiB3NUnxlrzt905yLo
+        \\qIjG9h4hP8Cwjufqlc87W95zuTS6htAEJlZKAqwj+s6rblBxFxMqzEnwHcY3zNFW
+        \\yi3I8QpQUYsrsjmlDVPPOvEIQkccEwPabhAfW82e2vD+xwi8nYDWjwVUnXqXVLDg
+        \\7d1gF/wZu4QISzEy2POpSIcfQ9cCAwEAAaMpMCcwFAYDVR0RBA0wC4IJbG9jYWxo
+        \\b3N0MA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggEBADPeEB5RXkkR
+        \\a6+IrRr9wlodnreGhFYCdq+jwk4enJUskpQwMAa9fQTS41zulsB3tem4UDsIOi4W
+        \\ZzwFLYWVN1PGwKqyCOXIyBa6h64yRSZ+RJcWXNPtakQExpCh8zkEMjPxXac8AC4c
+        \\vUH+RZCKwlfDX+hEvRGm/cI/On5fYLjDjiRuH/MLhciZLLFE7vYmCEj+KoKqRA9K
+        \\TkWWwrPfMkjioFUoY8CAH65n8UaCl5ayu4y9ujNF4ZRpDTfmf18r4ypv/tXxon5i
+        \\3bElRRh+ePD0tdJBUVX+tA3yOFdo4VGRFm0IJ/0tybZtDCYCsFXo4q/dwnbKEH/P
+        \\LdctWqI2Sn4=
+        \\-----END CERTIFICATE-----
+    ;
+}
+
+fn rsa_key() -> []u8 {
+    return
+        \\308204bd020100300d06092a864886f70d0101010500048204a7308204a30201
+        \\000282010100ae3dd05491821b3fe70ca0e0ca4a3877568482d7c78fab644218
+        \\7a69229b1271579fd64874d7ee8c610420d5de8eb6f7e917def41948fffd3e52
+        \\171bdd355a458ba9966f6fd539d3ea1c2eb78cf80a9bdb8407e760ce239b0876
+        \\79a6ec3969330a6eaac4ae2fa1f5a574c5489dbae9861466c6d6b4776e0a48f4
+        \\7d93ca3fb8620773549f196bcedf74e722e8a888c6f61e213fc0b08ee7ea95cf
+        \\3b5bde73b934ba86d00426564a02ac23faceab6e507117132acc49f01dc637cc
+        \\d156ca2dc8f10a50518b2bb239a50d53cf3af10842471c1303da6e101f5bcd9e
+        \\daf0fec708bc9d80d68f05549d7a9754b0e0eddd6017fc19bb84084b3132d8f3
+        \\a948871f43d702030100010282010001e54843f345501894e1ed4a24c943ee00
+        \\71f69e745c5ac7ff7416b8d81889cdd3df384c9780d5e68f13a56bce3d0d3e8b
+        \\39a8424d981eb8d999b908a3927605f5ac05a7f6b682278d0f7b6ea1c8fd0c8f
+        \\09d3b02fbc6e64bc65d592fc54ef910f96fea29f26838391a6409336ac16e84f
+        \\8682b94943575e23470daab2f39884ebe785994c277a6646581764b2a11b6681
+        \\ad7b04671b742626f33a6da5e7b8296d06ae1762daef9ec58e1c3e07e61c0c48
+        \\9b01ec04c1be6313e696ef2409bb46ff9d92712de061511b6ab08d36c8828cca
+        \\1b5a254f99f07a3aa7702c1f200a0710d67fce9192bdb2774bd22dae22a7237a
+        \\4f252850ddb5405a10cb38ed02fb2102818100df63f8e926f19ecbe771e12401
+        \\0ad8ca0f1cde74d0d84421e6da23278e5a291ec62429c1c98f82c39ae7855347
+        \\7ed150d0c2a3682a6f2d445823dfbaff4100db05741e28d29c0100ab94bf07cc
+        \\5e671999232b110cc8a81bb7f61251ed67297c216575acc004e7eb3f147aa5c2
+        \\bb50d6c433dec537a649963f8466afc490e40702818100c7ad286e95ec865611
+        \\74a2117b6638fe129cb9a9e63a5158442f1fc9ea5b9a72297c7567b8ef89f452
+        \\9ffccab05caa6df3fd0a6f02819b1e5085193351f8e03d31893d86db3842e128
+        \\034b1e32c3f26884ae68e29aa2fe8cdf9012624840389de29760801d58969b8e
+        \\01355544258d3bac01575fa8c80c926ea7e2d4fee8cdb10281806d2a13870c2a
+        \\e2e8cdcf4eb0237a437a6a6c37216ab5648614a3e0ae01d87963ba7c0d93cf85
+        \\bbe70e99b9037b5ab3bb046939253c275c3d9bbcdc262b7a7e8a895db72747d4
+        \\48812557e90a4c8a8d636afc4e9d645be21ab9891c66c0d6bae51804d6be768f
+        \\6f2dfc836b73f9774407cf9571757abe5e137832a1639f71169d02818100b26f
+        \\2dd36ccc99db6debe12c682e983d8bda5c1bd4ae46a4ef018191c9892482624a
+        \\630c567a50b871e1a0606cabd26d417cdd87082153c20a487695a2ea1950f5e4
+        \\63841080bd5b418b77e43b8f591f477a28265ff3ca2f8f54cae8e311e8c64687
+        \\e9e772d2087c67b0f2bd0891da1cf9ff94d9da15330ee42dc90977e608710281
+        \\8013fa11283f90ea3a68608d7d7fe13894373303688777edf83d291e7c106e34
+        \\04997c4eb035c98f85f1489854f97afe8ffe578e79a7642e0d567d979ab325ff
+        \\04241ce3beed6a8b7f2ee23b04456ad7dcbc27c1105d041563deda907879b900
+        \\df90d11c183c74acb9f9178fd804a7d0d1ed844c524b3d672102e065ef116b3c
+        \\eb
+    ;
+}
+
+// chain_of is the one certificate as DER: the server's chain, and the
+// client's roots.
+fn chain_of(allocator: Allocator, kind: KeyKind) -> Failure!array::Array<string::String> {
+    var chain = array::new<string::String>(allocator);
+    errdefer chain.deinit(allocator);
+    let der = try x509::decode_pem(allocator, certificate_pem(kind), "CERTIFICATE");
+    try chain.append(allocator, move der);
+    return move chain;
+}
+
+fn key_der(allocator: Allocator, kind: KeyKind) -> mem::Error!string::String {
+    return bytes_of_hex_lines(allocator, key_hex(kind));
+}
+
+// bytes_of_hex_lines reads lowercase hex, skipping anything else.
+fn bytes_of_hex_lines(allocator: Allocator, hex: []u8) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    var high = -1;
+    for 0..mem::len(hex) |index| {
+        let byte = cast<i64>(hex[index]);
+        var value = -1;
+        if byte >= 48 and byte <= 57 {
+            value = byte - 48;
+        } else if byte >= 97 and byte <= 102 {
+            value = byte - 87;
+        }
+        if value < 0 {
+            continue;
+        }
+        if high < 0 {
+            high = value;
+        } else {
+            try out.append_byte(allocator, cast<u8>(high * 16 + value));
+            high = -1;
+        }
+    }
+    return move out;
+}
+
+// jan_2030 is 2030-01-01T00:00:00Z, within both certificates.
+fn jan_2030() -> i64 {
+    return 1893456000;
+}
+
+// A Source says what one end draws from: the host's source through the
+// functions that take no entropy, or the predictable source of `seed`,
+// itself when `child` is negative and its `child`th split otherwise.
+struct Source {
+    system: bool,
+    seed: i64,
+    child: i64,
+}
+
+fn system() -> Source {
+    return Source { system: true, seed: 0, child: -1 };
+}
+
+fn seeded(seed: i64) -> Source {
+    return Source { system: false, seed: seed, child: -1 };
+}
+
+fn split_of(seed: i64, child: i64) -> Source {
+    return Source { system: false, seed: seed, child: child };
+}
+
+fn entropy_of(source: Source) -> tls::Entropy {
+    if source.system {
+        return tls::system_entropy();
+    }
+    var seed = [8]u8{};
+    let view = seed.as_mut_bytes();
+    for 0..8 |at| {
+        view[at] = cast<u8>((source.seed >> (8 * at)) & 255);
+    }
+    let seed_bytes = seed.as_bytes();
+    if source.child < 0 {
+        return tls::predictable_entropy(seed_bytes);
+    }
+    var parent = tls::predictable_entropy(seed_bytes);
+    defer parent.deinit();
+    for 0..source.child |_| {
+        let passed = parent.split();
+        passed.deinit();
+    }
+    return parent.split();
+}
+
+fn loopback(allocator: Allocator, port: i64) -> mem::Error!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    try out.append_bytes(allocator, "127.0.0.1:");
+    try fmt::append_i64(allocator, &var out, port);
+    return move out;
+}
+
+// in_a_while is a deadline no exchange here comes near; reaching it is a
+// hang reported as a failure rather than a test that never ends.
+fn in_a_while() -> i64 {
+    return net::deadline_in_millis(20000);
+}
+
+// The server end: one connection, the line it reads sent back in upper
+// case, then close.
+struct ServerJob {
+    listener: net::TcpListener,
+    kind: KeyKind,
+    source: Source,
+    heard: string::String,
+    failed: bool,
+}
+
+fn (self: ServerJob) deinit(allocator: Allocator) -> void {
+    self.listener.deinit();
+    self.heard.deinit(allocator);
+    return;
+}
+
+fn serve(handle: Io, allocator: Allocator, job: &var ServerJob) -> void {
+    if serve_one(handle, allocator, job) {
+        return;
+    } else |_| {
+        job.failed = true;
+    }
+    return;
+}
+
+fn serve_one(handle: Io, allocator: Allocator, job: &var ServerJob) -> Failure!void {
+    var chain = try chain_of(allocator, job.kind);
+    defer chain.deinit(allocator);
+    let der = try key_der(allocator, job.kind);
+    defer der.deinit(allocator);
+    let der_bytes = der.as_bytes();
+    let key = try x509::parse_private_key(der_bytes);
+    var stream = try job.listener.accept(handle);
+    stream.set_read_deadline(in_a_while());
+    var connection = if job.source.system {
+        try tls::accept(handle, allocator, move stream, &chain, &key)
+    } else {
+        tls::accepting_with(allocator, move stream, entropy_of(job.source))
+    };
+    defer connection.deinit(allocator);
+    if !job.source.system {
+        try connection.accept_wait(handle, allocator, &chain, &key);
+    }
+    while job.heard.len() < 14 {
+        let got = try connection.read_into(handle, allocator, &var job.heard, 64);
+        if got == 0 {
+            break;
+        }
+    }
+    var upper = string::new(allocator);
+    defer upper.deinit(allocator);
+    let heard = job.heard.as_bytes();
+    for 0..mem::len(heard) |index| {
+        var byte = heard[index];
+        if byte >= 97 and byte <= 122 {
+            byte = byte - 32;
+        }
+        try upper.append_byte(allocator, byte);
+    }
+    let upper_bytes = upper.as_bytes();
+    try connection.write(handle, allocator, upper_bytes);
+    try connection.close(handle, allocator);
+    return;
+}
+
+// The client end: connect, say a line, read until the server's close.
+struct ClientJob {
+    address: string::String,
+    kind: KeyKind,
+    source: Source,
+    reply: string::String,
+    failed: bool,
+}
+
+fn (self: ClientJob) deinit(allocator: Allocator) -> void {
+    self.address.deinit(allocator);
+    self.reply.deinit(allocator);
+    return;
+}
+
+fn talk(handle: Io, allocator: Allocator, job: &var ClientJob) -> void {
+    if talk_once(handle, allocator, job) {
+        return;
+    } else |_| {
+        job.failed = true;
+    }
+    return;
+}
+
+fn talk_once(handle: Io, allocator: Allocator, job: &var ClientJob) -> Failure!void {
+    var roots = try chain_of(allocator, job.kind);
+    defer roots.deinit(allocator);
+    let address = job.address.as_bytes();
+    var client = if job.source.system {
+        try tls::connect(handle, allocator, address, "localhost", &roots, jan_2030())
+    } else {
+        try tls::connect_with(handle, allocator, address, "localhost", &roots, jan_2030(),
+            entropy_of(job.source))
+    };
+    defer client.deinit(allocator);
+    client.set_read_deadline(in_a_while());
+    try client.write(handle, allocator, "hello over tls");
+    while true {
+        let got = try client.read_into(handle, allocator, &var job.reply, 64);
+        if got == 0 {
+            break;
+        }
+    }
+    try client.close(handle, allocator);
+    return;
+}
+
+// The relay between them: what the client sends goes on to the server and
+// is kept in `outbound`, what the server sends comes back and is kept in
+// `inbound`. It listens to each side for a moment in turn, so the bytes it
+// keeps are each direction's whole stream however they were cut.
+struct RelayJob {
+    listener: net::TcpListener,
+    upstream: string::String,
+    outbound: string::String,
+    inbound: string::String,
+    failed: bool,
+}
+
+fn (self: RelayJob) deinit(allocator: Allocator) -> void {
+    self.listener.deinit();
+    self.upstream.deinit(allocator);
+    self.outbound.deinit(allocator);
+    self.inbound.deinit(allocator);
+    return;
+}
+
+fn relay(handle: Io, allocator: Allocator, job: &var RelayJob) -> void {
+    if relay_once(handle, allocator, job) {
+        return;
+    } else |_| {
+        job.failed = true;
+    }
+    return;
+}
+
+fn relay_once(handle: Io, allocator: Allocator, job: &var RelayJob) -> Failure!void {
+    var down = try job.listener.accept(handle);
+    defer down.deinit();
+    let address = job.upstream.as_bytes();
+    var up = try net::tcp_connect(handle, address);
+    defer up.deinit();
+    let give_up = in_a_while();
+    var down_open = true;
+    var up_open = true;
+    while down_open or up_open {
+        if net::deadline_in_millis(0) > give_up {
+            return net::Error::TimedOut;
+        }
+        if down_open {
+            down_open = try pass(handle, allocator, &var down, &var up, &var job.outbound);
+        }
+        if up_open {
+            up_open = try pass(handle, allocator, &var up, &var down, &var job.inbound);
+        }
+    }
+    return;
+}
+
+// pass moves what `from` sends within a few milliseconds on to `to`, keeps
+// it in `kept`, and answers whether `from` is still open. A closed `from`
+// closes the same direction of `to`.
+fn pass(
+    handle: Io,
+    allocator: Allocator,
+    from: &var net::TcpStream,
+    to: &var net::TcpStream,
+    kept: &var string::String
+) -> Failure!bool {
+    let start = kept.len();
+    from.set_read_deadline(net::deadline_in_millis(2));
+    if from.read_into(handle, allocator, kept, 65536) |got| {
+        if got == 0 {
+            to.close_write();
+            return false;
+        }
+        let bytes = kept.as_bytes();
+        try to.write_all(handle, bytes[start..start + got]);
+        return true;
+    } else |err| {
+        if err == net::Error::TimedOut {
+            return true;
+        }
+        return err;
+    }
+}
+
+// A Wire is what one exchange sent each way, and what each end got.
+struct Wire {
+    outbound: string::String,
+    inbound: string::String,
+    heard: string::String,
+    reply: string::String,
+}
+
+fn (self: Wire) deinit(allocator: Allocator) -> void {
+    self.outbound.deinit(allocator);
+    self.inbound.deinit(allocator);
+    self.heard.deinit(allocator);
+    self.reply.deinit(allocator);
+    return;
+}
+
+fn wire_new(allocator: Allocator) -> Wire {
+    return Wire {
+        outbound: string::new(allocator),
+        inbound: string::new(allocator),
+        heard: string::new(allocator),
+        reply: string::new(allocator),
+    };
+}
+
+// exchange runs one connection, client through the relay to the server,
+// and adds to `wire` what went over it.
+fn exchange(
+    allocator: Allocator,
+    kind: KeyKind,
+    client: Source,
+    server: Source,
+    wire: &var Wire
+) -> Failure!void {
+    var loop = try io::loop_new();
+    defer loop.deinit();
+    let handle = io::evented(&var loop);
+
+    var server_listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    errdefer server_listener.deinit();
+    let server_port = try server_listener.local_port();
+    var relay_listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    errdefer relay_listener.deinit();
+    let relay_port = try relay_listener.local_port();
+    var upstream = try loopback(allocator, server_port);
+    errdefer upstream.deinit(allocator);
+    var downstream = try loopback(allocator, relay_port);
+    errdefer downstream.deinit(allocator);
+
+    var serving = ServerJob {
+        listener: move server_listener,
+        kind: kind,
+        source: server,
+        heard: string::new(allocator),
+        failed: false,
+    };
+    defer serving.deinit(allocator);
+    var relaying = RelayJob {
+        listener: move relay_listener,
+        upstream: move upstream,
+        outbound: string::new(allocator),
+        inbound: string::new(allocator),
+        failed: false,
+    };
+    defer relaying.deinit(allocator);
+    var talking = ClientJob {
+        address: move downstream,
+        kind: kind,
+        source: client,
+        reply: string::new(allocator),
+        failed: false,
+    };
+    defer talking.deinit(allocator);
+
+    var served = try io::async<ServerJob>(handle, allocator, serve, &var serving);
+    errdefer served.deinit(allocator);
+    var relayed = try io::async<RelayJob>(handle, allocator, relay, &var relaying);
+    errdefer relayed.deinit(allocator);
+    var talked = try io::async<ClientJob>(handle, allocator, talk, &var talking);
+    talked.await();
+    talked.deinit(allocator);
+    relayed.await();
+    relayed.deinit(allocator);
+    served.await();
+    served.deinit(allocator);
+
+    testing::expect(!serving.failed);
+    testing::expect(!relaying.failed);
+    testing::expect(!talking.failed);
+    let outbound = relaying.outbound.as_bytes();
+    try wire.outbound.append_bytes(allocator, outbound);
+    let inbound = relaying.inbound.as_bytes();
+    try wire.inbound.append_bytes(allocator, inbound);
+    let heard = serving.heard.as_bytes();
+    try wire.heard.append_bytes(allocator, heard);
+    let reply = talking.reply.as_bytes();
+    try wire.reply.append_bytes(allocator, reply);
+    return;
+}
+
+// records counts the TLS records `bytes` is made of, or answers -1 when it
+// does not end on a record's end.
+fn records(bytes: []u8) -> i64 {
+    var at = 0;
+    var count = 0;
+    let total = mem::len(bytes);
+    while at + 5 <= total {
+        let length = cast<i64>(bytes[at + 3]) * 256 + cast<i64>(bytes[at + 4]);
+        at = at + 5 + length;
+        count = count + 1;
+    }
+    if at != total {
+        return -1;
+    }
+    return count;
+}
+
+// same_first_record says whether `a` and `b` begin with the same record:
+// the ClientHello outbound, the ServerHello inbound.
+fn same_first_record(a: []u8, b: []u8) -> bool {
+    if mem::len(a) < 5 or mem::len(b) < 5 {
+        return false;
+    }
+    let length = cast<i64>(a[3]) * 256 + cast<i64>(a[4]);
+    if mem::len(a) < 5 + length or mem::len(b) < 5 + length {
+        return false;
+    }
+    return mem::equal_bytes(a[0..5 + length], b[0..5 + length]);
+}
+
+fn expect_talked(wire: &Wire) -> void {
+    let heard = wire.heard.as_bytes();
+    testing::expect(mem::equal_bytes(heard, "hello over tls"));
+    let reply = wire.reply.as_bytes();
+    testing::expect(mem::equal_bytes(reply, "HELLO OVER TLS"));
+    let outbound = wire.outbound.as_bytes();
+    let inbound = wire.inbound.as_bytes();
+    testing::expect(records(outbound) > 0);
+    testing::expect(records(inbound) > 0);
+    return;
+}
+
+fn expect_same_twice(allocator: Allocator, kind: KeyKind) -> Failure!void {
+    var first = wire_new(allocator);
+    defer first.deinit(allocator);
+    try exchange(allocator, kind, seeded(1), seeded(2), &var first);
+    var second = wire_new(allocator);
+    defer second.deinit(allocator);
+    try exchange(allocator, kind, seeded(1), seeded(2), &var second);
+    expect_talked(&first);
+    expect_talked(&second);
+    let first_out = first.outbound.as_bytes();
+    let second_out = second.outbound.as_bytes();
+    testing::expect(mem::equal_bytes(first_out, second_out));
+    let first_in = first.inbound.as_bytes();
+    let second_in = second.inbound.as_bytes();
+    testing::expect(mem::equal_bytes(first_in, second_in));
+    return;
+}
+
+test "the same seeds send the same bytes both ways under a P-256 key" {
+    try expect_same_twice(mem::page_allocator(), KeyKind::P256);
+}
+
+test "the same seeds send the same bytes both ways under an RSA key" {
+    try expect_same_twice(mem::page_allocator(), KeyKind::Rsa);
+}
+
+test "the host's source sends different bytes each time and still connects" {
+    let allocator = mem::page_allocator();
+    var first = wire_new(allocator);
+    defer first.deinit(allocator);
+    try exchange(allocator, KeyKind::Rsa, system(), system(), &var first);
+    var second = wire_new(allocator);
+    defer second.deinit(allocator);
+    try exchange(allocator, KeyKind::Rsa, system(), system(), &var second);
+    expect_talked(&first);
+    expect_talked(&second);
+    let first_out = first.outbound.as_bytes();
+    let second_out = second.outbound.as_bytes();
+    testing::expect(!same_first_record(first_out, second_out));
+    let first_in = first.inbound.as_bytes();
+    let second_in = second.inbound.as_bytes();
+    testing::expect(!same_first_record(first_in, second_in));
+}
+
+test "one end on the host's source is seen in its own direction" {
+    let allocator = mem::page_allocator();
+    var seeded_both = wire_new(allocator);
+    defer seeded_both.deinit(allocator);
+    try exchange(allocator, KeyKind::P256, seeded(1), seeded(2), &var seeded_both);
+    var host_server = wire_new(allocator);
+    defer host_server.deinit(allocator);
+    try exchange(allocator, KeyKind::P256, seeded(1), system(), &var host_server);
+    expect_talked(&host_server);
+    let both_out = seeded_both.outbound.as_bytes();
+    let host_out = host_server.outbound.as_bytes();
+    testing::expect(same_first_record(both_out, host_out));
+    let both_in = seeded_both.inbound.as_bytes();
+    let host_in = host_server.inbound.as_bytes();
+    testing::expect(!same_first_record(both_in, host_in));
+}
+
+test "another seed sends other bytes" {
+    let allocator = mem::page_allocator();
+    var first = wire_new(allocator);
+    defer first.deinit(allocator);
+    try exchange(allocator, KeyKind::P256, seeded(1), seeded(2), &var first);
+    var other = wire_new(allocator);
+    defer other.deinit(allocator);
+    try exchange(allocator, KeyKind::P256, seeded(3), seeded(4), &var other);
+    expect_talked(&other);
+    let first_out = first.outbound.as_bytes();
+    let other_out = other.outbound.as_bytes();
+    testing::expect(!same_first_record(first_out, other_out));
+    let first_in = first.inbound.as_bytes();
+    let other_in = other.inbound.as_bytes();
+    testing::expect(!same_first_record(first_in, other_in));
+}
+
+test "the children of one seed differ from each other and from it, and repeat" {
+    let allocator = mem::page_allocator();
+    var parent = wire_new(allocator);
+    defer parent.deinit(allocator);
+    try exchange(allocator, KeyKind::P256, seeded(5), seeded(2), &var parent);
+    var zero = wire_new(allocator);
+    defer zero.deinit(allocator);
+    try exchange(allocator, KeyKind::P256, split_of(5, 0), seeded(2), &var zero);
+    var one = wire_new(allocator);
+    defer one.deinit(allocator);
+    try exchange(allocator, KeyKind::P256, split_of(5, 1), seeded(2), &var one);
+    var zero_again = wire_new(allocator);
+    defer zero_again.deinit(allocator);
+    try exchange(allocator, KeyKind::P256, split_of(5, 0), seeded(2), &var zero_again);
+    expect_talked(&zero);
+    expect_talked(&one);
+    let parent_hello = parent.outbound.as_bytes();
+    let zero_hello = zero.outbound.as_bytes();
+    let one_hello = one.outbound.as_bytes();
+    let again_hello = zero_again.outbound.as_bytes();
+    testing::expect(!same_first_record(zero_hello, one_hello));
+    testing::expect(!same_first_record(parent_hello, zero_hello));
+    testing::expect(!same_first_record(parent_hello, one_hello));
+    testing::expect(same_first_record(zero_hello, again_hello));
+}
+
+// The https server end: one request, answered with its path.
+struct HttpServerJob {
+    server: http::Server,
+    failed: bool,
+}
+
+fn (self: HttpServerJob) deinit(allocator: Allocator) -> void {
+    self.server.deinit(allocator);
+    return;
+}
+
+fn serve_http(handle: Io, allocator: Allocator, job: &var HttpServerJob) -> void {
+    if serve_http_once(handle, allocator, job) {
+        return;
+    } else |_| {
+        job.failed = true;
+    }
+    return;
+}
+
+fn serve_http_once(handle: Io, allocator: Allocator, job: &var HttpServerJob) -> Failure!void {
+    var current = try job.server.accept(handle, allocator, 1024);
+    defer current.deinit(allocator);
+    let target = current.request.target.as_bytes();
+    let path_view = http::path_of(target);
+    // A copy: the response writes to the exchange while the path still
+    // points into its request.
+    var path = try string::from_bytes(allocator, path_view);
+    defer path.deinit(allocator);
+    let path_bytes = path.as_bytes();
+    try current.respond_text(handle, allocator, 200, "text/plain", path_bytes);
+    return;
+}
+
+// The https client end: one GET, the answer's body kept.
+struct HttpClientJob {
+    address: string::String,
+    source: Source,
+    reply: string::String,
+    failed: bool,
+}
+
+fn (self: HttpClientJob) deinit(allocator: Allocator) -> void {
+    self.address.deinit(allocator);
+    self.reply.deinit(allocator);
+    return;
+}
+
+fn fetch(handle: Io, allocator: Allocator, job: &var HttpClientJob) -> void {
+    if fetch_once(handle, allocator, job) {
+        return;
+    } else |_| {
+        job.failed = true;
+    }
+    return;
+}
+
+fn fetch_once(handle: Io, allocator: Allocator, job: &var HttpClientJob) -> Failure!void {
+    var roots = try chain_of(allocator, KeyKind::P256);
+    defer roots.deinit(allocator);
+    let address = job.address.as_bytes();
+    var client = try http::connect_secure_with(handle, allocator, address, "localhost", &roots,
+        http::default_limits(), entropy_of(job.source));
+    defer client.deinit(allocator);
+    // No port in the URL: the Host header would carry the relay's, which is
+    // another one each run.
+    var url = try http::parse_url(allocator, "https://localhost/greeting");
+    defer url.deinit(allocator);
+    try client.send(handle, allocator, "GET", &url, "", "", 20000);
+    var response = try client.receive(handle, allocator, "GET", http::default_limits());
+    defer response.deinit(allocator);
+    try client.read_body(handle, allocator, &var response, 1024);
+    let body = response.body.as_bytes();
+    try job.reply.append_bytes(allocator, body);
+    return;
+}
+
+// http_exchange is `exchange` for https: http::connect_secure_with through
+// the relay to http::listen_secure_with, whose connection draws from the
+// first `split` of the server's source.
+fn http_exchange(allocator: Allocator, client: Source, server: Source, wire: &var Wire) -> Failure!void {
+    var loop = try io::loop_new();
+    defer loop.deinit();
+    let handle = io::evented(&var loop);
+
+    var chain = try chain_of(allocator, KeyKind::P256);
+    defer chain.deinit(allocator);
+    let der = try key_der(allocator, KeyKind::P256);
+    defer der.deinit(allocator);
+    let der_bytes = der.as_bytes();
+    var limits = http::default_limits();
+    limits.linger_millis = 20;
+    var listening = try http::listen_secure_with(handle, allocator, "127.0.0.1:0", &chain, der_bytes,
+        limits, entropy_of(server));
+    errdefer listening.deinit(allocator);
+    let server_port = try listening.local_port();
+    var relay_listener = try net::tcp_listen(handle, "127.0.0.1:0");
+    errdefer relay_listener.deinit();
+    let relay_port = try relay_listener.local_port();
+    var upstream = try loopback(allocator, server_port);
+    errdefer upstream.deinit(allocator);
+    var downstream = try loopback(allocator, relay_port);
+    errdefer downstream.deinit(allocator);
+
+    var serving = HttpServerJob { server: move listening, failed: false };
+    defer serving.deinit(allocator);
+    var relaying = RelayJob {
+        listener: move relay_listener,
+        upstream: move upstream,
+        outbound: string::new(allocator),
+        inbound: string::new(allocator),
+        failed: false,
+    };
+    defer relaying.deinit(allocator);
+    var fetching = HttpClientJob {
+        address: move downstream,
+        source: client,
+        reply: string::new(allocator),
+        failed: false,
+    };
+    defer fetching.deinit(allocator);
+
+    var served = try io::async<HttpServerJob>(handle, allocator, serve_http, &var serving);
+    errdefer served.deinit(allocator);
+    var relayed = try io::async<RelayJob>(handle, allocator, relay, &var relaying);
+    errdefer relayed.deinit(allocator);
+    var fetched = try io::async<HttpClientJob>(handle, allocator, fetch, &var fetching);
+    fetched.await();
+    fetched.deinit(allocator);
+    served.await();
+    served.deinit(allocator);
+    relayed.await();
+    relayed.deinit(allocator);
+
+    testing::expect(!serving.failed);
+    testing::expect(!relaying.failed);
+    testing::expect(!fetching.failed);
+    let outbound = relaying.outbound.as_bytes();
+    try wire.outbound.append_bytes(allocator, outbound);
+    let inbound = relaying.inbound.as_bytes();
+    try wire.inbound.append_bytes(allocator, inbound);
+    let reply = fetching.reply.as_bytes();
+    try wire.reply.append_bytes(allocator, reply);
+    return;
+}
+
+test "an https connection over the same seeds sends the same bytes both ways" {
+    let allocator = mem::page_allocator();
+    var first = wire_new(allocator);
+    defer first.deinit(allocator);
+    try http_exchange(allocator, seeded(1), seeded(2), &var first);
+    var second = wire_new(allocator);
+    defer second.deinit(allocator);
+    try http_exchange(allocator, seeded(1), seeded(2), &var second);
+    let reply = first.reply.as_bytes();
+    testing::expect(mem::equal_bytes(reply, "/greeting"));
+    let first_out = first.outbound.as_bytes();
+    let second_out = second.outbound.as_bytes();
+    testing::expect(records(first_out) > 0);
+    testing::expect(mem::equal_bytes(first_out, second_out));
+    let first_in = first.inbound.as_bytes();
+    let second_in = second.inbound.as_bytes();
+    testing::expect(records(first_in) > 0);
+    testing::expect(mem::equal_bytes(first_in, second_in));
+}
+
+test "an https server hands each connection the next child of its seed" {
+    let allocator = mem::page_allocator();
+    var served = wire_new(allocator);
+    defer served.deinit(allocator);
+    try http_exchange(allocator, seeded(1), seeded(2), &var served);
+    var plain = wire_new(allocator);
+    defer plain.deinit(allocator);
+    try exchange(allocator, KeyKind::P256, seeded(1), split_of(2, 0), &var plain);
+    let served_in = served.inbound.as_bytes();
+    let plain_in = plain.inbound.as_bytes();
+    testing::expect(same_first_record(served_in, plain_in));
+}

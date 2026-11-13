@@ -1,0 +1,132 @@
+// Where a connection draws its randomness. Every byte std::tls draws --
+// the hello's random, the session id, the x25519 private key, the RSA-PSS
+// salt -- comes from the connection's `Entropy`, and nothing here reaches
+// the host's source except `draw` on a system one. A source that is set
+// and still lets one byte come from elsewhere would make a replayed
+// connection differ without saying why, so a new draw in std::tls takes
+// it from here too.
+//
+// An Entropy is not copied: two connections drawing the same sequence
+// would reuse a key share and a nonce. All its fields are copy data, so
+// the `deinit` below is what keeps it moved rather than copied (SPEC §8);
+// it has nothing to free.
+
+enum EntropySource {
+    System,
+    Predictable,
+}
+
+// Entropy is the source one connection draws from: the host's, or a
+// sequence fixed by a seed.
+pub struct Entropy {
+    source: std::tls::EntropySource,
+    // A predictable source's key, SHA-256 of its seed; zeros for the
+    // host's.
+    key: [32]u8,
+    // How many bytes this source has handed out, and how many children
+    // `split` has made of it.
+    drawn: i64,
+    children: i64,
+}
+
+// system_entropy draws from the host's source, as std::crypto::random_bytes
+// does. It is what `connect`, `accept`, and `accepting` use.
+pub fn system_entropy() -> std::tls::Entropy {
+    return Entropy {
+        source: EntropySource::System,
+        key: [32]u8{},
+        drawn: 0,
+        children: 0,
+    };
+}
+
+// predictable_entropy draws a sequence fixed by `seed`: the same seed gives
+// the same bytes in the same order, every run. A connection over it keeps
+// no secret from anyone who knows the seed, so it is for replaying a test
+// and nothing else.
+//
+// The seed, of any length, is folded to a 32-byte key by SHA-256. Block `n`
+// of the sequence is HMAC-SHA256 under that key of a zero byte followed by
+// `n` as eight big-endian bytes, and the blocks are laid end to end; a draw
+// takes the next bytes of that, wherever the last one stopped. There is no
+// end to it.
+pub fn predictable_entropy(seed: []u8) -> std::tls::Entropy {
+    var key = [32]u8{};
+    let view = key.as_mut_bytes();
+    std::crypto::sha256(seed, view);
+    return Entropy {
+        source: EntropySource::Predictable,
+        key: key,
+        drawn: 0,
+        children: 0,
+    };
+}
+
+// split is a source for one more connection, distinct from this one and
+// from every other child of it. A predictable source's child `n` is
+// `predictable_entropy` of HMAC-SHA256 under this source's key of a one
+// byte followed by `n` as eight big-endian bytes, so the children are
+// fixed by the seed and the order they were split in. The host's source
+// splits into the host's source.
+pub fn (self: &var std::tls::Entropy) split() -> std::tls::Entropy {
+    if self.source == EntropySource::System {
+        return system_entropy();
+    }
+    var seed = [32]u8{};
+    let seed_view = seed.as_mut_bytes();
+    self.block(1, self.children, seed_view);
+    self.children = self.children + 1;
+    let seed_bytes = seed.as_bytes();
+    return predictable_entropy(seed_bytes);
+}
+
+fn (self: std::tls::Entropy) deinit() -> void {
+    return;
+}
+
+// draw returns the next `count` bytes of the source as an owned String.
+fn (self: &var std::tls::Entropy) draw(
+    io: Io,
+    allocator: Allocator,
+    count: i64
+) -> std::tls::Failure!std::string::String {
+    if self.source == EntropySource::System {
+        let drawn = try std::crypto::random_bytes(io, allocator, count);
+        return move drawn;
+    }
+    var out = std::string::new(allocator);
+    errdefer out.deinit(allocator);
+    var block_buffer = [32]u8{};
+    var remaining = count;
+    while remaining > 0 {
+        let index = self.drawn / 32;
+        let offset = self.drawn % 32;
+        let block_view = block_buffer.as_mut_bytes();
+        self.block(0, index, block_view);
+        var take = 32 - offset;
+        if take > remaining {
+            take = remaining;
+        }
+        let block_bytes = block_buffer.as_bytes();
+        try out.append_bytes(allocator, block_bytes[offset..offset + take]);
+        self.drawn = self.drawn + take;
+        remaining = remaining - take;
+    }
+    return move out;
+}
+
+// block writes HMAC-SHA256 under the key of `domain` followed by `index`
+// as eight big-endian bytes to the front of `out`. The domain keeps the
+// sequence's blocks (0) apart from the children's seeds (1).
+fn (self: &std::tls::Entropy) block(domain: u8, index: i64, out: &var []u8) -> void {
+    var message = [9]u8{};
+    let view = message.as_mut_bytes();
+    view[0] = domain;
+    for 0..8 |at| {
+        view[8 - at] = cast<u8>((index >> (8 * at)) & 255);
+    }
+    let message_bytes = message.as_bytes();
+    let key = self.key.as_bytes();
+    std::crypto::hmac_sha256(key, message_bytes, out);
+    return;
+}

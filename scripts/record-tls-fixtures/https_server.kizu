@@ -1,0 +1,162 @@
+// The Kizu end of the `https-server-*` TLS fixtures: std::http as an https
+// server, the peer node's https clients. record.mjs runs it from the
+// repository root as
+//
+//     kizu run scripts/record-tls-fixtures/https_server.kizu -- <run> <chain> <mode> <count>
+//
+// It listens on 127.0.0.1:0 through http::listen_secure_with, prints the port
+// on a line of its own, and answers <count> requests, each with "hello over
+// tls from " and the path, printing "served " and the path -- with the
+// blocking `accept` when <mode> is `accept`, with `first` / `next` when it is
+// `loop`. It presents examples/fixtures/tls/<chain>.pem, signs with
+// <chain>.key.pem, and draws from the predictable source seeded with
+// SHA-256("kizu tls fixture " + <run>): each connection it accepts gets the
+// next split of that source, so the fixtures of one run are the connections
+// of that run, in the order they came. A connection whose handshake fails is
+// not one of the <count>. tests/behavior/src/tls_replay/ replays the run with
+// the same steps.
+
+import std::array;
+import std::crypto;
+import std::crypto::x509;
+import std::fmt;
+import std::fs;
+import std::http;
+import std::io;
+import std::mem;
+import std::process;
+import std::string;
+import std::tls;
+
+error Failure = http::Failure or x509::Failure or fs::Error or process::Error or io::Error or mem::Error;
+
+fn seed_of(allocator: Allocator, name: []u8, seed: &var []u8) -> mem::Error!void {
+    var text = string::new(allocator);
+    defer text.deinit(allocator);
+    try text.append_bytes(allocator, "kizu tls fixture ");
+    try text.append_bytes(allocator, name);
+    let bytes = text.as_bytes();
+    crypto::sha256(bytes, seed);
+    return;
+}
+
+// pem_of decodes the first block labelled `label` of
+// examples/fixtures/tls/<name><suffix>.
+fn pem_of(allocator: Allocator, name: []u8, suffix: []u8, label: []u8) -> Failure!string::String {
+    var path = string::new(allocator);
+    defer path.deinit(allocator);
+    try path.append_bytes(allocator, "examples/fixtures/tls/");
+    try path.append_bytes(allocator, name);
+    try path.append_bytes(allocator, suffix);
+    let view = path.as_bytes();
+    let text = try fs::read_file(io::blocking(), allocator, &view, mem::Limit::Unlimited);
+    defer text.deinit(allocator);
+    let text_bytes = text.as_bytes();
+    let der = try x509::decode_pem(allocator, text_bytes, label);
+    return move der;
+}
+
+fn answer(io: Io, allocator: Allocator, exchange: &var http::Exchange) -> Failure!void {
+    let target = exchange.request.target.as_bytes();
+    var text = string::new(allocator);
+    defer text.deinit(allocator);
+    try text.append_bytes(allocator, "hello over tls from ");
+    try text.append_bytes(allocator, target);
+    var line = string::new(allocator);
+    defer line.deinit(allocator);
+    try line.append_bytes(allocator, "served ");
+    try line.append_bytes(allocator, target);
+    let text_bytes = text.as_bytes();
+    try exchange.respond_text(io, allocator, 200, "text/plain", text_bytes);
+    let line_bytes = line.as_bytes();
+    print(line_bytes);
+    return;
+}
+
+fn serve_accepting(io: Io, allocator: Allocator, server: &var http::Server, count: i64) -> Failure!void {
+    var served = 0;
+    while served < count {
+        if server.accept(io, allocator, 1 << 16) |taken| {
+            var exchange = move taken;
+            defer exchange.deinit(allocator);
+            try answer(io, allocator, &var exchange);
+            served = served + 1;
+        } else |err| {
+            let _ = err;
+        }
+    }
+    return;
+}
+
+fn serve_looping(io: Io, allocator: Allocator, server: &var http::Server, count: i64) -> Failure!void {
+    var current = try server.first(io, allocator, 1 << 16);
+    var served = 1;
+    while served < count {
+        current = try turn(io, allocator, server, move current);
+        served = served + 1;
+    }
+    try last(io, allocator, move current);
+    return;
+}
+
+// turn answers the exchange it owns and hands it back for the next one.
+fn turn(io: Io, allocator: Allocator, server: &var http::Server, taken: http::Exchange) -> Failure!http::Exchange {
+    var current = move taken;
+    errdefer current.deinit(allocator);
+    try answer(io, allocator, &var current);
+    let following = try server.next(io, allocator, move current, 1 << 16);
+    return move following;
+}
+
+fn last(io: Io, allocator: Allocator, taken: http::Exchange) -> Failure!void {
+    var current = move taken;
+    defer current.deinit(allocator);
+    try answer(io, allocator, &var current);
+    return;
+}
+
+fn serve(io: Io, allocator: Allocator) -> Failure!void {
+    let name = try process::arg(0);
+    let chain_name = try process::arg(1);
+    let mode = try process::arg(2);
+    let count_text = try process::arg(3);
+    var count = 0;
+    for 0..mem::len(count_text) |index| {
+        count = count * 10 + cast<i64>(count_text[index]) - 48;
+    }
+    var seed_buffer = [32]u8{};
+    var seed = seed_buffer.as_mut_bytes();
+    try seed_of(allocator, name, &var seed);
+    var chain = array::new<string::String>(allocator);
+    defer chain.deinit(allocator);
+    let der = try pem_of(allocator, chain_name, ".pem", "CERTIFICATE");
+    try chain.append(allocator, move der);
+    let key_der = try pem_of(allocator, chain_name, ".key.pem", "PRIVATE KEY");
+    defer key_der.deinit(allocator);
+    let key_bytes = key_der.as_bytes();
+    let seed_bytes = seed_buffer.as_bytes();
+    var server = try http::listen_secure_with(io, allocator, "127.0.0.1:0", &chain, key_bytes,
+        http::default_limits(), tls::predictable_entropy(seed_bytes));
+    defer server.deinit(allocator);
+    var port = string::new(allocator);
+    defer port.deinit(allocator);
+    try fmt::append_i64(allocator, &var port, try server.local_port());
+    let port_bytes = port.as_bytes();
+    try io::write_stdout_line(io, &port_bytes);
+    if mem::equal_bytes(mode, "accept") {
+        try serve_accepting(io, allocator, &var server, count);
+    } else {
+        try serve_looping(io, allocator, &var server, count);
+    }
+    return;
+}
+
+fn main() -> !void {
+    if serve(io::blocking(), mem::page_allocator()) {
+        return;
+    } else |err| {
+        let _ = err;
+        print("failed");
+    }
+    return;
+}
