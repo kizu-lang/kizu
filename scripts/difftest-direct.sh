@@ -1,14 +1,14 @@
 #!/usr/bin/env sh
-# Builds every `run` example twice, with the direct backend and through LLVM
-# (`kizu build`'s default), runs both, and requires the two to print the same
-# stdout and stderr and exit the same way:
+# Builds every `run` example twice, with the direct backend and through LLVM,
+# runs both, and requires the two to print the same stdout and stderr and
+# exit the same way:
 #
 #   scripts/difftest-direct.sh <kizu>
 #
-# `kizu test` builds with the direct backend by default, so the bootstrap
-# gate already runs it on compiler/ and the test cases; `kizu build` and
-# `kizu run` do not, and this is what holds the direct backend to LLVM on the
-# examples. LLVM is the reference rather than each case's `output:` block:
+# Both builds name their backend, since the direct one is the default where
+# the target has it. The bootstrap gate runs the default, so it runs the
+# direct backend on compiler/ and the cases; this is what holds it to LLVM
+# on the examples. LLVM is the reference rather than each case's `output:` block:
 # that block does not hold stderr or the exit status, and the run-fails cases
 # promise only a substring.
 #
@@ -40,8 +40,7 @@ check() {
   args="$(printf '%s\n' "$directive" | sed -n 's/^.* -- //p')"
   for backend in direct llvm; do
     mkdir -p "$work/$backend/tmp"
-    if [ "$backend" = direct ]; then set -- --backend direct; else set --; fi
-    if ! "$kizu" build --target native "$@" -o "$work/$backend/$name" "$file" \
+    if ! "$kizu" build --target native --backend "$backend" -o "$work/$backend/$name" "$file" \
       >"$work/$backend/$name.build" 2>&1; then
       echo "FAIL $name ($backend build)"
       sed 's/^/  /' "$work/$backend/$name.build"
