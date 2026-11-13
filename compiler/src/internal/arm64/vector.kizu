@@ -38,8 +38,9 @@ import std::array;
 // way each accumulator stays one chain, combined with the elements one after
 // another in the order and with the operands the scalar loop has, so every
 // rounding is the one the scalar loop makes. Only the bounds checks and the
-// loop's own tests go. On amd64 this loop for general registers over f64
-// accumulators is the only one taken.
+// loop's own tests go. On amd64 the loops for general registers are the
+// only ones taken, under both conventions: over word accumulators, and over
+// f64 accumulators, whose values live in xmm registers there.
 //
 // The vector registers are not allocated: the loop names v0..v7 and
 // v16..v31 directly, holds none of them across a call, and leaves v8..v15,
@@ -267,9 +268,9 @@ fn pool_size() -> i64 {
 /// after the edge's copies and ends the block, which goes on to the header.
 /// Reports false, having emitted nothing, otherwise.
 fn (self: &var Selector) vectorize_entry(module: &ir::Module, from: ir::Name, target: ir::Name) -> !bool {
-    // The vector loops are NEON; amd64 takes only the loop for general
-    // registers over f64 accumulators, whose values live in xmm registers
-    // there, and keeps every other loop scalar.
+    // The vector loops are NEON; amd64 takes only the loops for general
+    // registers, under both conventions: over words, and over f64
+    // accumulators, whose values live in xmm registers there.
     let header = self.block(target);
     if header < 0 or (self.preds.get(header) orelse 0) != 2 or !self.has_phis(module, target) {
         return false;
@@ -316,7 +317,7 @@ fn (self: &var Selector) vectorize_entry(module: &ir::Module, from: ir::Name, ta
     if !try self.plan_loop(module, from, &var plan, &var tables) {
         return false;
     }
-    if is_x86(self.arch) and !(plan.scalar and plan.float) {
+    if is_x86(self.arch) and !plan.scalar {
         return false;
     }
     if plan.lanes {
@@ -604,7 +605,8 @@ fn (self: &var Selector) plan_loop(module: &ir::Module, from: ir::Name, plan: &v
         return false;
     }
     if plan.float or plan.multiplies or tables.loads.len() > 1 {
-        return plan_scalar(plan, tables);
+        let budget = word_budget(self.arch, plan.float);
+        return plan_scalar(plan, tables, budget);
     }
     if self.pool_need(plan, tables, 1) > pool_size() {
         plan.unroll = 2;
@@ -824,7 +826,7 @@ fn (self: &var Selector) plan_load(module: &ir::Module, node: &ir::InstrNode, sl
 /// all its elements before it computes (and two words in a row from one
 /// source load as one pair); not more, as the values live through the loop
 /// take registers too.
-fn plan_scalar(plan: &var Plan, tables: &Tables) -> bool {
+fn plan_scalar(plan: &var Plan, tables: &Tables, budget: i64) -> bool {
     if plan.width != 8 or plan.uses_index {
         return false;
     }
@@ -844,10 +846,10 @@ fn plan_scalar(plan: &var Plan, tables: &Tables) -> bool {
     }
     let held = tables.loads.len() + 1 + tables.invs.len() + 3;
     plan.unroll = 4;
-    if held + tables.accs.len() * plan.unroll > word_budget() {
+    if held + tables.accs.len() * plan.unroll > budget {
         plan.unroll = 2;
     }
-    if held + tables.accs.len() * plan.unroll > word_budget() {
+    if held + tables.accs.len() * plan.unroll > budget {
         return false;
     }
     plan.scalar = true;
@@ -858,15 +860,23 @@ fn plan_scalar(plan: &var Plan, tables: &Tables) -> bool {
     }
     // In pairs, the three temporaries held allows become the elements of a
     // pair and a register for each value the body computes from them.
-    if held - 3 + tables.accs.len() * plan.unroll + (tables.loads.len() + tables.elems.len()) * 2 <= word_budget() {
+    if held - 3 + tables.accs.len() * plan.unroll + (tables.loads.len() + tables.elems.len()) * 2 <= budget {
         plan.group = 2;
     }
     return true;
 }
 
 /// Returns how many general registers a loop for general registers may
-/// hold at once, of the 24 the allocator hands out.
-fn word_budget() -> i64 {
+/// hold at once: 20 of the 24 the allocator hands out on arm64; on amd64
+/// all 11, as allocation gives up the long ranges around the loop before
+/// the ones inside it, and a value read once a turn from the frame costs
+/// less than halving the turn. A float loop on amd64 keeps its
+/// accumulators and elements in xmm registers, so the general ones bound
+/// it no more than on arm64.
+fn word_budget(arch: Arch, float: bool) -> i64 {
+    if is_x86(arch) and !float {
+        return 11;
+    }
     return 20;
 }
 

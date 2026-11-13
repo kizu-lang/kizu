@@ -10,10 +10,11 @@ import std::array;
 // caller-saved registers live across it are saved around it instead. x0..x7
 // are handed out too wherever the code does not name them inside the range.
 // A copy may share its source's register while the source is not written.
-// When no register is free, whatever is cheapest by loop-depth weight is
-// spilled for its whole life: a constant or a frame address is remade where
-// it is read, anything else lives in a frame slot. Afterwards the parallel
-// copies of the phi edges become moves that respect each other's reads.
+// When no register is free, whatever is cheapest by loop-depth weight per
+// position held is spilled for its whole life: a constant or a frame
+// address is remade where it is read, anything else lives in a frame slot.
+// Afterwards the parallel copies of the phi edges become moves that respect
+// each other's reads.
 //
 // On arm64 the registers only float instructions compute with (see
 // float_registers) take float registers instead: d20..d31, or d8..d15
@@ -1525,6 +1526,17 @@ fn (self: &Ranges) end(v: i64) -> i64 {
     return last;
 }
 
+/// Returns how many positions v's segments cover.
+fn (self: &Ranges) size(v: i64) -> i64 {
+    var at = self.first.get_or_panic(v);
+    var total = 0;
+    while at >= 0 {
+        total = total + self.seg_to.get_or_panic(at) - self.seg_from.get_or_panic(at) + 1;
+        at = self.seg_next.get_or_panic(at);
+    }
+    return total;
+}
+
 fn (self: &Ranges) covers(v: i64, pos: i64) -> bool {
     var at = self.first.get_or_panic(v);
     while at >= 0 {
@@ -2014,6 +2026,13 @@ fn allocate_laid_out(
         } else if remat.get_or_panic(v).op != MOp::Trap {
             try weight.set(v, weight.get_or_panic(v) / 4);
         }
+    }
+    // A weight is per position held: giving up a long range frees its
+    // register over all of it, a short one over little, so of two ranges
+    // read as often the longer goes first. The 50 positions added keep a
+    // short range from weighing without bound.
+    for 0..nv |v| {
+        try weight.set(v, weight.get_or_panic(v) * 256 / (ranges.size(v) + 50));
     }
     // Linear scan over the ranges by start, with active (live at the
     // current position) and inactive (in a hole there) sets.
