@@ -1,0 +1,134 @@
+// The Kizu end of the `server-*` TLS fixtures: std::tls as the server, the
+// peer a node TLS client that says "hello over tls". record.mjs runs it from
+// the repository root as
+//
+//     kizu run scripts/record-tls-fixtures/server.kizu -- <case> <chain>
+//
+// It listens on 127.0.0.1:0, prints the port on a line of its own, and takes
+// one connection, presenting examples/fixtures/tls/<chain>.pem and signing
+// with <chain>.key.pem, drawing from the predictable source seeded with
+// SHA-256("kizu tls fixture " + <case>). It reads once, sends what it read
+// back in upper case, closes, and prints what happened: the host and suite,
+// the line and "closed", or the failure's name.
+// tests/behavior/src/tls_replay/ replays the fixture with the same steps.
+
+import std::array;
+import std::crypto;
+import std::crypto::x509;
+import std::fmt;
+import std::fs;
+import std::io;
+import std::mem;
+import std::net;
+import std::process;
+import std::string;
+import std::tls;
+
+error Failure = tls::Failure or x509::Failure or fs::Error or process::Error or io::Error or mem::Error;
+
+fn seed_of(allocator: Allocator, name: []u8, seed: &var []u8) -> mem::Error!void {
+    var text = string::new(allocator);
+    defer text.deinit(allocator);
+    try text.append_bytes(allocator, "kizu tls fixture ");
+    try text.append_bytes(allocator, name);
+    let bytes = text.as_bytes();
+    crypto::sha256(bytes, seed);
+    return;
+}
+
+// pem_of decodes the first block labelled `label` of
+// examples/fixtures/tls/<name><suffix>.
+fn pem_of(allocator: Allocator, name: []u8, suffix: []u8, label: []u8) -> Failure!string::String {
+    var path = string::new(allocator);
+    defer path.deinit(allocator);
+    try path.append_bytes(allocator, "examples/fixtures/tls/");
+    try path.append_bytes(allocator, name);
+    try path.append_bytes(allocator, suffix);
+    let view = path.as_bytes();
+    let text = try fs::read_file(io::blocking(), allocator, &view, mem::Limit::Unlimited);
+    defer text.deinit(allocator);
+    let text_bytes = text.as_bytes();
+    let der = try x509::decode_pem(allocator, text_bytes, label);
+    return move der;
+}
+
+fn failure_name(failure: Failure) -> []u8 {
+    return match failure {
+        Alert => "Alert",
+        BadRecord => "BadRecord",
+        tls::Error::Closed => "Closed",
+        ConnectionReset => "ConnectionReset",
+        _ => "other",
+    };
+}
+
+fn upper(bytes: &var string::String) -> void {
+    let view = bytes.as_mut_bytes();
+    for 0..mem::len(view) |index| {
+        if view[index] >= 97 and view[index] <= 122 {
+            view[index] = view[index] - 32;
+        }
+    }
+    return;
+}
+
+fn serve(io: Io, allocator: Allocator) -> Failure!void {
+    let name = try process::arg(0);
+    let chain_name = try process::arg(1);
+    var seed_buffer = [32]u8{};
+    var seed = seed_buffer.as_mut_bytes();
+    try seed_of(allocator, name, &var seed);
+    var chain = array::new<string::String>(allocator);
+    defer chain.deinit(allocator);
+    let der = try pem_of(allocator, chain_name, ".pem", "CERTIFICATE");
+    try chain.append(allocator, move der);
+    let key_der = try pem_of(allocator, chain_name, ".key.pem", "PRIVATE KEY");
+    defer key_der.deinit(allocator);
+    let key_bytes = key_der.as_bytes();
+    let key = try x509::parse_private_key(key_bytes);
+    var listener = try net::tcp_listen(io, "127.0.0.1:0");
+    defer listener.deinit();
+    var port = string::new(allocator);
+    defer port.deinit(allocator);
+    try fmt::append_i64(allocator, &var port, try listener.local_port());
+    let port_bytes = port.as_bytes();
+    try io::write_stdout_line(io, &port_bytes);
+    let stream = try listener.accept(io);
+    let seed_bytes = seed_buffer.as_bytes();
+    var connection = tls::accepting_with(allocator, move stream, tls::predictable_entropy(seed_bytes));
+    defer connection.deinit(allocator);
+    try connection.accept_wait(io, allocator, &chain, &key);
+    var line = string::new(allocator);
+    defer line.deinit(allocator);
+    try line.append_bytes(allocator, "served ");
+    let host = connection.server_name();
+    try line.append_bytes(allocator, host);
+    if connection.cipher_suite() == tls::CipherSuite::Aes128GcmSha256 {
+        try line.append_bytes(allocator, " with AES-128-GCM");
+    } else {
+        try line.append_bytes(allocator, " with ChaCha20-Poly1305");
+    }
+    let line_bytes = line.as_bytes();
+    print(line_bytes);
+    var request = string::new(allocator);
+    defer request.deinit(allocator);
+    let got = try connection.read_into(io, allocator, &var request, 4096);
+    let _ = got;
+    let request_bytes = request.as_bytes();
+    print(request_bytes);
+    upper(&var request);
+    let reply = request.as_bytes();
+    try connection.write(io, allocator, reply);
+    try connection.close(io, allocator);
+    print("closed");
+    return;
+}
+
+fn main() -> !void {
+    if serve(io::blocking(), mem::page_allocator()) {
+        return;
+    } else |err| {
+        print(failure_name(err));
+    }
+    return;
+}

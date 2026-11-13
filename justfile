@@ -198,6 +198,11 @@ spec-trace:
     cd spec && lean --run Agreement.lean > ../examples/fixtures/agreement_trace.json
     cd spec && lean --run Tls.lean > ../examples/fixtures/tls_trace.json
 
+# Record the TLS fixtures under examples/fixtures/tls/ again, every one of
+# them, against the devShell's node (scripts/record-tls-fixtures/record.mjs).
+tls-fixtures: stage1
+    node scripts/record-tls-fixtures/record.mjs {{kizu}}
+
 # Run the broad baseline timing script.
 perf:
     scripts/measure-baseline.sh
