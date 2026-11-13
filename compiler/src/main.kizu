@@ -622,13 +622,14 @@ fn version_command(io: Io, next: i64, count: i64) -> !i64 {
 /// Writes the usage lines for the commands this binary has.
 fn usage(io: Io) -> !void {
     try io::write_stderr_line(io, "usage: kizu <parse|run|check|test> <file> [-- args...]");
-    try io::write_stderr_line(io, "usage: kizu test [--seed N] <file|package> [-- args...]");
-    try io::write_stderr_line(io, "usage: kizu test [--seed N] [--triple T] -o file <file|package>");
+    try io::write_stderr_line(io, "usage: kizu run [--backend direct|llvm] <file|package> [-- args...]");
+    try io::write_stderr_line(io, "usage: kizu test [--seed N] [--backend direct|llvm] <file|package> [-- args...]");
+    try io::write_stderr_line(io, "usage: kizu test [--seed N] [--backend direct|llvm] [--triple T] -o file <file|package>");
     try io::write_stderr_line(io, "usage: kizu init [path]");
     try io::write_stderr_line(io, "usage: kizu fmt [--write] <file>");
     try io::write_stderr_line(io, "usage: kizu ir [--opt] <file>");
     try io::write_stderr_line(io, "usage: kizu build --emit-llvm [--opt] <file>");
-    try io::write_stderr_line(io, "usage: kizu build --target native [native-options] <file>");
+    try io::write_stderr_line(io, "usage: kizu build --target native [--backend direct|llvm] [native-options] <file>");
     try io::write_stderr_line(io, "usage: kizu build --target wasm32-wasi [--emit wat] [--opt] [-o file] <file|package>");
     try io::write_stderr_line(io, "usage: kizu build --target wasm32-wasi --emit wasm -o file [--opt] <file|package>");
     try io::write_stderr_line(io, "usage: kizu build --target wasm32-browser [--emit wat] [--opt] [-o file] <file|package>");
@@ -1904,7 +1905,7 @@ fn default_native_options(allocator: Allocator) -> !native::Options {
         opt: false,
         thinlto: false,
         direct: false,
-        own_backend: false,
+        own_backend: true,
         libraries: array::new<string::String>(allocator),
         frameworks: array::new<string::String>(allocator),
         library_search: array::new<string::String>(allocator),
@@ -1995,20 +1996,40 @@ fn append_search_paths(
     return;
 }
 
-/// Runs `run <file|package> [-- args...]`, the Go `dispatchRun`: everything
-/// after `--` goes to the built program.
+/// Runs `run [--backend B] <file|package> [-- args...]`, the Go
+/// `dispatchRun`: everything after `--` goes to the built program.
+/// `--backend` names the backend as build's does.
 fn run_command(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, next: i64, count: i64) -> !i64 {
-    let child_start = next + 3;
+    var options = try default_native_options(allocator);
+    defer options.deinit(allocator);
+    var first = next;
+    if mem::equal_bytes(target, "--backend") {
+        if count - next < 3 {
+            try usage(io);
+            try io::write_stderr_line(io, "error: missing value after --backend");
+            return 1;
+        }
+        let backend = try process::arg(next + 2);
+        if !try select_backend(io, allocator, backend, &var options) {
+            return 1;
+        }
+        first = next + 2;
+        if count - first < 2 {
+            try usage(io);
+            try io::write_stderr_line(io, "error: missing source file");
+            return 1;
+        }
+    }
+    let path = try process::arg(first + 1);
+    let child_start = first + 3;
     var child_count = 0;
-    if count - next >= 3 {
-        let separator = try process::arg(next + 2);
+    if count - first >= 3 {
+        let separator = try process::arg(first + 2);
         if mem::equal_bytes(separator, "--") {
             child_count = count - child_start;
         }
     }
-    var options = try default_native_options(allocator);
-    defer options.deinit(allocator);
-    return native_target(io, allocator, lib_dir, target, NativeCommand::Run, &var options, null, child_start, child_count);
+    return native_target(io, allocator, lib_dir, path, NativeCommand::Run, &var options, null, child_start, child_count);
 }
 
 /// Runs `test [--seed N] [--triple T] [-o file] <file|package> [-- args...]`,
@@ -2017,13 +2038,10 @@ fn run_command(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, next: 
 /// §14.5). With -o the test executable is built for the machine --triple
 /// names and written there instead of being run, so it takes no program args,
 /// and --triple needs -o since an executable for another machine cannot run
-/// here. The tests are built with the direct backend where the target has
-/// it; `--backend llvm` builds them through LLVM instead, and `--backend`
-/// takes `direct` as build does.
+/// here. `--backend` names the backend as build's does.
 fn test_command(io: Io, allocator: Allocator, lib_dir: []u8, next: i64, count: i64) -> !i64 {
     var options = try default_native_options(allocator);
     defer options.deinit(allocator);
-    options.own_backend = true;
     var seed: ?i64 = null;
     var path_index = next + 1;
     while path_index < count {
@@ -2057,7 +2075,7 @@ fn test_command(io: Io, allocator: Allocator, lib_dir: []u8, next: i64, count: i
                 return 1;
             }
             let backend_bytes = backend.as_bytes();
-            if !try select_backend(io, allocator, backend_bytes, true, &var options) {
+            if !try select_backend(io, allocator, backend_bytes, &var options) {
                 return 1;
             }
             continue;
@@ -2177,7 +2195,7 @@ fn parse_native_build_args(
                 return 1;
             }
             let backend_bytes = backend.as_bytes();
-            if !try select_backend(io, allocator, backend_bytes, false, options) {
+            if !try select_backend(io, allocator, backend_bytes, options) {
                 return 1;
             }
             continue;
@@ -2259,15 +2277,16 @@ fn parse_native_build_args(
 }
 
 /// Sets the backend `--backend` named, reporting false after printing why
-/// for a name it does not take. `llvm` is a name only where the command's
-/// default is another backend, as `kizu test`'s is.
-fn select_backend(io: Io, allocator: Allocator, name: []u8, llvm: bool, options: &var native::Options) -> !bool {
+/// for a name it does not take. Without the flag, build, run and test take
+/// the direct backend on the targets it is the backend of (Darwin arm64,
+/// Linux and Windows x86_64) and LLVM on the others.
+fn select_backend(io: Io, allocator: Allocator, name: []u8, options: &var native::Options) -> !bool {
     options.own_backend = false;
     if mem::equal_bytes(name, "direct") {
         options.direct = true;
         return true;
     }
-    if llvm and mem::equal_bytes(name, "llvm") {
+    if mem::equal_bytes(name, "llvm") {
         options.direct = false;
         return true;
     }
@@ -2491,8 +2510,14 @@ fn native_target(
                     let arm = (darwin or linux) and arch == llvm::Arch::Arm64;
                     let amd = linux and arch == llvm::Arch::X86_64;
                     let amd_windows = windows and arch == llvm::Arch::X86_64Windows;
-                    if options.own_backend and (arm or amd or amd_windows) {
+                    // Linux arm64 takes --backend direct but is not a target
+                    // the backend is the default of.
+                    if options.own_backend and ((darwin and arm) or amd or amd_windows) {
                         options.direct = true;
+                    }
+                    if options.direct and options.thinlto {
+                        try io::write_stderr_line(io, "error: --thinlto optimizes LLVM bitcode in the link; build with --backend llvm");
+                        return 1;
                     }
                     if options.direct {
                         // Its machine code, written as an object here.
