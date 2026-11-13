@@ -15,23 +15,19 @@ import std::sort;
 import std::string;
 import std::thread;
 
-// Mechanical port of internal/native/build.go: linking a lowered program
-// with the embedded C runtime into a host executable through the configured
-// C/LLVM toolchain. The runtime object and the executable live in the
-// shared build cache (compiler::internal::buildcache), keyed the same way
-// the Go CLI keys them, so a build made by one CLI is reused by the other.
-// Claimed temporary directories only hold the toolchain's transient inputs
-// now. The units of LLVM IR text and the error set numbering are passed
-// alongside Options rather than held in it, because a Kizu struct cannot
-// borrow them.
+// Links a lowered program with the embedded C runtime into a host executable
+// through the configured C/LLVM toolchain. The runtime object and the
+// executable live in the shared build cache (compiler::internal::buildcache).
+// Claimed temporary directories only hold the toolchain's transient inputs.
+// The units of LLVM IR text and the error set numbering are passed alongside
+// Options rather than held in it, because a Kizu struct cannot borrow them.
 
-/// Describes one native link request, the Go `Options` without the fields a
-/// struct cannot borrow (`Units`, `ErrorSets`). The units are the LLVM
-/// modules the program was emitted as, in the order they are linked
+/// Describes one native link request. The units passed alongside it are the
+/// LLVM modules the program was emitted as, in the order they are linked
 /// (llvm::emit_units): a debug build has one per module and compiles each to
 /// an object the cache keeps, so an edit to one module recompiles that unit
-/// alone; an optimized build has one, which clang optimizes whole, unless
-/// it is linked with ThinLTO.
+/// alone; an optimized build has one, which clang optimizes whole, unless it
+/// is linked with ThinLTO.
 pub struct Options {
     pub output: string::String,
     /// target is the native target the triple (or, without one, the host)
@@ -70,12 +66,11 @@ pub struct Options {
     pub framework_search: array::Array<string::String>,
 }
 
-/// Hands out temporary build directories: the Go `os.TempDir` (TMPDIR or
-/// /tmp, and on Windows TMP or TEMP) plus
-/// `kizu-native-<monotonic_millis>-<sequence>`, the Go `os.MkdirTemp`.
-/// They hold the toolchain's transient inputs -- the IR, the runtime C
-/// source, the host probe answer -- never the outputs, which the build
-/// cache stores.
+/// Hands out temporary build directories: the system temporary directory
+/// (TMPDIR or /tmp, and on Windows TMP or TEMP) plus
+/// `kizu-native-<monotonic_millis>-<sequence>`. They hold the toolchain's
+/// transient inputs -- the IR, the runtime C source, the host probe answer --
+/// never the outputs, which the build cache stores.
 pub struct TempDirs {
     pub base: string::String,
     pub stamp: i64,
@@ -121,9 +116,9 @@ pub fn (self: &var TempDirs) claim_dir(io: Io, allocator: Allocator) -> !string:
 }
 
 /// Links a lowered program into the executable the caller names, and records
-/// next to it what it was built from, the Go `Build`. It is the artifact
-/// command: the output is a file the user asked for by name, so it is
-/// written where they asked rather than kept in the build tree.
+/// next to it what it was built from. It is the artifact command: the output
+/// is a file the user asked for by name, so it is written where they asked
+/// rather than kept in the build tree.
 pub fn build(
     io: Io,
     allocator: Allocator,
@@ -193,12 +188,12 @@ pub fn build(
     return null;
 }
 
-/// Returns an executable for one lowered program, linking it only when
-/// nothing has it yet, the Go `Executable`: the same IR linked against the
-/// same runtime by the same toolchain is the same executable however often
-/// it is asked for, and the cache is shared with the Go CLI. The toolchain
-/// is asked nothing until there is something to build: a run that finds its
-/// executable already made needs no C toolchain at all.
+/// Returns an executable for one lowered program, linking it only when nothing
+/// has it yet: the same IR linked against the same runtime by the same
+/// toolchain is the same executable however often it is asked for, and the
+/// cache keeps it. The toolchain is asked nothing until there is something to
+/// build: a run that finds its executable already made needs no C toolchain at
+/// all.
 pub fn executable(
     io: Io,
     allocator: Allocator,
@@ -284,13 +279,13 @@ pub fn executable(
 
 extern "c" fn uname(name: ptr<u8>) -> i32
 
-/// Spells the host the way the Go toolchain key spells `runtime.GOOS` and
-/// `runtime.GOARCH`, so the cache keys match the Go CLI's byte for byte. The
-/// machine is what uname(2) answers, the `uname -sm` spelling, read in this
-/// process so a cached run starts no child for it; or on Windows, which has
-/// no uname, what PROCESSOR_ARCHITECTURE names for this process: `AMD64` for
-/// an x64 process even on an Arm machine, as GOARCH would. A host the map
-/// does not name is an error rather than a guessed key.
+/// Spells the host as `<os>-<arch>` (`darwin-arm64`, `linux-amd64`), the
+/// spelling the toolchain key in every cache key is made with. The machine is
+/// what uname(2) answers, the `uname -sm` spelling, read in this process so a
+/// cached run starts no child for it; or on Windows, which has no uname, what
+/// PROCESSOR_ARCHITECTURE names for this process: `AMD64` for an x64 process
+/// even on an Arm machine. A host the map does not name is an error rather
+/// than a guessed key.
 pub fn host_key(allocator: Allocator, out: &var string::String) -> !?diagnostic::Diagnostic {
     var answer = string::new(allocator);
     defer answer.deinit(allocator);
@@ -343,8 +338,7 @@ fn append_c_field(allocator: Allocator, field: []u8, out: &var string::String) -
     return;
 }
 
-/// Returns where needle first occurs in haystack, or null, the Go
-/// `strings.Index`.
+/// Returns where needle first occurs in haystack, or null.
 fn index_of(haystack: []u8, needle: []u8) -> ?i64 {
     var start = 0;
     let size = mem::len(haystack);
@@ -357,8 +351,8 @@ fn index_of(haystack: []u8, needle: []u8) -> ?i64 {
     return null;
 }
 
-/// Reports whether the selected native target is a 64-bit Arm machine, the
-/// Go `TargetIsArm64`. An omitted triple names the host.
+/// Reports whether the selected native target is a 64-bit Arm machine. An
+/// omitted triple names the host.
 pub fn target_is_arm64(options: &Options, host: &string::String) -> bool {
     if options.triple.len() == 0 {
         let host_bytes = host.as_bytes();
@@ -371,8 +365,8 @@ pub fn target_is_arm64(options: &Options, host: &string::String) -> bool {
     return contains_ascii_fold(triple, "aarch64") or contains_ascii_fold(triple, "arm64");
 }
 
-/// Reports whether the selected native target is a 64-bit x86 machine, the
-/// Go `TargetIsX86_64`. An omitted triple names the host.
+/// Reports whether the selected native target is a 64-bit x86 machine. An
+/// omitted triple names the host.
 pub fn target_is_x86_64(options: &Options, host: &string::String) -> bool {
     if options.triple.len() == 0 {
         let host_bytes = host.as_bytes();
@@ -401,12 +395,11 @@ fn starts_with_ascii_fold(text: []u8, prefix: []u8) -> bool {
     return true;
 }
 
-/// Returns the native target a triple names, the Go `TargetFor`. An omitted
-/// triple names the host; explicit Apple Darwin, macOS and iOS triples name
-/// Darwin, Linux triples name Linux, MinGW triples name Windows, and a triple
-/// for any other OS is refused because the runtime is not built for it. iOS
-/// is matched with its separator because the OS field is the only place it is
-/// spelled.
+/// Returns the native target a triple names. An omitted triple names the host;
+/// explicit Apple Darwin, macOS and iOS triples name Darwin, Linux triples
+/// name Linux, MinGW triples name Windows, and a triple for any other OS is
+/// refused because the runtime is not built for it. iOS is matched with its
+/// separator because the OS field is the only place it is spelled.
 ///
 /// Windows is the GNU environment only: the executable is linked by
 /// llvm-mingw, which brings its own C runtime and import libraries and runs
@@ -488,7 +481,7 @@ fn ascii_lower(byte: u8) -> u8 {
 }
 
 /// Maps one `uname -sm` answer, or the Windows machine name spelled the same
-/// way, to the Go `GOOS-GOARCH` spelling.
+/// way, to the `<os>-<arch>` spelling.
 fn append_host_of(allocator: Allocator, answer: []u8, out: &var string::String) -> !bool {
     if mem::equal_bytes(answer, "Darwin arm64") {
         try out.append_bytes(allocator, "darwin-arm64");
@@ -517,11 +510,11 @@ fn append_host_of(allocator: Allocator, answer: []u8, out: &var string::String) 
     return false;
 }
 
-/// Returns the clang executable a build runs, the Go `driver`. A Windows
-/// target runs llvm-mingw's driver for its machine,
-/// `x86_64-w64-mingw32-clang`: the name is what selects the target's headers,
-/// C runtime and linker, and it is the same name on a Windows host and on any
-/// other. Every other target runs the linker by the name it was given.
+/// Returns the clang executable a build runs. A Windows target runs
+/// llvm-mingw's driver for its machine, `x86_64-w64-mingw32-clang`: the name
+/// is what selects the target's headers, C runtime and linker, and it is the
+/// same name on a Windows host and on any other. Every other target runs the
+/// linker by the name it was given.
 fn driver(allocator: Allocator, options: &Options, arm64: bool) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
@@ -541,11 +534,10 @@ fn driver(allocator: Allocator, options: &Options, arm64: bool) -> !string::Stri
     return move out;
 }
 
-/// Spells what changes the runtime object but is not in its source, the Go
-/// `runtimeCacheTarget` over `toolchainKey`, `/`-joined in the same order,
-/// then the clang's version line: the path and flags stay the same across an
-/// upgrade, and an object the old clang made must not be linked into what
-/// the new one builds.
+/// Spells what changes the runtime object but is not in its source: the
+/// toolchain key, then the clang's version line, `/`-joined. The path and
+/// flags stay the same across an upgrade, and an object the old clang made
+/// must not be linked into what the new one builds.
 fn runtime_cache_target(allocator: Allocator,
     options: &Options,
     host: &string::String,
@@ -558,10 +550,10 @@ fn runtime_cache_target(allocator: Allocator,
     return out.append_bytes(allocator, version);
 }
 
-/// Spells what a unit's object is made of besides the unit's text, the Go
-/// `objectCacheTarget`: the toolchain, and which clang it is. An object is
-/// linked with objects other builds made, perhaps by another clang, so the
-/// version keys it as it keys the runtime object.
+/// Spells what a unit's object is made of besides the unit's text: the
+/// toolchain, and which clang it is. An object is linked with objects other
+/// builds made, perhaps by another clang, so the version keys it as it keys
+/// the runtime object.
 fn object_cache_target(allocator: Allocator,
     options: &Options,
     host: &string::String,
@@ -574,8 +566,8 @@ fn object_cache_target(allocator: Allocator,
     return out.append_bytes(allocator, version);
 }
 
-/// Is the kind a compiled unit is cached as, the Go `unitArtifactName`: an
-/// object, or for a ThinLTO build the bitcode the link makes the code from.
+/// Is the kind a compiled unit is cached as: an object, or for a ThinLTO build
+/// the bitcode the link makes the code from.
 fn unit_artifact_name(options: &Options) -> []u8 {
     if options.thinlto {
         return "native-bc";
@@ -583,12 +575,12 @@ fn unit_artifact_name(options: &Options) -> []u8 {
     return "native-obj";
 }
 
-/// Spells what the executable is made of besides the IR, the Go
-/// `executableCacheTarget`: the toolchain key and the hash of the runtime
-/// source it is linked with, so a program built against an older runtime is
-/// a different artifact rather than the same one. The clang's version is not
-/// part of it: an executable already made was linked whole by one clang, and
-/// asking which one would cost every run the toolchain it does not need.
+/// Spells what the executable is made of besides the IR: the toolchain key and
+/// the hash of the runtime source it is linked with, so a program built
+/// against an older runtime is a different artifact rather than the same one.
+/// The clang's version is not part of it: an executable already made was
+/// linked whole by one clang, and asking which one would cost every run the
+/// toolchain it does not need.
 fn executable_cache_target(allocator: Allocator,
     cache: &buildcache::Cache,
     options: &Options,
@@ -602,9 +594,9 @@ fn executable_cache_target(allocator: Allocator,
     return cache.append_content_hash(allocator, runtime_source, out);
 }
 
-/// Appends the Go `toolchainKey` parts, `/`-joined: the driver, the host
-/// it builds on, the flags it is asked to honour, and the SDK Apple's clang
-/// reads from SDKROOT.
+/// Appends the toolchain key parts, `/`-joined: the driver, the host it builds
+/// on, the flags it is asked to honour, and the SDK Apple's clang reads from
+/// SDKROOT.
 fn append_toolchain_key(allocator: Allocator,
     options: &Options,
     host: &string::String,
@@ -646,9 +638,8 @@ fn append_toolchain_key(allocator: Allocator,
 }
 
 /// Removes the transient inputs a build wrote into one claimed temporary
-/// directory and the directory itself, the Go `defer os.RemoveAll` of
-/// `link` and `compileRuntime`. Files a failed
-/// build did not reach are skipped.
+/// directory and the directory itself. Files a failed build did not reach are
+/// skipped.
 pub fn clean_build_dir(io: Io, allocator: Allocator, dir: []u8) -> !void {
     try remove_temp_file(io, allocator, dir, "runtime.c");
     try remove_temp_file(io, allocator, dir, "clang.args");
@@ -683,9 +674,9 @@ fn remove_temp_unit_file(io: Io, allocator: Allocator, dir: []u8, index: i64, ex
     return;
 }
 
-/// Compiles the units and links them with the runtime into output, the Go
-/// `link`. The IR is transient because the executable is what is worth
-/// keeping: it is the thing that is expensive to make and cheap to name.
+/// Compiles the units and links them with the runtime into output. The IR is
+/// transient because the executable is what is worth keeping: it is the thing
+/// that is expensive to make and cheap to name.
 fn link(
     io: Io,
     allocator: Allocator,
@@ -726,15 +717,15 @@ fn link(
     return null;
 }
 
-/// Writes what the link reads the program from, in unit order, the Go
-/// `unitInputs`. An optimized build hands clang its one module as text, to
-/// compile and link in one step. A debug build compiles each unit to an
-/// object, which the cache keeps: the next build that emits the same text
-/// for a unit links the object it already has. The objects are read from the
-/// cache by `build` as well, since what that command writes where the user
-/// asked is the executable, not the objects it is linked from. A ThinLTO
-/// build compiles its units the way a debug build does, but to bitcode, and
-/// keyed apart from the objects: the code is made when the units are linked.
+/// Writes what the link reads the program from, in unit order. An optimized
+/// build hands clang its one module as text, to compile and link in one step.
+/// A debug build compiles each unit to an object, which the cache keeps: the
+/// next build that emits the same text for a unit links the object it already
+/// has. The objects are read from the cache by `build` as well, since what
+/// that command writes where the user asked is the executable, not the objects
+/// it is linked from. A ThinLTO build compiles its units the way a debug build
+/// does, but to bitcode, and keyed apart from the objects: the code is made
+/// when the units are linked.
 fn unit_inputs(
     io: Io,
     allocator: Allocator,
@@ -855,9 +846,9 @@ fn unit_inputs(
     return null;
 }
 
-/// Appends the SHA-256 of each unit's text, in unit order and a line each,
-/// the Go `unitDigests` joined: the content the executable is keyed by. An
-/// object is keyed by its own unit's digest.
+/// Appends the SHA-256 of each unit's text, in unit order and a line each: the
+/// content the executable is keyed by. An object is keyed by its own unit's
+/// digest.
 fn append_unit_digests(
     allocator: Allocator,
     cache: &buildcache::Cache,
@@ -904,7 +895,7 @@ fn unit_file(allocator: Allocator, dir: []u8, index: i64, extension: []u8) -> !s
 }
 
 /// Creates the index-th unit's directory and returns where its text is
-/// written, the Go `unitPath`.
+/// written.
 fn unit_text_path(io: Io, allocator: Allocator, dir: []u8, index: i64, options: &Options) -> !string::String {
     let unit = try unit_dir(allocator, dir, index);
     defer unit.deinit(allocator);
@@ -922,8 +913,8 @@ fn unit_extension(options: &Options) -> []u8 {
     return ".ll";
 }
 
-/// Removes the unit texts a link wrote, the part of the Go `defer
-/// os.RemoveAll` clean_build_dir does not know the names of.
+/// Removes the unit texts a link wrote, which clean_build_dir does not know
+/// the names of.
 fn remove_unit_files(io: Io, allocator: Allocator, dir: []u8, count: i64) -> !void {
     var index = 0;
     while index < count {
@@ -942,9 +933,8 @@ fn remove_unit_files(io: Io, allocator: Allocator, dir: []u8, count: i64) -> !vo
     return;
 }
 
-/// Is one unit clang compiles to an object, the Go `compileUnit`: the
-/// toolchain, the `@file` naming the arguments it reads, and the code it
-/// exited with once it has run.
+/// Is one unit clang compiles to an object: the toolchain, the `@file` naming
+/// the arguments it reads, and the code it exited with once it has run.
 struct UnitJob {
     toolchain: string::String,
     response: string::String,
@@ -1031,17 +1021,16 @@ fn compile_units(state: &var UnitJobs, part: &var []i64, index: i64) -> CompileF
     return;
 }
 
-/// Writes the module as the linker is to compile it, the Go
-/// `moduleForLinker`: with Apple's stack probe when Apple's clang, named by
-/// its version line, links a Darwin target, and with none asked for on
-/// Windows. Every module is emitted asking for LLVM's own inline probe, with
-/// which a frame wider than a page touches each page it crosses; Apple's
-/// clang calls the system __chkstk_darwin helper instead, and before Apple
-/// clang 17 takes any other probe name for a function to call. Windows probes
-/// every frame wider than a page itself, through __chkstk, and there LLVM
-/// reads the probe attribute as the name of a function to call instead. The
-/// choice waits until the link so that the module, and the executable cache
-/// keyed by it, is the same whichever clang links it.
+/// Writes the module as the linker is to compile it: with Apple's stack probe
+/// when Apple's clang, named by its version line, links a Darwin target, and
+/// with none asked for on Windows. Every module is emitted asking for LLVM's
+/// own inline probe, with which a frame wider than a page touches each page it
+/// crosses; Apple's clang calls the system __chkstk_darwin helper instead, and
+/// before Apple clang 17 takes any other probe name for a function to call.
+/// Windows probes every frame wider than a page itself, through __chkstk, and
+/// there LLVM reads the probe attribute as the name of a function to call
+/// instead. The choice waits until the link so that the module, and the
+/// executable cache keyed by it, is the same whichever clang links it.
 fn module_for_linker(
     allocator: Allocator,
     target: stdtarget::Target,
@@ -1072,12 +1061,12 @@ fn module_for_linker(
     return out.append_bytes(allocator, text[at + mem::len(inline_probe)..size]);
 }
 
-/// Writes the line the linker names itself with, the Go `linkerVersion`: the
-/// first of its `--version` output, `Apple clang version 17.0.0
-/// (clang-1700.0.13.3)` or `clang version 21.1.8`, with the spaces, tabs and
-/// carriage return `strings.Trim` takes off either end. It is what tells one
-/// clang from another where the path and flags are the same: the runtime
-/// object is keyed by it, and the Darwin stack probe is chosen by it.
+/// Writes the line the linker names itself with: the first of its `--version`
+/// output, `Apple clang version 17.0.0 (clang-1700.0.13.3)` or `clang version
+/// 21.1.8`, with spaces, tabs and carriage returns taken off either end. It is
+/// what tells one clang from another where the path and flags are the same:
+/// the runtime object is keyed by it, and the Darwin stack probe is chosen by
+/// it.
 fn linker_version(
     allocator: Allocator,
     options: &Options,
@@ -1114,21 +1103,20 @@ fn linker_version(
     return null;
 }
 
-/// Reports whether a version line's end byte is one `strings.Trim` takes
-/// off: a space, a tab or a carriage return.
+/// Reports whether a version line's end byte is one linker_version takes off:
+/// a space, a tab or a carriage return.
 fn is_trimmed(byte: u8) -> bool {
     return byte == cast<u8>(32) or byte == cast<u8>(9) or byte == cast<u8>(13);
 }
 
 /// Rejects a ThinLTO build the toolchain cannot link before anything is
-/// compiled for it, the Go `ValidateThinLTO`. ThinLTO optimizes an optimized
-/// build across its units, so it needs --opt, and the code is made when an
-/// executable is linked, so it builds one. The linker reads the units as
-/// bitcode: Apple's ld64 does through the libLTO beside the clang that
-/// drives it, and on Linux lld does, where the system's GNU ld does not, so
-/// a Linux build asks for lld and refuses to start without it rather than
-/// fail in the link. A Windows build is refused: its llvm-mingw linker has
-/// not been tried.
+/// compiled for it. ThinLTO optimizes an optimized build across its units, so
+/// it needs --opt, and the code is made when an executable is linked, so it
+/// builds one. The linker reads the units as bitcode: Apple's ld64 does
+/// through the libLTO beside the clang that drives it, and on Linux lld does,
+/// where the system's GNU ld does not, so a Linux build asks for lld and
+/// refuses to start without it rather than fail in the link. A Windows build
+/// is refused: its llvm-mingw linker has not been tried.
 pub fn validate_thinlto(allocator: Allocator, options: &Options) -> !?diagnostic::Diagnostic {
     if !options.thinlto {
         return null;
@@ -1166,9 +1154,8 @@ pub fn validate_thinlto(allocator: Allocator, options: &Options) -> !?diagnostic
     return try fail_parts(allocator, "native error: --thinlto is not supported for ", os, " yet");
 }
 
-/// Appends what a ThinLTO build compiles each unit with on top of
-/// clang_flags, the Go `thinLTOCompileFlags`: bitcode carrying the summary
-/// the link optimizes the units together by.
+/// Appends what a ThinLTO build compiles each unit with on top of clang_flags:
+/// bitcode carrying the summary the link optimizes the units together by.
 fn thinlto_compile_flags(
     allocator: Allocator,
     options: &Options,
@@ -1180,15 +1167,15 @@ fn thinlto_compile_flags(
     return;
 }
 
-/// Appends what a ThinLTO link is asked for besides the optimization level,
-/// the Go `thinLTOCodegenFlags`: the linker on Linux, and the code generator
-/// options clang_optimization_flags gives a compile. ThinLTO makes the code
-/// in the link, where the flags a unit was compiled with no longer reach, so
-/// each is handed to the linker's LLVM by its own name. They change the
-/// executable, so they key it with the other toolchain flags. The arm64
-/// literal pool is not among them: ld64 makes the code for the
-/// architecture's baseline processor, which already loads float constants
-/// from the pool, while `-mattr` handed to the linker reaches nothing.
+/// Appends what a ThinLTO link is asked for besides the optimization level:
+/// the linker on Linux, and the code generator options
+/// clang_optimization_flags gives a compile. ThinLTO makes the code in the
+/// link, where the flags a unit was compiled with no longer reach, so each is
+/// handed to the linker's LLVM by its own name. They change the executable, so
+/// they key it with the other toolchain flags. The arm64 literal pool is not
+/// among them: ld64 makes the code for the architecture's baseline processor,
+/// which already loads float constants from the pool, while `-mattr` handed to
+/// the linker reaches nothing.
 fn thinlto_codegen_flags(
     allocator: Allocator,
     options: &Options,
@@ -1210,13 +1197,12 @@ fn thinlto_codegen_flags(
     return;
 }
 
-/// Appends what a ThinLTO link adds to the command, the Go
-/// `thinLTOLinkFlags`: the code generator flags, then where the linker
-/// caches what it made of each unit, the `thinlto` directory under the
-/// cache. It is under the cache directory so that a build with an empty
-/// cache, the bootstrap's second stage say, also starts with no code the
-/// linker made before; it is not part of what the executable is keyed by
-/// because it does not change what is made.
+/// Appends what a ThinLTO link adds to the command: the code generator flags,
+/// then where the linker caches what it made of each unit, the `thinlto`
+/// directory under the cache. It is under the cache directory so that a build
+/// with an empty cache, the bootstrap's second stage say, also starts with no
+/// code the linker made before; it is not part of what the executable is keyed
+/// by because it does not change what is made.
 fn thinlto_link_flags(
     allocator: Allocator,
     options: &Options,
@@ -1242,8 +1228,7 @@ fn thinlto_link_flags(
     return append_copy(allocator, out, flag_bytes);
 }
 
-/// Rejects native build modes that do not have a concrete backend yet, the
-/// Go `validateOptions`.
+/// Rejects native build modes that do not have a concrete backend yet.
 fn validate_options(
     allocator: Allocator,
     options: &Options
@@ -1293,9 +1278,9 @@ fn validate_options(
     return null;
 }
 
-/// Writes the runtime C source a program is linked with, the Go
-/// `runtimeSourceFor`: the runtime is part of the compiler, not part of the
-/// program, and the numbers it names failures with are read from std.
+/// Writes the runtime C source a program is linked with: the runtime is part
+/// of the compiler, not part of the program, and the numbers it names failures
+/// with are read from std.
 fn runtime_source_for(
     allocator: Allocator,
     sets: &map::Map<[]u8, map::Map<[]u8, i64>>,
@@ -1309,12 +1294,11 @@ fn runtime_source_for(
     return null;
 }
 
-/// Returns the compiled runtime to link, compiling it only when nothing
-/// has it yet, the Go `runtimeObject`: the object lives in the shared
-/// build cache under the toolchain key and the clang's version, so a
-/// runtime compiled by either CLI serves both. On a miss the source is
-/// compiled into the cache's scratch path through a claimed temporary
-/// directory.
+/// Returns the compiled runtime to link, compiling it only when nothing has it
+/// yet: the object lives in the shared build cache under the toolchain key and
+/// the clang's version, so a runtime compiled by either CLI serves both. On a
+/// miss the source is compiled into the cache's scratch path through a claimed
+/// temporary directory.
 fn runtime_object(
     io: Io,
     allocator: Allocator,
@@ -1365,8 +1349,7 @@ fn runtime_object(
     }
 }
 
-/// Compiles the runtime source into one object file, the Go
-/// `compileRuntime`.
+/// Compiles the runtime source into one object file.
 fn compile_runtime(
     io: Io,
     allocator: Allocator,
@@ -1393,14 +1376,13 @@ fn compile_runtime(
     return spawn_clang(io, allocator, dir, &command);
 }
 
-/// Runs one toolchain command line, the exec of `runClang` and
-/// `compileRuntime`. std::process::spawn_wait8 carries eight arguments at
-/// most, and an optimized build hands clang more than that
-/// (`clang [-target T] -O3 -falign-loops=32 -Xclang -mllvm -Xclang
-/// -enable-tail-merge=false <a> <b> -o <output>`), so the arguments after the
-/// toolchain go to a response file in the build's temporary directory, one
-/// quoted word each, and clang reads them from `@file` exactly as the command
-/// records them.
+/// Runs one toolchain command line for run_clang and compile_runtime.
+/// std::process::spawn_wait8 carries eight arguments at most, and an optimized
+/// build hands clang more than that (`clang [-target T] -O3 -falign-loops=32
+/// -Xclang -mllvm -Xclang -enable-tail-merge=false <a> <b> -o <output>`), so
+/// the arguments after the toolchain go to a response file in the build's
+/// temporary directory, one quoted word each, and clang reads them from
+/// `@file` exactly as the command records them.
 fn spawn_clang(
     io: Io,
     allocator: Allocator,
@@ -1469,10 +1451,9 @@ fn append_quoted_word(allocator: Allocator, out: &var string::String, bytes: []u
     return out.append_byte(allocator, cast<u8>(39));
 }
 
-/// Names the sets the runtime reports its failures with, the Go
-/// `runtimeErrorSets` walk: it refers to all of them whatever a program
-/// uses, so a build that does not carry them would fail in the C compiler
-/// with an undeclared name.
+/// Names the sets the runtime reports its failures with: it refers to all of
+/// them whatever a program uses, so a build that does not carry them would
+/// fail in the C compiler with an undeclared name.
 fn require_runtime_error_sets(
     allocator: Allocator,
     sets: &map::Map<[]u8, map::Map<[]u8, i64>>
@@ -1512,9 +1493,9 @@ fn require_error_set(
     return try fail_parts(allocator, "native error: error set `", name, "` is missing");
 }
 
-/// Writes the number each error set member lowers to, the Go
-/// `errorSetConstants`, so the runtime names a failure the same way the
-/// program that reads it does: set names and member names in byte order.
+/// Writes the number each error set member lowers to, so the runtime names a
+/// failure the same way the program that reads it does: set names and member
+/// names in byte order.
 fn error_set_constants(
     allocator: Allocator,
     sets: &map::Map<[]u8, map::Map<[]u8, i64>>,
@@ -1553,8 +1534,7 @@ fn error_set_constants(
     return;
 }
 
-/// Collects the keys of one map in byte lexical order, the Go
-/// `sort.Strings` over collected key strings.
+/// Collects the keys of one map in byte lexical order.
 fn sorted_keys<V>(
     allocator: Allocator,
     source: &map::Map<[]u8, V>,
@@ -1569,9 +1549,9 @@ fn sorted_keys<V>(
     return sort::strings(out);
 }
 
-/// Spells one member as a C identifier, the Go `errorConstantName`:
-/// `::` and `.` in the set name become `_`, and everything is uppercased,
-/// written straight into the constants text.
+/// Spells one member as a C identifier: `::` and `.` in the set name become
+/// `_`, and everything is uppercased, written straight into the constants
+/// text.
 fn append_error_constant(allocator: Allocator, set: []u8, member: []u8, out: &var string::String) -> !void {
     try out.append_bytes(allocator, "KIZU_ERR_");
     var index = 0;
@@ -1609,8 +1589,7 @@ fn append_upper_byte(allocator: Allocator, out: &var string::String, byte: u8) -
     return out.append_byte(allocator, byte);
 }
 
-/// Separates the words in a member name for the C spelling, the Go
-/// `camelToSnake`.
+/// Separates the words in a member name for the C spelling.
 fn camel_to_snake(allocator: Allocator, name: []u8) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
@@ -1626,13 +1605,13 @@ fn camel_to_snake(allocator: Allocator, name: []u8) -> !string::String {
     return move out;
 }
 
-/// Invokes the configured C/LLVM toolchain with explicit inputs, the Go
-/// `runClang`, and leaves the command it ran in command for the caller.
+/// Invokes the configured C/LLVM toolchain with explicit inputs, and leaves
+/// the command it ran in command for the caller.
 ///
 /// Linking a Windows executable, the MinGW driver adds `.exe` to a name that
-/// has no extension, so such an output is linked under that name and moved
-/// to the one asked for, the Go `linkedOutput`: the artifact is the file the
-/// caller named, and the cache's scratch file has no extension.
+/// has no extension, so such an output is linked under that name and moved to
+/// the one asked for: the artifact is the file the caller named, and the
+/// cache's scratch file has no extension.
 ///
 /// An object is the program and the runtime joined by a relocatable link. It
 /// resolves nothing outside itself, the C library included: the libraries
@@ -1641,8 +1620,8 @@ fn camel_to_snake(allocator: Allocator, name: []u8) -> !string::String {
 ///
 /// The module names no target triple and clang fills in the driver's,
 /// reporting that as overriding the module's empty one on every build, so
-/// `-Wno-override-module` turns the warning off, as the Go `runClang` says
-/// at length: the emitter writes no triple a real override could replace.
+/// `-Wno-override-module` turns the warning off: the emitter writes no triple
+/// a real override could replace.
 fn run_clang(
     io: Io,
     allocator: Allocator,
@@ -1694,14 +1673,14 @@ fn run_clang(
     return null;
 }
 
-/// Spells what the linker resolves foreign symbols from, the Go `linkFlags`:
-/// the search paths the manifest adds, then each library and framework the
-/// program's extern declarations named, then libm and libpthread, which the
-/// runtime needs whatever the program declares (a float intrinsic the target
-/// has no instruction for, and std::thread; on Darwin both are part of
-/// libSystem and the names are harmless), and on Windows Winsock for std::net
-/// and bcrypt for the random bytes std::crypto draws. The order is the
-/// linker's: a path must be known before the library looked for in it.
+/// Spells what the linker resolves foreign symbols from: the search paths the
+/// manifest adds, then each library and framework the program's extern
+/// declarations named, then libm and libpthread, which the runtime needs
+/// whatever the program declares (a float intrinsic the target has no
+/// instruction for, and std::thread; on Darwin both are part of libSystem and
+/// the names are harmless), and on Windows Winsock for std::net and bcrypt for
+/// the random bytes std::crypto draws. The order is the linker's: a path must
+/// be known before the library looked for in it.
 ///
 /// A Windows executable is linked static, so it needs only the DLLs every
 /// Windows has: winpthread, which the runtime's threads are, is otherwise a
@@ -1786,7 +1765,7 @@ fn append_prefixed(
     return;
 }
 
-/// Spells what the toolchain is asked to produce, the Go `clangFlags`.
+/// Spells what the toolchain is asked to produce.
 fn clang_flags(
     allocator: Allocator,
     options: &Options,
@@ -1801,9 +1780,9 @@ fn clang_flags(
     return clang_optimization_flags(allocator, options.opt, arm64, out);
 }
 
-/// Selects the native toolchain optimization level, the Go
-/// `clangOptimizationFlags`. `--opt` is asked for when the binary's own speed
-/// is what matters, so it asks for the most the toolchain offers.
+/// Selects the native toolchain optimization level. `--opt` is asked for when
+/// the binary's own speed is what matters, so it asks for the most the
+/// toolchain offers.
 ///
 /// It also keeps the code generator from merging identical instruction tails
 /// of blocks that jump to one successor. Arms of a dispatch loop that end in
@@ -1857,12 +1836,9 @@ fn append_copy(
     return;
 }
 
-/// Builds the failure one toolchain run reports, the Go
-/// `fmt.Errorf("native error: %s failed: %w\n%s", ...)`. The Go error
-/// carries the toolchain's combined output after the message line;
-/// std::process inherits the child's streams instead, so the line here is
-/// the message alone and the toolchain's own output has already reached
-/// stderr.
+/// Builds the failure one toolchain run reports. std::process inherits the
+/// child's streams, so the line here is the message alone and the toolchain's
+/// own output has already reached stderr.
 fn fail_linker(allocator: Allocator, linker: []u8, code: i64) -> !diagnostic::Diagnostic {
     var message = try string::from_bytes(allocator, "native error: ");
     defer message.deinit(allocator);
@@ -1873,8 +1849,7 @@ fn fail_linker(allocator: Allocator, linker: []u8, code: i64) -> !diagnostic::Di
     return diagnostic::from_text(allocator, diagnostic::Severity::Error, ast::zero_span(), text);
 }
 
-/// Builds one failure from up to three message parts, the Go inline
-/// `fmt.Errorf("native error: ...")`.
+/// Builds one failure from up to three message parts.
 fn fail_parts(allocator: Allocator, before: []u8, value: []u8, after: []u8) -> !diagnostic::Diagnostic {
     var message = try string::from_bytes(allocator, before);
     defer message.deinit(allocator);
@@ -1884,8 +1859,7 @@ fn fail_parts(allocator: Allocator, before: []u8, value: []u8, after: []u8) -> !
     return diagnostic::from_text(allocator, diagnostic::Severity::Error, ast::zero_span(), text);
 }
 
-/// Records the native optimization mode in artifact metadata, the Go
-/// `optimizationModeName`.
+/// Records the native optimization mode in artifact metadata.
 fn optimization_mode_name(options: &Options) -> []u8 {
     if options.thinlto {
         return "opt-thinlto";
@@ -1896,11 +1870,9 @@ fn optimization_mode_name(options: &Options) -> []u8 {
     return "debug";
 }
 
-/// Writes the explicit build configuration used for one artifact, the Go
-/// `Metadata` and `writeMetadata`: the same two-space indented JSON
-/// `encoding/json` renders, next to the output as
-/// `<output>.kizu-build.json`. The Go `Metadata` struct exists to carry
-/// json tags, so it maps to the field sequence the encoder writes here.
+/// Writes the explicit build configuration used for one artifact: two-space
+/// indented JSON, next to the output as `<output>.kizu-build.json`. The fields
+/// are written in a fixed order.
 fn write_metadata(
     io: Io,
     allocator: Allocator,
@@ -1942,7 +1914,7 @@ fn write_metadata(
 }
 
 /// Writes one list of strings as a metadata array field. An empty list is
-/// `null`, the way Go's encoder writes a slice nothing was appended to.
+/// written as `null`, not `[]`.
 fn write_list_field(
     encoder: &var json::Encoder,
     name: []u8,
