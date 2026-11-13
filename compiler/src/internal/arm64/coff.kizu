@@ -74,15 +74,8 @@ fn coff_number(index: i64) -> i64 {
 fn (self: &var Obj) resolve_coff(allocator: Allocator) -> !void {
     var section_index = 0;
     while section_index < self.sections.len() {
-        var relocs = array::new<Reloc>(allocator);
+        var relocs = try self.relocs_of(allocator, section_index);
         defer relocs.deinit(allocator);
-        if self.sections.at(section_index) |section| {
-            var held_index = 0;
-            while section.relocs.get(held_index) |held| {
-                held_index = held_index + 1;
-                try relocs.append(allocator, held);
-            }
-        }
         var kept = array::new<Reloc>(allocator);
         defer kept.deinit(allocator);
         var reloc_index = 0;
@@ -100,7 +93,7 @@ fn (self: &var Obj) resolve_coff(allocator: Allocator) -> !void {
                 if distance < 0 - 2147483648 or distance > 2147483647 {
                     try self.fail(allocator, "reference out of range", distance);
                 }
-                try self.patch(section_index, reloc.address, distance);
+                try self.patch(section_index, reloc.address, distance, 4);
                 continue;
             }
             var addend = reloc.addend;
@@ -120,29 +113,11 @@ fn (self: &var Obj) resolve_coff(allocator: Allocator) -> !void {
             if addend < 0 - 2147483648 or addend > 2147483647 {
                 try self.fail(allocator, "addend out of range", addend);
             }
-            try self.patch_value(section_index, reloc.address, addend, size);
+            try self.patch(section_index, reloc.address, addend, size);
             try kept.append(allocator, reloc);
         }
-        if self.sections.at_mut(section_index) |section| {
-            section.relocs.clear(allocator);
-            var kept_index = 0;
-            while kept.get(kept_index) |reloc| {
-                kept_index = kept_index + 1;
-                try section.relocs.append(allocator, reloc);
-            }
-        }
+        try self.set_relocs(allocator, section_index, &kept);
         section_index = section_index + 1;
-    }
-    return;
-}
-
-/// Overwrites size little-endian bytes at an offset of a section.
-fn (self: &var Obj) patch_value(section_index: i64, at: i64, value: i64, size: i64) -> !void {
-    if self.sections.at_mut(section_index) |section| {
-        let writable = section.bytes.as_mut_bytes();
-        for 0..size |byte| {
-            writable[at + byte] = cast<u8>((value >> (8 * byte)) & 255);
-        }
     }
     return;
 }
@@ -190,11 +165,7 @@ fn put_short_name(allocator: Allocator, out: &var string::String, name: []u8, of
         try put(allocator, out, 0, 4);
         return put(allocator, out, offset, 4);
     }
-    try out.append_bytes(allocator, name);
-    for mem::len(name)..8 |_pad| {
-        try out.append_byte(allocator, cast<u8>(0));
-    }
-    return;
+    return put_field(allocator, out, name, 8);
 }
 
 /// Writes a section header.

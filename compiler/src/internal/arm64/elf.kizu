@@ -4,16 +4,16 @@ import std::mem;
 import std::string;
 
 // The ELF object of Linux arm64 or x86-64 (ELF64 AArch64 or x86-64,
-// ET_REL), written from the Obj the printer filled (obj.kizu). It lays the object out the way the
-// system assembler lays out the same lines: among the section headers the
-// string table first, then the sections in the order they are first
-// entered, each followed by its relocations, and the symbol table last;
-// the symbols in the order they are first named, the locals (with the
-// mapping symbols `$x` / `$d` and the section symbols relocations name)
-// before the globals; relocations in the order of their places; one string
-// table for the names of both, merged by common tail. In the file the
-// section contents come first, then the symbols, the relocations, the
-// strings and the section headers.
+// ET_REL), written from the Obj the printer filled (obj.kizu). It lays the
+// object out the way the system assembler lays out the same lines: among
+// the section headers the string table first, then the sections in the
+// order they are first entered, each followed by its relocations, and the
+// symbol table last; the symbols in the order they are first named, the
+// locals (with the mapping symbols `$x` / `$d` and the section symbols
+// relocations name) before the globals; relocations in the order of their
+// places; one string table for the names of both, merged by common tail.
+// In the file the section contents come first, then the symbols, the
+// relocations, the strings and the section headers.
 
 // The ELF relocation of each relocation kind the printer records.
 fn elf_reloc_type(kind: i64, x86: bool) -> i64 {
@@ -156,15 +156,8 @@ fn (self: &var Obj) resolve_elf(allocator: Allocator) -> !void {
     }
     section_index = 0;
     while section_index < starts.len() {
-        var relocs = array::new<Reloc>(allocator);
+        var relocs = try self.relocs_of(allocator, section_index);
         defer relocs.deinit(allocator);
-        if self.sections.at(section_index) |section| {
-            var held_index = 0;
-            while section.relocs.get(held_index) |held| {
-                held_index = held_index + 1;
-                try relocs.append(allocator, held);
-            }
-        }
         var kept = array::new<Reloc>(allocator);
         defer kept.deinit(allocator);
         var reloc_index = 0;
@@ -178,7 +171,7 @@ fn (self: &var Obj) resolve_elf(allocator: Allocator) -> !void {
                 if distance < 0 - (1 << 25) or distance >= (1 << 25) {
                     try self.fail(allocator, "call out of range", distance);
                 }
-                try self.patch(section_index, reloc.address, 0x94000000 | (distance & 0x3FFFFFF));
+                try self.patch(section_index, reloc.address, 0x94000000 | (distance & 0x3FFFFFF), 4);
                 continue;
             }
             let relative = reloc.kind == reloc_x86_pc32() or reloc.kind == reloc_x86_plt32();
@@ -187,7 +180,7 @@ fn (self: &var Obj) resolve_elf(allocator: Allocator) -> !void {
                 if distance < 0 - 2147483648 or distance > 2147483647 {
                     try self.fail(allocator, "reference out of range", distance);
                 }
-                try self.patch(section_index, reloc.address, distance);
+                try self.patch(section_index, reloc.address, distance, 4);
                 continue;
             }
             let got = reloc.kind == reloc_got_page21() or reloc.kind == reloc_got_pageoff12() or reloc.kind == reloc_x86_gotpcrelx();
@@ -208,14 +201,7 @@ fn (self: &var Obj) resolve_elf(allocator: Allocator) -> !void {
             }
             try kept.append(allocator, reloc);
         }
-        if self.sections.at_mut(section_index) |section| {
-            section.relocs.clear(allocator);
-            var kept_index = 0;
-            while kept.get(kept_index) |reloc| {
-                kept_index = kept_index + 1;
-                try section.relocs.append(allocator, reloc);
-            }
-        }
+        try self.set_relocs(allocator, section_index, &kept);
         section_index = section_index + 1;
     }
     return;
@@ -376,20 +362,9 @@ pub fn (self: &var Obj) write_elf(allocator: Allocator, syms: &ir::NameTable, ou
     try put(allocator, out, headers, 2);
     try put(allocator, out, 1, 2);
     // The section contents, each at its offset.
-    section_index = 0;
-    while self.sections.at(section_index) |section| {
-        let start = section_at.get_or_panic(section_index);
-        while out.len() < start {
-            try out.append_byte(allocator, cast<u8>(0));
-        }
-        let contents = section.bytes.as_bytes();
-        try out.append_bytes(allocator, contents);
-        section_index = section_index + 1;
-    }
+    try self.put_contents(allocator, out, 0, &section_at);
     // Elf64_Sym entries
-    while out.len() < symtab_at {
-        try out.append_byte(allocator, cast<u8>(0));
-    }
+    try pad_to(allocator, out, symtab_at);
     try put(allocator, out, 0, 24);
     position = 0;
     var named_position = section_names;
@@ -426,9 +401,7 @@ pub fn (self: &var Obj) write_elf(allocator: Allocator, syms: &ir::NameTable, ou
     while self.sections.at(section_index) |section| {
         let start = rela_at.get_or_panic(section_index);
         section_index = section_index + 1;
-        while out.len() < start {
-            try out.append_byte(allocator, cast<u8>(0));
-        }
+        try pad_to(allocator, out, start);
         var reloc_index = 0;
         while section.relocs.get(reloc_index) |reloc| {
             reloc_index = reloc_index + 1;
@@ -440,9 +413,7 @@ pub fn (self: &var Obj) write_elf(allocator: Allocator, syms: &ir::NameTable, ou
         }
     }
     try out.append_string(allocator, &strings);
-    while out.len() < headers_at {
-        try out.append_byte(allocator, cast<u8>(0));
-    }
+    try pad_to(allocator, out, headers_at);
     // Elf64_Shdr entries
     try put(allocator, out, 0, 64);
     // SHT_STRTAB
