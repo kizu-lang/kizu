@@ -1,24 +1,26 @@
 # 自前 native backend(direct)の本流採用(設計)
 
 Kizu IR から machine code を直接エンコードし、object file(Mach-O / ELF / COFF)を
-compiler 自身が書く native backend(以下 direct)を main に入れるかと、入れるなら
-どの範囲・どの順で入れるかを決める文書です。決まった部分は実装と同時に `SPEC.md` /
-`docs/architecture.md` / 該当 ADR へ移し、この文書は役目を終えたら消します。
+compiler 自身が書く native backend(以下 direct)を main に入れる範囲と順序を記録する
+文書です。§8 の判断(D1〜D10)は決定済みです。決まった部分は実装 PR で `SPEC.md` /
+`docs/architecture.md` へ移し(ADR は書かない)、この文書は役目を終えたら消します。
 
 direct は main とは別の統合ブランチで実装と検証を済ませています(main 取り込み済み、
 main に対して 89 commit 先行、compiler/ を中心に +24,863 / −268)。この PR は docs だけで、
-compiler/ は変えません。§8 の「決めること」が決まってから実装 PR を出します。
+compiler/・CI・SPEC は変えません。それらの変更は実装 PR 1 本(§7)の範囲です。
 
 ## 0. 要約
 
-| 項目 | 案 |
+| 項目 | 決定 |
 | --- | --- |
 | 対象 target | darwin-arm64、linux-amd64、windows-amd64(実機で実行検証のある 3 本) |
-| 対象外 | linux-arm64(ELF 書き出しは linux-amd64 と共用で残る)、darwin-amd64(保留、direct を作らない)、windows-arm64(保留) |
-| `kizu build` / `kizu run` | 既定は LLVM のまま。`--backend direct` で direct |
-| `kizu test` | 既定を direct。`--backend llvm` で opt-out。direct の無い target では LLVM |
+| 対象外 | linux-arm64(`--backend direct` では受けるが対象外。生成系は darwin-arm64 と共用)、darwin-amd64(保留、direct を作らない)、windows-arm64(保留) |
+| `kizu build` / `kizu run` / `kizu test` | 対象 target では既定を direct(初回から S2)。`--backend llvm` で LLVM。direct の無い target では LLVM |
 | `--backend asm` | 全 triple で明示エラー(assembly text の経路は削除済み) |
-| CI | `difftest-direct` job を test job と並列に追加(wall 時間の増加 約 0 分) |
+| bootstrap | LLVM のまま(S3 は今回の範囲外) |
+| CI | `difftest-direct` job(ubuntu-latest のみ)を test job と並列に追加。必須チェックにしない。arm・windows のランナーは使わない |
+| SPEC | §5 を書き換え、NaN ビット列を実装定義と書く。ADR は書かない |
+| 実装 PR | 分割せず 1 本 |
 | 品質の担保 | 差分検証・バイト比較・ベンチ・bootstrap の数値(§5) |
 
 ## 1. 構成
@@ -37,6 +39,9 @@ Kizu IR (--opt なら ir::optimize 済み)
 - 命令の byte 列は arch ごとに 1 つのエンコーダが書き、形式で変わるのは書き出し層だけ
 - 未対応の形は `arm64 error:` / `amd64 error:` で止まる。LLVM への暗黙の切り替えはしない
 - assembly text の印字層は削除済み。direct は `.s` を経由しない
+- ループのベクトル化は IR 命令と CFG の形を認識して行う。原理 11 が禁じるのはソースの形
+  ごとの payload 型・関数名分岐・形状 template で、IR の形の認識は原理 11 の対象外とする
+  (D4)。関数名やソースの書き方で分岐する認識は入れない
 
 ## 2. 対象 target
 
@@ -45,48 +50,58 @@ Kizu IR (--opt なら ir::optimize 済み)
 | darwin-arm64 | 対象 | Mach-O |
 | linux-amd64 | 対象 | ELF x86-64 |
 | windows-amd64 | 対象 | COFF |
-| linux-arm64 | 対象外。実装と検証(difftest 261/0/0、`clang -c` とのバイト一致)はある | ELF AArch64(ELF 層は linux-amd64 と共用) |
-| darwin-amd64 | 保留。direct を作らない。`kizu test` は LLVM | ― |
+| linux-arm64 | 対象外。`--backend direct` では受ける。実装と検証(difftest 261/0/0、`clang -c` とのバイト一致)はある | ELF AArch64(ELF 層は linux-amd64 と共用) |
+| darwin-amd64 | 保留。direct を作らない。LLVM | ― |
 | windows-arm64 | 保留 | ― |
 
-linux-arm64 を対象外にすると、`--backend direct` がそれを受けるか拒否するかと、
-CI1 の `ubuntu-24.04-arm` ランナーを残すかが決まっていない(§8 D2)。
+linux-arm64 は `--backend direct` で受けたまま、対象外と明記する(D2)。命令選択・
+エンコーダは darwin-arm64 と、ELF 層は linux-amd64 と共用なので、生成系の検証は
+その 2 target で続く。既定は LLVM のままで、CI でも常時は回さない。linux-arm64 が
+必要になったら、Mac 上の一時的な VM / コンテナで実装・検証する(常駐の環境は置かない)。
+その時期と、既定を direct にするかは今回の範囲外で後日判断する。
 
 ## 3. CLI
 
 | 入力 | 振る舞い |
 | --- | --- |
-| `kizu build` / `kizu run`(フラグなし) | LLVM |
-| `kizu build --backend direct` | 対象 target なら direct。他は `error: --backend direct needs ... target` |
-| `kizu test`(フラグなし) | 対象 target なら direct、他は LLVM |
-| `kizu test --backend llvm` | LLVM(`llvm` を受けるのは `test` だけ) |
-| `--backend asm`(build / test、全 triple) | exit 1、出力なし、`error: --backend asm (assembly text) was removed; ...` |
+| `kizu build` / `kizu run` / `kizu test`(フラグなし) | 対象 target なら direct、他は LLVM |
+| `--backend direct` | 対象 target と linux-arm64 なら direct。他は `error: --backend direct needs ... target` |
+| `--backend llvm` | LLVM(build / run / test とも受ける) |
+| `--backend asm`(全 triple) | exit 1、出力なし、`error: --backend asm (assembly text) was removed; ...` |
 
-`kizu test` の LLVM への切り替えは target で決まり、同じ target では常に同じ backend に
-なる。ただし原理 9(経路は 1 本、hidden fallback を入れない)と SPEC §5 の
-「native code は LLVM IR backend が生成します」とは文言上ぶつかる(§8 D3)。
+- `--backend` は `kizu help`(usage)に載せる(D10)。今も指定はでき、載っていないのは
+  usage 表示だけ
+- backend は target で決まり、同じ target では常に同じ backend になる。direct の無い
+  target で LLVM を使うのは fallback ではなく target ごとの選択(wasm が別の生成系を
+  持つのと同じ)。direct が未対応の形で止まっても LLVM へは切り替えない(原理 9)
+- 実装 PR で SPEC §5 の「native code は LLVM IR backend が生成します」を、backend は
+  target ごとに決まる(対象 target は direct、他は LLVM)という記述に書き換える(D3)。
+  ADR は書かない
 
 ## 4. CI
 
-統合ブランチに入っている形:
+実装 PR で入れる形:
 
-- job `difftest-direct`、matrix `[ubuntu-latest, ubuntu-24.04-arm]`、timeout 10 分
+- job `difftest-direct`、`ubuntu-latest` のみ、timeout 10 分。統合ブランチにある
+  `ubuntu-24.04-arm` の matrix は消す(D2)
 - `scripts/bootstrap.sh --stage1-only` → `scripts/difftest-direct.sh target/seed/stage1/bin/kizu`
 - `scripts/difftest-direct.sh` は `examples/*.kizu` の `run` / `run-fails` 261 件を
   direct と LLVM で build・実行し、stdout・stderr・exit status の全文一致を求める
-- 既存 `test` job は変えない。`kizu test` が既定 direct なので、macOS / Linux の test job は
+  (既定が direct になるので、両側とも `--backend` を明示する)
+- 既存 `test` job は変えない。既定が direct なので、macOS / Linux の test job は
   compiler 自身の test と test 系 case を direct で回す(Mach-O 側はここで担保)
 - debug のみ、cache なし。macOS は 1 件ごとの link と初回起動が遅く(ローカルで 10〜13 分)外した
+- `difftest-direct` は必須チェックにしない。job としては回す(D5)。CI はミニマムに保ち、
+  開発効率を落とさない
+- windows の job は足さない。windows-amd64 の検証はローカル実機に頼る(D6)
 
 | 項目 | 見積もり(ローカル実測から) |
 | --- | --- |
-| 新 job 1 本 | 3〜4 分(linux-arm64 コンテナ 201 s、WSL 115 s) |
+| 新 job 1 本 | 3〜4 分(ローカルの WSL で 115 s) |
 | merge までの wall 時間 | +約 0 分(既存 test job 9〜11 分と並列) |
-| ランナー消費 | 1 push あたり +約 6〜8 分 |
+| ランナー消費 | 1 push あたり +約 3〜4 分(arm を消して job 1 本) |
 
-実ランナーでの所要時間は未計測で、最初の PR の run で確認する。
-**必須チェックにするかはリポジトリ設定側の判断**で、docs は「必須」と書かない(§8 D5)。
-windows-amd64 は CI に job 自体が無く、direct の検証はローカル実機に頼る(§8 D6)。
+実ランナーでの所要時間は未計測で、実装 PR の run で確認する。
 
 ## 5. 検証の証拠
 
@@ -131,60 +146,63 @@ direct の object と、同じ機械 IR を assembly text にして `clang -c` �
 
 ## 6. 既知の制限
 
-- darwin-amd64: direct なし。`kizu test` は LLVM。実機での実行検証なし
-- linux-arm64: 対象外(実装は残る。§8 D2)
+- darwin-amd64: direct なし。LLVM。実機での実行検証なし
+- linux-arm64: 対象外(実装は残り、`--backend direct` で受ける。§2)
 - windows-arm64: 保留。実機での実行検証なし
-- NaN のビット列(payload・符号)は規定しない(実装定義)。LLVM `--opt` も演算の
-  オペランドを入れ替えて NaN の選び方を変えるため、direct と LLVM でビット列が違い得る。
-  SPEC は IEEE 754 と等値比較の規則だけを持つ
+- NaN のビット列(payload・符号)は実装定義。LLVM `--opt` も演算のオペランドを入れ替えて
+  NaN の選び方を変えるため、direct と LLVM でビット列が違い得る。実装 PR で SPEC に
+  「NaN のビット列は実装定義」と書く(D8)。SPEC が規定するのは IEEE 754 と等値比較の規則
 - 性能の残差(amd64): windows bits 1.09〜1.12、gcd 1.05〜1.07、sieve 1.04〜1.11、
   fmandel 1.04〜1.06(全 target)。`2.0*x` → `x+x` は意味論に触れるので入れていない
 - windows の SEH unwind 情報(`.pdata` / `.xdata`)は出さない
 - 分岐の到達範囲超過(arm64 ±1MB / ±128MB)は診断で止まる(examples では起きない)
-- `--opt` の difftest と windows の difftest は CI に無い
+- `--opt` の difftest、windows・linux-arm64 の difftest は CI に無い(ローカルで回す)
 
-## 7. 実装 PR の分割案(技術的境界)
+## 7. 実装 PR(1 本)
 
-レビューの都合ではなく、生成物とゲートが独立に検証できる境界で切る。各 PR の完了条件は
-§5 の該当ゲート(difftest 261/0/0、バイト比較、ベンチ、`just selfhost`)。
+実装 PR は分割せず 1 本で出す(D9)。統合ブランチで検証済みの状態をそのまま入れる。
+内訳(レビューで追うときの技術的境界):
 
-| 順 | PR | 内容 | 主なゲート |
-| --- | --- | --- | --- |
-| 1 | arm64 直接エンコード基盤 | 機械 IR・命令選択・RA・ベクトル化・arm64 エンコーダ・共有 object バッファ・Mach-O。`--backend direct`(darwin-arm64) | darwin difftest、Mach-O バイト比較、ベンチ darwin |
-| 2 | ELF 層 + x86-64 エンコーダ | amd64 選択・エンコーダ・ELF x86-64。linux-amd64 を受ける | linux-amd64 difftest、ELF バイト比較 |
-| 3 | COFF 層 | windows-amd64 を受ける。Win64 の xmm 退避を含む | windows 実機 difftest、COFF バイト比較、f64 ベンチ |
-| 4 | `kizu test` 既定化 | `--backend llvm` の opt-out、`--backend asm` の removed エラー | 3 target のテスト資産一致、`just selfhost` |
-| 5 | CI | `difftest-direct` job と script | 実ランナーでの所要時間 |
+| 内訳 | 内容 |
+| --- | --- |
+| arm64 直接エンコード基盤 | 機械 IR・命令選択・RA・ベクトル化・arm64 エンコーダ・共有 object バッファ・Mach-O |
+| ELF 層 + x86-64 エンコーダ | amd64 選択・エンコーダ・ELF(x86-64 / AArch64) |
+| COFF 層 | windows-amd64。Win64 の xmm 退避を含む |
+| CLI と既定化(S2) | build / run / test の既定 direct、`--backend llvm` の opt-out、`--backend asm` の removed エラー、`--backend` の usage 掲載 |
+| bootstrap | `scripts/bootstrap.sh` の stage2 build に `--backend llvm` を明示し、bootstrap を LLVM のまま保つ(S3 は範囲外) |
+| CI | `difftest-direct` job(ubuntu-latest のみ)と script |
+| 文書 | SPEC §5 の書き換え、NaN ビット列の実装定義、`docs/architecture.md`。この設計文書の削除 |
 
 - assembly text の経路は main に入れない(統合ブランチでは実装後に削除済み。エンコーダの
-  正しさは削除前に取ったバイト比較が担保する)。入れてから消す順にはしない
-- 1 は規模が大きい(`internal/arm64/` は全体で約 23,800 行、その多くが 1)。arch と形式の
-  境界以外に技術的に独立な切れ目は「ベクトル化を後から足す」くらいで、ベクトル化前の
-  計測では darwin の scan が 2.75 倍だった(Phase 1)
-- 2 と 3 は 1 に依存し、互いには独立(COFF は ELF と x86-64 エンコーダを共有するので 2 の後)
-- 4・5 は 1 の後ならいつでもよい。5 を先に入れると以後の PR が CI で direct を検証される
-- 代案: 統合ブランチを 1 本の PR として入れる(検証済みの状態そのものを入れる)
+  正しさは削除前に取ったバイト比較が担保する)
+- 完了条件は §8 D7 の S2 の証拠を実装 PR に揃えること
 
-## 8. 決めること
+## 8. 決定(D1〜D10)
 
-| # | 問い | 案 |
+| # | 問い | 決定 |
 | --- | --- | --- |
 | D1 | direct を main に入れるか | 入れる |
-| D2 | linux-arm64 の扱い | (a) `--backend direct` で受けたまま対象外と書く、(b) 拒否する。CI の `ubuntu-24.04-arm` を残すか |
-| D3 | 原理 9・SPEC §5 との関係 | backend は target で決まる(wasm と同じ)と SPEC に書き、`kizu test` の LLVM 切り替えを fallback でなく target ごとの選択とする。SPEC の「LLVM IR backend が生成します」を書き換える。ADR が要るか |
-| D4 | 原理 11 との関係 | ループのベクトル化は IR 命令と CFG の形を認識する(関数名・ソース形ではない)。これを原理 11 の下で許すか |
-| D5 | CI の必須チェック | `difftest-direct (*)` を required checks にするか(リポジトリ設定) |
-| D6 | windows の CI | windows ランナーの job を足すか、ローカル実機の検証に頼るか |
-| D7 | 既定化の段階と完了条件 | 下表 |
-| D8 | NaN ビット列 | 実装定義のまま SPEC に書くか、何も書かないか |
-| D9 | 分割 | §7 の 5 PR か、1 PR か |
-| D10 | `--backend` の usage 掲載 | `kizu help` に載せるか(現状は載せていない) |
+| D2 | linux-arm64 の扱い | CI の arm ランナー(`ubuntu-24.04-arm`)は消す。`--backend direct` では受けたまま対象外と明記する(生成系は darwin-arm64 と共用で検証が続く)。必要になったら Mac 上の一時的な VM / コンテナで実装・検証する(常駐させない) |
+| D3 | 原理 9・SPEC §5 との関係 | SPEC §5 を書き換え、backend は target ごとの選択と書く。ADR は書かない |
+| D4 | 原理 11 との関係 | ループのベクトル化(IR 命令と CFG の形の認識)は原理 11 の下で許す。IR の形の認識は原理 11 の対象外とする |
+| D5 | CI の必須チェック | `difftest-direct` は必須チェックにしない(job としては回す)。CI はミニマムに保ち開発効率を落とさない |
+| D6 | windows の CI | job を足さない。ローカル実機の検証に頼る |
+| D7 | 既定化の段階 | 段階を踏まず初回から S2 まで入れる(build / run / test を対象 target で direct 既定)。完了条件は下表 |
+| D8 | NaN ビット列 | 「実装定義」と SPEC に書く |
+| D9 | 分割 | 実装 PR は分割せず 1 本 |
+| D10 | `--backend` の usage 掲載 | `kizu help`(usage)に載せる |
 
-既定化の段階(D7):
+実装 PR に揃える証拠(D7、S2 の完了条件):
 
-| 段 | 既定 | 完了条件(ゲート証拠) |
-| --- | --- | --- |
-| S1 | `kizu test` だけ direct | 3 target difftest 261/0/0(debug・`--opt`)、テスト資産の一致、`just selfhost` 通過、CI `difftest-direct` 緑 |
-| S2 | `kizu build` / `kizu run` も対象 target で direct | S1 + ベンチ 11 本 3 target とも < 1.00、f64 4 本 < 1.05、windows を含む CI か実機記録、一定期間の CI 緑 |
-| S3 | bootstrap(stage1 → stage2)も direct | S2 + stage2 の自己再現、種が direct を知るリリースへの更新(`docs/bootstrap.md` の 2 リリース規律) |
-| S4 | LLVM を対象 target から外すか | S3 + 判断。外さないなら比較基準と非対象 target のために残る |
+- 3 target の difftest 261/0/0(debug・`--opt`)
+- テスト資産の LLVM との一致、`just selfhost` 通過
+- ベンチ 11 本の幾何平均が 3 target とも < 1.00、f64 4 本が < 1.05
+- windows-amd64 は実機の記録(D6)
+- 実装 PR の run で `difftest-direct` が緑(必須チェックではない)
+
+今回の範囲外(後日判断):
+
+- S3: bootstrap(stage1 → stage2)の direct 化。種が direct を知るリリースへの更新
+  (`docs/bootstrap.md` の 2 リリース規律)が前提
+- S4: LLVM を対象 target から外すか。外さないなら比較基準と非対象 target のために残る
+- linux-arm64 の対応時期と既定化
