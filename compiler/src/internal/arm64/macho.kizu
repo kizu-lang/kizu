@@ -1,6 +1,5 @@
 import compiler::internal::ir;
 import std::array;
-import std::mem;
 import std::sort;
 import std::string;
 
@@ -11,24 +10,6 @@ import std::string;
 // are first named, the others sorted by name, relocations last to first,
 // the string table merged by common tail), so the object is byte for byte
 // the one the assembler would make.
-
-// Writing the file.
-
-fn put(allocator: Allocator, out: &var string::String, value: i64, size: i64) -> !void {
-    for 0..size |at| {
-        try out.append_byte(allocator, cast<u8>((value >> (8 * at)) & 255));
-    }
-    return;
-}
-
-/// Writes a name in a 16-byte field.
-fn put_name(allocator: Allocator, out: &var string::String, name: []u8) -> !void {
-    try out.append_bytes(allocator, name);
-    for mem::len(name)..16 |_pad| {
-        try out.append_byte(allocator, cast<u8>(0));
-    }
-    return;
-}
 
 fn section_name(kind: SectionKind) -> []u8 {
     return match kind {
@@ -55,10 +36,6 @@ fn section_flags(kind: SectionKind) -> i64 {
         Cstring => 2,
         _ => 0,
     };
-}
-
-fn round_to(value: i64, size: i64) -> i64 {
-    return (value + size - 1) / size * size;
 }
 
 /// Writes the object: a 64-bit arm64 MH_OBJECT whose LC_BUILD_VERSION
@@ -180,7 +157,7 @@ pub fn (self: &var Obj) write_macho(allocator: Allocator, syms: &ir::NameTable, 
     let segment_size = 72 + 80 * nsects;
     let commands = segment_size + 24 + 24 + 80;
     let data_start = 32 + commands;
-    var reloc_start = round_to(data_start + data_size, 8);
+    let reloc_start = round_to(data_start + data_size, 8);
     var reloc_at = array::new<i64>(allocator);
     defer reloc_at.deinit(allocator);
     var relocs_end = reloc_start;
@@ -205,7 +182,7 @@ pub fn (self: &var Obj) write_macho(allocator: Allocator, syms: &ir::NameTable, 
     // LC_SEGMENT_64, unnamed, holding every section
     try put(allocator, out, 0x19, 4);
     try put(allocator, out, segment_size, 4);
-    try put_name(allocator, out, "");
+    try put_field(allocator, out, "", 16);
     try put(allocator, out, 0, 8);
     try put(allocator, out, data_size, 8);
     try put(allocator, out, data_start, 8);
@@ -217,8 +194,8 @@ pub fn (self: &var Obj) write_macho(allocator: Allocator, syms: &ir::NameTable, 
     section_index = 0;
     while self.sections.at(section_index) |section| {
         let at = addresses.get_or_panic(section_index);
-        try put_name(allocator, out, section_name(section.kind));
-        try put_name(allocator, out, segment_name(section.kind));
+        try put_field(allocator, out, section_name(section.kind), 16);
+        try put_field(allocator, out, segment_name(section.kind), 16);
         try put(allocator, out, at, 8);
         try put(allocator, out, section.bytes.len(), 8);
         try put(allocator, out, data_start + at, 4);
@@ -261,19 +238,8 @@ pub fn (self: &var Obj) write_macho(allocator: Allocator, syms: &ir::NameTable, 
     try put(allocator, out, undefined, 4);
     try put(allocator, out, 0, 48);
     // The section contents, each at its address.
-    section_index = 0;
-    while self.sections.at(section_index) |section| {
-        let at = data_start + addresses.get_or_panic(section_index);
-        while out.len() < at {
-            try out.append_byte(allocator, cast<u8>(0));
-        }
-        let contents = section.bytes.as_bytes();
-        try out.append_bytes(allocator, contents);
-        section_index = section_index + 1;
-    }
-    while out.len() < reloc_start {
-        try out.append_byte(allocator, cast<u8>(0));
-    }
+    try self.put_contents(allocator, out, data_start, &addresses);
+    try pad_to(allocator, out, reloc_start);
     // The relocations of each section, last first, an addend before the
     // relocation it belongs to.
     section_index = 0;
@@ -385,8 +351,6 @@ fn (self: &Obj) string_table(
         try names.append(allocator, try string::from_bytes(allocator, bytes));
     }
     try merge_strings(allocator, &names, out, offsets);
-    while out.len() % 8 != 0 {
-        try out.append_byte(allocator, cast<u8>(0));
-    }
-    return;
+    let size = round_to(out.len(), 8);
+    return pad_to(allocator, out, size);
 }

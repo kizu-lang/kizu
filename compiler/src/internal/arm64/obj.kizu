@@ -9,10 +9,10 @@ import std::string;
 // The object the backend writes itself: the bytes of each section the
 // printer fills, the symbols and relocations its instructions name, and
 // the branches within a function, patched when it ends (on x86-64, whose
-// jumps are short or near, laid out when it ends: amd64_encode.kizu). The file the system
-// linker reads is laid out from it by macho.kizu, elf.kizu or coff.kizu, the way the
-// system assembler lays out the same code, so the object is byte for byte
-// the one the assembler would make.
+// jumps are short or near, laid out when it ends: amd64_encode.kizu). The
+// file the system linker reads is laid out from it by macho.kizu, elf.kizu
+// or coff.kizu, the way the system assembler lays out the same code, so the
+// object is byte for byte the one the assembler would make.
 
 /// Is one section the printer writes into.
 pub enum SectionKind {
@@ -470,20 +470,90 @@ pub fn (self: &var Obj) end_function(allocator: Allocator) -> !void {
             }
             word = word | ((distance & 0x7FFFF) << 5);
         }
-        try self.patch(self.current, branch.at, word);
+        try self.patch(self.current, branch.at, word, 4);
     }
     return;
 }
 
-/// Overwrites the word at an offset of a section.
-fn (self: &var Obj) patch(section_index: i64, at: i64, word: i64) -> !void {
+/// Overwrites size little-endian bytes at an offset of a section.
+fn (self: &var Obj) patch(section_index: i64, at: i64, value: i64, size: i64) -> !void {
     if self.sections.at_mut(section_index) |section| {
         let writable = section.bytes.as_mut_bytes();
-        for 0..4 |byte| {
-            writable[at + byte] = cast<u8>((word >> (8 * byte)) & 255);
+        for 0..size |byte| {
+            writable[at + byte] = cast<u8>((value >> (8 * byte)) & 255);
         }
     }
     return;
+}
+
+/// Returns a copy of a section's relocations, for a pass that rewrites them
+/// while it changes the rest of the Obj.
+fn (self: &Obj) relocs_of(allocator: Allocator, section_index: i64) -> !array::Array<Reloc> {
+    var relocs = array::new<Reloc>(allocator);
+    errdefer relocs.deinit(allocator);
+    if self.sections.at(section_index) |section| {
+        var index = 0;
+        while section.relocs.get(index) |reloc| {
+            index = index + 1;
+            try relocs.append(allocator, reloc);
+        }
+    }
+    return move relocs;
+}
+
+/// Replaces a section's relocations with relocs.
+fn (self: &var Obj) set_relocs(allocator: Allocator, section_index: i64, relocs: &array::Array<Reloc>) -> !void {
+    if self.sections.at_mut(section_index) |section| {
+        section.relocs.clear(allocator);
+        var index = 0;
+        while relocs.get(index) |reloc| {
+            index = index + 1;
+            try section.relocs.append(allocator, reloc);
+        }
+    }
+    return;
+}
+
+// Writing the file: the helpers macho.kizu, elf.kizu and coff.kizu share.
+
+/// Writes a little-endian value of size bytes.
+fn put(allocator: Allocator, out: &var string::String, value: i64, size: i64) -> !void {
+    for 0..size |at| {
+        try out.append_byte(allocator, cast<u8>((value >> (8 * at)) & 255));
+    }
+    return;
+}
+
+/// Writes a name in a field of width bytes, padded with zeros.
+fn put_field(allocator: Allocator, out: &var string::String, name: []u8, width: i64) -> !void {
+    try out.append_bytes(allocator, name);
+    for mem::len(name)..width |_pad| {
+        try out.append_byte(allocator, cast<u8>(0));
+    }
+    return;
+}
+
+/// Pads out with zeros to at bytes.
+fn pad_to(allocator: Allocator, out: &var string::String, at: i64) -> !void {
+    while out.len() < at {
+        try out.append_byte(allocator, cast<u8>(0));
+    }
+    return;
+}
+
+/// Writes each section's contents at base plus its offset, zeros between.
+fn (self: &Obj) put_contents(allocator: Allocator, out: &var string::String, base: i64, offsets: &array::Array<i64>) -> !void {
+    var section_index = 0;
+    while self.sections.at(section_index) |section| {
+        try pad_to(allocator, out, base + offsets.get_or_panic(section_index));
+        try out.append_string(allocator, &section.bytes);
+        section_index = section_index + 1;
+    }
+    return;
+}
+
+fn round_to(value: i64, size: i64) -> i64 {
+    return (value + size - 1) / size * size;
 }
 
 /// Builds a string table the way the assembler does: a zero byte, then the
