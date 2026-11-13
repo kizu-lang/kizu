@@ -19,6 +19,20 @@ struct Scalar {
     valid: bool,
 }
 
+/// Is one token as positions in the input: its kind, where it begins, and
+/// the bytes its literal is read from. A string's bytes are its contents
+/// without the quotes. A multiline string's literal is its lines joined, so
+/// its lines are kept in the lexer's `string_lines` and its bytes are empty.
+/// Reading a lexeme copies nothing; `next_token` turns one into a token.
+pub struct Lexeme {
+    pub kind: token::Kind,
+    pub start: i64,
+    pub end: i64,
+    line: i64,
+    column: i64,
+    multiline: bool,
+}
+
 struct CompoundToken {
     next: u8,
     compound: token::Kind,
@@ -36,6 +50,7 @@ pub struct Lexer {
     column: i64,
     pending_doc: array::Array<Span>,
     pending_safety: array::Array<Span>,
+    string_lines: array::Array<Span>,
     source: ?source::SourceId,
 }
 
@@ -68,6 +83,7 @@ fn make(
         column: 0,
         pending_doc: array::new<Span>(allocator),
         pending_safety: array::new<Span>(allocator),
+        string_lines: array::new<Span>(allocator),
         source: source_id
     };
     out.read_char();
@@ -77,7 +93,8 @@ fn make(
 /// Returns the next token from the input stream.
 fn (self: &var Lexer) next_token() -> !token::Token {
     try self.skip_ignored();
-    var out = try self.scan_token();
+    let lexeme = try self.scan_lexeme();
+    var out = try self.token_from_lexeme(&lexeme);
     errdefer out.deinit(self.allocator);
     try self.attach_comments(&var out);
     clear_spans(&var self.pending_doc);
@@ -85,66 +102,109 @@ fn (self: &var Lexer) next_token() -> !token::Token {
     return move out;
 }
 
-fn (self: &var Lexer) scan_token() -> !token::Token {
+/// Returns the next token as positions in the input, the token `next_token`
+/// would return without its literal or comments copied out. A reader that
+/// only needs kinds and names reads the input this way.
+pub fn (self: &var Lexer) next_lexeme() -> !Lexeme {
+    try self.skip_ignored();
+    let lexeme = try self.scan_lexeme();
+    clear_spans(&var self.pending_doc);
+    clear_spans(&var self.pending_safety);
+    return lexeme;
+}
+
+/// Copies a lexeme's literal into a token stamped with where it begins.
+fn (self: &Lexer) token_from_lexeme(lexeme: &Lexeme) -> !token::Token {
+    if lexeme.kind == token::Kind::Eof {
+        return self.token_from_bytes(token::Kind::Eof, "", lexeme.line, lexeme.column);
+    }
+    if lexeme.multiline {
+        var literal = string::new(self.allocator);
+        errdefer literal.deinit(self.allocator);
+        var index = 0;
+        while index < self.string_lines.len() {
+            let span = self.string_lines.get_or_panic(index);
+            if index > 0 {
+                try literal.append_byte(self.allocator, cast<u8>(10));
+            }
+            try append_normalized_utf8(self.allocator, &var literal, self.input[span.start..span.end]);
+            index = index + 1;
+        }
+        return self.token_from_string(lexeme.kind, move literal, lexeme.line, lexeme.column);
+    }
+    return self.token_from_bytes(lexeme.kind, self.input[lexeme.start..lexeme.end],
+        lexeme.line, lexeme.column);
+}
+
+fn (self: &var Lexer) scan_lexeme() -> !Lexeme {
     let line = self.line;
     let column = self.column;
+    let start = self.position;
     if self.ch == cast<u8>(61) {
-        var out = if self.peek_char() == cast<u8>(62) {
-            try self.two_char_token(token::Kind::FatArrow)
-        } else {
-            try self.read_compound_token(CompoundToken {
-                next: cast<u8>(61),
-                compound: token::Kind::Eq,
-                single: token::Kind::Assign
-            })
-        };
+        var kind = token::Kind::Assign;
+        if self.peek_char() == cast<u8>(62) {
+            kind = token::Kind::FatArrow;
+            self.read_char();
+        } else if self.peek_char() == cast<u8>(61) {
+            kind = token::Kind::Eq;
+            self.read_char();
+        }
+        let out = lexeme_at(kind, start, self.read_position, line, column);
         self.read_char();
-        return move out;
+        return out;
     }
     if self.ch == cast<u8>(34) {
-        let literal = try self.read_string();
-        return self.token_from_string(token::Kind::String, move literal, line, column);
+        let span = self.read_string();
+        return lexeme_at(token::Kind::String, span.start, span.end, line, column);
     }
     if self.ch == cast<u8>(92) and self.peek_char() == cast<u8>(92) {
-        let literal = try self.read_multiline_string();
-        return self.token_from_string(token::Kind::String, move literal, line, column);
+        try self.read_multiline_string();
+        var out = lexeme_at(token::Kind::String, start, start, line, column);
+        out.multiline = true;
+        return out;
     }
     if self.ch == cast<u8>(0) {
-        var out = try self.token_from_bytes(token::Kind::Eof, "", line, column);
+        let out = lexeme_at(token::Kind::Eof, start, start, line, column);
         self.read_char();
-        return move out;
+        return out;
     }
     if self.ch == cast<u8>(46) and self.peek_char() == cast<u8>(46) and
         self.peek_byte(2) == cast<u8>(46) {
-        var out = try self.ellipsis_token();
         self.read_char();
-        return move out;
+        self.read_char();
+        let out = lexeme_at(token::Kind::Ellipsis, start, self.read_position, line, column);
+        self.read_char();
+        return out;
     }
     if compound_token(self.ch) |spec| {
-        var out = try self.read_compound_token(spec);
+        var kind = spec.single;
+        if self.peek_char() == spec.next {
+            kind = spec.compound;
+            self.read_char();
+        }
+        let out = lexeme_at(kind, start, self.read_position, line, column);
         self.read_char();
-        return move out;
+        return out;
     }
     if single_char_kind(self.ch) |kind| {
-        var out = try self.one_char_token(kind);
+        let out = lexeme_at(kind, start, self.read_position, line, column);
         self.read_char();
-        return move out;
+        return out;
     }
     // `c` directly before a quote opens a C string literal. No name can sit
     // against a string, so the spelling takes nothing a program could have
     // written before.
     if self.ch == cast<u8>(99) and self.peek_char() == cast<u8>(34) {
         self.read_char();
-        let literal = try self.read_string();
-        return self.token_from_string(token::Kind::CString, move literal, line, column);
+        let span = self.read_string();
+        return lexeme_at(token::Kind::CString, span.start, span.end, line, column);
     }
     if is_letter(self.ch) {
-        let start = self.position;
         while is_letter(self.ch) or is_digit(self.ch) {
             self.read_char();
         }
         let literal = self.input[start..self.position];
-        return self.token_from_bytes(token::lookup_ident(literal), literal, line, column);
+        return lexeme_at(token::lookup_ident(literal), start, self.position, line, column);
     }
     if is_digit(self.ch) {
         // A number is decimal, or `0x` / `0b` and its digits; a float adds a
@@ -152,7 +212,6 @@ fn (self: &var Lexer) scan_token() -> !token::Token {
         // between digits. The scanner only finds where the literal ends; the
         // parser decides whether the spelling is a number. A `.` not followed
         // by a digit is left alone, so `0..n` stays a range.
-        let start = self.position;
         if self.ch == cast<u8>(48) and
             (self.peek_char() == cast<u8>(120) or self.peek_char() == cast<u8>(98)) {
             self.read_char();
@@ -160,8 +219,7 @@ fn (self: &var Lexer) scan_token() -> !token::Token {
             while is_hex_digit(self.ch) or self.ch == cast<u8>(95) {
                 self.read_char();
             }
-            return self.token_from_bytes(token::Kind::Int,
-                self.input[start..self.position], line, column);
+            return lexeme_at(token::Kind::Int, start, self.position, line, column);
         }
         var kind = token::Kind::Int;
         while is_digit(self.ch) or self.ch == cast<u8>(95) {
@@ -187,44 +245,17 @@ fn (self: &var Lexer) scan_token() -> !token::Token {
                 }
             }
         }
-        return self.token_from_bytes(kind, self.input[start..self.position], line, column);
+        return lexeme_at(kind, start, self.position, line, column);
     }
-    var out = try self.one_char_token(token::Kind::Illegal);
+    let out = lexeme_at(token::Kind::Illegal, start, self.read_position, line, column);
     self.read_char();
-    return move out;
+    return out;
 }
 
-fn (self: &var Lexer) read_compound_token(spec: CompoundToken) -> !token::Token {
-    if self.peek_char() == spec.next {
-        return self.two_char_token(spec.compound);
-    }
-    return self.one_char_token(spec.single);
-}
-
-fn (self: &Lexer) one_char_token(kind: token::Kind) -> !token::Token {
-    return self.token_from_bytes(kind, self.input[self.position..self.read_position],
-        self.line, self.column);
-}
-
-fn (self: &var Lexer) two_char_token(kind: token::Kind) -> !token::Token {
-    let start = self.position;
-    let line = self.line;
-    let column = self.column;
-    self.read_char();
-    return self.token_from_bytes(kind, self.input[start..self.read_position], line, column);
-}
-
-/// Returns the `...` token starting at the current byte, the three-dot arm
-/// of the Go `readDotToken`. Three dots are one token, so a variadic marker
-/// is never a range with a stray dot after it.
-fn (self: &var Lexer) ellipsis_token() -> !token::Token {
-    let start = self.position;
-    let line = self.line;
-    let column = self.column;
-    self.read_char();
-    self.read_char();
-    return self.token_from_bytes(token::Kind::Ellipsis,
-        self.input[start..self.read_position], line, column);
+fn lexeme_at(kind: token::Kind, start: i64, end: i64, line: i64, column: i64) -> Lexeme {
+    return Lexeme {
+        kind: kind, start: start, end: end, line: line, column: column, multiline: false
+    };
 }
 
 fn (self: &Lexer) token_from_bytes(
@@ -406,23 +437,25 @@ fn (self: &var Lexer) read_doc_comment() -> Span {
     };
 }
 
-fn (self: &var Lexer) read_string() -> !string::String {
+// Reads a string after its opening quote, returning where its contents are.
+fn (self: &var Lexer) read_string() -> Span {
     self.read_char();
     let start = self.position;
     while self.ch != cast<u8>(34) and self.ch != cast<u8>(0) {
         self.read_char();
     }
-    let out = try owned_text(self.allocator, self.input[start..self.position]);
+    let out = Span {
+        start: start, end: self.position
+    };
     if self.ch == cast<u8>(34) {
         self.read_char();
     }
-    return move out;
+    return out;
 }
 
-fn (self: &var Lexer) read_multiline_string() -> !string::String {
-    var out = string::new(self.allocator);
-    errdefer out.deinit(self.allocator);
-    var first = true;
+// Reads a multiline string into `string_lines`, one span per line.
+fn (self: &var Lexer) read_multiline_string() -> !void {
+    clear_spans(&var self.string_lines);
     while true {
         self.read_char();
         self.read_char();
@@ -430,16 +463,14 @@ fn (self: &var Lexer) read_multiline_string() -> !string::String {
         while self.ch != cast<u8>(10) and self.ch != cast<u8>(0) {
             self.read_char();
         }
-        if !first {
-            try out.append_byte(self.allocator, cast<u8>(10));
-        }
-        first = false;
-        try append_normalized_utf8(self.allocator, &var out, self.input[start..self.position]);
+        try self.string_lines.append(self.allocator, Span {
+            start: start, end: self.position
+        });
         if !self.peek_multiline_continuation() {
             break;
         }
     }
-    return move out;
+    return;
 }
 
 fn (self: &var Lexer) peek_multiline_continuation() -> bool {
