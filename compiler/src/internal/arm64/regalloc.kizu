@@ -1523,6 +1523,18 @@ fn (self: &Ranges) covers(v: i64, pos: i64) -> bool {
     return false;
 }
 
+/// Returns the first segment of v from its cursor on that ends at pos or
+/// later, leaving the cursor there: what covers(v, pos) reads, for a pos
+/// that only grows from one call to the next. v must live at pos or later.
+fn (self: &Ranges) seek(cursor: &var array::Array<i64>, v: i64, pos: i64) -> !i64 {
+    var at = cursor.get_or_panic(v);
+    while self.seg_to.get_or_panic(at) < pos {
+        at = self.seg_next.get_or_panic(at);
+    }
+    try cursor.set(v, at);
+    return at;
+}
+
 fn (self: &Ranges) intersect(a: i64, b: i64) -> bool {
     var x = self.first.get_or_panic(a);
     var y = self.first.get_or_panic(b);
@@ -1811,9 +1823,17 @@ fn allocate_laid_out(
         let base = b * words;
         let from = 2 * block_first.get_or_panic(b);
         let to = 2 * block_last.get_or_panic(b) + 1;
-        for 0..nv |v| {
-            if has_bit(&live_out, base, v) {
-                try ranges.add(allocator, v, from, to);
+        // Each v live out, ascending; a word with no bit set is skipped
+        // whole.
+        for 0..words |w| {
+            let bits = live_out.get_or_panic(base + w);
+            if bits == 0 {
+                continue;
+            }
+            for 0..64 |bit| {
+                if (bits & (1 << bit)) != 0 {
+                    try ranges.add(allocator, 64 * w + bit, from, to);
+                }
             }
         }
         if func.blocks.at(b) |block| {
@@ -2021,9 +2041,18 @@ fn allocate_laid_out(
     defer phys.deinit(allocator);
     var spill = array::new<i64>(allocator);
     defer spill.deinit(allocator);
-    for 0..nv |_index| {
+    // Where each range ends: the ranges are final here, and the scan asks
+    // for the end of every active and inactive one at each step.
+    var ends = array::new<i64>(allocator);
+    defer ends.deinit(allocator);
+    // The segment of each range the scan last stopped at (Ranges.seek).
+    var cursor = array::new<i64>(allocator);
+    defer cursor.deinit(allocator);
+    for 0..nv |v| {
         try phys.append(allocator, 0 - 1);
         try spill.append(allocator, 0 - 1);
+        try ends.append(allocator, ranges.end(v));
+        try cursor.append(allocator, ranges.first.get_or_panic(v));
     }
     var crosses_call = array::new<bool>(allocator);
     defer crosses_call.deinit(allocator);
@@ -2046,48 +2075,66 @@ fn allocate_laid_out(
     }
     var candidates = array::new<i64>(allocator);
     defer candidates.deinit(allocator);
+    var to_inactive = array::new<i64>(allocator);
+    defer to_inactive.deinit(allocator);
+    // The first position at which a range in active or inactive may change
+    // set: where an active one's segment ends, or an inactive one's next
+    // segment starts. Before it the sets stay as they are, in the same
+    // order, so the scan below has nothing to move. Ranges evicted since
+    // only leave it early, never late.
+    var next_change = 0;
     var scan = 0;
     while by_start.get(scan) |v| {
         scan = scan + 1;
         let start = ranges.start(v);
-        // Move what ended to handled and what is in a hole to inactive.
-        var keep = 0;
-        var look = 0;
-        var to_inactive = array::new<i64>(allocator);
-        defer to_inactive.deinit(allocator);
-        while active.get(look) |other| {
-            look = look + 1;
-            if ranges.end(other) < start {
-                continue;
+        if start >= next_change {
+            next_change = positions + 1;
+            // Move what ended to handled and what is in a hole to inactive.
+            var keep = 0;
+            var look = 0;
+            to_inactive.clear(allocator);
+            while active.get(look) |other| {
+                look = look + 1;
+                if ends.get_or_panic(other) < start {
+                    continue;
+                }
+                let at = try ranges.seek(&var cursor, other, start);
+                if ranges.seg_from.get_or_panic(at) > start {
+                    next_change = min(next_change, ranges.seg_from.get_or_panic(at));
+                    try to_inactive.append(allocator, other);
+                    continue;
+                }
+                next_change = min(next_change, ranges.seg_to.get_or_panic(at) + 1);
+                try active.set(keep, other);
+                keep = keep + 1;
             }
-            if !ranges.covers(other, start) {
-                try to_inactive.append(allocator, other);
-                continue;
+            try active.truncate(allocator, keep);
+            keep = 0;
+            look = 0;
+            while inactive.get(look) |other| {
+                look = look + 1;
+                if ends.get_or_panic(other) < start {
+                    continue;
+                }
+                let at = try ranges.seek(&var cursor, other, start);
+                if ranges.seg_from.get_or_panic(at) <= start {
+                    next_change = min(next_change, ranges.seg_to.get_or_panic(at) + 1);
+                    try active.append(allocator, other);
+                    continue;
+                }
+                next_change = min(next_change, ranges.seg_from.get_or_panic(at));
+                try inactive.set(keep, other);
+                keep = keep + 1;
             }
-            try active.set(keep, other);
-            keep = keep + 1;
+            try inactive.truncate(allocator, keep);
+            var moved = 0;
+            while to_inactive.get(moved) |other| {
+                moved = moved + 1;
+                try inactive.append(allocator, other);
+            }
         }
-        try active.truncate(allocator, keep);
-        keep = 0;
-        look = 0;
-        while inactive.get(look) |other| {
-            look = look + 1;
-            if ranges.end(other) < start {
-                continue;
-            }
-            if ranges.covers(other, start) {
-                try active.append(allocator, other);
-                continue;
-            }
-            try inactive.set(keep, other);
-            keep = keep + 1;
-        }
-        try inactive.truncate(allocator, keep);
-        var moved = 0;
-        while to_inactive.get(moved) |other| {
-            moved = moved + 1;
-            try inactive.append(allocator, other);
-        }
+        // v joins active below covering start in its first segment.
+        let first_to = ranges.seg_to.get_or_panic(ranges.first.get_or_panic(v));
         let crosses = crosses_call.get_or_panic(v);
         // Where no float register outlives a call, a range across one
         // stays in a general register, as it would without float ones.
@@ -2175,6 +2222,7 @@ fn allocate_laid_out(
         if chosen >= 0 {
             try phys.set(v, chosen);
             try active.append(allocator, v);
+            next_change = min(next_change, first_to + 1);
             try used.set(chosen, true);
             continue;
         }
@@ -2203,6 +2251,7 @@ fn allocate_laid_out(
         try evict(allocator, func, &ranges, &var phys, &var spill, &remat, &var inactive, v, best_reg);
         try phys.set(v, best_reg);
         try active.append(allocator, v);
+        next_change = min(next_change, first_to + 1);
         try used.set(best_reg, true);
     }
     // The caller-saved registers live across each cold call.
@@ -2211,17 +2260,39 @@ fn allocate_laid_out(
     for 0..count + 1 |_index| {
         try cold_saves.append(allocator, 0);
     }
-    var cold_index = 0;
-    while cold_calls.get(cold_index) |k| {
-        cold_index = cold_index + 1;
-        var mask = 0;
-        for 0..nv |v| {
-            let reg = phys.get_or_panic(v);
-            if is_cold_saved(reg, arch) and ranges.covers(v, 2 * k) and ranges.covers(v, 2 * k + 1) {
-                mask = mask | (1 << reg);
+    // A range in such a register adds it at each cold call k whose 2k and
+    // 2k + 1 it covers; the calls are in ascending k, so each segment
+    // finds the first one inside it by bisection.
+    for 0..nv |v| {
+        let reg = phys.get_or_panic(v);
+        if !is_cold_saved(reg, arch) {
+            continue;
+        }
+        var at = ranges.first.get_or_panic(v);
+        while at >= 0 {
+            let from = ranges.seg_from.get_or_panic(at);
+            let to = ranges.seg_to.get_or_panic(at);
+            at = ranges.seg_next.get_or_panic(at);
+            var low = 0;
+            var high = cold_calls.len();
+            while low < high {
+                let middle = (low + high) / 2;
+                if 2 * cold_calls.get_or_panic(middle) < from {
+                    low = middle + 1;
+                } else {
+                    high = middle;
+                }
+            }
+            while cold_calls.get(low) |k| {
+                if 2 * k > to {
+                    break;
+                }
+                low = low + 1;
+                if 2 * k + 1 <= to or ranges.covers(v, 2 * k + 1) {
+                    try cold_saves.set(k, cold_saves.get_or_panic(k) | (1 << reg));
+                }
             }
         }
-        try cold_saves.set(k, mask);
     }
     var save_slots = array::new<i64>(allocator);
     defer save_slots.deinit(allocator);
