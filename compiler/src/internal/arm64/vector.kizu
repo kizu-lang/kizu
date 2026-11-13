@@ -28,9 +28,11 @@ import std::array;
 //
 // The NEON loop reads one element. A loop that reads more, or multiplies
 // (NEON has no 64-bit lane multiply), runs in general registers instead
-// when its values are all words and its accumulators all unconditional:
-// behind the same test, without the bounds checks, several elements a turn,
-// each accumulator kept once per element of the turn.
+// when its accumulators are words: behind the same test, without the bounds
+// checks, several elements a turn, each element read and extended to a word
+// as the lanes are. An unconditional accumulator is kept once per element
+// of the turn; a conditional one compares, picks x or 0 by the flags and
+// combines the pick (`acc op 0` is acc), kept once.
 //
 // A loop whose accumulators are `f64` runs in NEON lanes where
 // flanes.kizu covers it. Otherwise it runs in general registers too, with
@@ -39,8 +41,9 @@ import std::array;
 // another in the order and with the operands the scalar loop has, so every
 // rounding is the one the scalar loop makes. Only the bounds checks and the
 // loop's own tests go. On amd64 the loops for general registers are the
-// only ones taken, under both conventions: over word accumulators, and over
-// f64 accumulators, whose values live in xmm registers there.
+// only ones taken, under both conventions, for every loop the idioms cover
+// that they can run: over word accumulators, and over f64 accumulators,
+// whose values live in xmm registers there.
 //
 // The vector registers are not allocated: the loop names v0..v7 and
 // v16..v31 directly, holds none of them across a call, and leaves v8..v15,
@@ -604,7 +607,7 @@ fn (self: &var Selector) plan_loop(module: &ir::Module, from: ir::Name, plan: &v
     if plan.uses_index and plan.width != 8 {
         return false;
     }
-    if plan.float or plan.multiplies or tables.loads.len() > 1 {
+    if plan.float or plan.multiplies or tables.loads.len() > 1 or is_x86(self.arch) {
         let budget = word_budget(self.arch, plan.float);
         return plan_scalar(plan, tables, budget);
     }
@@ -818,8 +821,10 @@ fn (self: &var Selector) plan_load(module: &ir::Module, node: &ir::InstrNode, sl
 
 /// Plans the loop for general registers, where it multiplies or reads
 /// more than one element: the 64-bit lanes NEON lacks a multiply for, and
-/// the vector loop reads one element. It qualifies when every value is a
-/// word, every accumulator updates unconditionally by `+ - ^ & |`, and the
+/// the vector loop reads one element; on amd64, any loop. It qualifies when
+/// the accumulators are words, each updating by `+ - ^ & |` -- or
+/// conditionally, by `+ - ^ |` under a comparison of word values -- the
+/// elements are read and extended to words as the lanes are, and the
 /// copies of the accumulators, the pointers and the uniform values leave
 /// registers for the temporaries: unrolled 4 times, else 2. Copies run in
 /// pairs when the elements of a pair fit beside them too, as a pair reads
@@ -827,29 +832,46 @@ fn (self: &var Selector) plan_load(module: &ir::Module, node: &ir::InstrNode, sl
 /// source load as one pair); not more, as the values live through the loop
 /// take registers too.
 fn plan_scalar(plan: &var Plan, tables: &Tables, budget: i64) -> bool {
-    if plan.width != 8 or plan.uses_index {
+    if plan.width != 8 {
         return false;
     }
     var index = 0;
     while tables.loads.get(index) |load| {
         index = index + 1;
-        if load.elem != 8 {
+        if plan.float and load.elem != 8 {
             return false;
         }
     }
     index = 0;
     while tables.accs.get(index) |acc| {
         index = index + 1;
-        if is_select(acc.kind) or !ir::is_empty(acc.cond) {
+        if is_select(acc.kind) {
             return false;
         }
     }
-    let held = tables.loads.len() + 1 + tables.invs.len() + 3;
+    // k, when the body reads it, is one more register held.
+    var held = tables.loads.len() + 1 + tables.invs.len() + 3;
+    if plan.uses_index {
+        held = held + 1;
+    }
+    // A conditional accumulator is kept once: its pick is off the chain,
+    // which is one op an element, so copies of it would only take registers
+    // the turn can use.
+    var once = 0;
+    index = 0;
+    while tables.accs.get(index) |acc| {
+        index = index + 1;
+        if !ir::is_empty(acc.cond) {
+            once = once + 1;
+        }
+    }
+    let split = tables.accs.len() - once;
+    held = held + once;
     plan.unroll = 4;
-    if held + tables.accs.len() * plan.unroll > budget {
+    if held + split * plan.unroll > budget {
         plan.unroll = 2;
     }
-    if held + tables.accs.len() * plan.unroll > budget {
+    if held + split * plan.unroll > budget {
         return false;
     }
     plan.scalar = true;
@@ -859,8 +881,13 @@ fn plan_scalar(plan: &var Plan, tables: &Tables, budget: i64) -> bool {
         return true;
     }
     // In pairs, the three temporaries held allows become the elements of a
-    // pair and a register for each value the body computes from them.
-    if held - 3 + tables.accs.len() * plan.unroll + (tables.loads.len() + tables.elems.len()) * 2 <= budget {
+    // pair and a register for each value the body computes from them, k
+    // and each conditional pick.
+    var temps = tables.loads.len() + tables.elems.len() + once;
+    if plan.uses_index {
+        temps = temps + 1;
+    }
+    if held - 3 + split * plan.unroll + temps * 2 <= budget {
         plan.group = 2;
     }
     return true;
@@ -1390,11 +1417,11 @@ fn (self: &Pool) copy(u: i64) -> i64 {
 }
 
 /// Returns the register of name, bound to slot, in unrolled copy u: a
-/// value the body computes has one for each of copies copies running
-/// together, the uniform values one for all.
+/// value the body computes (and k, in general registers) has one for each
+/// of copies copies running together, the uniform values one for all.
 fn per_copy(copies: i64, tables: &Tables, name: ir::Name, slot: i64, u: i64) -> i64 {
     let role = role_of(tables, name);
-    if role == Role::Elem or role == Role::Mask {
+    if role == Role::Elem or role == Role::Mask or role == Role::Index {
         return slot + u % copies;
     }
     return slot;
@@ -1695,13 +1722,13 @@ fn (self: &var Selector) emit_scalar_loop(module: &ir::Module, plan: &Plan, tabl
     try self.op_imm(MOp::AndImm, count, rest, 0 - unroll);
     var index = 0;
     while sources.get(index) |source| {
-        index = index + 1;
         let ptr = self.func.new_vreg();
         var at = blank(MOp::AddShift);
         at.rd = ptr;
         at.rn = source.reg;
         at.rm = k;
-        at.imm = 3;
+        at.imm = power_of_two(tables.loads.get_or_panic(index).elem);
+        index = index + 1;
         try self.inst(at);
         try ptrs.append(allocator, ptr);
     }
@@ -1710,8 +1737,14 @@ fn (self: &var Selector) emit_scalar_loop(module: &ir::Module, plan: &Plan, tabl
     past.rd = end;
     past.rn = ptrs.get_or_panic(0);
     past.rm = count;
-    past.imm = 3;
+    past.imm = power_of_two(tables.loads.get_or_panic(0).elem);
     try self.inst(past);
+    // k of the turn's first element, when the body reads k.
+    var turn_k = 0 - 1;
+    if plan.uses_index {
+        turn_k = self.func.new_vreg();
+        try self.mov(turn_k, k);
+    }
     index = 0;
     while tables.invs.get(index) |name| {
         index = index + 1;
@@ -1729,7 +1762,7 @@ fn (self: &var Selector) emit_scalar_loop(module: &ir::Module, plan: &Plan, tabl
         index = index + 1;
         var chain = 0 - 1;
         for 0..unroll |u| {
-            if plan.float and u > 0 {
+            if (plan.float or !ir::is_empty(acc.cond)) and u > 0 {
                 try accs.append(allocator, chain);
                 continue;
             }
@@ -1759,9 +1792,21 @@ fn (self: &var Selector) emit_scalar_loop(module: &ir::Module, plan: &Plan, tabl
             let first = self.func.new_vregs(each);
             try set_vreg_slot(allocator, tables, load.name, first);
             for 0..each |copy| {
-                try self.load(first + copy, ptrs.get_or_panic(index), (turn * each + copy) * 8, 8, load.signed);
+                try self.load(first + copy, ptrs.get_or_panic(index), (turn * each + copy) * load.elem, load.elem, load.signed);
             }
             index = index + 1;
+        }
+        if plan.uses_index {
+            let first = self.func.new_vregs(each);
+            try set_vreg_slot(allocator, tables, plan.k, first);
+            for 0..each |copy| {
+                let offset = turn * each + copy;
+                if offset == 0 {
+                    try self.mov(first + copy, turn_k);
+                } else {
+                    try self.op_imm(MOp::AddImm, first + copy, turn_k, offset);
+                }
+            }
         }
         var body_index = 0;
         while tables.body.get(body_index) |mir| {
@@ -1781,18 +1826,17 @@ fn (self: &var Selector) emit_scalar_loop(module: &ir::Module, plan: &Plan, tabl
                 }
             }
         }
+        if !plan.float {
+            for 0..each |copy| {
+                try self.word_updates(module, plan, tables, &accs, turn * each + copy, copy);
+            }
+            continue;
+        }
         index = 0;
         while tables.accs.get(index) |acc| {
             let x = resolve(tables, acc.x);
             let at = index * unroll + turn * each;
             index = index + 1;
-            if !plan.float {
-                for 0..each |copy| {
-                    let reg = accs.get_or_panic(at + copy);
-                    try self.op3(word_op(acc.kind), reg, reg, per_copy(each, tables, x, vreg_slot(tables, x), copy));
-                }
-                continue;
-            }
             // One chain in the order of the source: plan.group is 1, so
             // the turn is the element, and x + acc keeps x first.
             let reg = accs.get_or_panic(at);
@@ -1810,8 +1854,11 @@ fn (self: &var Selector) emit_scalar_loop(module: &ir::Module, plan: &Plan, tabl
     }
     index = 0;
     while ptrs.get(index) |ptr| {
+        try self.op_imm(MOp::AddImm, ptr, ptr, unroll * tables.loads.get_or_panic(index).elem);
         index = index + 1;
-        try self.op_imm(MOp::AddImm, ptr, ptr, unroll * 8);
+    }
+    if plan.uses_index {
+        try self.op_imm(MOp::AddImm, turn_k, turn_k, unroll);
     }
     try self.op3(MOp::Cmp, reg_none(), ptrs.get_or_panic(0), end);
     self.func.end(self.current, Term::Flags, Cond::Lo, reg_none(), body, fold);
@@ -1825,7 +1872,7 @@ fn (self: &var Selector) emit_scalar_loop(module: &ir::Module, plan: &Plan, tabl
         }
         let first = accs.get_or_panic(index * unroll);
         var u = 1;
-        if plan.float {
+        if plan.float or !ir::is_empty(acc.cond) {
             u = unroll;
         }
         while u < unroll {
@@ -1838,6 +1885,114 @@ fn (self: &var Selector) emit_scalar_loop(module: &ir::Module, plan: &Plan, tabl
     try self.op3(MOp::Add, k, k, count);
     self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), plan.header, 0 - 1);
     return;
+}
+
+/// Emits the accumulators' updates for element u of the turn, copy copy of
+/// the copies running together. A conditional update picks x or 0 by the
+/// flags of its comparison (or sets the 1 a count adds) and combines the
+/// pick: `acc op 0` is acc for `+ - ^ |`, so the pick stands for the
+/// branch. Every pick of a comparison follows it before anything sets the
+/// flags again; the combining comes after all of them.
+fn (self: &var Selector) word_updates(module: &ir::Module, plan: &Plan, tables: &Tables, accs: &array::Array<i64>, u: i64, copy: i64) -> !void {
+    let allocator = self.allocator;
+    let each = plan.group;
+    var picks = array::new<i64>(allocator);
+    defer picks.deinit(allocator);
+    for 0..tables.accs.len() |_index| {
+        try picks.append(allocator, 0 - 1);
+    }
+    var index = 0;
+    while tables.accs.get(index) |acc| {
+        index = index + 1;
+        if ir::is_empty(acc.cond) or picks.get_or_panic(index - 1) >= 0 {
+            continue;
+        }
+        let cond = try self.word_compare(module, tables, acc.cond, copy, each);
+        var other = index - 1;
+        while tables.accs.get(other) |same| {
+            other = other + 1;
+            if !ir::same_name(same.cond, acc.cond) {
+                continue;
+            }
+            var picked = cond;
+            if !same.when {
+                picked = invert(cond);
+            }
+            let reg = self.func.new_vreg();
+            if counts_one(self, same) {
+                var set = blank(MOp::CSet);
+                set.rd = reg;
+                set.cond = picked;
+                try self.inst(set);
+            } else {
+                let x = resolve(tables, same.x);
+                var pick = blank(MOp::CSel);
+                pick.rd = reg;
+                pick.rn = per_copy(each, tables, x, vreg_slot(tables, x), copy);
+                pick.rm = reg_zr();
+                pick.cond = picked;
+                try self.inst(pick);
+            }
+            try picks.set(other - 1, reg);
+        }
+    }
+    index = 0;
+    while tables.accs.get(index) |acc| {
+        let reg = accs.get_or_panic(index * plan.unroll + u);
+        var x = picks.get_or_panic(index);
+        if x < 0 {
+            let held = resolve(tables, acc.x);
+            x = per_copy(each, tables, held, vreg_slot(tables, held), copy);
+        }
+        index = index + 1;
+        try self.op3(word_op(acc.kind), reg, reg, x);
+    }
+    return;
+}
+
+/// Emits the comparison of word values that mask names, for copy copy, and
+/// returns the condition that holds where the vector loop's mask is all
+/// ones: for `!=`, the equality (an accumulator's when says which side
+/// updates).
+fn (self: &var Selector) word_compare(module: &ir::Module, tables: &Tables, mask: ir::Name, copy: i64, copies: i64) -> !Cond {
+    var body_index = 0;
+    while tables.body.get(body_index) |mir| {
+        body_index = body_index + 1;
+        let block = self.ir_blocks.get_or_panic(mir);
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let node = module.instrs.at(instr.node);
+            if !ir::same_name(node.result.name, mask) {
+                continue;
+            }
+            let left = node.args.get_or_panic(0);
+            let right = node.args.get_or_panic(1);
+            let left_held = resolve(tables, left.name);
+            let right_held = resolve(tables, right.name);
+            var cond = comparison(module, node.operand, shape_of(module, left.type_name).signed) orelse Cond::Eq;
+            if cond == Cond::Ne {
+                cond = Cond::Eq;
+            }
+            let lhs = per_copy(copies, tables, left_held, vreg_slot(tables, left_held), copy);
+            let rhs = per_copy(copies, tables, right_held, vreg_slot(tables, right_held), copy);
+            // A constant side is compared as an immediate.
+            let left_val = self.val(left_held);
+            let right_val = self.val(right_held);
+            if uniform(role_of(tables, right_held)) and right_val.kind == ValKind::Const {
+                try self.cmp_imm_or_reg(lhs, right_val.imm);
+                return cond;
+            }
+            if uniform(role_of(tables, left_held)) and left_val.kind == ValKind::Const {
+                try self.cmp_imm_or_reg(rhs, left_val.imm);
+                return swap_cond(cond);
+            }
+            try self.op3(MOp::Cmp, reg_none(), lhs, rhs);
+            return cond;
+        }
+    }
+    return Cond::Eq;
 }
 
 /// Returns the general-register op an accumulator of `+ - ^ & |` combines
