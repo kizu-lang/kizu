@@ -33,10 +33,19 @@
 //                                   that answers with the path
 // https-client-wrong-root           https_client.kizu trusting other-p256
 // https-client-wrong-host           https_client.kizu asking for 127.0.0.1
+// https-server-accept               https_server.kizu answering with `accept`:
+//                                   https-server-accept-one / -two /
+//                                   -stranger / -three, one connection each
+// https-server-loop                 https_server.kizu answering with `first` /
+//                                   `next`: https-server-keepalive (/one and
+//                                   /two), -stranger, -fresh (/three)
 //
 // The Kizu end draws from the predictable source seeded with
 // SHA-256("kizu tls fixture " + case), so recording again changes only the
-// node lines and whatever the change being recorded changed.
+// node lines and whatever the change being recorded changed. An https server
+// case is one run of the server and writes a fixture per connection, all
+// with the case's seed: the server gives each connection it accepts the next
+// split of it, so the fixtures hold in the order the run took them.
 //
 // A fixture is text, one record a line after a header:
 //
@@ -610,8 +619,106 @@ async function httpsClientCase(kizu, spec) {
   };
 }
 
+// httpsServerRun: the Kizu https server of one run against node's https
+// clients, one connection after another, each the next fixture. A
+// connection's records are taken once both its ends have closed, before the
+// next one is opened, so the fixtures are the order the server took them in:
+// its handshakes draw from successive splits of the run's seed, and the
+// replay has to come in the same order to meet the same bytes.
+//
+// `connections` lists them: `name` the fixture, `paths` the requests sent
+// down it (none for a client that refuses the server), `roots` what the
+// client trusts, `keepAlive` whether it asks to keep the connection. A
+// kept-alive connection is closed by the client after its last answer.
+async function httpsServerRun(kizu, spec) {
+  let kizuPort = null;
+  let started;
+  const ready = new Promise((resolve) => {
+    started = resolve;
+  });
+  const count = spec.connections.reduce((sum, connection) => sum + connection.paths.length, 0);
+  const run = kizuRun(kizu, 'https_server.kizu', [spec.name, spec.chain, spec.mode, String(count)], (line) => {
+    if (kizuPort === null) {
+      kizuPort = Number(line);
+      started();
+    }
+  });
+  run.done.then(() => started());
+  await ready;
+  if (kizuPort === null) {
+    const result = await run.done;
+    fail(`${spec.name}: the Kizu server printed no port\n${result.out}\n${result.err}`);
+  }
+  const middle = relay(() => kizuPort, false);
+  const port = await middle.listening;
+  const fixtures = [];
+  for (const [index, connection] of spec.connections.entries()) {
+    const keylog = [];
+    const agent = new https.Agent({
+      ...tlsOptions,
+      ca: [pem(`${connection.roots}.pem`)],
+      servername: 'localhost',
+      keepAlive: connection.keepAlive,
+      maxSockets: 1,
+    });
+    agent.on('keylog', (line) => keylog.push(line));
+    const read = [];
+    let refused = null;
+    for (const route of connection.paths.length > 0 ? connection.paths : ['/']) {
+      const got = await new Promise((resolve) => {
+        const request = https.request(
+          { host: '127.0.0.1', port, path: route, agent, headers: { Host: `localhost:${port}` } },
+          (response) => {
+            let body = '';
+            response.on('data', (chunk) => {
+              body += chunk.toString();
+            });
+            response.on('end', () => resolve({ body: `${response.statusCode} ${body}` }));
+          },
+        );
+        request.on('error', (error) => resolve({ error }));
+        request.end();
+      });
+      if (got.error) {
+        refused = got.error;
+        break;
+      }
+      read.push(got.body);
+    }
+    agent.destroy();
+    const trace = await middle.next();
+    let outcome;
+    if (connection.paths.length > 0) {
+      expectEqual(`${connection.name}: node's requests`, refused, null);
+      const want = connection.paths.map((route) => `200 hello over tls from ${route}`);
+      expectEqual(`${connection.name}: what node read`, read.join('; '), want.join('; '));
+      outcome = `peer handshake ok; peer read ${read.map((body) => `"${body}"`).join(', ')}`;
+    } else {
+      expectEqual(`${connection.name}: node's error`, refused?.code, spec.strangerError);
+      outcome = `peer handshake failed: ${refused.code}`;
+    }
+    const asked = connection.paths.length > 0 ? `asks ${connection.paths.join(' ')}` : 'asks /';
+    fixtures.push({
+      name: connection.name,
+      trace,
+      keylog,
+      outcome,
+      role: `https client for localhost trusting ${connection.roots}, ${connection.keepAlive ? 'keep-alive' : 'no keep-alive'}, ${asked}`,
+      kizu: `https server chain=${spec.chain} mode=${spec.mode} run=${spec.name} connection=${index + 1}/${spec.connections.length}`,
+      kizuIsClient: false,
+    });
+  }
+  const result = await run.done;
+  middle.close();
+  // The first line is the port.
+  const printed = result.out.split('\n').slice(1).join('\n');
+  expectEqual(`${spec.name}: what the Kizu server printed`, printed, spec.kizuPrints);
+  return fixtures;
+}
+
 const echoed = 'connected with AES-128-GCM\nHELLO OVER TLS\nclosed';
 const served = 'served localhost with AES-128-GCM\nhello over tls\nclosed';
+const servedRoutes = 'served /one\nserved /two\nserved /three';
 
 const cases = [
   { name: 'client-echo-p256', run: clientCase, chain: 'localhost-p256', roots: 'localhost-p256', host: 'localhost', kizuPrints: echoed },
@@ -626,6 +733,40 @@ const cases = [
   { name: 'https-client-fetch', run: httpsClientCase, chain: 'localhost-p256', roots: 'localhost-p256', host: 'localhost', kizuPrints: '200\nhello over tls from /greeting' },
   { name: 'https-client-wrong-root', run: httpsClientCase, chain: 'localhost-p256', roots: 'other-p256', host: 'localhost', kizuPrints: 'UnknownIssuer', peerAlert: 48 },
   { name: 'https-client-wrong-host', run: httpsClientCase, chain: 'localhost-p256', roots: 'localhost-p256', host: '127.0.0.1', kizuPrints: 'NameMismatch', peerAlert: 42 },
+  // `accept` takes one request off a connection and closes it after the
+  // answer, so each of its connections carries one request. The stranger
+  // comes between the others: a server takes a failed handshake silently and
+  // waits for the next connection, so with the stranger last the run would
+  // wait for a request that never comes.
+  {
+    name: 'https-server-accept',
+    run: httpsServerRun,
+    chain: 'localhost-p256',
+    mode: 'accept',
+    kizuPrints: servedRoutes,
+    strangerError: 'DEPTH_ZERO_SELF_SIGNED_CERT',
+    connections: [
+      { name: 'https-server-accept-one', roots: 'localhost-p256', keepAlive: false, paths: ['/one'] },
+      { name: 'https-server-accept-two', roots: 'localhost-p256', keepAlive: false, paths: ['/two'] },
+      { name: 'https-server-accept-stranger', roots: 'other-p256', keepAlive: false, paths: [] },
+      { name: 'https-server-accept-three', roots: 'localhost-p256', keepAlive: false, paths: ['/three'] },
+    ],
+  },
+  // `first` / `next` keep a connection: /one and /two down one, the stranger,
+  // then /three down a fresh one.
+  {
+    name: 'https-server-loop',
+    run: httpsServerRun,
+    chain: 'localhost-p256',
+    mode: 'loop',
+    kizuPrints: servedRoutes,
+    strangerError: 'DEPTH_ZERO_SELF_SIGNED_CERT',
+    connections: [
+      { name: 'https-server-keepalive', roots: 'localhost-p256', keepAlive: true, paths: ['/one', '/two'] },
+      { name: 'https-server-stranger', roots: 'other-p256', keepAlive: false, paths: [] },
+      { name: 'https-server-fresh', roots: 'localhost-p256', keepAlive: false, paths: ['/three'] },
+    ],
+  },
 ];
 
 async function main() {
@@ -639,26 +780,29 @@ async function main() {
   console.log(`recording with node ${process.versions.node} (OpenSSL ${process.versions.openssl})`);
   const written = [];
   for (const spec of cases) {
-    const got = await spec.run(kizu, spec);
-    if (got.trace.broken) {
-      fail(`${spec.name}: ${got.trace.broken}`);
+    // A case is one Kizu run: one connection, or for an https server run
+    // the connections it took, each its own fixture under its own name.
+    const ran = await spec.run(kizu, spec);
+    for (const got of Array.isArray(ran) ? ran : [{ ...ran, name: spec.name }]) {
+      if (got.trace.broken) {
+        fail(`${got.name}: ${got.trace.broken}`);
+      }
+      const suite = suiteOf(got.trace.records);
+      const keylog = keylogOf(got.keylog);
+      if (got.port !== undefined && !keylog.CLIENT_TRAFFIC_SECRET_0) {
+        fail(`${got.name}: node logged no CLIENT_TRAFFIC_SECRET_0 to open the request with`);
+      }
+      const recorded = {
+        ...got,
+        seed: seedOf(spec.name),
+        suite,
+        keylog,
+        records: got.trace.records,
+        notes: notes(got.trace.records, suite, keylog, got.kizuIsClient),
+      };
+      written.push({ name: got.name, text: fixtureText(recorded) });
+      console.log(`${got.name}: ${got.trace.records.length} records; ${got.outcome}`);
     }
-    const suite = suiteOf(got.trace.records);
-    const keylog = keylogOf(got.keylog);
-    if (got.port !== undefined && !keylog.CLIENT_TRAFFIC_SECRET_0) {
-      fail(`${spec.name}: node logged no CLIENT_TRAFFIC_SECRET_0 to open the request with`);
-    }
-    const recorded = {
-      ...got,
-      name: spec.name,
-      seed: seedOf(spec.name),
-      suite,
-      keylog,
-      records: got.trace.records,
-      notes: notes(got.trace.records, suite, keylog, got.kizuIsClient),
-    };
-    written.push({ name: spec.name, text: fixtureText(recorded) });
-    console.log(`${spec.name}: ${got.trace.records.length} records; ${got.outcome}`);
   }
   for (const fixture of written) {
     fs.writeFileSync(path.join(fixtures, `${fixture.name}.trace`), fixture.text);
