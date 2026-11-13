@@ -495,3 +495,40 @@ test "lexer normalizes invalid UTF-8 like Go rune conversion" {
     try expect_next(&var scanner, token::Kind::Illegal, "�");
     try expect_next(&var scanner, token::Kind::Ident, "x");
 }
+
+test "lexer reads lexemes where it reads tokens" {
+    let allocator = mem::page_allocator();
+    let input =
+        \\/// doc
+        \\pub error Fault { A, B }
+        \\fn f() -> !void { let s = "a{b"; c"x" == => ... x.y 0x1F 1.5e3 $ é
+        \\    \\one
+        \\    \\two
+        \\    // SAFETY: ok
+        \\    let t = s;
+        \\}
+    ;
+    var tokens = new(allocator, input);
+    defer tokens.deinit(allocator);
+    var lexemes = new(allocator, input);
+    defer lexemes.deinit(allocator);
+    var count = 0;
+    while true {
+        let expected = try tokens.next_token();
+        defer expected.deinit(allocator);
+        let actual = try lexemes.next_lexeme();
+        testing::expect(actual.kind == expected.kind);
+        testing::expect_equal<i64>(expected.line, actual.line);
+        testing::expect_equal<i64>(expected.column, actual.column);
+        if expected.kind == token::Kind::Eof {
+            break;
+        }
+        if !actual.multiline {
+            let literal = expected.literal.as_bytes();
+            testing::expect(mem::equal_bytes(literal, input[actual.start..actual.end]));
+        }
+        count = count + 1;
+    }
+    testing::expect_equal<i64>(39, count);
+    return;
+}

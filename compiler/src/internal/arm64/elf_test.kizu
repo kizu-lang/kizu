@@ -1,0 +1,77 @@
+import compiler::internal::ir;
+import std::mem;
+import std::string;
+import std::testing;
+
+// The object below is what the system assembler (clang -c for
+// aarch64-linux) makes of these lines, a shape no example reaches: a call
+// to a global the object defines stays a relocation, a call to a local
+// function of the section is resolved in place even when it is defined
+// later, and a call to an undefined symbol is relocated.
+//
+//         .text
+//         .globl main
+//         .p2align 4
+//     main:
+//         bl main
+//         bl kz_f
+//         bl ext
+//         ret
+//         .p2align 4
+//     kz_f:
+//         ret
+//         .section .note.GNU-stack,"",%progbits
+
+fn assembled_calls(allocator: Allocator) -> !string::String {
+    var hex = string::new(allocator);
+    defer hex.deinit(allocator);
+    try hex.append_bytes(allocator, "7f454c460201010000000000000000000100b70001000000000000000000000000000000000000004001000000000000");
+    try hex.append_bytes(allocator, "00000000400000000000400006000100000000940300009400000094c0035fd6c0035fd6000000000000000000000000");
+    try hex.append_bytes(allocator, "000000000000000000000000000000000100000000000200000000000000000000000000000000002400000000000200");
+    try hex.append_bytes(allocator, "100000000000000000000000000000000f00000010000200000000000000000000000000000000000b00000010000000");
+    try hex.append_bytes(allocator, "0000000000000000000000000000000000000000000000001b0100000300000000000000000000000800000000000000");
+    try hex.append_bytes(allocator, "1b010000040000000000000000000000002478002e72656c612e74657874006d61696e002e6e6f74652e474e552d7374");
+    try hex.append_bytes(allocator, "61636b006b7a5f66002e737472746162002e73796d746162000000000000000000000000000000000000000000000000");
+    try hex.append_bytes(allocator, "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+    try hex.append_bytes(allocator, "290000000300000000000000000000000000000000000000000100000000000039000000000000000000000000000000");
+    try hex.append_bytes(allocator, "010000000000000000000000000000000900000001000000060000000000000000000000000000004000000000000000");
+    try hex.append_bytes(allocator, "140000000000000000000000000000001000000000000000000000000000000004000000040000004000000000000000");
+    try hex.append_bytes(allocator, "0000000000000000d0000000000000003000000000000000050000000200000008000000000000001800000000000000");
+    try hex.append_bytes(allocator, "140000000100000000000000000000000000000000000000540000000000000000000000000000000000000000000000");
+    try hex.append_bytes(allocator, "010000000000000000000000000000003100000002000000000000000000000000000000000000005800000000000000");
+    try hex.append_bytes(allocator, "7800000000000000010000000300000008000000000000001800000000000000");
+    let text = hex.as_bytes();
+    return hex_bytes(allocator, text);
+}
+
+test "write the ELF object of calls resolved in place and relocated" {
+    let allocator = mem::page_allocator();
+    var syms = try ir::new_name_table(allocator);
+    defer syms.deinit(allocator);
+    var obj = new_obj(allocator, Format::Elf);
+    defer obj.deinit(allocator);
+    let main = try syms.intern("_main");
+    let local = try syms.intern("kz_f");
+    let external = try syms.intern("_ext");
+    try obj.enter(allocator, &var syms, SectionKind::Text);
+    try obj.global(allocator, &syms, main);
+    try obj.align(allocator, 4);
+    try obj.define(allocator, &syms, main);
+    try obj.call(allocator, &syms, main);
+    try obj.call(allocator, &syms, local);
+    try obj.call(allocator, &syms, external);
+    try obj.word(allocator, enc_ret(), "ret");
+    try obj.align(allocator, 4);
+    try obj.define(allocator, &syms, local);
+    try obj.word(allocator, enc_ret(), "ret");
+    try obj.enter(allocator, &var syms, SectionKind::Note);
+    var written = string::new(allocator);
+    defer written.deinit(allocator);
+    try obj.write_elf(allocator, &syms, &var written);
+    let want = try assembled_calls(allocator);
+    defer want.deinit(allocator);
+    let want_bytes = want.as_bytes();
+    let written_bytes = written.as_bytes();
+    testing::expect(obj.failure.len() == 0);
+    testing::expect(mem::equal_bytes(written_bytes, want_bytes));
+}

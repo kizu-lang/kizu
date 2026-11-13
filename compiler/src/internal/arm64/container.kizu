@@ -1,0 +1,736 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import compiler::internal::llvm;
+import std::array;
+
+// Array element access and optionals. An array is its header in memory:
+// data pointer, length, capacity, three words. An append writes into the
+// reserved tail when there is room and asks the runtime to grow otherwise;
+// an indexed access tests the index against the length unsigned, so a
+// negative index is out of range without a second test. An optional whose
+// element has a niche (a reference, a Box, a function, an arena handle, or a
+// struct that holds one) is the element itself, zero when absent; any other
+// is `{ i8, T }` in memory.
+
+/// Returns the shape of the element of the container a value names.
+fn element_shape(module: &ir::Module, container: ir::Value) -> Shape {
+    let text = ir::name_text(&module.names, container.type_name);
+    let bytes = text.as_bytes();
+    let elem = container_elem(bytes);
+    return shape_of_bytes(module, elem, 1);
+}
+
+fn (self: &var Selector) new_join() -> !i64 {
+    let block = try self.func.add_block(self.allocator);
+    try self.cold.append(self.allocator, self.cold.get(self.current) orelse false);
+    return block;
+}
+
+/// Stores a value as an array element at data + index * size.
+fn (self: &var Selector) store_element(module: &ir::Module, data: i64, index: i64, value: ir::Value, shape: Shape) -> !bool {
+    let shift = power_of_two(shape.size);
+    if is_word(shape) and shift >= 0 {
+        let reg = try self.reg(module, value) orelse return false;
+        var inst = blank(MOp::StoreIdx);
+        inst.rd = reg;
+        inst.rn = data;
+        inst.rm = index;
+        inst.imm = shift;
+        inst.width = shape.size;
+        try self.inst(inst);
+        return true;
+    }
+    let address = try self.scaled_addr(data, index, shape.size);
+    return self.store_value(module, value, shape, address, 0);
+}
+
+/// Returns data + index * size in a register.
+fn (self: &var Selector) scaled_addr(data: i64, index: i64, size: i64) -> !i64 {
+    let address = self.func.new_vreg();
+    let shift = power_of_two(size);
+    if shift >= 0 {
+        var inst = blank(MOp::AddShift);
+        inst.rd = address;
+        inst.rn = data;
+        inst.rm = index;
+        inst.imm = shift;
+        try self.inst(inst);
+        return address;
+    }
+    let size_reg = try self.imm_reg_nz(size);
+    var inst = blank(MOp::MAdd);
+    inst.rd = address;
+    inst.rn = index;
+    inst.rm = size_reg;
+    inst.ra = data;
+    try self.inst(inst);
+    return address;
+}
+
+/// Loads element index of an array's data as a value of type_name.
+fn (self: &var Selector) load_element(module: &ir::Module, data: i64, index: i64, type_name: ir::Name) -> !?Val {
+    let shape = shape_of(module, type_name);
+    let shift = power_of_two(shape.size);
+    if is_word(shape) and shift >= 0 {
+        let rd = self.func.new_vreg();
+        var inst = blank(MOp::LoadIdx);
+        inst.rd = rd;
+        inst.rn = data;
+        inst.rm = index;
+        inst.imm = shift;
+        inst.width = shape.size;
+        inst.signed = shape.signed;
+        try self.inst(inst);
+        return reg_val(rd);
+    }
+    let address = try self.scaled_addr(data, index, shape.size);
+    return self.load_value(module, type_name, address, 0, true);
+}
+
+/// Selects Array.append(value): the fast path stores into the reserved
+/// tail; the slow path grows the storage through the runtime first.
+fn (self: &var Selector) select_array_append(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let array_value = node.args.get(0) orelse return try self.fail_op(module, node);
+    let allocator_value = node.args.get(1) orelse return try self.fail_op(module, node);
+    let value = node.args.get(2) orelse return try self.fail_op(module, node);
+    let elem = element_shape(module, array_value);
+    if elem.class == Class::Unsupported or self.oom < 0 {
+        return try self.fail_op(module, node);
+    }
+    let header = try self.header_addr(module, array_value) orelse return try self.fail_op(module, node);
+    let allocator_reg = try self.reg(module, allocator_value) orelse return try self.fail_op(module, node);
+    let length = self.func.new_vreg();
+    try self.load(length, header, 8, 8, true);
+    let code = try self.append_at(module, header, length, allocator_reg, value, elem) orelse return try self.fail_op(module, node);
+    try self.set_val(node.result.name, reg_val(code));
+    return null;
+}
+
+/// Appends value at length, the length header holds, and returns the
+/// register of the code it leaves: 0, or the out-of-memory failure when the
+/// storage could not grow. An arena's add is this append too.
+fn (self: &var Selector) append_at(module: &ir::Module, header: i64, length: i64, allocator_reg: i64, value: ir::Value, elem: Shape) -> !?i64 {
+    let capacity = self.func.new_vreg();
+    try self.load(capacity, header, 16, 8, true);
+    let code = self.func.new_vreg();
+    let fast = try self.new_join();
+    let slow = try self.new_cold_block();
+    let join = try self.new_join();
+    try self.op3(MOp::Cmp, reg_none(), length, capacity);
+    self.func.end(self.current, Term::Flags, Cond::Lt, reg_none(), fast, slow);
+    // Slow: grow to at least one more, or fail.
+    try self.start_block(slow);
+    let data_old = self.func.new_vreg();
+    try self.load(data_old, header, 0, 8, false);
+    let storage_slot = try self.func.add_slot(self.allocator, 16, 8);
+    let storage = try self.frame_addr(storage_slot, 0);
+    let grown = self.func.new_vreg();
+    try self.op_imm(MOp::AddImm, grown, length, 1);
+    let size_reg = try self.imm_reg_nz(elem.size);
+    var words = array::new<i64>(self.allocator);
+    defer words.deinit(self.allocator);
+    try words.append(self.allocator, storage);
+    try words.append(self.allocator, allocator_reg);
+    try words.append(self.allocator, data_old);
+    try words.append(self.allocator, capacity);
+    try words.append(self.allocator, grown);
+    try words.append(self.allocator, size_reg);
+    let count = try self.place_words(&words);
+    try self.call_c("kizu_array_grow", count);
+    let new_capacity = self.func.new_vreg();
+    try self.load(new_capacity, storage, 8, 8, true);
+    let store_grown = try self.new_join();
+    let failed = try self.new_cold_block();
+    try self.op_imm(MOp::CmpImm, reg_none(), new_capacity, 0);
+    self.func.end(self.current, Term::Flags, Cond::Ge, reg_none(), store_grown, failed);
+    try self.start_block(failed);
+    try self.mov_imm(code, self.oom);
+    self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), join, 0 - 1);
+    try self.start_block(store_grown);
+    let new_data = self.func.new_vreg();
+    try self.load(new_data, storage, 0, 8, false);
+    try self.store(new_data, header, 0, 8);
+    try self.store(new_capacity, header, 16, 8);
+    self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), fast, 0 - 1);
+    // Fast: store at the old length and count it.
+    try self.start_block(fast);
+    let data = self.func.new_vreg();
+    try self.load(data, header, 0, 8, false);
+    if !try self.store_element(module, data, length, value, elem) {
+        return null;
+    }
+    let next_length = self.func.new_vreg();
+    try self.op_imm(MOp::AddImm, next_length, length, 1);
+    try self.store(next_length, header, 8, 8);
+    try self.mov_imm(code, 0);
+    self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), join, 0 - 1);
+    try self.start_block(join);
+    return code;
+}
+
+/// Selects Array.set(index, value): out of range is the array's
+/// OutOfBounds failure.
+fn (self: &var Selector) select_array_set(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let array_value = node.args.get(0) orelse return try self.fail_op(module, node);
+    let index = node.args.get(1) orelse return try self.fail_op(module, node);
+    let value = node.args.get(2) orelse return try self.fail_op(module, node);
+    let elem = element_shape(module, array_value);
+    if elem.class == Class::Unsupported or self.oob < 0 {
+        return try self.fail_op(module, node);
+    }
+    let header = try self.header_addr(module, array_value) orelse return try self.fail_op(module, node);
+    let index_reg = try self.reg_nz(module, index) orelse return try self.fail_op(module, node);
+    let length = self.func.new_vreg();
+    try self.load(length, header, 8, 8, true);
+    // The code is set on each path, so a `try` right after it resolves
+    // on each path without testing.
+    let code = self.func.new_vreg();
+    let store_block = try self.new_join();
+    let out_of_range = try self.new_cold_block();
+    let join = try self.new_join();
+    try self.op3(MOp::Cmp, reg_none(), index_reg, length);
+    self.func.end(self.current, Term::Flags, Cond::Lo, reg_none(), store_block, out_of_range);
+    try self.start_block(out_of_range);
+    try self.mov_imm(code, self.oob);
+    self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), join, 0 - 1);
+    try self.start_block(store_block);
+    let data = self.func.new_vreg();
+    try self.load(data, header, 0, 8, false);
+    if !try self.store_element(module, data, index_reg, value, elem) {
+        return try self.fail_op(module, node);
+    }
+    try self.mov_imm(code, 0);
+    self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), join, 0 - 1);
+    try self.start_block(join);
+    try self.set_val(node.result.name, reg_val(code));
+    return null;
+}
+
+/// Selects Array.get_or_panic(index): out of range reports the bounds
+/// failure at the call's position.
+fn (self: &var Selector) select_array_get_or_panic(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let array_value = node.args.get(0) orelse return try self.fail_op(module, node);
+    let index = node.args.get(1) orelse return try self.fail_op(module, node);
+    let header = try self.header_addr(module, array_value) orelse return try self.fail_op(module, node);
+    let index_reg = try self.reg_nz(module, index) orelse return try self.fail_op(module, node);
+    let length = self.func.new_vreg();
+    try self.load(length, header, 8, 8, true);
+    let fail_block = try self.new_cold_block();
+    let cont = try self.new_join();
+    try self.op3(MOp::Cmp, reg_none(), index_reg, length);
+    self.func.end(self.current, Term::Flags, Cond::Hs, reg_none(), fail_block, cont);
+    try self.start_block(fail_block);
+    var words = array::new<i64>(self.allocator);
+    defer words.deinit(self.allocator);
+    try words.append(self.allocator, index_reg);
+    try words.append(self.allocator, length);
+    try self.report_failure("kizu_panic_bounds", &words, node.span.start.line, node.span.start.column);
+    try self.start_block(cont);
+    let data = self.func.new_vreg();
+    try self.load(data, header, 0, 8, false);
+    let loaded = try self.load_element(module, data, index_reg, node.result.type_name) orelse return try self.fail_op(module, node);
+    try self.set_val(node.result.name, loaded);
+    return null;
+}
+
+/// Selects Array.at / at_mut: the element's address when the index is in
+/// range, null otherwise -- the niche optional `?&T`.
+fn (self: &var Selector) select_array_at(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let array_value = node.args.get(0) orelse return try self.fail_op(module, node);
+    let index = node.args.get(1) orelse return try self.fail_op(module, node);
+    let elem = element_shape(module, array_value);
+    if elem.class == Class::Unsupported or elem.class == Class::Void {
+        return try self.fail_op(module, node);
+    }
+    let header = try self.header_addr(module, array_value) orelse return try self.fail_op(module, node);
+    let index_reg = try self.reg_nz(module, index) orelse return try self.fail_op(module, node);
+    let checked = try self.element_or_null(header, index_reg, elem.size);
+    try self.set_val(node.result.name, reg_val(checked));
+    return null;
+}
+
+/// Returns a register holding the address of element index, or null when
+/// the index is out of range.
+fn (self: &var Selector) element_or_null(header: i64, index_reg: i64, size: i64) -> !i64 {
+    let length = self.func.new_vreg();
+    let data = self.func.new_vreg();
+    try self.load(length, header, 8, 8, true);
+    try self.load(data, header, 0, 8, false);
+    let address = try self.scaled_addr(data, index_reg, size);
+    try self.op3(MOp::Cmp, reg_none(), index_reg, length);
+    let checked = self.func.new_vreg();
+    var pick = blank(MOp::CSel);
+    pick.rd = checked;
+    pick.rn = address;
+    pick.rm = reg_zr();
+    pick.cond = Cond::Lo;
+    try self.inst(pick);
+    return checked;
+}
+
+/// Selects Array.get: `?T` holding a copy of the element when the index is
+/// in range. A niche optional is bound from the element's address, null out
+/// of range, the way Map.get binds one.
+fn (self: &var Selector) select_array_get(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let array_value = node.args.get(0) orelse return try self.fail_op(module, node);
+    let index = node.args.get(1) orelse return try self.fail_op(module, node);
+    let elem = element_shape(module, array_value);
+    let optional = optional_layout(module, node.result.type_name) orelse return try self.fail_op(module, node);
+    if elem.class == Class::Unsupported or elem.class == Class::Void {
+        return try self.fail_op(module, node);
+    }
+    let header = try self.header_addr(module, array_value) orelse return try self.fail_op(module, node);
+    let index_reg = try self.reg_nz(module, index) orelse return try self.fail_op(module, node);
+    if optional.niche {
+        let checked = try self.element_or_null(header, index_reg, elem.size);
+        return self.optional_from_pointer(module, node, checked, elem);
+    }
+    let result = try self.new_slot(optional.shape);
+    try self.store(reg_zr(), result, 0, 1);
+    let length = self.func.new_vreg();
+    try self.load(length, header, 8, 8, true);
+    let present = try self.new_join();
+    let join = try self.new_join();
+    try self.op3(MOp::Cmp, reg_none(), index_reg, length);
+    self.func.end(self.current, Term::Flags, Cond::Lo, reg_none(), present, join);
+    try self.start_block(present);
+    let data = self.func.new_vreg();
+    try self.load(data, header, 0, 8, false);
+    let source = try self.scaled_addr(data, index_reg, elem.size);
+    let target = try self.add_offset(result, optional.offset);
+    try self.copy_bytes(target, source, elem.size);
+    let one = try self.imm_reg_nz(1);
+    try self.store(one, result, 0, 1);
+    self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), join, 0 - 1);
+    try self.start_block(join);
+    try self.set_val(node.result.name, fresh_val(result));
+    return null;
+}
+
+// ---- optionals ----
+
+/// Is how one optional type is held: the element itself with absence as
+/// zero in the word its niche sits in (at `word`), or `{ i8, T }` with the
+/// payload at offset.
+struct OptionalLayout {
+    niche: bool,
+    shape: Shape,
+    offset: i64,
+    word: i64,
+}
+
+fn optional_layout(module: &ir::Module, type_name: ir::Name) -> ?OptionalLayout {
+    let text = ir::name_text(&module.names, type_name);
+    let bytes = text.as_bytes();
+    if llvm::niche_optional_elem(module, bytes) |elem| {
+        // A niche optional is its element, the address or index word itself
+        // or a struct that reaches one through a field; an absent one is the
+        // element's zero.
+        let inner = shape_of_bytes(module, elem, 1);
+        if inner.class != Class::Scalar and inner.class != Class::Aggregate {
+            return null;
+        }
+        let word = niche_word_offset(module, elem) orelse return null;
+        return OptionalLayout { niche: true, shape: inner, offset: 0, word: word };
+    }
+    let shape = shape_of(module, type_name);
+    if shape.class != Class::Aggregate {
+        return null;
+    }
+    // The payload follows the tag byte at its own alignment.
+    let payload_align = shape.align;
+    return OptionalLayout { niche: false, shape: shape, offset: round_up(1, payload_align), word: 0 };
+}
+
+/// Returns the byte offset of the word a niche sits in: the value itself
+/// for an address or an arena handle, and for a struct the first field that
+/// has a niche, followed down -- the path the LLVM backend's `niche_path`
+/// reads.
+fn niche_word_offset(module: &ir::Module, elem: []u8) -> ?i64 {
+    if module.structs.at(elem) |declared| {
+        var offset = 0;
+        var index = 0;
+        while declared.fields.get(index) |field| {
+            index = index + 1;
+            let field_text = ir::name_text(&module.names, field.type_name);
+            let field_bytes = field_text.as_bytes();
+            let inner = shape_of_bytes(module, field_bytes, 1);
+            if inner.class == Class::Unsupported {
+                return null;
+            }
+            if inner.class == Class::Void {
+                continue;
+            }
+            offset = round_up(offset, inner.align);
+            if llvm::has_niche(module, field_bytes) {
+                let within = niche_word_offset(module, field_bytes) orelse return null;
+                return offset + within;
+            }
+            offset = offset + inner.size;
+        }
+        return null;
+    }
+    if llvm::has_niche(module, elem) {
+        return 0;
+    }
+    return null;
+}
+
+fn (self: &var Selector) select_optional(module: &ir::Module, node: &ir::InstrNode, next: ir::Value, next_op: ir::Op) -> !?diagnostic::Diagnostic {
+    var optional_type = node.result.type_name;
+    if node.op == ir::Op::OptHas or node.op == ir::Op::OptValue {
+        let source = node.args.get(0) orelse return try self.fail_op(module, node);
+        optional_type = source.type_name;
+    }
+    let layout = optional_layout(module, optional_type) orelse return try self.fail_op(module, node);
+    match node.op {
+        OptNull => {
+            if layout.niche and layout.shape.class == Class::Scalar {
+                try self.set_val(node.result.name, const_val(0));
+                return null;
+            }
+            let address = try self.new_slot(layout.shape);
+            try self.zero_bytes(address, layout.shape.size);
+            try self.set_val(node.result.name, fresh_val(address));
+            return null;
+        },
+        OptSome => {
+            let value = node.args.get(0) orelse return try self.fail_op(module, node);
+            if layout.niche {
+                try self.set_val(node.result.name, self.val(value.name));
+                return null;
+            }
+            let address = try self.new_slot(layout.shape);
+            let one = try self.imm_reg_nz(1);
+            try self.store(one, address, 0, 1);
+            let payload = shape_of(module, value.type_name);
+            if !try self.store_value(module, value, payload, address, layout.offset) {
+                return try self.fail_op(module, node);
+            }
+            try self.set_val(node.result.name, fresh_val(address));
+            return null;
+        },
+        OptHas => {
+            let source = node.args.get_or_panic(0);
+            var tested = reg_none();
+            if layout.niche and layout.shape.class == Class::Scalar {
+                tested = try self.reg_nz(module, source) orelse return try self.fail_op(module, node);
+            } else if layout.niche {
+                let address = try self.addr(module, source) orelse return try self.fail_op(module, node);
+                tested = self.func.new_vreg();
+                try self.load(tested, address, layout.word, 8, false);
+            } else {
+                let address = try self.addr(module, source) orelse return try self.fail_op(module, node);
+                tested = self.func.new_vreg();
+                try self.load(tested, address, 0, 1, false);
+            }
+            var flags = no_val();
+            flags.kind = ValKind::Flags;
+            flags.cond = Cond::Ne;
+            flags.reg = tested;
+            flags.imm = 0;
+            return self.bind_flags(module, node.result, flags, next, next_op);
+        },
+        OptValue => {
+            let source = node.args.get_or_panic(0);
+            if layout.niche {
+                try self.set_val(node.result.name, self.val(source.name));
+                return null;
+            }
+            let address = try self.addr(module, source) orelse return try self.fail_op(module, node);
+            let loaded = try self.load_value(module, node.result.type_name, address, layout.offset, false) orelse return try self.fail_op(module, node);
+            try self.set_val(node.result.name, loaded);
+            return null;
+        },
+        _ => return try self.fail_op(module, node),
+    }
+}
+
+// ---- tagged unions ----
+
+/// Selects the union ops: a union is its tag word and then the active
+/// variant's payload at offset 8.
+fn (self: &var Selector) select_union(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    match node.op {
+        UnionNew => {
+            let shape = shape_of(module, node.result.type_name);
+            if shape.class != Class::Aggregate {
+                return try self.fail_op(module, node);
+            }
+            let variant = module.union_variant(node.result.type_name, node.immediate) orelse return try self.fail_op(module, node);
+            let address = try self.new_slot(shape);
+            let tag = try self.imm_reg(variant.index);
+            try self.store(tag, address, 0, 8);
+            if node.args.get(0) |payload| {
+                let payload_shape = shape_of(module, payload.type_name);
+                if !try self.store_value(module, payload, payload_shape, address, 8) {
+                    return try self.fail_op(module, node);
+                }
+            }
+            try self.set_val(node.result.name, fresh_val(address));
+            return null;
+        },
+        UnionLoad => {
+            let pointer = node.args.get(0) orelse return try self.fail_op(module, node);
+            let base = try self.reg_nz(module, pointer) orelse return try self.fail_op(module, node);
+            let loaded = try self.load_value(module, node.result.type_name, base, 0, true) orelse return try self.fail_op(module, node);
+            try self.set_val(node.result.name, loaded);
+            return null;
+        },
+        UnionTag => {
+            let source = node.args.get(0) orelse return try self.fail_op(module, node);
+            let address = try self.addr(module, source) orelse return try self.fail_op(module, node);
+            let tag = self.func.new_vreg();
+            try self.load(tag, address, 0, 8, true);
+            try self.set_val(node.result.name, reg_val(tag));
+            return null;
+        },
+        UnionPayload => {
+            let source = node.args.get(0) orelse return try self.fail_op(module, node);
+            let address = try self.addr(module, source) orelse return try self.fail_op(module, node);
+            let loaded = try self.load_value(module, node.result.type_name, address, 8, false) orelse return try self.fail_op(module, node);
+            try self.set_val(node.result.name, loaded);
+            return null;
+        },
+        UnionPayloadRef => {
+            let pointer = node.args.get(0) orelse return try self.fail_op(module, node);
+            let base = try self.reg_nz(module, pointer) orelse return try self.fail_op(module, node);
+            let address = try self.add_offset(base, 8);
+            try self.set_val(node.result.name, reg_val(address));
+            return null;
+        },
+        _ => return try self.fail_op(module, node),
+    }
+}
+
+/// Selects slice.compare: -1, 0 or 1 as left orders before, with or after
+/// right, by memcmp over the shared length and then by length.
+fn (self: &var Selector) select_slice_compare(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let left = node.args.get(0) orelse return try self.fail_op(module, node);
+    let right = node.args.get(1) orelse return try self.fail_op(module, node);
+    let lhs = try self.slice_regs(module, left) orelse return try self.fail_op(module, node);
+    let rhs = try self.slice_regs(module, right) orelse return try self.fail_op(module, node);
+    try self.op3(MOp::Cmp, reg_none(), lhs.reg2, rhs.reg2);
+    let shared = self.func.new_vreg();
+    var pick = blank(MOp::CSel);
+    pick.rd = shared;
+    pick.rn = lhs.reg2;
+    pick.rm = rhs.reg2;
+    pick.cond = Cond::Lt;
+    try self.inst(pick);
+    let lengths = self.func.new_vreg();
+    try self.op3(MOp::Sub, lengths, lhs.reg2, rhs.reg2);
+    var words = array::new<i64>(self.allocator);
+    defer words.deinit(self.allocator);
+    try words.append(self.allocator, lhs.reg);
+    try words.append(self.allocator, rhs.reg);
+    try words.append(self.allocator, shared);
+    let count = try self.place_words(&words);
+    try self.call_c("memcmp", count);
+    let bytes = self.func.new_vreg();
+    try self.extend(bytes, 0, 4, true);
+    try self.op_imm(MOp::CmpImm, reg_none(), bytes, 0);
+    let order = self.func.new_vreg();
+    var tied = blank(MOp::CSel);
+    tied.rd = order;
+    tied.rn = lengths;
+    tied.rm = bytes;
+    tied.cond = Cond::Eq;
+    try self.inst(tied);
+    try self.op_imm(MOp::CmpImm, reg_none(), order, 0);
+    let after = self.func.new_vreg();
+    var set_after = blank(MOp::CSet);
+    set_after.rd = after;
+    set_after.cond = Cond::Gt;
+    try self.inst(set_after);
+    let before = self.func.new_vreg();
+    var set_before = blank(MOp::CSet);
+    set_before.rd = before;
+    set_before.cond = Cond::Lt;
+    try self.inst(set_before);
+    let result = self.func.new_vreg();
+    try self.op3(MOp::Sub, result, after, before);
+    try self.set_val(node.result.name, reg_val(result));
+    return null;
+}
+
+/// Selects Array.clear, truncate, pop_or_panic, pop and reserve.
+fn (self: &var Selector) select_array_shrink(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let array_value = node.args.get(0) orelse return try self.fail_op(module, node);
+    let header = try self.header_addr(module, array_value) orelse return try self.fail_op(module, node);
+    match node.op {
+        ArrayClear => {
+            try self.store(reg_zr(), header, 8, 8);
+            try self.set_val(node.result.name, no_val());
+            return null;
+        },
+        ArrayTruncate => {
+            let wanted = node.args.get(1) orelse return try self.fail_op(module, node);
+            if self.oob < 0 {
+                return try self.fail_op(module, node);
+            }
+            let length = try self.reg_nz(module, wanted) orelse return try self.fail_op(module, node);
+            let held = self.func.new_vreg();
+            try self.load(held, header, 8, 8, true);
+            let failure = try self.imm_reg_nz(self.oob);
+            try self.op3(MOp::Cmp, reg_none(), length, held);
+            let kept = self.func.new_vreg();
+            var keep = blank(MOp::CSel);
+            keep.rd = kept;
+            keep.rn = length;
+            keep.rm = held;
+            keep.cond = Cond::Ls;
+            try self.inst(keep);
+            let code = self.func.new_vreg();
+            var pick = blank(MOp::CSel);
+            pick.rd = code;
+            pick.rn = reg_zr();
+            pick.rm = failure;
+            pick.cond = Cond::Ls;
+            try self.inst(pick);
+            try self.store(kept, header, 8, 8);
+            try self.set_val(node.result.name, reg_val(code));
+            return null;
+        },
+        ArrayReserve => {
+            let allocator_value = node.args.get(1) orelse return try self.fail_op(module, node);
+            let additional = node.args.get(2) orelse return try self.fail_op(module, node);
+            let elem = element_shape(module, array_value);
+            if elem.class == Class::Unsupported or self.oom < 0 {
+                return try self.fail_op(module, node);
+            }
+            var words = array::new<i64>(self.allocator);
+            defer words.deinit(self.allocator);
+            try words.append(self.allocator, try self.reg(module, allocator_value) orelse return try self.fail_op(module, node));
+            try words.append(self.allocator, header);
+            try words.append(self.allocator, try self.reg(module, additional) orelse return try self.fail_op(module, node));
+            try words.append(self.allocator, try self.imm_reg_nz(elem.size));
+            let count = try self.place_words(&words);
+            try self.call_c("kizu_array_reserve", count);
+            let ok = self.func.new_vreg();
+            try self.extend(ok, 0, 1, false);
+            try self.bool_result(module, node.result, ok, self.oom);
+            return null;
+        },
+        ArrayPopOrPanic => {
+            let length = self.func.new_vreg();
+            try self.load(length, header, 8, 8, true);
+            let fail_block = try self.new_cold_block();
+            let take = try self.new_join();
+            try self.op_imm(MOp::CmpImm, reg_none(), length, 0);
+            self.func.end(self.current, Term::Flags, Cond::Le, reg_none(), fail_block, take);
+            try self.start_block(fail_block);
+            var none = array::new<i64>(self.allocator);
+            defer none.deinit(self.allocator);
+            try self.report_failure("kizu_panic_array_empty", &none, node.span.start.line, node.span.start.column);
+            try self.start_block(take);
+            let shorter = self.func.new_vreg();
+            try self.op_imm(MOp::SubImm, shorter, length, 1);
+            try self.store(shorter, header, 8, 8);
+            let data = self.func.new_vreg();
+            try self.load(data, header, 0, 8, false);
+            let loaded = try self.load_element(module, data, shorter, node.result.type_name) orelse return try self.fail_op(module, node);
+            try self.set_val(node.result.name, loaded);
+            return null;
+        },
+        ArrayPop => {
+            let optional = optional_layout(module, node.result.type_name) orelse return try self.fail_op(module, node);
+            let elem = element_shape(module, array_value);
+            if elem.class == Class::Unsupported or elem.class == Class::Void {
+                return try self.fail_op(module, node);
+            }
+            if optional.niche {
+                // The last element's address, null when the array is empty,
+                // binds the niche optional as Map.get does; the element is
+                // copied out before anything can reuse its place.
+                let pointer = self.func.new_vreg();
+                try self.mov_imm(pointer, 0);
+                let length = self.func.new_vreg();
+                try self.load(length, header, 8, 8, true);
+                let take = try self.new_join();
+                let join = try self.new_join();
+                try self.op_imm(MOp::CmpImm, reg_none(), length, 0);
+                self.func.end(self.current, Term::Flags, Cond::Gt, reg_none(), take, join);
+                try self.start_block(take);
+                let shorter = self.func.new_vreg();
+                try self.op_imm(MOp::SubImm, shorter, length, 1);
+                try self.store(shorter, header, 8, 8);
+                let data = self.func.new_vreg();
+                try self.load(data, header, 0, 8, false);
+                let source = try self.scaled_addr(data, shorter, elem.size);
+                try self.mov(pointer, source);
+                self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), join, 0 - 1);
+                try self.start_block(join);
+                return self.optional_from_pointer(module, node, pointer, elem);
+            }
+            let result = try self.new_slot(optional.shape);
+            try self.store(reg_zr(), result, 0, 1);
+            let length = self.func.new_vreg();
+            try self.load(length, header, 8, 8, true);
+            let take = try self.new_join();
+            let join = try self.new_join();
+            try self.op_imm(MOp::CmpImm, reg_none(), length, 0);
+            self.func.end(self.current, Term::Flags, Cond::Gt, reg_none(), take, join);
+            try self.start_block(take);
+            let shorter = self.func.new_vreg();
+            try self.op_imm(MOp::SubImm, shorter, length, 1);
+            try self.store(shorter, header, 8, 8);
+            let data = self.func.new_vreg();
+            try self.load(data, header, 0, 8, false);
+            let source = try self.scaled_addr(data, shorter, elem.size);
+            let target = try self.add_offset(result, optional.offset);
+            try self.copy_bytes(target, source, elem.size);
+            let one = try self.imm_reg_nz(1);
+            try self.store(one, result, 0, 1);
+            self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), join, 0 - 1);
+            try self.start_block(join);
+            try self.set_val(node.result.name, fresh_val(result));
+            return null;
+        },
+        _ => return try self.fail_op(module, node),
+    }
+}
+
+/// Selects Array.swap(left, right): both in range swaps the elements, either
+/// out of range is the array's OutOfBounds failure and changes nothing.
+fn (self: &var Selector) select_array_swap(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let array_value = node.args.get(0) orelse return try self.fail_op(module, node);
+    let left = node.args.get(1) orelse return try self.fail_op(module, node);
+    let right = node.args.get(2) orelse return try self.fail_op(module, node);
+    let elem = element_shape(module, array_value);
+    if elem.class == Class::Unsupported or elem.class == Class::Void or self.oob < 0 {
+        return try self.fail_op(module, node);
+    }
+    let header = try self.header_addr(module, array_value) orelse return try self.fail_op(module, node);
+    let left_reg = try self.reg_nz(module, left) orelse return try self.fail_op(module, node);
+    let right_reg = try self.reg_nz(module, right) orelse return try self.fail_op(module, node);
+    let length = self.func.new_vreg();
+    try self.load(length, header, 8, 8, true);
+    let code = self.func.new_vreg();
+    let check_right = try self.new_join();
+    let swap = try self.new_join();
+    let out_of_range = try self.new_cold_block();
+    let join = try self.new_join();
+    try self.op3(MOp::Cmp, reg_none(), left_reg, length);
+    self.func.end(self.current, Term::Flags, Cond::Lo, reg_none(), check_right, out_of_range);
+    try self.start_block(check_right);
+    try self.op3(MOp::Cmp, reg_none(), right_reg, length);
+    self.func.end(self.current, Term::Flags, Cond::Lo, reg_none(), swap, out_of_range);
+    try self.start_block(out_of_range);
+    try self.mov_imm(code, self.oob);
+    self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), join, 0 - 1);
+    try self.start_block(swap);
+    let data = self.func.new_vreg();
+    try self.load(data, header, 0, 8, false);
+    let left_addr = try self.scaled_addr(data, left_reg, elem.size);
+    let right_addr = try self.scaled_addr(data, right_reg, elem.size);
+    let temp = try self.new_slot(elem);
+    try self.copy_bytes(temp, left_addr, elem.size);
+    try self.copy_bytes(left_addr, right_addr, elem.size);
+    try self.copy_bytes(right_addr, temp, elem.size);
+    try self.mov_imm(code, 0);
+    self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), join, 0 - 1);
+    try self.start_block(join);
+    try self.set_val(node.result.name, reg_val(code));
+    return null;
+}

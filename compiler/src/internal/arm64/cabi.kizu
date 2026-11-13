@@ -1,0 +1,404 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::array;
+import std::string;
+
+// Calls into C by the C calling convention, AAPCS64 as Darwin applies it
+// (arm64; amd64 calls by System V, in sysv.kizu, or under Windows by its
+// own convention, in win64.kizu).
+// A scalar takes the next general register, a float the next float
+// register. A C struct by value is laid out the way C lays it out (the
+// backend's struct layout already is: field after field at its natural
+// alignment) and travels by its size and leaves:
+//
+// - one to four floats of one width (a homogeneous float aggregate) in that
+//   many float registers, as an argument and as a result;
+// - otherwise at most 16 bytes in one or two general registers, loaded as
+//   whole words, as an argument and as a result;
+// - otherwise as the address of a copy the caller makes, and a result in
+//   memory the caller provides, its address in x8.
+//
+// A variadic callee takes its named arguments as any callee does. On
+// Darwin every argument after them goes on the stack, one 8-byte slot each.
+// Elsewhere (AAPCS64 as Linux applies it) an unnamed argument goes where a
+// named one would, and a scalar the registers left would not hold takes the
+// next 8-byte stack slot, as C rounds a stack argument of 8 bytes or less.
+//
+// What would spill a named argument onto the stack is refused: C packs a
+// stack argument by its own size and alignment, which this backend does not
+// lay out.
+
+/// Is where a C struct by value goes.
+enum CStructKind {
+    // count float registers of width bytes each.
+    Floats,
+    // count general registers.
+    Words,
+    // The address of a copy; for a result, memory at x8.
+    Memory,
+}
+
+/// Is how one C struct type crosses a call.
+struct CStructPassing {
+    kind: CStructKind,
+    count: i64,
+    width: i64,
+    size: i64,
+    align: i64,
+}
+
+/// Is one scalar of a flattened C struct.
+struct CLeaf {
+    // The byte offset in the outermost struct.
+    offset: i64,
+    size: i64,
+    float: bool,
+}
+
+/// Reports whether a type is a struct, which at a C boundary the checker
+/// lets only a C struct be.
+fn is_c_struct(module: &ir::Module, type_name: ir::Name) -> bool {
+    let text = ir::name_text(&module.names, type_name);
+    let bytes = text.as_bytes();
+    return module.structs.contains(bytes);
+}
+
+/// Appends the scalars of a struct at base in field order, nested structs
+/// flattened. Returns false when a field is not one C can name.
+fn c_leaves(module: &ir::Module, name: []u8, base: i64, leaves: &var array::Array<CLeaf>, allocator: Allocator, depth: i64) -> !bool {
+    if depth > 64 {
+        return false;
+    }
+    if module.structs.at(name) |declared| {
+        var offset = 0;
+        var index = 0;
+        while declared.fields.get(index) |field| {
+            index = index + 1;
+            let field_text = ir::name_text(&module.names, field.type_name);
+            let field_bytes = field_text.as_bytes();
+            let shape = shape_of_bytes(module, field_bytes, 0);
+            if shape.class == Class::Void {
+                continue;
+            }
+            offset = round_up(offset, shape.align);
+            if module.structs.contains(field_bytes) {
+                if !try c_leaves(module, field_bytes, base + offset, leaves, allocator, depth + 1) {
+                    return false;
+                }
+            } else {
+                if !is_word(shape) {
+                    return false;
+                }
+                try leaves.append(
+                    allocator, CLeaf { offset: base + offset, size: shape.size, float: shape.class == Class::Float }
+                );
+            }
+            offset = offset + shape.size;
+        }
+        return true;
+    }
+    return false;
+}
+
+/// Returns how a C struct type crosses a call, or null when it holds what C
+/// cannot name or nothing at all.
+fn c_struct_passing(module: &ir::Module, type_name: ir::Name, allocator: Allocator) -> !?CStructPassing {
+    let shape = shape_of(module, type_name);
+    if shape.class != Class::Aggregate or shape.size == 0 {
+        return null;
+    }
+    let text = ir::name_text(&module.names, type_name);
+    let bytes = text.as_bytes();
+    var leaves = array::new<CLeaf>(allocator);
+    defer leaves.deinit(allocator);
+    if !try c_leaves(module, bytes, 0, &var leaves, allocator, 0) {
+        return null;
+    }
+    var passing = CStructPassing {
+        kind: CStructKind::Memory, count: 0, width: 0, size: shape.size, align: shape.align
+    };
+    let count = leaves.len();
+    if count >= 1 and count <= 4 {
+        let head = leaves.get_or_panic(0);
+        var same = true;
+        var index = 0;
+        while leaves.get(index) |leaf| {
+            index = index + 1;
+            if !leaf.float or leaf.size != head.size {
+                same = false;
+            }
+        }
+        if same {
+            passing.kind = CStructKind::Floats;
+            passing.count = count;
+            passing.width = head.size;
+            return passing;
+        }
+    }
+    if shape.size <= 16 {
+        passing.kind = CStructKind::Words;
+        passing.count = (shape.size + 7) / 8;
+        passing.width = 8;
+    }
+    return passing;
+}
+
+/// Is the registers and stack slots a C call's arguments go in, collected
+/// before any is placed.
+struct CCallArgs {
+    words: array::Array<i64>,
+    floats: array::Array<i64>,
+    float_widths: array::Array<i64>,
+    // The words of a variadic callee's unnamed arguments, one stack slot
+    // each.
+    stacked: array::Array<i64>,
+}
+
+fn (self: CCallArgs) deinit(allocator: Allocator) -> void {
+    self.words.deinit(allocator);
+    self.floats.deinit(allocator);
+    self.float_widths.deinit(allocator);
+    self.stacked.deinit(allocator);
+    return;
+}
+
+/// Returns the address of a fresh frame slot of size bytes at align.
+fn (self: &var Selector) c_slot(size: i64, align: i64) -> !i64 {
+    var at = align;
+    if at < 8 {
+        at = 8;
+    }
+    let slot = try self.func.add_slot(self.allocator, size, at);
+    return self.frame_addr(slot, 0);
+}
+
+/// Adds a C struct argument to the registers it travels in. Returns false
+/// when it is not one this backend passes: a struct C cannot name, or one
+/// the registers left would not hold.
+fn (self: &var Selector) c_struct_arg(module: &ir::Module, arg: ir::Value, args: &var CCallArgs) -> !bool {
+    let passing = try c_struct_passing(module, arg.type_name, self.allocator) orelse return false;
+    let src = try self.addr(module, arg) orelse return false;
+    match passing.kind {
+        Floats => {
+            if args.floats.len() + passing.count > 8 {
+                return false;
+            }
+            var index = 0;
+            while index < passing.count {
+                let reg = self.func.new_vreg();
+                try self.load(reg, src, index * passing.width, passing.width, false);
+                try args.floats.append(self.allocator, reg);
+                try args.float_widths.append(self.allocator, passing.width);
+                index = index + 1;
+            }
+            return true;
+        },
+        Words => {
+            if args.words.len() + passing.count > 8 {
+                return false;
+            }
+            // A struct whose size is not whole words is copied into one that
+            // is, so the last word's load stays inside memory of its own.
+            var base = src;
+            if passing.size % 8 != 0 {
+                base = try self.c_slot(passing.count * 8, passing.align);
+                try self.copy_bytes(base, src, passing.size);
+            }
+            var index = 0;
+            while index < passing.count {
+                let reg = self.func.new_vreg();
+                try self.load(reg, base, index * 8, 8, false);
+                try args.words.append(self.allocator, reg);
+                index = index + 1;
+            }
+            return true;
+        },
+        Memory => {
+            if args.words.len() >= 8 {
+                return false;
+            }
+            // The callee owns the copy and may write it.
+            let copy = try self.c_slot(passing.size, passing.align);
+            try self.copy_bytes(copy, src, passing.size);
+            try args.words.append(self.allocator, copy);
+            return true;
+        },
+    }
+}
+
+/// Returns the address of a copy of an argument a `&T` parameter is handed
+/// the T of.
+fn (self: &var Selector) c_copy_address(module: &ir::Module, arg: ir::Value) -> !?i64 {
+    let shape = shape_of(module, arg.type_name);
+    if shape.class == Class::Unsupported or shape.class == Class::Void {
+        return null;
+    }
+    let address = try self.c_slot(shape.size, shape.align);
+    if !try self.store_value(module, arg, shape, address, 0) {
+        return null;
+    }
+    return address;
+}
+
+/// Selects a call to C: the runtime's plain builtins and extern "c"
+/// functions, by the convention this file describes, or on amd64 by the
+/// System V one (sysv.kizu) or the Windows one (win64.kizu).
+fn (self: &var Selector) select_c_call(module: &ir::Module, node: &ir::InstrNode, symbol_name: ir::Name) -> !?diagnostic::Diagnostic {
+    if self.arch == Arch::Amd64 {
+        return self.select_sysv_call(module, node, symbol_name);
+    }
+    if self.arch == Arch::Amd64Windows {
+        return self.select_win64_call(module, node, symbol_name);
+    }
+    var args = CCallArgs {
+        words: array::new<i64>(self.allocator),
+        floats: array::new<i64>(self.allocator),
+        float_widths: array::new<i64>(self.allocator),
+        stacked: array::new<i64>(self.allocator),
+    };
+    defer args.deinit(self.allocator);
+    var index = 0;
+    while node.args.get(index) |arg| {
+        let at = index;
+        index = index + 1;
+        let unnamed = node.variadic_fixed > 0 and at >= node.variadic_fixed;
+        let stacks_unnamed = unnamed and self.stacks_variadics;
+        var takes_address = false;
+        if node.call_params.get(at) |param| {
+            takes_address = takes_address_of(module, param, arg.type_name);
+        }
+        if takes_address {
+            let address = try self.c_copy_address(module, arg) orelse return try self.fail_op(module, node);
+            if stacks_unnamed or (unnamed and args.words.len() >= 8) {
+                try args.stacked.append(self.allocator, address);
+            } else {
+                try args.words.append(self.allocator, address);
+            }
+            continue;
+        }
+        let shape = shape_of(module, arg.type_name);
+        if stacks_unnamed {
+            // A scalar or a float fills its slot as the word it is held in.
+            if !is_word(shape) {
+                return try self.fail(module, "C variadic argument type", arg.type_name);
+            }
+            let reg = try self.reg(module, arg) orelse return try self.fail_op(module, node);
+            try args.stacked.append(self.allocator, reg);
+            continue;
+        }
+        if is_c_struct(module, arg.type_name) {
+            if !try self.c_struct_arg(module, arg, &var args) {
+                return try self.fail(module, "C argument type", arg.type_name);
+            }
+            continue;
+        }
+        if !is_word(shape) {
+            return try self.fail(module, "C argument type", arg.type_name);
+        }
+        let reg = try self.reg(module, arg) orelse return try self.fail_op(module, node);
+        if unnamed {
+            // Past the registers of its kind, an unnamed scalar fills the
+            // next stack slot as the word it is held in.
+            var bank = args.words.len();
+            if shape.class == Class::Float {
+                bank = args.floats.len();
+            }
+            if bank >= 8 {
+                try args.stacked.append(self.allocator, reg);
+                continue;
+            }
+        }
+        if shape.class == Class::Float {
+            try args.floats.append(self.allocator, reg);
+            try args.float_widths.append(self.allocator, shape.size);
+        } else {
+            try args.words.append(self.allocator, reg);
+        }
+    }
+    if args.words.len() > 8 or args.floats.len() > 8 {
+        return try self.fail_op(module, node);
+    }
+    let result = node.result;
+    var result_passing = CStructPassing { kind: CStructKind::Words, count: 0, width: 0, size: 0, align: 1 };
+    let struct_result = is_c_struct(module, result.type_name);
+    var sret = reg_none();
+    if struct_result {
+        result_passing = try c_struct_passing(module, result.type_name, self.allocator) orelse
+            return try self.fail(module, "C result type", result.type_name);
+        if result_passing.kind == CStructKind::Memory {
+            sret = try self.c_slot(result_passing.size, result_passing.align);
+        }
+    } else {
+        let shape = shape_of(module, result.type_name);
+        if !is_word(shape) and shape.class != Class::Void {
+            return try self.fail(module, "C result type", result.type_name);
+        }
+    }
+    index = 0;
+    while args.stacked.get(index) |reg| {
+        try self.store(reg, reg_sp(), index * 8, 8);
+        index = index + 1;
+    }
+    if args.stacked.len() > self.func.out_words {
+        self.func.out_words = args.stacked.len();
+    }
+    let count = try self.place_words(&args.words);
+    index = 0;
+    while args.floats.get(index) |reg| {
+        var inst = blank(MOp::FArg);
+        inst.rn = reg;
+        inst.imm = index;
+        inst.width = args.float_widths.get_or_panic(index);
+        try self.inst(inst);
+        index = index + 1;
+    }
+    if sret != reg_none() {
+        try self.mov(8, sret);
+    }
+    var symbol = string::new(self.allocator);
+    defer symbol.deinit(self.allocator);
+    let name_text = ir::name_text(&module.names, symbol_name);
+    let name_bytes = name_text.as_bytes();
+    try append_c_symbol(self.allocator, &var symbol, name_bytes);
+    let symbol_bytes = symbol.as_bytes();
+    let sym = try self.syms.intern(symbol_bytes);
+    try self.call_sym(sym, count, sret);
+    if !struct_result {
+        try self.bind_result(module, result, reg_none(), true);
+        return null;
+    }
+    if sret == reg_none() {
+        sret = try self.c_struct_result(result_passing);
+    }
+    try self.set_val(result.name, fresh_val(sret));
+    return null;
+}
+
+/// Moves a C struct result out of the registers it came back in, right
+/// after the call, into a slot of its own and returns the slot's address.
+fn (self: &var Selector) c_struct_result(passing: CStructPassing) -> !i64 {
+    var regs = array::new<i64>(self.allocator);
+    defer regs.deinit(self.allocator);
+    var index = 0;
+    while index < passing.count {
+        let reg = self.func.new_vreg();
+        if passing.kind == CStructKind::Floats {
+            var inst = blank(MOp::FRet);
+            inst.rd = reg;
+            inst.imm = index;
+            inst.width = passing.width;
+            try self.inst(inst);
+        } else {
+            try self.mov(reg, index);
+        }
+        try regs.append(self.allocator, reg);
+        index = index + 1;
+    }
+    let slot = try self.c_slot(passing.count * passing.width, passing.align);
+    index = 0;
+    while regs.get(index) |reg| {
+        try self.store(reg, slot, index * passing.width, passing.width);
+        index = index + 1;
+    }
+    return slot;
+}

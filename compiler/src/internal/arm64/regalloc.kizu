@@ -1,0 +1,3042 @@
+import std::array;
+
+// Register allocation, after a few machine-level clean-ups (constant
+// hoisting, tail duplication of small branch blocks, folding of frame
+// addresses into loads and stores, frame slots kept in registers, dead code).
+// Liveness over the machine blocks gives each virtual register a range of
+// segments in layout order, with holes where it is dead; a linear scan over
+// the ranges hands out registers. A range across a hot call takes a
+// callee-saved register; a call on a cold path is not counted, and the
+// caller-saved registers live across it are saved around it instead. x0..x7
+// are handed out too wherever the code does not name them inside the range.
+// A copy may share its source's register while the source is not written.
+// When no register is free, whatever is cheapest by loop-depth weight per
+// position held is spilled for its whole life: a constant or a frame
+// address is remade where it is read, anything else lives in a frame slot.
+// Afterwards the parallel copies of the phi edges become moves that respect
+// each other's reads.
+//
+// On arm64 the registers only float instructions compute with (see
+// float_registers) take float registers instead: d20..d31, or d8..d15
+// across a hot call or a vectorized loop, whose NEON instructions write
+// vector registers no range tracks. On amd64 under System V they take
+// xmm8..xmm12, or xmm0..xmm7 where nothing inside the range names those,
+// and none across a hot call, as the convention has a callee keep no xmm
+// register. Under Windows they take xmm6..xmm15, which a callee keeps, so
+// across a call too, or xmm0..xmm2 where nothing inside names those. A
+// spilled one is reloaded into a general scratch register like any other;
+// the printer moves it across.
+//
+// x16, x17 and x15 are scratch for the rewrite and the printer, x8 carries
+// an aggregate result's address and is scratch otherwise, x18 is the
+// platform's and x29/x30 the frame's: none of them is handed to a virtual
+// register.
+
+/// Returns the first scratch register.
+pub fn scratch0() -> i64 {
+    return 16;
+}
+
+/// Returns the second scratch register.
+pub fn scratch1() -> i64 {
+    return 17;
+}
+
+/// Returns the scratch register the printer forms out-of-range addresses
+/// in.
+pub fn scratch_addr() -> i64 {
+    return 15;
+}
+
+fn caller_saved_first() -> i64 {
+    return 9;
+}
+
+fn caller_saved_last(arch: Arch) -> i64 {
+    // amd64 has no register left for this pool: its six argument
+    // registers, five callee-saved ones, the two scratch registers and rax
+    // (x8, and the printer's own scratch) are all of them; under Windows,
+    // four argument registers and seven callee-saved ones.
+    if is_x86(arch) {
+        return 8;
+    }
+    return 14;
+}
+
+/// Returns the end of the float registers a callee keeps, d8..d15 (their
+/// low 64 bits, all a float register holds here). System V has a callee
+/// keep no xmm register, so on amd64 there are none; Windows has it keep
+/// xmm6..xmm15 (whole, which the printer's prologue saves).
+fn float_callee_saved_end(arch: Arch) -> i64 {
+    if arch == Arch::Amd64Windows {
+        return first_float_reg() + 10;
+    }
+    if is_x86(arch) {
+        return first_float_reg();
+    }
+    return first_float_reg() + 8;
+}
+
+/// Returns the first float register a call may clobber that allocation
+/// hands out: d20..d31 on arm64, where d16..d19 are the printer's float
+/// scratch; xmm8..xmm12 on amd64, where xmm0..xmm7 carry C's float
+/// arguments and xmm13..xmm15 are the printer's float scratch. Windows
+/// has none past xmm0..xmm2: xmm3..xmm5 are the scratch there.
+fn float_caller_saved_first(arch: Arch) -> i64 {
+    if arch == Arch::Amd64Windows {
+        return float_callee_saved_end(arch);
+    }
+    if is_x86(arch) {
+        return first_float_reg();
+    }
+    return first_float_reg() + 12;
+}
+
+/// Returns the end of the float registers a call may clobber that
+/// allocation hands out.
+fn float_caller_saved_end(arch: Arch) -> i64 {
+    if arch == Arch::Amd64Windows {
+        return float_callee_saved_end(arch);
+    }
+    if is_x86(arch) {
+        return first_float_reg() + 5;
+    }
+    return first_vreg();
+}
+
+/// Returns the end of the float registers a range may take only where no
+/// call, float argument or float result is inside it: on amd64 xmm0..xmm7,
+/// numbered after xmm8..xmm12, and under Windows xmm0..xmm2, after
+/// xmm6..xmm15; none on arm64.
+fn float_named_end(arch: Arch) -> i64 {
+    if arch == Arch::Amd64Windows {
+        return float_caller_saved_end(arch) + 3;
+    }
+    if is_x86(arch) {
+        return float_caller_saved_end(arch) + 8;
+    }
+    return float_caller_saved_end(arch);
+}
+
+/// Reports whether reg is saved around a cold call it lives across.
+fn is_cold_saved(reg: i64, arch: Arch) -> bool {
+    if reg >= caller_saved_first() and reg <= caller_saved_last(arch) {
+        return true;
+    }
+    return reg >= float_caller_saved_first(arch) and reg < float_caller_saved_end(arch);
+}
+
+fn callee_saved_first() -> i64 {
+    return 19;
+}
+
+fn callee_saved_last(arch: Arch) -> i64 {
+    // rbx and r12..r15 on amd64; under Windows also rdi and rsi, which
+    // its convention has a callee keep.
+    if arch == Arch::Amd64 {
+        return 23;
+    }
+    if arch == Arch::Amd64Windows {
+        return 25;
+    }
+    return 28;
+}
+
+/// Is what allocation leaves for the printer: the layout order and which
+/// callee-saved registers the function writes.
+pub struct Allocation {
+    pub order: array::Array<i64>,
+    pub saved: array::Array<i64>,
+}
+
+/// Removes instructions whose only effect is a register nobody reads.
+fn remove_dead(allocator: Allocator, func: &var MFunction) -> !void {
+    var reads_buf = array::new<i64>(allocator);
+    defer reads_buf.deinit(allocator);
+    var count = array::new<i64>(allocator);
+    defer count.deinit(allocator);
+    var changed = true;
+    while changed {
+        changed = false;
+        count.clear(allocator);
+        for 0..func.vregs |_index| {
+            try count.append(allocator, 0);
+        }
+        var block_index = 0;
+        while func.blocks.at(block_index) |block| {
+            block_index = block_index + 1;
+            var inst_index = 0;
+            while block.insts.at(inst_index) |inst| {
+                inst_index = inst_index + 1;
+                try reads(inst, &var reads_buf, allocator, &func.copies);
+                var read_index = 0;
+                while reads_buf.get(read_index) |reg| {
+                    read_index = read_index + 1;
+                    if is_vreg(reg) {
+                        let id = reg - first_vreg();
+                        try count.set(id, count.get_or_panic(id) + 1);
+                    }
+                }
+            }
+            if is_vreg(block.treg) {
+                let id = block.treg - first_vreg();
+                try count.set(id, count.get_or_panic(id) + 1);
+            }
+        }
+        block_index = 0;
+        while func.blocks.at_mut(block_index) |block| {
+            block_index = block_index + 1;
+            var write = 0;
+            var read = 0;
+            while block.insts.get(read) |inst| {
+                read = read + 1;
+                if writes_rd(inst.op) and !has_effect(inst.op) and is_vreg(inst.rd) and count.get_or_panic(inst.rd - first_vreg()) == 0 {
+                    changed = true;
+                    continue;
+                }
+                try block.insts.set(write, inst);
+                write = write + 1;
+            }
+            try block.insts.truncate(allocator, write);
+        }
+    }
+    return;
+}
+
+/// Copies a small block that ends in a conditional branch into each block
+/// that jumps to it, so a loop whose header only tests tests at its bottom
+/// and takes one branch a turn instead of two.
+fn duplicate_tails(allocator: Allocator, func: &var MFunction) -> !void {
+    var copied = array::new<MInst>(allocator);
+    defer copied.deinit(allocator);
+    var block_id = 0;
+    while block_id < func.blocks.len() {
+        let current = block_id;
+        block_id = block_id + 1;
+        var target = 0 - 1;
+        if func.blocks.at(current) |block| {
+            if block.term == Term::Jump and block.succ0 != current {
+                target = block.succ0;
+            }
+        }
+        if target < 0 {
+            continue;
+        }
+        copied.clear(allocator);
+        var term = Term::Open;
+        var cond = Cond::Eq;
+        var treg = reg_none();
+        var succ0 = 0 - 1;
+        var succ1 = 0 - 1;
+        var fits = false;
+        if func.blocks.at(target) |header| {
+            let conditional = header.term == Term::Flags or header.term == Term::Zero or header.term == Term::NonZero;
+            if conditional and header.insts.len() <= 3 and header.succ0 != target and header.succ1 != target {
+                fits = true;
+                var index = 0;
+                while header.insts.get(index) |inst| {
+                    index = index + 1;
+                    if inst.op == MOp::ParCopy or inst.op == MOp::Call or inst.op == MOp::CallReg {
+                        fits = false;
+                    }
+                    try copied.append(allocator, inst);
+                }
+                term = header.term;
+                cond = header.cond;
+                treg = header.treg;
+                succ0 = header.succ0;
+                succ1 = header.succ1;
+            }
+        }
+        if !fits {
+            continue;
+        }
+        if func.blocks.at_mut(current) |block| {
+            var index = 0;
+            while copied.get(index) |inst| {
+                index = index + 1;
+                try block.insts.append(allocator, inst);
+            }
+            block.term = term;
+            block.cond = cond;
+            block.treg = treg;
+            block.succ0 = succ0;
+            block.succ1 = succ1;
+        }
+    }
+    return;
+}
+
+/// Folds `t = x + 1` into the select that is its one reader:
+/// `csel d, a, t, c` becomes `csinc d, a, x, c`, and `csel d, t, b, c`
+/// becomes `csinc d, b, x, !c`. The add is left for dead-code removal.
+fn fold_increments(allocator: Allocator, func: &var MFunction) -> !void {
+    var reads_buf = array::new<i64>(allocator);
+    defer reads_buf.deinit(allocator);
+    var count = array::new<i64>(allocator);
+    defer count.deinit(allocator);
+    var defs_at = array::new<i64>(allocator);
+    defer defs_at.deinit(allocator);
+    for 0..func.vregs |_index| {
+        try count.append(allocator, 0);
+        try defs_at.append(allocator, 0);
+    }
+    var block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        block_id = block_id + 1;
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            try reads(inst, &var reads_buf, allocator, &func.copies);
+            var read_index = 0;
+            while reads_buf.get(read_index) |reg| {
+                read_index = read_index + 1;
+                if is_vreg(reg) {
+                    try bump(&var count, reg - first_vreg());
+                }
+            }
+            if writes_rd(inst.op) and is_vreg(inst.rd) {
+                try bump(&var defs_at, inst.rd - first_vreg());
+            }
+        }
+        if is_vreg(block.treg) {
+            try bump(&var count, block.treg - first_vreg());
+        }
+    }
+    block_id = 0;
+    while func.blocks.at_mut(block_id) |block| {
+        block_id = block_id + 1;
+        var inst_index = 0;
+        while inst_index < block.insts.len() {
+            let inst = block.insts.get_or_panic(inst_index);
+            inst_index = inst_index + 1;
+            if inst.op != MOp::CSel {
+                continue;
+            }
+            // Find, earlier in this block, the one definition of an
+            // operand that adds one.
+            var look = inst_index - 2;
+            while look >= 0 {
+                let earlier = block.insts.get_or_panic(look);
+                look = look - 1;
+                if earlier.op != MOp::AddImm or earlier.imm != 1 or !is_vreg(earlier.rd) {
+                    continue;
+                }
+                let id = earlier.rd - first_vreg();
+                if count.get_or_panic(id) != 1 or defs_at.get_or_panic(id) != 1 {
+                    continue;
+                }
+                var fused = inst;
+                if inst.rm == earlier.rd {
+                    fused.op = MOp::CSInc;
+                    fused.rm = earlier.rn;
+                } else if inst.rn == earlier.rd {
+                    fused.op = MOp::CSInc;
+                    fused.rn = inst.rm;
+                    fused.rm = earlier.rn;
+                    fused.cond = invert(inst.cond);
+                } else {
+                    continue;
+                }
+                // The add's operand must still hold the same value at the
+                // select: nothing between them writes it.
+                var clean = true;
+                var between = look + 2;
+                while between < inst_index - 1 {
+                    let middle = block.insts.get_or_panic(between);
+                    between = between + 1;
+                    if writes_rd(middle.op) and middle.rd == earlier.rn {
+                        clean = false;
+                    }
+                }
+                if clean {
+                    try block.insts.set(inst_index - 1, fused);
+                    try count.set(id, 0);
+                }
+                break;
+            }
+        }
+    }
+    return;
+}
+
+/// Fuses `t = a * b` into the add or subtract that is its one reader in
+/// the same block: `d = c + t` becomes `madd d, a, b, c` and `d = c - t`
+/// becomes `msub d, a, b, c`, one instruction off the dependence chain. The
+/// multiply is left for dead-code removal.
+fn fuse_multiply_adds(allocator: Allocator, func: &var MFunction) -> !void {
+    var reads_buf = array::new<i64>(allocator);
+    defer reads_buf.deinit(allocator);
+    var count = array::new<i64>(allocator);
+    defer count.deinit(allocator);
+    var defs_at = array::new<i64>(allocator);
+    defer defs_at.deinit(allocator);
+    for 0..func.vregs |_index| {
+        try count.append(allocator, 0);
+        try defs_at.append(allocator, 0);
+    }
+    var block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        block_id = block_id + 1;
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            try reads(inst, &var reads_buf, allocator, &func.copies);
+            var read_index = 0;
+            while reads_buf.get(read_index) |reg| {
+                read_index = read_index + 1;
+                if is_vreg(reg) {
+                    try bump(&var count, reg - first_vreg());
+                }
+            }
+            if writes_rd(inst.op) and is_vreg(inst.rd) {
+                try bump(&var defs_at, inst.rd - first_vreg());
+            }
+            if inst.op == MOp::ParCopy {
+                var index = 0;
+                while index < inst.imm {
+                    let copy = func.copies.get_or_panic(inst.slot + index);
+                    index = index + 1;
+                    if is_vreg(copy.dst) {
+                        try bump(&var defs_at, copy.dst - first_vreg());
+                    }
+                }
+            }
+        }
+        if is_vreg(block.treg) {
+            try bump(&var count, block.treg - first_vreg());
+        }
+    }
+    block_id = 0;
+    while func.blocks.at_mut(block_id) |block| {
+        block_id = block_id + 1;
+        var inst_index = 0;
+        while inst_index < block.insts.len() {
+            let inst = block.insts.get_or_panic(inst_index);
+            inst_index = inst_index + 1;
+            if inst.op != MOp::Add and inst.op != MOp::Sub {
+                continue;
+            }
+            var look = inst_index - 2;
+            while look >= 0 {
+                let earlier = block.insts.get_or_panic(look);
+                look = look - 1;
+                if earlier.op != MOp::Mul or !is_vreg(earlier.rd) {
+                    continue;
+                }
+                let id = earlier.rd - first_vreg();
+                if count.get_or_panic(id) != 1 or defs_at.get_or_panic(id) != 1 {
+                    continue;
+                }
+                var fused = inst;
+                if inst.rm == earlier.rd and inst.rn != earlier.rd {
+                    fused.ra = inst.rn;
+                } else if inst.op == MOp::Add and inst.rn == earlier.rd and inst.rm != earlier.rd {
+                    fused.ra = inst.rm;
+                } else {
+                    continue;
+                }
+                if inst.op == MOp::Add {
+                    fused.op = MOp::MAdd;
+                } else {
+                    fused.op = MOp::MSub;
+                }
+                fused.rn = earlier.rn;
+                fused.rm = earlier.rm;
+                // The factors must still hold their values at the add:
+                // nothing between them writes either.
+                var clean = fused.ra >= 0 and fused.ra != reg_zr();
+                var between = look + 2;
+                while between < inst_index - 1 {
+                    let middle = block.insts.get_or_panic(between);
+                    between = between + 1;
+                    if middle.op == MOp::ParCopy or middle.op == MOp::Call or middle.op == MOp::CallReg {
+                        clean = false;
+                    }
+                    if writes_rd(middle.op) and (middle.rd == earlier.rn or middle.rd == earlier.rm) {
+                        clean = false;
+                    }
+                }
+                if clean {
+                    try block.insts.set(inst_index - 1, fused);
+                    try count.set(id, 0);
+                }
+                break;
+            }
+        }
+    }
+    return;
+}
+
+/// Folds the address of a frame slot into the loads and stores that use it
+/// as their base, so the address needs no register.
+fn fold_frame_addresses(allocator: Allocator, func: &var MFunction) -> !void {
+    var def_count = array::new<i64>(allocator);
+    defer def_count.deinit(allocator);
+    var frame_slot = array::new<i64>(allocator);
+    defer frame_slot.deinit(allocator);
+    var frame_offset = array::new<i64>(allocator);
+    defer frame_offset.deinit(allocator);
+    for 0..func.vregs |_index| {
+        try def_count.append(allocator, 0);
+        try frame_slot.append(allocator, 0 - 1);
+        try frame_offset.append(allocator, 0);
+    }
+    var block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        block_id = block_id + 1;
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            if writes_rd(inst.op) and is_vreg(inst.rd) {
+                try add_to(&var def_count, inst.rd - first_vreg(), 1);
+                if inst.op == MOp::FrameAddr {
+                    try frame_slot.set(inst.rd - first_vreg(), inst.slot);
+                    try frame_offset.set(inst.rd - first_vreg(), inst.imm);
+                }
+            }
+            if inst.op == MOp::ParCopy {
+                var index = 0;
+                while index < inst.imm {
+                    let copy = func.copies.get_or_panic(inst.slot + index);
+                    index = index + 1;
+                    if is_vreg(copy.dst) {
+                        try add_to(&var def_count, copy.dst - first_vreg(), 1);
+                    }
+                }
+            }
+        }
+    }
+    block_id = 0;
+    while func.blocks.at_mut(block_id) |block| {
+        block_id = block_id + 1;
+        var inst_index = 0;
+        while inst_index < block.insts.len() {
+            let inst = block.insts.get_or_panic(inst_index);
+            inst_index = inst_index + 1;
+            if inst.op != MOp::Load and inst.op != MOp::Store {
+                continue;
+            }
+            if !is_vreg(inst.rn) {
+                continue;
+            }
+            let id = inst.rn - first_vreg();
+            if def_count.get_or_panic(id) != 1 or frame_slot.get_or_panic(id) < 0 {
+                continue;
+            }
+            var folded = inst;
+            folded.rn = reg_frame();
+            folded.slot = frame_slot.get_or_panic(id);
+            folded.imm = inst.imm + frame_offset.get_or_panic(id);
+            try block.insts.set(inst_index - 1, folded);
+        }
+    }
+    return;
+}
+
+fn add_to(table: &var array::Array<i64>, at: i64, amount: i64) -> !void {
+    return table.set(at, table.get_or_panic(at) + amount);
+}
+
+/// Counts for each block how many loops it is inside: a jump from a block
+/// to one at or before it in layout order closes a loop over the blocks
+/// between them.
+fn loop_depths(
+    allocator: Allocator,
+    func: &MFunction,
+    order: &array::Array<i64>,
+    depth: &var array::Array<i64>
+) -> !void {
+    var place = array::new<i64>(allocator);
+    defer place.deinit(allocator);
+    for 0..func.blocks.len() |_index| {
+        try place.append(allocator, 0 - 1);
+        try depth.append(allocator, 0);
+    }
+    var index = 0;
+    while order.get(index) |b| {
+        try place.set(b, index);
+        index = index + 1;
+    }
+    index = 0;
+    while order.get(index) |b| {
+        let here = index;
+        index = index + 1;
+        var position = 0;
+        while position < 2 {
+            let succ = func.successor(b, position);
+            position = position + 1;
+            if succ < 0 {
+                continue;
+            }
+            let there = place.get_or_panic(succ);
+            if there >= 0 and there <= here {
+                var inner = there;
+                while inner <= here {
+                    let c = order.get_or_panic(inner);
+                    try depth.set(c, depth.get_or_panic(c) + 1);
+                    inner = inner + 1;
+                }
+            }
+        }
+    }
+    return;
+}
+
+/// Returns where a spilled register goes: -2 when it is remade at each use,
+/// otherwise a new frame slot.
+fn spill_place(allocator: Allocator, func: &var MFunction, remat: &array::Array<MInst>, v: i64) -> !i64 {
+    if remat.get_or_panic(v).op != MOp::Trap {
+        return 0 - 2;
+    }
+    return func.add_slot(allocator, 8, 8);
+}
+
+/// Moves each constant that takes more than one instruction to the entry
+/// block, once per value: inlining can leave a callee's entry constants
+/// inside a caller's loop. On amd64 under System V a constant a float
+/// operation reads is left to place_float_constants.
+fn hoist_constants(allocator: Allocator, func: &var MFunction, arch: Arch) -> !void {
+    var def_count = array::new<i64>(allocator);
+    defer def_count.deinit(allocator);
+    var float_read = array::new<bool>(allocator);
+    defer float_read.deinit(allocator);
+    for 0..func.vregs |_index| {
+        try def_count.append(allocator, 0);
+        try float_read.append(allocator, false);
+    }
+    var block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        block_id = block_id + 1;
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            if writes_rd(inst.op) and is_vreg(inst.rd) {
+                try add_to(&var def_count, inst.rd - first_vreg(), 1);
+            }
+            if arch == Arch::Amd64 and computes_float(inst.op) {
+                try mark_read(&var float_read, inst.rn);
+                try mark_read(&var float_read, inst.rm);
+                try mark_read(&var float_read, inst.ra);
+            }
+            if inst.op == MOp::ParCopy {
+                var index = 0;
+                while index < inst.imm {
+                    let copy = func.copies.get_or_panic(inst.slot + index);
+                    index = index + 1;
+                    if is_vreg(copy.dst) {
+                        try add_to(&var def_count, copy.dst - first_vreg(), 1);
+                    }
+                }
+            }
+        }
+    }
+    // A constant one move makes is hoisted only out of a loop.
+    var looped = array::new<i64>(allocator);
+    defer looped.deinit(allocator);
+    try loop_blocks(allocator, func, &var looped);
+    // Which register each hoisted constant's readers read instead.
+    var rename = array::new<i64>(allocator);
+    defer rename.deinit(allocator);
+    for 0..func.vregs |v| {
+        try rename.append(allocator, first_vreg() + v);
+    }
+    var values = array::new<i64>(allocator);
+    defer values.deinit(allocator);
+    var holders = array::new<i64>(allocator);
+    defer holders.deinit(allocator);
+    var hoisted = array::new<MInst>(allocator);
+    defer hoisted.deinit(allocator);
+    var moved_any = false;
+    block_id = 0;
+    while func.blocks.at_mut(block_id) |block| {
+        let in_loop = block_id > 0 and looped.get_or_panic(block_id) > 0 and !block.cold;
+        block_id = block_id + 1;
+        var write = 0;
+        var read = 0;
+        while block.insts.get(read) |inst| {
+            read = read + 1;
+            let wide = !(inst.imm >= 0 - 65536 and inst.imm < 65536) or in_loop;
+            if inst.op == MOp::MovImm and wide and is_vreg(inst.rd) and def_count.get_or_panic(inst.rd - first_vreg()) == 1 and
+                !float_read.get_or_panic(inst.rd - first_vreg()) {
+                moved_any = true;
+                var known = 0 - 1;
+                var at = 0;
+                while values.get(at) |value| {
+                    if value == inst.imm {
+                        known = holders.get_or_panic(at);
+                    }
+                    at = at + 1;
+                }
+                if known < 0 {
+                    try values.append(allocator, inst.imm);
+                    try holders.append(allocator, inst.rd);
+                    try hoisted.append(allocator, inst);
+                } else {
+                    try rename.set(inst.rd - first_vreg(), known);
+                }
+                continue;
+            }
+            try block.insts.set(write, inst);
+            write = write + 1;
+        }
+        try block.insts.truncate(allocator, write);
+    }
+    if !moved_any {
+        return;
+    }
+    block_id = 0;
+    while func.blocks.at_mut(block_id) |block| {
+        block_id = block_id + 1;
+        var inst_index = 0;
+        while inst_index < block.insts.len() {
+            let inst = block.insts.get_or_panic(inst_index);
+            var fixed = inst;
+            fixed.rn = renamed(&rename, inst.rn);
+            fixed.rm = renamed(&rename, inst.rm);
+            fixed.ra = renamed(&rename, inst.ra);
+            if inst.op == MOp::Store or inst.op == MOp::StoreIdx {
+                fixed.rd = renamed(&rename, inst.rd);
+            }
+            try block.insts.set(inst_index, fixed);
+            inst_index = inst_index + 1;
+        }
+        block.treg = renamed(&rename, block.treg);
+    }
+    var copy_index = 0;
+    while func.copies.at_mut(copy_index) |copy| {
+        copy_index = copy_index + 1;
+        if !copy.src_imm {
+            copy.src = renamed(&rename, copy.src);
+        }
+    }
+    if func.blocks.at_mut(0) |entry| {
+        var rest = 0;
+        while entry.insts.get(rest) |inst| {
+            rest = rest + 1;
+            try hoisted.append(allocator, inst);
+        }
+        entry.insts.clear(allocator);
+        var at = 0;
+        while hoisted.get(at) |inst| {
+            at = at + 1;
+            try entry.insts.append(allocator, inst);
+        }
+    }
+    return;
+}
+
+/// Reports whether an instruction computes with floats: what reads a
+/// constant there wants it in a float register.
+fn computes_float(op: MOp) -> bool {
+    return op == MOp::FBin or op == MOp::FUn or op == MOp::FMAdd or op == MOp::FCmp or op == MOp::FCvt;
+}
+
+/// On amd64 under System V, where no xmm register outlives a call, puts
+/// each constant a float operation reads where its readers need it and no
+/// sooner: in the nearest block outside every loop that dominates all of
+/// them, before the first of them there or else at the end, once per value
+/// and block. So it is made neither in a loop nor ahead of a call it need
+/// not live across.
+fn place_float_constants(allocator: Allocator, func: &var MFunction) -> !void {
+    let nv = func.vregs;
+    let nb = func.blocks.len();
+    var def_count = array::new<i64>(allocator);
+    defer def_count.deinit(allocator);
+    var float_read = array::new<bool>(allocator);
+    defer float_read.deinit(allocator);
+    for 0..nv |_index| {
+        try def_count.append(allocator, 0);
+        try float_read.append(allocator, false);
+    }
+    var block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        block_id = block_id + 1;
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            if writes_rd(inst.op) and is_vreg(inst.rd) {
+                try add_to(&var def_count, inst.rd - first_vreg(), 1);
+            }
+            if computes_float(inst.op) {
+                try mark_read(&var float_read, inst.rn);
+                try mark_read(&var float_read, inst.rm);
+                try mark_read(&var float_read, inst.ra);
+            }
+            if inst.op == MOp::ParCopy {
+                for 0..inst.imm |index| {
+                    let copy = func.copies.get_or_panic(inst.slot + index);
+                    if is_vreg(copy.dst) {
+                        try add_to(&var def_count, copy.dst - first_vreg(), 1);
+                    }
+                }
+            }
+        }
+    }
+    var wanted = array::new<bool>(allocator);
+    defer wanted.deinit(allocator);
+    var any = false;
+    for 0..nv |_index| {
+        try wanted.append(allocator, false);
+    }
+    block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        block_id = block_id + 1;
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            if inst.op == MOp::MovImm and is_vreg(inst.rd) {
+                let v = inst.rd - first_vreg();
+                if def_count.get_or_panic(v) == 1 and float_read.get_or_panic(v) {
+                    try wanted.set(v, true);
+                    any = true;
+                }
+            }
+        }
+    }
+    if !any or nb == 0 {
+        return;
+    }
+    var order = array::new<i64>(allocator);
+    defer order.deinit(allocator);
+    try reverse_postorder(allocator, func, &var order);
+    var place = array::new<i64>(allocator);
+    defer place.deinit(allocator);
+    var idom = array::new<i64>(allocator);
+    defer idom.deinit(allocator);
+    var looped = array::new<bool>(allocator);
+    defer looped.deinit(allocator);
+    try dominators(allocator, func, &order, &var place, &var idom, &var looped);
+    // The block dominating every reader of each constant.
+    var meet = array::new<i64>(allocator);
+    defer meet.deinit(allocator);
+    for 0..nv |_index| {
+        try meet.append(allocator, 0 - 1);
+    }
+    var reads_buf = array::new<i64>(allocator);
+    defer reads_buf.deinit(allocator);
+    block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        let b = block_id;
+        block_id = block_id + 1;
+        if place.get_or_panic(b) < 0 {
+            continue;
+        }
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            try reads(inst, &var reads_buf, allocator, &func.copies);
+            var read_index = 0;
+            while reads_buf.get(read_index) |reg| {
+                read_index = read_index + 1;
+                try meet_at(&var meet, &wanted, &place, &idom, reg, b);
+            }
+        }
+        try meet_at(&var meet, &wanted, &place, &idom, block.treg, b);
+    }
+    // Where each goes: its block, out of loops, and the instruction it
+    // goes before there (the block's length for the end). Constants of one
+    // value going to one block share the first register.
+    var target = array::new<i64>(allocator);
+    defer target.deinit(allocator);
+    var before = array::new<i64>(allocator);
+    defer before.deinit(allocator);
+    var rename = array::new<i64>(allocator);
+    defer rename.deinit(allocator);
+    for 0..nv |v| {
+        try target.append(allocator, 0 - 1);
+        try before.append(allocator, 0);
+        try rename.append(allocator, first_vreg() + v);
+    }
+    var imms = array::new<i64>(allocator);
+    defer imms.deinit(allocator);
+    for 0..nv |_index| {
+        try imms.append(allocator, 0);
+    }
+    block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        block_id = block_id + 1;
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            if inst.op == MOp::MovImm and is_vreg(inst.rd) {
+                try imms.set(inst.rd - first_vreg(), inst.imm);
+            }
+        }
+    }
+    var holders = array::new<i64>(allocator);
+    defer holders.deinit(allocator);
+    for 0..nv |v| {
+        var t = meet.get_or_panic(v);
+        if t < 0 {
+            continue;
+        }
+        while t != 0 and looped.get_or_panic(t) {
+            t = idom.get_or_panic(t);
+        }
+        let at = try first_reader(allocator, func, t, first_vreg() + v, &var reads_buf);
+        var shared = 0 - 1;
+        var index = 0;
+        while holders.get(index) |holder| {
+            index = index + 1;
+            let h = holder - first_vreg();
+            if target.get_or_panic(h) == t and imms.get_or_panic(h) == imms.get_or_panic(v) {
+                shared = h;
+            }
+        }
+        if shared >= 0 {
+            try rename.set(v, first_vreg() + shared);
+            try target.set(v, 0 - 2);
+            if at < before.get_or_panic(shared) {
+                try before.set(shared, at);
+            }
+            continue;
+        }
+        try target.set(v, t);
+        try before.set(v, at);
+        try holders.append(allocator, first_vreg() + v);
+    }
+    // Take the constants out, read the shared registers, and put each
+    // holder in place.
+    var fresh = array::new<MInst>(allocator);
+    defer fresh.deinit(allocator);
+    block_id = 0;
+    while func.blocks.at_mut(block_id) |block| {
+        let b = block_id;
+        block_id = block_id + 1;
+        fresh.clear(allocator);
+        let count = block.insts.len();
+        for 0..count + 1 |position| {
+            var index = 0;
+            while holders.get(index) |holder| {
+                index = index + 1;
+                let h = holder - first_vreg();
+                if target.get_or_panic(h) == b and before.get_or_panic(h) == position {
+                    var made = blank(MOp::MovImm);
+                    made.rd = holder;
+                    made.imm = imms.get_or_panic(h);
+                    try fresh.append(allocator, made);
+                }
+            }
+            if position == count {
+                break;
+            }
+            let inst = block.insts.get_or_panic(position);
+            if inst.op == MOp::MovImm and is_vreg(inst.rd) and target.get_or_panic(inst.rd - first_vreg()) != 0 - 1 {
+                continue;
+            }
+            var fixed = inst;
+            fixed.rn = renamed(&rename, inst.rn);
+            fixed.rm = renamed(&rename, inst.rm);
+            fixed.ra = renamed(&rename, inst.ra);
+            if inst.op == MOp::Store or inst.op == MOp::StoreIdx {
+                fixed.rd = renamed(&rename, inst.rd);
+            }
+            try fresh.append(allocator, fixed);
+        }
+        block.insts.clear(allocator);
+        var index = 0;
+        while fresh.get(index) |inst| {
+            index = index + 1;
+            try block.insts.append(allocator, inst);
+        }
+        block.treg = renamed(&rename, block.treg);
+    }
+    var copy_index = 0;
+    while func.copies.at_mut(copy_index) |copy| {
+        copy_index = copy_index + 1;
+        if !copy.src_imm {
+            copy.src = renamed(&rename, copy.src);
+        }
+    }
+    return;
+}
+
+fn mark_read(table: &var array::Array<bool>, reg: i64) -> !void {
+    if is_vreg(reg) {
+        try table.set(reg - first_vreg(), true);
+    }
+    return;
+}
+
+/// Widens the block dominating the readers of reg, when it is a constant
+/// being placed, to take in block b.
+fn meet_at(meet: &var array::Array<i64>, wanted: &array::Array<bool>, place: &array::Array<i64>, idom: &array::Array<i64>, reg: i64, b: i64) -> !void {
+    if !is_vreg(reg) or !wanted.get_or_panic(reg - first_vreg()) {
+        return;
+    }
+    let v = reg - first_vreg();
+    let here = meet.get_or_panic(v);
+    if here < 0 {
+        return meet.set(v, b);
+    }
+    return meet.set(v, common_dominator(place, idom, here, b));
+}
+
+/// Returns the index of the first instruction of block b that reads reg,
+/// or, when none does, where the end of the block starts: before the
+/// parallel copy and the comparison the terminator reads, if any.
+fn first_reader(allocator: Allocator, func: &MFunction, b: i64, reg: i64, buf: &var array::Array<i64>) -> !i64 {
+    if func.blocks.at(b) |block| {
+        var index = 0;
+        while block.insts.at(index) |inst| {
+            try reads(inst, buf, allocator, &func.copies);
+            var read_index = 0;
+            while buf.get(read_index) |read| {
+                read_index = read_index + 1;
+                if read == reg {
+                    return index;
+                }
+            }
+            index = index + 1;
+        }
+        var end = block.insts.len();
+        while end > 0 {
+            let last = block.insts.get_or_panic(end - 1);
+            if last.op != MOp::ParCopy and !(block.term == Term::Flags and is_comparison(last.op)) {
+                break;
+            }
+            end = end - 1;
+        }
+        return end;
+    }
+    return 0;
+}
+
+fn is_comparison(op: MOp) -> bool {
+    return op == MOp::Cmp or op == MOp::CmpImm or op == MOp::CmnImm or op == MOp::TstImm or op == MOp::FCmp;
+}
+
+/// Computes the immediate dominator of each block reachable from the entry
+/// (-1 for the others), each block's place in the reverse postorder, and
+/// which blocks a loop holds: those that reach the source of an edge to a
+/// block dominating it without passing that block, and that block.
+fn dominators(
+    allocator: Allocator,
+    func: &MFunction,
+    order: &array::Array<i64>,
+    place: &var array::Array<i64>,
+    idom: &var array::Array<i64>,
+    looped: &var array::Array<bool>
+) -> !void {
+    let nb = func.blocks.len();
+    var pred_start = array::new<i64>(allocator);
+    defer pred_start.deinit(allocator);
+    var preds = array::new<i64>(allocator);
+    defer preds.deinit(allocator);
+    var fill = array::new<i64>(allocator);
+    defer fill.deinit(allocator);
+    for 0..nb + 1 |_index| {
+        try pred_start.append(allocator, 0);
+    }
+    for 0..nb |b| {
+        try place.append(allocator, 0 - 1);
+        try idom.append(allocator, 0 - 1);
+        try looped.append(allocator, false);
+        for 0..2 |position| {
+            let succ = func.successor(b, position);
+            if succ >= 0 {
+                try pred_start.set(succ + 1, pred_start.get_or_panic(succ + 1) + 1);
+            }
+        }
+    }
+    for 0..nb |b| {
+        try pred_start.set(b + 1, pred_start.get_or_panic(b + 1) + pred_start.get_or_panic(b));
+        try fill.append(allocator, pred_start.get_or_panic(b));
+    }
+    for 0..pred_start.get_or_panic(nb) |_index| {
+        try preds.append(allocator, 0);
+    }
+    for 0..nb |b| {
+        for 0..2 |position| {
+            let succ = func.successor(b, position);
+            if succ >= 0 {
+                try preds.set(fill.get_or_panic(succ), b);
+                try fill.set(succ, fill.get_or_panic(succ) + 1);
+            }
+        }
+    }
+    var index = 0;
+    while order.get(index) |b| {
+        try place.set(b, index);
+        index = index + 1;
+    }
+    let entry = order.get(0) orelse return;
+    try idom.set(entry, entry);
+    var changed = true;
+    while changed {
+        changed = false;
+        index = 1;
+        while order.get(index) |b| {
+            index = index + 1;
+            var chosen = 0 - 1;
+            for pred_start.get_or_panic(b)..pred_start.get_or_panic(b + 1) |at| {
+                let p = preds.get_or_panic(at);
+                if idom.get_or_panic(p) < 0 {
+                    continue;
+                }
+                if chosen < 0 {
+                    chosen = p;
+                } else {
+                    chosen = common_dominator(place, idom, chosen, p);
+                }
+            }
+            if chosen != idom.get_or_panic(b) {
+                try idom.set(b, chosen);
+                changed = true;
+            }
+        }
+    }
+    var stack = array::new<i64>(allocator);
+    defer stack.deinit(allocator);
+    var seen = array::new<i64>(allocator);
+    defer seen.deinit(allocator);
+    for 0..nb |_index| {
+        try seen.append(allocator, 0 - 1);
+    }
+    index = 0;
+    while order.get(index) |b| {
+        index = index + 1;
+        for 0..2 |position| {
+            let head = func.successor(b, position);
+            if head < 0 or !dominates(idom, entry, head, b) {
+                continue;
+            }
+            // The loop of the edge b -> head: back from b to head.
+            let stamp = b * 2 + position;
+            try seen.set(head, stamp);
+            try looped.set(head, true);
+            stack.clear(allocator);
+            try stack.append(allocator, b);
+            while stack.pop() |x| {
+                if seen.get_or_panic(x) == stamp or place.get_or_panic(x) < 0 {
+                    continue;
+                }
+                try seen.set(x, stamp);
+                try looped.set(x, true);
+                for pred_start.get_or_panic(x)..pred_start.get_or_panic(x + 1) |at| {
+                    try stack.append(allocator, preds.get_or_panic(at));
+                }
+            }
+        }
+    }
+    return;
+}
+
+/// Reports whether block a dominates block b.
+fn dominates(idom: &array::Array<i64>, entry: i64, a: i64, b_in: i64) -> bool {
+    var b = b_in;
+    while b != a and b != entry and b >= 0 {
+        b = idom.get_or_panic(b);
+    }
+    return b == a;
+}
+
+/// Returns the nearest block dominating both a and b.
+fn common_dominator(place: &array::Array<i64>, idom: &array::Array<i64>, a_in: i64, b_in: i64) -> i64 {
+    var a = a_in;
+    var b = b_in;
+    while a != b {
+        while place.get_or_panic(a) > place.get_or_panic(b) {
+            a = idom.get_or_panic(a);
+        }
+        while place.get_or_panic(b) > place.get_or_panic(a) {
+            b = idom.get_or_panic(b);
+        }
+    }
+    return a;
+}
+
+/// Marks the blocks inside a loop: those between a back edge's target and
+/// its source in a depth-first reverse postorder.
+fn loop_blocks(allocator: Allocator, func: &MFunction, depth: &var array::Array<i64>) -> !void {
+    var order = array::new<i64>(allocator);
+    defer order.deinit(allocator);
+    try reverse_postorder(allocator, func, &var order);
+    return loop_depths(allocator, func, &order, depth);
+}
+
+/// Lists the blocks reachable from the entry in reverse postorder.
+fn reverse_postorder(allocator: Allocator, func: &MFunction, order: &var array::Array<i64>) -> !void {
+    let count = func.blocks.len();
+    var state = array::new<i64>(allocator);
+    defer state.deinit(allocator);
+    var next = array::new<i64>(allocator);
+    defer next.deinit(allocator);
+    var stack = array::new<i64>(allocator);
+    defer stack.deinit(allocator);
+    var post = array::new<i64>(allocator);
+    defer post.deinit(allocator);
+    for 0..count |_index| {
+        try state.append(allocator, 0);
+        try next.append(allocator, 0);
+    }
+    if count == 0 {
+        return;
+    }
+    try stack.append(allocator, 0);
+    try state.set(0, 1);
+    while stack.len() > 0 {
+        let top = stack.get_or_panic(stack.len() - 1);
+        let position = next.get_or_panic(top);
+        try next.set(top, position + 1);
+        if position < 2 {
+            let succ = func.successor(top, position);
+            if succ >= 0 and state.get_or_panic(succ) == 0 {
+                try state.set(succ, 1);
+                try stack.append(allocator, succ);
+            }
+            continue;
+        }
+        let _ = stack.pop();
+        try post.append(allocator, top);
+    }
+    var index = post.len() - 1;
+    while index >= 0 {
+        try order.append(allocator, post.get_or_panic(index));
+        index = index - 1;
+    }
+    return;
+}
+
+fn renamed(rename: &array::Array<i64>, reg: i64) -> i64 {
+    if is_vreg(reg) {
+        return rename.get_or_panic(reg - first_vreg());
+    }
+    return reg;
+}
+
+/// Sends a branch to an empty block that only jumps on straight to where
+/// it jumps.
+fn thread_empty_jumps(func: &var MFunction) -> void {
+    let count = func.blocks.len();
+    var block_id = 0;
+    while block_id < count {
+        let current = block_id;
+        block_id = block_id + 1;
+        for 0..2 |position| {
+            var target = func.successor(current, position);
+            var hops = 0;
+            while target >= 0 and hops < 8 {
+                var next = 0 - 1;
+                if func.blocks.at(target) |block| {
+                    if block.insts.len() == 0 and block.term == Term::Jump and block.succ0 != target {
+                        next = block.succ0;
+                    }
+                }
+                if next < 0 {
+                    break;
+                }
+                target = next;
+                hops = hops + 1;
+            }
+            if hops > 0 {
+                if func.blocks.at_mut(current) |block| {
+                    if position == 0 {
+                        block.succ0 = target;
+                    } else {
+                        block.succ1 = target;
+                    }
+                }
+            }
+        }
+    }
+    return;
+}
+
+/// Turns a block that ends comparing a register with zero for equality
+/// into a cbz / cbnz on the register.
+fn fuse_zero_tests(allocator: Allocator, func: &var MFunction) -> !void {
+    var block_id = 0;
+    while func.blocks.at_mut(block_id) |block| {
+        block_id = block_id + 1;
+        if block.term != Term::Flags or (block.cond != Cond::Eq and block.cond != Cond::Ne) {
+            continue;
+        }
+        let last = block.insts.len() - 1;
+        if last < 0 {
+            continue;
+        }
+        let inst = block.insts.get_or_panic(last);
+        if inst.op != MOp::CmpImm or inst.imm != 0 or inst.rn == reg_zr() {
+            continue;
+        }
+        if block.cond == Cond::Eq {
+            block.term = Term::Zero;
+        } else {
+            block.term = Term::NonZero;
+        }
+        block.treg = inst.rn;
+        try block.insts.truncate(allocator, last);
+    }
+    return;
+}
+
+/// Resolves a test of a register the same block just set to a constant:
+/// the branch becomes a jump to the side the constant takes.
+fn fold_constant_branches(func: &var MFunction) -> void {
+    var block_id = 0;
+    while func.blocks.at_mut(block_id) |block| {
+        block_id = block_id + 1;
+        if block.term != Term::Zero and block.term != Term::NonZero {
+            continue;
+        }
+        if !is_vreg(block.treg) {
+            continue;
+        }
+        var index = block.insts.len() - 1;
+        while index >= 0 {
+            let inst = block.insts.get_or_panic(index);
+            index = index - 1;
+            if inst.op == MOp::ParCopy or inst.op == MOp::Call or inst.op == MOp::CallReg {
+                break;
+            }
+            if !writes_rd(inst.op) or inst.rd != block.treg {
+                continue;
+            }
+            if inst.op == MOp::MovImm {
+                let zero = inst.imm == 0;
+                let taken = (block.term == Term::Zero) == zero;
+                if !taken {
+                    block.succ0 = block.succ1;
+                }
+                block.term = Term::Jump;
+                block.succ1 = 0 - 1;
+                block.treg = reg_none();
+            }
+            break;
+        }
+    }
+    return;
+}
+
+/// Keeps in registers the frame slots whose address never leaves the
+/// function's own loads and stores: each word of such a slot becomes a
+/// virtual register, a store to it a move in and a load a move out. Only
+/// slots read and written a whole aligned word at a time qualify.
+fn promote_slots(allocator: Allocator, func: &var MFunction) -> !void {
+    let slots = func.slots.len();
+    if slots == 0 {
+        return;
+    }
+    var promotable = array::new<bool>(allocator);
+    defer promotable.deinit(allocator);
+    var base = array::new<i64>(allocator);
+    defer base.deinit(allocator);
+    for 0..slots |_index| {
+        try promotable.append(allocator, true);
+        try base.append(allocator, 0 - 1);
+    }
+    var block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        block_id = block_id + 1;
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            if inst.op == MOp::FrameAddr {
+                try promotable.set(inst.slot, false);
+                continue;
+            }
+            if (inst.op == MOp::Load or inst.op == MOp::Store) and inst.rn == reg_frame() {
+                if inst.width != 8 or inst.imm % 8 != 0 or inst.imm < 0 {
+                    try promotable.set(inst.slot, false);
+                }
+            }
+        }
+    }
+    // One register per word of each promoted slot.
+    var slot_index = 0;
+    while func.slots.get(slot_index) |slot| {
+        let here = slot_index;
+        slot_index = slot_index + 1;
+        if !promotable.get_or_panic(here) {
+            continue;
+        }
+        let first = func.vregs;
+        func.vregs = func.vregs + (slot.size + 7) / 8;
+        try base.set(here, first_vreg() + first);
+    }
+    block_id = 0;
+    while func.blocks.at_mut(block_id) |block| {
+        block_id = block_id + 1;
+        var inst_index = 0;
+        while inst_index < block.insts.len() {
+            let inst = block.insts.get_or_panic(inst_index);
+            inst_index = inst_index + 1;
+            if (inst.op != MOp::Load and inst.op != MOp::Store) or inst.rn != reg_frame() {
+                continue;
+            }
+            if !promotable.get_or_panic(inst.slot) {
+                continue;
+            }
+            let word = base.get_or_panic(inst.slot) + inst.imm / 8;
+            var moved = blank(MOp::Mov);
+            if inst.op == MOp::Load {
+                moved.rd = inst.rd;
+                moved.rn = word;
+            } else {
+                moved.rd = word;
+                moved.rn = inst.rd;
+            }
+            try block.insts.set(inst_index - 1, moved);
+        }
+    }
+    return;
+}
+
+/// Orders the blocks the entry reaches: reverse postorder, visiting a
+/// block's fall-through successor last so it tends to follow it, with the
+/// cold blocks moved after all the others.
+fn layout(allocator: Allocator, func: &MFunction, cold: &array::Array<bool>, order: &var array::Array<i64>) -> !void {
+    let count = func.blocks.len();
+    var state = array::new<i64>(allocator);
+    defer state.deinit(allocator);
+    var next = array::new<i64>(allocator);
+    defer next.deinit(allocator);
+    var post = array::new<i64>(allocator);
+    defer post.deinit(allocator);
+    var stack = array::new<i64>(allocator);
+    defer stack.deinit(allocator);
+    for 0..count |_index| {
+        try state.append(allocator, 0);
+        try next.append(allocator, 0);
+    }
+    var depth = array::new<i64>(allocator);
+    defer depth.deinit(allocator);
+    try loop_blocks(allocator, func, &var depth);
+    try stack.append(allocator, 0);
+    try state.set(0, 1);
+    while stack.len() > 0 {
+        let top = stack.get_or_panic(stack.len() - 1);
+        let position = next.get_or_panic(top);
+        try next.set(top, position + 1);
+        if position < 2 {
+            // Visit succ1 (the else side) first and succ0 second, so succ0
+            // lands right after the block in reverse postorder -- unless
+            // succ1 stays in a loop succ0 leaves, which then falls through.
+            var side = 1 - position;
+            let s0 = func.successor(top, 0);
+            let s1 = func.successor(top, 1);
+            if s0 >= 0 and s1 >= 0 and depth.get_or_panic(s1) > depth.get_or_panic(s0) {
+                side = position;
+            }
+            var succ = func.successor(top, side);
+            if succ >= 0 and state.get_or_panic(succ) == 0 {
+                try state.set(succ, 1);
+                try stack.append(allocator, succ);
+            }
+            continue;
+        }
+        let _ = stack.pop();
+        try post.append(allocator, top);
+    }
+    var index = post.len() - 1;
+    while index >= 0 {
+        let block = post.get_or_panic(index);
+        index = index - 1;
+        if !(cold.get(block) orelse false) {
+            try order.append(allocator, block);
+        }
+    }
+    index = post.len() - 1;
+    while index >= 0 {
+        let block = post.get_or_panic(index);
+        index = index - 1;
+        if cold.get(block) orelse false {
+            try order.append(allocator, block);
+        }
+    }
+    return;
+}
+
+fn set_bit(bits: &var array::Array<i64>, base: i64, bit: i64) -> !void {
+    let word = base + bit / 64;
+    let mask = 1 << (bit % 64);
+    return bits.set(word, bits.get_or_panic(word) | mask);
+}
+
+fn has_bit(bits: &array::Array<i64>, base: i64, bit: i64) -> bool {
+    let word = base + bit / 64;
+    let mask = 1 << (bit % 64);
+    return (bits.get_or_panic(word) & mask) != 0;
+}
+
+/// Is the live range of one virtual register: segments [from, to] of
+/// positions, ascending, chained through the segment pool. An instruction
+/// at index k reads its operands at 2k and writes its result at 2k + 1.
+struct Ranges {
+    seg_from: array::Array<i64>,
+    seg_to: array::Array<i64>,
+    seg_next: array::Array<i64>,
+    // The first segment of each register, or -1.
+    first: array::Array<i64>,
+}
+
+fn (self: &var Ranges) add(allocator: Allocator, v: i64, from: i64, to: i64) -> !void {
+    let head = self.first.get_or_panic(v);
+    // Segments arrive from the last block backwards, so a new one either
+    // joins the first or goes in front of it.
+    if head >= 0 and self.seg_from.get_or_panic(head) <= to + 1 {
+        if from < self.seg_from.get_or_panic(head) {
+            try self.seg_from.set(head, from);
+        }
+        if to > self.seg_to.get_or_panic(head) {
+            try self.seg_to.set(head, to);
+        }
+        return;
+    }
+    let index = self.seg_from.len();
+    try self.seg_from.append(allocator, from);
+    try self.seg_to.append(allocator, to);
+    try self.seg_next.append(allocator, head);
+    return self.first.set(v, index);
+}
+
+/// Starts v's first segment at a definition: a value is not live before it
+/// is written.
+fn (self: &var Ranges) define(allocator: Allocator, v: i64, at: i64) -> !void {
+    let head = self.first.get_or_panic(v);
+    if head >= 0 and self.seg_from.get_or_panic(head) <= at and self.seg_to.get_or_panic(head) >= at {
+        return self.seg_from.set(head, at);
+    }
+    return self.add(allocator, v, at, at);
+}
+
+fn (self: &Ranges) start(v: i64) -> i64 {
+    let head = self.first.get_or_panic(v);
+    if head < 0 {
+        return 0 - 1;
+    }
+    return self.seg_from.get_or_panic(head);
+}
+
+fn (self: &Ranges) end(v: i64) -> i64 {
+    var at = self.first.get_or_panic(v);
+    var last = 0 - 1;
+    while at >= 0 {
+        last = self.seg_to.get_or_panic(at);
+        at = self.seg_next.get_or_panic(at);
+    }
+    return last;
+}
+
+/// Returns how many positions v's segments cover.
+fn (self: &Ranges) size(v: i64) -> i64 {
+    var at = self.first.get_or_panic(v);
+    var total = 0;
+    while at >= 0 {
+        total = total + self.seg_to.get_or_panic(at) - self.seg_from.get_or_panic(at) + 1;
+        at = self.seg_next.get_or_panic(at);
+    }
+    return total;
+}
+
+fn (self: &Ranges) covers(v: i64, pos: i64) -> bool {
+    var at = self.first.get_or_panic(v);
+    while at >= 0 {
+        if self.seg_from.get_or_panic(at) <= pos and pos <= self.seg_to.get_or_panic(at) {
+            return true;
+        }
+        if self.seg_from.get_or_panic(at) > pos {
+            return false;
+        }
+        at = self.seg_next.get_or_panic(at);
+    }
+    return false;
+}
+
+/// Returns the first segment of v from its cursor on that ends at pos or
+/// later, leaving the cursor there: what covers(v, pos) reads, for a pos
+/// that only grows from one call to the next. v must live at pos or later.
+fn (self: &Ranges) seek(cursor: &var array::Array<i64>, v: i64, pos: i64) -> !i64 {
+    var at = cursor.get_or_panic(v);
+    while self.seg_to.get_or_panic(at) < pos {
+        at = self.seg_next.get_or_panic(at);
+    }
+    try cursor.set(v, at);
+    return at;
+}
+
+fn (self: &Ranges) intersect(a: i64, b: i64) -> bool {
+    var x = self.first.get_or_panic(a);
+    var y = self.first.get_or_panic(b);
+    while x >= 0 and y >= 0 {
+        let x_from = self.seg_from.get_or_panic(x);
+        let x_to = self.seg_to.get_or_panic(x);
+        let y_from = self.seg_from.get_or_panic(y);
+        let y_to = self.seg_to.get_or_panic(y);
+        if x_to < y_from {
+            x = self.seg_next.get_or_panic(x);
+        } else if y_to < x_from {
+            y = self.seg_next.get_or_panic(y);
+        } else {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Reports whether some segment of v spans a marked position: counted
+/// prefix sums over positions, so each segment is one subtraction.
+fn (self: &Ranges) spans(v: i64, before: &array::Array<i64>, base: i64) -> bool {
+    var at = self.first.get_or_panic(v);
+    while at >= 0 {
+        let from = self.seg_from.get_or_panic(at);
+        let to = self.seg_to.get_or_panic(at);
+        if before.get_or_panic(base + to + 1) - before.get_or_panic(base + from) > 0 {
+            return true;
+        }
+        at = self.seg_next.get_or_panic(at);
+    }
+    return false;
+}
+
+/// Allocates registers for a function and rewrites it to use them.
+pub fn allocate(allocator: Allocator, func: &var MFunction, arch: Arch) -> !Allocation {
+    var cold_flags = array::new<bool>(allocator);
+    defer cold_flags.deinit(allocator);
+    var flag_index = 0;
+    while func.blocks.at(flag_index) |block| {
+        flag_index = flag_index + 1;
+        try cold_flags.append(allocator, block.cold);
+    }
+    let cold = &cold_flags;
+    try run_passes(allocator, func, arch);
+    var order = array::new<i64>(allocator);
+    errdefer order.deinit(allocator);
+    try layout(allocator, func, cold, &var order);
+    var float = array::new<bool>(allocator);
+    defer float.deinit(allocator);
+    try float_registers(allocator, func, arch, &var float);
+    return allocate_laid_out(allocator, func, cold, move order, &float, arch);
+}
+
+/// Runs the machine-level clean-ups allocation starts with.
+fn run_passes(allocator: Allocator, func: &var MFunction, arch: Arch) -> !void {
+    try hoist_constants(allocator, func, arch);
+    if arch == Arch::Amd64 {
+        try place_float_constants(allocator, func);
+    }
+    thread_empty_jumps(func);
+    try duplicate_tails(allocator, func);
+    fold_constant_branches(func);
+    thread_empty_jumps(func);
+    try fuse_zero_tests(allocator, func);
+    try fold_increments(allocator, func);
+    try fuse_multiply_adds(allocator, func);
+    try fold_frame_addresses(allocator, func);
+    try remove_dead(allocator, func);
+    try promote_slots(allocator, func);
+    try remove_dead(allocator, func);
+    return;
+}
+
+fn allocate_laid_out(
+    allocator: Allocator,
+    func: &var MFunction,
+    cold: &array::Array<bool>,
+    order_in: array::Array<i64>,
+    float: &array::Array<bool>,
+    arch: Arch
+) -> !Allocation {
+    var order = move order_in;
+    errdefer order.deinit(allocator);
+    let nv = func.vregs;
+    let words = (nv + 63) / 64;
+    let nb = func.blocks.len();
+    // Indices: each instruction one, and the end of each block one more.
+    var block_first = array::new<i64>(allocator);
+    defer block_first.deinit(allocator);
+    var block_last = array::new<i64>(allocator);
+    defer block_last.deinit(allocator);
+    for 0..nb |_index| {
+        try block_first.append(allocator, 0);
+        try block_last.append(allocator, 0);
+    }
+    var count = 0;
+    var order_index = 0;
+    while order.get(order_index) |block_id| {
+        order_index = order_index + 1;
+        try block_first.set(block_id, count);
+        if func.blocks.at(block_id) |block| {
+            count = count + block.insts.len();
+        }
+        try block_last.set(block_id, count);
+        count = count + 1;
+    }
+    let positions = 2 * count + 2;
+    // Marks: hot calls (index 0), each argument register named (1 + r) and
+    // the NEON instructions, which write vector registers allocation does
+    // not track (9), as prefix counts over positions. amd64 has no NEON
+    // instructions; there 9 marks what names xmm0..xmm7: every call, float
+    // argument and float result.
+    let stride = positions + 1;
+    var marks = array::new<i64>(allocator);
+    defer marks.deinit(allocator);
+    for 0..10 * stride |_index| {
+        try marks.append(allocator, 0);
+    }
+    var cold_calls = array::new<i64>(allocator);
+    defer cold_calls.deinit(allocator);
+    var index_at = 0;
+    order_index = 0;
+    while order.get(order_index) |block_id| {
+        order_index = order_index + 1;
+        if func.blocks.at(block_id) |block| {
+            let is_cold = cold.get(block_id) orelse false;
+            var inst_index = 0;
+            while block.insts.at(inst_index) |inst| {
+                inst_index = inst_index + 1;
+                let k = index_at;
+                index_at = index_at + 1;
+                if inst.op == MOp::Call or inst.op == MOp::CallReg {
+                    // A call on a cold path does not decide where values
+                    // live: the registers it would clobber are saved around
+                    // it instead.
+                    if !is_cold {
+                        try bump(&var marks, 2 * k);
+                        try bump(&var marks, 2 * k + 1);
+                    } else if block.term != Term::Stop {
+                        try cold_calls.append(allocator, k);
+                    }
+                    for 0..8 |r| {
+                        try bump(&var marks, (1 + r) * stride + 2 * k);
+                        try bump(&var marks, (1 + r) * stride + 2 * k + 1);
+                    }
+                }
+                if is_vector(inst.op) or (is_x86(arch) and names_float_args(inst.op)) {
+                    try bump(&var marks, 9 * stride + 2 * k);
+                    try bump(&var marks, 9 * stride + 2 * k + 1);
+                }
+                try mark_arguments(&var marks, stride, inst, k);
+            }
+        }
+        index_at = index_at + 1;
+    }
+    for 0..10 |row| {
+        var running = 0;
+        for 0..stride |p| {
+            let at = row * stride + p;
+            let here = marks.get_or_panic(at);
+            try marks.set(at, running);
+            running = running + here;
+        }
+    }
+    // Liveness: use and def per block, then live-in / live-out to a fixed
+    // point.
+    var use_bits = array::new<i64>(allocator);
+    defer use_bits.deinit(allocator);
+    var def_bits = array::new<i64>(allocator);
+    defer def_bits.deinit(allocator);
+    var live_in = array::new<i64>(allocator);
+    defer live_in.deinit(allocator);
+    var live_out = array::new<i64>(allocator);
+    defer live_out.deinit(allocator);
+    for 0..nb * words |_index| {
+        try use_bits.append(allocator, 0);
+        try def_bits.append(allocator, 0);
+        try live_in.append(allocator, 0);
+        try live_out.append(allocator, 0);
+    }
+    var reads_buf = array::new<i64>(allocator);
+    defer reads_buf.deinit(allocator);
+    var defs_buf = array::new<i64>(allocator);
+    defer defs_buf.deinit(allocator);
+    var block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        let base = block_id * words;
+        block_id = block_id + 1;
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            try reads(inst, &var reads_buf, allocator, &func.copies);
+            var read_index = 0;
+            while reads_buf.get(read_index) |reg| {
+                read_index = read_index + 1;
+                if is_vreg(reg) and !has_bit(&def_bits, base, reg - first_vreg()) {
+                    try set_bit(&var use_bits, base, reg - first_vreg());
+                }
+            }
+            try defs(inst, &var defs_buf, allocator, &func.copies);
+            var def_index = 0;
+            while defs_buf.get(def_index) |reg| {
+                def_index = def_index + 1;
+                if is_vreg(reg) {
+                    try set_bit(&var def_bits, base, reg - first_vreg());
+                }
+            }
+        }
+        if is_vreg(block.treg) and !has_bit(&def_bits, base, block.treg - first_vreg()) {
+            try set_bit(&var use_bits, base, block.treg - first_vreg());
+        }
+    }
+    var changed = true;
+    while changed {
+        changed = false;
+        var index = order.len() - 1;
+        while index >= 0 {
+            let b = order.get_or_panic(index);
+            index = index - 1;
+            let base = b * words;
+            for 0..words |w| {
+                var out = 0;
+                var position_s = 0;
+                while position_s < 2 {
+                    let succ = func.successor(b, position_s);
+                    position_s = position_s + 1;
+                    if succ >= 0 {
+                        out = out | live_in.get_or_panic(succ * words + w);
+                    }
+                }
+                let incoming = use_bits.get_or_panic(base + w) | (out & ~def_bits.get_or_panic(base + w));
+                if out != live_out.get_or_panic(base + w) or incoming != live_in.get_or_panic(base + w) {
+                    changed = true;
+                    try live_out.set(base + w, out);
+                    try live_in.set(base + w, incoming);
+                }
+            }
+        }
+    }
+    // Ranges, built from the last block backwards.
+    var ranges = Ranges {
+        seg_from: array::new<i64>(allocator),
+        seg_to: array::new<i64>(allocator),
+        seg_next: array::new<i64>(allocator),
+        first: array::new<i64>(allocator)
+    };
+    defer ranges.deinit(allocator);
+    for 0..nv |_index| {
+        try ranges.first.append(allocator, 0 - 1);
+    }
+    var hint = array::new<i64>(allocator);
+    defer hint.deinit(allocator);
+    var partner = array::new<i64>(allocator);
+    defer partner.deinit(allocator);
+    var sink = array::new<i64>(allocator);
+    defer sink.deinit(allocator);
+    // On amd64 a float operation's result is computed in place of its left
+    // operand, so it would rather have that operand's register.
+    var tied = array::new<i64>(allocator);
+    defer tied.deinit(allocator);
+    // Its right operand's register would make it a copy through a scratch
+    // register first.
+    var shunned = array::new<i64>(allocator);
+    defer shunned.deinit(allocator);
+    for 0..nv |_index| {
+        try hint.append(allocator, 0 - 1);
+        try partner.append(allocator, 0 - 1);
+        try sink.append(allocator, 0 - 1);
+        try tied.append(allocator, 0 - 1);
+        try shunned.append(allocator, 0 - 1);
+    }
+    if is_x86(arch) {
+        try note_tied(func, float, &var tied, &var shunned);
+    }
+    var order_back = order.len() - 1;
+    while order_back >= 0 {
+        let b = order.get_or_panic(order_back);
+        order_back = order_back - 1;
+        let base = b * words;
+        let from = 2 * block_first.get_or_panic(b);
+        let to = 2 * block_last.get_or_panic(b) + 1;
+        // Each v live out, ascending; a word with no bit set is skipped
+        // whole.
+        for 0..words |w| {
+            let bits = live_out.get_or_panic(base + w);
+            if bits == 0 {
+                continue;
+            }
+            for 0..64 |bit| {
+                if (bits & (1 << bit)) != 0 {
+                    try ranges.add(allocator, 64 * w + bit, from, to);
+                }
+            }
+        }
+        if func.blocks.at(b) |block| {
+            if is_vreg(block.treg) {
+                try ranges.add(allocator, block.treg - first_vreg(), from, 2 * block_last.get_or_panic(b));
+            }
+            var inst_index = block.insts.len() - 1;
+            while inst_index >= 0 {
+                let inst = block.insts.get_or_panic(inst_index);
+                let k = block_first.get_or_panic(b) + inst_index;
+                inst_index = inst_index - 1;
+                try defs(&inst, &var defs_buf, allocator, &func.copies);
+                var def_index = 0;
+                while defs_buf.get(def_index) |reg| {
+                    def_index = def_index + 1;
+                    if is_vreg(reg) {
+                        try ranges.define(allocator, reg - first_vreg(), 2 * k + 1);
+                    }
+                }
+                try reads(&inst, &var reads_buf, allocator, &func.copies);
+                var read_index = 0;
+                while reads_buf.get(read_index) |reg| {
+                    read_index = read_index + 1;
+                    if is_vreg(reg) {
+                        try ranges.add(allocator, reg - first_vreg(), from, 2 * k);
+                    }
+                }
+                try note_hints(&var hint, &var partner, &var sink, &inst, &func.copies);
+            }
+        }
+    }
+    // Spill weights: each def and use counts 8^depth of its block's loop
+    // nesting, so what a hot loop reads stays in a register. A register
+    // that is one constant or one frame address is remade where it is
+    // read rather than stored, and costs less to give up.
+    var depth = array::new<i64>(allocator);
+    defer depth.deinit(allocator);
+    try loop_depths(allocator, func, &order, &var depth);
+    var weight = array::new<i64>(allocator);
+    defer weight.deinit(allocator);
+    var def_count = array::new<i64>(allocator);
+    defer def_count.deinit(allocator);
+    var remat = array::new<MInst>(allocator);
+    defer remat.deinit(allocator);
+    for 0..nv |_index| {
+        try weight.append(allocator, 0);
+        try def_count.append(allocator, 0);
+        try remat.append(allocator, blank(MOp::Trap));
+    }
+    order_index = 0;
+    while order.get(order_index) |b| {
+        order_index = order_index + 1;
+        let block_depth = depth.get_or_panic(b);
+        var unit = 1;
+        for 0..block_depth |_level| {
+            if unit < 4096 {
+                unit = unit * 8;
+            }
+        }
+        if func.blocks.at(b) |block| {
+            var inst_index = 0;
+            while block.insts.at(inst_index) |inst| {
+                inst_index = inst_index + 1;
+                try reads(inst, &var reads_buf, allocator, &func.copies);
+                var read_index = 0;
+                while reads_buf.get(read_index) |reg| {
+                    read_index = read_index + 1;
+                    if is_vreg(reg) {
+                        try add_to(&var weight, reg - first_vreg(), unit);
+                    }
+                }
+                try defs(inst, &var defs_buf, allocator, &func.copies);
+                var def_index = 0;
+                while defs_buf.get(def_index) |reg| {
+                    def_index = def_index + 1;
+                    if is_vreg(reg) {
+                        try add_to(&var weight, reg - first_vreg(), unit);
+                        try add_to(&var def_count, reg - first_vreg(), 1);
+                        if inst.op == MOp::MovImm or inst.op == MOp::FrameAddr {
+                            try remat.set(reg - first_vreg(), inst.*);
+                        }
+                    }
+                }
+            }
+            if is_vreg(block.treg) {
+                try add_to(&var weight, block.treg - first_vreg(), unit);
+            }
+        }
+    }
+    // A register whose one definition copies another may share that
+    // register's location while the other is not written again.
+    var copy_of = array::new<i64>(allocator);
+    defer copy_of.deinit(allocator);
+    for 0..nv |v| {
+        var source = 0 - 1;
+        if def_count.get_or_panic(v) == 1 {
+            source = partner.get_or_panic(v);
+        }
+        try copy_of.append(allocator, source);
+    }
+    // Pairs (source, other destination) of each parallel copy: a source
+    // that takes the register of another destination of its copy makes
+    // the copy a cycle, resolved through a scratch register.
+    var avoid_src = array::new<i64>(allocator);
+    defer avoid_src.deinit(allocator);
+    var avoid_dst = array::new<i64>(allocator);
+    defer avoid_dst.deinit(allocator);
+    var pair_block = 0;
+    while func.blocks.at(pair_block) |block| {
+        pair_block = pair_block + 1;
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            if inst.op != MOp::ParCopy or inst.imm > 8 {
+                continue;
+            }
+            for 0..inst.imm |a| {
+                let copy = func.copies.get_or_panic(inst.slot + a);
+                if copy.src_imm or !is_vreg(copy.src) {
+                    continue;
+                }
+                for 0..inst.imm |b| {
+                    let other = func.copies.get_or_panic(inst.slot + b);
+                    if b != a and is_vreg(other.dst) and other.dst != copy.src {
+                        try avoid_src.append(allocator, copy.src - first_vreg());
+                        try avoid_dst.append(allocator, other.dst - first_vreg());
+                    }
+                }
+            }
+        }
+    }
+    // Where each register is written, to tell whether a copy's source
+    // changes while the copy lives.
+    var write_at = array::new<i64>(allocator);
+    defer write_at.deinit(allocator);
+    var write_next = array::new<i64>(allocator);
+    defer write_next.deinit(allocator);
+    var write_first = array::new<i64>(allocator);
+    defer write_first.deinit(allocator);
+    for 0..nv |_index| {
+        try write_first.append(allocator, 0 - 1);
+    }
+    order_index = 0;
+    while order.get(order_index) |b| {
+        order_index = order_index + 1;
+        if func.blocks.at(b) |block| {
+            var inst_index = 0;
+            while block.insts.at(inst_index) |inst| {
+                let k = block_first.get_or_panic(b) + inst_index;
+                inst_index = inst_index + 1;
+                try defs(inst, &var defs_buf, allocator, &func.copies);
+                var def_index = 0;
+                while defs_buf.get(def_index) |reg| {
+                    def_index = def_index + 1;
+                    if is_vreg(reg) {
+                        let id = reg - first_vreg();
+                        try write_at.append(allocator, 2 * k + 1);
+                        try write_next.append(allocator, write_first.get_or_panic(id));
+                        try write_first.set(id, write_at.len() - 1);
+                    }
+                }
+            }
+        }
+    }
+    for 0..nv |v| {
+        if def_count.get_or_panic(v) != 1 {
+            try remat.set(v, blank(MOp::Trap));
+        } else if remat.get_or_panic(v).op != MOp::Trap {
+            try weight.set(v, weight.get_or_panic(v) / 4);
+        }
+    }
+    // A weight is per position held: giving up a long range frees its
+    // register over all of it, a short one over little, so of two ranges
+    // read as often the longer goes first. The 50 positions added keep a
+    // short range from weighing without bound.
+    for 0..nv |v| {
+        try weight.set(v, weight.get_or_panic(v) * 256 / (ranges.size(v) + 50));
+    }
+    // Linear scan over the ranges by start, with active (live at the
+    // current position) and inactive (in a hole there) sets.
+    var by_start = array::new<i64>(allocator);
+    defer by_start.deinit(allocator);
+    var bucket = array::new<i64>(allocator);
+    defer bucket.deinit(allocator);
+    for 0..positions + 2 |_index| {
+        try bucket.append(allocator, 0);
+    }
+    for 0..nv |v| {
+        let start = ranges.start(v);
+        if start >= 0 {
+            try bump(&var bucket, start);
+        }
+    }
+    var running = 0;
+    for 0..positions + 2 |p| {
+        let here = bucket.get_or_panic(p);
+        try bucket.set(p, running);
+        running = running + here;
+    }
+    for 0..running |_index| {
+        try by_start.append(allocator, 0);
+    }
+    for 0..nv |v| {
+        let start = ranges.start(v);
+        if start >= 0 {
+            let at = bucket.get_or_panic(start);
+            try by_start.set(at, v);
+            try bucket.set(start, at + 1);
+        }
+    }
+    var phys = array::new<i64>(allocator);
+    defer phys.deinit(allocator);
+    var spill = array::new<i64>(allocator);
+    defer spill.deinit(allocator);
+    // Where each range ends: the ranges are final here, and the scan asks
+    // for the end of every active and inactive one at each step.
+    var ends = array::new<i64>(allocator);
+    defer ends.deinit(allocator);
+    // The segment of each range the scan last stopped at (Ranges.seek).
+    var cursor = array::new<i64>(allocator);
+    defer cursor.deinit(allocator);
+    for 0..nv |v| {
+        try phys.append(allocator, 0 - 1);
+        try spill.append(allocator, 0 - 1);
+        try ends.append(allocator, ranges.end(v));
+        try cursor.append(allocator, ranges.first.get_or_panic(v));
+    }
+    var crosses_call = array::new<bool>(allocator);
+    defer crosses_call.deinit(allocator);
+    for 0..nv |v| {
+        var crosses = ranges.first.get_or_panic(v) >= 0 and ranges.spans(v, &marks, 0);
+        // A float register is clobbered by a vectorized loop too.
+        if arch == Arch::Arm64 and float.get_or_panic(v) and !crosses {
+            crosses = ranges.first.get_or_panic(v) >= 0 and ranges.spans(v, &marks, 9 * stride);
+        }
+        try crosses_call.append(allocator, crosses);
+    }
+    var active = array::new<i64>(allocator);
+    defer active.deinit(allocator);
+    var inactive = array::new<i64>(allocator);
+    defer inactive.deinit(allocator);
+    var used = array::new<bool>(allocator);
+    defer used.deinit(allocator);
+    for 0..first_vreg() |_index| {
+        try used.append(allocator, false);
+    }
+    var candidates = array::new<i64>(allocator);
+    defer candidates.deinit(allocator);
+    var to_inactive = array::new<i64>(allocator);
+    defer to_inactive.deinit(allocator);
+    // The first position at which a range in active or inactive may change
+    // set: where an active one's segment ends, or an inactive one's next
+    // segment starts. Before it the sets stay as they are, in the same
+    // order, so the scan below has nothing to move. Ranges evicted since
+    // only leave it early, never late.
+    var next_change = 0;
+    var scan = 0;
+    while by_start.get(scan) |v| {
+        scan = scan + 1;
+        let start = ranges.start(v);
+        if start >= next_change {
+            next_change = positions + 1;
+            // Move what ended to handled and what is in a hole to inactive.
+            var keep = 0;
+            var look = 0;
+            to_inactive.clear(allocator);
+            while active.get(look) |other| {
+                look = look + 1;
+                if ends.get_or_panic(other) < start {
+                    continue;
+                }
+                let at = try ranges.seek(&var cursor, other, start);
+                if ranges.seg_from.get_or_panic(at) > start {
+                    next_change = min(next_change, ranges.seg_from.get_or_panic(at));
+                    try to_inactive.append(allocator, other);
+                    continue;
+                }
+                next_change = min(next_change, ranges.seg_to.get_or_panic(at) + 1);
+                try active.set(keep, other);
+                keep = keep + 1;
+            }
+            try active.truncate(allocator, keep);
+            keep = 0;
+            look = 0;
+            while inactive.get(look) |other| {
+                look = look + 1;
+                if ends.get_or_panic(other) < start {
+                    continue;
+                }
+                let at = try ranges.seek(&var cursor, other, start);
+                if ranges.seg_from.get_or_panic(at) <= start {
+                    next_change = min(next_change, ranges.seg_to.get_or_panic(at) + 1);
+                    try active.append(allocator, other);
+                    continue;
+                }
+                next_change = min(next_change, ranges.seg_from.get_or_panic(at));
+                try inactive.set(keep, other);
+                keep = keep + 1;
+            }
+            try inactive.truncate(allocator, keep);
+            var moved = 0;
+            while to_inactive.get(moved) |other| {
+                moved = moved + 1;
+                try inactive.append(allocator, other);
+            }
+        }
+        // v joins active below covering start in its first segment.
+        let first_to = ranges.seg_to.get_or_panic(ranges.first.get_or_panic(v));
+        let crosses = crosses_call.get_or_panic(v);
+        // Where no float register outlives a call, a range across one
+        // stays in a general register, as it would without float ones.
+        let wants_float = float.get_or_panic(v) and !(crosses and float_callee_saved_end(arch) == first_float_reg());
+        // The registers this range may take, in the order it wants them.
+        candidates.clear(allocator);
+        let mate = partner.get_or_panic(v);
+        if mate >= 0 {
+            let mate_reg = phys.get_or_panic(mate - first_vreg());
+            if mate_reg >= 0 {
+                try candidates.append(allocator, mate_reg);
+            }
+        }
+        // A chain of copies (a select into a join's phi into a loop
+        // header's phi) wants the register of the first one along it that
+        // has one.
+        let tie = tied.get_or_panic(v);
+        if wants_float and tie >= 0 {
+            let tie_reg = phys.get_or_panic(tie - first_vreg());
+            if tie_reg >= 0 {
+                try candidates.append(allocator, tie_reg);
+            }
+        }
+        var drain = sink.get_or_panic(v);
+        var hops = 0;
+        while drain >= 0 and hops < 4 {
+            let drain_reg = phys.get_or_panic(drain - first_vreg());
+            if drain_reg >= 0 {
+                try candidates.append(allocator, drain_reg);
+                break;
+            }
+            drain = sink.get_or_panic(drain - first_vreg());
+            hops = hops + 1;
+        }
+        let wanted = hint.get_or_panic(v);
+        if wanted >= 0 {
+            try candidates.append(allocator, wanted);
+        }
+        if wants_float {
+            if !crosses {
+                for float_caller_saved_first(arch)..float_named_end(arch) |r| {
+                    try candidates.append(allocator, r);
+                }
+            }
+            for first_float_reg()..float_callee_saved_end(arch) |r| {
+                try candidates.append(allocator, r);
+            }
+        } else {
+            if !crosses {
+                for caller_saved_first()..caller_saved_last(arch) + 1 |r| {
+                    try candidates.append(allocator, r);
+                }
+                for 0..arg_regs(arch) |r| {
+                    try candidates.append(allocator, r);
+                }
+            }
+            for callee_saved_first()..callee_saved_last(arch) + 1 |r| {
+                try candidates.append(allocator, r);
+            }
+        }
+        var chosen = 0 - 1;
+        var deferred = 0 - 1;
+        var shun = 0 - 1;
+        if wants_float and shunned.get_or_panic(v) >= 0 {
+            shun = phys.get_or_panic(shunned.get_or_panic(v) - first_vreg());
+        }
+        var candidate_index = 0;
+        while candidates.get(candidate_index) |r| {
+            candidate_index = candidate_index + 1;
+            if !may_take(&ranges, &marks, stride, v, r, crosses, wants_float, arch) {
+                continue;
+            }
+            if register_free(&ranges, &phys, &active, &inactive, &copy_of, &write_at, &write_next, &write_first, v, r) {
+                if deferred < 0 and (r == shun or closes_cycle(&avoid_src, &avoid_dst, &phys, v, r)) {
+                    deferred = r;
+                    continue;
+                }
+                chosen = r;
+                break;
+            }
+        }
+        if chosen < 0 {
+            chosen = deferred;
+        }
+        if chosen >= 0 {
+            try phys.set(v, chosen);
+            try active.append(allocator, v);
+            next_change = min(next_change, first_to + 1);
+            try used.set(chosen, true);
+            continue;
+        }
+        // No register is free for the whole range: give up whichever costs
+        // least -- this range, or the ranges holding one register it may
+        // take that overlap it.
+        var best_reg = 0 - 1;
+        var best_cost = weight.get_or_panic(v);
+        candidate_index = 0;
+        while candidates.get(candidate_index) |r| {
+            candidate_index = candidate_index + 1;
+            if !may_take(&ranges, &marks, stride, v, r, crosses, wants_float, arch) {
+                continue;
+            }
+            let cost = holders_weight(&ranges, &phys, &weight, &active, &inactive, v, r);
+            if cost < best_cost {
+                best_cost = cost;
+                best_reg = r;
+            }
+        }
+        if best_reg < 0 {
+            try spill.set(v, try spill_place(allocator, func, &remat, v));
+            continue;
+        }
+        try evict(allocator, func, &ranges, &var phys, &var spill, &remat, &var active, v, best_reg);
+        try evict(allocator, func, &ranges, &var phys, &var spill, &remat, &var inactive, v, best_reg);
+        try phys.set(v, best_reg);
+        try active.append(allocator, v);
+        next_change = min(next_change, first_to + 1);
+        try used.set(best_reg, true);
+    }
+    // The caller-saved registers live across each cold call.
+    var cold_saves = array::new<i64>(allocator);
+    defer cold_saves.deinit(allocator);
+    for 0..count + 1 |_index| {
+        try cold_saves.append(allocator, 0);
+    }
+    // A range in such a register adds it at each cold call k whose 2k and
+    // 2k + 1 it covers; the calls are in ascending k, so each segment
+    // finds the first one inside it by bisection.
+    for 0..nv |v| {
+        let reg = phys.get_or_panic(v);
+        if !is_cold_saved(reg, arch) {
+            continue;
+        }
+        var at = ranges.first.get_or_panic(v);
+        while at >= 0 {
+            let from = ranges.seg_from.get_or_panic(at);
+            let to = ranges.seg_to.get_or_panic(at);
+            at = ranges.seg_next.get_or_panic(at);
+            var low = 0;
+            var high = cold_calls.len();
+            while low < high {
+                let middle = (low + high) / 2;
+                if 2 * cold_calls.get_or_panic(middle) < from {
+                    low = middle + 1;
+                } else {
+                    high = middle;
+                }
+            }
+            while cold_calls.get(low) |k| {
+                if 2 * k > to {
+                    break;
+                }
+                low = low + 1;
+                if 2 * k + 1 <= to or ranges.covers(v, 2 * k + 1) {
+                    try cold_saves.set(k, cold_saves.get_or_panic(k) | (1 << reg));
+                }
+            }
+        }
+    }
+    var save_slots = array::new<i64>(allocator);
+    defer save_slots.deinit(allocator);
+    for 0..first_vreg() |_index| {
+        try save_slots.append(allocator, 0 - 1);
+    }
+    // A pure instruction whose result is dead right after it -- one of the
+    // definitions of a register written on several paths, say, after a
+    // test of it was resolved -- is dropped.
+    var dead = array::new<bool>(allocator);
+    defer dead.deinit(allocator);
+    for 0..count + 1 |_index| {
+        try dead.append(allocator, false);
+    }
+    order_index = 0;
+    while order.get(order_index) |b| {
+        order_index = order_index + 1;
+        if func.blocks.at(b) |block| {
+            var inst_index = 0;
+            while block.insts.at(inst_index) |inst| {
+                let k = block_first.get_or_panic(b) + inst_index;
+                inst_index = inst_index + 1;
+                if writes_rd(inst.op) and !has_effect(inst.op) and is_vreg(inst.rd) {
+                    if !ranges.covers(inst.rd - first_vreg(), 2 * k + 2) {
+                        try dead.set(k, true);
+                    }
+                }
+            }
+        }
+    }
+    try rewrite(allocator, func, &order, &phys, &spill, &remat, &cold_saves, &var save_slots, &dead);
+    var saved = array::new<i64>(allocator);
+    errdefer saved.deinit(allocator);
+    for callee_saved_first()..callee_saved_last(arch) + 1 |reg| {
+        if used.get_or_panic(reg) {
+            try saved.append(allocator, reg);
+        }
+    }
+    for first_float_reg()..float_callee_saved_end(arch) |reg| {
+        if used.get_or_panic(reg) {
+            try saved.append(allocator, reg);
+        }
+    }
+    return Allocation { order: move order, saved: move saved };
+}
+
+/// Reports whether a range may live in a register at all: a range across a
+/// hot call only in a callee-saved one, and none in an argument register
+/// the code names inside it.
+/// Reports whether v in reg would hold another destination's register in a
+/// parallel copy v is a source of.
+fn closes_cycle(avoid_src: &array::Array<i64>, avoid_dst: &array::Array<i64>, phys: &array::Array<i64>, v: i64, reg: i64) -> bool {
+    var index = 0;
+    while avoid_src.get(index) |source| {
+        if source == v and phys.get_or_panic(avoid_dst.get_or_panic(index)) == reg {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn may_take(ranges: &Ranges, marks: &array::Array<i64>, stride: i64, v: i64, reg: i64, crosses: bool, float: bool, arch: Arch) -> bool {
+    if float or is_float_reg(reg) {
+        if !float or !is_float_reg(reg) {
+            return false;
+        }
+        if reg >= float_caller_saved_end(arch) {
+            return reg < float_named_end(arch) and !ranges.spans(v, marks, 9 * stride);
+        }
+        return !crosses or reg < float_callee_saved_end(arch);
+    }
+    if crosses and reg < callee_saved_first() {
+        return false;
+    }
+    if reg < arg_regs(arch) {
+        return !ranges.spans(v, marks, (1 + reg) * stride);
+    }
+    return (reg >= caller_saved_first() and reg <= caller_saved_last(arch)) or
+        (reg >= callee_saved_first() and reg <= callee_saved_last(arch));
+}
+
+/// Reports whether no range holding reg overlaps v, a copy and its source
+/// excepted while the source is not written again.
+fn register_free(
+    ranges: &Ranges,
+    phys: &array::Array<i64>,
+    active: &array::Array<i64>,
+    inactive: &array::Array<i64>,
+    copy_of: &array::Array<i64>,
+    write_at: &array::Array<i64>,
+    write_next: &array::Array<i64>,
+    write_first: &array::Array<i64>,
+    v: i64,
+    reg: i64
+) -> bool {
+    var index = 0;
+    while active.get(index) |other| {
+        index = index + 1;
+        if phys.get_or_panic(other) == reg and !shares_value(ranges, copy_of, write_at, write_next, write_first, v, other) {
+            return false;
+        }
+    }
+    index = 0;
+    while inactive.get(index) |other| {
+        index = index + 1;
+        if phys.get_or_panic(other) == reg and ranges.intersect(v, other) and
+            !shares_value(ranges, copy_of, write_at, write_next, write_first, v, other) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Reports whether two ranges hold the same value wherever both live: one
+/// is a copy of the other, directly or through a chain of copies, and no
+/// register along the chain is written while the copy lives.
+fn shares_value(
+    ranges: &Ranges,
+    copy_of: &array::Array<i64>,
+    write_at: &array::Array<i64>,
+    write_next: &array::Array<i64>,
+    write_first: &array::Array<i64>,
+    a: i64,
+    b: i64
+) -> bool {
+    if copy_chain(ranges, copy_of, write_at, write_next, write_first, a, b) {
+        return true;
+    }
+    return copy_chain(ranges, copy_of, write_at, write_next, write_first, b, a);
+}
+
+fn copy_chain(
+    ranges: &Ranges,
+    copy_of: &array::Array<i64>,
+    write_at: &array::Array<i64>,
+    write_next: &array::Array<i64>,
+    write_first: &array::Array<i64>,
+    copy: i64,
+    target: i64
+) -> bool {
+    // Each source along the chain must keep its value while every copy
+    // made from it, directly or not, lives.
+    var chain0 = copy;
+    var chain1 = 0 - 1;
+    var chain2 = 0 - 1;
+    var chain3 = 0 - 1;
+    var source = copy_of.get_or_panic(copy);
+    var hops = 0;
+    while source >= 0 and hops < 4 {
+        let id = source - first_vreg();
+        var at = write_first.get_or_panic(id);
+        while at >= 0 {
+            let pos = write_at.get_or_panic(at);
+            at = write_next.get_or_panic(at);
+            if ranges.covers(chain0, pos) or chain1 >= 0 and ranges.covers(chain1, pos) or
+                chain2 >= 0 and ranges.covers(chain2, pos) or chain3 >= 0 and ranges.covers(chain3, pos) {
+                return false;
+            }
+        }
+        if id == target {
+            return true;
+        }
+        chain3 = chain2;
+        chain2 = chain1;
+        chain1 = id;
+        source = copy_of.get_or_panic(id);
+        hops = hops + 1;
+    }
+    return false;
+}
+
+/// Sums the weights of the ranges holding reg that overlap v.
+fn holders_weight(
+    ranges: &Ranges,
+    phys: &array::Array<i64>,
+    weight: &array::Array<i64>,
+    active: &array::Array<i64>,
+    inactive: &array::Array<i64>,
+    v: i64,
+    reg: i64
+) -> i64 {
+    var total = 0;
+    var index = 0;
+    while active.get(index) |other| {
+        index = index + 1;
+        if phys.get_or_panic(other) == reg {
+            total = total + weight.get_or_panic(other);
+        }
+    }
+    index = 0;
+    while inactive.get(index) |other| {
+        index = index + 1;
+        if phys.get_or_panic(other) == reg and ranges.intersect(v, other) {
+            total = total + weight.get_or_panic(other);
+        }
+    }
+    return total;
+}
+
+/// Spills the ranges of a set that hold reg and overlap v.
+fn evict(
+    allocator: Allocator,
+    func: &var MFunction,
+    ranges: &Ranges,
+    phys: &var array::Array<i64>,
+    spill: &var array::Array<i64>,
+    remat: &array::Array<MInst>,
+    set: &var array::Array<i64>,
+    v: i64,
+    reg: i64
+) -> !void {
+    var keep = 0;
+    var look = 0;
+    while set.get(look) |other| {
+        look = look + 1;
+        if phys.get_or_panic(other) == reg and ranges.intersect(v, other) {
+            try phys.set(other, 0 - 1);
+            try spill.set(other, try spill_place(allocator, func, remat, other));
+            continue;
+        }
+        try set.set(keep, other);
+        keep = keep + 1;
+    }
+    return set.truncate(allocator, keep);
+}
+
+/// Marks each argument register an instruction names, read at 2k and
+/// written at 2k + 1.
+fn mark_arguments(marks: &var array::Array<i64>, stride: i64, inst: &MInst, k: i64) -> !void {
+    let stores = inst.op == MOp::Store or inst.op == MOp::StoreIdx;
+    if inst.rn >= 0 and inst.rn < 8 {
+        try bump(marks, (1 + inst.rn) * stride + 2 * k);
+    }
+    if inst.rm >= 0 and inst.rm < 8 {
+        try bump(marks, (1 + inst.rm) * stride + 2 * k);
+    }
+    if inst.ra >= 0 and inst.ra < 8 {
+        try bump(marks, (1 + inst.ra) * stride + 2 * k);
+    }
+    if inst.rd >= 0 and inst.rd < 8 {
+        if stores {
+            try bump(marks, (1 + inst.rd) * stride + 2 * k);
+        } else if writes_rd(inst.op) {
+            try bump(marks, (1 + inst.rd) * stride + 2 * k + 1);
+        }
+    }
+    return;
+}
+
+fn bump(table: &var array::Array<i64>, at: i64) -> !void {
+    return table.set(at, table.get_or_panic(at) + 1);
+}
+
+/// Reports whether an instruction names xmm0..xmm7 on amd64: a call, which
+/// clobbers them, or a float argument or result, which moves through one.
+fn names_float_args(op: MOp) -> bool {
+    return op == MOp::Call or op == MOp::CallReg or op == MOp::FArg or op == MOp::FRet;
+}
+
+/// Notes, for each float operation amd64 computes two-address, the left
+/// operand its result would share a register with once that operand dies.
+fn note_tied(func: &MFunction, float: &array::Array<bool>, tied: &var array::Array<i64>, shunned: &var array::Array<i64>) -> !void {
+    var block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        block_id = block_id + 1;
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            if inst.op != MOp::FBin and inst.op != MOp::FUn and inst.op != MOp::FCvt {
+                continue;
+            }
+            if !is_vreg(inst.rd) or !float.get_or_panic(inst.rd - first_vreg()) {
+                continue;
+            }
+            if is_vreg(inst.rn) {
+                try tied.set(inst.rd - first_vreg(), inst.rn);
+            }
+            if inst.op == MOp::FBin and is_vreg(inst.rm) and inst.rm != inst.rn {
+                try shunned.set(inst.rd - first_vreg(), inst.rm);
+            }
+        }
+    }
+    return;
+}
+
+/// Notes which register a virtual register would like: the argument
+/// register it moves from or to, and the virtual registers it is copied
+/// from (partner) and into (sink).
+fn note_hints(hint: &var array::Array<i64>, partner: &var array::Array<i64>, sink: &var array::Array<i64>, inst: &MInst, copies: &array::Array<Copy>) -> !void {
+    if inst.op == MOp::Mov {
+        if is_vreg(inst.rd) and inst.rn >= 0 and inst.rn < 8 {
+            try hint.set(inst.rd - first_vreg(), inst.rn);
+        }
+        if is_vreg(inst.rn) and inst.rd >= 0 and inst.rd < 8 and hint.get_or_panic(inst.rn - first_vreg()) < 0 {
+            try hint.set(inst.rn - first_vreg(), inst.rd);
+        }
+        if is_vreg(inst.rd) and is_vreg(inst.rn) {
+            try partner.set(inst.rd - first_vreg(), inst.rn);
+            try sink.set(inst.rn - first_vreg(), inst.rd);
+        }
+        return;
+    }
+    if inst.op == MOp::ParCopy {
+        var index = 0;
+        while index < inst.imm {
+            let copy = copies.get_or_panic(inst.slot + index);
+            index = index + 1;
+            if !copy.src_imm and is_vreg(copy.src) and is_vreg(copy.dst) {
+                try partner.set(copy.dst - first_vreg(), copy.src);
+                try sink.set(copy.src - first_vreg(), copy.dst);
+            }
+        }
+    }
+    return;
+}
+
+/// Lists the registers an instruction writes.
+fn defs(inst: &MInst, out: &var array::Array<i64>, allocator: Allocator, copies: &array::Array<Copy>) -> !void {
+    out.clear(allocator);
+    if inst.op == MOp::ParCopy {
+        var index = 0;
+        while index < inst.imm {
+            let copy = copies.get_or_panic(inst.slot + index);
+            index = index + 1;
+            try out.append(allocator, copy.dst);
+        }
+        return;
+    }
+    if writes_rd(inst.op) and inst.rd >= 0 {
+        try out.append(allocator, inst.rd);
+    }
+    return;
+}
+
+/// Is where a virtual register lives after allocation.
+struct Loc {
+    reg: i64,
+    slot: i64,
+    // Set when the register is remade from its one definition, def.
+    remat: bool,
+    def: MInst,
+}
+
+fn reg_loc(reg: i64) -> Loc {
+    return Loc { reg: reg, slot: 0 - 1, remat: false, def: blank(MOp::Trap) };
+}
+
+fn slot_loc(slot: i64) -> Loc {
+    return Loc { reg: 0 - 1, slot: slot, remat: false, def: blank(MOp::Trap) };
+}
+
+fn loc_of(phys: &array::Array<i64>, spill: &array::Array<i64>, remat: &array::Array<MInst>, reg: i64) -> Loc {
+    if !is_vreg(reg) {
+        return reg_loc(reg);
+    }
+    let id = reg - first_vreg();
+    let slot = spill.get(id) orelse 0 - 1;
+    if slot == 0 - 2 {
+        return Loc { reg: 0 - 1, slot: 0 - 1, remat: true, def: remat.get_or_panic(id) };
+    }
+    if slot >= 0 {
+        return slot_loc(slot);
+    }
+    return reg_loc(phys.get(id) orelse 0 - 1);
+}
+
+/// Returns the definition of a remade register writing into target.
+fn remade(place: Loc, target: i64) -> MInst {
+    var inst = place.def;
+    inst.rd = target;
+    return inst;
+}
+
+fn spill_load(reg: i64, slot: i64) -> MInst {
+    var inst = blank(MOp::Load);
+    inst.rd = reg;
+    inst.rn = reg_frame();
+    inst.slot = slot;
+    inst.imm = 0;
+    inst.width = 8;
+    return inst;
+}
+
+fn spill_store(reg: i64, slot: i64) -> MInst {
+    var inst = blank(MOp::Store);
+    inst.rd = reg;
+    inst.rn = reg_frame();
+    inst.slot = slot;
+    inst.imm = 0;
+    inst.width = 8;
+    return inst;
+}
+
+/// Replaces every virtual register by its location, loading spilled reads
+/// into scratch registers, storing spilled writes back and remaking the
+/// remade ones; saves the caller-saved registers live across each cold
+/// call around it; and turns each parallel copy into moves. The blocks are
+/// walked in layout order, the order the positions were counted in.
+fn rewrite(
+    allocator: Allocator,
+    func: &var MFunction,
+    order: &array::Array<i64>,
+    phys: &array::Array<i64>,
+    spill: &array::Array<i64>,
+    remat: &array::Array<MInst>,
+    cold_saves: &array::Array<i64>,
+    save_slots: &var array::Array<i64>,
+    dead: &array::Array<bool>
+) -> !void {
+    var out = array::new<MInst>(allocator);
+    defer out.deinit(allocator);
+    var source = array::new<MInst>(allocator);
+    defer source.deinit(allocator);
+    var position = 0;
+    var order_index = 0;
+    while order.get(order_index) |block_id| {
+        order_index = order_index + 1;
+        out.clear(allocator);
+        source.clear(allocator);
+        var treg = reg_none();
+        if func.blocks.at(block_id) |block| {
+            treg = block.treg;
+            var copy_index = 0;
+            while block.insts.get(copy_index) |inst| {
+                copy_index = copy_index + 1;
+                try source.append(allocator, inst);
+            }
+        }
+        var inst_index = 0;
+        while source.get(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            let p = position;
+            position = position + 1;
+            if inst.op == MOp::ParCopy {
+                try lower_copies(allocator, &func.copies, inst, phys, spill, remat, &var out);
+                continue;
+            }
+            if writes_rd(inst.op) and is_vreg(inst.rd) and (spill.get(inst.rd - first_vreg()) orelse 0 - 1) == 0 - 2 {
+                continue;
+            }
+            if dead.get(p) orelse false {
+                continue;
+            }
+            let mask = cold_saves.get(p) orelse 0;
+            if (inst.op == MOp::Call or inst.op == MOp::CallReg) and mask != 0 {
+                for 9..first_vreg() |reg| {
+                    if (mask & (1 << reg)) != 0 {
+                        if save_slots.get_or_panic(reg) < 0 {
+                            try save_slots.set(reg, try func.add_slot(allocator, 8, 8));
+                        }
+                        try out.append(allocator, spill_store(reg, save_slots.get_or_panic(reg)));
+                    }
+                }
+                try rewrite_inst(allocator, inst, phys, spill, remat, &var out);
+                for 9..first_vreg() |reg| {
+                    if (mask & (1 << reg)) != 0 {
+                        try out.append(allocator, spill_load(reg, save_slots.get_or_panic(reg)));
+                    }
+                }
+                continue;
+            }
+            try rewrite_inst(allocator, inst, phys, spill, remat, &var out);
+        }
+        position = position + 1;
+        if is_vreg(treg) {
+            let place = loc_of(phys, spill, remat, treg);
+            if place.remat {
+                try out.append(allocator, remade(place, scratch0()));
+                treg = scratch0();
+            } else if place.slot >= 0 {
+                try out.append(allocator, spill_load(scratch0(), place.slot));
+                treg = scratch0();
+            } else {
+                treg = place.reg;
+            }
+        }
+        if func.blocks.at_mut(block_id) |block| {
+            block.insts.clear(allocator);
+            var copy_index = 0;
+            while out.get(copy_index) |inst| {
+                copy_index = copy_index + 1;
+                try block.insts.append(allocator, inst);
+            }
+            block.treg = treg;
+        }
+    }
+    return;
+}
+
+/// Maps one read operand: a spilled one is loaded into the next scratch
+/// register, once per instruction.
+fn map_read(
+    allocator: Allocator,
+    reg: i64,
+    phys: &array::Array<i64>,
+    spill: &array::Array<i64>,
+    remat: &array::Array<MInst>,
+    loaded: &var array::Array<i64>,
+    out: &var array::Array<MInst>
+) -> !i64 {
+    if !is_vreg(reg) {
+        return reg;
+    }
+    let place = loc_of(phys, spill, remat, reg);
+    if place.slot < 0 and !place.remat {
+        return place.reg;
+    }
+    var index = 0;
+    while index + 1 < loaded.len() {
+        if loaded.get_or_panic(index) == reg {
+            return loaded.get_or_panic(index + 1);
+        }
+        index = index + 2;
+    }
+    var scratch = scratch0();
+    let taken = loaded.len() / 2;
+    if taken == 1 {
+        scratch = scratch1();
+    }
+    if taken >= 2 {
+        scratch = 8;
+    }
+    if place.remat {
+        try out.append(allocator, remade(place, scratch));
+    } else {
+        try out.append(allocator, spill_load(scratch, place.slot));
+    }
+    try loaded.append(allocator, reg);
+    try loaded.append(allocator, scratch);
+    return scratch;
+}
+
+fn rewrite_inst(
+    allocator: Allocator,
+    inst: MInst,
+    phys: &array::Array<i64>,
+    spill: &array::Array<i64>,
+    remat: &array::Array<MInst>,
+    out: &var array::Array<MInst>
+) -> !void {
+    var fixed = inst;
+    if inst.op == MOp::Mov {
+        let dst = loc_of(phys, spill, remat, inst.rd);
+        let src = loc_of(phys, spill, remat, inst.rn);
+        if src.remat {
+            if dst.slot >= 0 {
+                try out.append(allocator, remade(src, scratch0()));
+                return out.append(allocator, spill_store(scratch0(), dst.slot));
+            }
+            return out.append(allocator, remade(src, dst.reg));
+        }
+        if src.slot >= 0 and dst.slot < 0 {
+            return out.append(allocator, spill_load(dst.reg, src.slot));
+        }
+        if dst.slot >= 0 and src.slot < 0 {
+            return out.append(allocator, spill_store(src.reg, dst.slot));
+        }
+        if dst.slot >= 0 and src.slot >= 0 {
+            if dst.slot == src.slot {
+                return;
+            }
+            try out.append(allocator, spill_load(scratch0(), src.slot));
+            return out.append(allocator, spill_store(scratch0(), dst.slot));
+        }
+        if dst.reg == src.reg {
+            return;
+        }
+        fixed.rd = dst.reg;
+        fixed.rn = src.reg;
+        return out.append(allocator, fixed);
+    }
+    var loaded = array::new<i64>(allocator);
+    defer loaded.deinit(allocator);
+    let stores = inst.op == MOp::Store or inst.op == MOp::StoreIdx;
+    if stores {
+        fixed.rd = try map_read(allocator, inst.rd, phys, spill, remat, &var loaded, out);
+    }
+    fixed.rn = try map_read(allocator, inst.rn, phys, spill, remat, &var loaded, out);
+    fixed.rm = try map_read(allocator, inst.rm, phys, spill, remat, &var loaded, out);
+    fixed.ra = try map_read(allocator, inst.ra, phys, spill, remat, &var loaded, out);
+    if !stores and writes_rd(inst.op) and is_vreg(inst.rd) {
+        let place = loc_of(phys, spill, remat, inst.rd);
+        if place.slot >= 0 {
+            fixed.rd = scratch0();
+            try out.append(allocator, fixed);
+            return out.append(allocator, spill_store(scratch0(), place.slot));
+        }
+        fixed.rd = place.reg;
+    }
+    return out.append(allocator, fixed);
+}
+
+/// Is one pending move of a parallel copy, by location.
+struct Move {
+    dst: Loc,
+    src: Loc,
+    imm: i64,
+    src_imm: bool,
+}
+
+/// Reports whether a move reads no location: an immediate or a remade
+/// register.
+fn reads_nothing(item: Move) -> bool {
+    return item.src_imm or item.src.remat;
+}
+
+fn same_loc(a: Loc, b: Loc) -> bool {
+    if a.remat or b.remat {
+        return false;
+    }
+    if a.slot >= 0 or b.slot >= 0 {
+        return a.slot == b.slot;
+    }
+    return a.reg == b.reg;
+}
+
+fn emit_move(allocator: Allocator, item: Move, out: &var array::Array<MInst>) -> !void {
+    if item.src.remat {
+        if item.dst.slot >= 0 {
+            try out.append(allocator, remade(item.src, scratch0()));
+            return out.append(allocator, spill_store(scratch0(), item.dst.slot));
+        }
+        return out.append(allocator, remade(item.src, item.dst.reg));
+    }
+    if item.src_imm {
+        var target = item.dst.reg;
+        if item.dst.slot >= 0 {
+            target = scratch0();
+        }
+        var inst = blank(MOp::MovImm);
+        inst.rd = target;
+        inst.imm = item.imm;
+        try out.append(allocator, inst);
+        if item.dst.slot >= 0 {
+            try out.append(allocator, spill_store(scratch0(), item.dst.slot));
+        }
+        return;
+    }
+    if item.src.slot >= 0 and item.dst.slot >= 0 {
+        try out.append(allocator, spill_load(scratch0(), item.src.slot));
+        return out.append(allocator, spill_store(scratch0(), item.dst.slot));
+    }
+    if item.src.slot >= 0 {
+        return out.append(allocator, spill_load(item.dst.reg, item.src.slot));
+    }
+    if item.dst.slot >= 0 {
+        return out.append(allocator, spill_store(item.src.reg, item.dst.slot));
+    }
+    var inst = blank(MOp::Mov);
+    inst.rd = item.dst.reg;
+    inst.rn = item.src.reg;
+    return out.append(allocator, inst);
+}
+
+/// Turns a parallel copy into moves: a move goes out once nothing pending
+/// still reads its destination, and a cycle is broken through x17.
+fn lower_copies(
+    allocator: Allocator,
+    copies: &array::Array<Copy>,
+    inst: MInst,
+    phys: &array::Array<i64>,
+    spill: &array::Array<i64>,
+    remat: &array::Array<MInst>,
+    out: &var array::Array<MInst>
+) -> !void {
+    var pending = array::new<Move>(allocator);
+    defer pending.deinit(allocator);
+    var index = 0;
+    while index < inst.imm {
+        let copy = copies.get_or_panic(inst.slot + index);
+        index = index + 1;
+        let dst = loc_of(phys, spill, remat, copy.dst);
+        if dst.reg < 0 and dst.slot < 0 {
+            continue;
+        }
+        var src = slot_loc(0 - 1);
+        if !copy.src_imm {
+            src = loc_of(phys, spill, remat, copy.src);
+            if same_loc(dst, src) {
+                continue;
+            }
+        }
+        try pending.append(allocator, Move { dst: dst, src: src, imm: copy.imm, src_imm: copy.src_imm });
+    }
+    while pending.len() > 0 {
+        var emitted = false;
+        var pick = 0;
+        while pending.get(pick) |item| {
+            var blocked = false;
+            var other = 0;
+            while pending.get(other) |reader| {
+                if other != pick and !reads_nothing(reader) and same_loc(reader.src, item.dst) {
+                    blocked = true;
+                    break;
+                }
+                other = other + 1;
+            }
+            if !blocked {
+                try emit_move(allocator, item, out);
+                let _ = try pending.remove(pick);
+                emitted = true;
+                break;
+            }
+            pick = pick + 1;
+        }
+        if emitted {
+            continue;
+        }
+        // Every destination is still read: the rest are cycles. Save one
+        // destination in x17 and read it from there.
+        let first = pending.get_or_panic(0);
+        let temp = reg_loc(scratch1());
+        try emit_move(allocator, Move { dst: temp, src: first.dst, imm: 0, src_imm: false }, out);
+        var fix = 0;
+        while pending.at_mut(fix) |item| {
+            fix = fix + 1;
+            if !reads_nothing(item.*) and same_loc(item.src, first.dst) {
+                item.src = temp;
+            }
+        }
+    }
+    return;
+}

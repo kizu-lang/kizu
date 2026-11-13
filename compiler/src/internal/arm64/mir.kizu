@@ -1,0 +1,732 @@
+import compiler::internal::ir;
+import std::array;
+
+// The machine IR the arm64 backend selects into: AArch64 instructions over
+// virtual registers, grouped in blocks whose terminator is kept apart from
+// the body so the printer can choose the fall-through. Register numbers below
+// 64 are physical (x0..x30, then the pseudo bases); 64 and up are virtual.
+
+/// Is the machine a module is emitted for. Selection and register
+/// allocation are shared: the machine IR is AArch64-shaped, and the amd64
+/// printer lowers each instruction to x86-64 after allocation. They differ
+/// in how many argument registers the convention has, which registers
+/// allocation hands out, and the printer. x86-64 under Windows is a machine
+/// of its own here, as its convention differs from System V in exactly
+/// those.
+pub enum Arch {
+    Arm64,
+    Amd64,
+    Amd64Windows,
+}
+
+/// Reports whether the amd64 printer writes arch.
+pub fn is_x86(arch: Arch) -> bool {
+    return arch != Arch::Arm64;
+}
+
+/// Returns how many argument words a call passes in registers: x0..x7 on
+/// arm64; on amd64 x0..x5, which the printer names rdi, rsi, rdx, rcx, r8
+/// and r9 as the System V convention has them; under Windows x0..x3, rcx,
+/// rdx, r8 and r9.
+pub fn arg_regs(arch: Arch) -> i64 {
+    if arch == Arch::Amd64 {
+        return 6;
+    }
+    if arch == Arch::Amd64Windows {
+        return 4;
+    }
+    return 8;
+}
+
+/// Returns the first virtual register number.
+pub fn first_vreg() -> i64 {
+    return 64;
+}
+
+/// Returns the stack pointer as a base register.
+pub fn reg_sp() -> i64 {
+    return 31;
+}
+
+/// Returns the zero register as an operand.
+pub fn reg_zr() -> i64 {
+    return 32;
+}
+
+/// Returns the pseudo base of a frame slot: the address is the stack pointer
+/// plus the slot's offset, known once the frame is laid out.
+pub fn reg_frame() -> i64 {
+    return 33;
+}
+
+/// Returns the pseudo base of the incoming stack arguments, addressed from
+/// the frame pointer once the frame is laid out.
+pub fn reg_inarg() -> i64 {
+    return 34;
+}
+
+/// Returns no register.
+pub fn reg_none() -> i64 {
+    return 0 - 1;
+}
+
+/// Reports whether a register number is virtual.
+pub fn is_vreg(reg: i64) -> bool {
+    return reg >= 64;
+}
+
+/// Returns the number of the float register d8 as allocation hands it
+/// out: 40..63 are d8..d31, numbered past the general registers and the
+/// pseudo bases so one number space holds both. d0..d7, the C argument
+/// registers, have no number. On amd64 40..52 are xmm8..xmm12, then
+/// xmm0..xmm7; under Windows 40..49 are xmm6..xmm15, then xmm0..xmm2.
+pub fn first_float_reg() -> i64 {
+    return 40;
+}
+
+/// Reports whether a physical register number is a float register.
+pub fn is_float_reg(reg: i64) -> bool {
+    return reg >= first_float_reg() and reg < first_vreg();
+}
+
+/// Returns the d register a float register number names.
+pub fn float_reg_index(reg: i64) -> i64 {
+    return reg - 32;
+}
+
+/// Is a condition a compare leaves in the flags.
+pub enum Cond {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Lo,
+    Ls,
+    Hi,
+    Hs,
+    // Only a float comparison leaves these: less than, ordered (Mi), and
+    // its negation, less than or unordered (Pl).
+    Mi,
+    Pl,
+}
+
+/// Returns the condition that holds exactly when cond does not.
+pub fn invert(cond: Cond) -> Cond {
+    return match cond {
+        Eq => Cond::Ne,
+        Ne => Cond::Eq,
+        Lt => Cond::Ge,
+        Le => Cond::Gt,
+        Gt => Cond::Le,
+        Ge => Cond::Lt,
+        Lo => Cond::Hs,
+        Ls => Cond::Hi,
+        Hi => Cond::Ls,
+        Hs => Cond::Lo,
+        Mi => Cond::Pl,
+        Pl => Cond::Mi,
+    };
+}
+
+/// Returns the condition that holds for the operands swapped.
+pub fn swap_cond(cond: Cond) -> Cond {
+    return match cond {
+        Eq => Cond::Eq,
+        Ne => Cond::Ne,
+        Lt => Cond::Gt,
+        Le => Cond::Ge,
+        Gt => Cond::Lt,
+        Ge => Cond::Le,
+        Lo => Cond::Hi,
+        Ls => Cond::Hs,
+        Hi => Cond::Lo,
+        Hs => Cond::Ls,
+        // A float comparison is never swapped; these keep the integer
+        // reading of the flags.
+        Mi => Cond::Mi,
+        Pl => Cond::Pl,
+    };
+}
+
+/// Is the kind of one machine instruction. The operand fields an op reads
+/// are named beside it.
+pub enum MOp {
+    // rd = rn
+    Mov,
+    // rd = imm
+    MovImm,
+    // rd = rn <op> rm
+    Add,
+    Sub,
+    Mul,
+    SDiv,
+    UDiv,
+    And,
+    Orr,
+    Eor,
+    Lsl,
+    Lsr,
+    Asr,
+    // rd = rn <op> imm
+    AddImm,
+    SubImm,
+    LslImm,
+    LsrImm,
+    AsrImm,
+    // rd = ra - rn * rm, rd = ra + rn * rm
+    MSub,
+    MAdd,
+    // rd = rn + (rm << imm), rd = rn - (rm << imm), rd = rn + (rm >> imm)
+    // logical
+    AddShift,
+    SubShift,
+    AddLsr,
+    // rd = high 64 bits of rn * rm, signed or unsigned
+    SMulH,
+    UMulH,
+    // rd = rn & imm, imm a logical immediate; flags = rn & imm
+    AndImm,
+    TstImm,
+    // rd = -rn, rd = ~rn
+    Neg,
+    Mvn,
+    // rd = extend(rn) from width bytes, signed or not
+    Extend,
+    // flags = rn - rm, flags = rn - imm, flags = rn + imm
+    Cmp,
+    CmpImm,
+    CmnImm,
+    // rd = cond ? 1 : 0
+    CSet,
+    // rd = cond ? rn : rm, rd = cond ? rn : rm + 1
+    CSel,
+    CSInc,
+    // rd = [rn + imm] of width bytes; slot names a frame slot when rn is the
+    // frame base
+    Load,
+    // [rn + imm] = rd
+    Store,
+    // rd = [rn + (rm << imm)]
+    LoadIdx,
+    // [rn + (rm << imm)] = rd
+    StoreIdx,
+    // rd = address of frame slot plus imm
+    FrameAddr,
+    // rd = address of symbol sym
+    SymAddr,
+    // rd = address of symbol sym, read from the global offset table: a
+    // symbol another image may define
+    GotAddr,
+    // calls symbol sym; imm is the number of argument registers it reads,
+    // ra the register holding the indirect result address or none
+    Call,
+    // calls the address in rn
+    CallReg,
+    // stops: a trap the program never returns from
+    Trap,
+    // the copies of one control-flow edge, done at once: imm entries of the
+    // function's copy pool starting at slot
+    ParCopy,
+    // NEON instructions over the vector registers named in vec (vd, vn, vm
+    // packed by vec_regs), with lanes of width bytes. The vector registers
+    // are not allocated: a vectorized loop names them directly and holds
+    // none of them across a call. Only rn (and rd of VToGpr) is a general
+    // register.
+    // vd = 0, vd = all ones
+    VZero,
+    VOnes,
+    // vd = every lane rn
+    VDup,
+    // vd lane imm = rn
+    VIns,
+    // vd, vn = the 32 bytes at [rn + imm]
+    VLdp,
+    // vd = vn <op> vm, lane by lane
+    VAdd,
+    VSub,
+    VAnd,
+    VOrr,
+    VEor,
+    VSMax,
+    VSMin,
+    VUMax,
+    VUMin,
+    // vd = all ones in the lanes where vn > vm, signed or unsigned
+    VCmGt,
+    VCmHi,
+    // vd takes vn in the lanes where vm is all ones
+    VBit,
+    // vd = vn shifted by imm
+    VShl,
+    VSShr,
+    VUShr,
+    // vd = the bytes of vn from byte imm on (vn:vn)
+    VExt,
+    // vd = the imm bytes (8 or 16) at [rn]
+    VLdr,
+    // vd = the low (VXtl) or high (VXtl2) half of vn's lanes of width
+    // bytes, each extended to twice the width, signed or not
+    VXtl,
+    VXtl2,
+    // vd = all ones in the lanes where vn == vm, vn >= vm signed or not
+    VCmEq,
+    VCmGe,
+    VCmHs,
+    // vd = vn & ~vm
+    VBic,
+    // rd = lane 0 of vn, extended by signed
+    VToGpr,
+    // vd = vn <op> vm over f64 lanes, op the FloatOp in imm
+    VFBin,
+    // vd = vn <op> vm over lane 0 alone, a scalar `d` op, op the FloatOp in
+    // imm; the other lane of vd becomes zero
+    VFScalar,
+    // vd = each signed 64-bit lane of vn rounded to f64
+    VSCvtF,
+    // vd = lane imm of vn, of width bytes, in lane 0; the rest becomes zero
+    VDupLane,
+    // Floating point over the general registers holding the bits, of width
+    // bytes (8 an `f64`, 4 an `f32`). Each moves its operands into scratch
+    // float registers (v16 and up), computes, and moves the result back, so
+    // no float register holds a value from one instruction to the next.
+    // rd = rn <op> rm, op the FloatOp in imm
+    FBin,
+    // rd = <op> rn, op the FloatOp in imm
+    FUn,
+    // rd = rn * rm + ra, rounded once
+    FMAdd,
+    // flags = rn compared with rm
+    FCmp,
+    // rd = rn converted from a float of width bytes to the other width
+    FCvt,
+    // rd = rn, a float of imm bytes, toward zero and saturating to an
+    // integer of width bytes (4 or 8), signed or not; NaN is 0
+    FToInt,
+    // rd = rn, a 64-bit integer signed or not, rounded to a float of width
+    // bytes
+    IntToF,
+    // float argument register imm = rn, just before a C call
+    FArg,
+    // rd = float result register imm, just after a C call
+    FRet,
+}
+
+// The operations an FBin or FUn names in its imm.
+fn float_add() -> i64 { return 0; }
+
+fn float_sub() -> i64 { return 1; }
+
+fn float_mul() -> i64 { return 2; }
+
+fn float_div() -> i64 { return 3; }
+
+fn float_neg() -> i64 { return 4; }
+
+fn float_sqrt() -> i64 { return 5; }
+
+fn float_floor() -> i64 { return 6; }
+
+fn float_ceil() -> i64 { return 7; }
+
+fn float_trunc() -> i64 { return 8; }
+
+/// Is one machine instruction. Fields an op does not read are zero or none.
+pub struct MInst {
+    pub op: MOp,
+    pub rd: i64,
+    pub rn: i64,
+    pub rm: i64,
+    pub ra: i64,
+    pub imm: i64,
+    pub slot: i64,
+    pub width: i64,
+    pub signed: bool,
+    pub cond: Cond,
+    pub sym: ir::Name,
+    // The vector registers of a NEON op: vd | vn << 8 | vm << 16.
+    pub vec: i64,
+}
+
+/// Returns an instruction of op with every operand empty.
+pub fn blank(op: MOp) -> MInst {
+    return MInst {
+        op: op,
+        rd: reg_none(),
+        rn: reg_none(),
+        rm: reg_none(),
+        ra: reg_none(),
+        imm: 0,
+        slot: 0 - 1,
+        width: 8,
+        signed: false,
+        cond: Cond::Eq,
+        sym: ir::empty_name(),
+        vec: 0
+    };
+}
+
+/// Packs the vector registers of a NEON op.
+pub fn vec_regs(vd: i64, vn: i64, vm: i64) -> i64 {
+    return vd + vn * 256 + vm * 65536;
+}
+
+/// Reports whether an op is a NEON op.
+pub fn is_vector(op: MOp) -> bool {
+    return match op {
+        VZero => true,
+        VOnes => true,
+        VDup => true,
+        VIns => true,
+        VLdp => true,
+        VAdd => true,
+        VSub => true,
+        VAnd => true,
+        VOrr => true,
+        VEor => true,
+        VSMax => true,
+        VSMin => true,
+        VUMax => true,
+        VUMin => true,
+        VCmGt => true,
+        VCmHi => true,
+        VBit => true,
+        VShl => true,
+        VSShr => true,
+        VUShr => true,
+        VExt => true,
+        VLdr => true,
+        VXtl => true,
+        VXtl2 => true,
+        VCmEq => true,
+        VCmGe => true,
+        VCmHs => true,
+        VBic => true,
+        VToGpr => true,
+        VFBin => true,
+        VFScalar => true,
+        VSCvtF => true,
+        VDupLane => true,
+        _ => false,
+    };
+}
+
+/// Is how a block ends.
+pub enum Term {
+    // not ended yet
+    Open,
+    // jump to succ0
+    Jump,
+    // the flags hold cond: succ0 when it holds, succ1 otherwise
+    Flags,
+    // treg is zero: succ0 when it is, succ1 otherwise
+    Zero,
+    // treg is non-zero: succ0 when it is, succ1 otherwise
+    NonZero,
+    // return from the function; the result is already in place
+    Return,
+    // nothing follows: a trap or a call that does not return
+    Stop,
+}
+
+/// Is one machine block.
+pub struct MBlock {
+    pub insts: array::Array<MInst>,
+    pub term: Term,
+    pub cond: Cond,
+    pub treg: i64,
+    pub succ0: i64,
+    pub succ1: i64,
+    // A cold block runs only on a failure or a rare path; it is laid out
+    // last and its calls do not decide where values live.
+    pub cold: bool,
+}
+
+/// Is one copy of a parallel copy: dst takes src, or the immediate when
+/// src_imm is set.
+pub struct Copy {
+    pub dst: i64,
+    pub src: i64,
+    pub imm: i64,
+    pub src_imm: bool,
+}
+
+/// Is one frame slot: bytes the function keeps on its stack.
+pub struct Slot {
+    pub size: i64,
+    pub align: i64,
+    pub offset: i64,
+}
+
+/// Is one function in machine IR.
+pub struct MFunction {
+    pub blocks: array::Array<MBlock>,
+    pub copies: array::Array<Copy>,
+    pub slots: array::Array<Slot>,
+    pub vregs: i64,
+    // The words of outgoing stack arguments the deepest call needs.
+    pub out_words: i64,
+    // Whether the function makes any call.
+    pub calls: bool,
+    // The C entry point main, which returns 0 when the body returns.
+    pub is_main: bool,
+}
+
+/// Creates an empty function.
+pub fn new_function(allocator: Allocator) -> MFunction {
+    return MFunction {
+        blocks: array::new<MBlock>(allocator),
+        copies: array::new<Copy>(allocator),
+        slots: array::new<Slot>(allocator),
+        vregs: 0,
+        out_words: 0,
+        calls: false,
+        is_main: false
+    };
+}
+
+/// Empties the function for the next one to be selected into.
+pub fn (self: &var MFunction) reset(allocator: Allocator) -> void {
+    while self.blocks.pop() |block| {
+        block.insts.deinit(allocator);
+    }
+    self.copies.clear(allocator);
+    self.slots.clear(allocator);
+    self.vregs = 0;
+    self.out_words = 0;
+    self.calls = false;
+    self.is_main = false;
+    return;
+}
+
+/// Appends an empty block and returns its index.
+pub fn (self: &var MFunction) add_block(allocator: Allocator) -> !i64 {
+    let index = self.blocks.len();
+    try self.blocks.append(allocator, MBlock {
+        insts: array::new<MInst>(allocator),
+        term: Term::Open,
+        cond: Cond::Eq,
+        treg: reg_none(),
+        succ0: 0 - 1,
+        succ1: 0 - 1,
+        cold: false
+    });
+    return index;
+}
+
+/// Returns a fresh virtual register.
+pub fn (self: &var MFunction) new_vreg() -> i64 {
+    let reg = first_vreg() + self.vregs;
+    self.vregs = self.vregs + 1;
+    return reg;
+}
+
+/// Returns the first of count new virtual registers, which are numbered
+/// consecutively from it.
+pub fn (self: &var MFunction) new_vregs(count: i64) -> i64 {
+    let first = first_vreg() + self.vregs;
+    self.vregs = self.vregs + count;
+    return first;
+}
+
+/// Adds a frame slot and returns its index.
+pub fn (self: &var MFunction) add_slot(allocator: Allocator, size: i64, align: i64) -> !i64 {
+    let index = self.slots.len();
+    var rounded = size;
+    if rounded < 1 {
+        rounded = 1;
+    }
+    var aligned = align;
+    if aligned < 1 {
+        aligned = 1;
+    }
+    try self.slots.append(allocator, Slot { size: rounded, align: aligned, offset: 0 });
+    return index;
+}
+
+/// Appends an instruction to a block.
+pub fn (self: &var MFunction) emit(allocator: Allocator, block: i64, inst: MInst) -> !void {
+    if self.blocks.at_mut(block) |node| {
+        try node.insts.append(allocator, inst);
+    }
+    return;
+}
+
+/// Reports whether a block has ended.
+pub fn (self: &MFunction) ended(block: i64) -> bool {
+    if self.blocks.at(block) |node| {
+        return node.term != Term::Open;
+    }
+    return true;
+}
+
+/// Ends a block.
+pub fn (self: &var MFunction) end(block: i64, term: Term, cond: Cond, treg: i64, succ0: i64, succ1: i64) -> void {
+    if self.blocks.at_mut(block) |node| {
+        node.term = term;
+        node.cond = cond;
+        node.treg = treg;
+        node.succ0 = succ0;
+        node.succ1 = succ1;
+    }
+    return;
+}
+
+/// Returns the successor at position of a block, or -1.
+pub fn (self: &MFunction) successor(block: i64, position: i64) -> i64 {
+    if self.blocks.at(block) |node| {
+        if position == 0 {
+            return node.succ0;
+        }
+        if position == 1 and (node.term == Term::Flags or node.term == Term::Zero or node.term == Term::NonZero) {
+            return node.succ1;
+        }
+    }
+    return 0 - 1;
+}
+
+/// Calls visit for each register an instruction reads, through the reads
+/// list: the registers in operand order.
+pub fn reads(inst: &MInst, out: &var array::Array<i64>, allocator: Allocator, copies: &array::Array<Copy>) -> !void {
+    out.clear(allocator);
+    match inst.op {
+        Mov => try add_read(allocator, out, inst.rn),
+        MovImm => {},
+        Add => try add_two(allocator, out, inst.rn, inst.rm),
+        Sub => try add_two(allocator, out, inst.rn, inst.rm),
+        Mul => try add_two(allocator, out, inst.rn, inst.rm),
+        SDiv => try add_two(allocator, out, inst.rn, inst.rm),
+        UDiv => try add_two(allocator, out, inst.rn, inst.rm),
+        And => try add_two(allocator, out, inst.rn, inst.rm),
+        Orr => try add_two(allocator, out, inst.rn, inst.rm),
+        Eor => try add_two(allocator, out, inst.rn, inst.rm),
+        Lsl => try add_two(allocator, out, inst.rn, inst.rm),
+        Lsr => try add_two(allocator, out, inst.rn, inst.rm),
+        Asr => try add_two(allocator, out, inst.rn, inst.rm),
+        AddImm => try add_read(allocator, out, inst.rn),
+        SubImm => try add_read(allocator, out, inst.rn),
+        LslImm => try add_read(allocator, out, inst.rn),
+        LsrImm => try add_read(allocator, out, inst.rn),
+        AsrImm => try add_read(allocator, out, inst.rn),
+        MSub => {
+            try add_two(allocator, out, inst.rn, inst.rm);
+            try add_read(allocator, out, inst.ra);
+        },
+        MAdd => {
+            try add_two(allocator, out, inst.rn, inst.rm);
+            try add_read(allocator, out, inst.ra);
+        },
+        AddShift => try add_two(allocator, out, inst.rn, inst.rm),
+        SubShift => try add_two(allocator, out, inst.rn, inst.rm),
+        AddLsr => try add_two(allocator, out, inst.rn, inst.rm),
+        SMulH => try add_two(allocator, out, inst.rn, inst.rm),
+        UMulH => try add_two(allocator, out, inst.rn, inst.rm),
+        AndImm => try add_read(allocator, out, inst.rn),
+        TstImm => try add_read(allocator, out, inst.rn),
+        Neg => try add_read(allocator, out, inst.rn),
+        Mvn => try add_read(allocator, out, inst.rn),
+        Extend => try add_read(allocator, out, inst.rn),
+        Cmp => try add_two(allocator, out, inst.rn, inst.rm),
+        CmpImm => try add_read(allocator, out, inst.rn),
+        CmnImm => try add_read(allocator, out, inst.rn),
+        CSet => {},
+        CSel => try add_two(allocator, out, inst.rn, inst.rm),
+        CSInc => try add_two(allocator, out, inst.rn, inst.rm),
+        Load => try add_read(allocator, out, inst.rn),
+        Store => try add_two(allocator, out, inst.rd, inst.rn),
+        LoadIdx => try add_two(allocator, out, inst.rn, inst.rm),
+        StoreIdx => {
+            try add_two(allocator, out, inst.rd, inst.rn);
+            try add_read(allocator, out, inst.rm);
+        },
+        FrameAddr => {},
+        SymAddr => {},
+        GotAddr => {},
+        Call => {},
+        CallReg => try add_read(allocator, out, inst.rn),
+        Trap => {},
+        ParCopy => {
+            var index = 0;
+            while index < inst.imm {
+                let copy = copies.get_or_panic(inst.slot + index);
+                index = index + 1;
+                if !copy.src_imm {
+                    try add_read(allocator, out, copy.src);
+                }
+            }
+        },
+        VDup => try add_read(allocator, out, inst.rn),
+        VIns => try add_read(allocator, out, inst.rn),
+        VLdp => try add_read(allocator, out, inst.rn),
+        VLdr => try add_read(allocator, out, inst.rn),
+        FBin => try add_two(allocator, out, inst.rn, inst.rm),
+        FUn => try add_read(allocator, out, inst.rn),
+        FMAdd => {
+            try add_two(allocator, out, inst.rn, inst.rm);
+            try add_read(allocator, out, inst.ra);
+        },
+        FCmp => try add_two(allocator, out, inst.rn, inst.rm),
+        FCvt => try add_read(allocator, out, inst.rn),
+        FToInt => try add_read(allocator, out, inst.rn),
+        IntToF => try add_read(allocator, out, inst.rn),
+        FArg => try add_read(allocator, out, inst.rn),
+        _ => {},
+    }
+    return;
+}
+
+fn add_read(allocator: Allocator, out: &var array::Array<i64>, reg: i64) -> !void {
+    if reg >= 0 {
+        try out.append(allocator, reg);
+    }
+    return;
+}
+
+fn add_two(allocator: Allocator, out: &var array::Array<i64>, a: i64, b: i64) -> !void {
+    try add_read(allocator, out, a);
+    return add_read(allocator, out, b);
+}
+
+/// Reports whether an op writes rd.
+pub fn writes_rd(op: MOp) -> bool {
+    return match op {
+        Store => false,
+        StoreIdx => false,
+        Cmp => false,
+        CmpImm => false,
+        CmnImm => false,
+        TstImm => false,
+        Call => false,
+        CallReg => false,
+        Trap => false,
+        ParCopy => false,
+        VToGpr => true,
+        FCmp => false,
+        FArg => false,
+        _ => !is_vector(op),
+    };
+}
+
+/// Reports whether an op has an effect beyond writing rd, so it stays when
+/// rd is never read.
+pub fn has_effect(op: MOp) -> bool {
+    return match op {
+        Store => true,
+        StoreIdx => true,
+        Cmp => true,
+        CmpImm => true,
+        CmnImm => true,
+        TstImm => true,
+        Call => true,
+        CallReg => true,
+        Trap => true,
+        ParCopy => true,
+        FCmp => true,
+        FArg => true,
+        // A NEON op writes a vector register, which no liveness tracks.
+        VToGpr => false,
+        // A division by zero is defined on arm64, so it has no effect either.
+        _ => is_vector(op),
+    };
+}

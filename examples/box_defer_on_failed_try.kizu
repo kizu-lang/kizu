@@ -1,0 +1,50 @@
+import std::mem;
+
+error ReadError {
+    Negative,
+    OutOfMemory,
+}
+
+struct Score {
+    value: i64,
+}
+
+fn checked(x: i64) -> ReadError!i64 {
+    if x < 0 {
+        return ReadError::Negative;
+    }
+    return x;
+}
+
+// `defer` puts the release of the box on every way out of the function, and
+// a failing `try` is one of them: the box is released whether `checked`
+// passes and the sum is returned, or fails and the error leaves from the
+// `try`.
+fn add_boxed(allocator: Allocator, x: i64) -> ReadError!i64 {
+    let held = mem::box<Score>(allocator, Score { value: 40 }) catch return ReadError::OutOfMemory;
+    defer held.deinit(allocator);
+    let more = try checked(x);
+    let score = held.borrow();
+    return score.value + more;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    if add_boxed(allocator, 2) |sum| {
+        print(sum);
+    } else |failure| {
+        print("failed");
+    }
+    if add_boxed(allocator, -1) |sum| {
+        print(sum);
+    } else |failure| {
+        print("failed");
+    }
+    return;
+}
+
+// run
+// features: std-mem box defer deinit cleanup error-union try
+// output:
+// 42
+// failed

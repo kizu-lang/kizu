@@ -1,0 +1,434 @@
+import compiler::internal::ir;
+import std::array;
+import std::mem;
+import std::string;
+
+// The COFF object of Windows x86-64 (IMAGE_FILE_MACHINE_AMD64), written
+// from the Obj the printer filled (obj.kizu). It lays the object out the
+// way the system assembler lays out the same lines: the sections `.text`,
+// `.data` and `.bss` the assembler always has, empty but for the code, then
+// `.rdata` if the strings, tables or error names were written; in the file
+// the headers, then each section's contents followed by its relocations,
+// the symbol table and the string table, with no padding between them.
+// The symbols are each section's, with its definition in an auxiliary
+// record, then the named ones in the order they are first named; an
+// assembler-local label (`.L`) is not among them, a relocation naming it
+// names its section instead. A name longer than eight bytes is in the
+// string table, merged by common tail like ELF's.
+
+// The COFF relocation of each relocation kind the x86-64 encoder records,
+// or -1: IMAGE_REL_AMD64_ADDR64, or IMAGE_REL_AMD64_REL32 for a call or an
+// address relative to the instruction, through no PLT or GOT.
+fn coff_reloc_type(kind: i64) -> i64 {
+    if kind == reloc_unsigned() {
+        return 1;
+    }
+    if kind == reloc_x86_pc32() or kind == reloc_x86_plt32() {
+        return 4;
+    }
+    return 0 - 1;
+}
+
+fn coff_section_name(kind: SectionKind) -> []u8 {
+    if kind == SectionKind::Text {
+        return ".text";
+    }
+    return ".rdata";
+}
+
+/// Returns a section's characteristics: what it holds and may be, and its
+/// alignment, 2^log2 bytes.
+fn coff_characteristics(kind: SectionKind, log2: i64) -> i64 {
+    // IMAGE_SCN_ALIGN_*BYTES
+    let align = (log2 + 1) << 20;
+    if kind == SectionKind::Text {
+        // CNT_CODE | MEM_EXECUTE | MEM_READ
+        return 0x60000020 | align;
+    }
+    // CNT_INITIALIZED_DATA | MEM_READ
+    return 0x40000040 | align;
+}
+
+// The empty `.data` and `.bss`: initialized or not, readable and writable,
+// 4-byte aligned.
+fn coff_data_characteristics() -> i64 { return 0xC0300040; }
+
+fn coff_bss_characteristics() -> i64 { return 0xC0300080; }
+
+/// Returns the COFF section number (from 1) of the Obj's index-th section:
+/// the code first, then `.data` and `.bss`, then the rest.
+fn coff_number(index: i64) -> i64 {
+    if index == 0 {
+        return 1;
+    }
+    return index + 3;
+}
+
+/// Resolves what the assembler resolves before it writes a COFF object: a
+/// reference relative to the instruction to a symbol of its own section is
+/// patched in place, and every other relocation keeps its addend in the
+/// place it relocates (a REL32 counting from the end of its four bytes),
+/// a relocation against an assembler-local label naming its section's
+/// symbol with the label's offset added. A relocation left names its
+/// symbol by index, or a section by -1 - its index.
+fn (self: &var Obj) resolve_coff(allocator: Allocator) -> !void {
+    var section_index = 0;
+    while section_index < self.sections.len() {
+        var relocs = try self.relocs_of(allocator, section_index);
+        defer relocs.deinit(allocator);
+        var kept = array::new<Reloc>(allocator);
+        defer kept.deinit(allocator);
+        var reloc_index = 0;
+        while relocs.get(reloc_index) |held| {
+            reloc_index = reloc_index + 1;
+            var reloc = held;
+            let symbol = self.symbols.get_or_panic(reloc.symbol);
+            let coff_type = coff_reloc_type(reloc.kind);
+            if coff_type < 0 {
+                try self.fail(allocator, "a relocation COFF has not, of kind", reloc.kind);
+                continue;
+            }
+            if coff_type == 4 and symbol.section == section_index {
+                let distance = symbol.value + reloc.addend - reloc.address;
+                if distance < 0 - 2147483648 or distance > 2147483647 {
+                    try self.fail(allocator, "reference out of range", distance);
+                }
+                try self.patch(section_index, reloc.address, distance, 4);
+                continue;
+            }
+            var addend = reloc.addend;
+            var size = 8;
+            if coff_type == 4 {
+                addend = addend + 4;
+                size = 4;
+            }
+            if symbol.temp {
+                if symbol.section < 0 {
+                    try self.fail(allocator, "a relocation names an undefined label, symbol", reloc.symbol);
+                    continue;
+                }
+                addend = addend + symbol.value;
+                reloc.symbol = 0 - 1 - symbol.section;
+            }
+            if addend < 0 - 2147483648 or addend > 2147483647 {
+                try self.fail(allocator, "addend out of range", addend);
+            }
+            try self.patch(section_index, reloc.address, addend, size);
+            try kept.append(allocator, reloc);
+        }
+        try self.set_relocs(allocator, section_index, &kept);
+        section_index = section_index + 1;
+    }
+    return;
+}
+
+/// Reports whether a symbol is in the COFF symbol table: every named one
+/// but an assembler-local label.
+fn coff_listed(symbol: &Symbol) -> bool {
+    return symbol.kind == SymbolKind::Named and !symbol.temp;
+}
+
+/// Returns the table of the CRC-32 of the reflected IEEE polynomial.
+fn crc_table(allocator: Allocator) -> !array::Array<i64> {
+    var table = array::new<i64>(allocator);
+    errdefer table.deinit(allocator);
+    for 0..256 |entry| {
+        var crc = entry;
+        for 0..8 |_bit| {
+            if crc & 1 != 0 {
+                crc = 0xEDB88320 ^ (crc >> 1);
+            } else {
+                crc = crc >> 1;
+            }
+        }
+        try table.append(allocator, crc);
+    }
+    return move table;
+}
+
+/// Returns the checksum of a section's contents in its definition: the
+/// JamCRC of the assembler, a CRC-32 started at zero and not inverted at
+/// the end. An empty section's is 0.
+fn jam_crc(bytes: []u8, table: &array::Array<i64>) -> i64 {
+    var crc = 0;
+    for 0..mem::len(bytes) |at| {
+        let entry = (crc ^ cast<i64>(bytes[at])) & 255;
+        crc = table.get_or_panic(entry) ^ (crc >> 8);
+    }
+    return crc;
+}
+
+/// Writes a name in an 8-byte field: itself, or past eight bytes a zero
+/// word and its offset in the string table.
+fn put_short_name(allocator: Allocator, out: &var string::String, name: []u8, offset: i64) -> !void {
+    if mem::len(name) > 8 {
+        try put(allocator, out, 0, 4);
+        return put(allocator, out, offset, 4);
+    }
+    return put_field(allocator, out, name, 8);
+}
+
+/// Writes a section header.
+fn put_coff_section(
+    allocator: Allocator,
+    out: &var string::String,
+    name: []u8,
+    size: i64,
+    raw: i64,
+    relocs_at: i64,
+    relocs: i64,
+    characteristics: i64
+) -> !void {
+    try put_short_name(allocator, out, name, 0);
+    // VirtualSize, VirtualAddress
+    try put(allocator, out, 0, 8);
+    try put(allocator, out, size, 4);
+    try put(allocator, out, raw, 4);
+    try put(allocator, out, relocs_at, 4);
+    // PointerToLinenumbers
+    try put(allocator, out, 0, 4);
+    try put(allocator, out, relocs, 2);
+    // NumberOfLinenumbers
+    try put(allocator, out, 0, 2);
+    return put(allocator, out, characteristics, 4);
+}
+
+/// Writes a section's symbol and the auxiliary record of its definition.
+fn put_section_symbol(
+    allocator: Allocator,
+    out: &var string::String,
+    name: []u8,
+    number: i64,
+    size: i64,
+    relocs: i64,
+    checksum: i64
+) -> !void {
+    try put_short_name(allocator, out, name, 0);
+    try put(allocator, out, 0, 4);
+    try put(allocator, out, number, 2);
+    try put(allocator, out, 0, 2);
+    // IMAGE_SYM_CLASS_STATIC, one auxiliary record
+    try put(allocator, out, 3, 1);
+    try put(allocator, out, 1, 1);
+    try put(allocator, out, size, 4);
+    try put(allocator, out, relocs, 2);
+    try put(allocator, out, 0, 2);
+    try put(allocator, out, checksum, 4);
+    try put(allocator, out, number, 2);
+    // Selection, unused
+    return put(allocator, out, 0, 4);
+}
+
+/// Returns the number of relocations a section header records: past
+/// 0xFFFF it records 0xFFFF and its first relocation the count, itself
+/// included (IMAGE_SCN_LNK_NRELOC_OVFL).
+fn coff_reloc_count(count: i64) -> i64 {
+    if count >= 0xFFFF {
+        return 0xFFFF;
+    }
+    return count;
+}
+
+/// Returns how many relocation entries a section writes.
+fn coff_reloc_entries(count: i64) -> i64 {
+    if count >= 0xFFFF {
+        return count + 1;
+    }
+    return count;
+}
+
+/// Writes the object: an x86-64 COFF object of the sections the printer
+/// wrote, the code first.
+pub fn (self: &var Obj) write_coff(allocator: Allocator, syms: &ir::NameTable, out: &var string::String) -> !void {
+    try self.resolve_coff(allocator);
+    var code_first = false;
+    if self.sections.at(0) |first| {
+        code_first = first.kind == SectionKind::Text;
+    }
+    if !code_first {
+        return self.fail_message(allocator, "the code is not the first COFF section");
+    }
+    let count = self.sections.len() + 2;
+    // The symbols: each section's two records, then the named ones.
+    var table = array::new<i64>(allocator);
+    defer table.deinit(allocator);
+    var names = array::new<string::String>(allocator);
+    defer names.deinit(allocator);
+    var symbol_index = 0;
+    while self.symbols.at(symbol_index) |symbol| {
+        if coff_listed(symbol) {
+            try table.append(allocator, symbol_index);
+            var name = string::new(allocator);
+            errdefer name.deinit(allocator);
+            try elf_symbol_name(allocator, syms, symbol, &var name);
+            try names.append(allocator, move name);
+        }
+        symbol_index = symbol_index + 1;
+    }
+    var position = 0;
+    while table.get(position) |index| {
+        if self.symbols.at_mut(index) |listed| {
+            listed.index = 2 * count + position;
+        }
+        position = position + 1;
+    }
+    var long_names = array::new<string::String>(allocator);
+    defer long_names.deinit(allocator);
+    var name_index = 0;
+    while names.at(name_index) |name| {
+        name_index = name_index + 1;
+        if name.len() > 8 {
+            let name_bytes = name.as_bytes();
+            try long_names.append(allocator, try string::from_bytes(allocator, name_bytes));
+        }
+    }
+    var merged = string::new(allocator);
+    defer merged.deinit(allocator);
+    var offsets = array::new<i64>(allocator);
+    defer offsets.deinit(allocator);
+    try merge_strings(allocator, &long_names, &var merged, &var offsets);
+    // Where everything goes: the contents of each section but `.bss`, each
+    // followed by its relocations.
+    var raw_at = array::new<i64>(allocator);
+    defer raw_at.deinit(allocator);
+    var relocs_at = array::new<i64>(allocator);
+    defer relocs_at.deinit(allocator);
+    var at = 20 + 40 * count;
+    var section_index = 0;
+    while self.sections.at(section_index) |section| {
+        try raw_at.append(allocator, at);
+        at = at + section.bytes.len();
+        if section.relocs.len() > 0 {
+            try relocs_at.append(allocator, at);
+            at = at + 10 * coff_reloc_entries(section.relocs.len());
+        } else {
+            try relocs_at.append(allocator, 0);
+        }
+        if section_index == 0 {
+            // `.data` and `.bss`, after the code.
+            try raw_at.append(allocator, at);
+            try relocs_at.append(allocator, 0);
+            try raw_at.append(allocator, 0);
+            try relocs_at.append(allocator, 0);
+        }
+        section_index = section_index + 1;
+    }
+    let symbols_at = at;
+    // IMAGE_FILE_HEADER
+    try put(allocator, out, 0x8664, 2);
+    try put(allocator, out, count, 2);
+    // TimeDateStamp
+    try put(allocator, out, 0, 4);
+    try put(allocator, out, symbols_at, 4);
+    try put(allocator, out, 2 * count + table.len(), 4);
+    // SizeOfOptionalHeader, Characteristics
+    try put(allocator, out, 0, 4);
+    section_index = 0;
+    while self.sections.at(section_index) |section| {
+        let number = coff_number(section_index);
+        let relocs = section.relocs.len();
+        var characteristics = coff_characteristics(section.kind, section.align);
+        if relocs >= 0xFFFF {
+            characteristics = characteristics | 0x01000000;
+        }
+        try put_coff_section(
+            allocator,
+            out,
+            coff_section_name(section.kind),
+            section.bytes.len(),
+            raw_at.get_or_panic(number - 1),
+            relocs_at.get_or_panic(number - 1),
+            coff_reloc_count(relocs),
+            characteristics
+        );
+        if section_index == 0 {
+            try put_coff_section(allocator, out, ".data", 0, raw_at.get_or_panic(1), 0, 0, coff_data_characteristics());
+            try put_coff_section(allocator, out, ".bss", 0, 0, 0, 0, coff_bss_characteristics());
+        }
+        section_index = section_index + 1;
+    }
+    // The contents and relocations.
+    section_index = 0;
+    while self.sections.at(section_index) |section| {
+        section_index = section_index + 1;
+        try out.append_string(allocator, &section.bytes);
+        let relocs = section.relocs.len();
+        if relocs >= 0xFFFF {
+            try put(allocator, out, relocs + 1, 4);
+            try put(allocator, out, 0, 6);
+        }
+        var reloc_index = 0;
+        while section.relocs.get(reloc_index) |reloc| {
+            reloc_index = reloc_index + 1;
+            var index = 0;
+            if reloc.symbol < 0 {
+                index = 2 * (coff_number(0 - 1 - reloc.symbol) - 1);
+            } else {
+                let symbol = self.symbols.get_or_panic(reloc.symbol);
+                index = symbol.index;
+            }
+            try put(allocator, out, reloc.address, 4);
+            try put(allocator, out, index, 4);
+            try put(allocator, out, coff_reloc_type(reloc.kind), 2);
+        }
+    }
+    // The symbol table.
+    var crcs = try crc_table(allocator);
+    defer crcs.deinit(allocator);
+    section_index = 0;
+    while self.sections.at(section_index) |section| {
+        let number = coff_number(section_index);
+        let contents = section.bytes.as_bytes();
+        try put_section_symbol(
+            allocator,
+            out,
+            coff_section_name(section.kind),
+            number,
+            section.bytes.len(),
+            coff_reloc_count(section.relocs.len()),
+            jam_crc(contents, &crcs)
+        );
+        if section_index == 0 {
+            try put_section_symbol(allocator, out, ".data", 2, 0, 0, 0);
+            try put_section_symbol(allocator, out, ".bss", 3, 0, 0, 0);
+        }
+        section_index = section_index + 1;
+    }
+    position = 0;
+    var long_position = 0;
+    while table.get(position) |index| {
+        let symbol = self.symbols.get_or_panic(index);
+        if names.at(position) |name| {
+            let name_bytes = name.as_bytes();
+            var offset = 0;
+            if mem::len(name_bytes) > 8 {
+                // Past the table's size word, where the merged table's
+                // leading zero byte was.
+                offset = offsets.get_or_panic(long_position) + 3;
+                long_position = long_position + 1;
+            }
+            try put_short_name(allocator, out, name_bytes, offset);
+        }
+        position = position + 1;
+        var number = 0;
+        var value = 0;
+        // IMAGE_SYM_CLASS_EXTERNAL, or STATIC for a local definition
+        var storage = 2;
+        if symbol.section >= 0 {
+            number = coff_number(symbol.section);
+            value = symbol.value;
+            if !symbol.global {
+                storage = 3;
+            }
+        }
+        try put(allocator, out, value, 4);
+        try put(allocator, out, number, 2);
+        try put(allocator, out, 0, 2);
+        try put(allocator, out, storage, 1);
+        try put(allocator, out, 0, 1);
+    }
+    // The string table: its size, itself included, and the names.
+    let strings = merged.as_bytes();
+    try put(allocator, out, 4 + mem::len(strings) - 1, 4);
+    return out.append_bytes(allocator, strings[1..mem::len(strings)]);
+}

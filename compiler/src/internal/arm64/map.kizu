@@ -1,0 +1,380 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import compiler::internal::typ;
+import std::array;
+import std::mem;
+
+// std::map::Map. A map is its header in memory, five words the runtime owns
+// (entries, count, capacity, index, index capacity), and every operation
+// but len and new is a call into the hosted runtime with the header's
+// address. The runtime has one key form, a (pointer, length) pair: a `[]u8`
+// key is that pair, and an integer key goes to a slot of its own width.
+// Each call that touches entries names the value's width, which the
+// header does not keep. Lookup, insertion order and hashing are the
+// runtime's alone, so what a program observes matches the LLVM backend,
+// which makes the same calls.
+
+/// Is the size of the runtime's map header.
+fn map_header_size() -> i64 {
+    return 40;
+}
+
+/// Returns V of a `std::map::Map<K, V>` spelling behind any borrow, or an
+/// empty spelling when it names no map.
+fn map_value_type(name: []u8) -> []u8 {
+    let args = container_elem(name);
+    var depth = 0;
+    var at = 0;
+    while at < mem::len(args) {
+        let ch = args[at];
+        if ch == cast<u8>(60) or ch == cast<u8>(40) or ch == cast<u8>(91) {
+            depth = depth + 1;
+        } else if ch == cast<u8>(62) or ch == cast<u8>(41) or ch == cast<u8>(93) {
+            depth = depth - 1;
+        } else if ch == cast<u8>(44) and depth == 0 {
+            return mem::trim_ascii(args[at + 1..mem::len(args)]);
+        }
+        at = at + 1;
+    }
+    return args[0..0];
+}
+
+/// Returns the shape of the value a map argument holds.
+fn map_value_shape(module: &ir::Module, map_value: ir::Value) -> Shape {
+    let text = ir::name_text(&module.names, map_value.type_name);
+    let bytes = text.as_bytes();
+    let value_type = map_value_type(bytes);
+    if mem::len(value_type) == 0 {
+        return unsupported();
+    }
+    return shape_of_bytes(module, value_type, 1);
+}
+
+/// Returns the (pointer, length) pair the runtime hashes a key as: a `[]u8`
+/// key is its own pair, an integer key its bytes in a slot of its width.
+fn (self: &var Selector) map_key(module: &ir::Module, key: ir::Value) -> !?Val {
+    if module.names.is(key.type_name, "[]u8") {
+        return self.slice_regs(module, key);
+    }
+    let text = ir::name_text(&module.names, key.type_name);
+    let bytes = text.as_bytes();
+    if !typ::is_map_key(bytes) {
+        return null;
+    }
+    let shape = shape_of(module, key.type_name);
+    if shape.class != Class::Scalar {
+        return null;
+    }
+    let reg = try self.reg(module, key) orelse return null;
+    let slot = try self.new_slot(scalar(8, false));
+    try self.store(reg, slot, 0, shape.size);
+    let width = try self.imm_reg_nz(shape.size);
+    return pair_val(slot, width);
+}
+
+/// Returns the address a value can be read from by the runtime, which only
+/// copies out of it: an aggregate's own memory, or a slot it is stored to.
+fn (self: &var Selector) value_source(module: &ir::Module, value: ir::Value, shape: Shape) -> !?i64 {
+    let held = self.val(value.name);
+    if shape.class == Class::Aggregate and held.kind == ValKind::Agg {
+        return held.reg;
+    }
+    let slot = try self.new_slot(shape);
+    if !try self.store_value(module, value, shape, slot, 0) {
+        return null;
+    }
+    return slot;
+}
+
+/// Selects the map ops.
+fn (self: &var Selector) select_map(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    match node.op {
+        MapNew => {
+            let address = try self.new_slot(aggregate(map_header_size(), 8));
+            try self.zero_bytes(address, map_header_size());
+            try self.set_val(node.result.name, fresh_val(address));
+            return null;
+        },
+        MapLen => {
+            let map_value = node.args.get(0) orelse return try self.fail_op(module, node);
+            let header = try self.header_addr(module, map_value) orelse return try self.fail_op(module, node);
+            let len = self.func.new_vreg();
+            try self.load(len, header, 8, 8, true);
+            try self.set_val(node.result.name, reg_val(len));
+            return null;
+        },
+        MapInsert => return self.select_map_insert(module, node),
+        MapGet => return self.select_map_lookup(module, node),
+        MapAt => return self.select_map_lookup(module, node),
+        MapAtMut => return self.select_map_lookup(module, node),
+        MapContains => return self.select_map_lookup(module, node),
+        MapRemove => return self.select_map_remove(module, node),
+        MapKeyAt => return self.select_map_key_at(module, node),
+        MapTakeValueAt => return self.select_map_take_value_at(module, node),
+        MapDeinit => {
+            let map_value = node.args.get(0) orelse return try self.fail_op(module, node);
+            let allocator_value = node.args.get(1) orelse return try self.fail_op(module, node);
+            let header = try self.header_addr(module, map_value) orelse return try self.fail_op(module, node);
+            let allocator_reg = try self.reg(module, allocator_value) orelse return try self.fail_op(module, node);
+            let value = map_value_shape(module, map_value);
+            if value.class == Class::Unsupported or value.class == Class::Void {
+                return try self.fail_op(module, node);
+            }
+            try self.release_map(header, allocator_reg, value.size);
+            try self.set_val(node.result.name, no_val());
+            return null;
+        },
+        _ => return try self.fail_op(module, node),
+    }
+}
+
+/// Releases a map's storage through the runtime.
+fn (self: &var Selector) release_map(header: i64, allocator_reg: i64, value_size: i64) -> !void {
+    var words = array::new<i64>(self.allocator);
+    defer words.deinit(self.allocator);
+    try words.append(self.allocator, allocator_reg);
+    try words.append(self.allocator, header);
+    try words.append(self.allocator, try self.imm_reg_nz(value_size));
+    let count = try self.place_words(&words);
+    return self.call_c("kizu_map_deinit", count);
+}
+
+/// Selects Map.insert(allocator, key, value): the runtime copies the value
+/// in, and a refused allocation is the allocator's OutOfMemory.
+fn (self: &var Selector) select_map_insert(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let map_value = node.args.get(0) orelse return try self.fail_op(module, node);
+    let allocator_value = node.args.get(1) orelse return try self.fail_op(module, node);
+    let key = node.args.get(2) orelse return try self.fail_op(module, node);
+    let value = node.args.get(3) orelse return try self.fail_op(module, node);
+    let shape = map_value_shape(module, map_value);
+    if shape.class == Class::Unsupported or shape.class == Class::Void or self.oom < 0 {
+        return try self.fail_op(module, node);
+    }
+    let header = try self.header_addr(module, map_value) orelse return try self.fail_op(module, node);
+    let allocator_reg = try self.reg(module, allocator_value) orelse return try self.fail_op(module, node);
+    let key_parts = try self.map_key(module, key) orelse return try self.fail_op(module, node);
+    let source = try self.value_source(module, value, shape) orelse return try self.fail_op(module, node);
+    var words = array::new<i64>(self.allocator);
+    defer words.deinit(self.allocator);
+    try words.append(self.allocator, allocator_reg);
+    try words.append(self.allocator, header);
+    try words.append(self.allocator, key_parts.reg);
+    try words.append(self.allocator, key_parts.reg2);
+    try words.append(self.allocator, source);
+    try words.append(self.allocator, try self.imm_reg_nz(shape.size));
+    let count = try self.place_words(&words);
+    try self.call_c("kizu_map_insert", count);
+    let ok = self.func.new_vreg();
+    try self.extend(ok, 0, 1, false);
+    try self.bool_result(module, node.result, ok, self.oom);
+    return null;
+}
+
+/// Selects the lookups by key: contains is the runtime's answer, at and
+/// at_mut are the value's address or null (the niche optional `?&V`), and
+/// get copies the value out when it is there.
+fn (self: &var Selector) select_map_lookup(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let map_value = node.args.get(0) orelse return try self.fail_op(module, node);
+    let key = node.args.get(1) orelse return try self.fail_op(module, node);
+    let shape = map_value_shape(module, map_value);
+    if shape.class == Class::Unsupported or shape.class == Class::Void {
+        return try self.fail_op(module, node);
+    }
+    let header = try self.header_addr(module, map_value) orelse return try self.fail_op(module, node);
+    let key_parts = try self.map_key(module, key) orelse return try self.fail_op(module, node);
+    var words = array::new<i64>(self.allocator);
+    defer words.deinit(self.allocator);
+    try words.append(self.allocator, header);
+    try words.append(self.allocator, key_parts.reg);
+    try words.append(self.allocator, key_parts.reg2);
+    try words.append(self.allocator, try self.imm_reg_nz(shape.size));
+    let count = try self.place_words(&words);
+    if node.op == ir::Op::MapContains {
+        try self.call_c("kizu_map_contains", count);
+        let found = self.func.new_vreg();
+        try self.extend(found, 0, 1, false);
+        try self.set_val(node.result.name, reg_val(found));
+        return null;
+    }
+    try self.call_c("kizu_map_get", count);
+    let pointer = self.func.new_vreg();
+    try self.mov(pointer, 0);
+    if node.op == ir::Op::MapGet {
+        return self.optional_from_pointer(module, node, pointer, shape);
+    }
+    try self.set_val(node.result.name, reg_val(pointer));
+    return null;
+}
+
+/// Binds `?V` from a nullable pointer to a value: a copy of it when the
+/// pointer is set, absent otherwise. A scalar niche optional is the word
+/// itself; any other is a slot, as select_optional holds it -- an aggregate
+/// niche optional is the value's bytes with absence as all zero, and the
+/// tagged one is `{ i8, V }`.
+fn (self: &var Selector) optional_from_pointer(module: &ir::Module, node: &ir::InstrNode, pointer: i64, shape: Shape) -> !?diagnostic::Diagnostic {
+    let optional = optional_layout(module, node.result.type_name) orelse return try self.fail_op(module, node);
+    let present = try self.new_join();
+    let absent = try self.new_join();
+    let join = try self.new_join();
+    if optional.niche and optional.shape.class == Class::Scalar {
+        let word = self.func.new_vreg();
+        self.func.end(self.current, Term::NonZero, Cond::Ne, pointer, present, absent);
+        try self.start_block(absent);
+        try self.mov_imm(word, 0);
+        self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), join, 0 - 1);
+        try self.start_block(present);
+        try self.load(word, pointer, 0, optional.shape.size, optional.shape.signed);
+        self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), join, 0 - 1);
+        try self.start_block(join);
+        try self.set_val(node.result.name, reg_val(word));
+        return null;
+    }
+    let result = try self.new_slot(optional.shape);
+    self.func.end(self.current, Term::NonZero, Cond::Ne, pointer, present, absent);
+    try self.start_block(absent);
+    if optional.niche {
+        try self.zero_bytes(result, optional.shape.size);
+    } else {
+        try self.store(reg_zr(), result, 0, 1);
+    }
+    self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), join, 0 - 1);
+    try self.start_block(present);
+    let target = try self.add_offset(result, optional.offset);
+    try self.copy_bytes(target, pointer, shape.size);
+    if !optional.niche {
+        let one = try self.imm_reg_nz(1);
+        try self.store(one, result, 0, 1);
+    }
+    self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), join, 0 - 1);
+    try self.start_block(join);
+    try self.set_val(node.result.name, fresh_val(result));
+    return null;
+}
+
+/// Selects Map.remove(allocator, key): the runtime moves the value into a
+/// slot before it releases the entry and answers whether the key was there.
+fn (self: &var Selector) select_map_remove(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let map_value = node.args.get(0) orelse return try self.fail_op(module, node);
+    let allocator_value = node.args.get(1) orelse return try self.fail_op(module, node);
+    let key = node.args.get(2) orelse return try self.fail_op(module, node);
+    let shape = map_value_shape(module, map_value);
+    if shape.class == Class::Unsupported or shape.class == Class::Void {
+        return try self.fail_op(module, node);
+    }
+    let header = try self.header_addr(module, map_value) orelse return try self.fail_op(module, node);
+    let allocator_reg = try self.reg(module, allocator_value) orelse return try self.fail_op(module, node);
+    let key_parts = try self.map_key(module, key) orelse return try self.fail_op(module, node);
+    let slot = try self.new_slot(shape);
+    var words = array::new<i64>(self.allocator);
+    defer words.deinit(self.allocator);
+    try words.append(self.allocator, allocator_reg);
+    try words.append(self.allocator, header);
+    try words.append(self.allocator, key_parts.reg);
+    try words.append(self.allocator, key_parts.reg2);
+    try words.append(self.allocator, slot);
+    try words.append(self.allocator, try self.imm_reg_nz(shape.size));
+    let count = try self.place_words(&words);
+    try self.call_c("kizu_map_remove", count);
+    let found = self.func.new_vreg();
+    try self.extend(found, 0, 1, false);
+    let pointer = self.func.new_vreg();
+    try self.op_imm(MOp::CmpImm, reg_none(), found, 0);
+    var pick = blank(MOp::CSel);
+    pick.rd = pointer;
+    pick.rn = slot;
+    pick.rm = reg_zr();
+    pick.cond = Cond::Ne;
+    try self.inst(pick);
+    return self.optional_from_pointer(module, node, pointer, shape);
+}
+
+/// Selects Map.key_at(index): the runtime fills a `{ i8, ptr, i64 }` slot,
+/// which is `?[]u8` itself; an integer key is read through the pointer when
+/// the slot is set.
+fn (self: &var Selector) select_map_key_at(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let map_value = node.args.get(0) orelse return try self.fail_op(module, node);
+    let index = node.args.get(1) orelse return try self.fail_op(module, node);
+    let shape = map_value_shape(module, map_value);
+    if shape.class == Class::Unsupported or shape.class == Class::Void {
+        return try self.fail_op(module, node);
+    }
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_bytes = result_text.as_bytes();
+    var keyed = false;
+    var bytes_key = false;
+    var key_shape = unsupported();
+    if typ::optional_elem(result_bytes) |key_type| {
+        keyed = typ::is_map_key(key_type);
+        bytes_key = mem::equal_bytes(key_type, "[]u8");
+        key_shape = shape_of_bytes(module, key_type, 1);
+    }
+    if !keyed {
+        return try self.fail_op(module, node);
+    }
+    let header = try self.header_addr(module, map_value) orelse return try self.fail_op(module, node);
+    let index_reg = try self.reg(module, index) orelse return try self.fail_op(module, node);
+    let slot = try self.new_slot(aggregate(24, 8));
+    var words = array::new<i64>(self.allocator);
+    defer words.deinit(self.allocator);
+    try words.append(self.allocator, slot);
+    try words.append(self.allocator, header);
+    try words.append(self.allocator, index_reg);
+    try words.append(self.allocator, try self.imm_reg_nz(shape.size));
+    let count = try self.place_words(&words);
+    try self.call_c("kizu_map_key_at", count);
+    if bytes_key {
+        try self.set_val(node.result.name, fresh_val(slot));
+        return null;
+    }
+    let has = self.func.new_vreg();
+    try self.load(has, slot, 0, 1, false);
+    let bytes = self.func.new_vreg();
+    try self.load(bytes, slot, 8, 8, false);
+    try self.op_imm(MOp::CmpImm, reg_none(), has, 0);
+    let pointer = self.func.new_vreg();
+    var pick = blank(MOp::CSel);
+    pick.rd = pointer;
+    pick.rn = bytes;
+    pick.rm = reg_zr();
+    pick.cond = Cond::Ne;
+    try self.inst(pick);
+    return self.optional_from_pointer(module, node, pointer, key_shape);
+}
+
+/// Selects the value move Map.deinit's cascade makes at insertion position
+/// index; past the end is the bounds failure, which only a broken runtime
+/// reaches.
+fn (self: &var Selector) select_map_take_value_at(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let map_value = node.args.get(0) orelse return try self.fail_op(module, node);
+    let index = node.args.get(1) orelse return try self.fail_op(module, node);
+    let shape = map_value_shape(module, map_value);
+    if shape.class == Class::Unsupported or shape.class == Class::Void {
+        return try self.fail_op(module, node);
+    }
+    let header = try self.header_addr(module, map_value) orelse return try self.fail_op(module, node);
+    let index_reg = try self.reg(module, index) orelse return try self.fail_op(module, node);
+    var words = array::new<i64>(self.allocator);
+    defer words.deinit(self.allocator);
+    try words.append(self.allocator, header);
+    try words.append(self.allocator, index_reg);
+    try words.append(self.allocator, try self.imm_reg_nz(shape.size));
+    let count = try self.place_words(&words);
+    try self.call_c("kizu_map_value_at", count);
+    let pointer = self.func.new_vreg();
+    try self.mov(pointer, 0);
+    let fail_block = try self.new_cold_block();
+    let cont = try self.new_join();
+    self.func.end(self.current, Term::NonZero, Cond::Ne, pointer, cont, fail_block);
+    try self.start_block(fail_block);
+    let length = self.func.new_vreg();
+    try self.load(length, header, 8, 8, true);
+    var failure = array::new<i64>(self.allocator);
+    defer failure.deinit(self.allocator);
+    try failure.append(self.allocator, index_reg);
+    try failure.append(self.allocator, length);
+    try self.report_failure("kizu_panic_bounds", &failure, node.span.start.line, node.span.start.column);
+    try self.start_block(cont);
+    let loaded = try self.load_value(module, node.result.type_name, pointer, 0, true) orelse return try self.fail_op(module, node);
+    try self.set_val(node.result.name, loaded);
+    return null;
+}

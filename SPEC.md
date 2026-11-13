@@ -230,7 +230,15 @@ std::arena::Handle<T>
 しません。
 
 `run` と `test` は生成した実行ファイルを走らせます。経路は 1 本で、interpreter は
-ありません(ADR-0083)。native code は LLVM IR backend が生成します。
+ありません(ADR-0083)。
+
+native code の backend は target ごとに 1 つに決まります。darwin-arm64、linux-amd64、
+windows-amd64 では、compiler が machine code を直接エンコードして object(Mach-O /
+ELF / COFF)を書く direct backend、それ以外の native target では LLVM IR backend です。
+`build`・`run`・`test` は同じ target で常に同じ backend を使い、direct backend が
+扱えない形で止まっても LLVM へは切り替えません。`--backend llvm` は direct の target
+でも LLVM IR backend で build します(比較の基準と bootstrap が使います)。
+`--backend direct` は linux-arm64 でも受けますが、linux-arm64 の既定は LLVM です。
 
 ## 6. 基本文法
 
@@ -971,6 +979,8 @@ let none = 1 << 64;              // 0
 
 演算と比較は IEEE 754 のとおりです。0 で割ると無限大か NaN になり、trap
 しません。NaN は自分自身を含む何とも等しくなく、`!=` だけが true です。
+演算が NaN を返すとき、その NaN のビット列(符号と payload)は実装定義で、
+backend や `--opt` の有無で変わり得ます。
 
 `cast<T>(value)` は数値どうしの変換で、意味は次のとおりです。
 
@@ -2745,6 +2755,7 @@ kizu_print_string
 ```
 
 LLVM IR backend では、extern C call は `declare` と `call` に lower します。
+direct backend は target の C 呼び出し規約どおりの call を直接エンコードします。
 native executable generation は、LLVM lowering 済み subset と `kizu_` runtime shim に
 限定して扱います。C layout 完全対応は別 phase で扱います。
 

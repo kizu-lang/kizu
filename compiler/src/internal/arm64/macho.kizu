@@ -1,0 +1,356 @@
+import compiler::internal::ir;
+import std::array;
+import std::sort;
+import std::string;
+
+// The Mach-O object of Darwin arm64, written from the Obj the printer
+// filled (obj.kizu). It lays the object out the way the system assembler
+// lays out the same lines (sections in the order they are first entered, a
+// section-start symbol `ltmpN` for each, local symbols in the order they
+// are first named, the others sorted by name, relocations last to first,
+// the string table merged by common tail), so the object is byte for byte
+// the one the assembler would make.
+
+fn section_name(kind: SectionKind) -> []u8 {
+    return match kind {
+        Text => "__text",
+        DataConst => "__const",
+        TextConst => "__const",
+        Cstring => "__cstring",
+        Note => "",
+    };
+}
+
+fn segment_name(kind: SectionKind) -> []u8 {
+    return match kind {
+        DataConst => "__DATA",
+        _ => "__TEXT",
+    };
+}
+
+fn section_flags(kind: SectionKind) -> i64 {
+    return match kind {
+        // S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS
+        Text => 0x80000400,
+        // S_CSTRING_LITERALS
+        Cstring => 2,
+        _ => 0,
+    };
+}
+
+/// Writes the object: a 64-bit arm64 MH_OBJECT whose LC_BUILD_VERSION
+/// names macOS minos (the version as the load command packs it), for the
+/// link to replace with the deployment target of the runtime it links
+/// with.
+pub fn (self: &var Obj) write_macho(allocator: Allocator, syms: &ir::NameTable, minos: i64, out: &var string::String) -> !void {
+    // A relocation against an assembler-local label in a section the
+    // linker splits by symbol names the section's start and the offset
+    // instead; in a section of C strings, which the linker splits by
+    // content, the label itself goes in the table.
+    var kinds = array::new<SectionKind>(allocator);
+    defer kinds.deinit(allocator);
+    var starts = array::new<i64>(allocator);
+    defer starts.deinit(allocator);
+    var section_index = 0;
+    while self.sections.at(section_index) |section| {
+        section_index = section_index + 1;
+        try kinds.append(allocator, section.kind);
+        try starts.append(allocator, section.start);
+    }
+    var unplaced = 0 - 1;
+    section_index = 0;
+    while self.sections.at_mut(section_index) |section| {
+        section_index = section_index + 1;
+        var reloc_index = 0;
+        while section.relocs.at_mut(reloc_index) |reloc| {
+            reloc_index = reloc_index + 1;
+            let symbol = self.symbols.get_or_panic(reloc.symbol);
+            if !symbol.temp {
+                continue;
+            }
+            let kind = kinds.get(symbol.section) orelse SectionKind::Text;
+            if symbol.section < 0 or kind == SectionKind::Text {
+                unplaced = reloc.symbol;
+                continue;
+            }
+            if kind == SectionKind::Cstring {
+                continue;
+            }
+            reloc.symbol = starts.get_or_panic(symbol.section);
+            reloc.addend = symbol.value;
+        }
+    }
+    if unplaced >= 0 {
+        try self.fail(allocator, "a relocation names an undefined or code label, symbol", unplaced);
+    }
+    // Mark what the relocations name.
+    section_index = 0;
+    while self.sections.at(section_index) |section| {
+        section_index = section_index + 1;
+        var reloc_index = 0;
+        while section.relocs.get(reloc_index) |reloc| {
+            reloc_index = reloc_index + 1;
+            if self.symbols.at_mut(reloc.symbol) |symbol| {
+                symbol.named = true;
+            }
+        }
+    }
+    // Lay the sections out.
+    var addresses = array::new<i64>(allocator);
+    defer addresses.deinit(allocator);
+    var address = 0;
+    section_index = 0;
+    while self.sections.at(section_index) |section| {
+        section_index = section_index + 1;
+        address = round_to(address, 1 << section.align);
+        try addresses.append(allocator, address);
+        address = address + section.bytes.len();
+    }
+    let data_size = address;
+    // The table: locals in the order first named, then the defined globals
+    // and the undefined, each sorted by name.
+    var locals = array::new<i64>(allocator);
+    defer locals.deinit(allocator);
+    var defined_names = array::new<string::String>(allocator);
+    defer defined_names.deinit(allocator);
+    var undefined_names = array::new<string::String>(allocator);
+    defer undefined_names.deinit(allocator);
+    var symbol_index = 0;
+    while self.symbols.at(symbol_index) |symbol| {
+        let text = ir::name_text(syms, symbol.name);
+        let bytes = text.as_bytes();
+        if symbol.section < 0 {
+            try undefined_names.append(allocator, try string::from_bytes(allocator, bytes));
+        } else if symbol.global {
+            try defined_names.append(allocator, try string::from_bytes(allocator, bytes));
+        } else if !symbol.temp or symbol.named {
+            try locals.append(allocator, symbol_index);
+        }
+        symbol_index = symbol_index + 1;
+    }
+    try sort::strings(&var defined_names);
+    try sort::strings(&var undefined_names);
+    var table = array::new<i64>(allocator);
+    defer table.deinit(allocator);
+    var local_index = 0;
+    while locals.get(local_index) |index| {
+        local_index = local_index + 1;
+        try table.append(allocator, index);
+    }
+    try self.append_sorted(allocator, syms, &defined_names, &var table);
+    try self.append_sorted(allocator, syms, &undefined_names, &var table);
+    var position = 0;
+    while table.get(position) |index| {
+        if self.symbols.at_mut(index) |symbol| {
+            symbol.index = position;
+        }
+        position = position + 1;
+    }
+    // The strings, merged by common tail.
+    var strings = string::new(allocator);
+    defer strings.deinit(allocator);
+    var offsets = array::new<i64>(allocator);
+    defer offsets.deinit(allocator);
+    try self.string_table(allocator, syms, &table, &var strings, &var offsets);
+    // Where everything goes.
+    let nsects = self.sections.len();
+    let segment_size = 72 + 80 * nsects;
+    let commands = segment_size + 24 + 24 + 80;
+    let data_start = 32 + commands;
+    let reloc_start = round_to(data_start + data_size, 8);
+    var reloc_at = array::new<i64>(allocator);
+    defer reloc_at.deinit(allocator);
+    var relocs_end = reloc_start;
+    section_index = 0;
+    while self.sections.at(section_index) |section| {
+        section_index = section_index + 1;
+        try reloc_at.append(allocator, relocs_end);
+        relocs_end = relocs_end + 8 * reloc_entries(&section.relocs);
+    }
+    let symoff = relocs_end;
+    let stroff = symoff + 16 * table.len();
+    // mach_header_64
+    try put(allocator, out, 0xFEEDFACF, 4);
+    try put(allocator, out, 0x0100000C, 4);
+    try put(allocator, out, 0, 4);
+    try put(allocator, out, 1, 4);
+    try put(allocator, out, 4, 4);
+    try put(allocator, out, commands, 4);
+    // MH_SUBSECTIONS_VIA_SYMBOLS
+    try put(allocator, out, 0x2000, 4);
+    try put(allocator, out, 0, 4);
+    // LC_SEGMENT_64, unnamed, holding every section
+    try put(allocator, out, 0x19, 4);
+    try put(allocator, out, segment_size, 4);
+    try put_field(allocator, out, "", 16);
+    try put(allocator, out, 0, 8);
+    try put(allocator, out, data_size, 8);
+    try put(allocator, out, data_start, 8);
+    try put(allocator, out, data_size, 8);
+    try put(allocator, out, 7, 4);
+    try put(allocator, out, 7, 4);
+    try put(allocator, out, nsects, 4);
+    try put(allocator, out, 0, 4);
+    section_index = 0;
+    while self.sections.at(section_index) |section| {
+        let at = addresses.get_or_panic(section_index);
+        try put_field(allocator, out, section_name(section.kind), 16);
+        try put_field(allocator, out, segment_name(section.kind), 16);
+        try put(allocator, out, at, 8);
+        try put(allocator, out, section.bytes.len(), 8);
+        try put(allocator, out, data_start + at, 4);
+        try put(allocator, out, section.align, 4);
+        let entries = reloc_entries(&section.relocs);
+        if entries > 0 {
+            try put(allocator, out, reloc_at.get_or_panic(section_index), 4);
+        } else {
+            try put(allocator, out, 0, 4);
+        }
+        try put(allocator, out, entries, 4);
+        try put(allocator, out, section_flags(section.kind), 4);
+        try put(allocator, out, 0, 12);
+        section_index = section_index + 1;
+    }
+    // LC_BUILD_VERSION: macOS, no SDK named, no tools
+    try put(allocator, out, 0x32, 4);
+    try put(allocator, out, 24, 4);
+    try put(allocator, out, 1, 4);
+    try put(allocator, out, minos, 4);
+    try put(allocator, out, 0, 4);
+    try put(allocator, out, 0, 4);
+    // LC_SYMTAB
+    try put(allocator, out, 2, 4);
+    try put(allocator, out, 24, 4);
+    try put(allocator, out, symoff, 4);
+    try put(allocator, out, table.len(), 4);
+    try put(allocator, out, stroff, 4);
+    try put(allocator, out, strings.len(), 4);
+    // LC_DYSYMTAB: the three runs of the table
+    let defined = defined_names.len();
+    let undefined = undefined_names.len();
+    try put(allocator, out, 0xB, 4);
+    try put(allocator, out, 80, 4);
+    try put(allocator, out, 0, 4);
+    try put(allocator, out, locals.len(), 4);
+    try put(allocator, out, locals.len(), 4);
+    try put(allocator, out, defined, 4);
+    try put(allocator, out, locals.len() + defined, 4);
+    try put(allocator, out, undefined, 4);
+    try put(allocator, out, 0, 48);
+    // The section contents, each at its address.
+    try self.put_contents(allocator, out, data_start, &addresses);
+    try pad_to(allocator, out, reloc_start);
+    // The relocations of each section, last first, an addend before the
+    // relocation it belongs to.
+    section_index = 0;
+    while self.sections.at(section_index) |section| {
+        section_index = section_index + 1;
+        var reloc_index = section.relocs.len() - 1;
+        while reloc_index >= 0 {
+            let reloc = section.relocs.get_or_panic(reloc_index);
+            reloc_index = reloc_index - 1;
+            if reloc.addend != 0 {
+                try put(allocator, out, reloc.address, 4);
+                try put(allocator, out, (reloc.addend & 0xFFFFFF) | (2 << 25) | (reloc_addend() << 28), 4);
+            }
+            let symbol = self.symbols.get_or_panic(reloc.symbol);
+            var info = symbol.index | (1 << 27) | (reloc.kind << 28);
+            if reloc.kind == reloc_unsigned() {
+                info = info | (3 << 25);
+            } else {
+                info = info | (2 << 25);
+            }
+            if reloc.kind == reloc_branch26() or reloc.kind == reloc_page21() or reloc.kind == reloc_got_page21() {
+                info = info | (1 << 24);
+            }
+            try put(allocator, out, reloc.address, 4);
+            try put(allocator, out, info, 4);
+        }
+    }
+    // nlist_64 entries
+    position = 0;
+    while table.get(position) |index| {
+        let symbol = self.symbols.get_or_panic(index);
+        try put(allocator, out, offsets.get_or_panic(position), 4);
+        if symbol.section < 0 {
+            // N_UNDF | N_EXT
+            try put(allocator, out, 1, 1);
+            try put(allocator, out, 0, 1);
+            try put(allocator, out, 0, 2);
+            try put(allocator, out, 0, 8);
+        } else {
+            // N_SECT, | N_EXT for a global
+            var kind = 0xE;
+            if symbol.global {
+                kind = 0xF;
+            }
+            try put(allocator, out, kind, 1);
+            try put(allocator, out, symbol.section + 1, 1);
+            try put(allocator, out, 0, 2);
+            try put(allocator, out, addresses.get_or_panic(symbol.section) + symbol.value, 8);
+        }
+        position = position + 1;
+    }
+    return out.append_string(allocator, &strings);
+}
+
+/// Returns how many entries a section's relocations take: an addend is an
+/// entry of its own.
+fn reloc_entries(relocs: &array::Array<Reloc>) -> i64 {
+    var count = 0;
+    var index = 0;
+    while relocs.get(index) |reloc| {
+        index = index + 1;
+        count = count + 1;
+        if reloc.addend != 0 {
+            count = count + 1;
+        }
+    }
+    return count;
+}
+
+/// Appends the symbols of sorted names to the table, in that order.
+fn (self: &Obj) append_sorted(
+    allocator: Allocator,
+    syms: &ir::NameTable,
+    names: &array::Array<string::String>,
+    table: &var array::Array<i64>
+) -> !void {
+    var index = 0;
+    while names.at(index) |name| {
+        index = index + 1;
+        let bytes = name.as_bytes();
+        if syms.lookup(bytes) |held| {
+            let known = self.by_name.get(ir::name_id(held)) orelse 0;
+            if known > 0 {
+                try table.append(allocator, known - 1);
+            }
+        }
+    }
+    return;
+}
+
+/// Builds the string table of the symbols in table, merged by common
+/// tail and padded to eight bytes. offsets gets each symbol's string
+/// offset, in table order.
+fn (self: &Obj) string_table(
+    allocator: Allocator,
+    syms: &ir::NameTable,
+    table: &array::Array<i64>,
+    out: &var string::String,
+    offsets: &var array::Array<i64>
+) -> !void {
+    var names = array::new<string::String>(allocator);
+    defer names.deinit(allocator);
+    var position = 0;
+    while table.get(position) |index| {
+        position = position + 1;
+        let symbol = self.symbols.get_or_panic(index);
+        let text = ir::name_text(syms, symbol.name);
+        let bytes = text.as_bytes();
+        try names.append(allocator, try string::from_bytes(allocator, bytes));
+    }
+    try merge_strings(allocator, &names, out, offsets);
+    let size = round_to(out.len(), 8);
+    return pad_to(allocator, out, size);
+}

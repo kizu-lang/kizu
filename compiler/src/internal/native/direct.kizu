@@ -1,0 +1,95 @@
+import std::array;
+import std::fs;
+import std::mem;
+import std::string;
+
+// The units of the direct backend (`--backend direct`): Mach-O or ELF
+// objects the backend wrote itself (arm64, or x86-64 for Linux), which the
+// link reads as they are.
+// The only thing the backend cannot know is the deployment target a Darwin
+// toolchain builds for, so a Mach-O object is stamped with the one of the
+// runtime object the same clang compiled for this link.
+
+/// Writes the program object the direct backend made as it is linked: with
+/// the deployment target of the runtime object it is linked with, which the
+/// clang that compiled the runtime chose and would have given the program
+/// too, in place of the none the backend names. An ELF object names none
+/// and is written as it is.
+fn stamp_object(io: Io, allocator: Allocator, runtime_path: []u8, unit: &string::String, out: &var string::String) -> !void {
+    let unit_bytes = unit.as_bytes();
+    let at = build_version_at(unit_bytes);
+    if at < 0 {
+        return out.append_string(allocator, unit);
+    }
+    var runtime = string::new(allocator);
+    defer runtime.deinit(allocator);
+    try fs::read_file_into(io, allocator, runtime_path, &var runtime);
+    let runtime_bytes = runtime.as_bytes();
+    let minos = build_version_at(runtime_bytes);
+    try out.append_string(allocator, unit);
+    if minos < 0 {
+        return;
+    }
+    let version = read32(runtime_bytes, minos);
+    let writable = out.as_mut_bytes();
+    for 0..4 |byte| {
+        writable[at + byte] = cast<u8>((version >> (8 * byte)) & 255);
+    }
+    return;
+}
+
+/// Returns where the minimum OS version of a 64-bit Mach-O object's
+/// LC_BUILD_VERSION is, or -1.
+fn build_version_at(bytes: []u8) -> i64 {
+    if mem::len(bytes) < 32 or read32(bytes, 0) != 0xFEEDFACF {
+        return 0 - 1;
+    }
+    let count = read32(bytes, 16);
+    var at = 32;
+    for 0..count |_command| {
+        if at + 16 > mem::len(bytes) {
+            return 0 - 1;
+        }
+        let command = read32(bytes, at);
+        if command == 0x32 {
+            return at + 12;
+        }
+        at = at + read32(bytes, at + 4);
+    }
+    return 0 - 1;
+}
+
+fn read32(bytes: []u8, at: i64) -> i64 {
+    var value = 0;
+    for 0..4 |byte| {
+        value = value | (cast<i64>(bytes[at + byte]) << (8 * byte));
+    }
+    return value;
+}
+
+/// Writes each direct unit, stamped, where the link reads it, and appends
+/// the paths to inputs.
+fn direct_inputs(
+    io: Io,
+    allocator: Allocator,
+    dir: []u8,
+    runtime_path: []u8,
+    options: &Options,
+    units: &array::Array<string::String>,
+    inputs: &var array::Array<string::String>
+) -> !void {
+    var index = 0;
+    while units.at(index) |unit| {
+        let unit_path = try unit_text_path(io, allocator, dir, index, options);
+        defer unit_path.deinit(allocator);
+        var object = string::new(allocator);
+        defer object.deinit(allocator);
+        try stamp_object(io, allocator, runtime_path, unit, &var object);
+        let path_bytes = unit_path.as_bytes();
+        let object_bytes = object.as_bytes();
+        try fs::write_file(io, path_bytes, object_bytes);
+        try inputs.append(allocator, try string::from_bytes(allocator, path_bytes));
+        index = index + 1;
+    }
+    return;
+}

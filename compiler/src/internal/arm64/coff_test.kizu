@@ -1,0 +1,109 @@
+import compiler::internal::ir;
+import std::mem;
+import std::string;
+import std::testing;
+
+// The object below is what the system assembler (clang -c of llvm-mingw
+// for x86_64-windows-gnu) makes of these lines, shapes no example
+// reaches: a call to the global the object defines (main) is resolved in
+// place like a call to a local function, unlike ELF; a call to an
+// undefined symbol, and an address in `.rdata`, take a relocation with the
+// addend in place, the label's section named for the label; and a name
+// that ends a longer one is found at its tail in the string table.
+//
+//         .text
+//         .globl main
+//         .p2align 4
+//     main:
+//         call main
+//         call kz_f
+//         call external_function_name
+//         call function_name
+//         leaq kz_f(%rip), %rax
+//         leaq .Lkz_str.1(%rip), %rax
+//         ret
+//         .p2align 4
+//     kz_f:
+//         ret
+//         .section .rdata,"dr"
+//         .p2align 3
+//     .Lkz_error_names:
+//         .quad .Lkz_str.1
+//         .quad 1
+//     .Lkz_str.0:
+//         .byte 97
+//         .byte 0
+//     .Lkz_str.1:
+//         .byte 98
+//         .byte 0
+
+fn assembled_coff(allocator: Allocator) -> !string::String {
+    var hex = string::new(allocator);
+    defer hex.deinit(allocator);
+    try hex.append_bytes(allocator, "6486040000000000210100000c000000000000002e74657874000000000000000000000031000000b4000000e5000000");
+    try hex.append_bytes(allocator, "0000000003000000200050602e6461746100000000000000000000000000000003010000000000000000000000000000");
+    try hex.append_bytes(allocator, "400030c02e6273730000000000000000000000000000000000000000000000000000000000000000800030c02e726461");
+    try hex.append_bytes(allocator, "746100000000000000000000140000000301000017010000000000000100000040004040e8fbffffffe826000000e800");
+    try hex.append_bytes(allocator, "000000e800000000488d0515000000488d0512000000c3662e0f1f8400000000000f1f00c30b0000000a000000040010");
+    try hex.append_bytes(allocator, "0000000b00000004001e0000000600000004001200000000000000010000000000000061006200000000000600000001");
+    try hex.append_bytes(allocator, "002e746578740000000000000001000000030131000000030000009853254e0100000000002e64617461000000000000");
+    try hex.append_bytes(allocator, "000200000003010000000000000000000000000200000000002e62737300000000000000000300000003010000000000");
+    try hex.append_bytes(allocator, "000000000000000300000000002e726461746100000000000004000000030114000000010000008508fc650400000000");
+    try hex.append_bytes(allocator, "006d61696e00000000000000000100000002006b7a5f6600000000300000000100000003000000000004000000000000");
+    try hex.append_bytes(allocator, "00000000000200000000000d000000000000000000000002001b00000065787465726e616c5f66756e6374696f6e5f6e");
+    try hex.append_bytes(allocator, "616d6500");
+    let text = hex.as_bytes();
+    return hex_bytes(allocator, text);
+}
+
+test "write the x86-64 COFF object of calls, addresses and strings" {
+    let allocator = mem::page_allocator();
+    var syms = try ir::new_name_table(allocator);
+    defer syms.deinit(allocator);
+    var obj = new_obj(allocator, Format::Coff);
+    defer obj.deinit(allocator);
+    obj.x86 = true;
+    try obj.enter(allocator, &var syms, SectionKind::Text);
+    let main = try syms.intern("_main");
+    let local = try syms.intern("kz_f");
+    let external = try syms.intern("_external_function_name");
+    let tail = try syms.intern("_function_name");
+    let table = try syms.intern("Lkz_error_names");
+    let first = try syms.intern("Lkz_str.0");
+    let second = try syms.intern("Lkz_str.1");
+    try obj.global(allocator, &syms, main);
+    try obj.align(allocator, 4);
+    try obj.define(allocator, &syms, main);
+    try obj.x86_call(allocator, &syms, main);
+    try obj.x86_call(allocator, &syms, local);
+    try obj.x86_call(allocator, &syms, external);
+    try obj.x86_call(allocator, &syms, tail);
+    try obj.x86_rip(allocator, &syms, local, 0, false);
+    try obj.x86_rip(allocator, &syms, second, 0, false);
+    try obj.x86_bare(allocator, "ret");
+    try obj.align(allocator, 4);
+    try obj.define(allocator, &syms, local);
+    try obj.x86_bare(allocator, "ret");
+    try obj.enter(allocator, &var syms, SectionKind::DataConst);
+    try obj.align(allocator, 3);
+    try obj.define(allocator, &syms, table);
+    try obj.relocate(allocator, &syms, second, reloc_unsigned());
+    try obj.datum(allocator, 0, 8);
+    try obj.datum(allocator, 1, 8);
+    try obj.enter(allocator, &var syms, SectionKind::Cstring);
+    try obj.define(allocator, &syms, first);
+    try obj.datum(allocator, 97, 1);
+    try obj.datum(allocator, 0, 1);
+    try obj.define(allocator, &syms, second);
+    try obj.datum(allocator, 98, 1);
+    try obj.datum(allocator, 0, 1);
+    var written = string::new(allocator);
+    defer written.deinit(allocator);
+    try obj.write_coff(allocator, &syms, &var written);
+    let want = try assembled_coff(allocator);
+    defer want.deinit(allocator);
+    let want_bytes = want.as_bytes();
+    let written_bytes = written.as_bytes();
+    testing::expect(obj.failure.len() == 0);
+    testing::expect(mem::equal_bytes(written_bytes, want_bytes));
+}

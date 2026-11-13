@@ -1,4 +1,5 @@
 import compiler::internal::diagnostic;
+import compiler::internal::hostabi;
 import compiler::internal::ir;
 import compiler::internal::typ;
 import std::array;
@@ -30,7 +31,7 @@ fn (self: &var Emitter) call_kind(module: &ir::Module, node: &ir::InstrNode) -> 
     if module.names.is(node.extern_abi, "c") {
         return CallKind::Foreign;
     }
-    if thread_round_data(&module.names, node.operand) |_| {
+    if hostabi::hands_worker(module, node.operand) {
         return CallKind::Builtin;
     }
     if module.names.is(node.operand, "std::internal::builtin::mem_size_of") {
@@ -102,8 +103,8 @@ fn (self: &var Emitter) write_call(module: &ir::Module, node: &ir::InstrNode) ->
 /// runtime, the Go `writeCompilerBuiltin`: a pool round, or the size of a
 /// type.
 fn (self: &var Emitter) write_compiler_builtin(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    if thread_round_data(&module.names, node.operand) |data_index| {
-        return self.write_thread_pool_round(module, node, data_index);
+    if hostabi::hands_worker(module, node.operand) {
+        return self.write_thread_pool_round(module, node);
     }
     return self.write_size_of(module, node);
 }
@@ -339,75 +340,44 @@ fn deref_borrow_type(name: []u8) -> []u8 {
 
 /// Reports whether a std hosted runtime call uses the explicit pointer ABI
 /// instead of the platform C aggregate ABI, the Go `usesHostedRuntimeABI`.
-/// Error unions and optionals are both C-side aggregates, so both go out
-/// through the pointer; an aggregate argument goes in through one. How C
-/// passes an aggregate by value is the platform's to say -- two registers on
-/// System V and AAPCS64 for a slice, a hidden address on Windows -- and a
-/// pointer is the one spelling every platform agrees on.
+/// The rule is hostabi's, the one every native backend reads.
 fn (self: &var Emitter) uses_hosted_runtime_abi(module: &ir::Module, name: ir::Name, node: &ir::InstrNode) -> !bool {
-    let symbol = try self.callee_symbol(module, name);
-    if !self.names.starts_with(symbol, "std__internal__builtin__") {
-        return false;
-    }
-    let result_text = ir::name_text(&module.names, node.result.type_name);
-    let result_type = result_text.as_bytes();
-    if try self.error_union_success_type(result_type) |success| {
-        success.deinit(self.allocator);
-        return true;
-    }
-    if is_optional_type(result_type) {
-        return true;
-    }
-    var index = 0;
-    while node.args.get(index) |arg| {
-        index = index + 1;
-        let type_text = ir::name_text(&module.names, arg.type_name);
-        let type_bytes = type_text.as_bytes();
-        if hosted_runtime_indirect_abi(module, type_bytes) {
-            return true;
-        }
-    }
-    return false;
+    return hostabi::uses_out(module, name, node);
+}
+
+/// Spells the LLVM type of one declared C parameter.
+fn (self: &var Emitter) hosted_param_type(module: &ir::Module, node: &ir::InstrNode, param: hostabi::Param) -> !ir::Name {
+    return match param.c_type {
+        Pointer => self.names.intern("ptr"),
+        I64 => self.names.intern("i64"),
+        Operand => self.llvm_type_of(module, node.args.get_or_panic(param.arg).type_name),
+    };
 }
 
 /// Appends the lowered parameter ABI for hosted runtime calls, the Go
-/// `hostedRuntimeParamTypes`. Aggregates -- slices and module structs --
-/// reach the C runtime behind a pointer, never by value.
+/// `hostedRuntimeParamTypes`: the parameters hostabi declares after Out.
 fn (self: &var Emitter) append_hosted_runtime_param_types(
     module: &ir::Module,
     name: ir::Name,
-    args: &array::Array<ir::Value>,
+    node: &ir::InstrNode,
     params: &var array::Array<string::String>
 ) -> !void {
+    let signature = try hostabi::declare(self.allocator, module, name, node);
+    defer signature.deinit(self.allocator);
     var index = 0;
-    while args.get(index) |arg| {
+    while signature.params.get(index) |param| {
         index = index + 1;
-        let type_text = ir::name_text(&module.names, arg.type_name);
-        let type_bytes = type_text.as_bytes();
-        if hosted_runtime_indirect_abi(module, type_bytes) {
-            try params.append(self.allocator, try string::from_bytes(self.allocator, "ptr"));
-            if module.names.is(name, "std::internal::builtin::task_set_spawn") and index == 4 {
-                try params.append(self.allocator, try string::from_bytes(self.allocator, "ptr"));
-            }
-            if module.names.is(name, "std::internal::builtin::task_set_spawn") and index == 5 {
-                try params.append(self.allocator, try string::from_bytes(self.allocator, "i64"));
-            }
+        if param.source == hostabi::Source::Out {
             continue;
         }
-        let arg_type = try self.llvm_type_of(module, arg.type_name);
-        try params.append(self.allocator, try self.names.copy(arg_type));
-        if module.names.is(name, "std::internal::builtin::task_set_spawn") and index == 4 {
-            try params.append(self.allocator, try string::from_bytes(self.allocator, "ptr"));
-        }
-        if module.names.is(name, "std::internal::builtin::task_set_spawn") and index == 5 {
-            try params.append(self.allocator, try string::from_bytes(self.allocator, "i64"));
-        }
+        let param_type = try self.hosted_param_type(module, node, param);
+        try params.append(self.allocator, try self.names.copy(param_type));
     }
     return;
 }
 
 /// Adapts Kizu aggregate values to the narrow hosted C ABI, the Go
-/// `writeHostedRuntimeCall`.
+/// `writeHostedRuntimeCall`, by the parameters hostabi declares.
 fn (self: &var Emitter) write_hosted_runtime_call(
     module: &ir::Module,
     name: ir::Name,
@@ -419,50 +389,87 @@ fn (self: &var Emitter) write_hosted_runtime_call(
     try self.line2("  %s = alloca %s", Arg::Str(result_slot), Arg::Str(result_type));
     var args = array::new<string::String>(self.allocator);
     defer args.deinit(self.allocator);
-    try args.append(self.allocator, try self.sprint2("ptr %s", Arg::Str(result_slot), Arg::None));
-    var index = 0;
-    while node.args.get(index) |arg| {
-        let type_text = ir::name_text(&module.names, arg.type_name);
-        let type_bytes = type_text.as_bytes();
-        let arg_type = try self.llvm_type_of(module, arg.type_name);
-        if hosted_runtime_indirect_abi(module, type_bytes) {
-            let arg_slot = try self.text2("%s.arg.%d", Arg::Str(result_name), Arg::Int(index));
-            try self.line2("  %s = alloca %s", Arg::Str(arg_slot), Arg::Str(arg_type));
-            if !try self.copied_from_memory(module, node, index, arg_slot) {
-                let value = try self.operand(module, arg);
-                try self.line3("  store %s %s, ptr %s", Arg::Str(arg_type), Arg::Str(value.operand), Arg::Str(arg_slot));
-            }
-            try args.append(self.allocator, try self.sprint2("ptr %s", Arg::Str(arg_slot), Arg::None));
-            if module.names.is(name, "std::internal::builtin::task_set_spawn") and index == 3 {
-                let state = node.args.get_or_panic(4);
-                let invoke = try self.task_invoke_thunk_name(module, state.type_name);
-                try args.append(self.allocator, try self.sprint2("ptr @%s", Arg::Str(invoke), Arg::None));
-            }
-            if module.names.is(name, "std::internal::builtin::task_set_spawn") and index == 4 {
-                let size = try self.element_size_operand(module, arg.type_name);
-                try args.append(self.allocator, try self.sprint2("i64 %s", Arg::Str(size), Arg::None));
-            }
-            index = index + 1;
-            continue;
+    let signature = try hostabi::declare(self.allocator, module, name, node);
+    defer signature.deinit(self.allocator);
+    var param_index = 0;
+    while signature.params.get(param_index) |param| {
+        param_index = param_index + 1;
+        let index = param.arg;
+        match param.source {
+            Out => try args.append(self.allocator, try self.sprint2("ptr %s", Arg::Str(result_slot), Arg::None)),
+            Address => {
+                let arg = node.args.get_or_panic(index);
+                let arg_type = try self.llvm_type_of(module, arg.type_name);
+                let arg_slot = try self.text2("%s.arg.%d", Arg::Str(result_name), Arg::Int(index));
+                try self.line2("  %s = alloca %s", Arg::Str(arg_slot), Arg::Str(arg_type));
+                if !try self.copied_from_memory(module, node, index, arg_slot) {
+                    let value = try self.operand(module, arg);
+                    try self.line3("  store %s %s, ptr %s", Arg::Str(arg_type), Arg::Str(value.operand), Arg::Str(arg_slot));
+                }
+                try args.append(self.allocator, try self.sprint2("ptr %s", Arg::Str(arg_slot), Arg::None));
+            },
+            _ => {
+                if try self.append_hosted_arg(module, node, param, &var args) |failed| {
+                    return move failed;
+                }
+            },
         }
-        let value = try self.operand(module, arg);
-        try args.append(self.allocator, try self.sprint2("%s %s", Arg::Str(arg_type), Arg::Str(value.operand)));
-        if module.names.is(name, "std::internal::builtin::task_set_spawn") and index == 3 {
-            let state = node.args.get_or_panic(4);
-            let invoke = try self.task_invoke_thunk_name(module, state.type_name);
-            try args.append(self.allocator, try self.sprint2("ptr @%s", Arg::Str(invoke), Arg::None));
-        }
-        if module.names.is(name, "std::internal::builtin::task_set_spawn") and index == 4 {
-            let size = try self.element_size_operand(module, arg.type_name);
-            try args.append(self.allocator, try self.sprint2("i64 %s", Arg::Str(size), Arg::None));
-        }
-        index = index + 1;
     }
     let symbol = try self.callee_symbol(module, name);
     let joined = try string::join(self.allocator, &args, ", ");
     try self.line2("  call void @%s(%s)", Arg::Str(symbol), Arg::Owned(move joined));
     try self.line3("  %s = load %s, ptr %s", Arg::Str(result_name), Arg::Str(result_type), Arg::Str(result_slot));
     try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Appends the argument for one declared C parameter that is neither Out
+/// nor Address, whose memory each writer names its own way.
+fn (self: &var Emitter) append_hosted_arg(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    param: hostabi::Param,
+    args: &var array::Array<string::String>
+) -> !?diagnostic::Diagnostic {
+    match param.source {
+        Value => {
+            let arg = node.args.get_or_panic(param.arg);
+            let value = try self.operand(module, arg);
+            let arg_type = try self.hosted_param_type(module, node, param);
+            try args.append(self.allocator, try self.sprint2("%s %s", Arg::Str(arg_type), Arg::Str(value.operand)));
+        },
+        TaskInvoke => {
+            let state = node.args.get_or_panic(param.arg);
+            let invoke = try self.task_invoke_thunk_name(module, state.type_name);
+            try args.append(self.allocator, try self.sprint2("ptr @%s", Arg::Str(invoke), Arg::None));
+        },
+        SizeOf => {
+            let arg = node.args.get_or_panic(param.arg);
+            let size = try self.element_size_operand(module, arg.type_name);
+            try args.append(self.allocator, try self.sprint2("i64 %s", Arg::Str(size), Arg::None));
+        },
+        ElementSize => {
+            let arg = node.args.get_or_panic(param.arg);
+            let text = ir::name_text(&module.names, arg.type_name);
+            let bytes = text.as_bytes();
+            let element = hostabi::element_type(bytes) orelse return try self.fail_name2(
+                module, "llvm error: %s is handed %s, which holds no elements", node.operand, arg.type_name);
+            let size = try self.element_size_operand_bytes(module, bytes[element.start..element.end]);
+            try args.append(self.allocator, try self.sprint2("i64 %s", Arg::Str(size), Arg::None));
+        },
+        Zero => {
+            if param.c_type == hostabi::CType::Pointer {
+                try args.append(self.allocator, try string::from_bytes(self.allocator, "ptr null"));
+            } else {
+                let zero_type = try self.hosted_param_type(module, node, param);
+                try args.append(self.allocator, try self.sprint2("%s 0", Arg::Str(zero_type), Arg::None));
+            }
+        },
+        PoolInvoke => return self.pool_invoke_arg(module, node, false, args),
+        PoolStateInvoke => return self.pool_invoke_arg(module, node, true, args),
+        Out => return try self.fail_name1(module, "llvm error: %s declares Out where it has no slot", node.operand),
+        Address => return try self.fail_name1(module, "llvm error: %s declares an Address where it has no slot", node.operand),
+    }
     return null;
 }
 
@@ -534,14 +541,11 @@ fn (self: &var Emitter) rendered_llvm_type(module: &ir::Module, value: typ::Type
 /// `externalCallDecl`.
 fn (self: &var Emitter) external_call_decl(module: &ir::Module, name: ir::Name, node: &ir::InstrNode) -> !string::String {
     let symbol = try self.callee_symbol(module, name);
-    if thread_round_data(&module.names, name) |data_index| {
-        return self.thread_pool_round_decl(module, name, node, data_index);
-    }
     var params = array::new<string::String>(self.allocator);
     defer params.deinit(self.allocator);
     if try self.uses_hosted_runtime_abi(module, name, node) {
         try params.append(self.allocator, try string::from_bytes(self.allocator, "ptr"));
-        try self.append_hosted_runtime_param_types(module, name, &node.args, &var params);
+        try self.append_hosted_runtime_param_types(module, name, node, &var params);
         let joined = try string::join(self.allocator, &params, ", ");
         return self.sprint2("declare void @%s(%s)", Arg::Str(symbol), Arg::Owned(move joined));
     }
