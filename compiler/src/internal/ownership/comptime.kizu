@@ -6,11 +6,6 @@ import compiler::internal::stdmeta;
 import compiler::internal::stdtarget;
 import compiler::internal::typ;
 
-// Mechanical port of internal/ownership/comptime.go: the compile-time branch
-// selection of `comptime if` and the minimal constant evaluation it needs.
-
-/// Checks ownership effects for the selected compile-time branch, the Go
-/// `checkComptimeIfStmt`.
 fn (self: &var Checker) check_comptime_if_stmt(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -31,9 +26,6 @@ fn (self: &var Checker) check_comptime_if_stmt(
     return self.check_block(tree, try scope, statement.consequence);
 }
 
-/// Evaluates integer-only compile-time arithmetic used in branch conditions,
-/// the Go `intLiteral`, with an integer-range capture standing for its
-/// expansion's value.
 fn (self: &Checker) int_literal(tree: &ast::Ast, expression: ast::Expression) -> ?i64 {
     if comptime_expr(tree, expression) |wrapped| {
         return self.int_literal(tree, wrapped.expr);
@@ -47,8 +39,6 @@ fn (self: &Checker) int_literal(tree: &ast::Ast, expression: ast::Expression) ->
         let retained = tree.texts.at(ident.name.node);
         let bytes = retained.as_bytes();
         let bound = self.comptime_values.get(bytes) orelse return null;
-        // A bound value may be negative: a static expression such as `(-2)`
-        // reaches the instance as its decimal text.
         let text = name_text(&self.names, bound);
         let text_bytes = text.as_bytes();
         return staticexpr::parse_i64(text_bytes);
@@ -69,8 +59,6 @@ fn (self: &Checker) int_literal(tree: &ast::Ast, expression: ast::Expression) ->
     return null;
 }
 
-/// Evaluates simple integer arithmetic for ownership branch selection, the
-/// Go `evalComptimeInt`.
 pub fn eval_comptime_int(tree: &ast::Ast, op: ast::Text, left: i64, right: i64) -> ?i64 {
     if text_equals(tree, op, "+") {
         return left + right;
@@ -96,8 +84,6 @@ pub fn eval_comptime_int(tree: &ast::Ast, op: ast::Text, left: i64, right: i64) 
     return null;
 }
 
-/// Evaluates integer comparisons for ownership branch selection, the Go
-/// `compareComptimeInts`.
 pub fn compare_comptime_ints(tree: &ast::Ast, op: ast::Text, left: i64, right: i64) -> ?bool {
     if text_equals(tree, op, "==") {
         return left == right;
@@ -120,8 +106,6 @@ pub fn compare_comptime_ints(tree: &ast::Ast, op: ast::Text, left: i64, right: i
     return null;
 }
 
-/// Rejects runtime locals inside compile-time expressions, the Go
-/// `readComptimeOnly`.
 fn (self: &var Checker) read_comptime_only(
     tree: &ast::Ast,
     expression: ast::Expression,
@@ -198,9 +182,6 @@ fn (self: &var Checker) read_comptime_only(
     }
 }
 
-/// Reads a call a comptime expression may make, the Go `readComptimeCall`:
-/// a target or meta predicate, or a std::math function of comptime
-/// arguments.
 fn (self: &var Checker) read_comptime_call(
     tree: &ast::Ast,
     call: ast::CallExpr,
@@ -231,8 +212,6 @@ fn (self: &var Checker) read_comptime_call(
     return null;
 }
 
-/// Reports whether a call is one of the std::math functions a float comptime
-/// expression may make, the Go `comptimeMathCall`.
 fn (self: &var Checker) comptime_math_call(tree: &ast::Ast, call: ast::CallExpr) -> !bool {
     let apply = type_apply_expr(tree, call.callee) orelse return false;
     let name = try self.qualified_name(tree, apply.callee) orelse return false;
@@ -241,9 +220,6 @@ fn (self: &var Checker) comptime_math_call(tree: &ast::Ast, call: ast::CallExpr)
     return stdmath::names(bytes);
 }
 
-/// Evaluates f64 compile-time arithmetic for ownership branch selection, the
-/// Go `floatLiteral`, with the same bits the type checker and the lowerer
-/// compute.
 fn (self: &var Checker) float_literal(tree: &ast::Ast, expression: ast::Expression) -> !?f64 {
     if comptime_expr(tree, expression) |wrapped| {
         return self.float_literal(tree, wrapped.expr);
@@ -299,8 +275,6 @@ fn (self: &var Checker) float_literal(tree: &ast::Ast, expression: ast::Expressi
     return null;
 }
 
-/// Answers a compiler-defined std::target predicate; null reports that the
-/// call was not one.
 fn (self: &var Checker) target_predicate_call(
     tree: &ast::Ast,
     call: ast::CallExpr
@@ -316,9 +290,6 @@ fn (self: &var Checker) target_predicate_call(
     return stdtarget::evaluate(self.target, predicate);
 }
 
-/// Answers the predicates that ask which declaration a type came from, the
-/// Go `declaredKindPredicate`; null reports that the form was not one of
-/// them.
 fn (self: &Checker) declared_kind_predicate(form: stdmeta::Form, subject: Name) -> ?bool {
     match form {
         IsStruct => return self.is_struct(subject),
@@ -329,8 +300,6 @@ fn (self: &Checker) declared_kind_predicate(form: stdmeta::Form, subject: Name) 
     }
 }
 
-/// Answers a `std::meta` predicate written as a compile-time condition, the
-/// Go `metaPredicateCall`; null reports that the call was not one.
 fn (self: &var Checker) meta_predicate_call(tree: &ast::Ast, call: ast::CallExpr) -> !?bool {
     let apply = type_apply_expr(tree, call.callee) orelse return null;
     let name = try self.qualified_name(tree, apply.callee) orelse return null;
@@ -374,23 +343,18 @@ fn (self: &var Checker) meta_predicate_call(tree: &ast::Ast, call: ast::CallExpr
     }
 }
 
-/// Reports whether a type spelling carries a cleanup contract, the Go
-/// `ast.OwnerType(c.deinitOwners, subject)`.
 fn (self: &Checker) owner_type(type_name: Name) -> bool {
     let retained = name_text(&self.names, type_name);
     let bytes = retained.as_bytes();
     return ast::owner_type(&self.deinit_owners, bytes);
 }
 
-/// Reports whether releasing a type names an allocator (ADR-0132).
 fn (self: &Checker) release_names_allocator(type_name: Name) -> bool {
     let retained = name_text(&self.names, type_name);
     let bytes = retained.as_bytes();
     return ast::release_names(&self.release_allocators, bytes);
 }
 
-/// Evaluates simple compile-time boolean expressions for ownership branch
-/// checks, the Go `comptimeBool`.
 fn (self: &var Checker) comptime_bool(tree: &ast::Ast, expression: ast::Expression) -> !?bool {
     match tree.expressions.at(expression.node) {
         Comptime(value) => return self.comptime_bool(tree, value.expr),
@@ -427,8 +391,6 @@ fn (self: &var Checker) comptime_bool(tree: &ast::Ast, expression: ast::Expressi
     }
 }
 
-/// Evaluates a compile-time logical operator, a type comparison, or an
-/// integer or float comparison, the Go `comptimeBinaryBool`.
 fn (self: &var Checker) comptime_binary_bool(tree: &ast::Ast, binary: ast::BinaryExpr) -> !?bool {
     let logical = text_equals(tree, binary.operator, "and") or
         text_equals(tree, binary.operator, "or");
@@ -452,8 +414,6 @@ fn (self: &var Checker) comptime_binary_bool(tree: &ast::Ast, binary: ast::Binar
     return stdmath::compare(operator, left_float, right_float);
 }
 
-/// Returns a type value from the minimal compile-time type subset, the Go
-/// `comptimeTypeValue`.
 fn (self: &var Checker) comptime_type_value(
     tree: &ast::Ast,
     expression: ast::Expression
@@ -478,8 +438,6 @@ fn (self: &var Checker) comptime_type_value(
     }
 }
 
-/// Evaluates equality on compile-time type values, the Go
-/// `compareComptimeTypes`.
 pub fn compare_comptime_types(
     tree: &ast::Ast,
     op: ast::Text,
@@ -495,8 +453,6 @@ pub fn compare_comptime_types(
     return null;
 }
 
-/// Evaluates constant boolean logical expressions, the Go
-/// `comptimeLogicalBool`.
 fn (self: &var Checker) comptime_logical_bool(tree: &ast::Ast, binary: ast::BinaryExpr) -> !?bool {
     let left = try self.comptime_bool(tree, binary.left) orelse return null;
     if text_equals(tree, binary.operator, "and") and !left {

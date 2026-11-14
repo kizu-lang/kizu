@@ -8,13 +8,6 @@ import std::fmt;
 import std::map;
 import std::string;
 
-// Port of the `<...>` type application checks of internal/ownership/
-// checker.go: the Array / Map / Box / Arena constructors and the std-only
-// container primitives behind them, and the generic wrapper instantiation
-// path (checkGenericUserTypeApply through checkGenericUserArg).
-
-/// Is the resolved callee and instantiated static arguments of a `<...>`
-/// call, the Go `typeApplyTarget` result.
 pub struct TypeApplyTarget {
     pub name: Name,
     pub type_arg: Name,
@@ -24,8 +17,6 @@ pub fn empty_type_apply_target() -> TypeApplyTarget {
     return TypeApplyTarget { name: empty_name(), type_arg: empty_name() };
 }
 
-/// Validates `std::array::new<T>(allocator)` ownership, the Go
-/// `checkArrayConstructor`.
 fn (self: &var Checker) check_array_constructor(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -58,8 +49,6 @@ fn (self: &var Checker) check_array_constructor(
     return null;
 }
 
-/// Validates std source Map wrapper construction, the Go
-/// `checkMapConstructorAllowTypeParams`.
 fn (self: &var Checker) check_map_constructor_allow_type_params(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -92,8 +81,6 @@ fn (self: &var Checker) check_map_constructor_allow_type_params(
     return null;
 }
 
-/// Rejects element types with unresolved ownership hazards, the Go
-/// `rejectArrayElementType`.
 fn (self: &var Checker) reject_array_element_type(tree: &ast::Ast, elem: Name) -> !?diagnostic::Diagnostic {
     var seen = map::new<[]u8, bool>(self.allocator);
     defer seen.deinit(self.allocator);
@@ -105,8 +92,6 @@ fn (self: &var Checker) reject_array_element_type(tree: &ast::Ast, elem: Name) -
     return null;
 }
 
-/// Rejects values that are not Array-safe yet, the Go
-/// `rejectArrayStorageType`.
 fn (self: &var Checker) reject_array_storage_type(
     tree: &ast::Ast,
     type_name: Name,
@@ -119,9 +104,6 @@ fn (self: &var Checker) reject_array_storage_type(
     if self.names.is_raw_pointer(type_name) {
         return try self.error0(ast::zero_span(), "array error: Array element cannot be raw pointer");
     }
-    // An owner inside `E!T` is released only by the capture that opens it,
-    // and a container's element cleanup has no `if` to open one with; the
-    // optional form is refused before this by the type checker.
     if try self.wrapped_payload_elem(type_name) |wrapped| {
         if wrapped.error_union and try self.value_type_needs_consume(self.allocator, wrapped.elem) {
             return try self.error0(
@@ -142,8 +124,6 @@ fn (self: &var Checker) reject_array_storage_type(
     return self.reject_array_storage_union(tree, type_name, seen);
 }
 
-/// Checks struct fields recursively for Array storage, the Go
-/// `rejectArrayStorageStruct`.
 fn (self: &var Checker) reject_array_storage_struct(
     tree: &ast::Ast,
     type_name: Name,
@@ -163,8 +143,6 @@ fn (self: &var Checker) reject_array_storage_struct(
     return null;
 }
 
-/// Checks union payloads recursively for Array storage, the Go
-/// `rejectArrayStorageUnion`.
 fn (self: &var Checker) reject_array_storage_union(
     tree: &ast::Ast,
     type_name: Name,
@@ -187,9 +165,6 @@ fn (self: &var Checker) reject_array_storage_union(
     return null;
 }
 
-/// Resolves the callee and static arguments of a `<...>` call, and refuses
-/// an unknown primitive before any of them is looked at, the Go
-/// `typeApplyTarget`.
 fn (self: &var Checker) type_apply_target(
     tree: &ast::Ast,
     apply: ast::TypeApplyExpr,
@@ -218,8 +193,6 @@ fn (self: &var Checker) type_apply_target(
     );
 }
 
-/// Validates typed std constructor ownership effects, the Go
-/// `checkTypeApplyCallExpr`.
 fn (self: &var Checker) check_type_apply_call_expr(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -288,10 +261,6 @@ fn (self: &var Checker) check_type_apply_call_expr(
     );
 }
 
-/// Walks the arguments of `mem_allocator_from`. The state is borrowed for as
-/// long as the allocator lives, which the tied-allocator recognizer enforces
-/// from the wrapper's signature; the two functions own nothing, because the
-/// code they name outlives the program.
 fn (self: &var Checker) check_allocator_from(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -310,9 +279,6 @@ fn (self: &var Checker) check_allocator_from(
     return null;
 }
 
-/// Walks the arguments of `task_new`. The state is borrowed for as long as the
-/// task runs, which the Future's own shape enforces: the Future is tied to
-/// what it was lent, and the only ways to release it finish the task first.
 fn (self: &var Checker) check_task_new(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -331,8 +297,6 @@ fn (self: &var Checker) check_task_new(
     return null;
 }
 
-/// Moves the state argument of task_set_spawn; every other argument is read.
-/// Lowering releases that state if the runtime cannot allocate the task.
 fn (self: &var Checker) check_task_set_spawn(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -357,9 +321,6 @@ fn (self: &var Checker) check_task_set_spawn(
     return null;
 }
 
-/// Reads every argument of a pool round. The slice stays lent for the call,
-/// which is all it is lent for: the runtime has joined every chunk or lane
-/// before the call returns.
 fn (self: &var Checker) check_thread_pool_round(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -375,7 +336,6 @@ fn (self: &var Checker) check_thread_pool_round(
         }
         index = index + 1;
     }
-    // The round returns `E!void`, E the last of its `<T, E>` or `<T, S, E>`.
     let parts = try self.names.split_generic_args(type_arg) orelse
         return try self.error0(ast::zero_span(),
         "move error: a pool round expects an element type, an optional state type and an error set");
@@ -389,8 +349,6 @@ fn (self: &var Checker) check_thread_pool_round(
     return null;
 }
 
-/// Validates std::arena::new<T>(allocator) ownership, the Go
-/// `checkArenaTypeApply`.
 fn (self: &var Checker) check_arena_type_apply(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -426,8 +384,6 @@ fn (self: &var Checker) check_arena_type_apply(
     return null;
 }
 
-/// Validates std-only generic container primitives, the Go
-/// `checkBuiltinContainerTypeApply`.
 fn (self: &var Checker) check_builtin_container_type_apply(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -455,11 +411,6 @@ fn (self: &var Checker) check_builtin_container_type_apply(
     return self.check_builtin_testing_type_apply(tree, env, name, type_arg, args, handled, out);
 }
 
-/// Validates the Arena constructor and the storage primitives std::arena's
-/// methods forward to, the Go `checkBuiltinArenaTypeApply`. Handle provenance
-/// is not asked here: only std::arena's own bodies reach a primitive, and the
-/// handle they pass on is the one the call site already had checked against
-/// the arena it names.
 fn (self: &var Checker) check_builtin_arena_type_apply(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -479,8 +430,6 @@ fn (self: &var Checker) check_builtin_arena_type_apply(
         return move failed;
     }
     if self.names.is(method, "deinit") {
-        // The raw primitive frees the storage through the allocator the
-        // release names: the header keeps none of its own (ADR-0131).
         let label = try self.names.intern("Arena.deinit");
         if try self.read_release_allocator(tree, env, label, null, args, 1) |failed| {
             return move failed;
@@ -524,8 +473,6 @@ fn (self: &var Checker) check_builtin_arena_type_apply(
     );
 }
 
-/// Reads the allocator the storage is bought from and the element handed over
-/// to the arena, the Go `readArenaPrimitiveAdd`.
 fn (self: &var Checker) read_arena_primitive_add(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -561,8 +508,6 @@ fn (self: &var Checker) read_arena_primitive_add(
     return null;
 }
 
-/// Reads the one handle argument an arena accessor takes, the Go
-/// `readArenaPrimitiveHandle`. what names the accessor in errors.
 fn (self: &var Checker) read_arena_primitive_handle(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -593,8 +538,6 @@ fn (self: &var Checker) read_arena_primitive_handle(
     return null;
 }
 
-/// Validates typed std::testing primitives, the Go
-/// `checkBuiltinTestingTypeApply`.
 fn (self: &var Checker) check_builtin_testing_type_apply(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -612,8 +555,6 @@ fn (self: &var Checker) check_builtin_testing_type_apply(
     return self.check_builtin_test_fail_equal(tree, env, type_arg, args, out);
 }
 
-/// Validates ownership for the typed testing failure primitive, the Go
-/// `checkBuiltinTestFailEqual`.
 fn (self: &var Checker) check_builtin_test_fail_equal(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -646,8 +587,6 @@ fn (self: &var Checker) check_builtin_test_fail_equal(
     return null;
 }
 
-/// Validates std-only generic Array primitives, the Go
-/// `checkBuiltinArrayTypeApply`.
 fn (self: &var Checker) check_builtin_array_type_apply(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -668,8 +607,6 @@ fn (self: &var Checker) check_builtin_array_type_apply(
     return null;
 }
 
-/// Names the Array method primitives the Go `checkBuiltinArrayTypeApply`
-/// switch routes to `checkBuiltinArrayMethod`.
 fn (self: &Checker) is_builtin_array_primitive(name: Name) -> bool {
     return self.names.is(name, "std::internal::builtin::array_append") or
         self.names.is(name, "std::internal::builtin::array_append_bytes") or
@@ -688,8 +625,6 @@ fn (self: &Checker) is_builtin_array_primitive(name: Name) -> bool {
         self.names.is(name, "std::internal::builtin::array_deinit");
 }
 
-/// Validates std-only generic Box primitives, the Go
-/// `checkBuiltinBoxTypeApply`.
 fn (self: &var Checker) check_builtin_box_type_apply(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -713,8 +648,6 @@ fn (self: &var Checker) check_builtin_box_type_apply(
     return null;
 }
 
-/// Validates std::mem::box<T>(allocator, value) ownership, the Go
-/// `checkBoxConstructor`.
 fn (self: &var Checker) check_box_constructor(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -753,7 +686,6 @@ fn (self: &var Checker) check_box_constructor(
     return null;
 }
 
-/// Validates std-only Box method primitives, the Go `checkBuiltinBoxMethod`.
 fn (self: &var Checker) check_builtin_box_method(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -769,8 +701,6 @@ fn (self: &var Checker) check_builtin_box_method(
     if try self.check_builtin_receiver_method(tree, env, name, receiver, args) |failed| {
         return move failed;
     }
-    // A release names the allocator the cell came from; a read of the
-    // payload needs nothing beyond the receiver (ADR-0132).
     if self.names.is(method, "deinit") or self.names.is(method, "take") {
         let release_label = try self.names.format(
             "Box.%s", method, empty_name(), empty_name());
@@ -806,8 +736,6 @@ fn (self: &var Checker) check_builtin_box_method(
     return try self.error1(tree, ast::zero_span(), "box error: Box has no method `%s`", Arg::Str(method));
 }
 
-/// Validates std-only Array method primitives, the Go
-/// `checkBuiltinArrayMethod`.
 fn (self: &var Checker) check_builtin_array_method(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -827,9 +755,6 @@ fn (self: &var Checker) check_builtin_array_method(
     return self.check_array_primitive_call(tree, env, type_arg, method, rest, out);
 }
 
-/// Validates a trusted primitive receiver argument, the Go
-/// `checkBuiltinReceiverMethod`. The Go `checkRest` closure is the caller's
-/// own check over `rest_args(tree, args, 1)` once this returns null.
 fn (self: &var Checker) check_builtin_receiver_method(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -854,8 +779,6 @@ fn (self: &var Checker) check_builtin_receiver_method(
     return null;
 }
 
-/// Copies `args[from..]` into a list of its own, the slice the Go
-/// `checkRest` closures receive after the receiver argument.
 fn (self: &Checker) rest_args(
     tree: &var ast::Ast,
     args: ast::ExpressionList,
@@ -871,8 +794,6 @@ fn (self: &Checker) rest_args(
     return tree.add_expression_list(move values);
 }
 
-/// Validates Array primitives that back source wrappers, the Go
-/// `checkArrayPrimitiveMethod`.
 fn (self: &var Checker) check_array_primitive_call(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -903,8 +824,6 @@ fn (self: &var Checker) check_array_primitive_call(
         return self.check_array_primitive_shrink(tree, env, method, args, out);
     }
     if self.names.is(method, "deinit") {
-        // The raw primitive frees the buffer through the allocator the
-        // release names: the header keeps none of its own (ADR-0132).
         let release_label = try self.names.intern("Array.deinit");
         if try self.read_release_allocator(tree, env, release_label, null, args, 0) |failed| {
             return move failed;
@@ -919,8 +838,6 @@ fn (self: &var Checker) check_array_primitive_call(
     return self.check_std_method_call(tree, env, array, base, method, args, out);
 }
 
-/// Validates the raw copy-only element reads used by their std wrappers, the
-/// Go `checkArrayPrimitiveGet`.
 fn (self: &var Checker) check_array_primitive_get(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -961,8 +878,6 @@ fn (self: &var Checker) check_array_primitive_get(
     return null;
 }
 
-/// Validates the raw storage operations used only by the owner-aware std
-/// wrappers, the Go `checkArrayPrimitiveShrink`.
 fn (self: &var Checker) check_array_primitive_shrink(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -990,8 +905,6 @@ fn (self: &var Checker) check_array_primitive_shrink(
     return null;
 }
 
-/// Validates the std-only Map runtime primitive, the Go
-/// `checkBuiltinMapTypeApply`.
 fn (self: &var Checker) check_builtin_map_type_apply(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -1012,7 +925,6 @@ fn (self: &var Checker) check_builtin_map_type_apply(
     return self.check_map_constructor_allow_type_params(tree, env, type_arg, args, out);
 }
 
-/// Validates std-only Map method primitives, the Go `checkBuiltinMapMethod`.
 fn (self: &var Checker) check_builtin_map_method(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -1041,8 +953,6 @@ fn (self: &var Checker) check_builtin_map_method(
     return self.check_map_primitive_method(tree, env, map_value, key_type, value_type, method, rest, out);
 }
 
-/// Validates Map primitives that back source wrappers, the Go
-/// `checkMapPrimitiveMethod`.
 fn (self: &var Checker) check_map_primitive_method(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -1053,9 +963,6 @@ fn (self: &var Checker) check_map_primitive_method(
     args: ast::ExpressionList,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
-    // at/at_mut come first: only the std wrapper body reaches the primitive,
-    // and routing a concrete instantiation to the std call would hit the
-    // user-facing capture-only refusal.
     if self.names.is(method, "at") {
         if try self.check_map_primitive_key_arg(tree, env, method, key_type, args) |failed| {
             return move failed;
@@ -1071,8 +978,6 @@ fn (self: &var Checker) check_map_primitive_method(
         return null;
     }
     if self.names.is(method, "take_value_at") {
-        // Reserved to Map.deinit's cascade, so it is answered here and never
-        // reaches the std call: a caller outside std spells no name for it.
         if try self.check_map_index_arg(tree, env, method, args) |failed| {
             return move failed;
         }
@@ -1083,8 +988,6 @@ fn (self: &var Checker) check_map_primitive_method(
     return self.check_std_method_call(tree, env, map_value, base, method, args, out);
 }
 
-/// Validates a generic Map wrapper key argument, the Go
-/// `checkMapPrimitiveKeyArg`.
 fn (self: &var Checker) check_map_primitive_key_arg(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -1113,8 +1016,6 @@ fn (self: &var Checker) check_map_primitive_key_arg(
     return null;
 }
 
-/// Validates Map arguments inside std generic wrappers, the Go
-/// `checkedMapArgsAllowTypeParams`.
 fn (self: &var Checker) checked_map_args_allow_type_params(
     tree: &ast::Ast,
     arg: Name,
@@ -1136,8 +1037,6 @@ fn (self: &var Checker) checked_map_args_allow_type_params(
     return self.checked_map_args(tree, arg, out);
 }
 
-/// Validates ownership for source std generic wrappers, the Go
-/// `checkGenericUserTypeApply`.
 fn (self: &var Checker) check_generic_user_type_apply(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -1169,9 +1068,6 @@ fn (self: &var Checker) check_generic_user_type_apply(
         subst.deinit(self.allocator);
         return move failed;
     }
-    // The call site sees the instantiated signature and nothing else: with
-    // `T` spelled out, an owner argument moves, a view lends or is refused,
-    // and two borrows of one value collide, exactly as for a direct call.
     let values = try self.generic_call_values(function, type_arg);
     defer values.deinit(self.allocator);
     let instantiated = try self.instantiate_function_info(function, &subst, &values);
@@ -1191,12 +1087,6 @@ fn (self: &var Checker) check_generic_user_type_apply(
     return null;
 }
 
-/// Is the signature one generic call sees, the Go `instantiateFunctionInfo`:
-/// the declaration's, with every type parameter replaced by the static
-/// argument the call spelled, and every array length read from a static value
-/// bound to the value the call gave. Only the ownership-facing parts are
-/// substituted; the body and static parameter list stay the declaration's.
-/// The copy joins the function arena, which releases it with the checker.
 fn (self: &var Checker) instantiate_function_info(
     function: FunctionHandle,
     subst: &Subst,
@@ -1242,10 +1132,6 @@ fn (self: &var Checker) instantiate_function_info(
     return FunctionHandle { index: try self.functions.add(self.allocator, move info) };
 }
 
-/// Reports whether a declaration takes a compile-time value in `<...>`, the
-/// Go `FunctionSignature.HasValueStaticParam`. Such a body means something
-/// only once the value is bound -- a `Function` names the callee, an integer
-/// or bool can decide a `comptime if` -- so it is checked per instantiation.
 fn (self: &Checker) has_value_static_param(function: FunctionHandle) -> bool {
     var index = 0;
     while self.static_param_at(function, index) |param| {
@@ -1257,12 +1143,6 @@ fn (self: &Checker) has_value_static_param(function: FunctionHandle) -> bool {
     return false;
 }
 
-/// Reads the integer and bool static arguments of one call, the Go
-/// `genericCallValues`, each through the bindings in force where the call is
-/// written, so a capture or a forwarded static parameter arrives as the value
-/// it stands for. The answer runs parallel to the static parameters, with an
-/// empty name wherever a parameter is not such a value; it is empty when the
-/// arguments do not split to the parameter count.
 fn (self: &var Checker) generic_call_values(
     function: FunctionHandle,
     type_arg: Name
@@ -1297,8 +1177,6 @@ fn (self: &var Checker) generic_call_values(
     return move values;
 }
 
-/// Is generic_call_values for a declaration that takes a compile-time value,
-/// and no values for one that takes only types, which has none to read.
 fn (self: &var Checker) instance_values(function: FunctionHandle, type_arg: Name) -> !array::Array<Name> {
     if !self.has_value_static_param(function) {
         return array::new<Name>(self.allocator);
@@ -1306,10 +1184,6 @@ fn (self: &var Checker) instance_values(function: FunctionHandle, type_arg: Name
     return self.generic_call_values(function, type_arg);
 }
 
-/// Replaces a parenthesized static expression with the decimal text of its
-/// value, the Go `staticexpr.Eval(arg, c.comptimeInt)`. The type checker has
-/// already refused an expression that does not evaluate, so a failure here
-/// leaves the text as written.
 fn (self: &var Checker) evaluate_static_expr(arg: Name) -> !Name {
     let retained = name_text(&self.names, arg);
     let arg_bytes = retained.as_bytes();
@@ -1333,9 +1207,6 @@ fn (self: &var Checker) evaluate_static_expr(arg: Name) -> !Name {
     }
 }
 
-/// Binds the integers the comptime-readable names stand for, the Go
-/// `c.comptimeInt`. The innermost binding of a name is the one in force, so
-/// the walk from the current binding outward binds it first.
 fn (self: &Checker) comptime_env() -> !staticexpr::Env {
     var env = staticexpr::new_env(self.allocator);
     errdefer env.deinit(self.allocator);
@@ -1355,9 +1226,6 @@ fn (self: &Checker) comptime_env() -> !staticexpr::Env {
     return move env;
 }
 
-/// Binds the integers one call gives the static value parameters of function;
-/// values runs parallel to the static parameters, as generic_call_values
-/// answers it.
 fn (self: &Checker) values_env(function: FunctionHandle, values: &array::Array<Name>) -> !staticexpr::Env {
     var env = staticexpr::new_env(self.allocator);
     errdefer env.deinit(self.allocator);
@@ -1376,8 +1244,6 @@ fn (self: &Checker) values_env(function: FunctionHandle, values: &array::Array<N
     return move env;
 }
 
-/// Evaluates the array lengths a type reads from the comptime-readable
-/// integers, the Go `bindOwnershipLengths(name, c.comptimeValues)`.
 fn (self: &var Checker) bind_comptime_lengths(type_name: Name) -> !Name {
     if self.comptime_values.current |_| {} else {
         return type_name;
@@ -1390,8 +1256,6 @@ fn (self: &var Checker) bind_comptime_lengths(type_name: Name) -> !Name {
     return self.bind_ownership_lengths(type_name, &env);
 }
 
-/// Evaluates the array lengths a type reads from the integers one call gives
-/// the static value parameters of function.
 fn (self: &var Checker) bind_value_lengths(
     type_name: Name,
     function: FunctionHandle,
@@ -1411,8 +1275,6 @@ fn (self: &Checker) has_static_length(type_name: Name) -> bool {
     return typ::has_static_length(bytes);
 }
 
-/// Evaluates the array lengths a type reads from the integers env binds, the
-/// Go `bindOwnershipLengths`.
 fn (self: &var Checker) bind_ownership_lengths(type_name: Name, env: &staticexpr::Env) -> !Name {
     let retained = name_text(&self.names, type_name);
     let bytes = retained.as_bytes();
@@ -1420,10 +1282,6 @@ fn (self: &var Checker) bind_ownership_lengths(type_name: Name, env: &staticexpr
     return self.names.intern_owned(move bound);
 }
 
-/// Replaces the comptime-readable names with the values an instance binds and
-/// answers the handle that puts back the ones in force. It replaces rather
-/// than adds: an instance body is its own function, and the captures and
-/// static values of the body that called it are not in scope.
 fn (self: &var Checker) enter_comptime_values(
     function: FunctionHandle,
     values: &array::Array<Name>
@@ -1444,8 +1302,6 @@ fn (self: &var Checker) enter_comptime_values(
     return previous;
 }
 
-/// Binds the `Function` static arguments of one call under their parameter
-/// names, and answers the handle that unbinds them.
 fn (self: &var Checker) bind_generic_call_functions(
     function: FunctionHandle,
     type_arg: Name
@@ -1472,9 +1328,6 @@ fn (self: &var Checker) bind_generic_call_functions(
     return previous;
 }
 
-/// Binds one `Function` argument, reading the argument through the bindings
-/// already in force so a generic that forwards its own parameter names the
-/// function the outer call named.
 fn (self: &var Checker) bind_one_function(name: Name, argument: Name) -> !void {
     let retained_name = name_text(&self.names, name);
     let name_bytes = retained_name.as_bytes();
@@ -1492,22 +1345,16 @@ fn (self: &var Checker) bind_one_function(name: Name, argument: Name) -> !void {
     return;
 }
 
-/// Counts the static parameters of a collected function, the Go
-/// `len(fn.sig.StaticParams)`.
 fn (self: &Checker) static_param_count(function: FunctionHandle) -> i64 {
     let info = self.functions.at(function.index);
     return info.static_params.len();
 }
 
-/// Counts the runtime parameters of a collected function, the Go
-/// `len(fn.params)`.
 fn (self: &Checker) param_count(function: FunctionHandle) -> i64 {
     let info = self.functions.at(function.index);
     return info.params.len();
 }
 
-/// Resolves a generic call's static arguments into the type-parameter
-/// substitution the ownership check applies, the Go `genericCallSubst`.
 fn (self: &var Checker) generic_call_subst(
     tree: &ast::Ast,
     name: Name,
@@ -1522,8 +1369,6 @@ fn (self: &var Checker) generic_call_subst(
     if static_args.len() != static_count {
         return try self.static_args_count_error(tree, name, static_count);
     }
-    // Only the entries that declare types take part in substitution; a
-    // compile-time value carries no ownership.
     var type_args = array::new<Name>(self.allocator);
     defer type_args.deinit(self.allocator);
     var index = 0;
@@ -1549,7 +1394,6 @@ fn (self: &var Checker) generic_call_subst(
     return null;
 }
 
-/// Builds the static argument count refusal of the Go `genericCallSubst`.
 fn (self: &Checker) static_args_count_error(
     tree: &ast::Ast,
     name: Name,
@@ -1561,9 +1405,6 @@ fn (self: &Checker) static_args_count_error(
     );
 }
 
-/// Records one `param -> replacement` pair of a substitution, the Go
-/// `subst[param] = typeArgs[idx]`, as both the handle map and the owned
-/// texts the type parser substitutes with.
 fn (self: &Checker) bind_subst_param(out: &var Subst, param: Name, replacement: Name) -> !void {
     let retained = name_text(&self.names, param);
     let bytes = retained.as_bytes();
@@ -1577,14 +1418,6 @@ fn (self: &Checker) bind_subst_param(out: &var Subst, param: Name, replacement: 
     return;
 }
 
-/// Reads the `Field` static arguments of one call and makes them readable by
-/// the forms written against them, the Go `genericCallFields` and
-/// `bindMetaFields`. A field token instantiates like a type argument, not like
-/// the other compile-time values: the body reads it through the `std::meta`
-/// forms written against it, so each bound field is its own instance. The
-/// result is the binding to restore once the instantiation has been checked.
-/// A resolved list (ast::TypeApplyExpr) names a field of its owner, never a
-/// capture.
 fn (self: &var Checker) bind_generic_call_fields(
     tree: &ast::Ast,
     function: FunctionHandle,
@@ -1598,8 +1431,6 @@ fn (self: &var Checker) bind_generic_call_fields(
     if static_args.len() != static_count {
         return previous;
     }
-    // The fields are collected first and bound after, as the Go map is, so a
-    // later argument's lookup does not see an earlier parameter's binding.
     var names = array::new<Name>(self.allocator);
     defer names.deinit(self.allocator);
     var fields = array::new<MetaField>(self.allocator);
@@ -1646,15 +1477,12 @@ fn (self: &var Checker) bind_generic_call_fields(
     return previous;
 }
 
-/// Reads the capture bound to a name, the Go `c.metaFields[name]`.
 fn (self: &Checker) bound_meta_field(name: Name) -> ?MetaField {
     let retained = name_text(&self.names, name);
     let bytes = retained.as_bytes();
     return self.meta_fields.get(bytes);
 }
 
-/// Binds one `Field` argument under its parameter name, the Go
-/// `c.metaFields[name] = field` of `bindMetaFields`.
 fn (self: &var Checker) bind_generic_field(name: Name, field: MetaField) -> !void {
     let retained = name_text(&self.names, name);
     let bytes = retained.as_bytes();
@@ -1662,9 +1490,6 @@ fn (self: &var Checker) bind_generic_field(name: Name, field: MetaField) -> !voi
     return;
 }
 
-/// Checks a generic function body for one static type set, the Go
-/// `checkGenericInstantiation`. The substitution becomes the active one for
-/// the body, so the parameters are defined once it is entered.
 fn (self: &var Checker) check_generic_instantiation(
     tree: &var ast::Ast,
     function: FunctionHandle,
@@ -1705,16 +1530,10 @@ fn (self: &var Checker) check_generic_instantiation(
     return null;
 }
 
-/// Bounds how deep generic instantiation may nest, the Go
-/// `maxInstantiationDepth`, for the reason the type checker's bound of the
-/// same name gives (#1627). The two checkers walk the same instantiations,
-/// so they carry the same bound.
 fn max_instantiation_depth() -> i64 {
     return 64;
 }
 
-/// Records one instantiation and reports whether it has already been
-/// checked, the Go `enterInstantiation`.
 fn (self: &var Checker) enter_instantiation(
     tree: &ast::Ast,
     function: FunctionHandle,
@@ -1743,8 +1562,6 @@ fn (self: &var Checker) enter_instantiation(
         }
     }
     try key.append_bytes(self.allocator, ">");
-    // Each integer or bool value is its own instance: the body can fold a
-    // `comptime if` differently for each.
     index = 0;
     while values.get(index) |value| {
         index = index + 1;
@@ -1753,8 +1570,6 @@ fn (self: &var Checker) enter_instantiation(
             try self.names.append_to(&var key, value);
         }
     }
-    // A `Field` or a `Function` argument is its own instance too: the body
-    // reads the type of the field, or calls the function, it was bound to.
     index = 0;
     while self.static_param_at(function, index) |param| {
         index = index + 1;
@@ -1796,8 +1611,6 @@ fn (self: &var Checker) enter_instantiation(
     return null;
 }
 
-/// Validates std wrapper-specific static ownership contracts, the Go
-/// `checkGenericWrapperTypeArgs`.
 fn (self: &var Checker) check_generic_wrapper_type_args(
     tree: &ast::Ast,
     name: Name,
@@ -1836,11 +1649,6 @@ fn (self: &var Checker) check_generic_wrapper_type_args(
     return null;
 }
 
-/// Refuses an element or state a pool round would hand to another thread
-/// with something still shared, the Go `checkThreadRoundTypeArg`. Every chunk
-/// and every state goes to one thread; an Io or Allocator copied into two of
-/// them would be one capability used from two threads at once, and a view
-/// would reach past the chunk or state it came in.
 fn (self: &var Checker) check_thread_round_type_arg(
     tree: &ast::Ast,
     name: Name,
@@ -1858,8 +1666,6 @@ fn (self: &var Checker) check_thread_round_type_arg(
     return null;
 }
 
-/// Names the comma-joined spelling of a static argument list, the Go
-/// `strings.Join(typeArgs, ", ")`.
 fn (self: &var Checker) join_type_args(type_args: &array::Array<Name>) -> !Name {
     var out = string::new(self.allocator);
     errdefer out.deinit(self.allocator);
