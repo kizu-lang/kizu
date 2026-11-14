@@ -8,22 +8,14 @@ import std::map;
 import std::mem;
 import std::string;
 
-// Mechanical port of internal/ast's declaration, statement, and expression
-// representation. Ast owns every node for one parsed program; Declaration,
-// Expression, and Statement are copy handles whose types keep the three closed
-// node categories distinct.
-
-/// Identifies immutable text retained by an Ast.
 pub struct Text {
     pub node: arena::Handle<string::String>,
 }
 
-/// Identifies one immutable expression list retained by an Ast.
 pub struct ExpressionList {
     pub node: arena::Handle<array::Array<Expression>>,
 }
 
-/// Owns the syntax and parsed type graphs for one compiler phase.
 pub struct Ast {
     allocator: Allocator,
     pub types: typ::Table,
@@ -32,63 +24,44 @@ pub struct Ast {
     pub declarations: arena::Arena<DeclarationNode>,
     pub expressions: arena::Arena<ExpressionNode>,
     pub statements: arena::Arena<StatementNode>,
-    /// Where the parser read each statement and declaration, kept once here
-    /// so a handle carries 8 bytes for it rather than the span itself.
     pub spans: arena::Arena<Span>,
-    /// How many blocks add_block has retained: the next block's `id`.
     block_count: i64,
 }
 
-/// Is the root of one parsed Kizu source file.
 pub struct Program {
     pub declarations: array::Array<Declaration>,
-    /// The module paths the declarations came from, each before the modules
-    /// that import it, the Go `Modules`: the order a native build compiles
-    /// them in, one unit each.
     pub modules: array::Array<Text>,
 }
 
-/// Identifies one declaration retained by an Ast, and where the parser read
-/// it from its first token to its last (null for one the compiler made), the
-/// Go `DeclSpan`. `Ast.declaration_span` reads it.
 pub struct Declaration {
     pub node: arena::Handle<DeclarationNode>,
     pub span: ?arena::Handle<Span>,
 }
 
-/// Identifies one expression retained by an Ast.
 pub struct Expression {
     pub node: arena::Handle<ExpressionNode>,
 }
 
-/// Identifies one statement retained by an Ast, and where the parser read it
-/// from its first token to its last (null for one the compiler made), the Go
-/// `StmtSpan`: a diagnostic raised inside the statement can point at it when
-/// nothing finer is known. `Ast.statement_span` reads it.
 pub struct Statement {
     pub node: arena::Handle<StatementNode>,
     pub span: ?arena::Handle<Span>,
 }
 
-/// Identifies one block retained by an Ast.
 pub struct Block {
     pub node: arena::Handle<StatementNode>,
 }
 
-/// Identifies a one-based source position.
 pub struct Position {
     pub line: i64,
     pub column: i64,
 }
 
-/// Identifies a half-open source range.
 pub struct Span {
     pub source: ?source::SourceId,
     pub start: Position,
     pub end: Position,
 }
 
-/// Is one node that may appear as a top-level declaration.
 pub union DeclarationNode {
     Import(ImportDecl),
     Function(FunctionDecl),
@@ -102,75 +75,50 @@ pub union DeclarationNode {
     Recovered(RecoveredNode),
 }
 
-/// Stands in for a node the parser could not finish. The parse that produced
-/// one also produced a diagnostic, and nothing consumes a program that has
-/// diagnostics, so the node carries only the span where parsing gave up.
 pub struct RecoveredNode {
     pub span: Span,
 }
 
-/// Represents one explicit top-level module import.
 pub struct ImportDecl {
     pub path: array::Array<Text>,
 }
 
-/// Is the declaration information visible to a function caller.
 pub struct FunctionSignature {
     pub receiver: bool,
     pub name: Text,
     pub static_params: array::Array<StaticParam>,
     pub params: array::Array<Param>,
-    /// variadic reports a parameter list that ends in `...`: a C variadic
-    /// function, which takes further arguments after params. Only an
-    /// `extern "c" fn` declaration can say so.
     pub variadic: bool,
     pub return_type: ?typ::Type,
     pub requires_unsafe: bool,
     pub extern_abi: Text,
     pub export_abi: Text,
-    /// link_library and link_framework name what the native linker is
-    /// handed to resolve an `extern "c"` symbol: `@link_library("m")` becomes
-    /// `-lm` and `@link_framework("Accelerate")` becomes
-    /// `-framework Accelerate`. Where the linker looks for them is the
-    /// manifest's business (SPEC §12.2).
     pub link_library: Text,
     pub link_framework: Text,
     pub public: bool,
     pub std: bool,
-    /// span points at the declaration name, so a diagnostic about the
-    /// signature can say where it was written.
     pub span: Span,
 }
 
-/// Represents a function declaration and its optional body.
 pub struct FunctionDecl {
     pub signature: FunctionSignature,
     pub doc: Text,
     pub derived: bool,
     pub body: ?Block,
-    /// The module path the function was declared in, empty for a loose file,
-    /// the Go `Module`. A native debug build compiles each module as a unit
-    /// of its own, and this is what files the function under one.
     pub module: Text,
 }
 
-/// Is one entry of a static argument declaration list.
 pub struct StaticParam {
     pub name: Text,
     pub type_name: ?typ::Type,
 }
 
-/// Represents a top-level test block.
 pub struct TestDecl {
     pub name: Text,
     pub body: ?Block,
-    /// The package module the block was written in, empty for a loose file. A
-    /// test body resolves the module's own names the way a function in it
-    /// does, and a synthetic name with no module cannot.
     pub module: Text,
 }
 
-/// Represents a top-level struct declaration.
 pub struct StructDecl {
     pub name: Text,
     pub doc: Text,
@@ -179,16 +127,10 @@ pub struct StructDecl {
     pub public: bool,
     pub span: Span,
     pub requires_unsafe: bool,
-    /// extern_abi names the foreign ABI whose layout the struct promises,
-    /// spelled `extern "c" struct`. Its fields are what that ABI can name and
-    /// are public: the foreign side already decides them (SPEC §12.2).
     pub extern_abi: Text,
-    /// The module path the struct was declared in, which its derived cleanup
-    /// is filed under.
     pub module: Text,
 }
 
-/// Represents a top-level tag enum declaration.
 pub struct EnumDecl {
     pub name: Text,
     pub doc: Text,
@@ -197,9 +139,6 @@ pub struct EnumDecl {
     pub public: bool,
 }
 
-/// Represents a top-level error set declaration. The `error C = A or B;`
-/// form lists the declared sets it combines and declares no members of its
-/// own; the `{ }` form leaves combines empty (ADR-0127).
 pub struct ErrorSetDecl {
     pub name: Text,
     pub doc: Text,
@@ -209,42 +148,33 @@ pub struct ErrorSetDecl {
     pub combines: array::Array<Text>,
 }
 
-/// Represents a top-level tagged union declaration.
 pub struct UnionDecl {
     pub name: Text,
     pub doc: Text,
     pub type_params: array::Array<Text>,
     pub variants: array::Array<UnionVariant>,
     pub public: bool,
-    /// The module path the union was declared in, which its derived cleanup
-    /// is filed under.
     pub module: Text,
 }
 
-/// Represents one tagged union variant.
 pub struct UnionVariant {
     pub name: Text,
     pub doc: Text,
     pub payload: ?typ::Type,
-    /// Runs from the name to the end of the payload, the Go `Span`, for a
-    /// diagnostic about this one variant.
     pub span: Span,
 }
 
-/// Represents required method signatures.
 pub struct ContractDecl {
     pub name: Text,
     pub methods: array::Array<FunctionDecl>,
     pub public: bool,
 }
 
-/// Asserts that one concrete type satisfies one contract.
 pub struct ImplDecl {
     pub contract_name: Text,
     pub type_name: Text,
 }
 
-/// Represents a named struct field.
 pub struct Field {
     pub name: Text,
     pub doc: Text,
@@ -252,37 +182,28 @@ pub struct Field {
     pub borrow: bool,
     pub mut_borrow: bool,
     pub public: bool,
-    /// Runs from the name to the end of the type, the Go `Span`.
     pub span: Span,
 }
 
-/// Represents one function parameter.
 pub struct Param {
     pub name: Text,
     pub type_name: typ::Type,
     pub borrow: bool,
     pub mut_borrow: bool,
-    /// Runs from the name to the end of the type, the Go `Span`.
     pub span: Span,
 }
 
-/// Is one enum tag or union variant exposed to compile-time reflection.
 pub struct MetaVariant {
     pub name: Text,
     pub has_payload: bool,
-    /// The error set that declares a member of an error set, empty for an
-    /// enum tag or a union variant. A member keeps the set that declared it
-    /// (SPEC §11.2), so the arm names that set the way a written arm would.
     pub origin: Text,
 }
 
-/// Is one public field filled by a compile-time construct expansion.
 pub struct ConstructField {
     pub name: []u8,
     pub type_name: []u8,
 }
 
-/// Owns the generated statement list and its retained result expression.
 pub struct ConstructResult {
     pub statements: array::Array<Statement>,
     pub literal: Expression,
@@ -294,19 +215,14 @@ struct ConstructBuilt {
     field: FieldValue,
 }
 
-// DerivedNames retains the closed vocabulary shared by one generated deinit.
 struct DerivedNames {
     receiver: Text,
     capture: Text,
-    // The error member the `else |err|` of an `E!T` field's open binds. The
-    // body has nothing to do with it: the field held no value.
     err: Text,
     cleanup: Text,
     allocator: Text,
     empty: Text,
     empty_args: ExpressionList,
-    // The one argument every derived release carries: the allocator the body
-    // was handed, which is what made the fields it consumes (ADR-0132).
     allocator_args: ExpressionList,
 }
 
@@ -317,7 +233,6 @@ enum DerivedMemberKind {
     ErrorUnionOwner,
 }
 
-/// Is one node that may appear as a statement.
 pub union StatementNode {
     Block(BlockStmt),
     Let(LetStmt),
@@ -338,7 +253,6 @@ pub union StatementNode {
     Recovered(RecoveredNode),
 }
 
-/// Is one node that may produce a value.
 pub union ExpressionNode {
     Ident(IdentExpr),
     Int(IntExpr),
@@ -370,19 +284,11 @@ pub union ExpressionNode {
     Recovered(RecoveredNode),
 }
 
-/// Represents a sequence of statements. `id` numbers the block among the
-/// ones its Ast holds, so a pass can key a map by block, which a handle
-/// cannot be; the Go side keys by the node pointer.
 pub struct BlockStmt {
     pub statements: array::Array<Statement>,
     pub id: i64,
 }
 
-/// Represents a let or var declaration. `type_name` is the type the binding
-/// declares, or null when the initializer alone says. A declared type is the
-/// initializer's context, the way a parameter type is an argument's: `null`
-/// and a bare literal take their type from it, and a plain value wraps into a
-/// declared `?T`.
 pub struct LetStmt {
     pub mutable: bool,
     pub name: Text,
@@ -390,30 +296,23 @@ pub struct LetStmt {
     pub value: Expression,
 }
 
-/// Represents assignment to an existing binding.
 pub struct AssignStmt {
     pub target: Expression,
     pub value: Expression,
 }
 
-/// Represents an explicit return statement.
 pub struct ReturnStmt {
     pub value: ?Expression,
 }
 
-/// Registers one cleanup expression for the current lexical block.
 pub struct DeferStmt {
     pub expr: Expression,
 }
 
-/// Registers a cleanup expression for an error-return path.
 pub struct ErrDeferStmt {
     pub expr: Expression,
 }
 
-/// Represents a conditional branch or conditional expression. err_capture
-/// names the error member an `else |err|` block binds when the condition is
-/// an error union; it is empty otherwise (SPEC §11.1).
 pub struct IfStmt {
     pub condition: Expression,
     pub consequence: Block,
@@ -422,7 +321,6 @@ pub struct IfStmt {
     pub err_capture: Text,
 }
 
-/// Represents a loop guarded by a condition expression.
 pub struct WhileStmt {
     pub label: Text,
     pub condition: Expression,
@@ -430,7 +328,6 @@ pub struct WhileStmt {
     pub capture: Text,
 }
 
-/// Represents a bounded integer range loop.
 pub struct ForStmt {
     pub label: Text,
     pub name: Text,
@@ -439,17 +336,14 @@ pub struct ForStmt {
     pub body: Block,
 }
 
-/// Exits the nearest loop or a named enclosing loop.
 pub struct BreakStmt {
     pub label: Text,
 }
 
-/// Skips to the next iteration of the nearest or named loop.
 pub struct ContinueStmt {
     pub label: Text,
 }
 
-/// Represents an enum or union tag match.
 pub struct MatchStmt {
     pub value: Expression,
     pub arms: array::Array<MatchArm>,
@@ -457,9 +351,6 @@ pub struct MatchStmt {
     pub meta_owner: Text,
 }
 
-/// Represents one tag branch in a match. tag_set qualifies tag with the
-/// error set that declared it (`FsError::NotFound => ...`); it is empty for
-/// bare arms and for enum or union tags (SPEC §11.2).
 pub struct MatchArm {
     pub tag: Text,
     pub binding: Text,
@@ -467,35 +358,28 @@ pub struct MatchArm {
     pub tag_set: Text,
 }
 
-/// Represents a branch selected during compilation.
 pub struct ComptimeIfStmt {
     pub condition: Expression,
     pub consequence: Block,
     pub alternative: ?Block,
 }
 
-/// Repeats a body for every element of a compile-time list, or for every
-/// integer of a half-open range. Name binds one element per expansion.
 pub struct ComptimeForStmt {
     pub iterable: ComptimeForIterable,
     pub name: Text,
     pub body: Block,
 }
 
-/// Is what a `comptime for` walks: a `std::meta` list, or an integer range
-/// written Start..End (the Go List, or Start and End with List nil).
 pub union ComptimeForIterable {
     List(Expression),
     Range(ComptimeForRange),
 }
 
-/// Is the half-open integer range an integer-range `comptime for` expands.
 pub struct ComptimeForRange {
     pub start: Expression,
     pub end: Expression,
 }
 
-/// Repeats a body for every variant of a compile-time value.
 pub struct ComptimeMatchStmt {
     pub value: Expression,
     pub name: Text,
@@ -503,96 +387,71 @@ pub struct ComptimeMatchStmt {
     pub body: Block,
 }
 
-/// Wraps an expression used as a statement.
 pub struct ExprStmt {
     pub expr: Expression,
     pub semicolon: bool,
 }
 
-/// Represents a name reference.
 pub struct IdentExpr {
     pub name: Text,
     pub span: Span,
 }
 
-/// Represents an integer literal.
 pub struct IntExpr {
     pub value: Text,
 }
 
-/// Represents a floating-point literal. The value is the spelling with
-/// separators removed and the exponent marker lowercased, as `1.5e3`.
 pub struct FloatExpr {
     pub value: Text,
 }
 
-/// Is the file an `@embed_file` call names: `path` as written, relative to
-/// the kizu.toml of the package the call is in, and `span` where the call is,
-/// for a file that cannot be read. The span is kept in `Ast.spans`, as a
-/// declaration's is, so the field stays plain data an optional may hold.
 pub struct EmbedFile {
     pub path: Text,
     pub span: arena::Handle<Span>,
 }
 
-/// Represents a string literal. An `@embed_file("path")` is one too, with
-/// `embed` set: its value is a constant `[]u8` like a literal's, so every
-/// phase after the loader reads it as the literal it is. The parser leaves
-/// `value` empty and the loader fills it with the file's bytes.
 pub struct StringExpr {
     pub value: Text,
     pub embed: ?EmbedFile,
 }
 
-/// Represents a C string literal `c"..."`. `value` is the bytes between the
-/// quotes; the NUL that ends them in storage is not part of it.
 pub struct CStringExpr {
     pub value: Text,
 }
 
-/// Is the null literal of an optional type.
 pub struct NullExpr {
     pub span: Span,
 }
 
-/// Is `cond orelse return/break/continue`.
 pub struct OrelseGuardExpr {
     pub condition: Expression,
     pub exit: Statement,
     pub span: Span,
 }
 
-/// Is `cond catch return/break/continue`: on failure the guard leaves the
-/// enclosing function or loop, so the expression itself always yields the
-/// success payload. The default form (`cond catch expr`) is a BinaryExpr.
 pub struct CatchGuardExpr {
     pub condition: Expression,
     pub exit: Statement,
     pub span: Span,
 }
 
-/// Represents a boolean literal.
 pub struct BoolExpr {
     pub value: bool,
 }
 
-/// Represents a compile-time type value.
 pub struct TypeExpr {
     pub type_name: Text,
 }
 
-/// Represents an expression evaluated during compilation.
 pub struct ComptimeExpr {
     pub expr: Expression,
 }
 
-/// Represents a unary operator expression.
 pub struct PrefixExpr {
     pub operator: Text,
     pub right: Expression,
 }
 
-/// Represents an infix binary operator expression.
 pub struct BinaryExpr {
     pub left: Expression,
     pub operator: Text,
@@ -600,52 +459,38 @@ pub struct BinaryExpr {
     pub right: Expression,
 }
 
-/// Represents a function call.
 pub struct CallExpr {
     pub callee: Expression,
     pub args: ExpressionList,
 }
 
-/// Represents a call target with explicit static arguments.
-///
-/// `resolved` marks a list the compiler wrote with every argument already
-/// bound: the types are concrete and a `Field` argument is the name of a field
-/// of the type before it. Nothing in such a list is read through the type
-/// parameters or captures in force where the call sits, which is what keeps a
-/// field named `T` or `f` from being taken for the generic's own `T` or `f`
-/// (#1987).
 pub struct TypeApplyExpr {
     pub callee: Expression,
     pub type_arg: Text,
     pub resolved: bool,
 }
 
-/// Represents an explicit cast<T>(value) conversion.
 pub struct CastExpr {
     pub target_type: typ::Type,
     pub value: Expression,
     pub keyword_span: Span,
 }
 
-/// Unwraps a !T value or returns the error from the current function.
 pub struct TryExpr {
     pub value: Expression,
 }
 
-/// Marks the place an owner is handed off from.
 pub struct MoveExpr {
     pub value: Expression,
     pub span: Span,
 }
 
-/// Marks an expression whose memory safety the compiler does not prove.
 pub struct UnsafeExpr {
     pub value: Expression,
     pub safety: Text,
     pub span: Span,
 }
 
-/// Represents checked byte indexing or one-dimensional slicing.
 pub struct IndexExpr {
     pub target: Expression,
     pub index: ?Expression,
@@ -655,29 +500,19 @@ pub struct IndexExpr {
     pub span: Span,
 }
 
-/// Represents construction of a struct value.
 pub struct StructLiteralExpr {
     pub type_name: Text,
     pub fields: array::Array<FieldValue>,
     pub span: Span,
 }
 
-/// Is a fixed-length array literal (ADR-0097): `[N]T{}` fills every element
-/// with zero, `[N]T{a, b, ...}` lists all N of them. elem is the element
-/// type's spelling; elements are the listed values in index order, empty for
-/// `{}`.
 pub struct BufferLiteralExpr {
-    /// Is the length as the type spells it: a number, or a static name or
-    /// expression such as `n` or `(n * 2)`, which the checker evaluates.
     pub len: Text,
     pub elem: Text,
     pub elements: array::Array<Expression>,
     pub span: Span,
 }
 
-/// Copies one array literal out of the tree, or null when the expression is
-/// something else: the elements are an owned clone, as copy_vector_literal's
-/// lanes are. The caller releases the copy.
 pub fn copy_array_literal(
     allocator: Allocator,
     tree: &Ast,
@@ -694,17 +529,12 @@ pub fn copy_array_literal(
     }
 }
 
-/// Is `f64x2{a, b}`: a vector built from one expression per lane, in lane
-/// order; type_name is the vector type's spelling.
 pub struct VectorLiteralExpr {
     pub type_name: Text,
     pub lanes: array::Array<Expression>,
     pub span: Span,
 }
 
-/// Copies one vector literal out of the tree, or null when the expression is
-/// something else: the lanes are an owned clone, since the node itself holds
-/// them and cannot leave the tree. The caller releases the copy.
 pub fn copy_vector_literal(
     allocator: Allocator,
     tree: &Ast,
@@ -719,13 +549,11 @@ pub fn copy_vector_literal(
     }
 }
 
-/// Represents one field initializer in a struct literal.
 pub struct FieldValue {
     pub name: Text,
     pub value: Expression,
 }
 
-/// Represents field access on a receiver expression.
 pub struct FieldExpr {
     pub receiver: Expression,
     pub name: Text,
@@ -733,19 +561,16 @@ pub struct FieldExpr {
     pub span: Span,
 }
 
-/// Holds the root identifier and dotted suffix of one runtime field path.
 pub struct FieldPath {
     pub root: IdentExpr,
     pub path: string::String,
 }
 
-/// Represents explicit postfix dereference.
 pub struct DerefExpr {
     pub receiver: Expression,
     pub operator_span: Span,
 }
 
-/// Creates empty storage for one parsed AST.
 pub fn new(allocator: Allocator) -> Ast {
     return Ast {
         allocator: allocator,
@@ -760,7 +585,6 @@ pub fn new(allocator: Allocator) -> Ast {
     };
 }
 
-/// Creates an empty root declaration list.
 pub fn new_program(allocator: Allocator) -> Program {
     return Program {
         declarations: array::new<Declaration>(allocator),
@@ -768,17 +592,14 @@ pub fn new_program(allocator: Allocator) -> Program {
     };
 }
 
-/// Retains owned text and returns its copyable identity.
 fn (self: &var Ast) add_text(value: string::String) -> !Text {
     return Text { node: try self.texts.add(self.allocator, move value) };
 }
 
-/// Retains an empty text value without a fallible byte copy.
 fn (self: &var Ast) add_empty_text() -> !Text {
     return try self.add_text(string::new(self.allocator));
 }
 
-/// Copies borrowed bytes into text retained for the Ast lifetime.
 fn (self: &var Ast) add_text_from_bytes(
     bytes: []u8
 ) -> !Text {
@@ -786,7 +607,6 @@ fn (self: &var Ast) add_text_from_bytes(
     return try self.add_text(move value);
 }
 
-/// Retains one immutable expression handle list for shared call sites.
 fn (self: &var Ast) add_expression_list(
     values: array::Array<Expression>
 ) -> !ExpressionList {
@@ -817,7 +637,6 @@ fn expression_list_get_or_panic(
     return values.get_or_panic(index);
 }
 
-/// Retains one declaration node and returns its typed handle.
 fn (self: &var Ast) add_declaration(node: DeclarationNode) -> !Declaration {
     return Declaration {
         node: try self.declarations.add(self.allocator, move node),
@@ -825,7 +644,6 @@ fn (self: &var Ast) add_declaration(node: DeclarationNode) -> !Declaration {
     };
 }
 
-/// Appends one retained declaration to the source-file root.
 fn (self: &var Program) add_declaration(
     allocator: Allocator,
     declaration: Declaration
@@ -833,14 +651,12 @@ fn (self: &var Program) add_declaration(
     return self.declarations.append(allocator, declaration);
 }
 
-/// Retains one expression node and returns its typed handle.
 fn (self: &var Ast) add_expression(node: ExpressionNode) -> !Expression {
     return Expression {
         node: try self.expressions.add(self.allocator, move node)
     };
 }
 
-/// Retains one statement node and returns its typed handle.
 fn (self: &var Ast) add_statement(node: StatementNode) -> !Statement {
     return Statement {
         node: try self.statements.add(self.allocator, move node),
@@ -848,19 +664,14 @@ fn (self: &var Ast) add_statement(node: StatementNode) -> !Statement {
     };
 }
 
-/// Records where the parser read a statement or declaration and returns the
-/// handle it keeps.
 fn (self: &var Ast) add_span(span: Span) -> !arena::Handle<Span> {
     return self.spans.add(self.allocator, span);
 }
 
-/// Returns where the parser read a statement; zero for one the compiler made.
 fn (self: &Ast) statement_span(statement: Statement) -> Span {
     return self.span_at(statement.span);
 }
 
-/// Returns where the parser read a declaration, the Go `DeclarationSpan`;
-/// zero for one the compiler made.
 fn (self: &Ast) declaration_span(declaration: Declaration) -> Span {
     return self.span_at(declaration.span);
 }
@@ -872,7 +683,6 @@ fn (self: &Ast) span_at(handle: ?arena::Handle<Span>) -> Span {
     return zero_span();
 }
 
-/// Retains one block of statements and returns its typed handle.
 fn (self: &var Ast) add_block(statements: array::Array<Statement>) -> !Block {
     let block = BlockStmt { statements: move statements, id: self.block_count };
     let node = try self.statements.add(self.allocator, StatementNode::Block(move block));
@@ -880,38 +690,32 @@ fn (self: &var Ast) add_block(statements: array::Array<Statement>) -> !Block {
     return Block { node: node };
 }
 
-/// Retains the recovery declaration for a parse that gave up at `span`.
 fn (self: &var Ast) add_recovered_declaration(span: Span) -> !Declaration {
     return try self.add_declaration(DeclarationNode::Recovered(RecoveredNode {
         span: span
     }));
 }
 
-/// Retains the recovery statement for a parse that gave up at `span`.
 fn (self: &var Ast) add_recovered_statement(span: Span) -> !Statement {
     return try self.add_statement(StatementNode::Recovered(RecoveredNode {
         span: span
     }));
 }
 
-/// Retains the recovery expression for a parse that gave up at `span`.
 fn (self: &var Ast) add_recovered_expression(span: Span) -> !Expression {
     return try self.add_expression(ExpressionNode::Recovered(RecoveredNode {
         span: span
     }));
 }
 
-/// Retains an empty block using the syntax graph's allocator.
 fn (self: &var Ast) add_empty_block() -> !Block {
     return try self.add_block(array::new<Statement>(self.allocator));
 }
 
-/// Views a retained block as the statement node with the same identity.
 fn (self: Block) as_statement() -> Statement {
     return Statement { node: self.node, span: null };
 }
 
-/// Reports whether a span has no source position.
 fn (self: Span) is_zero() -> bool {
     return self.start.line == 0 or self.start.column == 0;
 }
@@ -924,7 +728,6 @@ pub fn zero_span() -> Span {
     };
 }
 
-/// Reports whether this entry declares a type parameter.
 fn (self: &StaticParam) is_type() -> bool {
     if self.type_name |_| {
         return false;
@@ -933,7 +736,6 @@ fn (self: &StaticParam) is_type() -> bool {
     }
 }
 
-/// Returns the names of static entries that declare types.
 fn (self: &FunctionSignature) type_param_names(
     allocator: Allocator
 ) -> !array::Array<Text> {
@@ -949,14 +751,12 @@ fn (self: &FunctionSignature) type_param_names(
     return move names;
 }
 
-/// Reports whether this arm is the fallback match branch.
 pub fn (self: &MatchArm) is_wildcard(ast: &Ast) -> bool {
     let retained = ast.texts.at(self.tag.node);
     let bytes = retained.as_bytes();
     return mem::equal_bytes(bytes, "_");
 }
 
-/// Returns this fixed buffer literal's type spelling.
 pub fn (self: &BufferLiteralExpr) type_text(
     allocator: Allocator,
     tree: &Ast
@@ -983,7 +783,6 @@ fn (self: &BufferLiteralExpr) append_type_text(
     return;
 }
 
-/// Resolves a runtime field chain to its root and dotted relative path.
 pub fn field_path_root(
     allocator: Allocator,
     ast: &Ast,
@@ -1039,7 +838,6 @@ fn append_field_path(
     }
 }
 
-/// Renders one retained expression in the compact compiler diagnostic form.
 pub fn render_expression(
     allocator: Allocator,
     ast: &Ast,
@@ -1051,7 +849,6 @@ pub fn render_expression(
     return move out;
 }
 
-/// Renders one retained statement in the compact compiler diagnostic form.
 pub fn render_statement(
     allocator: Allocator,
     ast: &Ast,
@@ -1063,7 +860,6 @@ pub fn render_statement(
     return move out;
 }
 
-/// Renders one retained block in the compact compiler diagnostic form.
 pub fn render_block(
     allocator: Allocator,
     ast: &Ast,
@@ -1580,7 +1376,6 @@ fn string_ends_with(value: &string::String, expected: u8) -> bool {
     return bytes[length - 1] == expected;
 }
 
-/// Renders one source-file root in the compact compiler diagnostic form.
 pub fn render_program(
     allocator: Allocator,
     ast: &Ast,
@@ -1603,7 +1398,6 @@ pub fn render_program(
     return move out;
 }
 
-/// Renders one retained declaration in the compact compiler diagnostic form.
 pub fn render_declaration(
     allocator: Allocator,
     ast: &Ast,
@@ -1697,8 +1491,6 @@ fn append_function_decl(
     return;
 }
 
-/// Renders one link attribute written above an extern declaration on its own
-/// line, the Go `linkAttributeText`, so a formatted file reads as written.
 fn append_link_attribute(
     allocator: Allocator,
     out: &var string::String,
@@ -1784,7 +1576,6 @@ fn append_static_params(
     return;
 }
 
-/// Appends one static parameter using its source declaration spelling.
 pub fn append_static_param(
     allocator: Allocator,
     out: &var string::String,
@@ -2047,7 +1838,6 @@ fn append_borrow_prefix(
     return;
 }
 
-/// Expands one compile-time match into the ordinary match every phase reads.
 pub fn comptime_match_expansion(
     allocator: Allocator,
     stmt: &ComptimeMatchStmt,
@@ -2098,7 +1888,6 @@ fn add_variant_path(
     }));
 }
 
-/// Expands one reflected variant constructor into an ordinary expression.
 pub fn variant_expansion(
     ast: &var Ast,
     owner: []u8,
@@ -2118,7 +1907,6 @@ pub fn variant_expansion(
     }));
 }
 
-/// Reports whether a type spelling carries a cleanup contract.
 pub fn owner_type(
     owners: &map::Map<[]u8, bool>,
     type_name: []u8
@@ -2258,7 +2046,6 @@ fn add_owner_bytes(
     return true;
 }
 
-/// Returns every declared or transitive owner base name in one program.
 pub fn deinit_owners(
     allocator: Allocator,
     ast: &Ast,
@@ -2290,16 +2077,6 @@ pub fn deinit_owners(
     return move owners;
 }
 
-/// Returns owner base names whose release names an allocator -- whose `deinit`
-/// takes one (ADR-0132).
-///
-/// Generic cleanup has to know. A container releasing owner elements calls each
-/// element's deinit, and an owner that frees memory and one that closes a
-/// descriptor do not take the same argument.
-///
-/// A derived deinit always takes one, because the body it derives hands the
-/// allocator to every field it consumes. Only a declared deinit says otherwise,
-/// and it says it in its parameter list.
 pub fn release_names_allocator(
     allocator: Allocator,
     ast: &Ast,
@@ -2326,8 +2103,6 @@ pub fn release_names_allocator(
         }
         index = index + 1;
     }
-    // Everything else that owes cleanup owes it through fields, and the body
-    // that discharges those is derived with an allocator.
     let owners = try deinit_owners(allocator, ast, program);
     defer owners.deinit(allocator);
     var owner_index = 0;
@@ -2362,8 +2137,6 @@ fn collect_release_allocator(
     return;
 }
 
-// deinit_takes_allocator reads a declared cleanup's parameter list. The
-// receiver is the first parameter, so an allocator is the one behind it.
 fn deinit_takes_allocator(
     allocator: Allocator,
     ast: &Ast,
@@ -2383,12 +2156,10 @@ fn deinit_takes_allocator(
     return false;
 }
 
-/// Reports whether releasing a type names an allocator under the map above.
 pub fn release_names(names: &map::Map<[]u8, bool>, type_name: []u8) -> bool {
     return owner_type(names, type_name);
 }
 
-/// Returns owner base names with cleanup written by the program's author.
 pub fn declared_deinits(
     allocator: Allocator,
     ast: &Ast,
@@ -2411,7 +2182,6 @@ fn all_declared_deinits(
     return move declared;
 }
 
-/// Adds the ordinary deinit method for every owner aggregate that declares none.
 pub fn add_derived_deinits(
     allocator: Allocator,
     ast: &var Ast,
@@ -2465,7 +2235,6 @@ fn has_declared_deinit(
     );
 }
 
-// Keeps the arena borrow inside the lookup so later generation may mutate Ast.
 fn retained_map_contains(
     values: &map::Map<[]u8, bool>,
     retained: &string::String
@@ -2474,7 +2243,6 @@ fn retained_map_contains(
     return values.contains(bytes);
 }
 
-/// Returns the deinit body fixed by one struct or union's owner members.
 pub fn derive_deinit(
     allocator: Allocator,
     ast: &var Ast,
@@ -2543,7 +2311,6 @@ fn derive_struct_deinit(
         rendered.deinit(allocator);
         match kind {
             OptionalOwner => {
-                // Only if may consume a field that while could read twice.
                 let read = try add_derived_field_read(
                     ast,
                     names.receiver,
@@ -2566,8 +2333,6 @@ fn derive_struct_deinit(
                 )));
             },
             ErrorUnionOwner => {
-                // An error union opens the same way, and its `if` names the
-                // failure arm too (SPEC §11.1); a failed field holds nothing.
                 let read = try add_derived_field_read(
                     ast,
                     names.receiver,
@@ -2683,7 +2448,6 @@ fn derive_union_deinit(
                 tag_set: names.empty
             });
         } else {
-            // Empty arms keep the generated match exhaustive.
             let body = try add_derived_empty_block(allocator, ast);
             try arms.append(allocator, MatchArm {
                 tag: variant.name,
@@ -2718,8 +2482,6 @@ fn derive_union_deinit(
     );
 }
 
-/// Wraps a derived body in the method declaration that carries it. The
-/// method is filed under the module that declared the type.
 fn derive_decl(
     allocator: Allocator,
     ast: &var Ast,
@@ -2771,7 +2533,6 @@ fn derive_decl(
     let owner_copy = try copy_text(allocator, ast, owner);
     defer owner_copy.deinit(allocator);
     let owner_bytes = owner_copy.as_bytes();
-    // A derived method keeps the module identity of its receiver type.
     let std_owner = mem::starts_with(owner_bytes, "std::");
     let function_name = try joined_text(allocator,
         ast,
@@ -2842,7 +2603,6 @@ fn append_retained_text(
     return out.append_bytes(allocator, bytes);
 }
 
-// Owns a name while the text arena is mutated to retain a derived method name.
 fn copy_text(
     allocator: Allocator,
     ast: &Ast,
@@ -2986,9 +2746,6 @@ fn add_construct_field(
         name: worker_name,
         span: zero_span()
     }));
-    // The owner is concrete and the field is one of its own, so the list is
-    // bound already: read where `construct` sits, a field named like a type
-    // parameter or capture there would name that instead.
     let applied = try ast.add_expression(ExpressionNode::TypeApply(TypeApplyExpr {
         callee: worker_expr,
         type_arg: type_arg,
@@ -3041,18 +2798,12 @@ fn add_construct_field(
     };
 }
 
-// Accumulates the statements and literal fields of one construct expansion
-// so callers that hold field descriptions in different shapes share one
-// expansion.
 struct ConstructBuilder {
     statements: array::Array<Statement>,
     values: array::Array<FieldValue>,
     type_name: Text,
     worker_name: Text,
     cleanup_method: Text,
-    // The release an owner field's errdefer writes names the allocator the
-    // worker built it from, which is the construct's own first argument
-    // (ADR-0132).
     release_args: ExpressionList,
 }
 
@@ -3134,7 +2885,6 @@ fn finish_construct(
     };
 }
 
-/// Expands one reflected struct construction into ordinary AST nodes.
 pub fn construct_expansion(
     allocator: Allocator,
     ast: &var Ast,
@@ -3155,8 +2905,6 @@ pub fn construct_expansion(
     return finish_construct(allocator, ast, move builder);
 }
 
-/// Expands one reflected struct construction whose field names and type
-/// spellings are retained Strings, paired by index.
 pub fn construct_expansion_from_names(
     allocator: Allocator,
     ast: &var Ast,
@@ -3183,7 +2931,6 @@ pub fn construct_expansion_from_names(
     return finish_construct(allocator, ast, move builder);
 }
 
-/// Returns the expression covered by a value-transparent marker.
 pub fn marker_value(ast: &Ast, value: Expression) -> ?Expression {
     match ast.expressions.at(value.node) {
         Comptime(node) => return node.expr,
