@@ -9,58 +9,42 @@ import std::array;
 import std::map;
 import std::string;
 
-// Port of internal/project/qualify.go. Go copies a node and rewrites the
-// names in the copy; here the copy is added to the syntax graph as a new node
-// and the source node stays where it was, so every function hands back the
-// handle of the node it built.
-
-/// Is one qualified declaration, an import that is consumed here, or the
-/// module error that stopped the rewrite.
 union DeclarationResult {
     Declaration(ast::Declaration),
     Skipped,
     Failed(diagnostic::Diagnostic),
 }
 
-/// Is one qualified function declaration or the module error.
 union FunctionResult {
     Function(ast::FunctionDecl),
     Failed(diagnostic::Diagnostic),
 }
 
-/// Is one qualified block or the module error.
 union BlockResult {
     Block(ast::Block),
     Failed(diagnostic::Diagnostic),
 }
 
-/// Is one qualified statement or the module error.
 union StatementResult {
     Statement(ast::Statement),
     Failed(diagnostic::Diagnostic),
 }
 
-/// Is one qualified conditional, used as a statement or an expression.
 union IfResult {
     If(ast::IfStmt),
     Failed(diagnostic::Diagnostic),
 }
 
-/// Is one qualified match, used as a statement or an expression.
 union MatchResult {
     Match(ast::MatchStmt),
     Failed(diagnostic::Diagnostic),
 }
 
-/// Is one qualified expression or the module error.
 union ExpressionResult {
     Expression(ast::Expression),
     Failed(diagnostic::Diagnostic),
 }
 
-/// Rewrites one parsed module into package-qualified names and appends the
-/// qualified declarations to merged. Imports are consumed here and not handed
-/// on.
 fn (self: &var Loader) qualify_module(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -83,14 +67,11 @@ fn (self: &var Loader) qualify_module(
     return null;
 }
 
-/// Rewrites declaration type references for a package check.
 fn (self: &var Loader) qualify_decl(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
     declaration: ast::Declaration
 ) -> !DeclarationResult {
-    // The rewrite is a new node, read where the declaration it replaces was;
-    // a name it cannot resolve is reported there, the Go `qualifyDecl`.
     let outcome = try self.qualify_decl_form(tree, file, declaration);
     match outcome {
         Declaration(qualified) => {
@@ -106,7 +87,6 @@ fn (self: &var Loader) qualify_decl(
     }
 }
 
-/// Rewrites one declaration by its form.
 fn (self: &var Loader) qualify_decl_form(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -155,7 +135,6 @@ fn (self: &var Loader) qualify_decl_form(
     }
 }
 
-/// Copies the documentation a declaration keeps per tag or member.
 fn copy_docs(allocator: Allocator, docs: &map::Map<[]u8, ast::Text>) -> !map::Map<[]u8, ast::Text> {
     var out = map::new<[]u8, ast::Text>(allocator);
     errdefer out.deinit(allocator);
@@ -169,7 +148,6 @@ fn copy_docs(allocator: Allocator, docs: &map::Map<[]u8, ast::Text>) -> !map::Ma
     return move out;
 }
 
-/// Retains what a name declared in file's module is filed under.
 fn (self: &Loader) qualify_text(tree: &var ast::Ast, file: arena::Handle<ModuleFile>, name: ast::Text) -> !ast::Text {
     let source = try text_copy(self.allocator, tree, name);
     defer source.deinit(self.allocator);
@@ -178,16 +156,12 @@ fn (self: &Loader) qualify_text(tree: &var ast::Ast, file: arena::Handle<ModuleF
     return try tree.add_text(move qualified);
 }
 
-/// Reports whether a file belongs to the standard library package.
 fn (self: &Loader) module_is_std(file: arena::Handle<ModuleFile>) -> bool {
     let entry = self.files.at(file);
     let group = self.groups.at(entry.group);
     return text_is(&group.pkg, std_root());
 }
 
-/// Returns what a function is filed under. A method is filed under the type
-/// it is a method on, so two types in one module may each declare a `len`;
-/// anything else is filed under its module.
 fn (self: &var Loader) declared_function_name(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -224,8 +198,6 @@ fn (self: &var Loader) declared_function_name(
     }
 }
 
-/// Names the type a receiver stands for, with borrows and static arguments
-/// dropped: `&std::array::Array<T>` is a method on `std::array::Array`.
 fn receiver_base(allocator: Allocator, table: &typ::Table, value: typ::Type) -> !?string::String {
     match typ::root_node(table, value) {
         Borrow(node) => return receiver_base(allocator, table, typ::child_type(value, node.elem)),
@@ -235,7 +207,6 @@ fn receiver_base(allocator: Allocator, table: &typ::Table, value: typ::Type) -> 
     }
 }
 
-/// Rewrites a struct declaration and its field types.
 fn (self: &var Loader) qualify_struct(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -273,8 +244,6 @@ fn (self: &var Loader) qualify_struct(
     return DeclarationResult::Declaration(try tree.add_declaration(ast::DeclarationNode::Struct(move node)));
 }
 
-/// Rewrites an error set declaration: the name is filed under the module and
-/// every combined set reference resolves like a type name (ADR-0127).
 fn (self: &var Loader) qualify_error_set(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -326,7 +295,6 @@ fn (self: &var Loader) qualify_error_set(
     )));
 }
 
-/// Rewrites a union declaration and its payload types.
 fn (self: &var Loader) qualify_union(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -363,7 +331,6 @@ fn (self: &var Loader) qualify_union(
     return DeclarationResult::Declaration(try tree.add_declaration(ast::DeclarationNode::Union(move node)));
 }
 
-/// Rewrites contract method signature type references.
 fn (self: &var Loader) qualify_contract(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -389,7 +356,6 @@ fn (self: &var Loader) qualify_contract(
     )));
 }
 
-/// Rewrites the type and contract an assertion names.
 fn (self: &var Loader) qualify_impl(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -413,7 +379,6 @@ fn (self: &var Loader) qualify_impl(
     }
 }
 
-/// Rewrites one retained type spelling into its package-qualified form.
 fn (self: &var Loader) resolve_text(tree: &var ast::Ast, file: arena::Handle<ModuleFile>, name: ast::Text) -> !NameResolution {
     let source = try text_copy(self.allocator, tree, name);
     defer source.deinit(self.allocator);
@@ -421,11 +386,6 @@ fn (self: &var Loader) resolve_text(tree: &var ast::Ast, file: arena::Handle<Mod
     return self.resolve_type(tree, file, bytes);
 }
 
-/// Rewrites a function signature and body type references.
-///
-/// A function std declared is marked as such, because being std source is what
-/// lets it name the trusted primitives and what makes its `self` parameter a
-/// method receiver.
 fn (self: &var Loader) qualify_function(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -500,7 +460,6 @@ fn (self: &var Loader) qualify_function(
     });
 }
 
-/// Rewrites type-bearing expressions inside a test block.
 fn (self: &var Loader) qualify_test_decl(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -523,7 +482,6 @@ fn (self: &var Loader) qualify_test_decl(
     return DeclarationResult::Declaration(try tree.add_declaration(ast::DeclarationNode::Test(node)));
 }
 
-/// Rewrites type-bearing expressions inside a block.
 fn (self: &var Loader) qualify_block(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -549,13 +507,10 @@ fn (self: &var Loader) qualify_block(
             }
             return BlockResult::Block(try tree.add_block(move statements));
         },
-        // A block handle always names a block node.
         _ => return BlockResult::Block(block),
     }
 }
 
-/// Rewrites type-bearing expressions inside one statement. The rewrite is a
-/// new node, read where the statement it replaces was.
 fn (self: &var Loader) qualify_stmt(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -575,7 +530,6 @@ fn (self: &var Loader) qualify_stmt(
     }
 }
 
-/// Rewrites one statement by its form.
 fn (self: &var Loader) qualify_stmt_form(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -665,7 +619,6 @@ fn (self: &var Loader) qualify_stmt_form(
             };
         },
         Block(_) => {
-            // Only a match arm body is a bare block statement (SPEC §6.12).
             let outcome = try self.qualify_block(tree, file, ast::Block { node: stmt.node });
             return match outcome {
                 Block(qualified) => StatementResult::Statement(qualified.as_statement()),
@@ -676,8 +629,6 @@ fn (self: &var Loader) qualify_stmt_form(
     }
 }
 
-/// Rewrites the statements that are resolved at compile time. A statement that
-/// is none of them carries nothing to qualify.
 fn (self: &var Loader) qualify_comptime_stmt(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -691,7 +642,6 @@ fn (self: &var Loader) qualify_comptime_stmt(
     }
 }
 
-/// Rewrites the dispatched value and the body every variant expands.
 fn (self: &var Loader) qualify_comptime_match_stmt(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -715,7 +665,6 @@ fn (self: &var Loader) qualify_comptime_match_stmt(
     }
 }
 
-/// Rewrites the compile-time list or the range bounds, and the loop body.
 fn (self: &var Loader) qualify_comptime_for_stmt(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -760,7 +709,6 @@ fn (self: &var Loader) qualify_comptime_for_stmt(
     };
 }
 
-/// Rewrites type-bearing expressions in a deferred cleanup.
 fn (self: &var Loader) qualify_defer_stmt(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -775,7 +723,6 @@ fn (self: &var Loader) qualify_defer_stmt(
     };
 }
 
-/// Rewrites type-bearing expressions in an errdefer cleanup.
 fn (self: &var Loader) qualify_err_defer_stmt(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -790,7 +737,6 @@ fn (self: &var Loader) qualify_err_defer_stmt(
     };
 }
 
-/// Rewrites both sides of an assignment statement.
 fn (self: &var Loader) qualify_assign_stmt(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -814,7 +760,6 @@ fn (self: &var Loader) qualify_assign_stmt(
     }
 }
 
-/// Rewrites all expressions reachable from an if node.
 fn (self: &var Loader) qualify_if_stmt(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -847,7 +792,6 @@ fn (self: &var Loader) qualify_if_stmt(
     }
 }
 
-/// Rewrites range bounds and loop body expressions.
 fn (self: &var Loader) qualify_for_stmt(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -878,7 +822,6 @@ fn (self: &var Loader) qualify_for_stmt(
     }
 }
 
-/// Rewrites both branches of a compile-time conditional.
 fn (self: &var Loader) qualify_comptime_if_stmt(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -911,7 +854,6 @@ fn (self: &var Loader) qualify_comptime_if_stmt(
     }
 }
 
-/// Rewrites the matched value and all arm bodies.
 fn (self: &var Loader) qualify_match_stmt(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -934,8 +876,6 @@ fn (self: &var Loader) qualify_match_stmt(
             while source.at(index) |arm| {
                 index = index + 1;
                 var copied = arm.*;
-                // A qualified arm names the error set a member originates
-                // from, so the set reference resolves like any type name.
                 if try self.resolve_match_arm_set(tree, file, arm.tag_set) |set_outcome| {
                     match set_outcome {
                         Name(resolved) => {
@@ -968,7 +908,6 @@ fn (self: &var Loader) qualify_match_stmt(
     }
 }
 
-/// Rewrites type names carried by expressions.
 fn (self: &var Loader) qualify_expr(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -989,8 +928,6 @@ fn (self: &var Loader) qualify_expr(
     }
 }
 
-/// Resolves one retained set-reference spelling like a type name. The text
-/// read stays in this borrow scope so the caller may retain the result.
 fn (self: &var Loader) resolve_text_base(
     tree: &ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -1001,8 +938,6 @@ fn (self: &var Loader) resolve_text_base(
     return self.resolve_base(file, bytes);
 }
 
-/// Resolves a match arm's error-set qualifier, or reports none for a bare
-/// arm.
 fn (self: &var Loader) resolve_match_arm_set(
     tree: &ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -1017,7 +952,6 @@ fn (self: &var Loader) resolve_match_arm_set(
     return move outcome;
 }
 
-/// Rewrites the condition and any returned value of an orelse guard.
 fn (self: &var Loader) qualify_orelse_guard_expr(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -1050,7 +984,6 @@ fn (self: &var Loader) qualify_orelse_guard_expr(
     }
 }
 
-/// Rewrites the condition and any returned value of a catch guard.
 fn (self: &var Loader) qualify_catch_guard_expr(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -1083,7 +1016,6 @@ fn (self: &var Loader) qualify_catch_guard_expr(
     }
 }
 
-/// Rewrites type-bearing and control expressions.
 fn (self: &var Loader) qualify_type_or_control_expr(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -1128,7 +1060,6 @@ fn (self: &var Loader) qualify_type_or_control_expr(
     }
 }
 
-/// Rewrites the expression evaluated at compile time.
 fn (self: &var Loader) qualify_comptime_expr(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -1143,7 +1074,6 @@ fn (self: &var Loader) qualify_comptime_expr(
     };
 }
 
-/// Rewrites the operand of a unary expression.
 fn (self: &var Loader) qualify_prefix_expr(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -1160,7 +1090,6 @@ fn (self: &var Loader) qualify_prefix_expr(
     };
 }
 
-/// Rewrites both sides of a binary expression.
 fn (self: &var Loader) qualify_binary_expr(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -1184,7 +1113,6 @@ fn (self: &var Loader) qualify_binary_expr(
     }
 }
 
-/// Rewrites the target type and value of a cast expression.
 fn (self: &var Loader) qualify_cast_expr(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -1208,7 +1136,6 @@ fn (self: &var Loader) qualify_cast_expr(
     }
 }
 
-/// Rewrites the fallible expression wrapped by try.
 fn (self: &var Loader) qualify_try_expr(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -1223,7 +1150,6 @@ fn (self: &var Loader) qualify_try_expr(
     };
 }
 
-/// Rewrites the expression an unsafe marker covers.
 fn (self: &var Loader) qualify_unsafe_expr(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -1240,7 +1166,6 @@ fn (self: &var Loader) qualify_unsafe_expr(
     };
 }
 
-/// Rewrites the place a move marker covers.
 fn (self: &var Loader) qualify_move_expr(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -1257,7 +1182,6 @@ fn (self: &var Loader) qualify_move_expr(
     };
 }
 
-/// Rewrites callees and arguments inside a call expression.
 fn (self: &var Loader) qualify_call_expr(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -1292,12 +1216,6 @@ fn (self: &var Loader) qualify_call_expr(
     }
 }
 
-/// Rewrites explicit static type arguments in constructor calls.
-///
-/// The callee goes through qualify_callee, not qualify_expr: `f<T>(x)` names a
-/// function of this module exactly as `f(x)` does, and reading it as a plain
-/// expression left the name unqualified while the declaration was registered
-/// under the module path, so the call found nothing that takes static arguments.
 fn (self: &var Loader) qualify_type_apply_expr(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -1323,16 +1241,10 @@ fn (self: &var Loader) qualify_type_apply_expr(
                     }
                     let arg_bytes = arg.as_bytes();
                     if index == worker {
-                        // This argument names a function the form calls, not a
-                        // type, so it is qualified the way a callee is. Resolving
-                        // it as a type would leave the name unqualified and the
-                        // call would find nothing.
                         let qualified = try self.qualify_function_name(file, arg);
                         defer qualified.deinit(self.allocator);
                         try out.append_string(self.allocator, &qualified);
                     } else if staticexpr::is(arg_bytes) {
-                        // Integer arithmetic on compile-time names; nothing in
-                        // it is a type or a module path.
                         try out.append_bytes(self.allocator, arg_bytes);
                     } else {
                         let outcome = try self.resolve_type(tree, file, arg_bytes);
@@ -1363,8 +1275,6 @@ fn (self: &var Loader) qualify_type_apply_expr(
     }
 }
 
-/// Returns the index of the static argument that names a function the callee
-/// will call, or -1 when the callee calls none.
 fn worker_arg_index(allocator: Allocator, tree: &ast::Ast, callee: ast::Expression) -> !i64 {
     let rendered = try ast::render_expression(allocator, tree, callee);
     defer rendered.deinit(allocator);
@@ -1378,10 +1288,6 @@ fn worker_arg_index(allocator: Allocator, tree: &ast::Ast, callee: ast::Expressi
     return -1;
 }
 
-/// Resolves a bare function name against this module, the way a callee written
-/// as a bare name is resolved. A name that is not this module's stays as
-/// written, which is what an already-qualified spelling and a forwarded static
-/// parameter both need.
 fn (self: &Loader) qualify_function_name(file: arena::Handle<ModuleFile>, name: &string::String) -> !string::String {
     let bytes = name.as_bytes();
     if try self.declares_function(file, bytes) {
@@ -1390,14 +1296,11 @@ fn (self: &Loader) qualify_function_name(file: arena::Handle<ModuleFile>, name: 
     return copy_string(self.allocator, name);
 }
 
-/// Rewrites imported function calls to their package function name.
 fn (self: &var Loader) qualify_callee(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
     expr: ast::Expression
 ) -> !ExpressionResult {
-    // Qualifying rewrites the callee node, so the span has to be carried over:
-    // it is what anchors every later diagnostic that points at a call.
     match tree.expressions.at(expr.node) {
         Ident(value) => {
             var node = value;
@@ -1434,19 +1337,12 @@ fn (self: &var Loader) qualify_callee(
     return self.qualify_expr(tree, file, expr);
 }
 
-/// Reports whether file's module has a local top-level function. It reads the
-/// index collect_functions built, which holds exactly the functions a module
-/// names -- methods are filed under their receiver and are not among them.
 fn (self: &Loader) declares_function(file: arena::Handle<ModuleFile>, name: []u8) -> !bool {
     let qualified = try self.qualify_in(file, name);
     defer qualified.deinit(self.allocator);
     return index_holds(&self.functions, &qualified);
 }
 
-/// Rewrites a namespace path used as a value, the Go `qualifyFieldValue`. A
-/// path that names an imported function -- `helper::double` handed to a
-/// parameter of function type -- is that function's package name, the way
-/// the same path is when it is called; anything else keeps its field shape.
 fn (self: &var Loader) qualify_field_value(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -1474,7 +1370,6 @@ fn (self: &var Loader) qualify_field_value(
     return self.qualify_field_expr(tree, file, node);
 }
 
-/// Rewrites namespace receivers while preserving field names.
 fn (self: &var Loader) qualify_field_expr(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -1501,7 +1396,6 @@ fn (self: &var Loader) qualify_field_expr(
     };
 }
 
-/// Rewrites target and index expressions.
 fn (self: &var Loader) qualify_index_expr(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -1545,7 +1439,6 @@ fn (self: &var Loader) qualify_index_expr(
     return ExpressionResult::Expression(try tree.add_expression(ast::ExpressionNode::Index(node)));
 }
 
-/// Rewrites the receiver before explicit pointer dereference.
 fn (self: &var Loader) qualify_deref_expr(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -1562,8 +1455,6 @@ fn (self: &var Loader) qualify_deref_expr(
     };
 }
 
-/// Rewrites an array literal's element type and the elements it lists, the
-/// Go `qualifyArrayLiteral`.
 fn (self: &var Loader) qualify_array_literal(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -1603,7 +1494,6 @@ fn (self: &var Loader) qualify_array_literal(
     }
 }
 
-/// Rewrites struct literal type and field value expressions.
 fn (self: &var Loader) qualify_struct_literal(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
