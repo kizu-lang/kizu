@@ -6,16 +6,6 @@ import std::array;
 import std::mem;
 import std::string;
 
-// Mechanical port of the call half of internal/llvm/emit.go: `call.<f>`
-// instructions to module-local functions with the explicit pointer ABI, to
-// std hosted runtime entries with the out-pointer ABI, and to external
-// symbols, plus the declaration an external call gets in the header. Go's `functionParams[name]` is read here through the
-// function handle `function_named` hands back.
-
-/// Is which of its ways write_call hands a callee its arguments, the Go
-/// `callKind`: as the values they are, spelled by the emitter itself, to a
-/// std runtime entry with the out-pointer ABI, to a function of this module
-/// with the pointer ABI, or to a declared C function.
 enum CallKind {
     Plain,
     Builtin,
@@ -24,9 +14,6 @@ enum CallKind {
     Foreign,
 }
 
-/// Says how the callee of a call by name is called, the Go `callTarget`. It
-/// is asked where the call is written and where its arguments are sorted
-/// (call_reads_address), so the two cannot answer differently.
 fn (self: &var Emitter) call_kind(module: &ir::Module, node: &ir::InstrNode) -> !CallKind {
     if module.names.is(node.extern_abi, "c") {
         return CallKind::Foreign;
@@ -46,7 +33,6 @@ fn (self: &var Emitter) call_kind(module: &ir::Module, node: &ir::InstrNode) -> 
     return CallKind::Plain;
 }
 
-/// Writes user function calls, the Go `writeCall`.
 fn (self: &var Emitter) write_call(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     var callee_name = node.operand;
     match try self.call_kind(module, node) {
@@ -70,8 +56,6 @@ fn (self: &var Emitter) write_call(module: &ir::Module, node: &ir::InstrNode) ->
     defer args.deinit(self.allocator);
     var index = 0;
     while node.args.get(index) |arg| {
-        // A foreign callee carries its declared passing on the call; a
-        // parameter handed the address of a copy gets that copy made here.
         if call_param_takes_address_of(module, node, index, arg.type_name) {
             try args.append(self.allocator, try self.copy_address_arg(module, node, index, index));
             index = index + 1;
@@ -82,9 +66,6 @@ fn (self: &var Emitter) write_call(module: &ir::Module, node: &ir::InstrNode) ->
         let arg_type = try self.llvm_type_of(module, arg.type_name);
         try args.append(self.allocator, try self.sprint2("%s %s", Arg::Str(arg_type), Arg::Str(value.operand)));
     }
-    // A call to a variadic callee names the callee's whole function type, not
-    // only its result: that is what tells the target which arguments are the
-    // variadic ones, and so how each is passed.
     var callee_type = try self.llvm_type_of(module, node.result.type_name);
     if node.variadic_fixed > 0 {
         var params = array::new<string::String>(self.allocator);
@@ -99,9 +80,6 @@ fn (self: &var Emitter) write_call(module: &ir::Module, node: &ir::InstrNode) ->
     return self.write_call_line(module, node, call);
 }
 
-/// Writes a builtin the emitter spells itself rather than calling into the
-/// runtime, the Go `writeCompilerBuiltin`: a pool round, or the size of a
-/// type.
 fn (self: &var Emitter) write_compiler_builtin(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if hostabi::hands_worker(module, node.operand) {
         return self.write_thread_pool_round(module, node);
@@ -109,9 +87,6 @@ fn (self: &var Emitter) write_compiler_builtin(module: &ir::Module, node: &ir::I
     return self.write_size_of(module, node);
 }
 
-/// Writes the size of the type the call names as the target lays it out, the
-/// Go `writeSizeOf`: the address one T past null, which LLVM folds to a
-/// constant from the data layout clang gives the module.
 fn (self: &var Emitter) write_size_of(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let end_name = try self.next_synthetic_value("size.end");
     let end = try self.percent(end_name);
@@ -123,9 +98,6 @@ fn (self: &var Emitter) write_size_of(module: &ir::Module, node: &ir::InstrNode)
     return null;
 }
 
-/// Writes the address of a declared function. A function symbol is already a
-/// pointer in LLVM, so the value is the symbol itself and no instruction is
-/// emitted for it.
 fn (self: &var Emitter) write_func_addr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if module.names.is(node.extern_abi, "c") {
         let symbol = try self.callee_symbol(module, node.extern_name);
@@ -142,8 +114,6 @@ fn (self: &var Emitter) write_func_addr(module: &ir::Module, node: &ir::InstrNod
     return try self.fail1("llvm error: `%s` is not a declared function", Arg::Str(node.operand));
 }
 
-/// Writes a call through a function pointer. The callee is the first operand,
-/// the way it arrived from lowering.
 fn (self: &var Emitter) write_indirect_call(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let callee_value = node.args.get(0) orelse
         return try self.fail0("llvm error: call.indirect expects a callee");
@@ -175,8 +145,6 @@ fn (self: &var Emitter) write_indirect_call(module: &ir::Module, node: &ir::Inst
     return self.write_call_line(module, node, call);
 }
 
-/// Writes the call text as a statement or as a result definition, the tail
-/// the Go `writeCall` and `writeInternalCall` share.
 fn (self: &var Emitter) write_call_line(module: &ir::Module, node: &ir::InstrNode, call: ir::Name) -> !?diagnostic::Diagnostic {
     if module.names.is(node.result.type_name, "void") {
         try self.line1("  %s", Arg::Str(call));
@@ -188,17 +156,12 @@ fn (self: &var Emitter) write_call_line(module: &ir::Module, node: &ir::InstrNod
     return null;
 }
 
-/// Names the LLVM symbol of a callee the module names, the Go
-/// `llvmFunctionName(name)`.
 fn (self: &var Emitter) callee_symbol(module: &ir::Module, name: ir::Name) -> !ir::Name {
     let retained = ir::name_text(&module.names, name);
     let bytes = retained.as_bytes();
     return self.llvm_function_name(bytes);
 }
 
-/// Adapts module-local struct values to Kizu's explicit pointer ABI,
-/// avoiding target-dependent aggregate argument lowering, the Go
-/// `writeInternalCall`.
 fn (self: &var Emitter) write_internal_call(
     module: &ir::Module,
     callee: ir::Function,
@@ -209,8 +172,6 @@ fn (self: &var Emitter) write_internal_call(
     let param_count = module.function_param_count(callee);
     var index = 0;
     while index < node.args.len() {
-        // A callee this module does not declare takes its arguments by value,
-        // which is what the zero Param says.
         var passing = ir::Passing::Value;
         var param_type = ir::empty_name();
         if index < param_count {
@@ -233,14 +194,6 @@ fn (self: &var Emitter) write_internal_call(
     return self.write_call_line(module, node, call);
 }
 
-/// Returns the argument of an instruction at arg_index, the index-th the
-/// callee takes, in function_param_abi form, the Go `internalCallArg`. A
-/// parameter handed the value its address is taken of gets that address made
-/// here, which is the one thing the callee's declared Passing decides.
-///
-/// A value kept in memory is passed as the slot it already lives in: the
-/// callee only reads through the address, and nothing writes the slot while
-/// the call runs.
 fn (self: &var Emitter) internal_call_arg(
     module: &ir::Module,
     node: &ir::InstrNode,
@@ -272,10 +225,6 @@ fn (self: &var Emitter) internal_call_arg(
     return self.sprint2("ptr %s", Arg::Str(slot_name), Arg::None);
 }
 
-/// Stores a copy of the argument of an instruction at arg_index, the
-/// index-th the callee takes, in a slot of its own and returns that slot as
-/// the pointer argument a CopyAddress parameter reads through, the Go
-/// `copyAddressArg`.
 fn (self: &var Emitter) copy_address_arg(
     module: &ir::Module,
     node: &ir::InstrNode,
@@ -296,24 +245,16 @@ fn (self: &var Emitter) copy_address_arg(
     return self.sprint2("ptr %s", Arg::Str(slot_name), Arg::None);
 }
 
-/// Reports whether the call's index-th declared parameter, when the call
-/// carries one, is handed the address of a copy of its argument: the Go
-/// `index < len(instr.CallParams) && instr.CallParams[index].TakesAddressOf(arg.Type)`.
 fn call_param_takes_address_of(module: &ir::Module, node: &ir::InstrNode, index: i64, arg_type: ir::Name) -> bool {
     let param = node.call_params.get(index) orelse return false;
     return takes_address_of(module, param.passing, param.type_name, arg_type);
 }
 
-/// Names the slot one by-address argument is copied into, the Go
-/// `"%" + e.nextSyntheticValue(fmt.Sprintf("arg.%d", index))`.
 fn (self: &var Emitter) next_arg_slot(index: i64) -> !ir::Name {
     self.next_label = self.next_label + 1;
     return self.text2("%%kizu.arg.%d.%d", Arg::Int(index), Arg::Int(self.next_label));
 }
 
-/// Reports whether a parameter reading through an address is being handed
-/// the value that address is taken of, rather than an address the caller
-/// already held, the Go `Param.TakesAddressOf` read without interning.
 fn takes_address_of(module: &ir::Module, passing: ir::Passing, param_type: ir::Name, arg_type: ir::Name) -> bool {
     if passing != ir::Passing::CopyAddress or ir::same_name(param_type, arg_type) {
         return false;
@@ -326,8 +267,6 @@ fn takes_address_of(module: &ir::Module, passing: ir::Passing, param_type: ir::N
     return mem::equal_bytes(deref, arg_bytes);
 }
 
-/// Returns T for `&T` and `&var T`, and the spelling itself otherwise, the
-/// Go ir `derefType`.
 fn deref_borrow_type(name: []u8) -> []u8 {
     if mem::starts_with(name, "&var ") {
         return name[5..mem::len(name)];
@@ -338,14 +277,10 @@ fn deref_borrow_type(name: []u8) -> []u8 {
     return name;
 }
 
-/// Reports whether a std hosted runtime call uses the explicit pointer ABI
-/// instead of the platform C aggregate ABI, the Go `usesHostedRuntimeABI`.
-/// The rule is hostabi's, the one every native backend reads.
 fn (self: &var Emitter) uses_hosted_runtime_abi(module: &ir::Module, name: ir::Name, node: &ir::InstrNode) -> !bool {
     return hostabi::uses_out(module, name, node);
 }
 
-/// Spells the LLVM type of one declared C parameter.
 fn (self: &var Emitter) hosted_param_type(module: &ir::Module, node: &ir::InstrNode, param: hostabi::Param) -> !ir::Name {
     return match param.c_type {
         Pointer => self.names.intern("ptr"),
@@ -354,8 +289,6 @@ fn (self: &var Emitter) hosted_param_type(module: &ir::Module, node: &ir::InstrN
     };
 }
 
-/// Appends the lowered parameter ABI for hosted runtime calls, the Go
-/// `hostedRuntimeParamTypes`: the parameters hostabi declares after Out.
 fn (self: &var Emitter) append_hosted_runtime_param_types(
     module: &ir::Module,
     name: ir::Name,
@@ -376,8 +309,6 @@ fn (self: &var Emitter) append_hosted_runtime_param_types(
     return;
 }
 
-/// Adapts Kizu aggregate values to the narrow hosted C ABI, the Go
-/// `writeHostedRuntimeCall`, by the parameters hostabi declares.
 fn (self: &var Emitter) write_hosted_runtime_call(
     module: &ir::Module,
     name: ir::Name,
@@ -423,8 +354,6 @@ fn (self: &var Emitter) write_hosted_runtime_call(
     return null;
 }
 
-/// Appends the argument for one declared C parameter that is neither Out
-/// nor Address, whose memory each writer names its own way.
 fn (self: &var Emitter) append_hosted_arg(
     module: &ir::Module,
     node: &ir::InstrNode,
@@ -473,8 +402,6 @@ fn (self: &var Emitter) append_hosted_arg(
     return null;
 }
 
-/// Names the typed side of the TaskSet callback ABI for one state type, the
-/// Go `taskInvokeThunkName`.
 fn (self: &var Emitter) task_invoke_thunk_name(
     module: &ir::Module,
     type_name: ir::Name
@@ -491,9 +418,6 @@ fn (self: &var Emitter) task_invoke_thunk_name_bytes(type_name: []u8) -> !ir::Na
     return self.names.intern_owned(move out);
 }
 
-/// Declares the C symbol one instruction names, the Go `externalDecl`. A call
-/// spells the signature with its operands; taking the address spells it with
-/// the `extern "c" fn(...)` type the address has.
 fn (self: &var Emitter) external_decl(module: &ir::Module, node: &ir::InstrNode) -> !string::String {
     if node.op != ir::Op::FuncAddr {
         return self.external_call_decl(module, node.extern_name, node);
@@ -529,7 +453,6 @@ fn (self: &var Emitter) external_decl(module: &ir::Module, node: &ir::InstrNode)
     return self.sprint3("declare %s @%s(%s)", Arg::Str(result_type), Arg::Str(symbol), Arg::Owned(move joined));
 }
 
-/// Names the LLVM type of one parsed Kizu type.
 fn (self: &var Emitter) rendered_llvm_type(module: &ir::Module, value: typ::Type) -> !ir::Name {
     let rendered = try typ::render(self.allocator, &self.types, value);
     defer rendered.deinit(self.allocator);
@@ -537,8 +460,6 @@ fn (self: &var Emitter) rendered_llvm_type(module: &ir::Module, value: typ::Type
     return self.llvm_type(module, bytes);
 }
 
-/// Formats one external call declaration from typed IR operands, the Go
-/// `externalCallDecl`.
 fn (self: &var Emitter) external_call_decl(module: &ir::Module, name: ir::Name, node: &ir::InstrNode) -> !string::String {
     let symbol = try self.callee_symbol(module, name);
     var params = array::new<string::String>(self.allocator);
@@ -558,12 +479,6 @@ fn (self: &var Emitter) external_call_decl(module: &ir::Module, name: ir::Name, 
     return self.sprint3("declare %s @%s(%s)", Arg::Str(result_type), Arg::Str(symbol), Arg::Owned(move joined));
 }
 
-/// Spells the parameter list of a callee that takes every argument as the
-/// value it is, from the operands of one call to it, the Go
-/// `plainCallParams`. A C variadic callee declares only its first
-/// variadic_fixed arguments and then `...`: the arguments after them differ
-/// from call to call, and the declaration and every call have to say where
-/// they start.
 fn (self: &var Emitter) append_plain_call_params(
     module: &ir::Module,
     node: &ir::InstrNode,

@@ -4,92 +4,53 @@ import std::array;
 import std::mem;
 import std::string;
 
-// Port of internal/llvm/cabi.go. A C struct passed or returned by value
-// (SPEC §12.2) travels the way the target's C calling convention says. LLVM
-// leaves that to the frontend: clang rewrites each struct into the registers
-// or the memory the convention names, and so does this file, with the types
-// clang uses. A C struct holds only integers, floats, bool, pointers and
-// other C structs, so no leaf is wider or more aligned than 8 bytes and no
-// vector or long double reaches the rules.
-
-/// Is the machine a native module is built for, which decides how a C
-/// struct travels by value, the Go `Arch`.
 pub enum Arch {
-    /// Follows AAPCS64, on Darwin and Linux alike.
     Arm64,
-    /// Follows the System V AMD64 ABI.
     X86_64,
-    /// Follows the Windows x64 convention.
     X86_64Windows,
-    /// Names a machine whose C convention the emitter does not follow; a C
-    /// struct by value is refused there.
     Other,
 }
 
-/// Is where a C struct by value goes, the Go `cPassKind`.
 enum CPassKind {
-    /// Loads the struct as the register-sized parts in CPassing.
     Direct,
-    /// Hands the address of a copy (AAPCS64 above 16 bytes; a return goes
-    /// through `sret` storage the caller provides).
     Indirect,
-    /// Copies the struct onto the stack (x86-64 memory class).
     Byval,
 }
 
-/// Is how one C struct crosses a call, the Go `cPassing`. A direct struct
-/// fills one register part, or two on x86-64, each loaded from the struct's
-/// storage at 8-byte steps.
 struct CPassing {
     kind: CPassKind,
     part_count: i64,
     first: ir::Name,
     second: ir::Name,
-    // AAPCS64's `alignstack(8)`, which Linux, unlike Darwin, puts on a float
-    // aggregate.
     align_stack: bool,
     align: i64,
 }
 
-/// Is one scalar of a flattened C struct, the Go `cLeaf`.
 struct CLeaf {
     offset: i64,
     size: i64,
     float: bool,
 }
 
-/// Counts the x86-64 registers a call has left while its arguments are
-/// assigned, which decides whether a struct still fits in them, the Go
-/// `cRegisters`.
 struct CRegisters {
     integer: i64,
     sse: i64,
 }
 
-/// Is one argument of a C call, the Go `cArg`. A struct by value keeps its
-/// Kizu type in type_name and its value in operand; any other argument is
-/// already spelled as the operand it is, and declares param.
 struct CArg {
     type_name: ir::Name,
-    // Whether a scalar argument takes a float register; a pointer the call
-    // makes takes an integer one.
     float_scalar: bool,
     by_value: bool,
     param: ir::Name,
     operand: ir::Name,
 }
 
-/// Reports whether a module type name is a struct passed to C by value, the
-/// Go `isCStructValue`. The checker lets only C structs reach a C boundary,
-/// so any struct is one.
 fn is_c_struct_value(module: &ir::Module, type_name: ir::Name) -> bool {
     let text = ir::name_text(&module.names, type_name);
     let bytes = text.as_bytes();
     return module.structs.contains(bytes);
 }
 
-/// Flattens a C struct into its scalars at their byte offsets and returns its
-/// size and alignment, laid out by the C rules, the Go `cStructLeaves`.
 fn (self: &Emitter) c_struct_leaves(
     module: &ir::Module,
     typ_name: []u8,
@@ -135,8 +96,6 @@ fn (self: &Emitter) c_struct_leaves(
     return Layout { size: round_up(size, align), align: align };
 }
 
-/// Is the size and alignment of a C struct field that is not a struct: an
-/// integer, a float, bool, or a pointer of any kind, the Go `cScalarLayout`.
 fn c_scalar_layout(typ_name: []u8) -> Layout {
     if primitive_layout(typ_name) |layout| {
         return layout;
@@ -144,8 +103,6 @@ fn c_scalar_layout(typ_name: []u8) -> Layout {
     return Layout { size: 8, align: 8 };
 }
 
-/// Is the x86-64 argument registers before any is taken; an `sret` return
-/// takes the first integer one, the Go `newCRegisters`.
 fn new_c_registers(sret: bool) -> CRegisters {
     if sret {
         return CRegisters { integer: 5, sse: 8 };
@@ -153,7 +110,6 @@ fn new_c_registers(sret: bool) -> CRegisters {
     return CRegisters { integer: 6, sse: 8 };
 }
 
-/// Takes the register a scalar argument uses, the Go `takeScalar`.
 fn take_c_scalar(regs: &var CRegisters, float_scalar: bool) -> void {
     if float_scalar {
         regs.sse = regs.sse - 1;
@@ -162,7 +118,6 @@ fn take_c_scalar(regs: &var CRegisters, float_scalar: bool) -> void {
     regs.integer = regs.integer - 1;
 }
 
-/// Is a CPassing of kind with no register parts.
 fn c_passing_memory(kind: CPassKind, align: i64) -> CPassing {
     return CPassing {
         kind: kind,
@@ -174,7 +129,6 @@ fn c_passing_memory(kind: CPassKind, align: i64) -> CPassing {
     };
 }
 
-/// Is a direct CPassing of one register part.
 fn c_passing_one(part: ir::Name, align_stack: bool, align: i64) -> CPassing {
     return CPassing {
         kind: CPassKind::Direct,
@@ -186,7 +140,6 @@ fn c_passing_one(part: ir::Name, align_stack: bool, align: i64) -> CPassing {
     };
 }
 
-/// Is how a C struct argument goes to the callee, the Go `cArgPassing`.
 fn (self: &var Emitter) c_arg_passing(
     module: &ir::Module,
     type_name: ir::Name,
@@ -235,7 +188,6 @@ fn (self: &var Emitter) c_arg_passing(
     return c_passing_one(try self.aapcs_words(layout.size), false, layout.align);
 }
 
-/// Is how a C struct result comes back, the Go `cReturnPassing`.
 fn (self: &var Emitter) c_return_passing(module: &ir::Module, type_name: ir::Name) -> !CPassing {
     var leaves = array::new<CLeaf>(self.allocator);
     defer leaves.deinit(self.allocator);
@@ -261,10 +213,6 @@ fn (self: &var Emitter) c_return_passing(module: &ir::Module, type_name: ir::Nam
     return c_passing_one(try self.aapcs_words(layout.size), false, layout.align);
 }
 
-/// Is how the Windows x64 convention moves a C struct, as an argument and as
-/// a result alike, the Go `win64Passing`: in one integer register when it is
-/// exactly 1, 2, 4 or 8 bytes, whatever its fields are, and otherwise as the
-/// address of a copy the caller makes, which for a result is `sret` storage.
 fn (self: &var Emitter) win64_passing(layout: Layout) -> !CPassing {
     if layout.size == 1 or layout.size == 2 or layout.size == 4 or layout.size == 8 {
         let part = try self.text1("i%d", Arg::Int(layout.size * 8));
@@ -273,10 +221,6 @@ fn (self: &var Emitter) win64_passing(layout: Layout) -> !CPassing {
     return c_passing_memory(CPassKind::Indirect, layout.align);
 }
 
-/// Names the register part of an AAPCS64 homogeneous float aggregate: one
-/// to four leaves, every one the same float type, which travels in float
-/// registers, the Go `homogeneousFloats`. An argument is `[N x float]`, a
-/// result `{ float, ... }`; null when the leaves are not one.
 fn (self: &var Emitter) homogeneous_floats(leaves: &array::Array<CLeaf>, result: bool) -> !?ir::Name {
     let count = leaves.len();
     let head = leaves.get(0) orelse return null;
@@ -312,8 +256,6 @@ fn (self: &var Emitter) homogeneous_floats(leaves: &array::Array<CLeaf>, result:
     return try self.names.intern_owned(move spelled);
 }
 
-/// Names the integer registers an AAPCS64 struct of at most 16 bytes fills:
-/// one word, or two, the Go `aapcsWords`.
 fn (self: &var Emitter) aapcs_words(size: i64) -> !ir::Name {
     if size <= 8 {
         return self.names.intern("i64");
@@ -321,10 +263,6 @@ fn (self: &var Emitter) aapcs_words(size: i64) -> !ir::Name {
     return self.names.intern("[2 x i64]");
 }
 
-/// Classifies an x86-64 struct of at most 16 bytes into the register each
-/// eightbyte goes in: an integer register when it holds any integer or
-/// pointer, otherwise a float register, the Go `sysVParts`. A larger struct
-/// comes back as Byval, which the convention places in memory.
 fn (self: &var Emitter) sys_v_parts(leaves: &array::Array<CLeaf>, layout: Layout) -> !CPassing {
     if layout.size > 16 {
         return c_passing_memory(CPassKind::Byval, layout.align);
@@ -368,8 +306,6 @@ fn (self: &var Emitter) sys_v_parts(leaves: &array::Array<CLeaf>, layout: Layout
     return passing;
 }
 
-/// Names the integer an eightbyte loads as: the bytes left of the struct, at
-/// most a word, the Go `sysVIntegerPart`.
 fn (self: &var Emitter) sys_v_integer_part(left: i64) -> !ir::Name {
     if left >= 8 {
         return self.names.intern("i64");
@@ -377,14 +313,11 @@ fn (self: &var Emitter) sys_v_integer_part(left: i64) -> !ir::Name {
     return self.text1("i%d", Arg::Int(left * 8));
 }
 
-/// Reports whether a register part is a float register, the Go `isSSEPart`.
 fn (self: &Emitter) is_sse_part(part: ir::Name) -> bool {
     return self.names.is(part, "float") or self.names.is(part, "double") or
         self.names.is(part, "<2 x float>");
 }
 
-/// Allocates storage for a C struct wide enough to load its register parts
-/// from and returns its address, the Go `cStructSlot`.
 fn (self: &var Emitter) c_struct_slot(module: &ir::Module, type_name: ir::Name, index: i64) -> !ir::Name {
     var leaves = array::new<CLeaf>(self.allocator);
     defer leaves.deinit(self.allocator);
@@ -397,8 +330,6 @@ fn (self: &var Emitter) c_struct_slot(module: &ir::Module, type_name: ir::Name, 
     return slot;
 }
 
-/// Spells one parameter part with the attributes it carries, the Go
-/// `cParamType`.
 fn (self: &var Emitter) c_param_type(part: ir::Name, passing: CPassing) -> !ir::Name {
     if passing.align_stack {
         return self.text1("%s alignstack(8)", Arg::Str(part));
@@ -406,8 +337,6 @@ fn (self: &var Emitter) c_param_type(part: ir::Name, passing: CPassing) -> !ir::
     return part;
 }
 
-/// Spells the parameter a struct passed on the stack or returned in memory
-/// declares: `ptr byval(...)` or `ptr sret(...)`.
 fn (self: &var Emitter) c_memory_param(
     module: &ir::Module,
     attribute: []u8,
@@ -418,8 +347,6 @@ fn (self: &var Emitter) c_memory_param(
     return self.text3("ptr %s(%s) align %d", Arg::Lit(attribute), Arg::Str(struct_type), Arg::Int(align));
 }
 
-/// Appends the parameters a C struct argument declares, the Go
-/// `cDeclParams`.
 fn (self: &var Emitter) append_c_decl_params(
     module: &ir::Module,
     type_name: ir::Name,
@@ -442,8 +369,6 @@ fn (self: &var Emitter) append_c_decl_params(
     return;
 }
 
-/// Names the LLVM result a direct C struct return comes back as, the Go
-/// `cReturnType`.
 fn (self: &var Emitter) c_return_type(passing: CPassing) -> !ir::Name {
     if passing.part_count == 1 {
         return passing.first;
@@ -451,10 +376,6 @@ fn (self: &var Emitter) c_return_type(passing: CPassing) -> !ir::Name {
     return self.text2("{ %s, %s }", Arg::Str(passing.first), Arg::Str(passing.second));
 }
 
-/// Describes a C call's arguments for the convention's rewriting, the Go
-/// `cArgs`. With operands set, it also writes the copies borrowed arguments
-/// are lent from and spells each operand; without, it only names the
-/// parameters.
 fn (self: &var Emitter) c_args(
     module: &ir::Module,
     node: &ir::InstrNode,
@@ -505,8 +426,6 @@ fn (self: &var Emitter) c_args(
     return;
 }
 
-/// Reports whether a C call passes or returns a struct by value, which is
-/// what needs the convention's rewriting, the Go `usesCStructValues`.
 fn uses_c_struct_values(module: &ir::Module, result: ir::Name, args: &array::Array<CArg>) -> bool {
     if is_c_struct_value(module, result) {
         return true;
@@ -521,7 +440,6 @@ fn uses_c_struct_values(module: &ir::Module, result: ir::Name, args: &array::Arr
     return false;
 }
 
-/// Reports whether a foreign C call passes or returns a struct by value.
 fn (self: &var Emitter) c_call_uses_struct_values(module: &ir::Module, node: &ir::InstrNode) -> !bool {
     var args = array::new<CArg>(self.allocator);
     defer args.deinit(self.allocator);
@@ -529,8 +447,6 @@ fn (self: &var Emitter) c_call_uses_struct_values(module: &ir::Module, node: &ir
     return uses_c_struct_values(module, node.result.type_name, &args);
 }
 
-/// Formats the declaration of a C function whose arguments or result include
-/// a struct by value, the Go `cCallSignature` in `externalCallDecl`.
 fn (self: &var Emitter) c_struct_call_decl(module: &ir::Module, symbol: ir::Name, node: &ir::InstrNode) -> !string::String {
     var args = array::new<CArg>(self.allocator);
     defer args.deinit(self.allocator);
@@ -567,8 +483,6 @@ fn (self: &var Emitter) c_struct_call_decl(module: &ir::Module, symbol: ir::Name
     return self.sprint3("declare %s @%s(%s)", Arg::Str(result_type), Arg::Str(symbol), Arg::Owned(move joined));
 }
 
-/// Writes the storage a C struct argument is passed through and appends the
-/// call operands that pass it, the Go `cStructArgs`.
 fn (self: &var Emitter) append_c_struct_args(
     module: &ir::Module,
     arg: CArg,
@@ -594,8 +508,6 @@ fn (self: &var Emitter) append_c_struct_args(
     return;
 }
 
-/// Loads register part number part of a struct from slot and appends the
-/// operand that passes it.
 fn (self: &var Emitter) append_c_struct_part(
     slot: ir::Name,
     part_type: ir::Name,
@@ -619,9 +531,6 @@ fn (self: &var Emitter) append_c_struct_part(
     return operands.append(self.allocator, try self.sprint2("%s %s", Arg::Str(param), Arg::Str(loaded)));
 }
 
-/// Writes a C call whose arguments or result include a struct by value,
-/// rewritten the way the target's convention passes them, and binds its
-/// result, the Go `writeCStructResult` and `writeCStructCall`.
 fn (self: &var Emitter) write_c_struct_call(
     module: &ir::Module,
     symbol: ir::Name,
