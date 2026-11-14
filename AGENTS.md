@@ -28,7 +28,7 @@ CLI は `run` / `check` / `test` / `parse` が中核で、`build` / `ir` / `fmt`
 - ユーザー判断で仕様判断を変える場合だけ `SPEC.md` または `docs/adr/` を更新する。
 - `SPEC.md` には今の言語の定義だけを書く。延期・取り下げ・却下した案は
   adr に書き、SPEC に「〜は延期します」の類を残さない。
-- adrを気軽に追加するな。adrの追加を考える前に、コメントやコミットコメントで済む話かどうかを検討する。追加する場合も短く保つ。理想は50行以内。
+- adrを気軽に追加するな。adrの追加を考える前に、commit message で済む話かどうかを検討する。追加する場合も短く保つ。理想は50行以内。
 - std の API は `docs/std/` に書く。SPEC が std について持つのは compiler が
   知っている契約だけ —— capability としての `Allocator`、storage 型に対する
   borrow / ownership の検査規則、`test` 宣言。境界は「利用者が自分で同じものを
@@ -49,6 +49,22 @@ CLI は `run` / `check` / `test` / `parse` が中核で、`build` / `ir` / `fmt`
   build できる範囲に保つ。種の知らない言語機能や std API を `compiler/` で使う
   変更は 2 リリースがかりにする(`docs/bootstrap.md`)。確認は `just selfhost`。
 
+## コメント
+
+`compiler/src` と `lib/kizu/std` のコードには説明コメントを書きません。
+コードが何をするかは名前で、何を約束するかはテストと lint で分かるようにします。
+なぜそう書いたかの理由・背景は commit message に書きます。
+
+- 例外は unsafe の正当化だけです。`// SAFETY:` と、言語が unsafe 宣言に要求する
+  `///` は書きます。短く、前提だけを書きます。
+- `examples/` や `tests/` の末尾ブロック、corpus の期待値のように機械が読む
+  コメント形の行はコメントではなくテストデータなので、この規則の外です。
+- これは自前のコードの運用ルールで、言語仕様ではありません。`SPEC.md` には
+  持ち込みません。
+- pre-commit hook `no-code-comments` が新しいコメントを止めます。まだコメントを
+  消していないディレクトリは hook の `exclude` に並んでいて、消した PR が
+  その行を外します。
+
 ## ADR
 
 ADR が持つのは **なぜそうしたか** と **却下した案とその理由** の 2 つです。
@@ -64,7 +80,7 @@ ADR が持つのは **なぜそうしたか** と **却下した案とその理�
   - 消した subsystem や、もう存在しない仕組みの記述
   - 後続の判断に完全に置き換わったもの
   - 規則を別の場所が持っているもの(`SPEC.md`、`docs/` の他の文書、
-    pre-commit hook、コードのコメント)
+    pre-commit hook、テストや lint)
   - 進行管理・phase 計画・release gate の類
 - **却下案とその理由があるものは残す。** ADR の主な価値は同じ検討を 2 回
   しないことなので、決定だけなら SPEC にあっても却下表は ADR にしか無い。
