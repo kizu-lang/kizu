@@ -12,10 +12,6 @@ import std::map;
 import std::mem;
 import std::string;
 
-// Mechanical port of internal/parser/parser.go. Copy handles resolve through
-// a caller-owned Ast, which retains both syntax and parsed type graphs.
-
-/// Consumes tokens and builds one source file into a caller-owned AST graph.
 pub struct Parser {
     allocator: Allocator,
     scanner: lexer::Lexer,
@@ -24,13 +20,8 @@ pub struct Parser {
     position: i64,
     diagnostics_store: array::Array<diagnostic::Diagnostic>,
     safety: ?ast::Text,
-    // The `@link_library` / `@link_framework` lines read above the declaration
-    // being parsed, which the extern declaration they belong to takes.
     link_library: ?ast::Text,
     link_framework: ?ast::Text,
-    /// The `@embed_file` calls read so far, in source order. The parser does
-    /// not know which package a file belongs to, so the loader reads each file
-    /// and fills in the literal's bytes.
     pub embeds: array::Array<ast::Expression>,
 }
 
@@ -39,7 +30,6 @@ struct NameList {
     docs: ?map::Map<[]u8, ast::Text>,
 }
 
-/// Creates a parser and primes its current and lookahead tokens.
 pub fn new(allocator: Allocator, scanner: lexer::Lexer) -> !Parser {
     var input = move scanner;
     errdefer input.deinit(allocator);
@@ -63,7 +53,6 @@ pub fn new(allocator: Allocator, scanner: lexer::Lexer) -> !Parser {
     };
 }
 
-/// Renders parse errors collected so far without CLI severity wrapping.
 fn (self: &Parser) errors(
     allocator: Allocator,
     sources: &source::SourceMap
@@ -80,12 +69,10 @@ fn (self: &Parser) errors(
     return move out;
 }
 
-/// Returns the number of structured parse diagnostics collected so far.
 fn (self: &Parser) diagnostics_len() -> i64 {
     return self.diagnostics_store.len();
 }
 
-/// Borrows one structured parse diagnostic by index.
 fn (self: &Parser) diagnostic(index: i64) -> ?&diagnostic::Diagnostic {
     return self.diagnostics_store.at(index);
 }
@@ -134,7 +121,6 @@ fn (self: &Parser) starts_error_set_decl() -> bool {
         self.peek_kind() == token::Kind::Ident;
 }
 
-/// Parses one complete source file into caller-owned declaration storage.
 pub fn (self: &var Parser) parse_program(tree: &var ast::Ast) -> !ast::Program {
     let allocator = self.allocator;
     var program = ast::new_program(self.allocator);
@@ -275,8 +261,6 @@ fn (self: &var Parser) parse_import_decl(
     }));
 }
 
-// Builds the owned placeholder that declaration parsing mutates until its
-// success or recovery path moves it into the Ast exactly once.
 fn (self: &Parser) function_stub(
     tree: &var ast::Ast,
     public: bool,
@@ -411,8 +395,6 @@ fn (self: &var Parser) parse_extern_decl(
     return self.parse_extern_decl_with_doc(tree, move docs, false);
 }
 
-/// Parses the declarations `extern "abi"` introduces with attached docs: a
-/// foreign function, or a struct whose layout the foreign ABI decides.
 fn (self: &var Parser) parse_extern_decl_with_doc(
     tree: &var ast::Ast,
     docs: string::String,
@@ -433,8 +415,6 @@ fn (self: &var Parser) parse_extern_decl_with_doc(
     var function = try self.function_stub(tree, public, move docs);
     errdefer function.deinit(self.allocator);
     function.signature.extern_abi = abi;
-    // A declaration without an ABI name leaves the link attributes pending,
-    // the way the Go `parseAttributedDecl` refuses a function with no ABI.
     if !token_literal_is(self.current_token(), "") {
         self.take_link_attributes(&var function.signature);
     }
@@ -446,11 +426,6 @@ fn (self: &var Parser) parse_extern_decl_with_doc(
     return add_function_decl(self.allocator, tree, move function);
 }
 
-/// Reports `message` when the ABI string under the cursor is empty, the Go
-/// `requireABIName`. The tree spells "not extern" and "not export" as the
-/// empty ABI, so an empty literal would turn the declaration into an ordinary
-/// one without a word. The declaration is parsed all the same, so the tokens
-/// after the string are not reported a second time as stray ones.
 fn (self: &var Parser) require_abi_name(message: []u8) -> !void {
     if token_literal_is(self.current_token(), "") {
         try self.error_text(message);
@@ -458,10 +433,6 @@ fn (self: &var Parser) require_abi_name(message: []u8) -> !void {
     return;
 }
 
-/// Parses the struct after `extern "abi"`, the Go `parseExternStructDecl`.
-/// Its fields are visible wherever the struct is, because the foreign side
-/// names them, so `pub` on one says nothing and is refused rather than
-/// allowed to mean something.
 fn (self: &var Parser) parse_extern_struct_decl(
     tree: &var ast::Ast,
     docs: string::String,
@@ -483,7 +454,6 @@ fn (self: &var Parser) parse_extern_struct_decl(
     return add_struct_decl(self.allocator, tree, move declaration);
 }
 
-/// Records that `pub` on an extern struct field says nothing.
 fn (self: &var Parser) error_extern_struct_pub_field(
     tree: &ast::Ast,
     struct_name: ast::Text,
@@ -503,8 +473,6 @@ fn (self: &var Parser) error_extern_struct_pub_field(
     return self.record(move entry);
 }
 
-/// Moves the link attributes read above this declaration onto it, leaving
-/// none pending.
 fn (self: &var Parser) take_link_attributes(signature: &var ast::FunctionSignature) -> void {
     if self.link_library |value| {
         signature.link_library = ast::Text { node: value.node };
@@ -517,11 +485,6 @@ fn (self: &var Parser) take_link_attributes(signature: &var ast::FunctionSignatu
     return;
 }
 
-/// Parses the `@link_library("...")` / `@link_framework("...")` lines above an
-/// extern declaration and the declaration they belong to, the Go
-/// `parseAttributedDecl`. The attributes name what the linker resolves the
-/// symbol from, so the only declaration they can sit on is an
-/// `extern "c" fn` (SPEC §12.2).
 fn (self: &var Parser) parse_attributed_decl(
     tree: &var ast::Ast
 ) -> !?ast::Declaration {
@@ -538,8 +501,6 @@ fn (self: &var Parser) parse_attributed_decl(
         }
         try self.next_token();
     }
-    // The declaration is parsed whatever it is, so one misplaced attribute
-    // is one diagnostic rather than a cascade over the tokens after it.
     if self.current_kind() == token::Kind::Public {
         docs.deinit(self.allocator);
         let declaration = try self.parse_public_decl(tree);
@@ -557,7 +518,6 @@ fn (self: &var Parser) parse_attributed_decl(
     return declaration;
 }
 
-/// Reports link attributes no extern declaration took, and clears them.
 fn (self: &var Parser) finish_attributed_decl() -> !void {
     var pending = false;
     if self.link_library |_| {
@@ -581,10 +541,6 @@ fn (self: &var Parser) finish_attributed_decl() -> !void {
     return self.record(move entry);
 }
 
-/// Parses one `@name("value")` into the pending attributes and leaves the
-/// closing parenthesis current, the Go `parseLinkAttribute`. The value is
-/// the library or framework name as the linker is handed it, so an empty one
-/// is refused here.
 fn (self: &var Parser) parse_link_attribute(tree: &var ast::Ast) -> !bool {
     if !try self.expect_peek(token::Kind::Ident) {
         return false;
@@ -627,7 +583,6 @@ fn (self: &var Parser) parse_link_attribute(tree: &var ast::Ast) -> !bool {
     return true;
 }
 
-/// Records `<prefix><attribute name><suffix>` as an error at the current token.
 fn (self: &var Parser) error_attribute(
     prefix: []u8,
     name: ast::Text,
@@ -756,9 +711,6 @@ fn (self: &var Parser) parse_error_set_decl_with_doc(
     ));
 }
 
-// Parses the right side of `error Name = A or B;`: a list of declared set
-// references joined by `or`. The `=` form declares no members of its own, so
-// only names appear here.
 fn (self: &var Parser) parse_error_set_combines(
     tree: &var ast::Ast
 ) -> !array::Array<ast::Text> {
@@ -779,8 +731,6 @@ fn (self: &var Parser) parse_error_set_combines(
     return move combines;
 }
 
-// Parses one set name on the right side of an `=` error set declaration,
-// module qualification included.
 fn (self: &var Parser) parse_error_set_reference(
     tree: &var ast::Ast
 ) -> !?ast::Text {
@@ -802,13 +752,11 @@ fn (self: &var Parser) parse_error_set_reference(
     return try tree.add_text(move name);
 }
 
-// Reports whether one token's literal is text.
 fn token_literal_is(current: &token::Token, text: []u8) -> bool {
     let bytes = current.literal.as_bytes();
     return mem::equal_bytes(bytes, text);
 }
 
-// Appends one token's literal bytes to an owned spelling.
 fn append_token_literal(allocator: Allocator, name: &var string::String, current: &token::Token) -> !void {
     let bytes = current.literal.as_bytes();
     return name.append_bytes(allocator, bytes);
@@ -1268,10 +1216,6 @@ fn (self: &var Parser) parse_return_clause(
     return false;
 }
 
-/// Parses a function parameter list, the Go `parseParams`. variadic is set
-/// when the list ends in the `...` of a C variadic function; allow_variadic
-/// says whether the declaration being parsed is one that may, an
-/// `extern "c" fn`.
 fn (self: &var Parser) parse_params(
     tree: &var ast::Ast,
     allow_variadic: bool,
@@ -1349,10 +1293,6 @@ fn (self: &var Parser) parse_params(
     return move params;
 }
 
-/// Reports a `...` written where a parameter list cannot end in one, the Go
-/// `checkVariadicMarker`, with the marker as the current token. The list is
-/// parsed on either way, so a misplaced marker is one diagnostic rather than
-/// a cascade over the tokens after it.
 fn (self: &var Parser) check_variadic_marker(allow_variadic: bool, named: i64) -> !void {
     if !allow_variadic {
         return self.error_variadic_declaration("");
@@ -1366,8 +1306,6 @@ fn (self: &var Parser) check_variadic_marker(allow_variadic: bool, named: i64) -
     return;
 }
 
-/// Records prefix followed by the one place `...` may be written, at the
-/// current token.
 fn (self: &var Parser) error_variadic_declaration(prefix: []u8) -> !void {
     var entry = try self.error_entry();
     errdefer entry.deinit(self.allocator);
@@ -1489,9 +1427,6 @@ fn (self: &var Parser) consume_list_delimiter(context: []u8) -> !bool {
     };
 }
 
-/// Reports a brace-delimited list or block that reached the end of the file
-/// before its closing brace. The loops stop at Eof so they cannot spin, but
-/// stopping is not closing: a file cut off inside a body must not parse clean.
 fn (self: &var Parser) expect_list_close(context: []u8, suffix: []u8) -> !void {
     if self.current_kind() != token::Kind::Eof {
         return;
@@ -1827,9 +1762,6 @@ fn (self: &var Parser) parse_if_stmt(tree: &var ast::Ast) -> !?ast::IfStmt {
             if self.continues_else_chain() {
                 alternative = try self.parse_else_chain(tree);
             } else {
-                // `else |err|` binds the error member of an error union
-                // condition (SPEC §11.1), with the same `|name|` spelling as
-                // the success capture.
                 if try self.parse_payload_capture(tree) |bound| {
                     err_capture = bound;
                 } else {
@@ -1851,16 +1783,11 @@ fn (self: &var Parser) parse_if_stmt(tree: &var ast::Ast) -> !?ast::IfStmt {
     return null;
 }
 
-/// Reports whether the `else` under the cursor is followed by `if` or
-/// `comptime if` rather than a block.
 fn (self: &var Parser) continues_else_chain() -> bool {
     return self.peek_kind() == token::Kind::If or
         self.peek_kind() == token::Kind::Comptime;
 }
 
-/// Parses the `if` or `comptime if` an `else` continues with. `else if` is
-/// spelling: the alternative is the block that `else { if ... }` would hold,
-/// so the tree is the same either way (SPEC §6.9).
 fn (self: &var Parser) parse_else_chain(tree: &var ast::Ast) -> !ast::Block {
     try self.next_token();
     let nested = try self.parse_else_chain_statement(tree);
@@ -1933,9 +1860,6 @@ fn (self: &var Parser) parse_for_stmt(
     }));
 }
 
-/// Parses a compile-time loop over a `std::meta` list or an integer range.
-/// The range and capture spellings are the ones the runtime `for` uses, so
-/// the only word that separates the two loops is `comptime`.
 fn (self: &var Parser) parse_comptime_for_stmt(
     tree: &var ast::Ast
 ) -> !ast::Statement {
@@ -2058,10 +1982,6 @@ fn (self: &var Parser) parse_match_arm(tree: &var ast::Ast) -> !?ast::MatchArm {
     }
     var tag = try self.retain_current_literal(tree);
     var tag_set = try tree.add_empty_text();
-    // A qualified arm (`FsError::NotFound =>`) names the error set a member
-    // originates from, which a combined set needs when two of its sets
-    // declare the same member name. Every segment before the last is the set
-    // reference, module qualification included.
     while self.peek_kind() == token::Kind::DoubleColon {
         try self.next_token();
         if !try self.expect_peek(token::Kind::Ident) {
@@ -2112,8 +2032,6 @@ fn (self: &var Parser) parse_match_arm(tree: &var ast::Ast) -> !?ast::MatchArm {
     };
 }
 
-// Appends one qualifier segment to a retained set reference: an empty
-// qualifier becomes the segment, a filled one gains `::segment`.
 fn join_qualified_text(
     tree: &var ast::Ast,
     allocator: Allocator,
@@ -2124,8 +2042,6 @@ fn join_qualified_text(
     return try tree.add_text(move joined);
 }
 
-// Renders qualifier and segment into one owned `A::B` spelling. The reads
-// stay in this borrow scope so the caller may retain the result.
 fn joined_qualifier(
     tree: &ast::Ast,
     allocator: Allocator,
@@ -2406,10 +2322,6 @@ fn (self: &var Parser) parse_prefix_expression(
     };
 }
 
-// Parses a builtin call `@name(...)` in expression position. The names are
-// the compiler's and a program cannot declare one, so a name the compiler does
-// not know is refused here, as an unknown attribute is above a declaration.
-// `@embed_file` is the only one.
 fn (self: &var Parser) parse_builtin_expr(
     tree: &var ast::Ast
 ) -> !ast::Expression {
@@ -2461,9 +2373,6 @@ fn (self: &Parser) retain_literal_expression(
     ));
 }
 
-// Reads a C string literal. It has no multi-line form, so a line break
-// between the quotes is an error instead of a byte of the value: a quote left
-// open then stops at the end of its line.
 fn (self: &var Parser) parse_c_string_literal_expression(
     tree: &var ast::Ast
 ) -> !ast::Expression {
@@ -2492,9 +2401,6 @@ fn token_literal_has_line_break(current: &token::Token) -> bool {
     return false;
 }
 
-// Turns the spelling of an integer literal into its decimal value, so that
-// `0xFF`, `0b1111_1111`, and `255` reach the checker as one number. A
-// spelling that is not a number, or does not fit 64 bits, is a parse error.
 fn (self: &var Parser) parse_int_literal_expression(
     tree: &var ast::Ast
 ) -> !ast::Expression {
@@ -2513,9 +2419,6 @@ fn (self: &var Parser) parse_int_literal_expression(
     ));
 }
 
-// Keeps the spelling of a floating-point literal without its separators, as
-// `1.5e3`. The value it names is the nearest f64; a magnitude no f64 holds is
-// a parse error rather than an infinity.
 fn (self: &var Parser) parse_float_literal_expression(
     tree: &var ast::Ast
 ) -> !ast::Expression {
@@ -2581,10 +2484,6 @@ fn (self: &var Parser) error_invalid_integer() -> !void {
     return self.record(move entry);
 }
 
-// Reads a literal: decimal digits, or `0x` / `0b` and digits of that base,
-// with `_` allowed between two digits. There is no octal form, so `017` is
-// seventeen. The value must fit a signed 64-bit integer; a `-` in front is
-// the unary operator, not part of the literal.
 fn integer_literal_value(text: []u8) -> ?i64 {
     var base = 10;
     var index = 0;
@@ -2627,7 +2526,6 @@ fn integer_literal_value(text: []u8) -> ?i64 {
     return value;
 }
 
-// Reads one digit in any base up to 16.
 fn digit_value(ch: u8) -> ?i64 {
     if ch >= cast<u8>(48) and ch <= cast<u8>(57) {
         return cast<i64>(ch) - 48;
@@ -2783,10 +2681,6 @@ fn (self: &var Parser) parse_cast_expr(
     }));
 }
 
-// Parses the right side of `orelse` or `catch`: either a default expression
-// or a return/break/continue guard that leaves the enclosing function or loop
-// on null or failure. The two keywords share one grammar (SPEC §11.1); only
-// the node they build differs.
 fn (self: &var Parser) parse_guardable_expr(
     tree: &var ast::Ast,
     left: ast::Expression
@@ -2869,7 +2763,6 @@ fn (self: &var Parser) parse_binary_expr(
     ));
 }
 
-// Parses `<<` or `>>` from the two adjacent tokens at the lookahead.
 fn (self: &var Parser) parse_shift_expr(
     tree: &var ast::Ast,
     left: ast::Expression
@@ -2924,8 +2817,6 @@ fn (self: &var Parser) parse_call_expr(
     }));
 }
 
-/// Parses `f64x2{a, b}`: one expression per lane, the Go
-/// `parseVectorLiteralExpr`.
 fn (self: &var Parser) parse_vector_literal_expr(
     tree: &var ast::Ast
 ) -> !ast::Expression {
@@ -3183,7 +3074,6 @@ fn (self: &var Parser) parse_buffer_literal_expr(
     return try tree.add_recovered_expression(span);
 }
 
-/// Runs from the start of first to the end of last, the Go `spanThrough`.
 fn span_through(first: ast::Span, last: ast::Span) -> ast::Span {
     return ast::Span { source: first.source, start: first.start, end: last.end };
 }
@@ -3280,9 +3170,6 @@ fn (self: &var Parser) parse_type_node(
     return null;
 }
 
-// parse_unsafe_func_type reads `unsafe fn(...) -> T`. `unsafe` in a type
-// position names the obligation the function it points at carries, so nothing
-// else may follow it.
 fn (self: &var Parser) parse_unsafe_func_type(
     builder: &var typ::Builder
 ) -> !?arena::Handle<typ::Node> {
@@ -3294,8 +3181,6 @@ fn (self: &var Parser) parse_unsafe_func_type(
     return self.parse_func_type(builder, true);
 }
 
-// parse_extern_func_type reads `extern "c" fn(...) -> T`: the address of a
-// function with the C calling convention, which is the one ABI a type can name.
 fn (self: &var Parser) parse_extern_func_type(
     builder: &var typ::Builder
 ) -> !?arena::Handle<typ::Node> {
@@ -3314,7 +3199,6 @@ fn (self: &var Parser) parse_extern_func_type(
     return self.parse_func_type_with(builder, false, true);
 }
 
-// parse_func_type reads `fn(T, ...) -> R` with the current token on the `fn`.
 fn (self: &var Parser) parse_func_type(
     builder: &var typ::Builder,
     unsafe_call: bool
@@ -3322,8 +3206,6 @@ fn (self: &var Parser) parse_func_type(
     return self.parse_func_type_with(builder, unsafe_call, false);
 }
 
-// parse_func_type_with reads the function pointer spelling once its ABI and
-// obligation are known.
 fn (self: &var Parser) parse_func_type_with(
     builder: &var typ::Builder,
     unsafe_call: bool,
@@ -3340,8 +3222,6 @@ fn (self: &var Parser) parse_func_type_with(
         while true {
             try self.next_token();
             if self.current_kind() == token::Kind::Ellipsis {
-                // The rest of the type is parsed all the same, so the marker
-                // is one diagnostic rather than a cascade.
                 try self.error_variadic_declaration("a function type cannot be variadic; ");
             } else {
                 let parsed = try self.parse_type_node(builder);
@@ -3690,13 +3570,7 @@ fn (self: &var Parser) parse_static_type_arg(
     return null;
 }
 
-// parse_static_expr_arg parses a parenthesized static argument such as
-// `(n1 * k2)`. The parentheses are what keep a `>` inside it from closing the
-// list. Only integer arithmetic on literals and names is a static expression;
-// it is recorded in the one spelling staticexpr reads.
 fn (self: &var Parser) parse_static_expr_arg(tree: &var ast::Ast) -> !?string::String {
-    // Parse the inside of the parentheses only: an expression parse that
-    // started at `(` would read the closing `>` as a comparison.
     try self.next_token();
     let expression = try self.parse_expression(tree, lowest_precedence());
     if !try self.expect_peek(token::Kind::RParen) {
@@ -3717,18 +3591,12 @@ fn (self: &var Parser) parse_static_expr_arg(tree: &var ast::Ast) -> !?string::S
     try entry.message.append_bytes(self.allocator,
         "` is not integer arithmetic (literals, names, and + - * / % only)");
     try self.record(move entry);
-    // The expression was read to its `)`, so the list goes on from there; a
-    // stand-in keeps one bad argument to one error.
     var stand_in = string::new(self.allocator);
     errdefer stand_in.deinit(self.allocator);
     try stand_in.append_bytes(self.allocator, "0");
     return move stand_in;
 }
 
-// append_static_expr_text spells a static expression canonically: a name or
-// literal as itself, every operation in its own parentheses, and negation as
-// a subtraction from 0, so the reader needs no precedence. It answers false
-// for anything that is not integer arithmetic.
 fn append_static_expr_text(
     allocator: Allocator,
     tree: &ast::Ast,
@@ -3829,10 +3697,6 @@ fn (self: &var Parser) parse_bracket_type(
     return null;
 }
 
-// parse_buffer_type parses `[N]T`. N is a positive integer, or a static
-// integer the instance binds: a name, or a parenthesized expression. An
-// expression of literals alone is its value, so `[(2 * 4)]u8` and `[8]u8` are
-// one type.
 fn (self: &var Parser) parse_buffer_type(
     builder: &var typ::Builder
 ) -> !?arena::Handle<typ::Node> {
@@ -3880,9 +3744,6 @@ fn (self: &var Parser) parse_buffer_type(
     return null;
 }
 
-// parse_length_expr reads a parenthesized length into len, or answers its
-// value when it reads literals alone. The expression is parsed into a scratch
-// tree: a type holds only its canonical text.
 fn (self: &var Parser) parse_length_expr(len: &var string::String) -> !i64 {
     var scratch = ast::new(self.allocator);
     defer scratch.deinit(self.allocator);
@@ -3947,17 +3808,14 @@ fn (self: &var Parser) error_expected_declaration() -> !void {
     return self.error_token(prefix, self.current_token());
 }
 
-/// Starts one error diagnostic at the current token with an empty message.
 fn (self: &Parser) error_entry() -> !diagnostic::Diagnostic {
     return diagnostic_at_token(self.allocator, self.current_token(), "");
 }
 
-/// Stores one finished error diagnostic.
 fn (self: &var Parser) record(entry: diagnostic::Diagnostic) -> !void {
     return self.diagnostics_store.append(self.allocator, move entry);
 }
 
-/// Records `text` as an error at the current token.
 fn (self: &var Parser) error_text(text: []u8) -> !void {
     var entry = try self.error_entry();
     errdefer entry.deinit(self.allocator);
@@ -3965,7 +3823,6 @@ fn (self: &var Parser) error_text(text: []u8) -> !void {
     return self.record(move entry);
 }
 
-/// Records `prefix` followed by `context` as an error at the current token.
 fn (self: &var Parser) error_context(prefix: []u8, context: []u8) -> !void {
     var entry = try self.error_entry();
     errdefer entry.deinit(self.allocator);
@@ -3974,7 +3831,6 @@ fn (self: &var Parser) error_context(prefix: []u8, context: []u8) -> !void {
     return self.record(move entry);
 }
 
-/// Records `prefix` followed by the description of `actual`.
 fn (self: &var Parser) error_token(prefix: []u8, actual: &token::Token) -> !void {
     var entry = try self.error_entry();
     errdefer entry.deinit(self.allocator);
@@ -3983,7 +3839,6 @@ fn (self: &var Parser) error_token(prefix: []u8, actual: &token::Token) -> !void
     return self.record(move entry);
 }
 
-/// Records `expected <label>, got <actual>`.
 fn (self: &var Parser) error_expected(label: []u8, actual: &token::Token) -> !void {
     var entry = try self.error_entry();
     errdefer entry.deinit(self.allocator);
@@ -3994,7 +3849,6 @@ fn (self: &var Parser) error_expected(label: []u8, actual: &token::Token) -> !vo
     return self.record(move entry);
 }
 
-/// Records `<prefix><expected kind>, got <actual>`.
 fn (self: &var Parser) error_expected_kind(
     prefix: []u8,
     expected: token::Kind,
@@ -4009,7 +3863,6 @@ fn (self: &var Parser) error_expected_kind(
     return self.record(move entry);
 }
 
-/// Records `prefix` followed by the literal bytes of `actual`.
 fn (self: &var Parser) error_literal(prefix: []u8, actual: &token::Token) -> !void {
     var entry = try self.error_entry();
     errdefer entry.deinit(self.allocator);
@@ -4019,7 +3872,6 @@ fn (self: &var Parser) error_literal(prefix: []u8, actual: &token::Token) -> !vo
     return self.record(move entry);
 }
 
-/// Records `<prefix><value><suffix>`.
 fn (self: &var Parser) error_value(
     prefix: []u8,
     value: &string::String,
@@ -4034,7 +3886,6 @@ fn (self: &var Parser) error_value(
     return self.record(move entry);
 }
 
-/// Records the `impl <contract> for <type>;` hint for an impl without `for`.
 fn (self: &var Parser) error_impl_missing_for(contract_token: &token::Token) -> !void {
     var entry = try self.error_entry();
     errdefer entry.deinit(self.allocator);
@@ -4047,7 +3898,6 @@ fn (self: &var Parser) error_impl_missing_for(contract_token: &token::Token) -> 
     return self.record(move entry);
 }
 
-/// Records the no-body rule for `impl <contract> for <type> { ... }`.
 fn (self: &var Parser) error_impl_body(
     contract_token: &token::Token,
     type_token: &token::Token
@@ -4066,7 +3916,6 @@ fn (self: &var Parser) error_impl_body(
     return self.record(move entry);
 }
 
-/// Records `expected type parameter, got <param>`.
 fn (self: &var Parser) error_expected_type_param(
     tree: &ast::Ast,
     param: &ast::StaticParam
@@ -4137,8 +3986,6 @@ fn lowest_precedence() -> i64 {
     return 1;
 }
 
-// Returns the Pratt binding power for kind, or the lowest power when kind is
-// not an infix or postfix operator.
 fn precedence(kind: token::Kind) -> i64 {
     return match kind {
         Orelse => 2,
@@ -4167,8 +4014,6 @@ fn precedence(kind: token::Kind) -> i64 {
     };
 }
 
-// The binding power of `<<` and `>>`, which are two tokens and so have no
-// row in `precedence`.
 fn shift_precedence() -> i64 {
     return 10;
 }
@@ -4177,8 +4022,6 @@ fn (self: &Parser) current_precedence() -> i64 {
     return precedence(self.current_kind());
 }
 
-// Returns the binding power of the lookahead. A `<` `<` or `>` `>` pair is a
-// shift, and a `|` that opens a payload capture binds nothing.
 fn (self: &var Parser) peek_precedence() -> !i64 {
     if try self.shift_pair() {
         return shift_precedence();
@@ -4189,7 +4032,6 @@ fn (self: &var Parser) peek_precedence() -> !i64 {
     return precedence(self.peek_kind());
 }
 
-// Scans until the token at `offset` past the current one is in the stream.
 fn (self: &var Parser) ensure_lookahead(offset: i64) -> !void {
     let allocator = self.allocator;
     while self.position + offset >= self.stream.len() {
@@ -4212,9 +4054,6 @@ fn (self: &var Parser) kind_at(offset: i64) -> !token::Kind {
     return self.token_at(offset).kind;
 }
 
-// Reports whether the lookahead and the token after it spell `<<` or `>>`:
-// the same character twice with nothing between them. The scanner keeps
-// them apart so that `Array<Array<T>>` still closes two argument lists.
 fn (self: &var Parser) shift_pair() -> !bool {
     let kind = self.peek_kind();
     if kind != token::Kind::Lt and kind != token::Kind::Gt {
@@ -4227,9 +4066,6 @@ fn (self: &var Parser) shift_pair() -> !bool {
         second.column == first.column + 1;
 }
 
-// Reports whether the lookahead starts a payload capture: `|name| {`, or
-// `|name, name| {` for a variant capture. Any other `|` after an expression
-// is the bitwise or, since no operand can begin with `{`.
 fn (self: &var Parser) capture_ahead() -> !bool {
     if self.peek_kind() != token::Kind::Pipe {
         return false;
@@ -4255,7 +4091,6 @@ fn (self: &var Parser) capture_ahead() -> !bool {
     return close == token::Kind::Pipe and open == token::Kind::LBrace;
 }
 
-// Reports whether lookahead closes an optional expression value.
 fn (self: &Parser) peek_is_expression_end() -> bool {
     return match self.peek_kind() {
         Semicolon => true,
@@ -4267,7 +4102,6 @@ fn (self: &Parser) peek_is_expression_end() -> bool {
     };
 }
 
-// Reports whether `<...>` after expression is a static call argument list.
 fn (self: &var Parser) should_parse_type_apply(
     tree: &ast::Ast,
     expression: ast::Expression
@@ -4278,10 +4112,6 @@ fn (self: &var Parser) should_parse_type_apply(
     return self.type_apply_looks_like_call();
 }
 
-// Scans through a possible static argument list, then restores the token and
-// diagnostic cursors so the real parse sees the same state. A lexer allocation
-// failure remains terminal for the parse because scanning may already have
-// advanced; the caller propagates it and destroys the Parser.
 fn (self: &var Parser) type_apply_looks_like_call() -> !bool {
     let position = self.position;
     let diagnostic_count = self.diagnostics_store.len();
@@ -4293,8 +4123,6 @@ fn (self: &var Parser) type_apply_looks_like_call() -> !bool {
 fn (self: &var Parser) scan_type_apply_lookahead() -> !bool {
     try self.next_token();
     var depth = 1;
-    // A `<` or `>` inside a parenthesized static expression is arithmetic,
-    // not a bracket of the list.
     var parens = 0;
     while depth > 0 {
         try self.next_token();
@@ -4333,7 +4161,6 @@ fn (self: &var Parser) restore_lookahead(
     return;
 }
 
-// Reports whether expression may receive static call arguments.
 fn can_type_apply_target(tree: &ast::Ast, expression: ast::Expression) -> bool {
     match tree.expressions.at(expression.node) {
         Field(value) => return value.namespace,
@@ -4353,7 +4180,6 @@ fn retained_string_has_bytes(value: &string::String) -> bool {
     return value.len() > 0;
 }
 
-// Builds a half-open diagnostic span from the current parser token.
 fn diagnostic_at_token(
     allocator: Allocator,
     current: &token::Token,
@@ -4368,7 +4194,6 @@ fn diagnostic_at_token(
     );
 }
 
-// Converts a token position into a half-open AST span.
 fn token_span(current: &token::Token) -> ast::Span {
     let width = token_width(current);
     return ast::Span {
@@ -4384,9 +4209,6 @@ fn token_span(current: &token::Token) -> ast::Span {
     };
 }
 
-// Counts scalars in lexer-normalized token text. Every byte outside the UTF-8
-// continuation range begins exactly one scalar, including the replacement
-// scalar used when the source contained invalid UTF-8.
 fn token_width(current: &token::Token) -> i64 {
     let bytes = current.literal.as_bytes();
     var width = 0;
@@ -4404,7 +4226,6 @@ fn token_width(current: &token::Token) -> i64 {
     return width;
 }
 
-// Returns the best source span currently stored on an expression.
 fn expression_span(tree: &ast::Ast, expression: ast::Expression) -> ast::Span {
     match tree.expressions.at(expression.node) {
         Ident(value) => return value.span,
@@ -4418,7 +4239,6 @@ fn expression_span(tree: &ast::Ast, expression: ast::Expression) -> ast::Span {
     }
 }
 
-// Returns the range from first.start to last.end when both are known.
 fn join_spans(first: ast::Span, last: ast::Span) -> ast::Span {
     if first.is_zero() {
         return last;
@@ -4433,8 +4253,6 @@ fn join_spans(first: ast::Span, last: ast::Span) -> ast::Span {
     };
 }
 
-// Advances the current token while retaining every scanned token for parser
-// rewind and AST text copying.
 fn (self: &var Parser) next_token() -> !void {
     let allocator = self.allocator;
     let next_position = self.position + 1;
@@ -4455,8 +4273,6 @@ fn append_next_token(
     tokens: &var arena::Arena<token::Token>,
     stream: &var array::Array<arena::Handle<token::Token>>
 ) -> !void {
-    // Reserve before scanning so stream growth failure cannot leave the
-    // scanner frontier ahead of the ordered handle stream.
     try stream.reserve(allocator, 1);
     let next = try scanner.next_token();
     let handle = try tokens.add(allocator, move next);
