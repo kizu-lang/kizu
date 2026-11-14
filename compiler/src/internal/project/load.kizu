@@ -7,13 +7,6 @@ import std::mem;
 import std::sort;
 import std::string;
 
-// Port of the graph-wide passes of internal/project/load.go: export
-// collection, import binding, dependency ordering, and the merge that hands
-// one qualified program on.
-
-/// Returns what a name declared in a module is filed under. A module with no
-/// path is a program that is not part of a package: its declarations keep the
-/// names they are written with.
 fn (self: &Loader) qualify_name(
     group: arena::Handle<ModuleGroup>,
     name: []u8
@@ -29,8 +22,6 @@ fn (self: &Loader) qualify_name(
     return move out;
 }
 
-/// Appends what a diagnostic calls a module: its path, or the file it was read
-/// from when it is not part of a package.
 fn (self: &Loader) append_module_name(
     out: &var string::String,
     file: arena::Handle<ModuleFile>
@@ -43,27 +34,22 @@ fn (self: &Loader) append_module_name(
     return out.append_string(self.allocator, &entry.file);
 }
 
-/// Copies the module path a file belongs to.
 fn (self: &Loader) module_path_copy(file: arena::Handle<ModuleFile>) -> !string::String {
     let entry = self.files.at(file);
     let group = self.groups.at(entry.group);
     return copy_string(self.allocator, &group.path);
 }
 
-/// Retains the module path a file belongs to as text of the tree, the Go
-/// `module.path` a qualified declaration is filed under.
 fn (self: &Loader) module_path_text(tree: &var ast::Ast, file: arena::Handle<ModuleFile>) -> !ast::Text {
     return tree.add_text(try self.module_path_copy(file));
 }
 
-/// Copies the package a file belongs to.
 fn (self: &Loader) module_pkg_copy(file: arena::Handle<ModuleFile>) -> !string::String {
     let entry = self.files.at(file);
     let group = self.groups.at(entry.group);
     return copy_string(self.allocator, &group.pkg);
 }
 
-/// Records that a name was reached through one of a module's namespaces.
 fn (self: &var Loader) use_namespace(
     allocator: Allocator,
     file: arena::Handle<ModuleFile>,
@@ -75,7 +61,6 @@ fn (self: &var Loader) use_namespace(
     return;
 }
 
-/// Returns every module group, by path, so that a walk is in a stable order.
 fn (self: &Loader) sorted_module_groups() -> !array::Array<arena::Handle<ModuleGroup>> {
     var out = array::new<arena::Handle<ModuleGroup>>(self.allocator);
     errdefer out.deinit(self.allocator);
@@ -89,7 +74,6 @@ fn (self: &Loader) sorted_module_groups() -> !array::Array<arena::Handle<ModuleG
         try out.append(self.allocator, group.*);
         index = index + 1;
     }
-    // Insertion sort by path; the group count is small.
     var outer = 1;
     while outer < out.len() {
         var inner = outer;
@@ -109,8 +93,6 @@ fn (self: &Loader) sorted_module_groups() -> !array::Array<arena::Handle<ModuleG
     return move out;
 }
 
-/// Returns modules in the order they were loaded: std before the package that
-/// imports it, and inside each package a module after the ones it is built on.
 fn (self: &Loader) modules_in_load_order() -> !array::Array<arena::Handle<ModuleGroup>> {
     var out = array::new<arena::Handle<ModuleGroup>>(self.allocator);
     errdefer out.deinit(self.allocator);
@@ -127,7 +109,6 @@ fn (self: &Loader) modules_in_load_order() -> !array::Array<arena::Handle<Module
     return move out;
 }
 
-/// Lists every file handle of every group, groups in the given order.
 fn (self: &Loader) files_of(
     groups: &array::Array<arena::Handle<ModuleGroup>>
 ) -> !array::Array<arena::Handle<ModuleFile>> {
@@ -146,8 +127,6 @@ fn (self: &Loader) files_of(
     return move out;
 }
 
-/// Copies the declaration handles of one file, so that a walk over them can
-/// borrow and mutate the loader freely.
 fn (self: &Loader) declarations_of(
     file: arena::Handle<ModuleFile>
 ) -> !array::Array<ast::Declaration> {
@@ -155,14 +134,11 @@ fn (self: &Loader) declarations_of(
     return entry.program.declarations.clone(self.allocator);
 }
 
-/// Is the top-level type name and visibility a declaration carries, when it
-/// declares a type.
 struct DeclaredType {
     name: ast::Text,
     public: bool,
 }
 
-/// Returns the top-level type name declared by a declaration.
 fn declared_type(tree: &ast::Ast, declaration: ast::Declaration) -> ?DeclaredType {
     match tree.declarations.at(declaration.node) {
         Struct(value) => return DeclaredType { name: value.name, public: value.public },
@@ -174,7 +150,6 @@ fn declared_type(tree: &ast::Ast, declaration: ast::Declaration) -> ?DeclaredTyp
     }
 }
 
-/// Indexes user-declared module types before resolving references.
 fn (self: &var Loader) collect_types(tree: &ast::Ast) -> !?diagnostic::Diagnostic {
     let groups = try self.sorted_module_groups();
     defer groups.deinit(self.allocator);
@@ -216,9 +191,6 @@ fn (self: &var Loader) collect_types(tree: &ast::Ast) -> !?diagnostic::Diagnosti
     return null;
 }
 
-/// Indexes user-declared module functions before resolving calls. A method is
-/// filed under its receiver's type, not in its module, so it is not a name a
-/// path can reach.
 fn (self: &var Loader) collect_functions(tree: &ast::Ast) -> !?diagnostic::Diagnostic {
     let groups = try self.sorted_module_groups();
     defer groups.deinit(self.allocator);
@@ -265,9 +237,6 @@ fn (self: &var Loader) collect_functions(tree: &ast::Ast) -> !?diagnostic::Diagn
     return null;
 }
 
-/// Validates imports and returns package-qualified declarations: the merged
-/// program in dependency order, with derived cleanups filled in once the
-/// modules are merged and before any phase reads the program.
 fn (self: &var Loader) program(tree: &var ast::Ast) -> !LoadResult {
     let groups = try self.sorted_module_groups();
     defer groups.deinit(self.allocator);
@@ -315,13 +284,11 @@ fn (self: &var Loader) program(tree: &var ast::Ast) -> !LoadResult {
     }
 }
 
-/// Is the dependency order of the module groups, or the cycle that prevents one.
 union OrderResult {
     Ordered(array::Array<arena::Handle<ModuleGroup>>),
     Failed(diagnostic::Diagnostic),
 }
 
-/// Returns dependency modules before modules that import them.
 fn (self: &Loader) ordered_modules() -> !OrderResult {
     var out = array::new<arena::Handle<ModuleGroup>>(self.allocator);
     errdefer out.deinit(self.allocator);
@@ -342,7 +309,6 @@ fn (self: &Loader) ordered_modules() -> !OrderResult {
     return OrderResult::Ordered(move out);
 }
 
-/// Performs a deterministic DFS over explicit module imports.
 fn (self: &Loader) visit_module(
     allocator: Allocator,
     group: arena::Handle<ModuleGroup>,
@@ -372,8 +338,6 @@ fn (self: &Loader) visit_module(
     while imports.at(index) |import_path| {
         index = index + 1;
         let import_bytes = import_path.as_bytes();
-        // A package root binds a namespace without naming one module, so there
-        // is no single dependency to order this one after.
         if self.group_by_path.get(import_bytes) |imported| {
             if try self.visit_module(allocator, imported, visiting, visited, out) |failed| {
                 return move failed;
@@ -386,7 +350,6 @@ fn (self: &Loader) visit_module(
     return null;
 }
 
-/// Lists the import paths a group's files declare, in a stable order.
 fn sorted_import_paths(
     allocator: Allocator,
     imports: &map::Map<[]u8, string::String>
@@ -404,8 +367,6 @@ fn sorted_import_paths(
     return move out;
 }
 
-/// Lists the aliases a module's imports bind, in a stable order so that a file
-/// with two unused imports always reports the same one first.
 fn sorted_aliases(
     allocator: Allocator,
     imports: &map::Map<[]u8, string::String>
@@ -421,14 +382,11 @@ fn sorted_aliases(
     return move out;
 }
 
-/// Is one validated import: the alias it binds and the path it names.
 struct BoundImport {
     alias: string::String,
     path: string::String,
 }
 
-/// Validates imports and records last-segment aliases and the namespaces the
-/// file can name.
 fn (self: &var Loader) resolve_imports(
     tree: &ast::Ast,
     file: arena::Handle<ModuleFile>
@@ -484,8 +442,6 @@ fn (self: &var Loader) resolve_imports(
             }
         }
     }
-    // The namespaces are the imports plus the package root namespace, which is
-    // reachable without an import and is not an edge.
     if self.files.at_mut(file) |entry| {
         var bound_index = 0;
         while bound.at(bound_index) |import_entry| {
@@ -502,7 +458,6 @@ fn (self: &var Loader) resolve_imports(
     return null;
 }
 
-/// Reports whether an alias is already bound in this file's import list.
 fn bound_alias_taken(bound: &array::Array<BoundImport>, alias: []u8) -> bool {
     var index = 0;
     while bound.at(index) |entry| {
@@ -514,8 +469,6 @@ fn bound_alias_taken(bound: &array::Array<BoundImport>, alias: []u8) -> bool {
     return false;
 }
 
-/// Refuses a declaration whose local name is also bound by an import of the
-/// same module, so that a name always stands for one thing.
 fn (self: &Loader) reject_import_shadowing(
     tree: &ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -552,9 +505,6 @@ fn (self: &Loader) reject_import_shadowing(
     return null;
 }
 
-/// Returns the local namespace name introduced by a declaration. A method's
-/// name lives under its receiver's type, so it is not a name in this module
-/// and shadows nothing.
 fn declared_top_level_name(tree: &ast::Ast, declaration: ast::Declaration) -> ?ast::Text {
     match tree.declarations.at(declaration.node) {
         Function(value) => {
@@ -572,8 +522,6 @@ fn declared_top_level_name(tree: &ast::Ast, declaration: ast::Declaration) -> ?a
     }
 }
 
-/// Rejects an import that names nothing or names something the module may not
-/// reach.
 fn (self: &Loader) bind_import(
     file: arena::Handle<ModuleFile>,
     path: &string::String
@@ -598,9 +546,6 @@ fn (self: &Loader) bind_import(
     return null;
 }
 
-/// Refuses a module the reading file may not reach. What keeps it in is where
-/// it sits, so the message says where that is rather than naming a list it is
-/// missing from.
 fn (self: &Loader) internal_module_error(
     module_path: []u8,
     file: arena::Handle<ModuleFile>
@@ -618,7 +563,6 @@ fn (self: &Loader) internal_module_error(
     return module_error(self.allocator, move text);
 }
 
-/// Reports two imports competing for one name.
 fn (self: &Loader) duplicate_import(
     alias: []u8,
     file: arena::Handle<ModuleFile>
@@ -635,9 +579,6 @@ fn (self: &Loader) duplicate_import(
     return module_error(self.allocator, move text);
 }
 
-/// Refuses an import nothing was reached through. It runs after resolution, so
-/// what counts as used is what resolution actually went through rather than a
-/// second reading of the source.
 fn (self: &Loader) reject_unused_imports(
     tree: &ast::Ast,
     file: arena::Handle<ModuleFile>
@@ -668,9 +609,6 @@ fn (self: &Loader) reject_unused_imports(
     return null;
 }
 
-/// Returns where this file declares the import that binds alias, so an unused
-/// import is reported at its own line rather than at the module, which may be
-/// spread over several files.
 fn (self: &Loader) import_span(
     tree: &ast::Ast,
     file: arena::Handle<ModuleFile>,
