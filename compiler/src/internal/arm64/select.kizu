@@ -1554,64 +1554,50 @@ fn (self: &var Selector) select_call(module: &ir::Module, node: &ir::InstrNode) 
     return self.select_c_call(module, node, node.operand);
 }
 
-/// Checks that C can call an `export "c"` function: each parameter a
-/// scalar in a general argument register or a float in a float one, and a
-/// scalar or float result. A struct C passes or returns by value goes by
+/// Checks that C can call an `export "c"` function: each parameter and the
+/// result a scalar or a float. A struct C passes or returns by value goes by
 /// the target's aggregate rules, which this backend does not lower.
 fn (self: &var Selector) check_c_export(module: &ir::Module, node: &ir::FunctionNode) -> !?diagnostic::Diagnostic {
     if self.ret.class != Class::Scalar and self.ret.class != Class::Float and self.ret.class != Class::Void {
         return try self.fail(module, "C export result type", node.return_type);
     }
-    var words = 0;
-    var floats = 0;
     var index = 0;
     while node.params.get(index) |param| {
         index = index + 1;
         let shape = self.shapes.of(module, param.type_name);
-        if shape.class == Class::Void {
-            continue;
-        }
-        if shape.class == Class::Float {
-            floats = floats + 1;
-        } else if shape.class == Class::Scalar {
-            words = words + 1;
-        } else {
+        if shape.class != Class::Void and shape.class != Class::Float and shape.class != Class::Scalar {
             return try self.fail(module, "C export parameter type", param.type_name);
         }
-    }
-    // C packs narrow stack arguments, so an argument past the registers
-    // would be read from the wrong place. Under Windows a float takes the
-    // position a word would.
-    var over = words > arg_regs(self.arch) or floats > 8;
-    if self.arch == Arch::Amd64Windows {
-        over = words + floats > arg_regs(self.arch);
-    }
-    if over {
-        return try self.fail(module, "C export parameter count", node.name);
     }
     return null;
 }
 
-/// Reports whether an `export "c"` function takes or returns a float,
-/// which C passes in a float register where the backend's own convention
-/// passes a general one: C calls such a function through a thunk
-/// (select_export_thunk) and the function itself keeps the backend's
-/// convention.
-pub fn export_takes_floats(module: &ir::Module, node: &ir::FunctionNode) -> bool {
+/// Reports whether C puts an argument of an `export "c"` function, or its
+/// result, where the backend's own convention does not: a float, which C
+/// passes in a float register and the backend in a general one, or, where C
+/// packs the stack (packs_stack_args), a scalar past the general registers.
+/// C calls such a function through a thunk (select_export_thunk) and the
+/// function itself keeps the backend's convention.
+pub fn (self: &Selector) export_has_thunk(module: &ir::Module, node: &ir::FunctionNode) -> bool {
     if !module.names.is(node.export_abi, "c") {
         return false;
     }
     if shape_of(module, node.return_type).class == Class::Float {
         return true;
     }
+    var words = 0;
     var index = 0;
     while node.params.get(index) |param| {
         index = index + 1;
-        if shape_of(module, param.type_name).class == Class::Float {
+        let kind = shape_of(module, param.type_name).class;
+        if kind == Class::Float {
             return true;
         }
+        if kind == Class::Scalar {
+            words = words + 1;
+        }
     }
-    return false;
+    return self.packs_stack_args() and words > arg_regs(self.arch);
 }
 
 /// Returns the symbol of the thunk C calls an `export "c"` function taking
@@ -1626,11 +1612,11 @@ pub fn (self: &var Selector) export_thunk_symbol(module: &ir::Module, name: ir::
     return self.syms.intern(out_bytes);
 }
 
-/// Selects the thunk C calls an `export "c"` function through when it takes
-/// or returns a float: it moves each argument from where the target's C
-/// convention puts it (check_c_export has checked they are all in
-/// registers) to where the backend's own puts it, calls the function, and
-/// moves a float result to the float result register.
+/// Selects the thunk C calls an `export "c"` function through
+/// (export_has_thunk): it moves each argument from where the target's C
+/// convention puts it, a register or the stack, to where the backend's own
+/// puts it, calls the function, and moves a float result to the float
+/// result register.
 pub fn (self: &var Selector) select_export_thunk(module: &ir::Module, node: &ir::FunctionNode) -> !void {
     self.gen = self.gen + 1;
     self.func.reset(self.allocator);
@@ -1646,9 +1632,13 @@ pub fn (self: &var Selector) select_export_thunk(module: &ir::Module, node: &ir:
     try self.start_block(entry);
     var words = array::new<i64>(self.allocator);
     defer words.deinit(self.allocator);
+    // Under Windows an argument's position names its register, a float's
+    // too; elsewhere each kind counts its own registers.
     let positional = self.arch == Arch::Amd64Windows;
     var ints = 0;
     var floats = 0;
+    // The stack bytes the arguments past the registers take so far.
+    var stack = 0;
     var index = 0;
     while node.params.get(index) |param| {
         index = index + 1;
@@ -1657,26 +1647,37 @@ pub fn (self: &var Selector) select_export_thunk(module: &ir::Module, node: &ir:
             continue;
         }
         let position = ints + floats;
-        if shape.class == Class::Float {
+        let is_float = shape.class == Class::Float;
+        var reg_index = ints;
+        var regs = arg_regs(self.arch);
+        if is_float {
+            reg_index = floats;
+            regs = 8;
+            floats = floats + 1;
+        } else {
+            ints = ints + 1;
+        }
+        if positional {
+            reg_index = position;
+            regs = arg_regs(self.arch);
+        }
+        if reg_index >= regs {
+            let offset = self.stack_arg_at(stack, shape.size);
+            stack = offset + self.stack_arg_bytes(shape.size);
+            let reg = self.func.new_vreg();
+            try self.load(reg, reg_inarg(), offset, shape.size, false);
+            try words.append(self.allocator, reg);
+        } else if is_float {
             let reg = self.func.new_vreg();
             var inst = blank(MOp::FRet);
             inst.rd = reg;
-            inst.imm = floats;
-            if positional {
-                inst.imm = position;
-            }
+            inst.imm = reg_index;
             inst.width = shape.size;
             try self.inst(inst);
             try words.append(self.allocator, reg);
-            floats = floats + 1;
-            continue;
+        } else {
+            try words.append(self.allocator, try self.param_word(reg_index));
         }
-        var word = ints;
-        if positional {
-            word = position;
-        }
-        try words.append(self.allocator, try self.param_word(word));
-        ints = ints + 1;
     }
     let count = try self.place_words(&words);
     let body = try self.function_symbol(module, node.name);
@@ -1722,7 +1723,7 @@ fn (self: &var Selector) select_func_addr(module: &ir::Module, node: &ir::InstrN
             defined = true;
             // C calls through the address, so it is the thunk's when the
             // function has one.
-            thunk = export_takes_floats(module, module.function_nodes.at(callee.node));
+            thunk = self.export_has_thunk(module, module.function_nodes.at(callee.node));
         }
         if !defined or (mem::equal_bytes(bytes, "main") and !self.main_wraps) {
             // The package main is the C entry point when it returns

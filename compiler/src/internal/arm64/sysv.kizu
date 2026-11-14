@@ -87,7 +87,7 @@ fn (self: &var Selector) sysv_word(args: &var CCallArgs, reg: i64) -> !void {
     if args.words.len() < arg_regs(self.arch) {
         return args.words.append(self.allocator, reg);
     }
-    return args.stacked.append(self.allocator, reg);
+    return self.stack_word(args, reg);
 }
 
 /// Adds a float argument of width bytes to the next xmm register, or the
@@ -97,7 +97,7 @@ fn (self: &var Selector) sysv_float(args: &var CCallArgs, reg: i64, width: i64) 
         try args.floats.append(self.allocator, reg);
         return args.float_widths.append(self.allocator, width);
     }
-    return args.stacked.append(self.allocator, reg);
+    return self.stack_word(args, reg);
 }
 
 /// Adds a C struct argument to the registers or stack slots it travels in.
@@ -131,7 +131,7 @@ fn (self: &var Selector) sysv_struct_arg(module: &ir::Module, arg: ir::Value, ar
         let reg = self.func.new_vreg();
         try self.load(reg, base, index * 8, 8, false);
         if !in_regs {
-            try args.stacked.append(self.allocator, reg);
+            try self.stack_word(args, reg);
         } else if passing.sse(index) {
             try args.floats.append(self.allocator, reg);
             try args.float_widths.append(self.allocator, 8);
@@ -144,12 +144,7 @@ fn (self: &var Selector) sysv_struct_arg(module: &ir::Module, arg: ir::Value, ar
 
 /// Selects a call to C by System V.
 fn (self: &var Selector) select_sysv_call(module: &ir::Module, node: &ir::InstrNode, callee: CCallee) -> !?diagnostic::Diagnostic {
-    var args = CCallArgs {
-        words: array::new<i64>(self.allocator),
-        floats: array::new<i64>(self.allocator),
-        float_widths: array::new<i64>(self.allocator),
-        stacked: array::new<i64>(self.allocator),
-    };
+    var args = new_c_call_args(self.allocator);
     defer args.deinit(self.allocator);
     let result = node.result;
     var result_passing = SysvStruct { size: 0, align: 1, memory: false, count: 0, sse0: false, sse1: false };
@@ -202,14 +197,7 @@ fn (self: &var Selector) select_sysv_call(module: &ir::Module, node: &ir::InstrN
             try self.sysv_word(&var args, reg);
         }
     }
-    index = 0;
-    while args.stacked.get(index) |reg| {
-        try self.store(reg, reg_sp(), index * 8, 8);
-        index = index + 1;
-    }
-    if args.stacked.len() > self.func.out_words {
-        self.func.out_words = args.stacked.len();
-    }
+    try self.store_stack_args(&args);
     let count = try self.place_words(&args.words);
     index = 0;
     while args.floats.get(index) |reg| {

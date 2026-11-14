@@ -18,15 +18,18 @@ import std::string;
 // - otherwise as the address of a copy the caller makes, and a result in
 //   memory the caller provides, its address in x8.
 //
+// An argument the registers of its kind left would not hold goes on the
+// stack, in the order of the arguments; a struct that would not fit closes
+// its kind of registers to every later argument. Darwin packs the stack: a
+// scalar or a float takes its own size at its own alignment, a struct of
+// floats its floats at theirs, any other struct whole 8-byte words.
+// Elsewhere (AAPCS64 as Linux applies it) every argument starts at an
+// 8-byte boundary and takes whole 8-byte words.
+//
 // A variadic callee takes its named arguments as any callee does. On
 // Darwin every argument after them goes on the stack, one 8-byte slot each.
-// Elsewhere (AAPCS64 as Linux applies it) an unnamed argument goes where a
-// named one would, and a scalar the registers left would not hold takes the
-// next 8-byte stack slot, as C rounds a stack argument of 8 bytes or less.
-//
-// What would spill a named argument onto the stack is refused: C packs a
-// stack argument by its own size and alignment, which this backend does not
-// lay out.
+// Elsewhere an unnamed argument goes where a named one would, a scalar on
+// the stack in an 8-byte slot.
 
 /// Is where a C struct by value goes.
 enum CStructKind {
@@ -149,9 +152,31 @@ struct CCallArgs {
     words: array::Array<i64>,
     floats: array::Array<i64>,
     float_widths: array::Array<i64>,
-    // The words of a variadic callee's unnamed arguments, one stack slot
-    // each.
+    // The registers that go on the stack, each stored at its byte offset
+    // from the stack pointer, of its width.
     stacked: array::Array<i64>,
+    stack_offsets: array::Array<i64>,
+    stack_widths: array::Array<i64>,
+    // The bytes the stack arguments take so far.
+    stack_bytes: i64,
+    // Whether a struct that did not fit closed the general or the float
+    // registers to every later argument.
+    words_closed: bool,
+    floats_closed: bool,
+}
+
+fn new_c_call_args(allocator: Allocator) -> CCallArgs {
+    return CCallArgs {
+        words: array::new<i64>(allocator),
+        floats: array::new<i64>(allocator),
+        float_widths: array::new<i64>(allocator),
+        stacked: array::new<i64>(allocator),
+        stack_offsets: array::new<i64>(allocator),
+        stack_widths: array::new<i64>(allocator),
+        stack_bytes: 0,
+        words_closed: false,
+        floats_closed: false,
+    };
 }
 
 fn (self: CCallArgs) deinit(allocator: Allocator) -> void {
@@ -159,7 +184,91 @@ fn (self: CCallArgs) deinit(allocator: Allocator) -> void {
     self.floats.deinit(allocator);
     self.float_widths.deinit(allocator);
     self.stacked.deinit(allocator);
+    self.stack_offsets.deinit(allocator);
+    self.stack_widths.deinit(allocator);
     return;
+}
+
+/// Reports whether C packs a stack argument by its own size and alignment,
+/// as Darwin's arm64 convention does, rather than in whole 8-byte words.
+fn (self: &Selector) packs_stack_args() -> bool {
+    return self.arch == Arch::Arm64 and self.stacks_variadics;
+}
+
+/// Returns the offset from the stack pointer at which C puts a stack
+/// argument aligned to align after used bytes of earlier ones.
+fn (self: &Selector) stack_arg_at(used: i64, align: i64) -> i64 {
+    if self.packs_stack_args() {
+        return round_up(used, align);
+    }
+    return round_up(used, 8);
+}
+
+/// Returns the stack bytes C gives an argument of size bytes.
+fn (self: &Selector) stack_arg_bytes(size: i64) -> i64 {
+    if self.packs_stack_args() {
+        return size;
+    }
+    return round_up(size, 8);
+}
+
+/// Reserves the stack bytes of an argument of size bytes at align and
+/// returns their offset.
+fn (self: &Selector) next_stack_arg(args: &var CCallArgs, size: i64, align: i64) -> i64 {
+    let offset = self.stack_arg_at(args.stack_bytes, align);
+    args.stack_bytes = offset + self.stack_arg_bytes(size);
+    return offset;
+}
+
+/// Adds width bytes of a register on the stack at offset.
+fn (self: &var Selector) stack_at(args: &var CCallArgs, reg: i64, offset: i64, width: i64) -> !void {
+    try args.stacked.append(self.allocator, reg);
+    try args.stack_offsets.append(self.allocator, offset);
+    return args.stack_widths.append(self.allocator, width);
+}
+
+/// Adds a scalar or a float of size bytes on the stack.
+fn (self: &var Selector) stack_scalar(args: &var CCallArgs, reg: i64, size: i64) -> !void {
+    let offset = self.next_stack_arg(args, size, size);
+    return self.stack_at(args, reg, offset, size);
+}
+
+/// Adds a whole 8-byte word on the stack.
+fn (self: &var Selector) stack_word(args: &var CCallArgs, reg: i64) -> !void {
+    return self.stack_scalar(args, reg, 8);
+}
+
+/// Stores the stack arguments and grows the outgoing area to hold them.
+fn (self: &var Selector) store_stack_args(args: &CCallArgs) -> !void {
+    var index = 0;
+    while args.stacked.get(index) |reg| {
+        try self.store(reg, reg_sp(), args.stack_offsets.get_or_panic(index), args.stack_widths.get_or_panic(index));
+        index = index + 1;
+    }
+    let words = (args.stack_bytes + 7) / 8;
+    if words > self.func.out_words {
+        self.func.out_words = words;
+    }
+    return;
+}
+
+/// Adds a named scalar of size bytes that travels in a general register:
+/// the next one, or the stack when none is left.
+fn (self: &var Selector) c_word(args: &var CCallArgs, reg: i64, size: i64) -> !void {
+    if !args.words_closed and args.words.len() < arg_regs(self.arch) {
+        return args.words.append(self.allocator, reg);
+    }
+    return self.stack_scalar(args, reg, size);
+}
+
+/// Adds a named float of size bytes: the next float register, or the stack
+/// when none is left.
+fn (self: &var Selector) c_float(args: &var CCallArgs, reg: i64, size: i64) -> !void {
+    if !args.floats_closed and args.floats.len() < 8 {
+        try args.floats.append(self.allocator, reg);
+        return args.float_widths.append(self.allocator, size);
+    }
+    return self.stack_scalar(args, reg, size);
 }
 
 /// Returns the address of a fresh frame slot of size bytes at align.
@@ -172,30 +281,39 @@ fn (self: &var Selector) c_slot(size: i64, align: i64) -> !i64 {
     return self.frame_addr(slot, 0);
 }
 
-/// Adds a C struct argument to the registers it travels in. Returns false
-/// when it is not one this backend passes: a struct C cannot name, or one
-/// the registers left would not hold.
+/// Adds a C struct argument to the registers or the stack bytes it travels
+/// in. Returns false when it is a struct C cannot name.
 fn (self: &var Selector) c_struct_arg(module: &ir::Module, arg: ir::Value, args: &var CCallArgs) -> !bool {
     let passing = try c_struct_passing(module, arg.type_name, self.allocator) orelse return false;
     let src = try self.addr(module, arg) orelse return false;
     match passing.kind {
         Floats => {
-            if args.floats.len() + passing.count > 8 {
-                return false;
+            let on_stack = args.floats_closed or args.floats.len() + passing.count > 8;
+            var offset = 0;
+            if on_stack {
+                args.floats_closed = true;
+                offset = self.next_stack_arg(args, passing.count * passing.width, passing.width);
             }
             var index = 0;
             while index < passing.count {
                 let reg = self.func.new_vreg();
                 try self.load(reg, src, index * passing.width, passing.width, false);
-                try args.floats.append(self.allocator, reg);
-                try args.float_widths.append(self.allocator, passing.width);
+                if on_stack {
+                    try self.stack_at(args, reg, offset + index * passing.width, passing.width);
+                } else {
+                    try args.floats.append(self.allocator, reg);
+                    try args.float_widths.append(self.allocator, passing.width);
+                }
                 index = index + 1;
             }
             return true;
         },
         Words => {
-            if args.words.len() + passing.count > 8 {
-                return false;
+            let on_stack = args.words_closed or args.words.len() + passing.count > 8;
+            var offset = 0;
+            if on_stack {
+                args.words_closed = true;
+                offset = self.next_stack_arg(args, passing.count * 8, 8);
             }
             // A struct whose size is not whole words is copied into one that
             // is, so the last word's load stays inside memory of its own.
@@ -208,19 +326,20 @@ fn (self: &var Selector) c_struct_arg(module: &ir::Module, arg: ir::Value, args:
             while index < passing.count {
                 let reg = self.func.new_vreg();
                 try self.load(reg, base, index * 8, 8, false);
-                try args.words.append(self.allocator, reg);
+                if on_stack {
+                    try self.stack_at(args, reg, offset + index * 8, 8);
+                } else {
+                    try args.words.append(self.allocator, reg);
+                }
                 index = index + 1;
             }
             return true;
         },
         Memory => {
-            if args.words.len() >= 8 {
-                return false;
-            }
             // The callee owns the copy and may write it.
             let copy = try self.c_slot(passing.size, passing.align);
             try self.copy_bytes(copy, src, passing.size);
-            try args.words.append(self.allocator, copy);
+            try self.c_word(args, copy, 8);
             return true;
         },
     }
@@ -290,12 +409,7 @@ fn (self: &var Selector) select_c_call_to(module: &ir::Module, node: &ir::InstrN
     if self.arch == Arch::Amd64Windows {
         return self.select_win64_call(module, node, callee);
     }
-    var args = CCallArgs {
-        words: array::new<i64>(self.allocator),
-        floats: array::new<i64>(self.allocator),
-        float_widths: array::new<i64>(self.allocator),
-        stacked: array::new<i64>(self.allocator),
-    };
+    var args = new_c_call_args(self.allocator);
     defer args.deinit(self.allocator);
     var index = callee.first;
     while node.args.get(index) |arg| {
@@ -309,10 +423,10 @@ fn (self: &var Selector) select_c_call_to(module: &ir::Module, node: &ir::InstrN
         }
         if takes_address {
             let address = try self.c_copy_address(module, arg) orelse return try self.fail_op(module, node);
-            if stacks_unnamed or (unnamed and args.words.len() >= 8) {
-                try args.stacked.append(self.allocator, address);
+            if stacks_unnamed {
+                try self.stack_word(&var args, address);
             } else {
-                try args.words.append(self.allocator, address);
+                try self.c_word(&var args, address, 8);
             }
             continue;
         }
@@ -323,7 +437,7 @@ fn (self: &var Selector) select_c_call_to(module: &ir::Module, node: &ir::InstrN
                 return try self.fail(module, "C variadic argument type", arg.type_name);
             }
             let reg = try self.reg(module, arg) orelse return try self.fail_op(module, node);
-            try args.stacked.append(self.allocator, reg);
+            try self.stack_word(&var args, reg);
             continue;
         }
         if is_c_struct(module, arg.type_name) {
@@ -336,27 +450,17 @@ fn (self: &var Selector) select_c_call_to(module: &ir::Module, node: &ir::InstrN
             return try self.fail(module, "C argument type", arg.type_name);
         }
         let reg = try self.reg(module, arg) orelse return try self.fail_op(module, node);
+        // Past the registers of its kind, an unnamed scalar fills the next
+        // 8-byte stack slot as the word it is held in.
+        var size = shape.size;
         if unnamed {
-            // Past the registers of its kind, an unnamed scalar fills the
-            // next stack slot as the word it is held in.
-            var bank = args.words.len();
-            if shape.class == Class::Float {
-                bank = args.floats.len();
-            }
-            if bank >= 8 {
-                try args.stacked.append(self.allocator, reg);
-                continue;
-            }
+            size = 8;
         }
         if shape.class == Class::Float {
-            try args.floats.append(self.allocator, reg);
-            try args.float_widths.append(self.allocator, shape.size);
+            try self.c_float(&var args, reg, size);
         } else {
-            try args.words.append(self.allocator, reg);
+            try self.c_word(&var args, reg, size);
         }
-    }
-    if args.words.len() > 8 or args.floats.len() > 8 {
-        return try self.fail_op(module, node);
     }
     let result = node.result;
     var result_passing = CStructPassing { kind: CStructKind::Words, count: 0, width: 0, size: 0, align: 1 };
@@ -374,14 +478,7 @@ fn (self: &var Selector) select_c_call_to(module: &ir::Module, node: &ir::InstrN
             return try self.fail(module, "C result type", result.type_name);
         }
     }
-    index = 0;
-    while args.stacked.get(index) |reg| {
-        try self.store(reg, reg_sp(), index * 8, 8);
-        index = index + 1;
-    }
-    if args.stacked.len() > self.func.out_words {
-        self.func.out_words = args.stacked.len();
-    }
+    try self.store_stack_args(&args);
     let count = try self.place_words(&args.words);
     index = 0;
     while args.floats.get(index) |reg| {
