@@ -7,9 +7,6 @@ import std::map;
 import std::mem;
 import std::string;
 
-// Validates a receiver call after namespace and constructor forms have been
-// ruled out. The receiver expression remains an Ast handle; recursive checks
-// never retain a borrow into the mutable Ast.
 fn (self: &var Checker) check_method_call_expr(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -49,7 +46,6 @@ fn (self: &var Checker) check_method_call_expr(
     return self.check_arena_or_impl_method(tree, scope, field, name, receiver, args, out);
 }
 
-// Enforces the receiver path boundary shared by all methods.
 fn (self: &Checker) check_method_receiver_path(
     tree: &ast::Ast,
     field: &ast::FieldExpr,
@@ -448,7 +444,6 @@ fn (self: &Checker) missing_method_error(receiver: Type, name: []u8) -> !diagnos
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-// Validates receiver-sensitive Map<K, V> methods.
 fn (self: &var Checker) check_map_receiver_method(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -524,8 +519,6 @@ fn (self: &var Checker) check_map_method(
         return self.check_map_insert(tree, scope, key, value, args, offset, out);
     }
     if mem::equal_bytes(name, "remove") {
-        // The value moves out, so an owner leaves whole; the entry's storage
-        // goes back to the allocator the map was built from (ADR-0132).
         return self.check_map_remove(tree, scope, key, value, args, offset, out);
     }
     if mem::equal_bytes(name, "get") {
@@ -617,9 +610,6 @@ fn (self: &var Checker) check_map_at_condition(
     return null;
 }
 
-// Validates Map.insert(allocator, key, value). The insert is what buys the
-// storage the entry goes in, so it names the allocator it buys from: a Map
-// header keeps none of its own (ADR-0131, ADR-0132).
 fn (self: &var Checker) check_map_insert(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -669,7 +659,6 @@ fn (self: &var Checker) check_map_insert(
     return null;
 }
 
-// Validates Map.remove(allocator, key) -> ?V, the Go `checkMapRemove`.
 fn (self: &var Checker) check_map_remove(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -698,8 +687,6 @@ fn (self: &var Checker) check_map_remove(
     return null;
 }
 
-// Checks the argument at offset is the Allocator a Map call names, the Go
-// `checkGrowAllocator` with its "`Map.<method>` expects Allocator, got T".
 fn (self: &var Checker) check_map_grow_allocator(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -747,10 +734,6 @@ fn (self: &var Checker) check_map_key_arg(
     return null;
 }
 
-/// Reports whether T can be the element of a view `[]T`, the Go
-/// `isViewElem`: plain copy data, so that reading an element copies it and
-/// nothing reachable through the view carries a cleanup. A type parameter
-/// stands for whatever the instantiation checks.
 fn (self: &var Checker) is_view_elem(tree: &ast::Ast, value: Type) -> !bool {
     let retained = try self.types.copy_text(self.allocator, value);
     defer retained.deinit(self.allocator);
@@ -777,7 +760,6 @@ fn (self: &var Checker) is_copy_type(tree: &ast::Ast, value: Type) -> !bool {
     return self.is_plain_data_type(tree, value, &var seen);
 }
 
-// Validates Array<T> primitives reached only through std wrappers.
 fn (self: &var Checker) check_array_primitive_method(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -836,8 +818,6 @@ fn (self: &var Checker) check_array_primitive_method(
             tree, scope, name, args, offset, out);
     }
     if mem::equal_bytes(name, "deinit") {
-        // The raw primitive frees the buffer through the allocator the
-        // release names: the header keeps none of its own (ADR-0132).
         if try self.check_release_allocator(
             tree, scope, "Array", name, args, offset
         ) |problem| {
@@ -849,8 +829,6 @@ fn (self: &var Checker) check_array_primitive_method(
     return self.check_array_method(tree, scope, element, name, args, offset, out);
 }
 
-// Validates the raw storage operations used only by the owner-aware std
-// wrappers, the Go `checkArrayPrimitiveShrink`.
 fn (self: &var Checker) check_array_primitive_shrink(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1002,8 +980,6 @@ fn (self: &var Checker) check_array_method(
             "`Array.clone` requires copy element"
         );
     }
-    // The declaration is generic; only a u8 array has elements a byte run can
-    // be spelled as.
     if mem::equal_bytes(name, "append_bytes") and !self.types.is_text(element, "u8") {
         return try self.checker_error_at(
             "type error", ast::zero_span(),
@@ -1095,8 +1071,6 @@ fn (self: &var Checker) check_std_array_storage_method(
         try message.append_byte(self.allocator, cast<u8>(96));
         return try self.checker_message_at("type error", ast::zero_span(), move message);
     }
-    // The primitive std forwards to gives `[]T` over the elements of an Array
-    // of copy data: `as_bytes` on bytes, `as_slice` on anything else.
     let count = args.len(tree) - offset;
     if !try self.is_view_elem(tree, element) {
         let element_text = try self.types.copy_text(self.allocator, element);
@@ -1131,7 +1105,6 @@ fn (self: &Checker) owner_type(value: Type) -> bool {
     return ast::owner_type(owners, text);
 }
 
-// Checks one std receiver declaration with concrete static arguments.
 fn (self: &var Checker) check_std_method(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1274,8 +1247,6 @@ fn (self: &Checker) std_missing_method_error(label: []u8, name: []u8) -> !diagno
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-// Reports a method call arity mismatch the way the Go checker spells it:
-// `%d args` whatever the count, unlike the builtin arity messages.
 fn (self: &Checker) method_arity_error(
     name: []u8,
     expected: i64,

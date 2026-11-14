@@ -6,11 +6,6 @@ import std::map;
 import std::mem;
 import std::string;
 
-// Types a binding's initializer, the Go `checkLetValue`. A declared type is
-// the initializer's context, the way a parameter type is an argument's:
-// `null` and a bare literal take their type from it, and a plain value wraps
-// into a declared `?T`. What the initializer then is has to be what was
-// declared.
 fn (self: &var Checker) check_let_value(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -34,9 +29,6 @@ fn (self: &var Checker) check_let_value(
     return null;
 }
 
-// Resolves the type a binding declares, the Go `letDeclaredType`. A borrow is
-// not a type a binding declares: it is what a `&` initializer lends, and the
-// binding's type is what is borrowed.
 fn (self: &var Checker) let_declared_type(
     tree: &var ast::Ast,
     statement: &ast::LetStmt,
@@ -68,10 +60,6 @@ fn declares_borrow(tree: &ast::Ast, declared: typ::Type) -> bool {
     };
 }
 
-// Checks a declared type against a binding a special initializer already
-// made -- a borrow, a box borrow, or a string view -- whose type comes from
-// what it borrows rather than from context. The Go
-// `checkLetDeclaredAgainstBinding`.
 fn (self: &var Checker) check_let_declared_against_binding(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -108,7 +96,6 @@ fn (self: &var Checker) let_declared_mismatch(
     return self.checker_message_at("type error", expression_span(tree, statement.value), move message);
 }
 
-// Checks a let/var statement and marks the new local as unread.
 fn (self: &var Checker) check_let_stmt(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -127,7 +114,6 @@ fn (self: &var Checker) check_let_stmt(
     return null;
 }
 
-// Types one local binding and binds its name.
 fn (self: &var Checker) check_let_binding(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -185,7 +171,6 @@ fn (self: &var Checker) check_let_binding(
     return self.require_scope_definition(name, defined);
 }
 
-// Records local borrow/view initializers with source data.
 fn (self: &var Checker) define_special_let_initializer(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -292,12 +277,6 @@ fn (self: &var Checker) define_special_let_initializer(
     return null;
 }
 
-// Recognizes `let v = unsafe &p.*` and `let v = unsafe &var p.*`, the Go
-// `checkRawPointerBorrowInitializer`: a local borrow of the value a raw
-// pointer points at. Like a raw view it borrows no binding the checker can
-// name, so it is a local borrow that cannot be returned or stored; that the
-// value is there, initialized, and touched by nothing else while the borrow
-// lasts is what the `unsafe` marker answers for.
 fn (self: &var Checker) check_raw_pointer_borrow_initializer(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -352,9 +331,6 @@ fn (self: &var Checker) check_raw_pointer_borrow_initializer(
     return self.check_under_mark(tree, &unsafe_marker, &inner_mark);
 }
 
-// Types the pointee a raw pointer borrow lends: `T` for `ptr<T>`, and for a
-// shared borrow `ptr<const T>` too. The borrow is the `p.*` it spells, so it
-// asks for the marker `p.*` asks for.
 fn (self: &var Checker) check_raw_pointer_borrow_target(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -401,10 +377,6 @@ fn (self: &var Checker) check_raw_pointer_borrow_target(
     }
 }
 
-// Recognizes a raw view initializer under the `unsafe` marker it is written
-// with, the Go `checkMarkedRawViewInitializer`, so the marker's accounting
-// is the same as for any other marked expression: it must cover the
-// operation and it must be justified.
 fn (self: &var Checker) check_marked_raw_view_initializer(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -447,13 +419,11 @@ fn (self: &var Checker) check_marked_raw_view_initializer(
     return self.check_under_mark(tree, &unsafe_marker, &inner_mark);
 }
 
-// Is the callee and argument list of one `receiver.name(args)` call.
 struct FieldCallParts {
     field: ast::FieldExpr,
     args: ast::ExpressionList,
 }
 
-// Splits a method-style call into copy handles, or null for any other shape.
 fn field_call_parts(tree: &ast::Ast, expression: ast::Expression) -> ?FieldCallParts {
     match tree.expressions.at(expression.node) {
         Call(call) => {
@@ -476,7 +446,6 @@ fn field_call_parts(tree: &ast::Ast, expression: ast::Expression) -> ?FieldCallP
     }
 }
 
-// Recognizes box.borrow/borrow_mut local borrow initializers.
 fn (self: &var Checker) check_box_borrow_initializer(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -546,8 +515,6 @@ fn (self: &var Checker) check_box_borrow_initializer(
     return null;
 }
 
-// Accepts a mutable local Box or a Box reached through a field path on a
-// mutable owner.
 fn (self: &Checker) box_borrow_mut_receiver_is_mutable(
     tree: &ast::Ast,
     scope: ScopeHandle,
@@ -561,9 +528,6 @@ fn (self: &Checker) box_borrow_mut_receiver_is_mutable(
     return false;
 }
 
-// Recognizes string.as_bytes() / as_mut_bytes() local byte views. mutable_out
-// reports the as_mut_bytes form, whose receiver must be a writable String
-// place (ADR-0096).
 fn (self: &var Checker) check_string_view_initializer(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -594,7 +558,6 @@ fn (self: &var Checker) check_string_view_initializer(
     if try self.view_of_receiver(tree, receiver, name, view_out) |problem| {
         return move problem;
     }
-    // view_of_receiver took the receiver, so it is one of these three.
     var kind = "Array";
     if is_buffer {
         kind = "buffer";
@@ -611,9 +574,6 @@ fn (self: &var Checker) check_string_view_initializer(
         return try self.named_arity_error(method_name, 0, parts.args.len(tree));
     }
     if mutable {
-        // A `String` reached through a field path is writable when the local
-        // at the root of that path is, which is the rule every other `&var`
-        // position reads (ADR-0111).
         var writable = false;
         if try mutable_place_base(self.allocator, tree, parts.field.receiver) |place| {
             let retained_place = tree.texts.at(place.name.node);
@@ -638,17 +598,11 @@ fn (self: &var Checker) check_string_view_initializer(
     return null;
 }
 
-/// Reports whether name is one of the four view entries.
 fn is_view_method_name(name: []u8) -> bool {
     return mem::equal_bytes(name, "as_bytes") or mem::equal_bytes(name, "as_mut_bytes") or
         mem::equal_bytes(name, "as_slice") or mem::equal_bytes(name, "as_mut_slice");
 }
 
-// Returns in view_out the view type a view method gives on a receiver, the
-// Go `viewOfReceiver`. A String and a buffer of u8 are viewed as bytes; a
-// buffer or an Array of any other number is viewed as a slice of that
-// number, and the name says which, so `[8]u32` has no `as_bytes` and
-// `Array<u8>` -- whose byte owner is `String` -- no `as_slice`.
 fn (self: &var Checker) view_of_receiver(
     tree: &ast::Ast,
     receiver: Type,
@@ -727,7 +681,6 @@ fn (self: &Checker) view_receiver_error(method: []u8) -> !diagnostic::Diagnostic
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-// Validates assignment to an existing binding.
 fn (self: &var Checker) check_assign_stmt(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -764,7 +717,6 @@ fn (self: &var Checker) check_assign_stmt(
     return null;
 }
 
-// Returns the type that a valid assignment target accepts.
 fn (self: &var Checker) check_assignable_target(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -806,10 +758,6 @@ fn (self: &var Checker) check_assignable_target(
             return self.check_assignable_index(tree, scope, expression, &copied, out);
         },
         Unsafe(value) => {
-            // `unsafe p.* = value` marks the store, so the marker sits on the
-            // target. It covers the target only: the assigned value is a
-            // separate expression and needs its own marker if it is unproven
-            // too.
             let copied = ast::UnsafeExpr {
                 value: value.value,
                 safety: value.safety,
@@ -829,8 +777,6 @@ fn (self: &var Checker) check_assignable_target(
     }
 }
 
-// Rejects a marker that covers no unproven operation or lacks its SAFETY
-// comment, once the marked target has been checked under a fresh marker.
 fn (self: &Checker) unsafe_marker_coverage(
     tree: &ast::Ast,
     expression: &ast::UnsafeExpr,
@@ -876,9 +822,6 @@ fn (self: &Checker) invalid_assignment_target_error(
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-// Validates an element write through a writable slice view (ADR-0096):
-// `buf[i] = x` where buf is held as `&var []u8`. A plain `[]u8` binding is
-// rejected even when `var`-bound: it does not guarantee a writable backing.
 fn (self: &var Checker) check_assignable_index(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -893,8 +836,6 @@ fn (self: &var Checker) check_assignable_index(
     if try self.assignable_array_place(tree, scope, index.target, &var array) {
         return self.check_array_index(tree, scope, index, array, out);
     }
-    // An array that cannot be written as a whole cannot be written one
-    // element at a time either, and for the same reason.
     var target = empty_type();
     if try self.check_expr(tree, scope, index.target, &var target) |problem| {
         problem.deinit(self.allocator);
@@ -934,11 +875,6 @@ fn (self: &var Checker) check_assignable_index(
     return null;
 }
 
-/// Reports the array type of a place an element write can land in, the Go
-/// `assignableArrayPlace`: a place assignment could write as a whole -- a
-/// `var` binding, a `&var` parameter, a field of one -- whose type is
-/// `[N]T`, or an element of such an array or of a writable view that is
-/// itself an array.
 fn (self: &var Checker) assignable_array_place(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -997,9 +933,6 @@ fn (self: &Checker) unknown_local_error(name: []u8) -> !diagnostic::Diagnostic {
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-// Validates direct binding assignment. A `&var T` parameter is the caller's
-// storage, so assigning the binding stores there, under the same rule that
-// lets a field write through it.
 fn (self: &var Checker) check_assignable_ident(
     tree: &ast::Ast,
     scope: ScopeHandle,
@@ -1032,11 +965,6 @@ fn (self: &var Checker) check_assignable_ident(
     return null;
 }
 
-// Validates mutation of a field on a mutable value. The receiver must itself
-// be an assignable place: a mutable binding, a mutable borrow dereference, or
-// a field chain that bottoms out in one. Anything else (a call result, an
-// index) is refused here so the accept set matches what assignment lowering
-// can store into.
 fn (self: &var Checker) check_assignable_field(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1121,9 +1049,6 @@ fn (self: &Checker) field_receiver_error(prefix: []u8, name: []u8) -> !diagnosti
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-// Applies the declaring struct's invariant to one field write, or to a `&var`
-// lend of the field (`action` names which). The Kizu resolve_field_expr keeps
-// that declaration private, so the receiver type is read again here.
 fn (self: &var Checker) check_field_invariant(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1157,7 +1082,6 @@ fn (self: &var Checker) check_field_invariant(
     }
 }
 
-// Validates mutation through an &var borrow or raw pointer.
 fn (self: &var Checker) check_assignable_deref(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1171,9 +1095,6 @@ fn (self: &var Checker) check_assignable_deref(
             let source_name = retained.as_bytes();
             if self.scopes.is_mut_borrowed(scope, source_name) {
                 mut_borrowed_view = true;
-                // A writable slice view grants element writes only
-                // (ADR-0096): re-pointing it would assign the caller's
-                // binding, which the flat view representation never reaches.
                 if self.scopes.lookup(scope, source_name) |value| {
                     if self.types.is_slice_type(value) {
                         var message = string::new(self.allocator);
@@ -1228,7 +1149,6 @@ fn (self: &var Checker) check_assignable_deref(
     return try self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-// Unions the parameter names that can back a returned view of expression.
 fn (self: &var Checker) expr_borrow_sources(
     allocator: Allocator,
     tree: &var ast::Ast,
@@ -1276,9 +1196,6 @@ fn (self: &var Checker) expr_borrow_sources(
     }
 }
 
-// Derives a local value's borrow provenance from its binding. A binding may
-// record several sources (a multi-source `borrows` result), so the walk
-// resolves each recorded source to its root and unions the roots.
 fn (self: &Checker) ident_borrow_sources(
     scope: ScopeHandle,
     name: []u8,
@@ -1289,8 +1206,6 @@ fn (self: &Checker) ident_borrow_sources(
     return self.collect_borrow_roots(self.allocator, scope, name, &var seen, roots);
 }
 
-// Visits one recorded source name once, adding it to roots when nothing
-// backs it, and walking its own recorded sources otherwise.
 fn (self: &Checker) collect_borrow_roots(
     allocator: Allocator,
     scope: ScopeHandle,
@@ -1313,8 +1228,6 @@ fn (self: &Checker) collect_borrow_roots(
             while binding.borrow_sources.at(index) |recorded| {
                 let candidate = recorded.as_bytes();
                 if mem::equal_bytes(candidate, source) {
-                    // A name whose recorded provenance includes itself is a
-                    // root.
                     try roots.insert(allocator, source, true);
                 } else {
                     try self.collect_borrow_roots(allocator, scope, candidate, seen, roots);
@@ -1328,7 +1241,6 @@ fn (self: &Checker) collect_borrow_roots(
     return roots.insert(allocator, source, true);
 }
 
-// Maps returned borrow provenance back to call arguments.
 fn (self: &var Checker) call_borrow_sources(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1347,11 +1259,6 @@ fn (self: &var Checker) call_borrow_sources(
     return self.structural_return_sources(tree, scope, function, null, call.args, out);
 }
 
-// Unions the provenance of every tie-capable argument of a call whose return
-// type can carry a view. The contract is derived from the signature alone
-// (ADR-0098): a view-capable return is conservatively tied to every view or
-// borrow argument. A method call passes its receiver as parameter 0 and
-// offsets the call arguments by one; a function call passes null.
 fn (self: &var Checker) structural_return_sources(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1381,8 +1288,6 @@ fn (self: &var Checker) structural_return_sources(
     return null;
 }
 
-// Maps one parameter index to its call expression, or null for a slot the
-// call does not fill.
 fn structural_arg_at(
     tree: &ast::Ast,
     receiver: ?ast::Expression,
@@ -1402,14 +1307,11 @@ fn structural_arg_at(
     return args.get_or_panic(tree, position);
 }
 
-// Reports whether an argument in this slot can back a returned view: an
-// explicit borrow, or a view-typed parameter.
 fn (self: &var Checker) tie_capable_param(param: Type, borrowed: bool) -> !bool {
     return borrowed or
         try self.types.is_borrowed_view_return_type(param);
 }
 
-// Handles built-in method-style view returns.
 fn (self: &var Checker) method_borrow_sources(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1459,8 +1361,6 @@ fn (self: &var Checker) method_receiver_borrow_sources(
     defer owned_name.deinit(self.allocator);
     let name = owned_name.as_bytes();
     if self.impl_method(receiver_name, name) |method| {
-        // A method's params start with self, so index 0 is the receiver
-        // expression and the rest offset into the call arguments.
         handled.* = true;
         return self.structural_return_sources(tree, scope, method, field.receiver, args, out);
     }
@@ -1476,10 +1376,6 @@ fn (self: &var Checker) method_receiver_borrow_sources(
     return null;
 }
 
-// Appends the provenance names backing expression to out. Static backing is
-// not a provenance to keep alive and is dropped; a failed walk records
-// nothing. Order is not significant: the only consumer unions the names back
-// into a set.
 fn (self: &var Checker) expr_borrow_source_list(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1504,7 +1400,6 @@ fn (self: &var Checker) expr_borrow_source_list(
     return;
 }
 
-// Preserves the receiver provenance through direct fields.
 fn (self: &var Checker) field_borrow_sources(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1517,7 +1412,6 @@ fn (self: &var Checker) field_borrow_sources(
     return self.expr_borrow_sources(self.allocator, tree, scope, field.receiver, out);
 }
 
-// Unions borrow sources from stored field values, in declaration order.
 fn (self: &var Checker) struct_literal_borrow_sources(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1540,7 +1434,6 @@ fn (self: &var Checker) struct_literal_borrow_sources(
     return null;
 }
 
-// Resolves the struct a literal constructs, or null for an unknown name.
 fn (self: &Checker) struct_literal_declaration(
     tree: &ast::Ast,
     expression: ast::Expression
@@ -1562,8 +1455,6 @@ fn struct_declaration_field_count(tree: &ast::Ast, declaration: ast::Declaration
     }
 }
 
-// Returns the value a literal writes for the declared field at index, or
-// null when the literal leaves it out.
 fn written_struct_field_value(
     tree: &ast::Ast,
     declaration: ast::Declaration,
@@ -1583,8 +1474,6 @@ fn written_struct_field_value(
     }
 }
 
-// Returns the last value written under name, the way a name-keyed map of the
-// written fields would.
 fn written_field_value(
     tree: &ast::Ast,
     expression: ast::Expression,
@@ -1609,7 +1498,6 @@ fn written_field_value(
     }
 }
 
-// Resolves direct and namespace-qualified source function calls.
 fn (self: &Checker) called_function(tree: &ast::Ast, callee: ast::Expression) -> !?FunctionHandle {
     if try qualified_name(self.allocator, tree, callee) |name| {
         defer name.deinit(self.allocator);
