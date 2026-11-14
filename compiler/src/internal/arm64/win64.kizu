@@ -1,7 +1,6 @@
 import compiler::internal::diagnostic;
 import compiler::internal::ir;
 import std::array;
-import std::string;
 
 // Calls into C by the x64 convention of Windows, for the amd64 printer,
 // which there names x0..x3 rcx, rdx, r8 and r9 and x8 rax.
@@ -82,7 +81,7 @@ fn (self: &var Selector) win64_struct_arg(module: &ir::Module, arg: ir::Value, a
 }
 
 /// Selects a call to C by the Windows convention.
-fn (self: &var Selector) select_win64_call(module: &ir::Module, node: &ir::InstrNode, symbol_name: ir::Name) -> !?diagnostic::Diagnostic {
+fn (self: &var Selector) select_win64_call(module: &ir::Module, node: &ir::InstrNode, callee: CCallee) -> !?diagnostic::Diagnostic {
     var args = CCallArgs {
         words: array::new<i64>(self.allocator),
         floats: array::new<i64>(self.allocator),
@@ -111,9 +110,9 @@ fn (self: &var Selector) select_win64_call(module: &ir::Module, node: &ir::Instr
             return try self.fail(module, "C result type", result.type_name);
         }
     }
-    var index = 0;
+    var index = callee.first;
     while node.args.get(index) |arg| {
-        let at = index;
+        let at = index - callee.first;
         index = index + 1;
         let unnamed = node.variadic_fixed > 0 and at >= node.variadic_fixed;
         var takes_address = false;
@@ -163,14 +162,7 @@ fn (self: &var Selector) select_win64_call(module: &ir::Module, node: &ir::Instr
         try self.inst(inst);
         index = index + 1;
     }
-    var symbol = string::new(self.allocator);
-    defer symbol.deinit(self.allocator);
-    let name_text = ir::name_text(&module.names, symbol_name);
-    let name_bytes = name_text.as_bytes();
-    try append_c_symbol(self.allocator, &var symbol, name_bytes);
-    let symbol_bytes = symbol.as_bytes();
-    let sym = try self.syms.intern(symbol_bytes);
-    try self.call_sym(sym, count, reg_none());
+    try self.call_c_callee(module, callee, count, reg_none());
     if !struct_result {
         try self.bind_result(module, result, reg_none(), true);
         return null;

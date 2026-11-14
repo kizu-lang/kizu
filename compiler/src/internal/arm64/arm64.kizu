@@ -105,7 +105,7 @@ fn emit_into(allocator: Allocator, module: &ir::Module, arch: Arch, format: Form
     var symbols = array::new<ir::Name>(allocator);
     defer symbols.deinit(allocator);
     // The C symbol of each `export "c"` function, a second label on the
-    // same code, or the empty name.
+    // same code or on its thunk (select_export_thunk), or the empty name.
     var exports = array::new<ir::Name>(allocator);
     defer exports.deinit(allocator);
     var index = 0;
@@ -114,13 +114,26 @@ fn emit_into(allocator: Allocator, module: &ir::Module, arch: Arch, format: Form
         let function_node = module.function_nodes.at(function.node);
         let name = function_node.name;
         let symbol = try selector.function_symbol(module, name);
-        try exports.append(allocator, try selector.export_symbol(module, function_node));
+        let c_symbol = try selector.export_symbol(module, function_node);
+        let thunk = export_takes_floats(module, function_node);
+        if thunk {
+            try exports.append(allocator, ir::empty_name());
+        } else {
+            try exports.append(allocator, c_symbol);
+        }
         if try selector.select_function(module, function) |failed| {
             return move failed;
         }
         selector.mark_cold_blocks();
         try functions.append(allocator, try clone_function(allocator, &selector.func));
         try symbols.append(allocator, symbol);
+        if thunk {
+            try selector.select_export_thunk(module, function_node);
+            selector.mark_cold_blocks();
+            try functions.append(allocator, try clone_function(allocator, &selector.func));
+            try symbols.append(allocator, try selector.export_thunk_symbol(module, name));
+            try exports.append(allocator, c_symbol);
+        }
     }
     if selector.main_wraps {
         if try selector.select_main_wrapper(module, main_ret) |failed| {
