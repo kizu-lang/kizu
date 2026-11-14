@@ -8,10 +8,6 @@ import std::map;
 import std::mem;
 import std::string;
 
-// Mechanical port of internal/typ's type representation, table, parser,
-// renderer, structural equality, and walk. One Table owns the parsed trees for
-// a compiler phase; Type and child edges are copy handles into those trees.
-
 pub error Error {
     ExpectedName,
     TrailingText,
@@ -26,26 +22,22 @@ pub error Error {
     EmptyStaticArgument,
 }
 
-/// Owns every parsed type tree retained by one compiler phase.
 pub struct Table {
     allocator: Allocator,
     trees: arena::Arena<TypeTree>,
     parsed: map::Map<[]u8, Type>,
 }
 
-/// Identifies one node in a type tree retained by a Table.
 pub struct Type {
     tree: arena::Handle<TypeTree>,
     root: arena::Handle<Node>,
 }
 
-// TypeTree owns the node storage for one independently built type graph.
 struct TypeTree {
     nodes: arena::Arena<Node>,
     root: arena::Handle<Node>,
 }
 
-/// Is one node in a parsed type.
 pub union Node {
     Name(Name),
     Slice(Slice),
@@ -57,20 +49,15 @@ pub union Node {
     Func(Func),
 }
 
-/// Is a primitive, declared type, type parameter, or generic application.
 pub struct Name {
     pub path: array::Array<string::String>,
     pub args: array::Array<arena::Handle<Node>>,
 }
 
-/// Is `[]T`.
 pub struct Slice {
     pub elem: arena::Handle<Node>,
 }
 
-/// Returns the kind of a vector type name, or -1 for any other name, the Go
-/// `VectorOf`: `f64x2` is two f64 lanes. The names are the 128-bit vectors (SPEC §7.3), one
-/// register wide on every target the compiler has.
 pub fn vector_kind(name: []u8) -> i64 {
     if mem::equal_bytes(name, "f64x2") { return 0; }
     if mem::equal_bytes(name, "f32x4") { return 1; }
@@ -83,8 +70,6 @@ pub fn vector_kind(name: []u8) -> i64 {
     return -1;
 }
 
-/// Returns the lane type of a vector kind from `vector_kind`; the name is
-/// a literal, so it is tied to nothing.
 pub fn vector_lane_of_kind(kind: i64) -> []u8 {
     if kind == 0 { return "f64"; }
     if kind == 1 { return "f32"; }
@@ -96,7 +81,6 @@ pub fn vector_lane_of_kind(kind: i64) -> []u8 {
     return "u16";
 }
 
-/// Returns the lane count of a vector type name, 0 for any other name.
 pub fn vector_lanes(name: []u8) -> i64 {
     if mem::equal_bytes(name, "f64x2") or mem::equal_bytes(name, "i64x2") or
         mem::equal_bytes(name, "u64x2") {
@@ -112,46 +96,34 @@ pub fn vector_lanes(name: []u8) -> i64 {
     return 0;
 }
 
-/// Reports whether name spells a vector type, the Go `IsVector`.
 pub fn is_vector(name: []u8) -> bool {
     return vector_lanes(name) != 0;
 }
 
-/// Is `[N]T`. len holds a length that is a static integer name or
-/// expression, such as `n` or `(n * 2)`, until an instance binds it; size is
-/// the length once len is empty.
 pub struct Buffer {
     pub size: i64,
     pub len: string::String,
     pub elem: arena::Handle<Node>,
 }
 
-/// Is `&T` or `&var T`.
 pub struct Borrow {
     pub elem: arena::Handle<Node>,
     pub mutable: bool,
 }
 
-/// Is `?T`.
 pub struct Optional {
     pub elem: arena::Handle<Node>,
 }
 
-/// Is `const T` inside a static argument list.
 pub struct Const {
     pub elem: arena::Handle<Node>,
 }
 
-/// Is `!T`, or `E!T` when err is present.
 pub struct ErrorUnion {
     pub err: ?arena::Handle<Node>,
     pub ok: arena::Handle<Node>,
 }
 
-/// Is `fn(T, ...) -> R`, or `unsafe fn(...) -> R` when the function it points
-/// at carries an obligation. The two are different types, so an unsafe
-/// function cannot reach a safe call. c_abi is `extern "c" fn(...) -> R`, the
-/// address of a function C calls or C defined.
 pub struct Func {
     pub params: array::Array<arena::Handle<Node>>,
     pub result: arena::Handle<Node>,
@@ -159,8 +131,6 @@ pub struct Func {
     pub c_abi: bool,
 }
 
-/// Is the head of the `extern "c" fn(...) -> R` spelling, which a quoted
-/// literal cannot hold.
 pub fn c_func_head() -> []u8 {
     let head =
         \\extern "c" fn(
@@ -168,37 +138,30 @@ pub fn c_func_head() -> []u8 {
     return head;
 }
 
-/// Reports whether text spells a function pointer type, which its head says
-/// without parsing the rest.
 pub fn is_func_spelling(text: []u8) -> bool {
     return mem::starts_with(text, "fn(") or mem::starts_with(text, "unsafe fn(") or
         mem::starts_with(text, c_func_head());
 }
 
-/// Is the payload and mutability of a borrow optional spelling.
 pub struct BorrowOptionalParts {
     pub elem: []u8,
     pub mutable: bool,
 }
 
-/// Is the base and argument text of a generic application spelling.
 pub struct ApplyParts {
     pub base: []u8,
     pub args: []u8,
 }
 
-/// Is the receiver and method of a receiver-qualified method name.
 pub struct MethodNameParts {
     pub receiver: []u8,
     pub method: []u8,
 }
 
-/// Describes the structural callback Walk requires.
 pub contract TypeVisitor {
     fn visit(value: &Node) -> void;
 }
 
-/// Describes the path rewrite MapNames requires.
 pub contract NameMapper {
     fn rename_path(
         allocator: Allocator,
@@ -206,22 +169,18 @@ pub contract NameMapper {
     ) -> !array::Array<string::String>;
 }
 
-/// Describes a post-order whole-name fold into a distinct type graph.
 pub contract NameFolder {
     fn fold_name(builder: &var Builder, path: array::Array<string::String>, args: array::Array<arena::Handle<Node>>) -> !arena::Handle<Node>;
 }
 
 struct PlainNameTransform {}
 
-// NoReplacements selects the plain static renderer instantiation.
 struct NoReplacements {}
 
 struct RenderedSubstitutions {
     values: map::Map<[]u8, string::String>,
 }
 
-// parser reads one type spelling left to right while owning every node it has
-// accepted so an error can release the partial tree in one visible cleanup.
 struct Parser {
     allocator: Allocator,
     input: []u8,
@@ -229,7 +188,6 @@ struct Parser {
     nodes: arena::Arena<Node>,
 }
 
-/// Owns one type graph until it is transferred into a phase Table.
 pub struct Builder {
     allocator: Allocator,
     nodes: arena::Arena<Node>,
@@ -240,7 +198,6 @@ struct Span {
     end: i64,
 }
 
-/// Creates an empty type table for one compiler phase.
 pub fn new(allocator: Allocator) -> Table {
     return Table {
         allocator: allocator,
@@ -249,7 +206,6 @@ pub fn new(allocator: Allocator) -> Table {
     };
 }
 
-/// Creates an empty graph builder for one parsed or transformed type.
 pub fn new_builder(allocator: Allocator) -> Builder {
     return Builder {
         allocator: allocator,
@@ -257,7 +213,6 @@ pub fn new_builder(allocator: Allocator) -> Builder {
     };
 }
 
-/// Retains one node and returns its identity inside this graph.
 fn (self: &var Builder) add(node: Node) -> !arena::Handle<Node> {
     return try self.nodes.add(self.allocator, move node);
 }
@@ -276,19 +231,16 @@ fn copy_path(allocator: Allocator, source: &array::Array<string::String>) -> !ar
     return move path;
 }
 
-// Borrows a node already retained in this in-progress graph.
 fn (self: &Builder) at(handle: arena::Handle<Node>) -> &Node {
     return self.nodes.at(handle);
 }
 
-/// Transfers the completed graph into its phase table.
 pub fn finish_builder(allocator: Allocator, builder: Builder, table: &var Table, root: arena::Handle<Node>) -> !Type {
     let tree = TypeTree { nodes: move builder.nodes, root: root };
     let tree_handle = try table.trees.add(allocator, move tree);
     return Type { tree: tree_handle, root: root };
 }
 
-/// Returns the retained type for text, parsing its tree on first use.
 fn (self: &var Table) parse(text: []u8) -> !Type {
     if self.parsed.get(text) |parsed| {
         return parsed;
@@ -303,7 +255,6 @@ fn (self: &var Table) parse(text: []u8) -> !Type {
     return value;
 }
 
-// parse_tree parses one canonical spelling into an independent owned tree.
 fn parse_tree(allocator: Allocator, text: []u8) -> !TypeTree {
     var parser = Parser {
         allocator: allocator,
@@ -322,8 +273,6 @@ fn parse_tree(allocator: Allocator, text: []u8) -> !TypeTree {
     };
 }
 
-// parse_type reads a type, including the `E!T` spelling whose error type sits
-// to the left of the `!`.
 fn (self: &var Parser) parse_type() -> !arena::Handle<Node> {
     let left = try self.parse_prefix();
     if !self.accept("!") {
@@ -336,7 +285,6 @@ fn (self: &var Parser) parse_type() -> !arena::Handle<Node> {
     }));
 }
 
-// parse_prefix reads the spellings that wrap a type from the left.
 fn (self: &var Parser) parse_prefix() -> !arena::Handle<Node> {
     if self.accept("!") {
         let elem = try self.parse_prefix();
@@ -382,8 +330,6 @@ fn (self: &var Parser) parse_prefix() -> !arena::Handle<Node> {
     return self.parse_name();
 }
 
-// parse_func reads a function pointer spelling once its `fn(` is consumed. An
-// empty parameter list is the `fn() -> T` a nullary function points at.
 fn (self: &var Parser) parse_func(unsafe_call: bool, c_abi: bool) -> !arena::Handle<Node> {
     var params = array::new<arena::Handle<Node>>(self.allocator);
     errdefer params.deinit(self.allocator);
@@ -412,8 +358,6 @@ fn (self: &var Parser) parse_func(unsafe_call: bool, c_abi: bool) -> !arena::Han
     }));
 }
 
-// parse_bracketed reads the `[]T` and `[N]T` spellings. N is a number, a
-// static name, or a static expression in its canonical parenthesized spelling.
 fn (self: &var Parser) parse_bracketed() -> !arena::Handle<Node> {
     if self.accept("[]") {
         let elem = try self.parse_prefix();
@@ -444,8 +388,6 @@ fn (self: &var Parser) parse_bracketed() -> !arena::Handle<Node> {
     }));
 }
 
-// skip_length moves past a length: a run of name bytes, or a parenthesized
-// expression, whose parentheses balance.
 fn (self: &var Parser) skip_length() -> !void {
     var depth = 0;
     let start = self.position;
@@ -466,15 +408,12 @@ fn (self: &var Parser) skip_length() -> !void {
     return Error::ExpectedBufferClose;
 }
 
-// is_length_byte reports whether byte may appear in a length outside
-// parentheses.
 fn is_length_byte(byte: u8) -> bool {
     return byte == cast<u8>(95) or is_digit(byte) or
         (byte >= cast<u8>(97) and byte <= cast<u8>(122)) or
         (byte >= cast<u8>(65) and byte <= cast<u8>(90));
 }
 
-// parse_name reads a `::` separated name and its static arguments.
 fn (self: &var Parser) parse_name() -> !arena::Handle<Node> {
     var path = array::new<string::String>(self.allocator);
     errdefer path.deinit(self.allocator);
@@ -564,7 +503,6 @@ fn owned_text(allocator: Allocator, bytes: []u8) -> !string::String {
     return move out;
 }
 
-/// Splits a static argument list at top-level commas.
 pub fn split_args(
     allocator: Allocator,
     text: []u8
@@ -577,7 +515,6 @@ pub fn split_args(
     return move parts;
 }
 
-/// Splits a valid static argument list, or returns null for malformed text.
 pub fn split_args_optional(
     allocator: Allocator,
     text: []u8
@@ -591,7 +528,6 @@ pub fn split_args_optional(
     return move parts;
 }
 
-// Returns a parse reason as data while allocation failures stay errors.
 fn split_args_into(
     allocator: Allocator,
     text: []u8,
@@ -627,8 +563,6 @@ fn split_args_into(
     if depth != 0 {
         return Error::UnbalancedArgumentOpen;
     }
-    // Parser-produced static spellings contain only canonical ASCII spacing;
-    // source Unicode whitespace was already consumed by the lexer.
     let final_part = mem::trim_ascii(text[start..mem::len(text)]);
     if mem::len(final_part) == 0 {
         has_empty = true;
@@ -640,13 +574,6 @@ fn split_args_into(
     return null;
 }
 
-/// Reports whether text spells a type std::map::Map accepts as a key. A key is
-/// hashed and compared as the bytes it occupies, so a type qualifies when its
-/// bytes are its value: no padding to read, no pointer to follow, and no two
-/// byte patterns that have to compare equal. The integer types answer that;
-/// f32/f64 do not, because `0.0` and `-0.0` are equal with different bytes and
-/// a NaN is unequal to its own. How wide each one is stays with the backend
-/// that lays it out, so there is one answer to that and not two.
 pub fn is_map_key(text: []u8) -> bool {
     if mem::equal_bytes(text, "[]u8") or
         mem::equal_bytes(text, "i8") or mem::equal_bytes(text, "u8") or
@@ -658,16 +585,10 @@ pub fn is_map_key(text: []u8) -> bool {
     return mem::equal_bytes(text, "isize") or mem::equal_bytes(text, "usize");
 }
 
-/// Lists the accepted key spellings for a diagnostic, in the order a reader
-/// scans them.
 pub fn map_key_type_names() -> []u8 {
     return "[]u8, i8, i16, i32, i64, u8, u16, u32, u64, isize, usize";
 }
 
-/// Returns T for the optional value spelling `?T`.
-/// Returns the success type an `E!T` or `!T` spelling wraps, the Go
-/// `ast.ErrorUnionSuccess`: the text after the top-level `!`, the one not
-/// inside a static argument list.
 pub fn error_union_success(text: []u8) -> ?[]u8 {
     var depth = 0;
     var index = 0;
@@ -694,7 +615,6 @@ pub fn optional_elem(text: []u8) -> ?[]u8 {
     return text[1..mem::len(text)];
 }
 
-/// Splits `?&T` or `?&var T` into its payload and mutability.
 pub fn borrow_optional_elem(text: []u8) -> ?BorrowOptionalParts {
     if mem::starts_with(text, "?&var ") {
         return BorrowOptionalParts {
@@ -711,7 +631,6 @@ pub fn borrow_optional_elem(text: []u8) -> ?BorrowOptionalParts {
     return null;
 }
 
-/// Splits `Base<Args>` without interpreting Base or Args.
 pub fn split_apply(name: []u8) -> ?ApplyParts {
     var open = 0;
     while open < mem::len(name) and name[open] != cast<u8>(60) {
@@ -728,7 +647,6 @@ pub fn split_apply(name: []u8) -> ?ApplyParts {
     };
 }
 
-/// Splits a receiver-qualified method name at its last dot.
 pub fn split_method_name(name: []u8) -> ?MethodNameParts {
     var index = mem::len(name);
     while index > 0 {
@@ -743,12 +661,10 @@ pub fn split_method_name(name: []u8) -> ?MethodNameParts {
     return null;
 }
 
-/// Returns the method name that discharges an owner's consume obligation.
 pub fn cleanup_method() -> []u8 {
     return "deinit";
 }
 
-/// Renders one retained type back to its canonical spelling.
 pub fn render(
     allocator: Allocator,
     table: &Table,
@@ -760,7 +676,6 @@ pub fn render(
     return move out;
 }
 
-/// Appends one retained type's canonical spelling to caller-owned storage.
 pub fn append_render(
     allocator: Allocator,
     out: &var string::String,
@@ -774,13 +689,11 @@ pub fn append_render(
     );
 }
 
-/// Borrows the root node represented by value from its table.
 pub fn root_node(table: &Table, value: Type) -> &Node {
     let tree = table.trees.at(value.tree);
     return tree.nodes.at(value.root);
 }
 
-/// Converts one child edge into a Type handle in its parent's tree.
 pub fn child_type(
     parent: Type,
     child: arena::Handle<Node>
@@ -938,7 +851,6 @@ fn append_name_path(allocator: Allocator, out: &var string::String, node: &Name)
     return;
 }
 
-/// Reports whether two type trees have the same structure.
 pub fn equal(
     left_table: &Table,
     left: Type,
@@ -1082,17 +994,13 @@ fn equal_error_union(
     return equal_node(left, a.ok, right, b.ok);
 }
 
-/// Rewrites every name path while preserving the type structure around it.
 pub fn map_names<M>(table: &var Table, value: Type, mapper: &var M) -> !Type {
     var folder = PlainNameTransform {};
-    // The table is read while the tree is rewritten and written only once the
-    // rewrite is complete, so the two borrows never overlap.
     let allocator = table.allocator;
     let mapped = try map_tree<M, PlainNameTransform>(allocator, table, value, mapper, &var folder);
     return try finish_builder(allocator, move mapped.builder, table, mapped.root);
 }
 
-/// Folds whole names post-order from a borrowed graph into a distinct table.
 pub fn fold_names_into<F>(source: &Table, value: Type, destination: &var Table, folder: &var F) -> !Type {
     var mapper = PlainNameTransform {};
     return transform_names<PlainNameTransform, F>(source, value, destination, &var mapper, folder);
@@ -1112,8 +1020,6 @@ fn transform_names<M, F>(source: &Table, value: Type, destination: &var Table, m
     return try finish_builder(allocator, move mapped.builder, destination, mapped.root);
 }
 
-/// Is a rewritten tree before it joins a table: the builder holding its nodes
-/// and the root among them.
 struct MappedTree {
     builder: Builder,
     root: arena::Handle<Node>,
@@ -1189,7 +1095,6 @@ fn map_name_node<M, F>(builder: &var Builder, value: &TypeTree, node: &Name, map
     return folder.fold_name(builder, move path, move args);
 }
 
-// map_error_union_names keeps Go's callback order: success before error.
 fn map_error_union_names<M, F>(allocator: Allocator, builder: &var Builder, value: &TypeTree, node: &ErrorUnion, mapper: &var M, folder: &var F) -> !arena::Handle<Node> {
     let ok = try map_names_node<M, F>(allocator, builder, value, node.ok, mapper, folder);
     if node.err |source_err| {
@@ -1199,7 +1104,6 @@ fn map_error_union_names<M, F>(allocator: Allocator, builder: &var Builder, valu
     return try builder.nodes.add(allocator, Node::ErrorUnion(ErrorUnion { err: null, ok: ok }));
 }
 
-/// Replaces whole-name type parameters and retains the resulting graph.
 pub fn substitute(
     table: &var Table,
     value: Type,
@@ -1222,7 +1126,6 @@ pub fn substitute(
     return try finish_builder(allocator, move builder, table, root);
 }
 
-/// Retains one parsed type wrapped in an explicit borrow node.
 pub fn wrap_borrow(
     table: &var Table,
     value: Type,
@@ -1318,7 +1221,6 @@ fn substitute_node(
     };
 }
 
-// add_buffer copies a buffer node's length around a rewritten element.
 fn add_buffer(builder: &var Builder, node: &Buffer, elem: arena::Handle<Node>) -> !arena::Handle<Node> {
     let source = node.len.as_bytes();
     let len = try owned_text(builder.allocator, source);
@@ -1397,7 +1299,6 @@ fn substitute_name(
     return builder.add(Node::Name(Name { path: move path, args: move args }));
 }
 
-// substitute_error_union keeps Go's traversal order: success before error.
 fn substitute_error_union(
     allocator: Allocator,
     builder: &var Builder,
@@ -1419,18 +1320,11 @@ fn substitute_error_union(
     return try builder.nodes.add(allocator, Node::ErrorUnion(ErrorUnion { err: null, ok: ok }));
 }
 
-/// Is what binding a type's lengths gives: the bound type, or why a length
-/// the names bind is not one.
 pub union Bound {
     Type(Type),
     Problem(string::String),
 }
 
-/// Evaluates each array length that waits on static names against the
-/// integers env binds, the Go `BindLengths`: `[(n * 2)]f64` is `[8]f64` where
-/// n is 4. A length naming anything env does not bind stays as written,
-/// because that is how a generic's own declaration spells it. A bound length
-/// is at least 1, as a written one is.
 pub fn bind_lengths(table: &var Table, value: Type, env: &staticexpr::Env) -> !Bound {
     let allocator = table.allocator;
     var builder = new_builder(allocator);
@@ -1511,9 +1405,6 @@ fn bind_node(
     };
 }
 
-// bind_buffer evaluates one array's length and binds its element's. The first
-// length that fails is the problem; the rest still copy, so the tree stays
-// whole for the caller to release.
 fn bind_buffer(
     builder: &var Builder,
     tree: &TypeTree,
@@ -1558,9 +1449,6 @@ fn bind_buffer(
     return add_buffer(builder, node, elem);
 }
 
-/// Is bind_lengths for a caller that holds a type as text, the Go
-/// `BindLengthsText`. A length env makes no array stays as written: the type
-/// checker refused the program that wrote it.
 pub fn bind_lengths_text(allocator: Allocator, text: []u8, env: &staticexpr::Env) -> !string::String {
     if !has_static_length(text) {
         return owned_text(allocator, text);
@@ -1578,8 +1466,6 @@ pub fn bind_lengths_text(allocator: Allocator, text: []u8, env: &staticexpr::Env
     }
 }
 
-/// Returns why a length in a spelling that env binds is no length, or null
-/// when every such length is one.
 pub fn length_problem(allocator: Allocator, text: []u8, env: &staticexpr::Env) -> !?string::String {
     var table = new(allocator);
     defer table.deinit(allocator);
@@ -1591,9 +1477,6 @@ pub fn length_problem(allocator: Allocator, text: []u8, env: &staticexpr::Env) -
     }
 }
 
-/// Reports whether a spelling holds an array whose length waits on a static
-/// name or expression, the Go `HasStaticLengthText`: a `[` that neither
-/// closes at once, as `[]T` does, nor opens a number.
 pub fn has_static_length(text: []u8) -> bool {
     var index = 0;
     while index + 1 < mem::len(text) {
@@ -1608,7 +1491,6 @@ pub fn has_static_length(text: []u8) -> bool {
     return false;
 }
 
-/// Replaces type parameters in a spelling and renders the owned result.
 pub fn substitute_text(
     allocator: Allocator,
     text: []u8,
@@ -1638,7 +1520,6 @@ pub fn substitute_text(
     );
 }
 
-/// Replaces type parameters supplied as parallel owned text arrays.
 pub fn substitute_owned_text(
     allocator: Allocator,
     text: []u8,
@@ -1698,7 +1579,6 @@ fn render_substituted(
     return move out;
 }
 
-/// Calls visitor for value and every nested type, outermost first.
 pub fn walk<V>(table: &Table, value: Type, visitor: &var V) -> void {
     walk_node<V>(table.trees.at(value.tree), value.root, visitor);
 }
@@ -1740,9 +1620,6 @@ fn walk_node<V>(
     return;
 }
 
-/// Shifts an i64 by a non-negative amount with the width rule of SPEC
-/// §6.9.2, the Go `ShiftInt64`: an amount at or past 64 leaves 0 from `<<`
-/// and the sign from `>>`.
 pub fn shift_i64(op: []u8, value: i64, amount: i64) -> i64 {
     var count = amount;
     if count >= 64 {
@@ -1757,8 +1634,6 @@ pub fn shift_i64(op: []u8, value: i64, amount: i64) -> i64 {
     return value >> count;
 }
 
-/// Returns the spelling of a floating-point literal with its `_` separators
-/// removed and the exponent marker lowercased, the Go `CleanFloatLiteral`.
 pub fn clean_float_literal(allocator: Allocator, text: []u8) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
@@ -1779,12 +1654,6 @@ pub fn clean_float_literal(allocator: Allocator, text: []u8) -> !string::String 
     return move out;
 }
 
-/// Converts a cleaned floating-point literal to the f64 it names, the Go
-/// `ParseFloatLiteral`: the nearest value with ties to even, through
-/// `std::float::parse`; null for a spelling that is not a number or whose
-/// magnitude no f64 holds. The C99 hexadecimal spelling a folded comptime
-/// float reaches the backends in (stdmath::literal) reads as Go's
-/// strconv.ParseFloat reads it; source has no such literal.
 pub fn parse_float_literal(allocator: Allocator, text: []u8) -> !?f64 {
     if hex_float_spelling(text) {
         return stdmath::parse_literal(text);
