@@ -1,42 +1,12 @@
 import compiler::internal::ir;
 import std::array;
 
-// Loops over `f64` accumulators, run with NEON lanes. The planner takes the
-// header vector.kizu reads (phis, constants, `k < n`) and a body of blocks
-// that only jump on, reading elements as `a.get_or_panic(k)` or `s[k]` of
-// `f64` arrays and slices the loop does not change. Everything else the body
-// computes is `f64` `+ - * /` of the elements, of `cast<f64>(k)`, of
-// constants and of values from before the loop -- also inside a call to a
-// function whose one block does only that to its `f64` parameters, which
-// the planner reads as if it were written in the loop -- and each
-// accumulator takes one such value once a turn: `acc op x` or `x op acc`,
-// op one of `+ - * /`.
-//
-// Behind the guard of vector.kizu the values are computed two elements at a
-// time, one in each lane of a register, by the same op on the same operands
-// in the same order, so each lane rounds as the scalar loop does. NaN, the
-// infinities, signed zeros and subnormals take the same course lane by lane
-// as in the scalar op, which reads the same FPCR. The accumulators are not
-// split: each is one chain in lane 0 of a register of its own, combined with
-// lane 0 and then lane 1 of each turn's value, in the element order and with
-// the operands of the source. So only the lane-wise work runs in parallel;
-// every accumulator rounds in the order the scalar loop does.
-
-/// Is what a value of a float lane loop is.
 enum FKind {
-    // the same in every lane: a value from before the loop or a constant
     Uniform,
-    // k, in 64-bit integer lanes
     Index,
-    // computed in the loop: one f64 per lane
     Lane,
 }
 
-/// Is one value of a float lane loop. A uniform names the caller's value it
-/// reads, or is a constant of bits. A lane value is defined by op def and
-/// read last by op last (the op count for an accumulator's operand); slot is
-/// where it lives -- for a uniform its register, for a lane value the slot
-/// allocation gives it, one register per unrolled copy.
 struct FVal {
     kind: FKind,
     name: ir::Name,
@@ -47,13 +17,9 @@ struct FVal {
     slot: i64,
 }
 
-/// Is the form of one op of a float lane loop.
 enum FForm {
-    // dst = a <kind> b
     Bin,
-    // dst = a, the index lanes, converted to f64
     Cvt,
-    // dst = the elements of tables.loads[a]
     Load,
 }
 
@@ -65,8 +31,6 @@ struct FOp {
     b: i64,
 }
 
-/// Is one accumulator: phi becomes update, `phi <kind> x` or, x_first,
-/// `x <kind> phi`, one element after another.
 struct FAcc {
     phi: ir::Name,
     update: ir::Name,
@@ -75,10 +39,6 @@ struct FAcc {
     x_first: bool,
 }
 
-/// Is where a float lane loop's registers are, as pool indices: copies
-/// unrolled copies of two lanes each, the lane slots copies registers each
-/// from temps on. A lane moves out through scratch, one register for each
-/// copy when per_copy.
 struct FPool {
     copies: i64,
     index: i64,
@@ -101,7 +61,6 @@ fn bind_fval(allocator: Allocator, names: &var array::Array<i64>, name: ir::Name
     return names.set(id, value + 1);
 }
 
-/// Returns the FloatOp of a binary op of `+ - * /`, or -1.
 fn float_kind(module: &ir::Module, op: ir::Name) -> i64 {
     if module.names.is(op, "+") {
         return float_add();
@@ -123,13 +82,11 @@ fn is_double(module: &ir::Module, type_name: ir::Name) -> bool {
     return shape.class == Class::Float and shape.size == 8;
 }
 
-/// Adds a value and returns its index.
 fn add_fval(allocator: Allocator, tables: &var Tables, value: FVal) -> !i64 {
     try tables.fvals.append(allocator, value);
     return tables.fvals.len() - 1;
 }
 
-/// Adds a lane value op defines and returns its index.
 fn add_fop(allocator: Allocator, tables: &var Tables, form: FForm, kind: i64, a: i64, b: i64) -> !i64 {
     let at = tables.fops.len();
     let dst = try add_fval(allocator, tables, FVal {
@@ -145,7 +102,6 @@ fn add_fop(allocator: Allocator, tables: &var Tables, form: FForm, kind: i64, a:
     return dst;
 }
 
-/// Returns the uniform constant of bits, made once.
 fn uniform_const(allocator: Allocator, tables: &var Tables, bits: i64) -> !i64 {
     var index = 0;
     while tables.fvals.get(index) |known| {
@@ -165,10 +121,6 @@ fn uniform_const(allocator: Allocator, tables: &var Tables, bits: i64) -> !i64 {
     });
 }
 
-/// Returns the value a name of the loop reads: one the body defined, k, a
-/// constant, or a value from before the loop held in a register. Returns -1
-/// for anything else -- an accumulator, or a value of the loop the plan does
-/// not cover.
 fn (self: &var Selector) caller_fval(tables: &var Tables, name: ir::Name) -> !i64 {
     let known = fval_of(&tables.fnames, name);
     if known >= 0 {
@@ -218,15 +170,11 @@ fn (self: &var Selector) caller_fval(tables: &var Tables, name: ir::Name) -> !i6
     return made;
 }
 
-/// Reports whether a value can be an operand of an f64 op.
 fn is_number(tables: &Tables, value: i64) -> bool {
     let held = tables.fvals.get(value) orelse return false;
     return held.kind != FKind::Index;
 }
 
-/// Plans a loop over f64 accumulators for NEON lanes, after plan_loop has
-/// read its header and counted the uses inside the body. Reports false,
-/// leaving no load planned, when the body is not one the lanes cover.
 fn (self: &var Selector) plan_float_lanes(module: &ir::Module, plan: &var Plan, tables: &var Tables) -> !bool {
     if try self.plan_float_body(module, plan, tables) {
         if try self.plan_float_pool(plan, tables) {
@@ -241,7 +189,6 @@ fn (self: &var Selector) plan_float_lanes(module: &ir::Module, plan: &var Plan, 
     return false;
 }
 
-/// Reads the body into tables.fvals, fops and faccs.
 fn (self: &var Selector) plan_float_body(module: &ir::Module, plan: &var Plan, tables: &var Tables) -> !bool {
     let allocator = self.allocator;
     var body_index = 0;
@@ -276,8 +223,6 @@ fn (self: &var Selector) plan_float_body(module: &ir::Module, plan: &var Plan, t
                     }
                 },
                 Cast => {
-                    // A cast nothing reads (left by a bounds test the
-                    // optimizer dropped) is not computed.
                     if inner_uses(tables, node.result.name) == 0 and !ir::same_name(node.result.name, plan.inc) {
                         continue;
                     }
@@ -308,9 +253,6 @@ fn (self: &var Selector) plan_float_body(module: &ir::Module, plan: &var Plan, t
             }
         }
     }
-    // Every header phi but k is one accumulator, updated by its latch value
-    // and read in the loop only by that update; k is read again only by the
-    // increment, which only the header reads.
     let header_block = self.ir_blocks.get(plan.header) orelse return false;
     let header_node = module.blocks.at(header_block.node);
     var index = 0;
@@ -343,7 +285,6 @@ fn (self: &var Selector) plan_float_body(module: &ir::Module, plan: &var Plan, t
         inner_uses(tables, plan.inc) != 0 {
         return false;
     }
-    // When each value is read last.
     var op_index = 0;
     while tables.fops.get(op_index) |op| {
         if op.form != FForm::Load {
@@ -372,8 +313,6 @@ fn read_at(tables: &var Tables, value: i64, at: i64) -> !void {
     return;
 }
 
-/// Plans an element read: of f64, from a source the loop does not define,
-/// at k.
 fn (self: &var Selector) plan_float_load(module: &ir::Module, node: &ir::InstrNode, slice: bool, plan: &var Plan, tables: &var Tables) -> !bool {
     if !try self.plan_load(module, node, slice, plan, tables) {
         return false;
@@ -387,8 +326,6 @@ fn (self: &var Selector) plan_float_load(module: &ir::Module, node: &ir::InstrNo
     return true;
 }
 
-/// Plans a binary op of the body: the increment, an accumulator's update,
-/// or an f64 `+ - * /` of values.
 fn (self: &var Selector) plan_float_lane_binary(module: &ir::Module, node: &ir::InstrNode, plan: &var Plan, tables: &var Tables) -> !bool {
     let allocator = self.allocator;
     let left = node.args.get(0) orelse return false;
@@ -396,7 +333,6 @@ fn (self: &var Selector) plan_float_lane_binary(module: &ir::Module, node: &ir::
     let lr = role_of(tables, left.name);
     let rr = role_of(tables, right.name);
     if ir::same_name(node.result.name, plan.inc) {
-        // k + 1, the increment.
         var step = right;
         if rr == Role::Index {
             step = left;
@@ -450,9 +386,6 @@ fn (self: &var Selector) plan_float_lane_binary(module: &ir::Module, node: &ir::
     return true;
 }
 
-/// Plans a call to a function whose one block does f64 `+ - * /` on its f64
-/// parameters and constants and returns the result: its ops join the loop's
-/// as if written there, on the call's arguments.
 fn (self: &var Selector) plan_float_call(module: &ir::Module, node: &ir::InstrNode, tables: &var Tables) -> !bool {
     let allocator = self.allocator;
     if !ir::is_empty(node.extern_abi) or !is_double(module, node.result.type_name) {
@@ -482,7 +415,6 @@ fn (self: &var Selector) plan_float_call(module: &ir::Module, node: &ir::InstrNo
     if block_node.terminator.op != ir::TermOp::Return or block_node.instrs.len() > 64 {
         return false;
     }
-    // The callee's names, apart from the loop's: they may spell the same.
     var scope = array::new<i64>(allocator);
     defer scope.deinit(allocator);
     var index = 0;
@@ -535,10 +467,6 @@ fn (self: &var Selector) plan_float_call(module: &ir::Module, node: &ir::InstrNo
     return true;
 }
 
-/// Gives each lane value a slot, the loads first as a turn reads them
-/// before it computes, a slot free again once its value is read last, and
-/// picks how many copies run: 4, 2 or 1, the most the 24 pool registers
-/// hold. Reports false when not even one copy fits.
 fn (self: &var Selector) plan_float_pool(plan: &var Plan, tables: &var Tables) -> !bool {
     var busy = array::new<bool>(self.allocator);
     defer busy.deinit(self.allocator);
@@ -601,7 +529,6 @@ fn (self: &var Selector) plan_float_pool(plan: &var Plan, tables: &var Tables) -
     return false;
 }
 
-/// Gives value the lowest free slot.
 fn take_slot(allocator: Allocator, tables: &var Tables, busy: &var array::Array<bool>, value: i64) -> !void {
     var slot = 0;
     while busy.get(slot) |taken| {
@@ -620,7 +547,6 @@ fn take_slot(allocator: Allocator, tables: &var Tables, busy: &var array::Array<
     return tables.fvals.set(value, held);
 }
 
-/// Frees the slot of a lane value op at reads last.
 fn free_read(tables: &Tables, busy: &var array::Array<bool>, value: i64, at: i64) -> !void {
     let held = tables.fvals.get_or_panic(value);
     if held.kind == FKind::Lane and held.last == at and held.slot >= 0 {
@@ -629,7 +555,6 @@ fn free_read(tables: &Tables, busy: &var array::Array<bool>, value: i64, at: i64
     return;
 }
 
-/// Returns the pool index of a value in unrolled copy u.
 fn fval_reg(pool: &FPool, tables: &Tables, value: i64, u: i64) -> i64 {
     let held = tables.fvals.get_or_panic(value);
     if held.kind == FKind::Lane {
@@ -648,7 +573,6 @@ fn (self: &var Selector) lane_inst(op: MOp, kind: i64, vd: i64, vn: i64, vm: i64
     return self.inst(inst);
 }
 
-/// Emits the guard, the lane loop and the fold, ending at the header.
 fn (self: &var Selector) emit_float_lanes(module: &ir::Module, plan: &Plan, tables: &var Tables) -> !void {
     let allocator = self.allocator;
     let copies = plan.copies;
@@ -657,8 +581,6 @@ fn (self: &var Selector) emit_float_lanes(module: &ir::Module, plan: &Plan, tabl
     var sources = array::new<Val>(allocator);
     defer sources.deinit(allocator);
     let rest = try self.emit_guard(module, plan, tables, step, &var sources);
-    // The set-up: a pointer per load, where the loop stops, the uniform
-    // values and the index in their lanes, each accumulator in lane 0.
     let count = self.func.new_vreg();
     try self.op_imm(MOp::AndImm, count, rest, 0 - step);
     var ptrs = array::new<i64>(allocator);
@@ -675,7 +597,6 @@ fn (self: &var Selector) emit_float_lanes(module: &ir::Module, plan: &Plan, tabl
         try self.inst(at);
         try ptrs.append(allocator, ptr);
     }
-    // Without a load, a counter of its own runs from k.
     var counter = 0 - 1;
     let end = self.func.new_vreg();
     if ptrs.len() > 0 {
@@ -698,8 +619,6 @@ fn (self: &var Selector) emit_float_lanes(module: &ir::Module, plan: &Plan, tabl
             var held = value;
             held.slot = next_free;
             try tables.fvals.set(index, held);
-            // A register of its own, so the value keeps the class its
-            // other uses give it.
             let reg = self.func.new_vreg();
             if value.constant {
                 try self.mov_imm(reg, value.bits);
@@ -747,11 +666,6 @@ fn (self: &var Selector) emit_float_lanes(module: &ir::Module, plan: &Plan, tabl
     }
     next_free = next_free + tables.faccs.len();
     pool.temps = next_free;
-    // Where lane 1 is moved out to: the slots nothing holds once the turn's
-    // ops are done, a register for each copy. With one such slot for each
-    // accumulator, every lane is moved out before the chains take them, so
-    // no chain waits behind a move; otherwise one at a time, through the
-    // one free slot or a register of its own.
     var at_end = array::new<bool>(allocator);
     defer at_end.deinit(allocator);
     index = 0;
@@ -784,9 +698,6 @@ fn (self: &var Selector) emit_float_lanes(module: &ir::Module, plan: &Plan, tabl
     let body = try self.new_vector_block();
     let fold = try self.new_vector_block();
     self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), body, 0 - 1);
-    // The loop: each load's elements for every copy, two registers at a
-    // time; each op for each copy in turn; then the accumulators, copy by
-    // copy and lane by lane, in the order of the elements.
     try self.start_block(body);
     index = 0;
     while tables.fops.get(index) |op| {
@@ -888,8 +799,6 @@ fn (self: &var Selector) emit_float_lanes(module: &ir::Module, plan: &Plan, tabl
         try self.op3(MOp::Cmp, reg_none(), ptrs.get_or_panic(0), end);
     }
     self.func.end(self.current, Term::Flags, Cond::Lo, reg_none(), body, fold);
-    // The fold: each accumulator's lane 0 into its phi; k moves past the
-    // elements done.
     try self.start_block(fold);
     index = 0;
     while tables.faccs.get(index) |acc| {
@@ -907,8 +816,6 @@ fn (self: &var Selector) emit_float_lanes(module: &ir::Module, plan: &Plan, tabl
     return;
 }
 
-/// Combines lane 0 of x into the accumulator in reg, with the operands in
-/// the source's order.
 fn (self: &var Selector) fold_lane(acc: FAcc, reg: i64, x: i64) -> !void {
     if acc.x_first {
         return self.lane_inst(MOp::VFScalar, acc.kind, reg, x, reg);

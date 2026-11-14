@@ -3,30 +3,10 @@ import compiler::internal::ir;
 import std::array;
 import std::string;
 
-// Calls into C by the x64 convention of Windows, for the amd64 printer,
-// which there names x0..x3 rcx, rdx, r8 and r9 and x8 rax.
-//
-// An argument goes by its position: the first four in rcx, rdx, r8 and r9,
-// or a float in xmm0..3 of the same position, and the rest in 8-byte stack
-// slots above the 32 bytes the caller leaves for the callee to spill the
-// four registers to. A float argument here also goes in the general
-// register of its position, which a variadic callee reads it from and any
-// other ignores. A C struct by value (laid out as C lays it out) of 1, 2, 4
-// or 8 bytes travels as an integer of its size, as an argument and as a
-// result (in rax); any other as the address of a copy the caller makes,
-// and a result in memory the caller provides, its address the hidden first
-// argument.
-//
-// A struct aligned to more than 8 bytes is refused: none C can name here
-// is.
-
-/// Reports whether a C struct of a size travels as an integer.
 fn win64_in_register(size: i64) -> bool {
     return size == 1 or size == 2 or size == 4 or size == 8;
 }
 
-/// Returns the shape of a C struct type when the backend passes it, or null
-/// when it holds what C cannot name or nothing at all.
 fn win64_struct(module: &ir::Module, type_name: ir::Name, allocator: Allocator) -> !?Shape {
     let shape = shape_of(module, type_name);
     if shape.class != Class::Aggregate or shape.size == 0 or shape.align > 8 {
@@ -42,8 +22,6 @@ fn win64_struct(module: &ir::Module, type_name: ir::Name, allocator: Allocator) 
     return shape;
 }
 
-/// Adds the word of the next argument position: a general register or a
-/// stack slot.
 fn (self: &var Selector) win64_word(args: &var CCallArgs, reg: i64) -> !void {
     if args.words.len() < arg_regs(self.arch) {
         return args.words.append(self.allocator, reg);
@@ -51,8 +29,6 @@ fn (self: &var Selector) win64_word(args: &var CCallArgs, reg: i64) -> !void {
     return args.stacked.append(self.allocator, reg);
 }
 
-/// Adds a float argument of width bytes at the next position: its xmm
-/// register, recorded in positions, and its general one; or a stack slot.
 fn (self: &var Selector) win64_float(args: &var CCallArgs, positions: &var array::Array<i64>, reg: i64, width: i64) -> !void {
     if args.words.len() < arg_regs(self.arch) {
         try args.floats.append(self.allocator, reg);
@@ -62,8 +38,6 @@ fn (self: &var Selector) win64_float(args: &var CCallArgs, positions: &var array
     return self.win64_word(args, reg);
 }
 
-/// Adds a C struct argument: an integer of its size, or the address of a
-/// copy. Returns false when it is not one this backend passes.
 fn (self: &var Selector) win64_struct_arg(module: &ir::Module, arg: ir::Value, args: &var CCallArgs) -> !bool {
     let shape = try win64_struct(module, arg.type_name, self.allocator) orelse return false;
     let src = try self.addr(module, arg) orelse return false;
@@ -73,15 +47,12 @@ fn (self: &var Selector) win64_struct_arg(module: &ir::Module, arg: ir::Value, a
         try self.win64_word(args, reg);
         return true;
     }
-    // The callee owns the copy and may write it; the convention aligns it
-    // to 16 bytes.
     let copy = try self.c_slot(shape.size, 16);
     try self.copy_bytes(copy, src, shape.size);
     try self.win64_word(args, copy);
     return true;
 }
 
-/// Selects a call to C by the Windows convention.
 fn (self: &var Selector) select_win64_call(module: &ir::Module, node: &ir::InstrNode, symbol_name: ir::Name) -> !?diagnostic::Diagnostic {
     var args = CCallArgs {
         words: array::new<i64>(self.allocator),
@@ -90,7 +61,6 @@ fn (self: &var Selector) select_win64_call(module: &ir::Module, node: &ir::Instr
         stacked: array::new<i64>(self.allocator),
     };
     defer args.deinit(self.allocator);
-    // The argument position of each float, which names its xmm register.
     var positions = array::new<i64>(self.allocator);
     defer positions.deinit(self.allocator);
     let result = node.result;
@@ -176,7 +146,6 @@ fn (self: &var Selector) select_win64_call(module: &ir::Module, node: &ir::Instr
         return null;
     }
     if sret == reg_none() {
-        // rax, which the printer moves to x0 after a call to C.
         let word = self.func.new_vreg();
         try self.mov(word, 0);
         sret = try self.c_slot(8, 8);

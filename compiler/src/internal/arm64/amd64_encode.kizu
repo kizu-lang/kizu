@@ -3,34 +3,15 @@ import std::array;
 import std::mem;
 import std::string;
 
-// The x86-64 encoder: the machine code of each instruction the amd64
-// printer hands it, named by its AT&T mnemonic, into the object (obj.kizu),
-// byte for byte as the system assembler (LLVM's) encodes the same line of
-// assembly. Where a line has more than one encoding
-// the assembler's choice is taken: the register-to-register form that
-// names the source in ModRM.reg (89, 01, 29, ...), the shortest
-// displacement, an 8-bit immediate where it fits, rax's own form of an
-// arithmetic immediate that does not, the one-operand form of a shift by 1.
-// A jump is written short and made near when the function ends, where its
-// target is out of a byte's reach (relax_jumps). A line no encoding here
-// holds is recorded as the object's failure, which stops the build.
-
-/// Is one instruction to encode: an optional legacy prefix, REX.W, one to
-/// three opcode bytes, ModRM.reg (a register 0..15 or an opcode
-/// extension), the r/m operand -- a register or a memory operand -- and an
-/// immediate.
 struct X86 {
     prefix: i64,
     w: bool,
     opcode: i64,
     length: i64,
     reg: i64,
-    // reg or rm names a byte register: spl, bpl, sil and dil need a REX.
     reg_byte: bool,
     rm_byte: bool,
-    // 0 a register, 1 memory.
     kind: i64,
-    // The register, or the memory operand's base (-1 none).
     rm: i64,
     index: i64,
     shift: i64,
@@ -39,8 +20,6 @@ struct X86 {
     imm_size: i64,
 }
 
-/// Is a memory operand as the printer resolved it: base and index the
-/// backend's register numbers (-1 none), the index scaled by 1 << shift.
 struct Mem {
     base: i64,
     index: i64,
@@ -48,15 +27,12 @@ struct Mem {
     disp: i64,
 }
 
-// The relocation kinds of x86-64 ELF the encoder records, beside
-// reloc_unsigned (obj.kizu), which is R_X86_64_64 there.
 fn reloc_x86_pc32() -> i64 { return 20; }
 
 fn reloc_x86_plt32() -> i64 { return 21; }
 
 fn reloc_x86_gotpcrelx() -> i64 { return 22; }
 
-/// Returns an instruction of opcode, length bytes long, with no operand.
 fn x86_op(opcode: i64, length: i64) -> X86 {
     return X86 {
         prefix: 0,
@@ -76,7 +52,6 @@ fn x86_op(opcode: i64, length: i64) -> X86 {
     };
 }
 
-/// Returns an instruction whose r/m is the register rm.
 fn x86_reg_form(opcode: i64, length: i64, w: bool, reg: i64, rm: i64) -> X86 {
     var inst = x86_op(opcode, length);
     inst.w = w;
@@ -86,8 +61,6 @@ fn x86_reg_form(opcode: i64, length: i64, w: bool, reg: i64, rm: i64) -> X86 {
     return inst;
 }
 
-/// Returns an instruction whose r/m is memory, its registers numbered as
-/// the machine numbers them.
 fn x86_mem_form(opcode: i64, length: i64, w: bool, reg: i64, base: i64, index: i64, shift: i64, disp: i64) -> X86 {
     var inst = x86_op(opcode, length);
     inst.w = w;
@@ -104,7 +77,6 @@ fn fits_i8(value: i64) -> bool {
     return value >= 0 - 128 and value <= 127;
 }
 
-/// Returns the condition code of a jcc, setcc or cmovcc suffix, or -1.
 fn x86_cc_code(suffix: []u8) -> i64 {
     if mem::equal_bytes(suffix, "o") { return 0; }
     if mem::equal_bytes(suffix, "no") { return 1; }
@@ -125,8 +97,6 @@ fn x86_cc_code(suffix: []u8) -> i64 {
     return 0 - 1;
 }
 
-/// Writes one instruction: prefix, REX when one is needed, opcode, ModRM,
-/// SIB and displacement, and the immediate.
 fn (self: &var Obj) x86(allocator: Allocator, inst: &X86, what: []u8) -> !void {
     let base = inst.rm;
     if inst.reg < 0 or inst.reg > 15 or (inst.kind == 0 and (base < 0 or base > 15)) or inst.index == 4 or inst.index > 15 or
@@ -163,7 +133,6 @@ fn (self: &var Obj) x86(allocator: Allocator, inst: &X86, what: []u8) -> !void {
     if inst.kind == 0 {
         try self.byte(allocator, 0xC0 | reg | (base & 7));
     } else if base < 0 {
-        // No base: the index scaled, and a 32-bit displacement.
         try self.byte(allocator, reg | 4);
         try self.byte(allocator, (inst.shift << 6) | ((inst.index & 7) << 3) | 5);
         try self.little(allocator, inst.disp, 4);
@@ -193,8 +162,6 @@ fn (self: &var Obj) x86(allocator: Allocator, inst: &X86, what: []u8) -> !void {
     return self.little(allocator, inst.imm, inst.imm_size);
 }
 
-/// Writes an instruction that names its register in the opcode's low
-/// bits: push, pop, mov of an immediate.
 fn (self: &var Obj) x86_plus(allocator: Allocator, opcode: i64, w: bool, reg: i64, imm: i64, imm_size: i64, what: []u8) -> !void {
     if reg < 0 or reg > 15 {
         return self.fail(allocator, what, reg);
@@ -213,10 +180,8 @@ fn (self: &var Obj) x86_plus(allocator: Allocator, opcode: i64, w: bool, reg: i6
     return self.little(allocator, imm, imm_size);
 }
 
-/// `op %src, %dst`, each register at its size.
 fn (self: &var Obj) x86_rr(allocator: Allocator, mnemonic: []u8, src: i64, src_size: i64, dst: i64, dst_size: i64) -> !void {
     let w = dst_size == 8;
-    // ModRM.reg is the source.
     var opcode = 0 - 1;
     if mem::equal_bytes(mnemonic, "movq") or mem::equal_bytes(mnemonic, "movl") {
         opcode = 0x89;
@@ -239,7 +204,6 @@ fn (self: &var Obj) x86_rr(allocator: Allocator, mnemonic: []u8, src: i64, src_s
         let inst = x86_reg_form(opcode, 1, w, src, dst);
         return self.x86(allocator, &inst, mnemonic);
     }
-    // ModRM.reg is the destination.
     var length = 2;
     if mem::equal_bytes(mnemonic, "imulq") {
         opcode = 0x0FAF;
@@ -263,21 +227,17 @@ fn (self: &var Obj) x86_rr(allocator: Allocator, mnemonic: []u8, src: i64, src_s
     return self.x86(allocator, &inst, mnemonic);
 }
 
-/// `cmov<cc>q %src, %dst`.
 fn (self: &var Obj) x86_cmov(allocator: Allocator, cc: i64, src: i64, dst: i64) -> !void {
     let inst = x86_reg_form(0x0F40 | cc, 2, true, dst, src);
     return self.x86(allocator, &inst, "cmov");
 }
 
-/// `set<cc> %reg`, a byte register.
 fn (self: &var Obj) x86_setcc(allocator: Allocator, cc: i64, reg: i64) -> !void {
     var inst = x86_reg_form(0x0F90 | cc, 2, false, 0, reg);
     inst.rm_byte = true;
     return self.x86(allocator, &inst, "set");
 }
 
-/// Returns the ModRM.reg extension of a group 1 arithmetic mnemonic (the
-/// 80..83 opcodes), or -1.
 fn group1(mnemonic: []u8) -> i64 {
     if mem::equal_bytes(mnemonic, "addq") { return 0; }
     if mem::equal_bytes(mnemonic, "orq") { return 1; }
@@ -287,7 +247,6 @@ fn group1(mnemonic: []u8) -> i64 {
     return 0 - 1;
 }
 
-/// Returns the ModRM.reg extension of a shift mnemonic, or -1.
 fn shift_group(mnemonic: []u8) -> i64 {
     if mem::equal_bytes(mnemonic, "shlq") { return 4; }
     if mem::equal_bytes(mnemonic, "shrq") { return 5; }
@@ -295,7 +254,6 @@ fn shift_group(mnemonic: []u8) -> i64 {
     return 0 - 1;
 }
 
-/// `op $imm, %dst` at size.
 fn (self: &var Obj) x86_ir(allocator: Allocator, mnemonic: []u8, imm: i64, dst: i64, size: i64) -> !void {
     let w = size == 8;
     if mem::equal_bytes(mnemonic, "movl") {
@@ -319,7 +277,6 @@ fn (self: &var Obj) x86_ir(allocator: Allocator, mnemonic: []u8, imm: i64, dst: 
             return self.x86(allocator, &inst, mnemonic);
         }
         if dst == 0 {
-            // rax's own form: op rax, imm32.
             if w {
                 try self.byte(allocator, 0x48);
             }
@@ -362,8 +319,6 @@ fn (self: &var Obj) x86_ir(allocator: Allocator, mnemonic: []u8, imm: i64, dst: 
     return self.fail(allocator, mnemonic, imm);
 }
 
-/// Returns the F7 group's ModRM.reg extension of a one-operand mnemonic,
-/// or -1.
 fn unary_group(mnemonic: []u8) -> i64 {
     if mem::equal_bytes(mnemonic, "notq") or mem::equal_bytes(mnemonic, "not") { return 2; }
     if mem::equal_bytes(mnemonic, "negq") { return 3; }
@@ -374,7 +329,6 @@ fn unary_group(mnemonic: []u8) -> i64 {
     return 0 - 1;
 }
 
-/// `op %reg` at size.
 fn (self: &var Obj) x86_r1(allocator: Allocator, mnemonic: []u8, reg: i64, size: i64) -> !void {
     if mem::equal_bytes(mnemonic, "pushq") {
         return self.x86_plus(allocator, 0x50, false, reg, 0, 0, mnemonic);
@@ -390,7 +344,6 @@ fn (self: &var Obj) x86_r1(allocator: Allocator, mnemonic: []u8, reg: i64, size:
     return self.x86(allocator, &inst, mnemonic);
 }
 
-/// `op mem`: a division or multiplication by memory.
 fn (self: &var Obj) x86_m1(allocator: Allocator, mnemonic: []u8, base: i64, index: i64, shift: i64, disp: i64) -> !void {
     let extension = unary_group(mnemonic);
     if extension < 0 {
@@ -401,7 +354,6 @@ fn (self: &var Obj) x86_m1(allocator: Allocator, mnemonic: []u8, base: i64, inde
     return self.x86(allocator, &inst, mnemonic);
 }
 
-/// `op mem, %dst`: a load, lea, or an or from memory.
 fn (self: &var Obj) x86_mr(
     allocator: Allocator,
     mnemonic: []u8,
@@ -447,7 +399,6 @@ fn (self: &var Obj) x86_mr(
     return self.x86(allocator, &inst, mnemonic);
 }
 
-/// `mov<size> %src, mem`.
 fn (self: &var Obj) x86_rm(
     allocator: Allocator,
     mnemonic: []u8,
@@ -473,7 +424,6 @@ fn (self: &var Obj) x86_rm(
     return self.x86(allocator, &inst, mnemonic);
 }
 
-/// `mov<size> $imm, mem`.
 fn (self: &var Obj) x86_im(
     allocator: Allocator,
     mnemonic: []u8,
@@ -500,7 +450,6 @@ fn (self: &var Obj) x86_im(
     return self.x86(allocator, &inst, mnemonic);
 }
 
-/// An instruction without operands.
 fn (self: &var Obj) x86_bare(allocator: Allocator, mnemonic: []u8) -> !void {
     if mem::equal_bytes(mnemonic, "ret") {
         return self.byte(allocator, 0xC3);
@@ -520,7 +469,6 @@ fn (self: &var Obj) x86_bare(allocator: Allocator, mnemonic: []u8) -> !void {
     return self.fail(allocator, mnemonic, 0);
 }
 
-/// `op %cl, %dst`: a shift by cl.
 fn (self: &var Obj) x86_shift_cl(allocator: Allocator, mnemonic: []u8, dst: i64) -> !void {
     let extension = shift_group(mnemonic);
     if extension < 0 {
@@ -530,7 +478,6 @@ fn (self: &var Obj) x86_shift_cl(allocator: Allocator, mnemonic: []u8, dst: i64)
     return self.x86(allocator, &inst, mnemonic);
 }
 
-/// `leaq sym(%rip), %dst`, or with got `movq sym@GOTPCREL(%rip), %dst`.
 fn (self: &var Obj) x86_rip(allocator: Allocator, syms: &ir::NameTable, name: ir::Name, dst: i64, got: bool) -> !void {
     if dst < 0 or dst > 15 {
         return self.fail(allocator, "leaq", dst);
@@ -548,22 +495,17 @@ fn (self: &var Obj) x86_rip(allocator: Allocator, syms: &ir::NameTable, name: ir
     return self.little(allocator, 0, 4);
 }
 
-/// `call sym`: resolved here when sym is a local function of the section,
-/// else left to the linker, through the PLT.
 fn (self: &var Obj) x86_call(allocator: Allocator, syms: &ir::NameTable, name: ir::Name) -> !void {
     try self.byte(allocator, 0xE8);
     try self.relocate_addend(allocator, syms, name, reloc_x86_plt32(), 0 - 4);
     return self.little(allocator, 0, 4);
 }
 
-/// `call *%reg`.
 fn (self: &var Obj) x86_call_reg(allocator: Allocator, reg: i64) -> !void {
     let inst = x86_reg_form(0xFF, 1, false, 2, reg);
     return self.x86(allocator, &inst, "call");
 }
 
-/// `op %xmm a, %xmm b`: prefix and opcode by mnemonic, or by a float
-/// arithmetic mnemonic and width (the sd or ss suffix).
 fn (self: &var Obj) x86_xx(allocator: Allocator, mnemonic: []u8, width: i64, a: i64, b: i64) -> !void {
     var prefix = 0xF3;
     if width == 8 {
@@ -596,8 +538,6 @@ fn (self: &var Obj) x86_xx(allocator: Allocator, mnemonic: []u8, width: i64, a: 
         opcode = 0x0F57;
         prefix = 0;
     } else if mem::equal_bytes(mnemonic, "movapd") {
-        // The load form, ModRM.reg the destination, as the assembler
-        // writes a register copy.
         opcode = 0x0F28;
         prefix = 0x66;
     }
@@ -609,8 +549,6 @@ fn (self: &var Obj) x86_xx(allocator: Allocator, mnemonic: []u8, width: i64, a: 
     return self.x86(allocator, &inst, mnemonic);
 }
 
-/// Returns the prefix of a float move by its mnemonic: F2 for movsd, F3
-/// for movss, none (0) for movups, or -1.
 fn scalar_move_prefix(mnemonic: []u8) -> i64 {
     if mem::equal_bytes(mnemonic, "movsd") { return 0xF2; }
     if mem::equal_bytes(mnemonic, "movss") { return 0xF3; }
@@ -618,8 +556,6 @@ fn scalar_move_prefix(mnemonic: []u8) -> i64 {
     return 0 - 1;
 }
 
-/// `op mem, %xmm`: a float loaded into an xmm register (movsd, movss),
-/// the rest of the register cleared, or all 16 bytes of it (movups).
 fn (self: &var Obj) x86_mx(allocator: Allocator, mnemonic: []u8, base: i64, index: i64, shift: i64, disp: i64, xmm: i64) -> !void {
     let prefix = scalar_move_prefix(mnemonic);
     if prefix < 0 {
@@ -630,8 +566,6 @@ fn (self: &var Obj) x86_mx(allocator: Allocator, mnemonic: []u8, base: i64, inde
     return self.x86(allocator, &inst, mnemonic);
 }
 
-/// `op %xmm, mem`: a float stored from an xmm register (movsd, movss), or
-/// all 16 bytes of it (movups).
 fn (self: &var Obj) x86_xm(allocator: Allocator, mnemonic: []u8, xmm: i64, base: i64, index: i64, shift: i64, disp: i64) -> !void {
     let prefix = scalar_move_prefix(mnemonic);
     if prefix < 0 {
@@ -642,8 +576,6 @@ fn (self: &var Obj) x86_xm(allocator: Allocator, mnemonic: []u8, xmm: i64, base:
     return self.x86(allocator, &inst, mnemonic);
 }
 
-/// `op %reg, %xmm`: a general register into an xmm one, its bits (movq,
-/// movd) or its value (cvtsi2sdq, cvtsi2ssq).
 fn (self: &var Obj) x86_rx(allocator: Allocator, mnemonic: []u8, reg: i64, size: i64, xmm: i64) -> !void {
     var prefix = 0x66;
     var opcode = 0x0F6E;
@@ -661,8 +593,6 @@ fn (self: &var Obj) x86_rx(allocator: Allocator, mnemonic: []u8, reg: i64, size:
     return self.x86(allocator, &inst, mnemonic);
 }
 
-/// `op %xmm, %reg`: an xmm register into a general one, its bits (movq,
-/// movd) or its value truncated (cvttsd2si, cvttss2si).
 fn (self: &var Obj) x86_xr(allocator: Allocator, mnemonic: []u8, xmm: i64, reg: i64, size: i64) -> !void {
     if mem::equal_bytes(mnemonic, "movq") or mem::equal_bytes(mnemonic, "movd") {
         var inst = x86_reg_form(0x0F7E, 2, size == 8, xmm, reg);
@@ -680,9 +610,6 @@ fn (self: &var Obj) x86_xr(allocator: Allocator, mnemonic: []u8, xmm: i64, reg: 
     return self.x86(allocator, &inst, mnemonic);
 }
 
-/// Is one jump of the function being written, two bytes long until the
-/// function ends: cc is its condition code, or -1 for jmp; target a block,
-/// or with local set a label of the printer's own.
 struct X86Jump {
     at: i64,
     cc: i64,
@@ -690,14 +617,12 @@ struct X86Jump {
     local: bool,
 }
 
-/// Appends a jump, short for now.
 fn (self: &var Obj) x86_jump(allocator: Allocator, cc: i64, target: i64, local: bool) -> !void {
     let at = self.here();
     try self.jumps.append(allocator, X86Jump { at: at, cc: cc, target: target, local: local });
     return self.little(allocator, 0, 2);
 }
 
-/// Places one of the printer's own labels here.
 fn (self: &var Obj) place_local(allocator: Allocator, label: i64) -> !void {
     while self.local_at.len() <= label {
         try self.local_at.append(allocator, 0 - 1);
@@ -706,7 +631,6 @@ fn (self: &var Obj) place_local(allocator: Allocator, label: i64) -> !void {
     return self.local_at.set(label, at);
 }
 
-/// Returns how many of the jumps start before at, given they are in order.
 fn jumps_before(jumps: &array::Array<X86Jump>, at: i64) -> i64 {
     var low = 0;
     var high = jumps.len();
@@ -721,17 +645,11 @@ fn jumps_before(jumps: &array::Array<X86Jump>, at: i64) -> i64 {
     return low;
 }
 
-/// Ends a function on x86-64: makes near each jump whose target a byte
-/// does not reach, as the assembler relaxes them -- every jump starts
-/// short, and one that does not reach grows, until none grows -- then
-/// writes them, and moves what follows each grown one: the bytes, the
-/// relocations and the symbols of the function.
 fn (self: &var Obj) relax_jumps(allocator: Allocator) -> !void {
     let count = self.jumps.len();
     if count == 0 {
         return;
     }
-    // The target of each jump, and how many jumps start before it.
     var targets = array::new<i64>(allocator);
     defer targets.deinit(allocator);
     var before = array::new<i64>(allocator);
@@ -752,8 +670,6 @@ fn (self: &var Obj) relax_jumps(allocator: Allocator) -> !void {
         try targets.append(allocator, target);
         try before.append(allocator, jumps_before(&self.jumps, target));
     }
-    // grown[i] is what the i-th jump adds when near; added[i] what the
-    // jumps before it add.
     var grown = array::new<i64>(allocator);
     defer grown.deinit(allocator);
     var added = array::new<i64>(allocator);
@@ -788,7 +704,6 @@ fn (self: &var Obj) relax_jumps(allocator: Allocator) -> !void {
             }
         }
     }
-    // Write the function again from its first jump.
     let first = self.jumps.get_or_panic(0).at;
     var tail = string::new(allocator);
     defer tail.deinit(allocator);
@@ -846,8 +761,6 @@ fn (self: &var Obj) relax_jumps(allocator: Allocator) -> !void {
     return;
 }
 
-/// Pads code to an alignment with the nops the assembler writes for
-/// x86-64: the longest first, ten bytes at most.
 fn (self: &var Obj) x86_nops(allocator: Allocator, count: i64) -> !void {
     var left = count;
     while left > 0 {

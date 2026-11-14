@@ -5,25 +5,6 @@ import std::array;
 import std::float;
 import std::string;
 
-// Floating point: `f64` and `f32` values are their IEEE 754 bits in a
-// register like any other word, so moves, phis, spills, memory and the
-// backend's own calls need nothing of their own. On arm64 and System V
-// amd64, allocation keeps the values only float instructions compute with
-// in float registers (see float_registers), where the bits are the same;
-// elsewhere, and for a value also read as an integer, a general register
-// holds them and the instructions that read a value as a number move it
-// through a scratch float register (v16..v19, or xmm13..xmm15), which none
-// holds from one machine instruction to the next.
-//
-// The operations are the ones the LLVM backend asks of LLVM: IEEE 754
-// arithmetic rounded to nearest even, ordered comparisons except `!=`,
-// conversions to an integer that truncate toward zero and saturate with NaN
-// at 0, and conversions from an integer that round. A constant is its exact
-// bits.
-
-/// Returns the bits a float constant's literal stands for in a register of
-/// a float shape: the double's bits, or for an `f32` the bits of the value
-/// rounded to single precision, as the LLVM backend rounds it.
 fn float_literal_bits(allocator: Allocator, literal: []u8, shape: Shape) -> !?i64 {
     let value = try typ::parse_float_literal(allocator, literal) orelse return null;
     if shape.size == 4 {
@@ -32,15 +13,12 @@ fn float_literal_bits(allocator: Allocator, literal: []u8, shape: Shape) -> !?i6
     return cast<i64>(float::bits(value));
 }
 
-/// Returns the binary32 bits of a double that a single holds exactly: a
-/// value already rounded to single precision, an infinity, or a NaN.
 fn single_bits(value: f64) -> i64 {
     let raw = float::bits(value);
     let sign = cast<i64>(raw >> 63) << 31;
     let exponent = cast<i64>(raw >> 52 & 2047);
     let fraction = cast<i64>(raw & ((cast<u64>(1) << 52) - 1));
     if exponent == 2047 {
-        // An infinity, or a NaN keeping the top of its payload and quiet.
         if fraction == 0 {
             return sign | 2139095040;
         }
@@ -53,7 +31,6 @@ fn single_bits(value: f64) -> i64 {
     if unbiased >= 0 - 126 {
         return sign | ((unbiased + 127) << 23) | (fraction >> 29);
     }
-    // A subnormal single: the hidden bit joins the fraction.
     let mantissa = fraction | (1 << 52);
     return sign | (mantissa >> (29 + (0 - 126 - unbiased)));
 }
@@ -66,8 +43,6 @@ fn (self: &var Selector) select_float_const(module: &ir::Module, node: &ir::Inst
     return null;
 }
 
-/// Maps a comparison of floats to the condition `fcmp` leaves: ordered for
-/// each, except `!=`, which holds for NaN as IEEE 754 says.
 fn float_comparison(module: &ir::Module, op: ir::Name) -> ?Cond {
     if module.names.is(op, "==") {
         return Cond::Eq;
@@ -100,8 +75,6 @@ fn (self: &var Selector) float_op(op: MOp, kind: i64, width: i64, rd: i64, rn: i
     return self.inst(inst);
 }
 
-/// Selects a binary operation on floats: a comparison left in the flags
-/// like an integer one, or arithmetic.
 fn (self: &var Selector) select_float_binary(module: &ir::Module, node: &ir::InstrNode, next: ir::Value, next_op: ir::Op) -> !?diagnostic::Diagnostic {
     let left = node.args.get_or_panic(0);
     let right = node.args.get_or_panic(1);
@@ -138,7 +111,6 @@ fn (self: &var Selector) select_float_binary(module: &ir::Module, node: &ir::Ins
     return null;
 }
 
-/// Makes the comparison of two floats a Flags value describes.
 fn (self: &var Selector) float_compare(module: &ir::Module, held: Val) -> !?Cond {
     let lhs = try self.reg(module, held.lhs) orelse return null;
     let rhs = try self.reg(module, held.rhs) orelse return null;
@@ -146,8 +118,6 @@ fn (self: &var Selector) float_compare(module: &ir::Module, held: Val) -> !?Cond
     return held.cond;
 }
 
-/// Selects a one-operand float operation of kind: negation or a `std::math`
-/// primitive.
 fn (self: &var Selector) select_float_unary(module: &ir::Module, node: &ir::InstrNode, kind: i64) -> !?diagnostic::Diagnostic {
     let source = node.args.get(0) orelse return try self.fail_op(module, node);
     let shape = shape_of(module, node.result.type_name);
@@ -157,9 +127,6 @@ fn (self: &var Selector) select_float_unary(module: &ir::Module, node: &ir::Inst
     let value = try self.reg(module, source) orelse return try self.fail_op(module, node);
     let rd = self.func.new_vreg();
     if is_x86(self.arch) and kind != float_neg() and kind != float_sqrt() {
-        // Rounding to an integral value is SSE4.1, past the x86-64
-        // baseline; C's floor, ceil and trunc compute it, as LLVM calls
-        // them for that baseline.
         var name = "trunc";
         if kind == float_floor() {
             name = "floor";
@@ -175,8 +142,6 @@ fn (self: &var Selector) select_float_unary(module: &ir::Module, node: &ir::Inst
     return null;
 }
 
-/// Calls the C function name of the float width (with an `f` for `f32`)
-/// over up to three float arguments and binds its float result to rd.
 fn (self: &var Selector) call_float_c(name: []u8, width: i64, rd: i64, a: i64, b: i64, c: i64) -> !void {
     var index = 0;
     for 0..3 |position| {
@@ -210,7 +175,6 @@ fn (self: &var Selector) call_float_c(name: []u8, width: i64, rd: i64, a: i64, b
     return self.inst(ret);
 }
 
-/// Selects the fused multiply-add x * y + z.
 fn (self: &var Selector) select_float_fma(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let shape = shape_of(module, node.result.type_name);
     if shape.class != Class::Float or node.args.len() != 3 {
@@ -221,7 +185,6 @@ fn (self: &var Selector) select_float_fma(module: &ir::Module, node: &ir::InstrN
     let z = try self.reg(module, node.args.get_or_panic(2)) orelse return try self.fail_op(module, node);
     let rd = self.func.new_vreg();
     if is_x86(self.arch) {
-        // FMA3 is past the x86-64 baseline; C's fma rounds once too.
         try self.call_float_c("fma", shape.size, rd, x, y, z);
         try self.set_val(node.result.name, reg_val(rd));
         return null;
@@ -237,8 +200,6 @@ fn (self: &var Selector) select_float_fma(module: &ir::Module, node: &ir::InstrN
     return null;
 }
 
-/// Selects `std::float::bits` and `from_bits`: the register already holds
-/// the bits either way.
 fn (self: &var Selector) select_float_bits(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let source = node.args.get(0) orelse return try self.fail_op(module, node);
     let from = shape_of(module, source.type_name);
@@ -250,8 +211,6 @@ fn (self: &var Selector) select_float_bits(module: &ir::Module, node: &ir::Instr
     return null;
 }
 
-/// Selects a cast with a float side: between the float widths, from a float
-/// to an integer, or from an integer to a float.
 fn (self: &var Selector) select_float_cast(module: &ir::Module, node: &ir::InstrNode, from: Shape, to: Shape) -> !?diagnostic::Diagnostic {
     let source = node.args.get_or_panic(0);
     let value = try self.reg(module, source) orelse return try self.fail_op(module, node);
@@ -269,8 +228,6 @@ fn (self: &var Selector) select_float_cast(module: &ir::Module, node: &ir::Instr
         if from.class != Class::Scalar or module.names.is(source.type_name, "bool") {
             return try self.fail_op(module, node);
         }
-        // The register holds the integer extended to 64 bits, and both
-        // conversions round the exact value once.
         var inst = blank(MOp::IntToF);
         inst.rd = rd;
         inst.rn = value;
@@ -306,8 +263,6 @@ fn (self: &var Selector) select_float_cast(module: &ir::Module, node: &ir::Instr
         try self.set_val(node.result.name, reg_val(rd));
         return null;
     }
-    // A narrower integer: saturate at 64 bits, then clamp to the type's
-    // range, which saturates the same as converting to it directly.
     let bits = to.size * 8;
     if to.signed {
         let high = (1 << (bits - 1)) - 1;
@@ -323,7 +278,6 @@ fn (self: &var Selector) select_float_cast(module: &ir::Module, node: &ir::Instr
     return null;
 }
 
-/// Returns value where value <cond> bound holds, and bound otherwise.
 fn (self: &var Selector) pick_bound(value: i64, bound: i64, cond: Cond) -> !i64 {
     try self.cmp_imm_or_reg(value, bound);
     let limit = try self.imm_reg_nz(bound);
@@ -337,14 +291,6 @@ fn (self: &var Selector) pick_bound(value: i64, bound: i64, cond: Cond) -> !i64 
     return out;
 }
 
-/// Picks the virtual registers allocation keeps in float registers:
-/// those a float instruction reads or writes as a number, and those only
-/// moved, loaded, stored or selected alongside them, while nothing reads
-/// or writes them as an integer. Such a register holds the same bits a
-/// general one would; only the instructions that touch it change, so the
-/// choice never changes a result. A select keeps its three registers in
-/// one class, as `fcsel` and `csel` do not mix them; on amd64, which has
-/// no select of xmm registers, a select keeps them in general ones.
 fn float_registers(allocator: Allocator, func: &MFunction, arch: Arch, out: &var array::Array<bool>) -> !void {
     let nv = func.vregs;
     var wants = array::new<bool>(allocator);
@@ -407,8 +353,6 @@ fn float_registers(allocator: Allocator, func: &MFunction, arch: Arch, out: &var
     for 0..nv |v| {
         try out.set(v, wants.get_or_panic(v) and !forced.get_or_panic(v));
     }
-    // A register only copied to or from one in a float register joins it,
-    // so the copy is a float move.
     var changed = true;
     var rounds = 0;
     while changed and rounds < 8 {
@@ -436,7 +380,6 @@ fn float_registers(allocator: Allocator, func: &MFunction, arch: Arch, out: &var
             }
         }
     }
-    // A select with any register outside them takes all three out.
     changed = true;
     while changed {
         changed = false;
@@ -481,9 +424,6 @@ fn mark_regs(table: &var array::Array<bool>, a: i64, b: i64, c: i64, d: i64) -> 
     return mark_reg(table, d);
 }
 
-/// Marks the registers of a load or store a float register cannot hold:
-/// the address operands, and the data one unless it is a whole word or a
-/// zero-extended half word, which `ldr d` and `ldr s` read.
 fn mark_memory(forced: &var array::Array<bool>, inst: &MInst, load: bool) -> !void {
     try mark_reg(forced, inst.rn);
     try mark_reg(forced, inst.rm);
@@ -501,8 +441,6 @@ fn in_float(chosen: &array::Array<bool>, reg: i64) -> bool {
     return chosen.get_or_panic(reg - first_vreg());
 }
 
-/// Puts whichever of a copy's two registers is outside the float ones in
-/// with the other, when nothing reads or writes it as an integer.
 fn join_float(chosen: &var array::Array<bool>, forced: &array::Array<bool>, a: i64, b: i64) -> !bool {
     if !is_vreg(a) or !is_vreg(b) {
         return false;
@@ -531,8 +469,6 @@ fn leave_float(chosen: &var array::Array<bool>, reg: i64) -> !bool {
     return true;
 }
 
-/// Is what the printer knows across the float instructions of one block:
-/// which general register's value v16 still holds, at which width, or -1.
 struct FloatCache {
     reg: i64,
     width: i64,
@@ -542,7 +478,6 @@ fn empty_cache() -> FloatCache {
     return FloatCache { reg: 0 - 1, width: 0 };
 }
 
-/// Reports whether an op is printed by print_float.
 fn is_float_op(op: MOp) -> bool {
     return match op {
         FBin => true,
@@ -558,19 +493,14 @@ fn is_float_op(op: MOp) -> bool {
     };
 }
 
-/// Writes `fmov vd, rn`: the bits of a general register into a float one.
 fn fmov_in(allocator: Allocator, out: &var Out, v: i64, reg: i64, width: i64) -> !void {
     return out.word(allocator, enc_fmov(true, width, reg, v), "fmov");
 }
 
-/// Writes `fmov rd, vn`: the bits of a float register into a general one.
 fn fmov_out(allocator: Allocator, out: &var Out, reg: i64, v: i64, width: i64) -> !void {
     return out.word(allocator, enc_fmov(false, width, reg, v), "fmov");
 }
 
-/// Returns the float register holding operand reg: its own when allocation
-/// gave it one, otherwise v16 when that already holds it, or scratch after
-/// moving it in.
 fn float_operand(allocator: Allocator, out: &var Out, cache: &FloatCache, reg: i64, width: i64, scratch: i64) -> !i64 {
     if is_float_reg(reg) {
         return float_reg_index(reg);
@@ -582,8 +512,6 @@ fn float_operand(allocator: Allocator, out: &var Out, cache: &FloatCache, reg: i
     return scratch;
 }
 
-/// Returns the float register an instruction computes rd in: rd's own, or
-/// v16, from which it is then moved out.
 fn float_dest(rd: i64) -> i64 {
     if is_float_reg(rd) {
         return float_reg_index(rd);
@@ -591,9 +519,6 @@ fn float_dest(rd: i64) -> i64 {
     return 16;
 }
 
-/// Moves a result computed in v16 out to the general register rd, which
-/// the cache then names; a result computed in rd's own float register
-/// needs nothing.
 fn float_result(allocator: Allocator, out: &var Out, rd: i64, width: i64, cache: &var FloatCache) -> !void {
     if is_float_reg(rd) {
         return;
@@ -632,9 +557,6 @@ fn float_mnemonic(kind: i64) -> []u8 {
     return "frintz";
 }
 
-/// Prints one float instruction. A result goes through v16, which the
-/// cache then names, so an instruction reading the result right after
-/// does not move it in again.
 fn print_float(allocator: Allocator, out: &var Out, inst: &MInst, cache: &var FloatCache) -> !void {
     let width = inst.width;
     match inst.op {
@@ -705,13 +627,10 @@ fn print_float(allocator: Allocator, out: &var Out, inst: &MInst, cache: &var Fl
     return float_result(allocator, out, inst.rd, width, cache);
 }
 
-/// Writes `fmov vd, vn` between float registers of a width.
 fn float_move(allocator: Allocator, out: &var Out, vd: i64, vn: i64, width: i64) -> !void {
     return out.word(allocator, enc_fmov_float(width, vd, vn), "fmov");
 }
 
-/// Puts a constant's bits in the float register rd: from the zero register,
-/// or through x16, which no instruction holds a value in across a constant.
 fn float_constant(allocator: Allocator, out: &var Out, rd: i64, imm: i64) -> !void {
     var source = reg_zr();
     if imm != 0 {
@@ -721,9 +640,6 @@ fn float_constant(allocator: Allocator, out: &var Out, rd: i64, imm: i64) -> !vo
     return rr(allocator, out, "fmov", rd, source);
 }
 
-/// Prints a select over float registers as `fcsel`. A spilled operand, which
-/// allocation reloads into a general register, moves through v17 or v18,
-/// and a spilled result through v16.
 fn float_select(allocator: Allocator, out: &var Out, inst: &MInst) -> !void {
     let cache = empty_cache();
     let a = try float_operand(allocator, out, &cache, inst.rn, 8, 17);

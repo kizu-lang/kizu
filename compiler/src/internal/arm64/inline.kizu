@@ -2,15 +2,6 @@ import compiler::internal::ir;
 import std::array;
 import std::map;
 
-// Inlining at the machine level: a call to a small function that calls
-// nothing is replaced by a copy of the callee's selected blocks. The
-// convention makes the seams fit without renaming any physical register:
-// the caller has already moved the arguments into x0..x7 (and x8) and reads
-// the result from x0 (and x1) after the call, which is where the callee's
-// entry reads them and its returns write them. The callee's virtual
-// registers, frame slots and copies are renumbered into the caller's.
-
-/// Returns an independent copy of a function.
 pub fn clone_function(allocator: Allocator, source: &MFunction) -> !MFunction {
     var copy = new_function(allocator);
     errdefer copy.deinit(allocator);
@@ -51,8 +42,6 @@ pub fn clone_function(allocator: Allocator, source: &MFunction) -> !MFunction {
     return move copy;
 }
 
-/// Reports whether a function may be copied into its callers: it calls
-/// nothing, reads no stack argument, and is small.
 fn inlinable(func: &MFunction) -> bool {
     if func.is_main or func.calls {
         return false;
@@ -73,8 +62,6 @@ fn inlinable(func: &MFunction) -> bool {
     return size <= 48 and func.blocks.len() <= 16;
 }
 
-/// Replaces the calls each function makes to inlinable functions by copies
-/// of their bodies. symbols[i] names functions[i].
 pub fn inline_calls(allocator: Allocator, functions: &var array::Array<MFunction>, symbols: &array::Array<ir::Name>) -> !void {
     var by_symbol = map::new<i64, i64>(allocator);
     defer by_symbol.deinit(allocator);
@@ -90,7 +77,6 @@ pub fn inline_calls(allocator: Allocator, functions: &var array::Array<MFunction
     while caller < functions.len() {
         var budget = 16;
         while budget > 0 {
-            // Find one call to an inlinable callee.
             var found_block = 0 - 1;
             var found_inst = 0 - 1;
             var callee = 0 - 1;
@@ -135,14 +121,11 @@ fn clone_at(allocator: Allocator, functions: &array::Array<MFunction>, index: i6
     return new_function(allocator);
 }
 
-/// Splits block at the call at index at and puts the callee's blocks
-/// between the two halves.
 fn splice(allocator: Allocator, func: &var MFunction, block: i64, at: i64, callee: &MFunction) -> !void {
     let vreg_base = func.vregs;
     let slot_base = func.slots.len();
     let copy_base = func.copies.len();
     let block_base = func.blocks.len();
-    // The continuation: what followed the call, ending as the block did.
     var rest = array::new<MInst>(allocator);
     errdefer rest.deinit(allocator);
     var term = Term::Open;
@@ -170,7 +153,6 @@ fn splice(allocator: Allocator, func: &var MFunction, block: i64, at: i64, calle
         node.treg = reg_none();
     }
     let continuation = block_base + callee.blocks.len();
-    // The callee's blocks, renumbered; a return jumps to the continuation.
     var index = 0;
     while callee.blocks.at(index) |source| {
         index = index + 1;
@@ -228,7 +210,6 @@ fn splice(allocator: Allocator, func: &var MFunction, block: i64, at: i64, calle
         func.out_words = callee.out_words;
     }
     try untie_seams(allocator, func, block, block_base, continuation);
-    // The call is gone: the function calls only if another call remains.
     var calls = false;
     index = 0;
     while func.blocks.at(index) |node| {
@@ -274,19 +255,11 @@ fn renumber(inst: MInst, vreg_base: i64, slot_base: i64, copy_base: i64) -> MIns
     return out;
 }
 
-/// Replaces the argument and result registers at the seams of an inlined
-/// body by virtual registers where that is safe: the caller's last write of
-/// an argument register before the call, the callee's every use of it, and
-/// the caller's reads of a result register before it is written again in
-/// the continuation. Values then flow through copies the allocator can
-/// coalesce instead of through a fixed register.
 fn untie_seams(allocator: Allocator, func: &var MFunction, caller: i64, first: i64, continuation: i64) -> !void {
     var buf = array::new<i64>(allocator);
     defer buf.deinit(allocator);
     var reads_mask = 0;
     var writes_mask = 0;
-    // Reads of a register the callee may already have written: outside its
-    // entry block, or after a write there. Such a register keeps one name.
     var late_mask = 0;
     var block_id = first;
     while block_id < continuation {
@@ -322,7 +295,6 @@ fn untie_seams(allocator: Allocator, func: &var MFunction, caller: i64, first: i
         }
         block_id = block_id + 1;
     }
-    // The caller's argument writes, back from the call.
     var def_at = array::new<i64>(allocator);
     defer def_at.deinit(allocator);
     var after_reads = array::new<i64>(allocator);
@@ -347,8 +319,6 @@ fn untie_seams(allocator: Allocator, func: &var MFunction, caller: i64, first: i
             index = index - 1;
         }
     }
-    // The caller's result reads, on from the call; a result register read
-    // past the continuation stays fixed.
     var settled = 0;
     var open = writes_mask;
     if func.blocks.at(continuation) |block| {
@@ -378,9 +348,6 @@ fn untie_seams(allocator: Allocator, func: &var MFunction, caller: i64, first: i
             }
             index = index + 1;
         }
-        // Past the block an argument register carries nothing: values
-        // cross blocks in virtual registers, and a return writes its
-        // result first.
         if !stopped and block.term != Term::Return and !(block.treg >= 0 and block.treg < 9) {
             settled = settled | open;
         }
@@ -399,8 +366,6 @@ fn untie_seams(allocator: Allocator, func: &var MFunction, caller: i64, first: i
         if (late_mask & bit) != 0 and (writes_mask & bit) != 0 {
             continue;
         }
-        // The argument and the result each get their own register, so each
-        // is one copy the allocator can share a register with.
         let fresh = func.new_vreg();
         var result = fresh;
         if (reads_mask & bit) != 0 and (writes_mask & bit) != 0 {
@@ -457,7 +422,6 @@ fn seam_mask(regs: &array::Array<i64>) -> i64 {
     return mask;
 }
 
-/// Renames register from in a block: reads to read_as, writes to write_as.
 fn rename_in_block(allocator: Allocator, func: &var MFunction, block_id: i64, from: i64, read_as: i64, write_as: i64) -> !void {
     var copy_slots = array::new<i64>(allocator);
     defer copy_slots.deinit(allocator);

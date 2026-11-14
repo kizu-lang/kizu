@@ -6,34 +6,12 @@ import std::fmt;
 import std::mem;
 import std::string;
 
-// The arm64 backend: a lowered module straight to an AArch64 object,
-// Mach-O for Darwin or ELF for Linux, which the system linker turns into
-// the executable. The printer encodes each instruction itself
-// (encode.kizu) into the object (obj.kizu, macho.kizu, elf.kizu), laid
-// out byte for byte as the system assembler lays out the same code.
-// Every function is selected into machine IR, given registers, and printed;
-// an op or a type the backend does not lower stops the build with a
-// diagnostic naming it rather than being handed to another backend. The
-// same machine IR, allocated, is also printed as x86-64 by the amd64
-// printer, for Linux and Windows as an ELF or COFF object
-// (amd64_encode.kizu, elf.kizu, coff.kizu), laid out as the system
-// assembler would lay out the same code.
-
-/// Is the object format the code is written for. Selection names symbols
-/// the Mach-O way; the ELF and COFF writers spell them their own.
 pub enum Format {
     MachO,
     Elf,
     Coff,
 }
 
-/// Emits a lowered module as an object in format: for arm64 Mach-O for
-/// Darwin or ELF for Linux, for x86-64 ELF for Linux or COFF for Windows.
-/// Each instruction is
-/// encoded here, laid out the way the system assembler would lay it out.
-/// An operand no encoding takes stops the build. A Mach-O object's
-/// LC_BUILD_VERSION names no version; the link stamps the one of the
-/// runtime it links with.
 pub fn emit_object(allocator: Allocator, module: &ir::Module, arch: Arch, format: Format, out: &var string::String) -> !?diagnostic::Diagnostic {
     var sink = new_out(allocator, format);
     defer sink.deinit(allocator);
@@ -57,8 +35,6 @@ pub fn emit_object(allocator: Allocator, module: &ir::Module, arch: Arch, format
     return null;
 }
 
-/// Is where the printer writes: the machine code of each instruction into
-/// obj, and then the object file into file.
 pub struct Out {
     file: string::String,
     obj: Obj,
@@ -68,7 +44,6 @@ fn new_out(allocator: Allocator, format: Format) -> Out {
     return Out { file: string::new(allocator), obj: new_obj(allocator, format) };
 }
 
-/// Appends one instruction word to the object.
 fn (self: &var Out) word(allocator: Allocator, value: i64, what: []u8) -> !void {
     return self.obj.word(allocator, value, what);
 }
@@ -79,8 +54,6 @@ fn emit_into(allocator: Allocator, module: &ir::Module, arch: Arch, format: Form
     try selector.index_functions(module);
     selector.stacks_variadics = format == Format::MachO;
     if arch == Arch::Amd64Windows {
-        // The stack probe a frame of a page or more calls, spelled the
-        // Mach-O way like every name the selector makes.
         let _ = try selector.syms.intern("____chkstk_ms");
     }
     if module.error_sets.at("std::mem::Error") |declared| {
@@ -98,14 +71,10 @@ fn emit_into(allocator: Allocator, module: &ir::Module, arch: Arch, format: Form
         }
     }
     try out.obj.enter(allocator, &var selector.syms, SectionKind::Text);
-    // Select every function first, so a call can take a copy of its
-    // callee's body; then allocate and print each.
     var functions = array::new<MFunction>(allocator);
     defer functions.deinit(allocator);
     var symbols = array::new<ir::Name>(allocator);
     defer symbols.deinit(allocator);
-    // The C symbol of each `export "c"` function, a second label on the
-    // same code, or the empty name.
     var exports = array::new<ir::Name>(allocator);
     defer exports.deinit(allocator);
     var index = 0;
@@ -182,7 +151,6 @@ fn emit_into(allocator: Allocator, module: &ir::Module, arch: Arch, format: Form
         try write_literal_bytes(allocator, &var selector, &var out.obj);
     }
     if format == Format::Elf {
-        // The stack is not executable.
         try out.obj.enter(allocator, &var selector.syms, SectionKind::Note);
         try out.obj.write_elf(allocator, &selector.syms, &var out.file);
     } else if format == Format::Coff {
@@ -193,7 +161,6 @@ fn emit_into(allocator: Allocator, module: &ir::Module, arch: Arch, format: Form
     return null;
 }
 
-/// Writes the string literals into the object's C string section.
 fn write_literal_bytes(allocator: Allocator, selector: &var Selector, obj: &var Obj) -> !void {
     try obj.enter(allocator, &var selector.syms, SectionKind::Cstring);
     var literal_index = 0;
@@ -209,7 +176,6 @@ fn write_literal_bytes(allocator: Allocator, selector: &var Selector, obj: &var 
     return;
 }
 
-/// Returns the name of the local label prefix followed by index.
 fn local_label(allocator: Allocator, syms: &var ir::NameTable, prefix: []u8, index: i64) -> !ir::Name {
     var label = try string::from_bytes(allocator, prefix);
     defer label.deinit(allocator);
@@ -218,7 +184,6 @@ fn local_label(allocator: Allocator, syms: &var ir::NameTable, prefix: []u8, ind
     return syms.intern(bytes);
 }
 
-/// Writes the read-only tables of table.get, eight bytes an entry.
 fn write_tables(allocator: Allocator, selector: &var Selector, sink: &var Out) -> !void {
     try sink.obj.enter(allocator, &var selector.syms, SectionKind::TextConst);
     var table = 0;
@@ -238,9 +203,6 @@ fn write_tables(allocator: Allocator, selector: &var Selector, sink: &var Out) -
     return;
 }
 
-/// Is where a function's frame puts things, from the stack pointer after
-/// the prologue: the outgoing arguments and slots from 0, then the
-/// callee-saved registers, then the frame record (x29, x30) at the top.
 struct Frame {
     needed: bool,
     total: i64,
@@ -276,8 +238,6 @@ fn plan_frame(func: &var MFunction, allocation: &Allocation) -> Frame {
     return Frame { needed: needed, total: total, saved_at: saved_at };
 }
 
-/// Writes `op xa, xb, [base, #offset]` for a register pair, or two single
-/// accesses when the offset does not fit the pair form.
 fn print_pair(allocator: Allocator, out: &var Out, load: bool, a: i64, b: i64, base: i64, offset: i64) -> !void {
     if offset >= 0 and offset <= 504 and offset % 8 == 0 {
         return out.word(allocator, enc_pair(load, a, b, base, offset), "ldp/stp");
@@ -286,7 +246,6 @@ fn print_pair(allocator: Allocator, out: &var Out, load: bool, a: i64, b: i64, b
     return print_mem(allocator, out, load, b, base, offset + 8, 8, false);
 }
 
-/// Saves or restores the callee-saved registers, two at a time.
 fn print_saved(allocator: Allocator, out: &var Out, load: bool, saved: &array::Array<i64>, at: i64) -> !void {
     var index = 0;
     while index < saved.len() {
@@ -340,41 +299,33 @@ fn print_epilogue(allocator: Allocator, out: &var Out, frame: Frame, saved: &arr
     return rrr(allocator, out, "add", reg_sp(), reg_sp(), scratch_addr());
 }
 
-/// Is the printer's state for one function.
 struct Printer {
     allocator: Allocator,
     ordinal: i64,
 }
 
-/// Writes `op xd, xn, xm`.
 fn rrr(allocator: Allocator, out: &var Out, op: []u8, rd: i64, rn: i64, rm: i64) -> !void {
     return out.word(allocator, enc_rrr(op, rd, rn, rm), op);
 }
 
-/// Writes `op xd, xn, xm, <shift> #imm`.
 fn rrr_shifted(allocator: Allocator, out: &var Out, op: []u8, inst: &MInst, shift: []u8) -> !void {
     let sub = mem::equal_bytes(op, "sub");
     let lsr = mem::equal_bytes(shift, ", lsr ");
     return out.word(allocator, enc_shifted(sub, lsr, inst.rd, inst.rn, inst.rm, inst.imm), op);
 }
 
-/// Writes `op xd, xn, #imm`.
 fn rri(allocator: Allocator, out: &var Out, op: []u8, rd: i64, rn: i64, imm: i64) -> !void {
     return out.word(allocator, enc_rri(op, rd, rn, imm), op);
 }
 
-/// Writes `op xd, xn`.
 fn rr(allocator: Allocator, out: &var Out, op: []u8, rd: i64, rn: i64) -> !void {
     return out.word(allocator, enc_rr(op, rd, rn), op);
 }
 
-/// Writes a 16-bit move op into rd: base is movz, movn or movk, chunk the
-/// 16 bits it encodes, shift where they go.
 fn move_wide(allocator: Allocator, out: &var Out, op: []u8, rd: i64, base: i64, chunk: i64, shift: i64) -> !void {
     return out.word(allocator, enc_move_wide(base, rd, chunk, shift), op);
 }
 
-/// Puts a 64-bit constant in a register with the fewest moves.
 fn materialize(allocator: Allocator, out: &var Out, rd: i64, imm: i64) -> !void {
     if imm >= 0 and imm < 65536 {
         return move_wide(allocator, out, "mov", rd, movz(), imm, 0);
@@ -382,8 +333,6 @@ fn materialize(allocator: Allocator, out: &var Out, rd: i64, imm: i64) -> !void 
     if imm < 0 and imm >= 0 - 65536 {
         return move_wide(allocator, out, "mov", rd, movn(), ~imm, 0);
     }
-    // Count the chunks that are all ones: with three or more, start from
-    // movn and patch the others.
     var ones = 0;
     var zeros = 0;
     for 0..4 |chunk| {
@@ -418,13 +367,11 @@ fn materialize(allocator: Allocator, out: &var Out, rd: i64, imm: i64) -> !void 
         }
     }
     if first {
-        // Every chunk was the skipped value: all ones.
         return move_wide(allocator, out, "movn", rd, movn(), 0, 0);
     }
     return;
 }
 
-/// Returns the memory mnemonic for a load or store of width bytes.
 fn mem_op(load: bool, width: i64, signed: bool, unscaled: bool) -> []u8 {
     if load {
         if width == 8 {
@@ -486,8 +433,6 @@ fn mem_op(load: bool, width: i64, signed: bool, unscaled: bool) -> []u8 {
     return "strb";
 }
 
-/// Writes one load or store of width bytes at base + offset, forming an
-/// address that does not fit the instruction in x15 first.
 fn print_mem(allocator: Allocator, out: &var Out, load: bool, data: i64, base: i64, offset: i64, width: i64, signed: bool) -> !void {
     var at_base = base;
     var at_offset = offset;
@@ -504,21 +449,16 @@ fn print_mem(allocator: Allocator, out: &var Out, load: bool, data: i64, base: i
     return out.word(allocator, enc_mem(load, width, signed, use_unscaled, data, at_base, at_offset), op);
 }
 
-/// Writes a branch to a block: word is what `b` or `b.<cond>` encodes
-/// with the offset zero.
 fn branch(allocator: Allocator, out: &var Out, word: i64, block: i64) -> !void {
     return out.obj.branch(allocator, word, block, word == enc_b());
 }
 
-/// Writes `b.<cond>` to a block.
 fn branch_if(allocator: Allocator, out: &var Out, cond: Cond, block: i64) -> !void {
     return branch(allocator, out, 0x54000000 | cond_field(cond), block);
 }
 
 fn enc_b() -> i64 { return 0x14000000; }
 
-/// Adds or subtracts an immediate from a register into another, through x15
-/// when it does not fit one instruction.
 fn add_imm(allocator: Allocator, out: &var Out, rd: i64, rn: i64, imm: i64) -> !void {
     if imm >= 0 and imm < 4096 {
         return rri(allocator, out, "add", rd, rn, imm);
@@ -530,7 +470,6 @@ fn add_imm(allocator: Allocator, out: &var Out, rd: i64, rn: i64, imm: i64) -> !
     return rrr(allocator, out, "add", rd, rn, scratch_addr());
 }
 
-/// Writes an instruction with no operands to choose: ret or brk #1.
 fn bare(allocator: Allocator, out: &var Out, op: []u8, word: i64) -> !void {
     return out.word(allocator, word, op);
 }
@@ -614,8 +553,6 @@ fn print_function(
     return;
 }
 
-/// Writes the cbz or cbnz (nonzero) of a block that tests reg, and the
-/// jump after it when the other successor does not follow.
 fn print_test_branch(
     allocator: Allocator,
     out: &var Out,
@@ -636,7 +573,6 @@ fn print_test_branch(
     return;
 }
 
-/// Writes `cbz` or `cbnz reg, block`.
 fn test_branch(allocator: Allocator, out: &var Out, nonzero: bool, reg: i64, block: i64) -> !void {
     var word = 0xB4000000 | field(reg);
     if nonzero {
@@ -645,8 +581,6 @@ fn test_branch(allocator: Allocator, out: &var Out, nonzero: bool, reg: i64, blo
     return out.obj.branch(allocator, word, block, false);
 }
 
-/// Resolves a memory base and offset: a frame slot to the stack pointer and
-/// the slot's offset, an incoming argument to the frame pointer.
 fn resolve_base(func: &MFunction, inst: &MInst) -> Frame {
     if inst.rn == reg_frame() {
         let slot = func.slots.get_or_panic(inst.slot);
@@ -658,9 +592,6 @@ fn resolve_base(func: &MFunction, inst: &MInst) -> Frame {
     return Frame { needed: true, total: inst.rn, saved_at: inst.imm };
 }
 
-/// Reports whether two loads read one 8-byte word and the next from one
-/// base into two registers, the first not the base, so one ldp does both:
-/// it reads the base before writing either register.
 fn load_pair(func: &MFunction, first: &MInst, second: &MInst) -> bool {
     if first.op != MOp::Load or second.op != MOp::Load or first.width != 8 or second.width != 8 {
         return false;
@@ -676,13 +607,11 @@ fn load_pair(func: &MFunction, first: &MInst, second: &MInst) -> bool {
     return b.saved_at == a.saved_at + 8 and a.saved_at >= 0 and a.saved_at <= 504 and a.saved_at % 8 == 0;
 }
 
-/// Writes `op xd, xn, xm, xa`: madd or msub.
 fn rrrr(allocator: Allocator, out: &var Out, op: []u8, inst: &MInst) -> !void {
     let sub = mem::equal_bytes(op, "msub");
     return out.word(allocator, enc_madd(sub, inst.rd, inst.rn, inst.rm, inst.ra), op);
 }
 
-/// Writes `op xn, #imm` that only sets the flags: tst, cmp or cmn.
 fn flags_imm(allocator: Allocator, out: &var Out, op: []u8, rn: i64, imm: i64) -> !void {
     if mem::equal_bytes(op, "tst") {
         return out.word(allocator, enc_logical_imm(0xF2000000, reg_zr(), rn, imm), op);
@@ -691,7 +620,6 @@ fn flags_imm(allocator: Allocator, out: &var Out, op: []u8, rn: i64, imm: i64) -
     return out.word(allocator, enc_add_imm(sub, true, reg_zr(), rn, imm), op);
 }
 
-/// Writes `csel` or `csinc xd, xn, xm, cond`.
 fn conditional(allocator: Allocator, out: &var Out, increment: bool, inst: &MInst) -> !void {
     var word = 0x9A800000;
     if increment {
@@ -700,8 +628,6 @@ fn conditional(allocator: Allocator, out: &var Out, increment: bool, inst: &MIns
     return out.word(allocator, word | (field(inst.rm) << 16) | (cond_field(inst.cond) << 12) | (field(inst.rn) << 5) | field(inst.rd), "csel");
 }
 
-/// Writes the address of a symbol into rd: adrp and add of the page
-/// offset, or with got the adrp and load of its global offset table slot.
 fn symbol_address(allocator: Allocator, out: &var Out, inst: &MInst, got: bool, syms: &ir::NameTable) -> !void {
     let rd = field(inst.rd);
     if got {
@@ -810,13 +736,10 @@ fn print_inst(allocator: Allocator, out: &var Out, func: &MFunction, inst: &MIns
     }
 }
 
-/// Writes `op vd.T, vn.T[, vm.T]`: base is the encoding, sized whether it
-/// takes the lane width.
 fn vvv(allocator: Allocator, out: &var Out, op: []u8, inst: &MInst, base: i64, sized: bool) -> !void {
     return out.word(allocator, enc_vvv(base, sized, inst.width, inst.vec % 256, (inst.vec / 256) % 256, inst.vec / 65536), op);
 }
 
-/// Writes `op vd.T, vn.T, #imm`: shl, sshr or ushr.
 fn vshift(allocator: Allocator, out: &var Out, op: []u8, inst: &MInst, base: i64, left: bool) -> !void {
     let vd = inst.vec % 256;
     let vn = (inst.vec / 256) % 256;
@@ -912,9 +835,6 @@ fn print_indexed(allocator: Allocator, out: &var Out, load: bool, inst: &MInst) 
     return out.word(allocator, enc_mem_indexed(load, inst.width, signed, inst.rd, inst.rn, inst.rm, inst.imm > 0), op);
 }
 
-/// Writes the table the entry point reads a failure's name from: one
-/// (pointer, length) row per error code, row 0 and codes no set declares
-/// empty, each name a string literal.
 fn write_error_names(allocator: Allocator, module: &ir::Module, selector: &var Selector, sink: &var Out) -> !void {
     var rows = 1;
     var set_index = 0;

@@ -1,19 +1,9 @@
-// Division and remainder by a constant without a divide instruction: a
-// power of two by shifts that round toward zero, any other divisor by a
-// multiply by its magic reciprocal (Hacker's Delight, chapter 10). The
-// quotient is the one `sdiv` / `udiv` give, so the remainder `n - q * d`
-// keeps the sign of the dividend as the IR's `%` does.
-
-/// Is the reciprocal of a divisor: the multiplier, the shift after the high
-/// half of the product, and for an unsigned divisor whether the multiplier
-/// needed a 65th bit.
 struct Magic {
     multiplier: i64,
     shift: i64,
     add: bool,
 }
 
-/// Returns the signed magic of d, |d| >= 2 and not a power of two.
 fn signed_magic(d: i64) -> Magic {
     let two63 = cast<u64>(1) << 63;
     var ad = cast<u64>(d);
@@ -53,7 +43,6 @@ fn signed_magic(d: i64) -> Magic {
     return Magic { multiplier: multiplier, shift: p - 64, add: false };
 }
 
-/// Returns the unsigned magic of d, 2 <= d < 2^63 and not a power of two.
 fn unsigned_magic(d: i64) -> Magic {
     let ud = cast<u64>(d);
     let two63 = cast<u64>(1) << 63;
@@ -94,8 +83,6 @@ fn unsigned_magic(d: i64) -> Magic {
     return Magic { multiplier: cast<i64>(q2 + cast<u64>(1)), shift: p - 64, add: add };
 }
 
-/// Reports whether value is a run of ones, the shape an AArch64 logical
-/// immediate spells without rotation.
 pub fn logical_imm_ok(value: i64) -> bool {
     if value == 0 or value == 0 - 1 {
         return false;
@@ -108,8 +95,6 @@ pub fn logical_imm_ok(value: i64) -> bool {
     return (next & bits) == cast<u64>(0);
 }
 
-/// Selects n / d or n % d for a constant d into rd. Reports false when d is
-/// zero: that division stays the machine's.
 fn (self: &var Selector) divide_by_constant(rd: i64, n: i64, d: i64, signed: bool, remainder: bool) -> !bool {
     if d == 0 {
         return false;
@@ -125,7 +110,6 @@ fn (self: &var Selector) divide_by_constant(rd: i64, n: i64, d: i64, signed: boo
         return true;
     }
     if !signed and d < 0 {
-        // A divisor of 2^63 or more goes into n at most once.
         let d_reg = try self.imm_reg_nz(d);
         try self.op3(MOp::Cmp, reg_none(), n, d_reg);
         if remainder {
@@ -160,7 +144,6 @@ fn (self: &var Selector) divide_by_constant(rd: i64, n: i64, d: i64, signed: boo
         return true;
     }
     if shift >= 0 and self.known_clear(n, magnitude - 1) {
-        // The dividend is a multiple of d here: the shift is exact.
         if remainder {
             try self.mov_imm(rd, 0);
         } else if d < 0 {
@@ -172,7 +155,6 @@ fn (self: &var Selector) divide_by_constant(rd: i64, n: i64, d: i64, signed: boo
         return true;
     }
     if shift >= 0 {
-        // Bias a negative dividend by d - 1 so the shift rounds toward zero.
         let biased = self.func.new_vreg();
         if shift == 1 {
             var add = blank(MOp::AddLsr);
@@ -261,11 +243,8 @@ fn (self: &var Selector) divide_by_constant(rd: i64, n: i64, d: i64, signed: boo
     return true;
 }
 
-/// Selects rd = n - q * d. A d of 2^k + 1 or 2^k - 1 is a shifted add and a
-/// subtract, which keep off the multiplier.
 fn (self: &var Selector) multiply_subtract(rd: i64, n: i64, q: i64, d: i64) -> !void {
     if d > 2 and power_of_two(d - 1) >= 1 {
-        // n - (q + (q << k))
         let product = self.func.new_vreg();
         var add = blank(MOp::AddShift);
         add.rd = product;
@@ -276,7 +255,6 @@ fn (self: &var Selector) multiply_subtract(rd: i64, n: i64, q: i64, d: i64) -> !
         return self.op3(MOp::Sub, rd, n, product);
     }
     if d > 2 and power_of_two(d + 1) >= 2 {
-        // (n + q) - (q << k)
         let sum = self.func.new_vreg();
         try self.op3(MOp::Add, sum, n, q);
         var sub = blank(MOp::SubShift);
