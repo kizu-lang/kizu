@@ -4,43 +4,21 @@ import std::fmt;
 import std::mem;
 import std::string;
 
-// Mechanical port of internal/manifest/manifest.go. Go's helpers return
-// `(value, error)`; a Kizu error value carries no text, so each helper returns
-// the manifest error text as `?string::String` (null is success) and writes its
-// value through a `&var` parameter, the way Go's assignManifestValue already
-// fills `*Manifest`. Go's pre-split line slice is a LineCursor over source.
-
-/// Manifest is the minimal kizu.toml shape accepted by the compiler.
-///
-/// There is no export list. What a package keeps to itself is decided by where
-/// the source sits: a module under an `internal` directory is reachable from the
-/// subtree that directory belongs to and nowhere else.
 pub struct Manifest {
     pub package_name: string::String,
     pub version: string::String,
     pub paths: array::Array<string::String>,
-    /// native is the `[native]` section: the directories the linker is told
-    /// to look in for what `@link_library` / `@link_framework` name, relative
-    /// to the manifest. The names live in the source beside the extern
-    /// declaration; where they are found is the package's build input, so it
-    /// lives here (SPEC §12.2). native_darwin, native_linux and
-    /// native_windows hold the `[native.<os>]` sections that add to it for
-    /// one operating system, the Go `NativeByOS` map with one field per name
-    /// the `std::target` predicates use.
     pub native: SearchPaths,
     pub native_darwin: SearchPaths,
     pub native_linux: SearchPaths,
     pub native_windows: SearchPaths,
 }
 
-/// Is what one `[native]` or `[native.<os>]` section tells the linker to
-/// search.
 pub struct SearchPaths {
     pub libraries: array::Array<string::String>,
     pub frameworks: array::Array<string::String>,
 }
 
-/// Returns empty search paths.
 pub fn new_search_paths(allocator: Allocator) -> SearchPaths {
     return SearchPaths {
         libraries: array::new<string::String>(allocator),
@@ -48,8 +26,6 @@ pub fn new_search_paths(allocator: Allocator) -> SearchPaths {
     };
 }
 
-/// Returns the search directories for one operating system, the Go
-/// `NativeSearch`: the `[native]` section followed by that OS's section.
 pub fn (self: &Manifest) native_search(allocator: Allocator, os: []u8) -> !SearchPaths {
     var out = new_search_paths(allocator);
     errdefer out.deinit(allocator);
@@ -70,7 +46,6 @@ pub fn (self: &Manifest) native_search(allocator: Allocator, os: []u8) -> !Searc
     return move out;
 }
 
-// append_cloned appends a copy of every string in values onto out.
 fn append_cloned(
     allocator: Allocator, values: &array::Array<string::String>, out: &var array::Array<string::String>
 ) -> !void {
@@ -84,13 +59,11 @@ fn append_cloned(
     return;
 }
 
-/// Is either the parsed manifest or the manifest error text.
 pub union ParseResult {
     Manifest(Manifest),
     Error(string::String),
 }
 
-// Names the TOML section the current assignment belongs to; None is Go's "".
 enum Section {
     None,
     Package,
@@ -101,33 +74,25 @@ enum Section {
     NativeWindows,
 }
 
-// Holds the two sides of one `key = value` line.
 struct Assignment {
     key: []u8,
     value: []u8,
 }
 
-// Walks source one line at a time: [start, end) is the current line and
-// number its 1-based line number. end starts at -1, the newline before the
-// first line, so that the visited lines are exactly strings.Split(source, "\n").
 struct LineCursor {
     start: i64,
     end: i64,
     number: i64,
 }
 
-/// Parses the declarative subset of kizu.toml used by Kizu.
 pub fn parse_manifest(allocator: Allocator, source: []u8) -> !ParseResult {
     return parse(allocator, source, false);
 }
 
-/// Parses the std package manifest with its reserved name.
 pub fn parse_std_manifest(allocator: Allocator, source: []u8) -> !ParseResult {
     return parse(allocator, source, true);
 }
 
-// parse owns the manifest under construction so that one cleanup covers every
-// failure of parse_into.
 fn parse(allocator: Allocator, source: []u8, allow_reserved_name: bool) -> !ParseResult {
     var manifest = Manifest {
         package_name: string::new(allocator),
@@ -146,7 +111,6 @@ fn parse(allocator: Allocator, source: []u8, allow_reserved_name: bool) -> !Pars
     return ParseResult::Manifest(move manifest);
 }
 
-// parse_into parses the declarative subset shared by user and std manifests.
 fn parse_into(
     allocator: Allocator, source: []u8, allow_reserved_name: bool, manifest: &var Manifest
 ) -> !?string::String {
@@ -183,7 +147,6 @@ fn parse_into(
     return validate_manifest(allocator, manifest, allow_reserved_name);
 }
 
-// next moves to the following line and reports false after the last one.
 fn (self: &var LineCursor) next(source: []u8) -> bool {
     if self.end >= mem::len(source) {
         return false;
@@ -194,14 +157,10 @@ fn (self: &var LineCursor) next(source: []u8) -> bool {
     return true;
 }
 
-// starts_multiline_array reports arrays that continue on later lines.
 fn starts_multiline_array(value: []u8) -> bool {
     return mem::starts_with(value, "[") and !ends_with(value, "]");
 }
 
-// collect_multiline_array joins the supported TOML string array subset onto
-// out, which already holds the opening line, and leaves cursor on the closing
-// line.
 fn collect_multiline_array(
     allocator: Allocator, out: &var string::String, source: []u8, cursor: &var LineCursor
 ) -> !?string::String {
@@ -219,12 +178,10 @@ fn collect_multiline_array(
     return try line_error(allocator, line_no, "unterminated string array");
 }
 
-// strip_comment removes a full-line or suffix TOML comment in the supported subset.
 fn strip_comment(line: []u8) -> []u8 {
     return line[0..find_byte(line, 0, cast<u8>(35))];
 }
 
-// parse_section parses a TOML section header into section.
 fn parse_section(
     allocator: Allocator, line: []u8, line_no: i64, section: &var Section
 ) -> !?string::String {
@@ -261,7 +218,6 @@ fn parse_section(
     return move failure;
 }
 
-// native_section returns the `[native.<os>]` section of one native target.
 fn native_section(target: stdtarget::Target) -> Section {
     if target == stdtarget::Target::NativeDarwin {
         return Section::NativeDarwin;
@@ -272,13 +228,11 @@ fn native_section(target: stdtarget::Target) -> Section {
     return Section::NativeLinux;
 }
 
-// is_native_section reports the `[native]` and `[native.<os>]` sections.
 fn is_native_section(section: Section) -> bool {
     return section == Section::Native or section == Section::NativeDarwin or
         section == Section::NativeLinux or section == Section::NativeWindows;
 }
 
-// parse_assignment parses one key/value assignment into out.
 fn parse_assignment(
     allocator: Allocator, line: []u8, line_no: i64, out: &var Assignment
 ) -> !?string::String {
@@ -295,7 +249,6 @@ fn parse_assignment(
     return null;
 }
 
-// assign_manifest_value stores one parsed manifest value.
 fn assign_manifest_value(
     allocator: Allocator, manifest: &var Manifest, section: Section, key: []u8, value: []u8,
     line_no: i64
@@ -326,9 +279,6 @@ fn assign_manifest_value(
     return move failure;
 }
 
-// assign_native_value stores one search path list into its section, the Go
-// `assignNativeValue`: the list is parsed before the key is looked at, so a
-// malformed value is reported before an unknown key.
 fn assign_native_value(
     allocator: Allocator, manifest: &var Manifest, section: Section, key: []u8, value: []u8,
     line_no: i64
@@ -379,8 +329,6 @@ fn assign_native_value(
     return move failure;
 }
 
-// replace_list moves every string of parsed into out in order, dropping what
-// out held, the Go slice assignment.
 fn replace_list(
     allocator: Allocator, out: &var array::Array<string::String>, parsed: &var array::Array<string::String>
 ) -> !void {
@@ -394,7 +342,6 @@ fn replace_list(
     return;
 }
 
-// section_spelling returns the section name Go keeps as the section string.
 fn section_spelling(section: Section) -> []u8 {
     return match section {
         None => "",
@@ -407,7 +354,6 @@ fn section_spelling(section: Section) -> []u8 {
     };
 }
 
-// parse_string_value parses a quoted string value onto out.
 fn parse_string_value(
     allocator: Allocator, value: []u8, line_no: i64, out: &var string::String
 ) -> !?string::String {
@@ -420,7 +366,6 @@ fn parse_string_value(
     return try line_error(allocator, line_no, "expected quoted string");
 }
 
-// parse_string_list parses a simple TOML string array onto values.
 fn parse_string_list(
     allocator: Allocator, value: []u8, line_no: i64, values: &var array::Array<string::String>
 ) -> !?string::String {
@@ -449,7 +394,6 @@ fn parse_string_list(
     return null;
 }
 
-// validate_manifest checks required fields and reserved package names.
 fn validate_manifest(
     allocator: Allocator, manifest: &var Manifest, allow_reserved_name: bool
 ) -> !?string::String {
@@ -466,7 +410,6 @@ fn validate_manifest(
     return null;
 }
 
-// line_error builds Go's `manifest error:<line_no>: <text>` message.
 fn line_error(allocator: Allocator, line_no: i64, text: []u8) -> !string::String {
     var out = try string::from_bytes(allocator, "manifest error:");
     errdefer out.deinit(allocator);
@@ -476,8 +419,6 @@ fn line_error(allocator: Allocator, line_no: i64, text: []u8) -> !string::String
     return move out;
 }
 
-// find_byte returns the index of the first needle at or after start, or the
-// length of bytes when there is none.
 fn find_byte(bytes: []u8, start: i64, needle: u8) -> i64 {
     var index = start;
     while index < mem::len(bytes) {
@@ -489,7 +430,6 @@ fn find_byte(bytes: []u8, start: i64, needle: u8) -> i64 {
     return index;
 }
 
-// ends_with reports whether bytes ends with suffix.
 fn ends_with(bytes: []u8, suffix: []u8) -> bool {
     let suffix_len = mem::len(suffix);
     let length = mem::len(bytes);
