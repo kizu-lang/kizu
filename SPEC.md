@@ -1487,9 +1487,9 @@ let cell = [2][2]f64{
 };
 ```
 
-N は整数 literal のほか、static な整数でも書けます。整数の static parameter と
-整数 range の `comptime for` の capture(§13)の名前か、それらと literal を括弧で
-囲んだ整数演算(`[(n * 2)]f64`)で、括弧の中は static 引数の式(§13)と同じ規則
+N の型は `i64` です。N は整数 literal のほか、static な整数でも書けます。`i64` の
+static parameter と整数 range の `comptime for` の capture(§13)の名前か、
+それらと literal を括弧で囲んだ整数演算(`[(n * 2)]f64`)で、括弧の中は static 引数の式(§13)と同じ規則
 です。長さは instance ごと・capture の値ごとに評価し、1 未満になるとその
 instance を作った呼び出しが compile error です。literal だけの式はその値と同じ型
 です(`[(2 * 4)]u8` は `[8]u8`)。長さが読む名前は宣言中の関数の static parameter
