@@ -4,10 +4,6 @@ import std::array;
 import std::mem;
 import std::string;
 
-// Mechanical port of internal/lexer/lexer.go. Input is borrowed from the
-// compilation source record. Token text is copied through the explicit
-// allocator passed to new/new_source.
-
 struct Span {
     start: i64,
     end: i64,
@@ -19,11 +15,6 @@ struct Scalar {
     valid: bool,
 }
 
-/// Is one token as positions in the input: its kind, where it begins, and
-/// the bytes its literal is read from. A string's bytes are its contents
-/// without the quotes. A multiline string's literal is its lines joined, so
-/// its lines are kept in the lexer's `string_lines` and its bytes are empty.
-/// Reading a lexeme copies nothing; `next_token` turns one into a token.
 pub struct Lexeme {
     pub kind: token::Kind,
     pub start: i64,
@@ -39,7 +30,6 @@ struct CompoundToken {
     single: token::Kind,
 }
 
-/// Scans Kizu source text into tokens.
 pub struct Lexer {
     allocator: Allocator,
     input: []u8,
@@ -54,12 +44,10 @@ pub struct Lexer {
     source: ?source::SourceId,
 }
 
-/// Creates a lexer for input.
 pub fn new(allocator: Allocator, input: []u8) -> Lexer {
     return make(allocator, null, input);
 }
 
-/// Creates a lexer that stamps source ID onto every token it produces.
 pub fn new_source(
     allocator: Allocator,
     source_id: source::SourceId,
@@ -90,7 +78,6 @@ fn make(
     return move out;
 }
 
-/// Returns the next token from the input stream.
 fn (self: &var Lexer) next_token() -> !token::Token {
     try self.skip_ignored();
     let lexeme = try self.scan_lexeme();
@@ -102,9 +89,6 @@ fn (self: &var Lexer) next_token() -> !token::Token {
     return move out;
 }
 
-/// Returns the next token as positions in the input, the token `next_token`
-/// would return without its literal or comments copied out. A reader that
-/// only needs kinds and names reads the input this way.
 pub fn (self: &var Lexer) next_lexeme() -> !Lexeme {
     try self.skip_ignored();
     let lexeme = try self.scan_lexeme();
@@ -113,7 +97,6 @@ pub fn (self: &var Lexer) next_lexeme() -> !Lexeme {
     return lexeme;
 }
 
-/// Copies a lexeme's literal into a token stamped with where it begins.
 fn (self: &Lexer) token_from_lexeme(lexeme: &Lexeme) -> !token::Token {
     if lexeme.kind == token::Kind::Eof {
         return self.token_from_bytes(token::Kind::Eof, "", lexeme.line, lexeme.column);
@@ -191,9 +174,6 @@ fn (self: &var Lexer) scan_lexeme() -> !Lexeme {
         self.read_char();
         return out;
     }
-    // `c` directly before a quote opens a C string literal. No name can sit
-    // against a string, so the spelling takes nothing a program could have
-    // written before.
     if self.ch == cast<u8>(99) and self.peek_char() == cast<u8>(34) {
         self.read_char();
         let span = self.read_string();
@@ -207,11 +187,6 @@ fn (self: &var Lexer) scan_lexeme() -> !Lexeme {
         return lexeme_at(token::lookup_ident(literal), start, self.position, line, column);
     }
     if is_digit(self.ch) {
-        // A number is decimal, or `0x` / `0b` and its digits; a float adds a
-        // fraction after `.`, an exponent after `e`, or both. `_` is allowed
-        // between digits. The scanner only finds where the literal ends; the
-        // parser decides whether the spelling is a number. A `.` not followed
-        // by a digit is left alone, so `0..n` stays a range.
         if self.ch == cast<u8>(48) and
             (self.peek_char() == cast<u8>(120) or self.peek_char() == cast<u8>(98)) {
             self.read_char();
@@ -351,9 +326,6 @@ fn (self: &var Lexer) skip_ignored() -> !void {
             return;
         }
         if self.is_doc_comment_start() {
-            // The comment is read before the append takes `pending_doc`
-            // exclusively: the two-phase receiver (ADR-0106) refuses a
-            // `&var self` call inside the arguments.
             let comment = self.read_doc_comment();
             try self.pending_doc.append(self.allocator, comment);
             continue;
@@ -437,7 +409,6 @@ fn (self: &var Lexer) read_doc_comment() -> Span {
     };
 }
 
-// Reads a string after its opening quote, returning where its contents are.
 fn (self: &var Lexer) read_string() -> Span {
     self.read_char();
     let start = self.position;
@@ -453,7 +424,6 @@ fn (self: &var Lexer) read_string() -> Span {
     return out;
 }
 
-// Reads a multiline string into `string_lines`, one span per line.
 fn (self: &var Lexer) read_multiline_string() -> !void {
     clear_spans(&var self.string_lines);
     while true {
@@ -618,9 +588,6 @@ fn is_digit(ch: u8) -> bool {
     return ch >= cast<u8>(48) and ch <= cast<u8>(57);
 }
 
-// Reports whether ch can appear in a `0x` literal. Decimal and binary
-// literals read the same set so that `0b12` becomes one bad token rather
-// than a number followed by an identifier.
 fn is_hex_digit(ch: u8) -> bool {
     return is_digit(ch) or
         (ch >= cast<u8>(97) and ch <= cast<u8>(102)) or
