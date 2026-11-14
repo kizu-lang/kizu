@@ -3,12 +3,6 @@ import compiler::internal::diagnostic;
 import std::array;
 import std::map;
 
-// Port of the owned container methods of internal/ownership/checker.go:
-// Array<T> and Map<[]u8, V> method checks, the concrete impl method call
-// with its two-phase receiver borrow, the arena accessors, and the arena /
-// handle provenance contracts derived from signatures (ADR-0098).
-
-/// Validates one i64 insertion-position argument, the Go `checkMapIndexArg`.
 fn (self: &var Checker) check_map_index_arg(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -36,9 +30,6 @@ fn (self: &var Checker) check_map_index_arg(
     return null;
 }
 
-/// Reads the single Allocator a release names. A value keeps no copy of the
-/// allocator that made it (ADR-0132), so the call spells it, the same way the
-/// construction did. `offset` skips the receiver a primitive carries.
 fn (self: &var Checker) read_release_allocator(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -68,10 +59,6 @@ fn (self: &var Checker) read_release_allocator(
     return self.check_release_tie(tree, env, label, receiver, first);
 }
 
-/// Requires the allocator a release names to be the one the value was made
-/// from, the Go `checkReleaseTie` (ADR-0132). Only a tied allocator has an
-/// identity to compare: `page_allocator()` values are indistinguishable, so
-/// nothing there is checkable and nothing needs to be.
 fn (self: &var Checker) check_release_tie(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -90,10 +77,6 @@ fn (self: &var Checker) check_release_tie(
         }
         sources = sources + 1;
         if tied |named| {
-            // By id, not by handle: a branch or a loop body is checked against
-            // a clone of the scope, so the allocator an argument resolves to
-            // there is a copy of the one the owner recorded. The id copies
-            // with the binding and names the same declaration on both sides.
             if self.binding(named).id == self.binding(source.target).id {
                 return null;
             }
@@ -124,7 +107,6 @@ fn (self: &var Checker) check_release_tie(
     );
 }
 
-/// Reads one i64 argument, the Go `checkOneI64Arg`.
 fn (self: &var Checker) check_one_i64_arg(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -149,8 +131,6 @@ fn (self: &var Checker) check_one_i64_arg(
     return null;
 }
 
-/// Reads non-arena method arguments after type checking, the Go
-/// `checkPlainMethodArgs`.
 fn (self: &var Checker) check_plain_method_args(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -169,9 +149,6 @@ fn (self: &var Checker) check_plain_method_args(
     return null;
 }
 
-/// Applies a concrete impl method signature to a receiver call, the Go
-/// `checkImplMethodCall`; handled is false when the type declares no such
-/// method.
 fn (self: &var Checker) check_impl_method_call(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -225,8 +202,6 @@ fn (self: &var Checker) check_impl_method_call(
         }
     }
     if receiver.mut_borrow {
-        // The exclusive receiver borrow is active from here through the call,
-        // so the deinit path below sees the receiver as borrowed.
         self.adjust_active_mut_borrows(value, 1);
     }
     if cleanup {
@@ -240,10 +215,6 @@ fn (self: &var Checker) check_impl_method_call(
             );
             return try self.with_borrower(move problem, env, value);
         }
-        // Inside the type's own deinit the fields are what the body consumes,
-        // and consuming them is how it finishes: the receiver's own cleanup
-        // is the body being written, so calling it is recursion, and after a
-        // field is gone it would release that field twice.
         if self.inside_deinit_of(value) {
             if receiver.mut_borrow {
                 self.adjust_active_mut_borrows(value, -1);
@@ -284,9 +255,6 @@ fn (self: &var Checker) check_impl_method_call(
     return null;
 }
 
-/// Moves the receiver's exclusive call-duration borrow count by delta: the
-/// `value.activeMutBorrows++` and deferred `--` of the Go
-/// `checkImplMethodCall`, which Kizu spells on every exit.
 fn (self: &var Checker) adjust_active_mut_borrows(value: BindingHandle, delta: i64) -> void {
     if self.store.binding_mut(value) |record| {
         record.active_mut_borrows = record.active_mut_borrows + delta;
@@ -294,18 +262,11 @@ fn (self: &var Checker) adjust_active_mut_borrows(value: BindingHandle, delta: i
     return;
 }
 
-/// Is the binding and field the receiver's call-duration borrow lands on,
-/// the Go `receiverPlace` result.
 pub struct ReceiverPlace {
     pub target: BindingHandle,
     pub field: Name,
 }
 
-/// Returns the binding and field the receiver's call-duration borrow lands
-/// on, the Go `receiverPlace`: the owner and its field for a direct-field
-/// projection, the receiver binding itself otherwise. Routing through the
-/// owner is what makes an argument borrow of the same field collide with
-/// the receiver.
 fn (self: &Checker) receiver_place(receiver: BindingHandle) -> ReceiverPlace {
     let record = self.binding(receiver);
     if record.field_owner |owner| {
@@ -314,12 +275,6 @@ fn (self: &Checker) receiver_place(receiver: BindingHandle) -> ReceiverPlace {
     return ReceiverPlace { target: receiver, field: empty_name() };
 }
 
-/// Applies ownership effects for explicit method arguments, the Go
-/// `checkImplMethodArgs`.
-///
-/// A `&var` receiver is two-phase: while the arguments are evaluated it is
-/// only reserved -- a shared borrow, so arguments can read the receiver --
-/// and the exclusive borrow activates once every argument has settled.
 fn (self: &var Checker) check_impl_method_args(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -330,15 +285,6 @@ fn (self: &var Checker) check_impl_method_args(
     return self.check_method_args(tree, env, method, receiver, args, 0);
 }
 
-/// Activates the borrows a method call holds while each argument's own
-/// effect is applied, then releases them, the Go `checkMethodArgs`. It is
-/// the argument borrow activation every method call shares, and the receiver
-/// two-phase of ADR-0106: a `&var` receiver is held as a shared borrow while
-/// the arguments are evaluated, so an argument can read it but cannot alias,
-/// mutate, or consume it, then as the exclusive borrow once every argument
-/// has settled. User methods and std containers alike come through here.
-/// lent is the position, from 1, of an argument the callee only reads (the
-/// Go check closure), or 0.
 fn (self: &var Checker) check_method_args(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -384,8 +330,6 @@ fn (self: &var Checker) check_method_args(
     }
     if receiver_mut {
         try self.release_reservation(place);
-        // Activation: argument borrows still live at the call must not
-        // overlap the receiver's exclusive borrow.
         if try self.check_borrow_conflict_for_field(tree, env, place.target, place.field, true
         ) |failed| {
             errdefer failed.deinit(self.allocator);
@@ -397,8 +341,6 @@ fn (self: &var Checker) check_method_args(
     return null;
 }
 
-/// Applies one argument's effect: a read for the lent position, the
-/// ordinary method argument rule otherwise.
 fn (self: &var Checker) check_method_arg(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -414,8 +356,6 @@ fn (self: &var Checker) check_method_arg(
     return self.check_impl_method_arg(tree, env, method, param_index, arg);
 }
 
-/// Ends a receiver reservation: the shared borrow and the count that marks
-/// it as one.
 fn (self: &var Checker) release_reservation(place: ReceiverPlace) -> !void {
     self.adjust_reservations(place.target, -1);
     return self.release_temporary_borrow(
@@ -423,8 +363,6 @@ fn (self: &var Checker) release_reservation(place: ReceiverPlace) -> !void {
     );
 }
 
-/// Counts a method call reserving value as its receiver, the Go
-/// `target.reservations++` / `--`.
 fn (self: &var Checker) adjust_reservations(value: BindingHandle, delta: i64) -> void {
     if self.store.binding_mut(value) |record| {
         record.reservations = record.reservations + delta;
@@ -432,11 +370,6 @@ fn (self: &var Checker) adjust_reservations(value: BindingHandle, delta: i64) ->
     return;
 }
 
-/// Mirrors user-call argument ownership for one method parameter, the Go
-/// `checkImplMethodArg`. A view lends to a method under the same condition
-/// as to a plain function, with the receiver counted among the parameters
-/// that could retain it: a `&var self` whose type carries a view could store
-/// the lend in a field.
 fn (self: &var Checker) check_impl_method_arg(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -460,9 +393,6 @@ fn (self: &var Checker) check_impl_method_arg(
     return self.move_expr(tree, env, arg, &var ignored);
 }
 
-/// Names T of an `std::arena::Arena<T>` binding, the
-/// `splitGenericType(arena.typeName)` with base check the Go arena methods
-/// share; null when the binding is not an arena.
 fn (self: &var Checker) arena_element_type(arena: BindingHandle) -> !?Name {
     let type_name = self.binding(arena).type_name;
     let parts = try self.names.split_generic(type_name) orelse return null;
@@ -472,13 +402,6 @@ fn (self: &var Checker) arena_element_type(arena: BindingHandle) -> !?Name {
     return parts.args;
 }
 
-/// Rejects handle uses whose provenance is known to mismatch, the Go
-/// `checkKnownHandleProvenance`: both sides carry an arena identity and they
-/// differ. An unknown side -- an arena that arrived as a borrow, a handle
-/// read out of a field -- passes, because the reader cannot see where it was
-/// made and the signature is what carries the contract (ADR-0098). This is
-/// the one provenance rule; local arenas always carry an identity, so known
-/// confusions still stop.
 fn (self: &var Checker) check_known_handle_provenance(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -518,8 +441,6 @@ fn (self: &var Checker) check_known_handle_provenance(
     return null;
 }
 
-/// Returns tracked arena identity for handle-like expressions, the Go
-/// `knownHandleProvenance`.
 fn (self: &Checker) known_handle_provenance(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -533,21 +454,11 @@ fn (self: &Checker) known_handle_provenance(
     return 0;
 }
 
-/// Names the parameter indices of one derived contract, the Go
-/// `arenaHandlePair`: the handle argument must come from the arena argument.
 pub struct ArenaHandlePair {
     pub arena: i64,
     pub handle: i64,
 }
 
-/// Derives handle-pairing contracts from a signature, the Go
-/// `arenaHandlePairs`, the same division of labor borrow provenance uses
-/// (ADR-0098: the callee trusts the signature, the caller re-derives the
-/// contract from it). A pair exists when a borrowed `Arena<T>` parameter
-/// and a by-value `Handle<T>` parameter appear for the same T exactly once
-/// each; any other shape -- repeated T, a by-value arena, a borrowed handle
-/// -- is ambiguous and derives nothing. first_param skips a method receiver,
-/// so pair indices count from the first explicit argument.
 fn (self: &var Checker) arena_handle_pairs(
     function: FunctionHandle,
     first_param: i64,
@@ -592,15 +503,10 @@ fn (self: &var Checker) arena_handle_pairs(
     return;
 }
 
-/// Is the marker an element spelling takes once it can no longer name one
-/// parameter, the `ambiguous` constant of the Go `arenaHandlePairs`.
 fn ambiguous_pair_index() -> i64 {
     return -1;
 }
 
-/// Records the parameter index one element spelling names, the `note`
-/// closure of the Go `arenaHandlePairs`: a spelling seen before, or one in
-/// an ineligible shape, becomes ambiguous.
 fn (self: &Checker) note_pair_index(
     allocator: Allocator,
     indices: &var map::Map<[]u8, i64>,
@@ -620,18 +526,12 @@ fn (self: &Checker) note_pair_index(
     return indices.insert(allocator, bytes, index);
 }
 
-/// Reads the parameter index recorded for one element spelling, the Go
-/// `handles[elem]` / `arenas[elem]` lookups.
 fn (self: &Checker) pair_index(indices: &map::Map<[]u8, i64>, elem: Name) -> ?i64 {
     let retained = name_text(&self.names, elem);
     let bytes = retained.as_bytes();
     return indices.get(bytes);
 }
 
-/// Enforces derived arena/handle contracts at a call site where both
-/// origins are visible, the Go `checkCallHandlePairing`. An unknown side --
-/// the caller itself received the arena or handle -- passes, and the
-/// contract chains to the next signature (ADR-0098).
 fn (self: &var Checker) check_call_handle_pairing(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -659,9 +559,6 @@ fn (self: &var Checker) check_call_handle_pairing(
     return null;
 }
 
-/// Resolves the arena identity an argument lends, if visible, the Go
-/// `arenaArgBinding`: a bare or &-prefixed local, or one direct owner field.
-/// Anything else has no visible identity and resolves to null.
 fn (self: &var Checker) arena_arg_binding(
     tree: &var ast::Ast,
     env: ScopeHandle,

@@ -5,30 +5,19 @@ import std::map;
 import std::mem;
 import std::string;
 
-// Mechanical port of the binding and scope records of internal/ownership/
-// checker.go. Go shares `*binding` between scopes and their clones; here one
-// ScopeStore owns every binding and scope of a checker run in arenas and hands
-// out copy handles, so a clone is a fresh record with the same stable id, as
-// in Go, and the chain walks and id lookups stay pointer-free.
-
-/// Identifies one binding retained by a ScopeStore.
 pub struct BindingHandle {
     node: arena::Handle<Binding>,
 }
 
-/// Identifies one lexical scope retained by a ScopeStore.
 pub struct ScopeHandle {
     node: arena::Handle<Scope>,
 }
 
-/// Is one owner a local borrow keeps active: the borrowed binding and, for a
-/// field borrow, the borrowed field path; an empty field is the whole value.
 pub struct BorrowSource {
     pub target: BindingHandle,
     pub field: Name,
 }
 
-/// Keeps every ownership fact about one local name.
 pub struct Binding {
     pub id: i64,
     pub name: Name,
@@ -41,11 +30,6 @@ pub struct Binding {
     pub mut_borrow: bool,
     pub active_borrows: i64,
     pub active_mut_borrows: i64,
-    /// reservations counts the method calls holding this value as their
-    /// `&var` receiver while their arguments are evaluated. Each is one of
-    /// active_borrows, so an argument cannot alias or consume the receiver,
-    /// but not a borrow the frame holds at an error exit inside the
-    /// arguments, where the call has not begun.
     pub reservations: i64,
     pub field_borrows: map::Map<[]u8, i64>,
     pub field_mut_borrows: map::Map<[]u8, i64>,
@@ -55,24 +39,12 @@ pub struct Binding {
     pub handle_arena_id: i64,
     pub deinitialized: bool,
     pub consume_exempt: bool,
-    // owns_tied marks a capture that was handed its owner payload while the
-    // payload's views keep it tied to the container it came from: the
-    // binding owns the value (its `deinit` is its to call) but cannot move
-    // it out of the frame (SPEC §9).
     pub owns_tied: bool,
     pub defer_cleanup: bool,
     pub decl_span: ast::Span,
-    /// The expression that handed the value off, when that place is known; a
-    /// use after the move points back at it, the Go `movedAt`. The handle is
-    /// 8 bytes where a span is 48, and a binding is copied with every scope.
     pub moved_at: ?ast::Expression,
-    // field_owner and field_owner_name link a direct-field receiver
-    // projection back to the owner binding and its field.
     pub field_owner: ?BindingHandle,
     pub field_owner_name: Name,
-    // owner_type records that type_name carries a deinit contract, the Go
-    // `ownerType`. The type never changes once the binding is defined, so the
-    // scope can keep its owners apart and an exit check reads only those.
     pub owner_type: bool,
 }
 
@@ -88,20 +60,10 @@ fn (self: Binding) deinit(allocator: Allocator) -> void {
 struct Scope {
     parent: ?ScopeHandle,
     values: map::Map<[]u8, BindingHandle>,
-    // borrowers lists the bindings defined here that held borrow targets
-    // when they were defined, the Go `scope.borrowers`, so the per-statement
-    // last-use release visits them instead of every value in scope. Every
-    // site that ties a borrow does it before the define, and targets are
-    // only cleared afterwards. The release pass drops released and shadowed
-    // entries.
     borrowers: array::Array<BindingHandle>,
-    // owners holds the bound values whose type carries a deinit contract:
-    // the only ones an exit can leak. An exit check, run at every `try`,
-    // reads these instead of every binding in the chain.
     owners: array::Array<BindingHandle>,
 }
 
-/// Owns the bindings and lexical scopes of one checker run.
 pub struct ScopeStore {
     allocator: Allocator,
     bindings: arena::Arena<Binding>,
@@ -124,15 +86,11 @@ fn (self: ScopeStore) deinit(allocator: Allocator) -> void {
     return;
 }
 
-/// Creates a local ownership binding with a stable id, the Go `newBinding`.
-/// The record is filled in by the caller and then defined into a scope.
 fn (self: &var ScopeStore) new_binding(name: Name, type_name: Name) -> Binding {
     self.next_id = self.next_id + 1;
     return self.blank_binding(self.next_id, name, type_name);
 }
 
-/// Creates a transient binding outside the id sequence, the Go
-/// `&binding{...}` literal of receiver projections.
 fn (self: &ScopeStore) blank_binding(id: i64, name: Name, type_name: Name) -> Binding {
     return Binding {
         id: id,
@@ -165,33 +123,27 @@ fn (self: &ScopeStore) blank_binding(id: i64, name: Name, type_name: Name) -> Bi
     };
 }
 
-/// Returns the next stable id, the Go `c.nextID++` used for field arenas.
 fn (self: &var ScopeStore) next_binding_id() -> i64 {
     self.next_id = self.next_id + 1;
     return self.next_id;
 }
 
-/// Returns the id watermark new bindings will exceed.
 fn (self: &ScopeStore) id_mark() -> i64 {
     return self.next_id;
 }
 
-/// Retains a binding that belongs to no scope, such as a receiver projection.
 fn (self: &var ScopeStore) retain(value: Binding) -> !BindingHandle {
     return BindingHandle { node: try self.bindings.add(self.allocator, move value) };
 }
 
-/// Reads one binding.
 fn (self: &ScopeStore) at(handle: BindingHandle) -> &Binding {
     return self.bindings.at(handle.node);
 }
 
-/// Opens one binding for mutation.
 fn (self: &var ScopeStore) binding_mut(handle: BindingHandle) -> ?&var Binding {
     return self.bindings.at_mut(handle.node);
 }
 
-/// Creates a lexical ownership scope, the Go `newScope`.
 fn (self: &var ScopeStore) new_scope(parent: ?ScopeHandle) -> !ScopeHandle {
     return ScopeHandle {
         node: try self.scopes.add(self.allocator, Scope {
@@ -203,21 +155,16 @@ fn (self: &var ScopeStore) new_scope(parent: ?ScopeHandle) -> !ScopeHandle {
     };
 }
 
-/// Creates a nested lexical ownership scope, the Go `scope.child`.
 fn (self: &var ScopeStore) child(parent: ScopeHandle) -> !ScopeHandle {
     return self.new_scope(parent);
 }
 
-/// Binds a local name in the current scope, the Go `scope.define`; a name
-/// already bound there is replaced.
 fn (self: &var ScopeStore) define(scope: ScopeHandle, name: []u8, value: Binding) -> !BindingHandle {
     let handle = try self.retain(move value);
     try self.define_handle(self.allocator, scope, name, handle);
     return handle;
 }
 
-/// Binds an already retained binding in the current scope. A name already
-/// bound there is replaced, and so leaves the scope's owners.
 fn (self: &var ScopeStore) define_handle(allocator: Allocator, scope: ScopeHandle, name: []u8, handle: BindingHandle) -> !void {
     let record = self.at(handle);
     let borrows = record.borrow_targets.len() > 0;
@@ -255,14 +202,11 @@ fn (self: &var ScopeStore) define_handle(allocator: Allocator, scope: ScopeHandl
     return;
 }
 
-/// Returns the binding at position in the scope's borrower list, the Go
-/// `scope.borrowers`; null past the last.
 fn (self: &ScopeStore) scope_borrower_at(scope: ScopeHandle, index: i64) -> ?BindingHandle {
     let retained = self.scopes.at(scope.node);
     return retained.borrowers.get(index);
 }
 
-/// Keeps only the borrowers whose keep flag is set, in order.
 fn (self: &var ScopeStore) retain_scope_borrowers(scope: ScopeHandle, keep: &array::Array<bool>) -> !void {
     if self.scopes.at_mut(scope.node) |current| {
         var kept = 0;
@@ -281,7 +225,6 @@ fn (self: &var ScopeStore) retain_scope_borrowers(scope: ScopeHandle, keep: &arr
     return;
 }
 
-/// Resolves a local name by walking parent scopes, the Go `scope.lookup`.
 fn (self: &ScopeStore) resolve(scope: ScopeHandle, name: []u8) -> ?BindingHandle {
     var current = optional_scope(scope);
     while current |handle| {
@@ -294,7 +237,6 @@ fn (self: &ScopeStore) resolve(scope: ScopeHandle, name: []u8) -> ?BindingHandle
     return null;
 }
 
-/// Resolves a name in one scope only, the Go `scope.values[name]`.
 fn (self: &ScopeStore) lookup_local(scope: ScopeHandle, name: []u8) -> ?BindingHandle {
     let retained = self.scopes.at(scope.node);
     return retained.values.get(name);
@@ -304,8 +246,6 @@ fn optional_scope(scope: ScopeHandle) -> ?ScopeHandle {
     return scope;
 }
 
-/// Visits every binding of a scope chain in turn; a Walker replaces the Go
-/// `walkBindings` visitor closure.
 pub struct Walker {
     current: ?ScopeHandle,
     index: i64,
@@ -328,8 +268,6 @@ fn (self: &var Walker) next(store: &ScopeStore) -> ?BindingHandle {
     return null;
 }
 
-/// Visits the bindings of a scope chain whose type carries a deinit
-/// contract, the Go `walkOwners`.
 pub struct OwnerWalker {
     current: ?ScopeHandle,
     index: i64,
@@ -352,9 +290,6 @@ fn (self: &var OwnerWalker) next(store: &ScopeStore) -> ?BindingHandle {
     return null;
 }
 
-/// Resolves the binding bound to name with this id, the Go `lookupNamedID`.
-/// A binding is bound under its own name, so this answers what find_by_id
-/// does while reading one map entry per scope.
 fn (self: &ScopeStore) find_named_id(scope: ScopeHandle, name: []u8, id: i64) -> ?BindingHandle {
     var current = optional_scope(scope);
     while current |handle| {
@@ -369,8 +304,6 @@ fn (self: &ScopeStore) find_named_id(scope: ScopeHandle, name: []u8, id: i64) ->
     return null;
 }
 
-/// Finds the binding with a stable id in a scope chain, the Go
-/// `collectBindings` map read back by id.
 fn (self: &ScopeStore) find_by_id(scope: ScopeHandle, id: i64) -> ?BindingHandle {
     var walker = self.walk(scope);
     while walker.next(self) |handle| {
@@ -381,10 +314,6 @@ fn (self: &ScopeStore) find_by_id(scope: ScopeHandle, id: i64) -> ?BindingHandle
     return null;
 }
 
-/// Indexes a scope chain's bindings by stable id once, the Go
-/// `collectBindings`, so a merge reads each id back in constant time rather
-/// than walking the chain per binding. The innermost binding of an id is
-/// kept, which is the one find_by_id returns.
 fn (self: &ScopeStore) bindings_by_id(scope: ScopeHandle) -> !map::Map<i64, BindingHandle> {
     var out = map::new<i64, BindingHandle>(self.allocator);
     errdefer out.deinit(self.allocator);
@@ -398,8 +327,6 @@ fn (self: &ScopeStore) bindings_by_id(scope: ScopeHandle) -> !map::Map<i64, Bind
     return move out;
 }
 
-/// Resolves the binding whose field holds the arena with this provenance id,
-/// the Go `scope.fieldArenaOwner`.
 fn (self: &ScopeStore) field_arena_owner(scope: ScopeHandle, arena_id: i64) -> ?BindingHandle {
     var walker = self.walk(scope);
     while walker.next(self) |handle| {
@@ -424,8 +351,6 @@ fn (self: &ScopeStore) holds_field_arena(handle: BindingHandle, arena_id: i64) -
     return false;
 }
 
-/// Resolves a tracked arena owner by provenance id, the Go
-/// `scope.lookupArenaID`.
 fn (self: &ScopeStore) lookup_arena_id(scope: ScopeHandle, arena_id: i64) -> ?BindingHandle {
     var walker = self.walk(scope);
     while walker.next(self) |handle| {
@@ -436,17 +361,12 @@ fn (self: &ScopeStore) lookup_arena_id(scope: ScopeHandle, arena_id: i64) -> ?Bi
     return null;
 }
 
-/// Reports whether a whole value or any direct field is borrowed, the Go
-/// `binding.hasAnyBorrow`. A field count that dropped to zero stays in its
-/// map, so only positive counts are borrows.
 fn (self: &ScopeStore) has_any_borrow(handle: BindingHandle) -> bool {
     let value = self.at(handle);
     return value.active_borrows > 0 or value.active_mut_borrows > 0 or
         any_positive(&value.field_borrows) or any_positive(&value.field_mut_borrows);
 }
 
-/// Reports whether any field of a binding is borrowed the given way, the Go
-/// `len(value.fieldMutBorrows) > 0` / `len(value.fieldBorrows) > 0`.
 fn (self: &ScopeStore) has_field_borrows(handle: BindingHandle, mutable: bool) -> bool {
     let value = self.at(handle);
     if mutable {
@@ -455,8 +375,6 @@ fn (self: &ScopeStore) has_field_borrows(handle: BindingHandle, mutable: bool) -
     return any_positive(&value.field_borrows);
 }
 
-/// Reports whether any field of a per-field counter map is borrowed, the Go
-/// `len(map) > 0` over a map that deletes zero counts.
 fn any_positive(counts: &map::Map<[]u8, i64>) -> bool {
     var index = 0;
     while counts.key_at(index) |field| {
@@ -470,8 +388,6 @@ fn any_positive(counts: &map::Map<[]u8, i64>) -> bool {
     return false;
 }
 
-/// Sums the borrow counts of every tracked field path that aliases path, the
-/// Go `overlappingFieldCount`.
 fn overlapping_field_count(counts: &map::Map<[]u8, i64>, path: []u8) -> i64 {
     var total = 0;
     var index = 0;
@@ -484,9 +400,6 @@ fn overlapping_field_count(counts: &map::Map<[]u8, i64>, path: []u8) -> i64 {
     return total;
 }
 
-/// Reports whether two dotted field paths alias the same storage, the Go
-/// `fieldPathsOverlap`: equal paths, or one naming a struct that contains the
-/// other (`a.b` overlaps `a.b.c`; `a.b` does not overlap `a.bc`).
 pub fn field_paths_overlap(left: []u8, right: []u8) -> bool {
     if mem::len(left) > mem::len(right) {
         return field_paths_overlap(right, left);
@@ -497,14 +410,11 @@ pub fn field_paths_overlap(left: []u8, right: []u8) -> bool {
     return mem::len(left) == mem::len(right) or right[mem::len(left)] == cast<u8>(46);
 }
 
-/// Reports whether a field path has been deinitialized.
 fn (self: &ScopeStore) field_deinit(handle: BindingHandle, field: []u8) -> bool {
     let value = self.at(handle);
     return value.field_deinit.get(field) orelse false;
 }
 
-/// Reports whether any field of a value has been deinitialized, the Go
-/// `len(value.fieldDeinit) == 0` over a map that deletes cleared fields.
 fn (self: &ScopeStore) has_field_deinit(handle: BindingHandle) -> bool {
     if self.partially_consumed_field_index(handle) |_| {
         return true;
@@ -512,8 +422,6 @@ fn (self: &ScopeStore) has_field_deinit(handle: BindingHandle) -> bool {
     return false;
 }
 
-/// Returns the insertion index of one field already taken out of a value,
-/// the Go `partiallyConsumedField`; callers read the key back with `key_at`.
 fn (self: &ScopeStore) partially_consumed_field_index(handle: BindingHandle) -> ?i64 {
     let value = self.at(handle);
     var index = 0;
@@ -526,8 +434,6 @@ fn (self: &ScopeStore) partially_consumed_field_index(handle: BindingHandle) -> 
     return null;
 }
 
-/// Records that an owned direct field has been cleaned up, the Go
-/// `binding.markFieldDeinit`.
 fn (self: &var ScopeStore) mark_field_deinit(handle: BindingHandle, field: []u8) -> !void {
     let allocator = self.allocator;
     if self.binding_mut(handle) |value| {
@@ -536,8 +442,6 @@ fn (self: &var ScopeStore) mark_field_deinit(handle: BindingHandle, field: []u8)
     return;
 }
 
-/// Records assignment of a fresh value into a direct field, the Go
-/// `binding.clearFieldDeinit`.
 fn (self: &var ScopeStore) clear_field_deinit(handle: BindingHandle, field: []u8) -> !void {
     if self.binding_mut(handle) |value| {
         if value.field_deinit.at_mut(field) |slot| {
@@ -563,8 +467,6 @@ fn add_count(allocator: Allocator, counts: &var map::Map<[]u8, i64>, key: []u8, 
     return counts.insert(allocator, key, delta);
 }
 
-/// Records one active whole-value or field borrow on a target, the Go
-/// `activateBorrow`.
 fn (self: &var ScopeStore) activate_borrow(target: BindingHandle, field: []u8, mutable: bool) -> !void {
     let allocator = self.allocator;
     if self.binding_mut(target) |value| {
@@ -584,8 +486,6 @@ fn (self: &var ScopeStore) activate_borrow(target: BindingHandle, field: []u8, m
     return;
 }
 
-/// Clears one call-scoped whole-value or field borrow, the Go
-/// `releaseTemporaryBorrow`.
 fn (self: &var ScopeStore) release_temporary_borrow(target: BindingHandle, field: []u8, mutable: bool) -> !void {
     if self.binding_mut(target) |value| {
         if mem::len(field) == 0 {
@@ -616,8 +516,6 @@ fn release_count(counts: &var map::Map<[]u8, i64>, key: []u8) -> !void {
     return;
 }
 
-/// Clears one owner's share of a local borrow, the Go `releaseBorrowSource`:
-/// the borrow's mutability decides which counter it held.
 fn (self: &var ScopeStore) release_borrow_source(mutable: bool, target: BindingHandle, field: []u8) -> !void {
     if self.binding_mut(target) |value| {
         if mem::len(field) == 0 {
@@ -638,10 +536,6 @@ fn (self: &var ScopeStore) release_borrow_source(mutable: bool, target: BindingH
     return;
 }
 
-/// Copies a scope chain so branch checks do not interfere with each other,
-/// the Go `scope.clone`. A binding's scalar facts copy with the record; its
-/// map and array facts are copied one by one, so a branch never writes into
-/// the state the other branches read.
 fn (self: &var ScopeStore) clone_scope(scope: ScopeHandle) -> !ScopeHandle {
     var parent = self.scopes.at(scope.node).parent;
     if parent |parent_handle| {
@@ -667,8 +561,6 @@ fn (self: &ScopeStore) scope_value_at(scope: ScopeHandle, index: i64) -> ?Bindin
     return retained.values.get(name);
 }
 
-// Copies the name the scope holds at index, so the source map is not
-// borrowed while the clone is defined.
 fn (self: &ScopeStore) scope_key_copy(scope: ScopeHandle, index: i64) -> !string::String {
     let retained = self.scopes.at(scope.node);
     if retained.values.key_at(index) |name| {
@@ -679,8 +571,6 @@ fn (self: &ScopeStore) scope_key_copy(scope: ScopeHandle, index: i64) -> !string
 
 fn (self: &ScopeStore) clone_binding(handle: BindingHandle) -> !Binding {
     let value = self.at(handle);
-    // Each copy is bound and covered before the next is made: a copy the
-    // allocator refuses must not leave the ones already made unreleased.
     var borrow_targets = try value.borrow_targets.clone(self.allocator);
     errdefer borrow_targets.deinit(self.allocator);
     var field_borrows = try copy_int_map(self.allocator, &value.field_borrows);
@@ -721,7 +611,6 @@ fn (self: &ScopeStore) clone_binding(handle: BindingHandle) -> !Binding {
     };
 }
 
-/// Copies a per-field counter map so a clone counts on its own.
 fn copy_int_map(allocator: Allocator, source: &map::Map<[]u8, i64>) -> !map::Map<[]u8, i64> {
     var out = map::new<[]u8, i64>(allocator);
     errdefer out.deinit(allocator);
@@ -733,7 +622,6 @@ fn copy_int_map(allocator: Allocator, source: &map::Map<[]u8, i64>) -> !map::Map
     return move out;
 }
 
-/// Copies a per-field flag map so a clone marks on its own.
 fn copy_bool_map(allocator: Allocator, source: &map::Map<[]u8, bool>) -> !map::Map<[]u8, bool> {
     var out = map::new<[]u8, bool>(allocator);
     errdefer out.deinit(allocator);
@@ -745,9 +633,6 @@ fn copy_bool_map(allocator: Allocator, source: &map::Map<[]u8, bool>) -> !map::M
     return move out;
 }
 
-/// Carries what a checked branch did to a binding out past the branch, the
-/// Go `scope.mergeMovedFrom`: that it moved it, that it released it, and
-/// which of its fields it cleaned.
 fn (self: &var ScopeStore) merge_moved_from(scope: ScopeHandle, other: ScopeHandle) -> !void {
     var targets = try self.bindings_by_id(scope);
     defer targets.deinit(self.allocator);
@@ -782,7 +667,6 @@ fn (self: &var ScopeStore) merge_binding(target: BindingHandle, value: BindingHa
     return;
 }
 
-// Returns the insertion index of the next cleaned field at or after index.
 fn (self: &ScopeStore) cleaned_field_at(handle: BindingHandle, index: i64) -> ?i64 {
     let value = self.at(handle);
     var current = index;
@@ -795,7 +679,6 @@ fn (self: &ScopeStore) cleaned_field_at(handle: BindingHandle, index: i64) -> ?i
     return null;
 }
 
-// Marks on target the field source holds at field_index.
 fn (self: &var ScopeStore) mark_field_deinit_from(target: BindingHandle, source: BindingHandle, field_index: i64) -> !void {
     let value = self.at(source);
     if value.field_deinit.key_at(field_index) |field| {
@@ -811,7 +694,6 @@ fn (self: &var ScopeStore) set_moved(handle: BindingHandle, moved: bool) -> !voi
     return;
 }
 
-/// Records the expression that handed a binding off, the Go `movedAt`.
 fn (self: &var ScopeStore) set_moved_at(handle: BindingHandle, place: ast::Expression) -> !void {
     if self.binding_mut(handle) |value| {
         value.moved_at = place;

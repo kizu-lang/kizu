@@ -3,13 +3,6 @@ import compiler::internal::diagnostic;
 import std::mem;
 import std::string;
 
-// Port of the field, namespace, and dereference access checks of
-// internal/ownership/checker.go (readFieldExpr through
-// checkUnionConstructor): reading and moving out of fields, the `::`
-// namespace lookups, assignment roots and their borrow conflicts, and the
-// `.*` reads through borrows and raw pointers.
-
-/// Reads a field without moving the receiver, the Go `readFieldExpr`.
 fn (self: &var Checker) read_field_expr(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -60,11 +53,6 @@ fn (self: &var Checker) read_field_expr(
     return null;
 }
 
-/// Types the receiver of a field access rooted in a local binding, the Go
-/// `readFieldPathReceiver`. Reading `p.b` touches only the storage under
-/// `p.b`, so the root is read against the borrows that alias that path
-/// rather than against every field borrow on it: `f(&var p.a, &p.b)` names
-/// disjoint storage (SPEC §9).
 fn (self: &var Checker) read_field_path_receiver(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -95,9 +83,6 @@ fn (self: &var Checker) read_field_path_receiver(
     return self.read_expr(tree, env, receiver, out);
 }
 
-/// Resolves the ownership type of a field on a receiver type, the Go
-/// `fieldTypeName`; a receiver the checker has no fields for keeps its own
-/// type.
 fn (self: &Checker) field_type_name(receiver_type: Name, tree: &ast::Ast, field: ast::Text) -> Name {
     if self.struct_field_type_text(receiver_type, tree, field) |field_type| {
         return field_type;
@@ -108,8 +93,6 @@ fn (self: &Checker) field_type_name(receiver_type: Name, tree: &ast::Ast, field:
     return receiver_type;
 }
 
-/// Returns ownership types for builtin filesystem structs, the Go
-/// `readFsFieldType`.
 fn (self: &Checker) read_fs_field_type(receiver_type: Name, tree: &ast::Ast, field: ast::Text) -> ?Name {
     if self.names.is(receiver_type, "std::fs::Metadata") {
         return self.read_fs_metadata_field_type(tree, field);
@@ -120,8 +103,6 @@ fn (self: &Checker) read_fs_field_type(receiver_type: Name, tree: &ast::Ast, fie
     return null;
 }
 
-/// Returns ownership types for std::fs::Metadata fields, the Go
-/// `readFsMetadataFieldType`.
 fn (self: &Checker) read_fs_metadata_field_type(tree: &ast::Ast, field: ast::Text) -> ?Name {
     if text_equals(tree, field, "size") {
         return self.common.i64_name;
@@ -132,8 +113,6 @@ fn (self: &Checker) read_fs_metadata_field_type(tree: &ast::Ast, field: ast::Tex
     return null;
 }
 
-/// Returns ownership types for std::fs::DirEntry fields, the Go
-/// `readFsDirEntryFieldType`.
 fn (self: &Checker) read_fs_dir_entry_field_type(tree: &ast::Ast, field: ast::Text) -> ?Name {
     if text_equals(tree, field, "name") or text_equals(tree, field, "path") {
         return self.common.string_name;
@@ -144,8 +123,6 @@ fn (self: &Checker) read_fs_dir_entry_field_type(tree: &ast::Ast, field: ast::Te
     return null;
 }
 
-/// Reads enum or payload-free union namespace lookup, the Go
-/// `readNamespaceExpr`.
 fn (self: &var Checker) read_namespace_expr(tree: &ast::Ast, field: ast::FieldExpr, out: &var Name) -> !?diagnostic::Diagnostic {
     var dotted = empty_name();
     if try self.qualified_name(tree, field.receiver) |found| {
@@ -197,8 +174,6 @@ fn (self: &var Checker) read_namespace_expr(tree: &ast::Ast, field: ast::FieldEx
     return try self.error1(tree, field.span, "move error: unknown namespace `%s`", Arg::Str(name));
 }
 
-/// Rejects partial moves from borrowed or aggregate values, the Go
-/// `moveFieldExpr`.
 fn (self: &var Checker) move_field_expr(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -208,8 +183,6 @@ fn (self: &var Checker) move_field_expr(
     if try self.read_field_expr(tree, env, field, out) |failed| {
         return move failed;
     }
-    // A `[]u8` field of a borrow-class value is a view of the same backing;
-    // copying it out in a move context would shed the tie.
     if self.names.is_view_type(out.*) {
         if try self.borrow_class_view_root_of_field(tree, env, field) |_| {
             let text = try self.field_expression_text(tree, field);
@@ -235,16 +208,6 @@ fn (self: &var Checker) move_field_expr(
     return self.consume_owner_field(tree, env, field);
 }
 
-/// Takes one owner field out of a value the frame holds, the Go
-/// `consumeOwnerField`. The caller of a value parameter has already let go,
-/// and a local is the frame's own, so taking a field apart cannot free
-/// anything twice: the obligation moves from the aggregate to the field, and
-/// every field still has to be consumed before the block ends.
-///
-/// A type that declares its own `deinit` is taken whole. Its obligation is
-/// the type's -- memory it took from an allocator, a descriptor -- and no
-/// sequence of field consumes discharges it, so taking it apart would leave
-/// a value with no way out (#1633).
 fn (self: &var Checker) consume_owner_field(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -265,8 +228,6 @@ fn (self: &var Checker) consume_owner_field(
         );
     }
     if self.names.contains_byte(path, cast<u8>(46)) {
-        // A nested field belongs to the value in between, which is still whole
-        // here. Take that one out first and the field comes with it.
         let text = try self.field_expression_text(tree, field);
         let dot = self.names.last_index_of(path, cast<u8>(46));
         let owner = try self.names.intern_slice(path, 0, dot);
@@ -309,8 +270,6 @@ fn (self: &var Checker) consume_owner_field(
     return null;
 }
 
-/// Rejects writes that overlap active borrows, the Go
-/// `checkAssignmentBorrowConflict`.
 fn (self: &var Checker) check_assignment_borrow_conflict(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -350,8 +309,6 @@ fn (self: &var Checker) check_assignment_borrow_conflict(
     return null;
 }
 
-/// Returns the borrowed identifier at the root of a field chain, the Go
-/// `borrowedFieldRoot`; null when the root is not a borrowed parameter.
 fn (self: &Checker) borrowed_field_root(tree: &ast::Ast, env: ScopeHandle, expression: ast::Expression) -> ?ast::Text {
     if field_expr(tree, expression) |field| {
         return self.borrowed_field_root(tree, env, field.receiver);
@@ -367,8 +324,6 @@ fn (self: &Checker) borrowed_field_root(tree: &ast::Ast, env: ScopeHandle, expre
     return ident.name;
 }
 
-/// Reads the value behind a local borrow or raw pointer, the Go
-/// `readDerefExpr`.
 fn (self: &var Checker) read_deref_expr(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -406,9 +361,6 @@ fn (self: &var Checker) read_deref_expr(
     return try self.error0(deref.operator_span, "borrow error: dereference expects a local borrow or raw pointer");
 }
 
-/// Returns the element type for unchecked pointer dereference, the Go
-/// `rawPointerDerefExprType`; handled reports whether the receiver was a raw
-/// pointer at all.
 fn (self: &var Checker) raw_pointer_deref_expr_type(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -441,8 +393,6 @@ fn (self: &var Checker) raw_pointer_deref_expr_type(
     return null;
 }
 
-/// Finds the binding invalidated by an assignment target, the Go
-/// `assignmentRoot`.
 fn (self: &Checker) assignment_root(tree: &ast::Ast, env: ScopeHandle, expression: ast::Expression) -> ?BindingHandle {
     if ident_expr(tree, expression) |ident| {
         return self.lookup_text(tree, env, ident.name);
@@ -456,11 +406,7 @@ fn (self: &Checker) assignment_root(tree: &ast::Ast, env: ScopeHandle, expressio
     return null;
 }
 
-/// Returns a binding only for whole-binding assignment, the Go
-/// `directAssignmentRoot`.
 fn (self: &Checker) direct_assignment_root(tree: &ast::Ast, env: ScopeHandle, expression: ast::Expression) -> ?BindingHandle {
-    // `n.*` through a `&var` parameter names the same storage `n` does, so
-    // both spellings take the direct-assignment path and its rules.
     if deref_expr(tree, expression) |deref| {
         let ident = ident_expr(tree, deref.receiver) orelse return null;
         let value = self.lookup_text(tree, env, ident.name) orelse return null;
@@ -473,8 +419,6 @@ fn (self: &Checker) direct_assignment_root(tree: &ast::Ast, env: ScopeHandle, ex
     return self.lookup_text(tree, env, ident.name);
 }
 
-/// Validates ownership effects of Union.Variant(payload), the Go
-/// `checkUnionConstructor`.
 fn (self: &var Checker) check_union_constructor(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -541,10 +485,6 @@ fn (self: &var Checker) check_union_constructor(
     return null;
 }
 
-/// Names the rendering of one field access, the Go `expr.String()` of a
-/// `*ast.FieldExpr`: the receiver, then `::` or `.`, then the field name. The
-/// access group receives the node copy, not its handle, so the text is
-/// rebuilt here.
 fn (self: &var Checker) field_expression_text(tree: &ast::Ast, field: ast::FieldExpr) -> !Name {
     var out = try ast::render_expression(self.allocator, tree, field.receiver);
     errdefer out.deinit(self.allocator);
@@ -558,11 +498,6 @@ fn (self: &var Checker) field_expression_text(tree: &ast::Ast, field: ast::Field
     return self.names.intern_owned(move out);
 }
 
-/// Returns the root binding and dotted field path of one field access, the
-/// Go `directFieldRoot(expr, env)` on a `*ast.FieldExpr`: `ast.FieldPathRoot`
-/// accepts a chain of runtime field hops that ends in an identifier, and the
-/// path is that identifier's relative dotted path. Null when the chain has a
-/// namespace hop, bottoms out in something else, or the root is unbound.
 fn (self: &var Checker) direct_field_root_of_field(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -590,10 +525,6 @@ fn (self: &var Checker) direct_field_root_of_field(
     return null;
 }
 
-/// Resolves the borrow-class owner whose `[]u8` storage one field access
-/// views, the Go `borrowClassViewRoot(expr, env)` on a `*ast.FieldExpr`
-/// whose node handle the caller no longer holds; the expression form lives
-/// with the call group.
 fn (self: &var Checker) borrow_class_view_root_of_field(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -617,8 +548,6 @@ fn (self: &var Checker) borrow_class_view_root_of_field(
     return found.root;
 }
 
-/// Names a dotted namespace chain as the `::` key the declaration tables
-/// use, the Go `strings.ReplaceAll(dotted, ".", "::")`.
 fn (self: &var Checker) namespace_key(dotted: Name) -> !Name {
     let replaced = try self.namespace_key_copy(dotted);
     return self.names.intern_owned(move replaced);
@@ -641,25 +570,18 @@ fn (self: &Checker) namespace_key_copy(dotted: Name) -> !string::String {
     return move out;
 }
 
-/// Reports whether an enum declares the tag an Ast text names, the Go
-/// `c.enums[name][expr.Name]`.
 fn (self: &Checker) enum_has_tag_text(enum_name: Name, tree: &ast::Ast, tag: ast::Text) -> bool {
     let retained = tree.texts.at(tag.node);
     let bytes = retained.as_bytes();
     return self.enum_has_tag(enum_name, bytes);
 }
 
-/// Reports whether an error set declares the member an Ast text names, the
-/// Go `c.errorSets[name][expr.Name]`.
 fn (self: &Checker) error_set_has_text(set_name: Name, tree: &ast::Ast, member: ast::Text) -> bool {
     let retained = tree.texts.at(member.node);
     let bytes = retained.as_bytes();
     return self.error_set_has(set_name, bytes);
 }
 
-/// Returns the payload type of the union variant an Ast text names, the Go
-/// `c.unions[name][expr.Name]`: null for no such variant, the empty name for
-/// a variant without payload.
 fn (self: &Checker) union_variant_payload_text(union_name: Name, tree: &ast::Ast, variant: ast::Text) -> ?Name {
     let retained = tree.texts.at(variant.node);
     let bytes = retained.as_bytes();

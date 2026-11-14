@@ -2,25 +2,11 @@ import compiler::internal::ast;
 import std::array;
 import std::map;
 
-// Port of the last-use analysis of internal/ownership/checker.go: which
-// statement index each identifier is last read at, so a block can release
-// local borrows once their binding is no longer used.
-
-/// Keeps the identifier reads the last-use analysis works from, the Go
-/// `identUses`. Every block the check enters asks for its own last uses, and
-/// each one reads its nested blocks' names; collecting a nested block once
-/// and keeping its distinct names keeps that linear. Walking each subtree
-/// again at every depth made deep nesting -- and a long else-if chain, which
-/// parses as nested blocks -- cubic. The names depend only on the syntax,
-/// which no check rewrites, so one entry serves every instantiation and
-/// expansion of a body.
 pub struct IdentUses {
-    // ranges maps a block's id to where its distinct names sit in texts.
     ranges: map::Map<i64, UseRange>,
     texts: array::Array<ast::Text>,
 }
 
-/// Is a run of IdentUses.texts.
 struct UseRange {
     start: i64,
     len: i64,
@@ -39,12 +25,6 @@ fn (self: IdentUses) deinit(allocator: Allocator) -> void {
     return;
 }
 
-/// Returns the last statement index where each identifier appears, the Go
-/// `blockLastUses`. A loop counts as one statement: every turn it runs is
-/// over once the statement is, and the body is checked against its own
-/// scope, which this block's releases never reach. A name a registered
-/// cleanup reads is read when the block exits, so it is kept until the end
-/// whatever else follows.
 fn (self: &var IdentUses) block_last_uses(
     allocator: Allocator,
     tree: &ast::Ast,
@@ -74,8 +54,6 @@ fn (self: &var IdentUses) block_last_uses(
     return move last_uses;
 }
 
-/// Reports whether statement registers a cleanup that runs when the block
-/// exits, the Go `cleanupStmt`.
 fn cleanup_stmt(tree: &ast::Ast, statement: ast::Statement) -> bool {
     if defer_stmt(tree, statement) |_| {
         return true;
@@ -86,8 +64,6 @@ fn cleanup_stmt(tree: &ast::Ast, statement: ast::Statement) -> bool {
     return false;
 }
 
-/// Records the index at which a name was used: a name already kept to the
-/// block's end (count) keeps that position.
 fn record_use(allocator: Allocator, out: &var map::Map<[]u8, i64>, name: []u8, at: i64, count: i64) -> !void {
     if out.at_mut(name) |slot| {
         if slot.* >= count {
@@ -99,8 +75,6 @@ fn record_use(allocator: Allocator, out: &var map::Map<[]u8, i64>, name: []u8, a
     return out.insert(allocator, name, at);
 }
 
-/// Appends the identifier reads of one statement to out, the Go
-/// `identUses.stmt`.
 fn (self: &var IdentUses) stmt(
     allocator: Allocator,
     tree: &ast::Ast,
@@ -160,8 +134,6 @@ fn (self: &var IdentUses) stmt(
     }
 }
 
-/// Appends the distinct identifier reads inside a nested block to out, the
-/// Go `identUses.block`.
 fn (self: &var IdentUses) block(
     allocator: Allocator,
     tree: &ast::Ast,
@@ -177,8 +149,6 @@ fn (self: &var IdentUses) block(
     return;
 }
 
-/// Returns where a block's distinct identifier reads sit in texts,
-/// collecting them on the first request.
 fn (self: &var IdentUses) block_range(allocator: Allocator, tree: &ast::Ast, block: ast::Block) -> !UseRange {
     var id = 0;
     match tree.statements.at(block.node) {
@@ -190,8 +160,6 @@ fn (self: &var IdentUses) block_range(allocator: Allocator, tree: &ast::Ast, blo
     if self.ranges.get(id) |found| {
         return found;
     }
-    // The nested blocks append their own entries to texts while this one is
-    // walked, so its names gather apart and join texts after.
     var names = array::new<ast::Text>(allocator);
     defer names.deinit(allocator);
     var index = 0;
@@ -217,8 +185,6 @@ fn (self: &var IdentUses) block_range(allocator: Allocator, tree: &ast::Ast, blo
     return range;
 }
 
-/// Appends the identifier reads of an expression to out, the Go
-/// `identUses.expr`.
 fn (self: &var IdentUses) expr(
     allocator: Allocator,
     tree: &ast::Ast,
@@ -246,10 +212,6 @@ fn (self: &var IdentUses) expr(
         },
         Cast(value) => return self.expr(allocator, tree, value.value, out),
         Try(value) => return self.expr(allocator, tree, value.value, out),
-        // A hand-off reads the place it hands off. Missing it here would end
-        // the value's live range at its previous statement, and everything a
-        // last use releases -- the borrows it holds, the allocator it is tied
-        // to -- would be released one statement early.
         Move(value) => return self.expr(allocator, tree, value.value, out),
         StructLiteral(value) => {
             var index = 0;
@@ -291,8 +253,6 @@ fn (self: &var IdentUses) expr(
             return;
         },
         Comptime(value) => return self.expr(allocator, tree, value.expr, out),
-        // An `if` or `match` standing as a value reads whatever its branches
-        // read, and a guard's exit reads whatever it returns.
         If(value) => {
             try self.expr(allocator, tree, value.condition, out);
             try self.block(allocator, tree, value.consequence, out);
@@ -322,19 +282,11 @@ fn (self: &var IdentUses) expr(
     }
 }
 
-/// Ends local borrows whose binding is no longer used, the Go
-/// `releaseLastUseBorrows`. A binding that is itself still borrowed keeps its
-/// own sources active: the chain buffer <- view <- allocator <- owner releases
-/// from the leaf inward, each release re-examining only the bindings it just
-/// unblocked.
 fn (self: &var Checker) release_last_use_borrows(
     env: ScopeHandle,
     statement_index: i64,
     last_uses: &map::Map<[]u8, i64>
 ) -> !void {
-    // Only the scope's borrowers can have targets to release. A release only
-    // lowers borrow counts, so the bindings it unblocks end up released
-    // whatever order they are visited in.
     var index = 0;
     while self.store.scope_borrower_at(env, index) |value| {
         if self.is_local_binding(env, value) {
@@ -353,16 +305,11 @@ fn (self: &var Checker) release_last_use_borrows(
     return self.store.retain_scope_borrowers(env, &keep);
 }
 
-/// Reports whether value is what its own name is bound to in env, the Go
-/// `s.values[value.name] == value`: false once a later define shadowed it.
 fn (self: &Checker) is_local_binding(env: ScopeHandle, value: BindingHandle) -> bool {
     let held = self.lookup_local_name(env, self.binding(value).name) orelse return false;
     return held.node == value.node;
 }
 
-/// Releases one binding's borrow targets once it is past its last use and
-/// nothing borrows it, then retries the targets that release may have
-/// unblocked, the Go `releaseIfUnused`.
 fn (self: &var Checker) release_if_unused(
     env: ScopeHandle,
     value: BindingHandle,
@@ -377,8 +324,6 @@ fn (self: &var Checker) release_if_unused(
             return;
         }
     }
-    // A deferred Future or TaskSet cleanup is a use at scope exit: live
-    // workers can still reach retained state and capabilities.
     let record = self.binding(value);
     if record.defer_cleanup and self.tied_struct_return(record.type_name) and
         !record.deinitialized and !record.moved {
@@ -402,12 +347,6 @@ fn (self: &var Checker) release_if_unused(
     return;
 }
 
-/// Ends the borrows a consumed binding holds, the Go
-/// `releaseConsumedBorrows`. A value handed off or released reads its
-/// sources no more, and the cleanup registered on it retires with it, so
-/// the mentions its name still has — an errdefer that will never run — keep
-/// nothing alive. What the release unblocks is released by the statement's
-/// own last-use pass.
 fn (self: &var Checker) release_consumed_borrows(value: BindingHandle) -> !void {
     if !self.has_borrow_targets(value) or self.store.has_any_borrow(value) {
         return;
@@ -418,15 +357,12 @@ fn (self: &var Checker) release_consumed_borrows(value: BindingHandle) -> !void 
     return self.take_borrow_targets(value, &var targets);
 }
 
-/// Reads the last-use statement index recorded for a binding's name.
 fn (self: &Checker) last_use_of(value: BindingHandle, last_uses: &map::Map<[]u8, i64>) -> ?i64 {
     let retained = name_text(&self.names, self.binding(value).name);
     let bytes = retained.as_bytes();
     return last_uses.get(bytes);
 }
 
-/// Moves a binding's borrow targets out, leaving it with none, the Go
-/// `targets := value.borrowTargets; value.borrowTargets = nil`.
 fn (self: &var Checker) take_borrow_targets(value: BindingHandle, out: &var array::Array<BorrowSource>) -> !void {
     let allocator = self.allocator;
     if self.store.binding_mut(value) |record| {

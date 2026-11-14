@@ -3,19 +3,6 @@ import compiler::internal::diagnostic;
 import compiler::internal::stdmethod;
 import std::array;
 
-// Port of internal/ownership/stdcall.go: one call path for every std
-// container method, driven by the method's signature and the facts
-// stdmethod keeps about it.
-
-/// Applies one std container method to its receiver, the Go
-/// `checkStdMethodCall`. The method's signature says how the receiver and
-/// each argument are handed over and what comes back, as it does for a user
-/// method; the method's facts (stdmethod::Facts) say what the signature
-/// cannot — how the call touches the storage a live borrow may alias, whether
-/// the allocator it names must be the container's own, whether an element it
-/// hands out must be a copy, whether its result exists only in a capture or a
-/// `let`. Local receivers, direct field receivers, and the std primitives
-/// behind the wrappers all come here.
 fn (self: &var Checker) check_std_method_call(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -77,8 +64,6 @@ fn (self: &var Checker) check_std_method_call(
         ) |failed| {
             return move failed;
         }
-        // Releasing the value is the last thing done with it, so the binding
-        // is consumed rather than left readable.
         try self.store.set_moved(receiver, true);
         try self.release_consumed_borrows(receiver);
         if facts.deinitializes {
@@ -91,23 +76,18 @@ fn (self: &var Checker) check_std_method_call(
     return null;
 }
 
-/// Names the std container a type is, the Go `stdmethod.Lookup` on the
-/// generic base.
 fn (self: &Checker) std_container(base: Name) -> ?stdmethod::Container {
     let text = name_text(&self.names, base);
     let bytes = text.as_bytes();
     return stdmethod::container_of(bytes);
 }
 
-/// Reads the facts of one container method, the Go `container.Methods[name]`.
 fn (self: &Checker) std_method_facts(container: stdmethod::Container, method: Name) -> ?stdmethod::Facts {
     let text = name_text(&self.names, method);
     let bytes = text.as_bytes();
     return stdmethod::method_facts(container, bytes);
 }
 
-/// Names the std container a value's type is, when it is one, the Go
-/// `stdContainerBase`.
 fn (self: &var Checker) std_container_base(type_name: Name) -> !?Name {
     var base = type_name;
     if try self.names.split_generic(type_name) |parts| {
@@ -117,18 +97,12 @@ fn (self: &var Checker) std_container_base(type_name: Name) -> !?Name {
     return base;
 }
 
-/// Reports whether a container method yields a borrow optional a capture
-/// consumes, the Go `stdCaptureAccessor`.
 fn (self: &Checker) std_capture_accessor(base: Name, method: Name) -> bool {
     let container = self.std_container(base) orelse return false;
     let facts = self.std_method_facts(container, method) orelse return false;
     return facts.access == stdmethod::Access::Capture;
 }
 
-/// Is the signature one call to a std container method sees, the Go
-/// `stdMethodInfo`: the declaration's, with the container's type arguments
-/// substituted for its type parameters, so `T` reads as the element the
-/// receiver holds.
 fn (self: &var Checker) std_method_info(base: Name, receiver_type: Name, method: Name) -> !?FunctionHandle {
     let function = self.impl_method(base, method) orelse return null;
     let static_count = self.static_param_count(function);
@@ -153,8 +127,6 @@ fn (self: &var Checker) std_method_info(base: Name, receiver_type: Name, method:
     return try self.instantiate_function_info(function, &subst, &values);
 }
 
-/// Is the type a container hands out by value, the Go `containerElemType`:
-/// the element of an Array, Box, or Arena, the value of a Map.
 fn (self: &var Checker) container_elem_type(receiver_type: Name) -> !Name {
     let parts = try self.names.split_generic(receiver_type) orelse return receiver_type;
     let type_args = try self.names.split_generic_args(parts.args) orelse return parts.args;
@@ -165,10 +137,6 @@ fn (self: &var Checker) container_elem_type(receiver_type: Name) -> !Name {
     return type_args.get_or_panic(type_args.len() - 1);
 }
 
-/// Refuses duplicating an owner element by value, the Go `checkStdCopyElem`:
-/// only a copy element can leave the container this way, an owner needs
-/// per-type deep-copy logic (ADR-0124). A type parameter is left to its
-/// instantiation.
 fn (self: &var Checker) check_std_copy_elem(
     tree: &ast::Ast,
     container: stdmethod::Container,
@@ -192,10 +160,6 @@ fn (self: &var Checker) check_std_copy_elem(
     );
 }
 
-/// Holds the receiver to what the signature asks of it, the Go
-/// `checkStdReceiverKind`: a `&var self` method needs a receiver that can be
-/// mutated, and a method that takes its receiver over needs one the caller
-/// owns, since a lender would still hold the released value.
 fn (self: &var Checker) check_std_receiver_kind(
     tree: &ast::Ast,
     kind: Name,
@@ -225,10 +189,6 @@ fn (self: &var Checker) check_std_receiver_kind(
     return null;
 }
 
-/// Refuses a result that exists only in one place, the Go
-/// `checkStdResultContext`: a borrow optional outside the capture condition
-/// that consumes it, and a view outside the `let` that binds it. A mutable
-/// capture also needs a mutable place to borrow from.
 fn (self: &var Checker) check_std_result_context(
     tree: &ast::Ast,
     kind: Name,
@@ -263,11 +223,6 @@ fn (self: &var Checker) check_std_result_context(
     return null;
 }
 
-/// Applies the signature to the arguments, then what the facts add, the Go
-/// `checkStdMethodArgs`: a growth's allocator and a cleanup's must be the
-/// container's own, and an arena handle must belong to the arena it is used
-/// on. A capture accessor reads its arguments with the capture context off,
-/// so a nested accessor in argument position refuses as usual.
 fn (self: &var Checker) check_std_method_args(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -321,10 +276,6 @@ fn (self: &var Checker) check_std_method_args(
     return null;
 }
 
-/// Refuses a container method whose access to the storage collides with a
-/// live borrow of it, the Go `checkContainerMethodAccess`: a read waits for
-/// mutable borrows, a mutation or cleanup for any borrow. A method the
-/// container does not have is refused here too.
 fn (self: &var Checker) check_container_method_access(
     tree: &ast::Ast,
     base: Name,
