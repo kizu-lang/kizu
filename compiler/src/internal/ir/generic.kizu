@@ -5,21 +5,11 @@ import std::array;
 import std::mem;
 import std::string;
 
-// The generic instantiation half of lowering: binding a generic declaration's
-// static parameters for one call, requesting and lowering instances, and the
-// symbol an instance lowers under.
-
-/// Is the symbol and signature a generic call resolves to.
 pub struct ResolvedInstance {
     pub symbol: Name,
     pub signature: SignatureHandle,
 }
 
-/// Records that one generic function is needed for one type argument, and
-/// returns the symbol it will be lowered under together with the signature the
-/// caller sees. Lowering happens after the current function finishes, so an
-/// instantiation never interrupts the function that asked for it. null carries
-/// the failure in out_failed.
 fn (self: &var Lowerer) request_generic_instance(
     tree: &var ast::Ast,
     name: Name,
@@ -43,9 +33,6 @@ fn (self: &var Lowerer) request_generic_instance(
         try self.instantiated.set(id, true);
         try self.pending.append(self.allocator, GenericInstance { decl: decl, args: args, symbol: symbol });
     }
-    // The signature the caller sees resolves the forms the declaration
-    // wrote, so a `-> std::meta::field_type<T, f>` result arrives as the
-    // field's type.
     var mark = MetaMark { previous: self.meta_current };
     if try self.bind_instance_fields(tree, decl, args, &var mark) |failed| {
         return move failed;
@@ -56,20 +43,15 @@ fn (self: &var Lowerer) request_generic_instance(
     return null;
 }
 
-/// Is one generic declaration bound for one call: the declaration and its
-/// arguments.
 pub struct GenericBinding {
     pub decl: FactsHandle,
     pub args: GenericArgsHandle,
 }
 
-/// Returns the record `generic_bindings` fills, pointing at the scratch
-/// entries until it does.
 fn (self: &Lowerer) blank_binding() -> GenericBinding {
     return GenericBinding { decl: self.scratch_facts, args: self.scratch_args };
 }
 
-/// Returns an empty binding set, the slot `generic_bindings` fills.
 fn blank_generic_args(allocator: Allocator) -> GenericArgs {
     return GenericArgs {
         order: array::new<Name>(allocator),
@@ -80,12 +62,6 @@ fn blank_generic_args(allocator: Allocator) -> GenericArgs {
     };
 }
 
-/// Binds one generic declaration's static parameters to the arguments of one
-/// call. Every reader of an instantiation -- the request that lowers its body
-/// and the caller that hands arguments to it -- reads this, so they cannot
-/// disagree about what the instance is. The declaration and the bindings are
-/// written into the handles given. A resolved list (ast::TypeApplyExpr) is
-/// taken as written: nothing in it is read through the bindings in force.
 fn (self: &var Lowerer) generic_bindings(
     tree: &var ast::Ast,
     name: Name,
@@ -110,8 +86,6 @@ fn (self: &var Lowerer) generic_bindings(
     return try self.fail2(tree, "ir error: `%s`: %s", Arg::Str(name), Arg::Str(reason));
 }
 
-/// Binds one generic declaration's static parameters to the split arguments of
-/// one call, what `generic_bindings` does after the split.
 fn (self: &var Lowerer) bind_generic_args(
     tree: &var ast::Ast,
     name: Name,
@@ -141,8 +115,6 @@ fn (self: &var Lowerer) bind_generic_args(
             try node.order.append(allocator, param.name);
         }
         if param.is_type {
-            // Resolve first: inside `fn twice<T>` a call to `wrap<T>` needs
-            // the argument T is currently bound to, not the parameter name.
             var bound = arg;
             if !resolved {
                 bound = try self.resolve_bound_type(arg);
@@ -150,8 +122,6 @@ fn (self: &var Lowerer) bind_generic_args(
             try self.add_type_binding(args, param.name, bound);
             continue;
         }
-        // A compile-time value reaches the body as a constant, or -- for a
-        // `Function` parameter -- as the name of the function to forward to.
         var text = arg;
         if !resolved {
             text = try self.resolve_static_value(arg);
@@ -163,7 +133,6 @@ fn (self: &var Lowerer) bind_generic_args(
     return null;
 }
 
-/// Records one type parameter binding in both forms the lowerer reads.
 fn (self: &var Lowerer) add_type_binding(args: GenericArgsHandle, name: Name, bound: Name) -> !void {
     let allocator = self.allocator;
     let name_copy = try self.module.names.copy(name);
@@ -181,8 +150,6 @@ fn (self: &var Lowerer) add_type_binding(args: GenericArgsHandle, name: Name, bo
     return;
 }
 
-/// Spells why a static argument list could not be split: the reason and the
-/// list it was read from.
 fn (self: &Lowerer) split_args_reason(text: []u8) -> !string::String {
     var out = string::new(self.allocator);
     errdefer out.deinit(self.allocator);
@@ -213,10 +180,6 @@ fn (self: &Lowerer) split_args_reason(text: []u8) -> !string::String {
     return move out;
 }
 
-/// Returns the parameters a generic declaration has at these type arguments,
-/// without asking for the instance. A callee that lowers to an instruction of
-/// its own never has its body called, so the caller needs the types it hands
-/// over but not the instantiation.
 fn (self: &var Lowerer) declared_instance_params(
     tree: &var ast::Ast,
     name: Name,
@@ -233,8 +196,6 @@ fn (self: &var Lowerer) declared_instance_params(
     return null;
 }
 
-/// Returns the signature a generic declaration has once its type arguments are
-/// bound. The caller sees the instance's types, not the declaration's.
 fn (self: &var Lowerer) instance_signature(decl: FactsHandle, args: GenericArgsHandle) -> !SignatureHandle {
     let previous = self.current_args;
     self.current_args = args;
@@ -243,16 +204,10 @@ fn (self: &var Lowerer) instance_signature(decl: FactsHandle, args: GenericArgsH
     return signature;
 }
 
-/// Lowers every requested instantiation, including any an instantiation itself
-/// requests.
 fn (self: &var Lowerer) lower_pending_generics(tree: &var ast::Ast) -> !?diagnostic::Diagnostic {
     while self.pending.get(self.pending_next) |next| {
         self.pending_next = self.pending_next + 1;
         self.current_args = next.args;
-        // A `Field` static argument names a field of the type bound
-        // alongside it, and the body reads it through the `std::meta` forms
-        // written against the parameter. Binding it here is what makes each
-        // field its own instance rather than one generic body.
         var mark = MetaMark { previous: self.meta_current };
         if try self.bind_instance_fields(tree, next.decl, next.args, &var mark) |failed| {
             self.clear_bindings();
@@ -272,10 +227,6 @@ fn (self: &var Lowerer) lower_pending_generics(tree: &var ast::Ast) -> !?diagnos
     return null;
 }
 
-/// Binds the `Field` static arguments of one instance to the fields they name;
-/// `restore_meta(mark)` unbinds them. The owner is the type argument declared
-/// before the parameter, the pairing `std::meta::field_type<T, f>` is written
-/// with.
 fn (self: &var Lowerer) bind_instance_fields(
     tree: &var ast::Ast,
     decl: FactsHandle,
@@ -320,8 +271,6 @@ fn (self: &var Lowerer) bind_instance_fields(
     return null;
 }
 
-/// Returns the text of the static value bound to name in one binding set;
-/// empty when none.
 fn (self: &Lowerer) static_value_in(args: GenericArgsHandle, name: Name) -> Name {
     let node = self.generic_args.at(args.node);
     var index = 0;
@@ -334,13 +283,10 @@ fn (self: &Lowerer) static_value_in(args: GenericArgsHandle, name: Name) -> Name
     return empty_name();
 }
 
-/// Returns the generic function declaration with this IR name.
 fn (self: &Lowerer) generic_decl(name: Name) -> ?FactsHandle {
     return self.generic_decls.get(name_id(name));
 }
 
-/// Returns the symbol one instantiation is lowered under. Static parameters
-/// are listed in declaration order so the symbol is stable.
 fn (self: &var Lowerer) generic_instance_name(name: Name, args: GenericArgsHandle) -> !Name {
     var out = string::new(self.allocator);
     errdefer out.deinit(self.allocator);
@@ -361,23 +307,16 @@ fn (self: &var Lowerer) generic_instance_name(name: Name, args: GenericArgsHandl
     return self.module.names.intern_owned(move out);
 }
 
-/// Returns the number of static parameters a binding set orders.
 fn (self: &Lowerer) order_count(args: GenericArgsHandle) -> i64 {
     let node = self.generic_args.at(args.node);
     return node.order.len();
 }
 
-/// Returns the static parameter name at position in declaration order.
 fn (self: &Lowerer) order_at(args: GenericArgsHandle, index: i64) -> Name {
     let node = self.generic_args.at(args.node);
     return node.order.get(index) orelse empty_name();
 }
 
-/// Spells one static argument in the character set every backend accepts, so a
-/// lowered name needs no further mangling on the way out. A byte a source
-/// identifier can hold passes through, which keeps `i64` and `4096` readable;
-/// every other byte is escaped, so two different arguments cannot collide on
-/// one symbol.
 fn (self: &Lowerer) append_encoded_static_arg(out: &var string::String, arg: Name) -> !void {
     let retained = name_text(&self.module.names, arg);
     let bytes = retained.as_bytes();
@@ -401,14 +340,12 @@ fn (self: &Lowerer) append_encoded_static_arg(out: &var string::String, arg: Nam
     return;
 }
 
-/// Appends one byte as two lowercase hex digits.
 fn append_hex_byte(allocator: Allocator, out: &var string::String, byte: u8) -> !void {
     let value = cast<i64>(byte);
     try out.append_byte(allocator, hex_digit(value / 16));
     return out.append_byte(allocator, hex_digit(value % 16));
 }
 
-/// Returns the lowercase hex digit for a value below 16.
 fn hex_digit(value: i64) -> u8 {
     if value < 10 {
         return cast<u8>(48 + value);

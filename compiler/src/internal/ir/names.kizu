@@ -7,51 +7,34 @@ import std::map;
 import std::mem;
 import std::string;
 
-// Holds the texts the IR passes around: SSA value names, type spellings, block
-// labels, call symbols, immediates. Every distinct text is retained once in
-// the NameTable a Module owns and handed on as the copy handle Name, so
-// instructions hold no owner Strings and equal spellings compare by handle.
-// The type spelling helpers that only read text live here as well.
-
-/// Identifies one retained text by the order it was retained in; 0 is the
-/// empty text. The number is dense, so a table keyed by a name can be an
-/// array indexed by it rather than a hash of the spelling.
 pub struct Name {
     id: i64,
 }
 
-/// Returns the empty text.
 pub fn empty_name() -> Name {
     return Name { id: 0 };
 }
 
-/// Returns the dense number a name is retained under, for the tables that
-/// index by it. The empty text is 0.
 pub fn name_id(name: Name) -> i64 {
     return name.id;
 }
 
-/// Reports whether two names spell the same text.
 pub fn same_name(left: Name, right: Name) -> bool {
     return left.id == right.id;
 }
 
-/// Reports whether a name is the empty text.
 pub fn is_empty(name: Name) -> bool {
     return name.id == 0;
 }
 
-/// Retains every text one module names.
 pub struct NameTable {
     allocator: Allocator,
     texts: arena::Arena<string::String>,
-    // handles[id - 1] is the text name id names; the empty text has no entry.
     handles: array::Array<arena::Handle<string::String>>,
     by_text: map::Map<[]u8, Name>,
     empty: arena::Handle<string::String>,
 }
 
-/// Creates a table holding only the empty text.
 pub fn new_name_table(allocator: Allocator) -> !NameTable {
     var texts = arena::new<string::String>(allocator);
     errdefer texts.deinit(allocator);
@@ -72,15 +55,11 @@ fn (self: NameTable) deinit(allocator: Allocator) -> void {
     return;
 }
 
-/// Returns the retained text of a name; callers bind `as_bytes()` locally.
 pub fn name_text(names: &NameTable, name: Name) -> &string::String {
-    // id 0 is the empty text and has no entry, so it falls out of range on
-    // the same bounds check every other id already pays.
     let handle = names.handles.get(name.id - 1) orelse names.empty;
     return names.texts.at(handle);
 }
 
-/// Returns the one name that spells text, retaining it on first use.
 pub fn (self: &var NameTable) intern(text: []u8) -> !Name {
     if mem::len(text) == 0 {
         return empty_name();
@@ -92,12 +71,10 @@ pub fn (self: &var NameTable) intern(text: []u8) -> !Name {
     return self.intern_owned(move owned);
 }
 
-/// Returns the retained name for text without adding it to this table.
 pub fn (self: &NameTable) lookup(text: []u8) -> ?Name {
     return self.by_text.get(text);
 }
 
-/// Returns the one name that spells an owned text, consuming the text.
 pub fn (self: &var NameTable) intern_owned(text: string::String) -> !Name {
     if text.len() == 0 {
         text.deinit(self.allocator);
@@ -121,7 +98,6 @@ fn (self: &NameTable) find_name(text: &string::String) -> ?Name {
     return self.by_text.get(bytes);
 }
 
-/// Names bytes `start..end` of an already retained name.
 pub fn (self: &var NameTable) intern_slice(name: Name, start: i64, end: i64) -> !Name {
     if start >= end {
         return empty_name();
@@ -135,14 +111,12 @@ pub fn (self: &var NameTable) intern_slice(name: Name, start: i64, end: i64) -> 
     return self.intern_owned(move copied);
 }
 
-/// Names one Ast text.
 pub fn (self: &var NameTable) intern_text(tree: &ast::Ast, text: ast::Text) -> !Name {
     let retained = tree.texts.at(text.node);
     let bytes = retained.as_bytes();
     return self.intern(bytes);
 }
 
-/// Names the decimal spelling of an integer.
 pub fn (self: &var NameTable) intern_i64(value: i64) -> !Name {
     var out = string::new(self.allocator);
     errdefer out.deinit(self.allocator);
@@ -150,14 +124,12 @@ pub fn (self: &var NameTable) intern_i64(value: i64) -> !Name {
     return self.intern_owned(move out);
 }
 
-/// Reports whether name spells text.
 pub fn (self: &NameTable) is(name: Name, text: []u8) -> bool {
     let retained = name_text(self, name);
     let bytes = retained.as_bytes();
     return mem::equal_bytes(bytes, text);
 }
 
-/// Reports whether a name and an Ast text spell the same bytes.
 pub fn (self: &NameTable) is_text(name: Name, tree: &ast::Ast, text: ast::Text) -> bool {
     let retained = name_text(self, name);
     let bytes = retained.as_bytes();
@@ -183,7 +155,6 @@ pub fn (self: &NameTable) ends_with(name: Name, suffix: []u8) -> bool {
     return ends_with_bytes(bytes, suffix);
 }
 
-/// Reports whether bytes end with suffix.
 pub fn ends_with_bytes(bytes: []u8, suffix: []u8) -> bool {
     let length = mem::len(bytes);
     let suffix_length = mem::len(suffix);
@@ -193,13 +164,11 @@ pub fn ends_with_bytes(bytes: []u8, suffix: []u8) -> bool {
     return mem::equal_bytes(bytes[length - suffix_length..length], suffix);
 }
 
-/// Appends the text of a name to a message under construction.
 pub fn (self: &NameTable) append_to(out: &var string::String, name: Name) -> !void {
     let retained = name_text(self, name);
     return out.append_string(self.allocator, retained);
 }
 
-/// Names `prefix` + name.
 pub fn (self: &var NameTable) prefixed(prefix: []u8, name: Name) -> !Name {
     var out = try string::from_bytes(self.allocator, prefix);
     errdefer out.deinit(self.allocator);
@@ -207,7 +176,6 @@ pub fn (self: &var NameTable) prefixed(prefix: []u8, name: Name) -> !Name {
     return self.intern_owned(move out);
 }
 
-/// Names `prefix` + name + `suffix`.
 pub fn (self: &var NameTable) wrapped(prefix: []u8, name: Name, suffix: []u8) -> !Name {
     var out = try string::from_bytes(self.allocator, prefix);
     errdefer out.deinit(self.allocator);
@@ -216,14 +184,12 @@ pub fn (self: &var NameTable) wrapped(prefix: []u8, name: Name, suffix: []u8) ->
     return self.intern_owned(move out);
 }
 
-/// Reports whether a name spells a type std::map::Map accepts as a key.
 pub fn (self: &NameTable) is_map_key(name: Name) -> bool {
     let retained = name_text(self, name);
     let bytes = retained.as_bytes();
     return typ::is_map_key(bytes);
 }
 
-/// Names left + `middle` + right.
 pub fn (self: &var NameTable) joined(left: Name, middle: []u8, right: Name) -> !Name {
     var out = string::new(self.allocator);
     errdefer out.deinit(self.allocator);
@@ -233,7 +199,6 @@ pub fn (self: &var NameTable) joined(left: Name, middle: []u8, right: Name) -> !
     return self.intern_owned(move out);
 }
 
-/// Names name with a leading prefix removed.
 pub fn (self: &var NameTable) trim_prefix(name: Name, prefix: []u8) -> !Name {
     if !self.starts_with(name, prefix) {
         return name;
@@ -241,7 +206,6 @@ pub fn (self: &var NameTable) trim_prefix(name: Name, prefix: []u8) -> !Name {
     return self.intern_slice(name, mem::len(prefix), self.len(name));
 }
 
-/// Names T for `&T` and `&var T`, and name itself otherwise.
 pub fn (self: &var NameTable) deref_type(name: Name) -> !Name {
     if self.starts_with(name, "&var ") {
         return self.intern_slice(name, 5, self.len(name));
@@ -252,18 +216,14 @@ pub fn (self: &var NameTable) deref_type(name: Name) -> !Name {
     return name;
 }
 
-/// Reports whether a type is a local borrow.
 pub fn (self: &NameTable) is_reference_type(name: Name) -> bool {
     return self.starts_with(name, "&");
 }
 
-/// Reports whether name is `&var T`, the borrow a write can go through.
 pub fn (self: &NameTable) is_mutable_reference_type(name: Name) -> bool {
     return self.starts_with(name, "&var ");
 }
 
-/// Names T for `ptr<T>` and `ptr<const T>`. Nullable `?ptr<T>` is not
-/// dereferenceable, so it stays out.
 pub fn (self: &var NameTable) raw_pointer_elem(name: Name) -> !?Name {
     if !self.starts_with(name, "ptr<") or !self.ends_with(name, ">") {
         return null;
@@ -272,7 +232,6 @@ pub fn (self: &var NameTable) raw_pointer_elem(name: Name) -> !?Name {
     return try self.trim_prefix(elem, "const ");
 }
 
-/// Names T for `?T`.
 pub fn (self: &var NameTable) optional_elem(name: Name) -> !?Name {
     if !self.starts_with(name, "?") or self.starts_with(name, "?ptr<") {
         return null;
@@ -280,7 +239,6 @@ pub fn (self: &var NameTable) optional_elem(name: Name) -> !?Name {
     return try self.intern_slice(name, 1, self.len(name));
 }
 
-/// Names `ptr<T>` for a nullable `?ptr<T>`.
 pub fn (self: &var NameTable) nullable_pointer_elem(name: Name) -> !?Name {
     if !self.starts_with(name, "?ptr<") {
         return null;
@@ -288,14 +246,12 @@ pub fn (self: &var NameTable) nullable_pointer_elem(name: Name) -> !?Name {
     return try self.intern_slice(name, 1, self.len(name));
 }
 
-/// Names T for `Base<T>`, and null when name is not applied to base.
 pub fn (self: &var NameTable) generic_arg_of(name: Name, base: []u8) -> !?Name {
     let prefix_len = mem::len(base) + 1;
     let end = self.generic_arg_end(name, base, prefix_len) orelse return null;
     return try self.intern_slice(name, prefix_len, end);
 }
 
-/// Reports whether name is applied to base, without interning the argument.
 pub fn (self: &NameTable) has_generic_arg(name: Name, base: []u8) -> bool {
     let prefix_len = mem::len(base) + 1;
     if self.generic_arg_end(name, base, prefix_len) |_| {
@@ -304,8 +260,6 @@ pub fn (self: &NameTable) has_generic_arg(name: Name, base: []u8) -> bool {
     return false;
 }
 
-/// Returns where the argument of `Base<T>` ends, or null when name is not
-/// applied to base.
 fn (self: &NameTable) generic_arg_end(name: Name, base: []u8, prefix_len: i64) -> ?i64 {
     let retained = name_text(self, name);
     let bytes = retained.as_bytes();
@@ -316,8 +270,6 @@ fn (self: &NameTable) generic_arg_end(name: Name, base: []u8, prefix_len: i64) -
     return mem::len(bytes) - 1;
 }
 
-/// Reports whether an IR type spelling is a fixed-length stack buffer
-/// (`[N]u8`).
 pub fn (self: &NameTable) is_buffer_type(name: Name) -> bool {
     let retained = name_text(self, name);
     let bytes = retained.as_bytes();
@@ -325,7 +277,6 @@ pub fn (self: &NameTable) is_buffer_type(name: Name) -> bool {
         bytes[1] >= cast<u8>(48) and bytes[1] <= cast<u8>(57);
 }
 
-/// Returns T of a fixed-length array spelling `[N]T`.
 pub fn (self: &var NameTable) buffer_elem(name: Name) -> !Name {
     let copied = try self.copy(name);
     defer copied.deinit(self.allocator);
@@ -337,7 +288,6 @@ pub fn (self: &var NameTable) buffer_elem(name: Name) -> !Name {
     return self.intern(bytes[at + 1..mem::len(bytes)]);
 }
 
-/// Returns N of a fixed-length array spelling `[N]T` as its digits.
 pub fn (self: &var NameTable) buffer_length_text(name: Name) -> !Name {
     let copied = try self.copy(name);
     defer copied.deinit(self.allocator);
@@ -349,7 +299,6 @@ pub fn (self: &var NameTable) buffer_length_text(name: Name) -> !Name {
     return self.intern(bytes[1..at]);
 }
 
-/// Returns the view a `[N]T` buffer gives (`[]T`).
 pub fn (self: &var NameTable) buffer_view(name: Name) -> !Name {
     let copied = try self.copy(name);
     defer copied.deinit(self.allocator);
@@ -365,7 +314,6 @@ pub fn (self: &var NameTable) buffer_view(name: Name) -> !Name {
     return self.intern(text);
 }
 
-/// Returns the element a view `[]T` reads.
 pub fn (self: &var NameTable) view_elem(name: Name) -> !Name {
     let copied = try self.copy(name);
     defer copied.deinit(self.allocator);
@@ -374,15 +322,12 @@ pub fn (self: &var NameTable) view_elem(name: Name) -> !Name {
     return self.intern(text);
 }
 
-/// Copies the text of a name into an owned String, for the places that need
-/// its bytes while the table is mutated.
 pub fn (self: &NameTable) copy(name: Name) -> !string::String {
     let retained = name_text(self, name);
     let bytes = retained.as_bytes();
     return string::from_bytes(self.allocator, bytes);
 }
 
-/// Names every retained String of a list in order.
 pub fn (self: &var NameTable) intern_all(parts: &array::Array<string::String>) -> !array::Array<Name> {
     var out = array::new<Name>(self.allocator);
     errdefer out.deinit(self.allocator);

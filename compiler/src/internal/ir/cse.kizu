@@ -2,20 +2,6 @@ import std::array;
 import std::map;
 import std::string;
 
-// Merging instructions that compute the same result from the same values. The
-// spelling expression_key gives an expression keys a slot, and leaving a block
-// marks its slots empty, since a std map cannot lose keys cheaply. The
-// dominator tree is walked by an explicit stack rather than by recursion, so a
-// long chain of blocks does not grow the native stack.
-
-/// Replaces an instruction with an earlier one that computes the same result
-/// from the same values: an arithmetic, comparison, cast or bitwise operation,
-/// a field of a struct value, a constant, or the tag or payload of a union
-/// value. None of these reads memory, and an SSA value does not change, so an
-/// earlier result is the same wherever it dominates.
-///
-/// Two reads of one field become one value, which is what lets a later pass
-/// see that `set(reg)` indexes where `get(reg)` just checked.
 pub fn eliminate_common_subexpressions(allocator: Allocator, module: &var Module) -> !void {
     var index = 0;
     while module.functions.get(index) |function| {
@@ -25,8 +11,6 @@ pub fn eliminate_common_subexpressions(allocator: Allocator, module: &var Module
     return;
 }
 
-/// Is the expressions the walk has available: each key spelled once, the
-/// result filed at its slot, and whether the slot holds one now.
 struct Expressions {
     slots: map::Map<[]u8, i64>,
     results: array::Array<Value>,
@@ -40,16 +24,12 @@ fn (self: Expressions) deinit(allocator: Allocator) -> void {
     return;
 }
 
-/// Is one step of the walk down the dominator tree: entering the block at
-/// position, or leaving it and emptying the slots filed from mark on.
 struct ExpressionVisit {
     position: i64,
     mark: i64,
     leave: bool,
 }
 
-/// Walks one function's dominator tree with the results each block's
-/// dominators computed.
 fn eliminate_common_subexpressions_in(allocator: Allocator, module: &var Module, function: Function) -> !void {
     if function_block_count(module, function) == 0 {
         return;
@@ -148,11 +128,6 @@ fn eliminate_common_subexpressions_in(allocator: Allocator, module: &var Module,
     return;
 }
 
-/// Reports whether an instruction's result follows from its operands alone.
-/// Bytes compared through a view are read where the view points, and what is
-/// there can change between two comparisons. A field read is one whose op
-/// spelling has no `field.ref` prefix, so a field whose name starts with `ref`
-/// is left out as well, which only gives up a merge.
 fn computes_from_operands(module: &Module, node: &InstrNode) -> bool {
     match node.op {
         Const => return true,
@@ -175,8 +150,6 @@ fn computes_from_operands(module: &Module, node: &InstrNode) -> bool {
     }
 }
 
-/// Spells what an instruction computes into key, when it computes it from its
-/// operands alone, and reports whether it does.
 fn expression_key(allocator: Allocator, module: &Module, instr: Instr, key: &var string::String) -> !bool {
     let node = module.instrs.at(instr.node);
     if is_empty(node.result.name) or module.names.is(node.result.type_name, "void") or

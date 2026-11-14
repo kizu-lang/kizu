@@ -7,55 +7,28 @@ import std::mem;
 import std::sort;
 import std::string;
 
-// Kizu's typed SSA intermediate representation. The Module owns the nodes in
-// arenas and hands out copy handles, every text is a Name interned in the
-// Module's NameTable, and an operation is an Op tag plus the Name it carries
-// (`call.<symbol>`, `field.<name>`, `binary.<operator>`), spelled back as one
-// text by `append_op`.
-
-/// Is one lowered Kizu program, from either a package or a loose source file.
 pub struct Module {
     pub names: NameTable,
     pub structs: map::Map<[]u8, Struct>,
     pub enums: map::Map<[]u8, Enum>,
-    // error_sets are named like enums but numbered globally: an error value
-    // is one integer that means the same member in every error union it
-    // crosses.
     pub error_sets: map::Map<[]u8, Enum>,
     pub unions: map::Map<[]u8, Union>,
     pub functions: array::Array<Function>,
     pub function_nodes: arena::Arena<FunctionNode>,
     pub blocks: arena::Arena<BlockNode>,
     pub instrs: arena::Arena<InstrNode>,
-    // externs lists the declared foreign functions by host symbol, indexed
-    // by the symbol's name id, with what the native linker is handed to
-    // resolve each. A call names its symbol in extern_name; which of these a
-    // program links is read off the calls that survive reachability, not off
-    // the declarations (link_inputs).
     pub externs: array::Array<Extern>,
-    // cleanup_args holds the arguments of every deferred cleanup, each cleanup
-    // naming its own contiguous run, kept here so a Cleanup stays a copy value
-    // the frames and the attached instructions can carry.
     pub cleanup_args: array::Array<Value>,
-    // cleanup_params holds the declared parameters of every deferred foreign
-    // call, each cleanup naming its own contiguous run, pooled the way
-    // cleanup_args is.
     pub cleanup_params: array::Array<Param>,
-    // modules lists the program's module paths, each before the modules that
-    // import it (ast::Program.modules): the order of the units a native debug
-    // build compiles separately.
     pub modules: array::Array<Name>,
 }
 
-/// Is what one `extern` declaration tells the linker: the ABI it is called
-/// through and the library or framework its symbol lives in.
 pub struct Extern {
     pub abi: Name,
     pub library: Name,
     pub framework: Name,
 }
 
-/// Creates an empty module whose names are its own.
 pub fn new_module(allocator: Allocator) -> !Module {
     return Module {
         names: try new_name_table(allocator),
@@ -74,8 +47,6 @@ pub fn new_module(allocator: Allocator) -> !Module {
     };
 }
 
-/// Appends one cleanup's arguments to the module's pool and returns where
-/// the run starts.
 pub fn (self: &var Module) add_cleanup_args(allocator: Allocator, args: &array::Array<Value>) -> !i64 {
     let start = self.cleanup_args.len();
     var index = 0;
@@ -86,7 +57,6 @@ pub fn (self: &var Module) add_cleanup_args(allocator: Allocator, args: &array::
     return start;
 }
 
-/// Returns one argument of a cleanup, or null past its last.
 pub fn (self: &Module) cleanup_arg(cleanup: Cleanup, index: i64) -> ?Value {
     if index < 0 or index >= cleanup.args_len {
         return null;
@@ -94,8 +64,6 @@ pub fn (self: &Module) cleanup_arg(cleanup: Cleanup, index: i64) -> ?Value {
     return self.cleanup_args.get(cleanup.args_start + index);
 }
 
-/// Appends one cleanup's declared parameters to the module's pool and
-/// returns where the run starts.
 pub fn (self: &var Module) add_cleanup_params(allocator: Allocator, params: &array::Array<Param>) -> !i64 {
     let start = self.cleanup_params.len();
     var index = 0;
@@ -106,7 +74,6 @@ pub fn (self: &var Module) add_cleanup_params(allocator: Allocator, params: &arr
     return start;
 }
 
-/// Returns one declared parameter of a cleanup, or null past its last.
 pub fn (self: &Module) cleanup_param(cleanup: Cleanup, index: i64) -> ?Param {
     if index < 0 or index >= cleanup.params_len {
         return null;
@@ -114,8 +81,6 @@ pub fn (self: &Module) cleanup_param(cleanup: Cleanup, index: i64) -> ?Param {
     return self.cleanup_params.get(cleanup.params_start + index);
 }
 
-/// Reports whether a cleanup loads its index-th argument out of a slot at the
-/// exit that runs it.
 pub fn cleanup_loads(cleanup: Cleanup, index: i64) -> bool {
     var bit = 1;
     var count = 0;
@@ -126,8 +91,6 @@ pub fn cleanup_loads(cleanup: Cleanup, index: i64) -> bool {
     return (cleanup.loads / bit) % 2 == 1;
 }
 
-/// Files what the linker is told about one host symbol, so a call naming
-/// the symbol can be traced back to its library.
 pub fn (self: &var Module) set_extern(allocator: Allocator, symbol: Name, declared: Extern) -> !void {
     let id = name_id(symbol);
     while self.externs.len() <= id {
@@ -138,9 +101,6 @@ pub fn (self: &var Module) set_extern(allocator: Allocator, symbol: Name, declar
     return self.externs.set(id, declared);
 }
 
-/// Appends the libraries and frameworks the module's remaining foreign calls
-/// need, each once and sorted. It is asked after reachability has been closed,
-/// so a library declared for a function the program never calls is not linked.
 pub fn link_inputs(
     allocator: Allocator,
     module: &Module,
@@ -177,8 +137,6 @@ pub fn link_inputs(
     return;
 }
 
-/// Adds the library and framework one foreign call's symbol was declared
-/// with, once each.
 fn visit_extern(
     allocator: Allocator,
     module: &Module,
@@ -198,7 +156,6 @@ fn visit_extern(
     return;
 }
 
-/// Appends one link input by its spelling unless it was already appended.
 fn add_link_input(
     allocator: Allocator,
     module: &Module,
@@ -219,52 +176,37 @@ fn add_link_input(
     return out.append(allocator, move copied);
 }
 
-/// Is the IR view of a declared Kizu struct.
 pub struct Struct {
     pub name: Name,
     pub fields: array::Array<Field>,
 }
 
-/// Is the IR view of a declared tag enum: each tag's integer. origins lists
-/// the `{ }`-form error sets a combined error set (`error C = A or B;`) takes
-/// its members from, fully resolved; it is empty for enums and for sets that
-/// declare their own members. A combined set carries no tags of its own: its
-/// member codes stay filed under the sets that declared them, which keeps
-/// every code's spelling unique and lets a match arm resolve through the
-/// declaring set (ADR-0127).
 pub struct Enum {
     pub name: Name,
     pub tags: map::Map<[]u8, i64>,
     pub origins: array::Array<Name>,
 }
 
-/// Is the IR view of a tagged union declaration.
 pub struct Union {
     pub name: Name,
     pub variants: map::Map<[]u8, UnionVariant>,
 }
 
-/// Stores one union tag and optional payload type; an empty payload is none.
 pub struct UnionVariant {
     pub name: Name,
     pub index: i64,
     pub payload: Name,
 }
 
-/// Is a typed struct field.
 pub struct Field {
     pub name: Name,
     pub type_name: Name,
 }
 
-/// Identifies one function retained by a Module.
 pub struct Function {
     pub node: arena::Handle<FunctionNode>,
 }
 
-/// Is a typed SSA function. Its parameters keep the Passing lowering decided
-/// for them, so a reader asks how an argument travels instead of inferring it
-/// back from the type's spelling.
 pub struct FunctionNode {
     pub name: Name,
     pub params: array::Array<Param>,
@@ -272,135 +214,78 @@ pub struct FunctionNode {
     pub blocks: array::Array<Block>,
     pub export_abi: Name,
     pub export_name: Name,
-    /// The module path the function was declared in. A function the compiler
-    /// writes for the whole program -- the package entry point, the test
-    /// runner -- has none.
     pub module: Name,
-    /// Marks a generic instance. Its code depends on the static arguments the
-    /// caller chose, so it belongs to no one module: every unit that reaches
-    /// it carries a copy (llvm::emit_units).
     pub instance: bool,
 }
 
-/// Identifies one basic block retained by a Module.
 pub struct Block {
     pub node: arena::Handle<BlockNode>,
 }
 
-/// Is a basic block with instructions and one terminator. Its predecessors
-/// are not stored: they follow from the terminators naming it.
 pub struct BlockNode {
     pub name: Name,
     pub instrs: array::Array<Instr>,
     pub terminator: Terminator,
 }
 
-/// Names an SSA value and its type; an empty type is the untyped zero value.
 pub struct Value {
     pub name: Name,
     pub type_name: Name,
 }
 
-/// Returns the zero value.
 pub fn empty_value() -> Value {
     return Value { name: empty_name(), type_name: empty_name() };
 }
 
-/// Reports whether two SSA value references are identical.
 pub fn same_value(left: Value, right: Value) -> bool {
     return same_name(left.name, right.name) and same_name(left.type_name, right.type_name);
 }
 
-/// Identifies one instruction retained by a Module.
 pub struct Instr {
     pub node: arena::Handle<InstrNode>,
 }
 
-/// Is one SSA instruction. operand is the name the op carries: the callee of
-/// a call, the field of a field access, the operator of a unary or binary op.
 pub struct InstrNode {
     pub result: Value,
     pub op: Op,
     pub operand: Name,
     pub args: array::Array<Value>,
-    // Explicit foreign-call facts consumed by backends. An empty ABI means a
-    // normal Kizu call.
     pub extern_abi: Name,
     pub extern_name: Name,
-    // The ABI signature carried by an indirect call. A direct call reads
-    // this from the function it names; an indirect call has no declaration
-    // at the use site, so lowering retains the Param facts beside it.
     pub call_params: array::Array<Param>,
-    // How many of args a C variadic callee declares as parameters; the
-    // arguments after them are its variadic ones. It is zero for every other
-    // call, which a variadic declaration cannot be mistaken for: it names at
-    // least one parameter. A backend needs the split because C passes a
-    // variadic argument differently from a declared one.
     pub variadic_fixed: i64,
-    // What the instruction carries that no value of its own spells: the text
-    // of a literal, the variant a union instruction selects, and the kind a
-    // cond_fail reports. A type argument is not among them -- a container
-    // spells its element in its own type, and a second copy here could be
-    // missing (a cleanup carries none) or disagree, either of which measures
-    // a release against the wrong size.
     pub immediate: Name,
     pub fields: array::Array<FieldArg>,
     pub incoming: array::Array<Incoming>,
     pub cleanups: array::Array<Cleanup>,
-    // span is set where a runtime failure must name a source position. It
-    // is zero for instructions that cannot fail.
     pub span: ast::Span,
 }
 
-/// Is a deferred void call that must run before a scope exits. Its
-/// arguments are a run of the module's cleanup_args pool. on_error marks
-/// errdefer cleanups, which run only on error-return paths. receiver names
-/// the owner the call consumes, so an error exit can drop the cleanups a
-/// move has retired (ADR-0114).
 pub struct Cleanup {
     pub op: Op,
     pub operand: Name,
     pub args_start: i64,
     pub args_len: i64,
-    // loads marks, one bit per argument, the arguments that are slots to load
-    // at the exit that runs the cleanup: the owners the call consumes, which
-    // the frame may still use until then. Every other argument is the value it
-    // had where the defer was written, a borrow's slot included, since the
-    // callee takes the slot itself.
     pub loads: i64,
-    // Explicit foreign-call facts consumed by backends. A cleanup can remain
-    // attached to error.try, so its boundary cannot be recovered from a
-    // standalone instruction later.
     pub extern_abi: Name,
     pub extern_name: Name,
-    // The declared passing of a foreign callee, which has no body here to read
-    // it from, as a run of the module's cleanup_params pool
-    // (InstrNode.call_params).
     pub params_start: i64,
     pub params_len: i64,
-    // The declared parameter count of a C variadic callee
-    // (InstrNode.variadic_fixed).
     pub variadic_fixed: i64,
     pub on_error: bool,
-    // The receiver expression the cleanup statement was written with, which
-    // is how the ownership checker names a retired errdefer: one node per
-    // registration, so two registrations on one name stay apart.
     pub receiver: ?arena::Handle<ast::ExpressionNode>,
 }
 
-/// Connects a struct field name to a value.
 pub struct FieldArg {
     pub name: Name,
     pub value: Value,
 }
 
-/// Is one predecessor value for a phi instruction.
 pub struct Incoming {
     pub block: Name,
     pub value: Value,
 }
 
-/// Ends a basic block; None is a block that has not ended yet.
 pub struct Terminator {
     pub op: TermOp,
     pub value: Value,
@@ -409,7 +294,6 @@ pub struct Terminator {
     pub else_target: Name,
 }
 
-/// Is the kind of one terminator.
 pub enum TermOp {
     None,
     Return,
@@ -418,7 +302,6 @@ pub enum TermOp {
     Unreachable,
 }
 
-/// Returns the terminator a block starts with.
 pub fn no_terminator() -> Terminator {
     return Terminator {
         op: TermOp::None,
@@ -429,7 +312,6 @@ pub fn no_terminator() -> Terminator {
     };
 }
 
-/// Returns a `return value` terminator.
 pub fn return_terminator(value: Value) -> Terminator {
     return Terminator {
         op: TermOp::Return,
@@ -440,7 +322,6 @@ pub fn return_terminator(value: Value) -> Terminator {
     };
 }
 
-/// Returns a `jump target` terminator.
 pub fn jump_terminator(target: Name) -> Terminator {
     return Terminator {
         op: TermOp::Jump,
@@ -451,7 +332,6 @@ pub fn jump_terminator(target: Name) -> Terminator {
     };
 }
 
-/// Returns a `branch cond, target, else` terminator.
 pub fn branch_terminator(cond: Value, target: Name, else_target: Name) -> Terminator {
     return Terminator {
         op: TermOp::Branch,
@@ -462,7 +342,6 @@ pub fn branch_terminator(cond: Value, target: Name, else_target: Name) -> Termin
     };
 }
 
-/// Returns an `unreachable` terminator.
 pub fn unreachable_terminator() -> Terminator {
     return Terminator {
         op: TermOp::Unreachable,
@@ -473,9 +352,6 @@ pub fn unreachable_terminator() -> Terminator {
     };
 }
 
-/// Returns the block at position among the ones control can reach from this
-/// terminator: the target, then the else target, each only when named; null
-/// past the last.
 pub fn (self: &Terminator) successor(position: i64) -> ?Name {
     var seen = 0;
     if !is_empty(self.target) {
@@ -492,34 +368,22 @@ pub fn (self: &Terminator) successor(position: i64) -> ?Name {
     return null;
 }
 
-/// Is one parameter of a callable: its SSA name, the type the callee sees,
-/// and how the call hands it over.
 pub struct Param {
     pub name: Name,
     pub type_name: Name,
     pub passing: Passing,
 }
 
-/// Returns the parameter as the body reads it: the SSA value bound to its
-/// name on entry.
 pub fn (self: &Param) value() -> Value {
     return Value { name: self.name, type_name: self.type_name };
 }
 
-/// Is how a call hands one parameter to the callee.
 pub enum Passing {
-    // Value copies the parameter. The callee cannot write back through it.
     Value,
-    // CallerStorage hands over the caller's local itself, so a write in the
-    // callee lands in it.
     CallerStorage,
-    // CopyAddress hands over the address of a copy made for the call. The
-    // callee reads through it and the caller keeps its own value.
     CopyAddress,
 }
 
-/// Is the kind of one instruction. The ops that carry a name (`call.<f>`,
-/// `field.<f>`, `binary.<op>`) keep it in the instruction's operand.
 pub enum Op {
     Const,
     Phi,
@@ -629,8 +493,6 @@ pub enum Op {
     UnionPayloadRef,
 }
 
-/// Returns the spelling of an op, up to the name it carries: the whole text
-/// for a fixed op, the prefix before the operand for one that carries a name.
 pub fn op_spelling(op: Op) -> []u8 {
     return match op {
         Const => "const",
@@ -742,7 +604,6 @@ pub fn op_spelling(op: Op) -> []u8 {
     };
 }
 
-/// Reports whether an op carries a name in its operand.
 pub fn op_carries_operand(op: Op) -> bool {
     return match op {
         Call => true,
@@ -758,7 +619,6 @@ pub fn op_carries_operand(op: Op) -> bool {
     };
 }
 
-/// Appends the spelling of an op and the name it carries.
 pub fn append_op(allocator: Allocator, out: &var string::String, names: &NameTable, op: Op, operand: Name) -> !void {
     try out.append_bytes(allocator, op_spelling(op));
     if op_carries_operand(op) {
@@ -767,26 +627,14 @@ pub fn append_op(allocator: Allocator, out: &var string::String, names: &NameTab
     return;
 }
 
-/// Is a function's callable type.
 pub struct Signature {
     pub params: array::Array<Param>,
     pub return_type: Name,
-    // The source-level callable type. params and return_type are ABI-lowered
-    // and deliberately erase a shared borrow of a copy value.
     pub pointer_type: Name,
-    /// Carries the obligation the declaration named, so the type its name has
-    /// as a value spells `unsafe fn(...)` the way the checker did.
     pub requires_unsafe: bool,
-    /// Marks a C variadic function: a call passes further arguments after
-    /// params.
     pub variadic: bool,
 }
 
-/// Returns the symbol a test block lowers to: `test.`, the test's place in
-/// declaration order, `.`, and the name with every byte outside `_ . a-z A-Z
-/// 0-9` replaced by `_`, one replacement per character. The ordinal is what
-/// keeps two tests apart whose names differ only in characters a symbol cannot
-/// carry.
 pub fn test_function_name(allocator: Allocator, ordinal: i64, name: []u8) -> !string::String {
     var out = try string::from_bytes(allocator, "test.");
     errdefer out.deinit(allocator);
@@ -803,8 +651,6 @@ pub fn test_function_name(allocator: Allocator, ordinal: i64, name: []u8) -> !st
             try out.append_byte(allocator, byte);
             continue;
         }
-        // A multi-byte character is one character, so its continuation bytes
-        // add no second underscore.
         if byte >= cast<u8>(128) and byte < cast<u8>(192) {
             continue;
         }
@@ -813,7 +659,6 @@ pub fn test_function_name(allocator: Allocator, ordinal: i64, name: []u8) -> !st
     return move out;
 }
 
-/// Appends the lowered test symbols in declaration order.
 pub fn test_function_names(allocator: Allocator, module: &Module, out: &var array::Array<Name>) -> !void {
     var index = 0;
     while module.functions.get(index) |function| {
@@ -826,7 +671,6 @@ pub fn test_function_names(allocator: Allocator, module: &Module, out: &var arra
     return;
 }
 
-/// Returns the lowered function with the requested symbol, or null.
 pub fn (self: &Module) function_named(name: []u8) -> ?Function {
     var index = 0;
     while self.functions.get(index) |function| {
@@ -839,8 +683,6 @@ pub fn (self: &Module) function_named(name: []u8) -> ?Function {
     return null;
 }
 
-/// Returns the declared type of a struct field: `unknown` when the struct or
-/// the field is not declared.
 pub fn (self: &var Module) field_type(struct_name: Name, field_name: Name) -> !Name {
     let struct_text = name_text(&self.names, struct_name);
     let struct_bytes = struct_text.as_bytes();
@@ -856,9 +698,6 @@ pub fn (self: &var Module) field_type(struct_name: Name, field_name: Name) -> !N
     return self.names.intern("unknown");
 }
 
-/// Reports whether a value of name keeps a fixed array in its own bytes: it is
-/// one, or a struct field is. A struct cannot hold itself by value, so the
-/// walk ends.
 pub fn (self: &Module) holds_fixed_array(name: Name) -> bool {
     if self.names.is_buffer_type(name) {
         return true;
@@ -877,30 +716,24 @@ pub fn (self: &Module) holds_fixed_array(name: Name) -> bool {
     return false;
 }
 
-/// Reports whether name declares a union in this module.
 pub fn (self: &Module) has_union(name: Name) -> bool {
     let text = name_text(&self.names, name);
     let bytes = text.as_bytes();
     return self.unions.contains(bytes);
 }
 
-/// Reports whether name declares an error set in this module.
 pub fn (self: &Module) has_error_set(name: Name) -> bool {
     let text = name_text(&self.names, name);
     let bytes = text.as_bytes();
     return self.error_sets.contains(bytes);
 }
 
-/// Reports whether name declares an enum or an error set in this module,
-/// the two `Tags` maps a tag match reads.
 pub fn (self: &Module) has_enum_or_error_set(name: Name) -> bool {
     let text = name_text(&self.names, name);
     let bytes = text.as_bytes();
     return self.enums.contains(bytes) or self.error_sets.contains(bytes);
 }
 
-/// Returns the integer of one enum or error set tag, or null when the type or
-/// the tag is not declared.
 pub fn (self: &Module) enum_tag(enum_name: Name, tag: Name) -> ?i64 {
     let enum_text = name_text(&self.names, enum_name);
     let enum_bytes = enum_text.as_bytes();
@@ -913,8 +746,6 @@ pub fn (self: &Module) enum_tag(enum_name: Name, tag: Name) -> ?i64 {
         if declared.tags.get(tag_bytes) |code| {
             return code;
         }
-        // A combined set files no tags of its own; a bare tag resolves
-        // through the sets it combines (the checker keeps it unambiguous).
         var index = 0;
         while declared.origins.at(index) |origin| {
             index = index + 1;
@@ -931,9 +762,6 @@ pub fn (self: &Module) enum_tag(enum_name: Name, tag: Name) -> ?i64 {
     return null;
 }
 
-/// Reports whether every member code of the source set is a member of the
-/// target set. A combined set carries its origins' codes, so the subset
-/// check `try` generalized to runs over codes, never names (ADR-0127).
 pub fn (self: &Module) error_set_fits(source: []u8, target: []u8) -> bool {
     if mem::equal_bytes(source, target) {
         return true;
@@ -958,8 +786,6 @@ pub fn (self: &Module) error_set_fits(source: []u8, target: []u8) -> bool {
     return false;
 }
 
-/// Reports whether every code one declaring set carries is a member of the
-/// target set.
 fn (self: &Module) enum_codes_fit(source: &Enum, target: []u8) -> bool {
     var position = 0;
     while source.tags.key_at(position) |member| {
@@ -973,8 +799,6 @@ fn (self: &Module) enum_codes_fit(source: &Enum, target: []u8) -> bool {
     return true;
 }
 
-/// Reports whether the target set carries one global error code, through the
-/// sets it combines.
 fn (self: &Module) error_set_holds_code(target: []u8, code: i64) -> bool {
     if self.error_sets.at(target) |declared| {
         if tags_hold_code(&declared.tags, code) {
@@ -995,7 +819,6 @@ fn (self: &Module) error_set_holds_code(target: []u8, code: i64) -> bool {
     return false;
 }
 
-/// Reports whether one tag map carries a code as a value.
 fn tags_hold_code(tags: &map::Map<[]u8, i64>, code: i64) -> bool {
     var position = 0;
     while tags.key_at(position) |member| {
@@ -1009,8 +832,6 @@ fn tags_hold_code(tags: &map::Map<[]u8, i64>, code: i64) -> bool {
     return false;
 }
 
-/// Returns one union variant by spelling, or null, for a name the caller
-/// spells itself.
 pub fn (self: &Module) union_variant_named(union_name: []u8, variant: []u8) -> ?UnionVariant {
     if self.unions.at(union_name) |declared| {
         return declared.variants.get(variant);
@@ -1018,8 +839,6 @@ pub fn (self: &Module) union_variant_named(union_name: []u8, variant: []u8) -> ?
     return null;
 }
 
-/// Returns one union variant, or null when the union or the variant is not
-/// declared.
 pub fn (self: &Module) union_variant(union_name: Name, variant: Name) -> ?UnionVariant {
     let union_text = name_text(&self.names, union_name);
     let union_bytes = union_text.as_bytes();
@@ -1031,7 +850,6 @@ pub fn (self: &Module) union_variant(union_name: Name, variant: Name) -> ?UnionV
     return null;
 }
 
-/// Appends a block to a function and returns its handle.
 pub fn (self: &var Module) add_block(function: Function, name: Name) -> !Block {
     let allocator = self.names.allocator;
     let block = Block {
@@ -1047,7 +865,6 @@ pub fn (self: &var Module) add_block(function: Function, name: Name) -> !Block {
     return block;
 }
 
-/// Retains one instruction and appends it to a block.
 pub fn (self: &var Module) add_instr(allocator: Allocator, block: Block, instr: InstrNode) -> !Instr {
     let handle = Instr { node: try self.instrs.add(allocator, move instr) };
     if self.blocks.at_mut(block.node) |node| {
@@ -1056,8 +873,6 @@ pub fn (self: &var Module) add_instr(allocator: Allocator, block: Block, instr: 
     return handle;
 }
 
-/// Returns an instruction record with empty operand lists, for a caller to
-/// fill in before it is retained.
 pub fn (self: &Module) blank_instr(result: Value, op: Op, operand: Name, immediate: Name) -> InstrNode {
     let allocator = self.names.allocator;
     return InstrNode {
@@ -1077,22 +892,18 @@ pub fn (self: &Module) blank_instr(result: Value, op: Op, operand: Name, immedia
     };
 }
 
-/// Returns the name of a block.
 pub fn (self: &Module) block_name(block: Block) -> Name {
     return self.blocks.at(block.node).name;
 }
 
-/// Returns the terminator of a block.
 pub fn (self: &Module) block_terminator(block: Block) -> Terminator {
     return self.blocks.at(block.node).terminator;
 }
 
-/// Reports whether a block has ended.
 pub fn (self: &Module) block_terminated(block: Block) -> bool {
     return self.blocks.at(block.node).terminator.op != TermOp::None;
 }
 
-/// Ends a block.
 pub fn (self: &var Module) set_terminator(block: Block, terminator: Terminator) -> void {
     if self.blocks.at_mut(block.node) |node| {
         node.terminator = terminator;
@@ -1100,17 +911,14 @@ pub fn (self: &var Module) set_terminator(block: Block, terminator: Terminator) 
     return;
 }
 
-/// Returns the result of an instruction.
 pub fn (self: &Module) instr_result(instr: Instr) -> Value {
     return self.instrs.at(instr.node).result;
 }
 
-/// Returns the op of an instruction.
 pub fn (self: &Module) instr_op(instr: Instr) -> Op {
     return self.instrs.at(instr.node).op;
 }
 
-/// Appends one phi incoming to an instruction.
 pub fn (self: &var Module) add_incoming(allocator: Allocator, instr: Instr, block: Name, value: Value) -> !void {
     if self.instrs.at_mut(instr.node) |node| {
         try node.incoming.append(allocator, Incoming { block: block, value: value });
@@ -1118,7 +926,6 @@ pub fn (self: &var Module) add_incoming(allocator: Allocator, instr: Instr, bloc
     return;
 }
 
-/// Appends one cleanup to an instruction.
 pub fn (self: &var Module) add_cleanup(allocator: Allocator, instr: Instr, cleanup: Cleanup) -> !void {
     if self.instrs.at_mut(instr.node) |node| {
         try node.cleanups.append(allocator, cleanup);
@@ -1126,7 +933,6 @@ pub fn (self: &var Module) add_cleanup(allocator: Allocator, instr: Instr, clean
     return;
 }
 
-/// Appends one indirect-call ABI parameter to an instruction.
 pub fn (self: &var Module) add_call_param(allocator: Allocator, instr: Instr, param: Param) -> !void {
     if self.instrs.at_mut(instr.node) |node| {
         try node.call_params.append(allocator, param);
@@ -1134,7 +940,6 @@ pub fn (self: &var Module) add_call_param(allocator: Allocator, instr: Instr, pa
     return;
 }
 
-/// Marks one direct call as a declared foreign boundary.
 pub fn (self: &var Module) set_extern_call(instr: Instr, abi: Name, name: Name) -> void {
     if self.instrs.at_mut(instr.node) |node| {
         node.extern_abi = abi;
@@ -1143,7 +948,6 @@ pub fn (self: &var Module) set_extern_call(instr: Instr, abi: Name, name: Name) 
     return;
 }
 
-/// Marks one foreign call as a C variadic one that declares fixed parameters.
 pub fn (self: &var Module) set_variadic_fixed(instr: Instr, fixed: i64) -> void {
     if self.instrs.at_mut(instr.node) |node| {
         node.variadic_fixed = fixed;
@@ -1151,23 +955,19 @@ pub fn (self: &var Module) set_variadic_fixed(instr: Instr, fixed: i64) -> void 
     return;
 }
 
-/// Returns the name of a function.
 pub fn (self: &Module) function_name(function: Function) -> Name {
     return self.function_nodes.at(function.node).name;
 }
 
-/// Returns the return type of a function.
 pub fn (self: &Module) function_return(function: Function) -> Name {
     return self.function_nodes.at(function.node).return_type;
 }
 
-/// Returns one parameter of a function, or null past the last.
 pub fn (self: &Module) function_param(function: Function, index: i64) -> ?Param {
     let node = self.function_nodes.at(function.node);
     return node.params.get(index);
 }
 
-/// Returns the number of parameters a function declares.
 pub fn (self: &Module) function_param_count(function: Function) -> i64 {
     let node = self.function_nodes.at(function.node);
     return node.params.len();

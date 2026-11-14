@@ -14,17 +14,6 @@ import std::map;
 import std::mem;
 import std::string;
 
-// The entry point of lowering, the lowerer state, declaration collection,
-// signatures, and function lowering. Every declaration fact the body lowering
-// reads is copied into FunctionFacts first, so no borrow of the Ast is held
-// while a body is lowered (the `std::meta` expansions add nodes to it), and
-// the sets a generic instantiation binds live in arenas behind copy handles.
-
-/// Converts a checked Kizu AST into typed SSA IR: the module is left in
-/// `self.module` for the caller to render, optimize or emit, and the first
-/// failure comes back as a diagnostic. The ownership checker was read for the
-/// errdefers a move retired (ADR-0114) when the lowerer was created, and
-/// std_errors gives the codes std error sets lower to.
 pub fn (self: &var Lowerer) lower(
     tree: &var ast::Ast,
     program: &ast::Program,
@@ -37,8 +26,6 @@ pub fn (self: &var Lowerer) lower(
     return verify(self.allocator, &self.module);
 }
 
-/// Is one function declaration as the lowering reads it: the signature facts
-/// rendered once, and the body.
 pub struct FunctionFacts {
     pub name: Name,
     pub static_params: array::Array<StaticParamFacts>,
@@ -51,20 +38,15 @@ pub struct FunctionFacts {
     pub requires_unsafe: bool,
     pub variadic: bool,
     pub body: ?ast::Block,
-    /// The module path the function was declared in, which the function it
-    /// lowers to is filed under.
     pub module: Name,
 }
 
-/// Is one static parameter: its name, whether it is a type parameter, and
-/// the declared type of a value parameter (`Field`, `Function`, `i64`).
 pub struct StaticParamFacts {
     pub name: Name,
     pub is_type: bool,
     pub type_name: Name,
 }
 
-/// Is one runtime parameter as written: name, rendered type, borrow marks.
 pub struct ParamFacts {
     pub name: Name,
     pub type_name: Name,
@@ -72,28 +54,19 @@ pub struct ParamFacts {
     pub mut_borrow: bool,
 }
 
-/// Identifies one FunctionFacts retained by the lowerer.
 pub struct FactsHandle {
     node: arena::Handle<FunctionFacts>,
 }
 
-/// Identifies one Signature retained by the lowerer.
 pub struct SignatureHandle {
     node: arena::Handle<Signature>,
 }
 
-/// Names the parameters a call hands its arguments over at: a signature's
-/// params from position offset on, or none at all.
 pub struct ParamsView {
     pub signature: ?SignatureHandle,
     pub offset: i64,
 }
 
-/// The types a call hands its first arguments over at when the callee has no
-/// signature the lowerer can read them from. A container primitive and a
-/// std::internal::builtin both declare none of their own, so the call site
-/// spells the ones that matter in place; `empty_name` leaves an argument with
-/// the type it carries itself.
 pub struct NamedTypes {
     pub first: Name,
     pub second: Name,
@@ -101,7 +74,6 @@ pub struct NamedTypes {
     pub fourth: Name,
 }
 
-/// Returns the record that names nothing.
 pub fn no_named_types() -> NamedTypes {
     return NamedTypes {
         first: empty_name(),
@@ -111,7 +83,6 @@ pub fn no_named_types() -> NamedTypes {
     };
 }
 
-/// Returns the type named for one argument position, or the empty name.
 pub fn named_type_at(types: NamedTypes, index: i64) -> Name {
     if index == 0 {
         return types.first;
@@ -128,36 +99,26 @@ pub fn named_type_at(types: NamedTypes, index: i64) -> Name {
     return empty_name();
 }
 
-/// Returns the parameter list a callee the lowerer has no signature for
-/// gets: every argument keeps the type it carries itself.
 pub fn no_params() -> ParamsView {
     return ParamsView { signature: null, offset: 0 };
 }
 
-/// Is one compile-time value bound to a static parameter.
 pub struct StaticValue {
     pub name: Name,
     pub typ: Name,
     pub text: Name,
 }
 
-/// Is the slot an array a local holds by value was written into when the local
-/// was bound.
 pub struct ReadStorage {
     pub value: Name,
     pub slot: Value,
 }
 
-/// Is one type parameter bound to a type argument.
 pub struct TypeBinding {
     pub name: Name,
     pub bound: Name,
 }
 
-/// Is what one generic declaration's static parameters are bound to for one
-/// call: the type arguments, the compile-time values, and the order they were
-/// declared in. The type arguments are kept as parallel owned texts as well,
-/// for the type parser's substitution.
 pub struct GenericArgs {
     pub order: array::Array<Name>,
     pub bindings: array::Array<TypeBinding>,
@@ -166,19 +127,16 @@ pub struct GenericArgs {
     pub values: array::Array<StaticValue>,
 }
 
-/// Identifies one GenericArgs retained by the lowerer.
 pub struct GenericArgsHandle {
     node: arena::Handle<GenericArgs>,
 }
 
-/// Is one generic function with its static parameters bound.
 pub struct GenericInstance {
     pub decl: FactsHandle,
     pub args: GenericArgsHandle,
     pub symbol: Name,
 }
 
-/// Is the per-function loop stack entry.
 pub struct LoopContext {
     pub label: Name,
     pub break_to: Name,
@@ -188,41 +146,30 @@ pub struct LoopContext {
     pub continue_edges: array::Array<LoopEdge>,
 }
 
-/// Is one edge back into or out of a loop: the block it leaves from and the
-/// environment it carries.
 pub struct LoopEdge {
     pub block: Name,
     pub env: EnvHandle,
 }
 
-/// Is a header phi and the name it carries around the loop.
 pub struct LoopPhi {
     pub name: Name,
     pub phi: Instr,
 }
 
-/// Is the field or variant a comptime capture names for the length of one
-/// expansion. A variant that carries no payload has no type, so typ is empty
-/// for it.
 pub struct MetaField {
     pub owner: Name,
     pub name: Name,
     pub typ: Name,
     pub variant: bool,
-    /// The error set that declared a member of an error set, empty
-    /// otherwise; the member is spelled and built through that set.
     pub origin: Name,
 }
 
-/// Returns a capture record to fill in.
 pub fn empty_meta_field() -> MetaField {
     return MetaField {
         owner: empty_name(), name: empty_name(), typ: empty_name(), variant: false, origin: empty_name()
     };
 }
 
-/// Names the declaration a variant is built from: the declaring set for an
-/// error member, the type itself otherwise.
 pub fn variant_owner(field: MetaField) -> Name {
     if is_empty(field.origin) {
         return field.owner;
@@ -230,45 +177,31 @@ pub fn variant_owner(field: MetaField) -> Name {
     return field.origin;
 }
 
-// MetaBinding is one `comptime` capture in force; the chain through parent
-// holds every capture in force, newest first.
 struct MetaBinding {
     parent: ?arena::Handle<MetaBinding>,
     name: Name,
     field: MetaField,
 }
 
-/// Identifies the captures in force before a bind, what its restore puts back.
 pub struct MetaMark {
     previous: ?arena::Handle<MetaBinding>,
 }
 
-// StaticBinding is one static value bound for the length of one expansion: the
-// capture of an integer-range `comptime for`, which stands beside the
-// instance's own static arguments. The chain through parent is newest first,
-// so a capture shadows an instance static of the same name until its mark is
-// restored.
 struct StaticBinding {
     parent: ?arena::Handle<StaticBinding>,
     value: StaticValue,
 }
 
-/// Identifies the static bindings in force before a bind, what its restore
-/// puts back.
 pub struct StaticMark {
     previous: ?arena::Handle<StaticBinding>,
 }
 
-/// Is one errdefer receiver the ownership checker retired at one return
-/// statement or try expression.
 pub struct RetiredReceiver {
     pub statement: ?arena::Handle<ast::StatementNode>,
     pub expression: ?arena::Handle<ast::ExpressionNode>,
-    // The receiver expression the retired `errdefer` was written with.
     pub receiver: arena::Handle<ast::ExpressionNode>,
 }
 
-/// Holds the names every lowering spells, interned once.
 pub struct CommonNames {
     pub bool_type: Name,
     pub i64_type: Name,
@@ -282,44 +215,24 @@ pub struct CommonNames {
     pub zero_index: Value,
 }
 
-/// Lowers one program. The module it builds is read in place after `lower`
-/// succeeds.
 pub struct Lowerer {
     allocator: Allocator,
     target: stdtarget::Target,
     pub module: Module,
     types: typ::Table,
     common: CommonNames,
-    // decls lists the program's function declarations in order; tests the
-    // test blocks, which lower after the functions.
     decl_facts: arena::Arena<FunctionFacts>,
-    // test_name and test_file are set while a test block lowers, quoted the
-    // way string constants are spelled. A test body tells the runtime which
-    // test it is and which statement it is on (`test.begin`, `test.mark`), so
-    // a failure inside whatever a statement called can still name the test and
-    // the statement that reached it.
     test_name: Name,
     test_file: Name,
     decls: array::Array<FactsHandle>,
-    // scratch_facts, scratch_args and scratch_signature fill result slots
-    // before a resolver writes them, so out parameters need no optional
-    // wrapper.
     scratch_facts: FactsHandle,
     scratch_args: GenericArgsHandle,
     scratch_signature: SignatureHandle,
-    // The signature the slot analysis reads for a generic method whose
-    // receiver arrives as the binding's storage: one param, handed over that
-    // way, which is all mark_lent_method_args looks at.
     storage_self_signature: SignatureHandle,
     tests: array::Array<TestFacts>,
-    /// The module of the test body being lowered, for the one body whose
-    /// symbol does not carry it.
     current_test_module: Name,
     signature_nodes: arena::Arena<Signature>,
     signatures: map::Map<[]u8, SignatureHandle>,
-    // method_signatures groups the signatures by the method name they end
-    // with, so a method call reads the handful of methods that could answer it
-    // instead of every declaration.
     method_signatures: map::Map<[]u8, array::Array<SignatureHandle>>,
     current: Function,
     block: Block,
@@ -329,94 +242,37 @@ pub struct Lowerer {
     next_block: i64,
     loops: array::Array<LoopContext>,
     defer_frames: array::Array<array::Array<Cleanup>>,
-    // current_args binds the type parameters and static values in force: those
-    // of the generic function being instantiated. null binds nothing.
     generic_args: arena::Arena<GenericArgs>,
     current_args: ?GenericArgsHandle,
-    // instantiated records the generic instances already requested, keyed
-    // by the symbol they were given; pending the ones still to lower, read
-    // from pending_next on.
-    // Indexed by the name id of the instance symbol, the way the emitter
-    // indexes its value table: the ids are dense and the key is always a name.
     instantiated: array::Array<bool>,
     pending: array::Array<GenericInstance>,
     pending_next: i64,
-    // slots names the locals of the function being lowered that live in
-    // memory because something writes through a `&var` borrow of them, and
-    // the `&var` parameters that arrive as such storage.
     slots: array::Array<Name>,
-    // index_written names the locals an element write `x[i] = v` or `x.f[i] =
-    // v` starts from. One that holds an array, or a struct holding one, is
-    // given a slot when it is bound; one holding a view writes through the
-    // view and keeps its SSA form.
     index_written: array::Array<Name>,
-    // index_read names the locals an element read `x[i]` starts from. One that
-    // holds an array by value has it written into a slot once, where it is
-    // bound, and read_storage keeps that slot.
     index_read: array::Array<Name>,
     read_storage: array::Array<ReadStorage>,
-    // place_slots names the slots bound for index_written locals: the storage
-    // is decided per binding, from the value's type, so it is recorded on the
-    // value rather than on the name.
     place_slots: array::Array<Name>,
-    // lent_places names the values a local binds that are a borrowed place's
-    // address rather than a slot of its own: a name bound by `let v = &var x`
-    // is storage the way a `&var` parameter is.
     lent_places: array::Array<Name>,
-    // for_indexes names the values a `for` binds as its index: an index is a
-    // value and never storage, even when a later local of the same name is one
-    // of slots.
     for_indexes: array::Array<Name>,
-    // caller_storage_params names the parameters that arrive as the
-    // caller's storage, apart from the locals that were given a slot of
-    // their own: a match through one binds payloads where they lie, a match
-    // on a local moves them out (ADR-0090).
     caller_storage_params: array::Array<Name>,
-    // generic_decls indexes the program's generic function declarations by
-    // name; struct_decls, enum_decls and union_decls the sum and product
-    // declarations, which is what `comptime for` and `std::meta::variants`
-    // walk in source order.
     generic_decls: map::Map<i64, FactsHandle>,
     struct_decls: map::Map<[]u8, ast::Declaration>,
     enum_decls: map::Map<[]u8, ast::Declaration>,
     union_decls: map::Map<[]u8, ast::Declaration>,
-    // meta_fields binds the captures of the `comptime for` expansions
-    // currently being lowered.
     meta_bindings: arena::Arena<MetaBinding>,
     meta_current: ?arena::Handle<MetaBinding>,
-    // static_bindings binds the captures of the integer-range `comptime for`
-    // expansions currently being lowered, read before the instance's own
-    // static arguments.
     static_bindings: arena::Arena<StaticBinding>,
     static_current: ?arena::Handle<StaticBinding>,
-    // extern_decls maps a resolved foreign function name to its explicit ABI
-    // and host symbol.
     extern_decls: array::Array<ExternDecl>,
-    // next_error_code is the next global code for an error set the program
-    // declares itself; std members keep the codes std assigns.
     next_error_code: i64,
-    // deinit_owners names the types that carry a deinit contract, seeded
-    // from ast::deinit_owners so lowering reads the same owner-ness the
-    // checkers do.
     deinit_owners: map::Map<[]u8, bool>,
     release_allocators: map::Map<[]u8, bool>,
-    // retired is the preceding phase's output: the errdefer receivers a
-    // move retired before each return statement and try expression.
     retired: array::Array<RetiredReceiver>,
-    // Argument places ownership proved an indirect call lends as &var.
     function_pointer_mut_borrows: array::Array<ast::Expression>,
-    // method_callees names the declarations each method call resolved to in
-    // the ownership check: the slot analysis reads only the methods a call
-    // reaches, not every method that shares its name.
     method_callees: array::Array<ResolvedMethodCall>,
-    // method_call_buckets indexes method_callees by ownership's
-    // method_call_key, in recording order; the callee node decides within a
-    // bucket.
     method_call_buckets: map::Map<i64, array::Array<i64>>,
 }
 
-/// Is one declaration a method call resolved to: the call's callee
-/// expression and the declaration's name.
 struct ResolvedMethodCall {
     callee: ast::Expression,
     name: Name,
@@ -427,21 +283,13 @@ pub struct ExternDecl {
     pub name: Name,
 }
 
-/// Is one `test "name" { ... }` block: the symbol it lowers under and its
-/// body.
 pub struct TestFacts {
     pub symbol: Name,
-    /// The name as written, quoted the way a string constant is spelled, so
-    /// the body can hand it to the runtime (`test.begin`).
     pub quoted_name: Name,
-    /// The package module the block was written in, empty for a loose file.
-    /// A test's symbol does not carry one, and a function pointer's value is
-    /// looked up through the prefix of what is being lowered.
     pub module: Name,
     pub body: ?ast::Block,
 }
 
-/// Prepares the lookup tables used during lowering.
 pub fn new_lowerer(
     allocator: Allocator,
     tree: &ast::Ast,
@@ -457,7 +305,6 @@ pub fn new_lowerer(
     );
 }
 
-/// Prepares lowering for one selected build target.
 pub fn new_lowerer_for_target(
     allocator: Allocator,
     tree: &ast::Ast,
@@ -475,9 +322,6 @@ pub fn new_lowerer_for_target(
     var envs = new_env_store(allocator);
     errdefer envs.deinit(allocator);
     let env = try envs.new_env();
-    // A function and a block that belong to no lowered function fill the
-    // current slots until the first function opens, so the fields need no
-    // optional wrapper.
     let scratch_function = Function {
         node: try module.function_nodes.add(allocator, FunctionNode {
             name: empty_name(),
@@ -617,9 +461,6 @@ fn intern_common(names: &var NameTable) -> !CommonNames {
     };
 }
 
-/// Copies the declaration facts the lowering reads out of the program: the
-/// function declarations in order, the test blocks, and the indexes of the
-/// generic, struct, enum and union declarations.
 fn (self: &var Lowerer) collect_facts(tree: &ast::Ast, program: &ast::Program) -> !void {
     var module_index = 0;
     while program.modules.get(module_index) |path| {
@@ -676,7 +517,6 @@ fn (self: &var Lowerer) collect_facts(tree: &ast::Ast, program: &ast::Program) -
     return;
 }
 
-/// Copies one function declaration's facts.
 fn (self: &var Lowerer) function_facts(tree: &ast::Ast, function: &ast::FunctionDecl) -> !FactsHandle {
     var static_params = array::new<StaticParamFacts>(self.allocator);
     errdefer static_params.deinit(self.allocator);
@@ -726,15 +566,11 @@ fn (self: &var Lowerer) function_facts(tree: &ast::Ast, function: &ast::Function
     return FactsHandle { node: try self.decl_facts.add(self.allocator, move facts) };
 }
 
-/// Names the canonical spelling of one parsed type.
 fn (self: &var Lowerer) intern_type(tree: &ast::Ast, value: typ::Type) -> !Name {
     let rendered = try typ::render(self.allocator, &tree.types, value);
     return self.module.names.intern_owned(move rendered);
 }
 
-/// Copies the errdefer receivers the ownership checker retired, the
-/// indirect-call lends and the method calls it resolved, so no borrow of the
-/// checker is kept.
 fn (self: &var Lowerer) copy_retired(checker: &ownership::Checker) -> !void {
     var index = 0;
     while checker.retired_return_at(index) |statement| {
@@ -789,8 +625,6 @@ fn (self: &var Lowerer) copy_retired(checker: &ownership::Checker) -> !void {
     return;
 }
 
-/// Reports whether the ownership checker retired the errdefer on receiver
-/// before this return statement.
 fn (self: &Lowerer) retired_for_return(
     statement: ast::Statement,
     receiver: arena::Handle<ast::ExpressionNode>
@@ -807,8 +641,6 @@ fn (self: &Lowerer) retired_for_return(
     return false;
 }
 
-/// Reports whether the ownership checker retired the errdefer on receiver
-/// before this try expression.
 fn (self: &Lowerer) retired_for_try(
     expression: ast::Expression,
     receiver: arena::Handle<ast::ExpressionNode>
@@ -825,7 +657,6 @@ fn (self: &Lowerer) retired_for_try(
     return false;
 }
 
-/// Performs declaration collection and function lowering.
 fn (self: &var Lowerer) lower_module(
     tree: &var ast::Ast,
     program: &ast::Program,
@@ -835,11 +666,6 @@ fn (self: &var Lowerer) lower_module(
     if try self.collect_decls(tree, program, std_errors) |failed| {
         return move failed;
     }
-    // The program's own functions lower in declaration order, every one of
-    // them: what `kizu ir` shows, and what a corpus expects, does not depend
-    // on who calls whom. std lowers on demand, the way a generic instance
-    // already does: a std function lowers once a lowered body reaches it, so
-    // a program pays for the part of the library it uses.
     var std = map::new<i64, FactsHandle>(self.allocator);
     defer std.deinit(self.allocator);
     var index = 0;
@@ -864,11 +690,6 @@ fn (self: &var Lowerer) lower_module(
     return self.lower_reached(tree, &var std);
 }
 
-/// Lowers the std functions the module reaches and the generic instances it
-/// asks for, until nothing new is reached. Every lowered function is scanned
-/// once for what it calls or takes the address of; a std function reached for
-/// the first time lowers next, ahead of the pending generics. The order
-/// functions are appended in is part of the output, so it stays fixed.
 fn (self: &var Lowerer) lower_reached(
     tree: &var ast::Ast,
     std: &var map::Map<i64, FactsHandle>
@@ -910,9 +731,6 @@ fn (self: &var Lowerer) lower_reached(
     return null;
 }
 
-/// Lowers each `test "name" { ... }` block into a function, so a test runs
-/// through the same lowering as the rest of the program. A test body may
-/// `try`, so it lowers as a function returning `!void`.
 fn (self: &var Lowerer) lower_tests(
     tree: &var ast::Ast,
     sources: &source::SourceMap
@@ -948,8 +766,6 @@ fn (self: &var Lowerer) lower_tests(
     return null;
 }
 
-/// Names the quoted path of the file a test body was written in, read off the
-/// first statement that carries a position. Quoted empty text when none does.
 fn (self: &var Lowerer) test_file_name(
     tree: &ast::Ast,
     sources: &source::SourceMap,
@@ -975,8 +791,6 @@ fn (self: &var Lowerer) test_file_name(
     return self.quoted_bytes("");
 }
 
-/// Tells the runtime which test is running: the name and the file are two
-/// constants the body hands over once.
 fn (self: &var Lowerer) emit_test_begin() -> !void {
     let name = try self.emit_const(self.common.bytes_type, self.test_name);
     let file = try self.emit_const(self.common.bytes_type, self.test_file);
@@ -988,7 +802,6 @@ fn (self: &var Lowerer) emit_test_begin() -> !void {
     return;
 }
 
-/// Records signatures and struct layouts.
 fn (self: &var Lowerer) collect_decls(
     tree: &var ast::Ast,
     program: &ast::Program,
@@ -1038,10 +851,6 @@ fn (self: &var Lowerer) collect_decls(
     return null;
 }
 
-/// Groups every declared method under the name it ends with. The receiver's
-/// type is unknown before lowering, so a method call has to union every method
-/// bearing the name; reading them from here is what keeps that union from
-/// walking the whole program once per call site.
 fn (self: &var Lowerer) index_method_signatures() -> !void {
     var method = string::new(self.allocator);
     defer method.deinit(self.allocator);
@@ -1066,10 +875,6 @@ fn (self: &var Lowerer) index_method_signatures() -> !void {
         }
         position = position + 1;
     }
-    // A generic method has no lowered signature until its instance is
-    // requested, which happens at the call the slot analysis runs before. Its
-    // declaration already says whether the receiver arrives as the binding's
-    // storage, so the analysis reads that rather than instantiating to ask.
     var generic_index = 0;
     while self.generic_decls.key_at(generic_index) |key| {
         generic_index = generic_index + 1;
@@ -1090,8 +895,6 @@ fn (self: &var Lowerer) index_method_signatures() -> !void {
     return;
 }
 
-/// Appends the method name a generic declaration ends with, and reports
-/// whether it has one.
 fn (self: &Lowerer) generic_method_name(decl: FactsHandle, out: &var string::String) -> !bool {
     let facts = self.decl_facts.at(decl.node);
     let retained = name_text(&self.module.names, facts.name);
@@ -1103,7 +906,6 @@ fn (self: &Lowerer) generic_method_name(decl: FactsHandle, out: &var string::Str
     return false;
 }
 
-/// Records one method under its name.
 fn (self: &var Lowerer) add_method_signature(method: []u8, signature: SignatureHandle) -> !void {
     let allocator = self.allocator;
     if self.method_signatures.at_mut(method) |list| {
@@ -1115,9 +917,6 @@ fn (self: &var Lowerer) add_method_signature(method: []u8, signature: SignatureH
     return self.method_signatures.insert(allocator, method, move list);
 }
 
-/// Returns the position-th declared method named method, null past the last.
-/// The index is read one entry at a time so the borrow ends before the body
-/// marks a name.
 fn (self: &Lowerer) method_signature_at(method: []u8, position: i64) -> ?SignatureHandle {
     if self.method_signatures.at(method) |list| {
         return list.get(position);
@@ -1125,7 +924,6 @@ fn (self: &Lowerer) method_signature_at(method: []u8, position: i64) -> ?Signatu
     return null;
 }
 
-/// Records the signature callers of name see.
 fn (self: &var Lowerer) record_signature(name: Name, signature: SignatureHandle) -> !void {
     let retained = name_text(&self.module.names, name);
     let name_bytes = retained.as_bytes();
@@ -1136,7 +934,6 @@ fn (self: &var Lowerer) record_signature(name: Name, signature: SignatureHandle)
     return self.signatures.insert(self.allocator, name_bytes, signature);
 }
 
-/// Records the explicit ABI and host symbol a foreign declaration links to.
 fn (self: &var Lowerer) record_extern_decl(name: Name, declared: ExternDecl) -> !void {
     let id = name_id(name);
     while self.extern_decls.len() <= id {
@@ -1147,8 +944,6 @@ fn (self: &var Lowerer) record_extern_decl(name: Name, declared: ExternDecl) -> 
     return self.extern_decls.set(id, declared);
 }
 
-/// Strips the module qualification a resolver added to a foreign declaration.
-/// The host symbol is the identifier the declaration was written with.
 fn (self: &var Lowerer) external_symbol(name: Name) -> !Name {
     let start = self.qualification_end(name);
     if start < 0 {
@@ -1157,8 +952,6 @@ fn (self: &var Lowerer) external_symbol(name: Name) -> !Name {
     return self.module.names.intern_slice(name, start, self.module.names.len(name));
 }
 
-/// Returns the index after the last `::` of a name, or -1 for an unqualified
-/// name.
 fn (self: &Lowerer) qualification_end(name: Name) -> i64 {
     let retained = name_text(&self.module.names, name);
     let bytes = retained.as_bytes();
@@ -1172,7 +965,6 @@ fn (self: &Lowerer) qualification_end(name: Name) -> i64 {
     return -1;
 }
 
-/// Converts an AST union declaration to IR metadata.
 fn (self: &var Lowerer) lower_union(allocator: Allocator, tree: &ast::Ast, declared: &ast::UnionDecl) -> !void {
     var variants = map::new<[]u8, UnionVariant>(self.allocator);
     errdefer variants.deinit(self.allocator);
@@ -1196,7 +988,6 @@ fn (self: &var Lowerer) lower_union(allocator: Allocator, tree: &ast::Ast, decla
     return self.module.unions.insert(allocator, name_bytes, Union { name: name, variants: move variants });
 }
 
-/// Converts an AST enum declaration to IR metadata.
 fn (self: &var Lowerer) lower_enum(allocator: Allocator, tree: &ast::Ast, declared: &ast::EnumDecl) -> !void {
     var tags = map::new<[]u8, i64>(self.allocator);
     errdefer tags.deinit(self.allocator);
@@ -1217,9 +1008,6 @@ fn (self: &var Lowerer) lower_enum(allocator: Allocator, tree: &ast::Ast, declar
     });
 }
 
-/// Converts an AST error set to IR metadata. An error value is one integer,
-/// globally unique across every set: std members keep the codes std assigns,
-/// and sets a program declares take the codes after them.
 fn (self: &var Lowerer) lower_error_set(
     allocator: Allocator,
     tree: &ast::Ast,
@@ -1263,10 +1051,6 @@ fn (self: &var Lowerer) lower_error_set(
     });
 }
 
-/// Records the `error C = A or B;` declarations once every declaring set is
-/// filed. A combined set keeps no codes of its own: it lists the `{ }`-form
-/// sets its members come from, resolved through any combined sets it names, so
-/// its member set is a code-set union and nothing is renumbered (ADR-0127).
 fn (self: &var Lowerer) lower_combined_error_sets(
     tree: &ast::Ast,
     pending: array::Array<ast::Declaration>
@@ -1299,17 +1083,12 @@ fn (self: &var Lowerer) lower_combined_error_sets(
             }
         }
         if !progress {
-            // A reference the checker did not already reject cannot appear
-            // here; an unresolved leftover is left unfiled rather than
-            // guessed at.
             return;
         }
     }
     return;
 }
 
-/// Files one combined error set when every set it names is already filed,
-/// reporting whether it was.
 fn (self: &var Lowerer) lower_combined_error_set(
     allocator: Allocator,
     tree: &ast::Ast,
@@ -1375,7 +1154,6 @@ fn (self: &var Lowerer) lower_combined_error_set(
     return;
 }
 
-/// Converts an AST struct declaration to IR metadata.
 fn (self: &var Lowerer) lower_struct(tree: &ast::Ast, declared: &ast::StructDecl) -> !void {
     var fields = array::new<Field>(self.allocator);
     errdefer fields.deinit(self.allocator);
@@ -1393,14 +1171,11 @@ fn (self: &var Lowerer) lower_struct(tree: &ast::Ast, declared: &ast::StructDecl
     return self.module.structs.insert(self.allocator, name_bytes, Struct { name: name, fields: move fields });
 }
 
-/// Names a declared type with its `std::meta::element<T>` forms resolved.
 fn (self: &var Lowerer) resolve_element_forms(tree: &ast::Ast, value: typ::Type) -> !Name {
     let resolved = try stdmeta::resolve_element_type_forms(self.allocator, &tree.types, value);
     return self.module.names.intern_owned(move resolved);
 }
 
-/// Extracts the callable type of a function declaration, against the type
-/// bindings in force.
 fn (self: &var Lowerer) lower_signature(decl: FactsHandle) -> !SignatureHandle {
     var params = array::new<Param>(self.allocator);
     errdefer params.deinit(self.allocator);
@@ -1412,10 +1187,6 @@ fn (self: &var Lowerer) lower_signature(decl: FactsHandle) -> !SignatureHandle {
         index = index + 1;
         var lowered = try self.lower_param(facts);
         if !is_empty(extern_abi) and facts.borrow and !facts.mut_borrow {
-            // A foreign function reads a borrowed extern struct through a
-            // pointer, so the call hands it the address of a copy: the flat
-            // copy a Kizu `&T` travels as is an internal shape C knows
-            // nothing about (SPEC §12.2).
             let elem = try self.resolve_bound_type(facts.type_name);
             lowered.type_name = try self.module.names.prefixed("&", elem);
             lowered.passing = Passing::CopyAddress;
@@ -1445,10 +1216,6 @@ fn (self: &var Lowerer) lower_signature(decl: FactsHandle) -> !SignatureHandle {
     return SignatureHandle { node: handle };
 }
 
-/// Spells the source-level callable type of a declaration. Runtime Params
-/// cannot answer this: `x: &i64` and `x: i64` both travel as i64, while only
-/// the former carries a borrow effect. A function C calls or C defined is
-/// `extern "c" fn(...)`.
 fn (self: &var Lowerer) declared_function_pointer_type(
     decl: FactsHandle,
     declared_return: Name,
@@ -1487,14 +1254,11 @@ fn (self: &var Lowerer) declared_function_pointer_type(
     return self.module.names.intern_owned(move text);
 }
 
-/// Returns the number of runtime parameters a declaration has.
 fn (self: &Lowerer) decl_param_count(decl: FactsHandle) -> i64 {
     let facts = self.decl_facts.at(decl.node);
     return facts.params.len();
 }
 
-/// Returns one runtime parameter of a declaration; the blank record past the
-/// last, which no caller reads.
 fn (self: &Lowerer) decl_param(decl: FactsHandle, index: i64) -> ParamFacts {
     let facts = self.decl_facts.at(decl.node);
     if facts.params.get(index) |param| {
@@ -1503,14 +1267,11 @@ fn (self: &Lowerer) decl_param(decl: FactsHandle, index: i64) -> ParamFacts {
     return ParamFacts { name: empty_name(), type_name: empty_name(), borrow: false, mut_borrow: false };
 }
 
-/// Returns the number of static parameters a declaration has.
 fn (self: &Lowerer) decl_static_param_count(decl: FactsHandle) -> i64 {
     let facts = self.decl_facts.at(decl.node);
     return facts.static_params.len();
 }
 
-/// Returns one static parameter of a declaration; the blank record past the
-/// last, which no caller reads.
 fn (self: &Lowerer) decl_static_param(decl: FactsHandle, index: i64) -> StaticParamFacts {
     let facts = self.decl_facts.at(decl.node);
     if facts.static_params.get(index) |param| {
@@ -1519,18 +1280,14 @@ fn (self: &Lowerer) decl_static_param(decl: FactsHandle, index: i64) -> StaticPa
     return StaticParamFacts { name: empty_name(), is_type: false, type_name: empty_name() };
 }
 
-/// Returns the body of a declaration, null for one that has none.
 fn (self: &Lowerer) decl_body(decl: FactsHandle) -> ?ast::Block {
     return self.decl_facts.at(decl.node).body;
 }
 
-/// Returns the return type of a signature.
 fn (self: &Lowerer) signature_return(signature: SignatureHandle) -> Name {
     return self.signature_nodes.at(signature.node).return_type;
 }
 
-/// Returns what a call to a signature records as its variadic_fixed: the
-/// declared parameter count of a C variadic function, zero for any other.
 fn (self: &Lowerer) signature_variadic_fixed(signature: SignatureHandle) -> i64 {
     let node = self.signature_nodes.at(signature.node);
     if !node.variadic {
@@ -1539,16 +1296,6 @@ fn (self: &Lowerer) signature_variadic_fixed(signature: SignatureHandle) -> i64 
     return node.params.len();
 }
 
-/// Returns the signature whose params one call to signature hands its
-/// arguments over at: the declared ones and, for a C variadic function, one
-/// more for each argument after them. A `&var x` or `&x` there lends an extern
-/// struct the way a declared `&var S` / `&S` parameter of a C function is lent
-/// one -- the caller's storage, or the address of a copy -- so it gets the
-/// Param that parameter would have had, and everything that reads how a borrow
-/// parameter is passed reads this one too. Every other variadic argument is
-/// the value it is, which is what the empty Param says. A call that passes
-/// nothing after the declared parameters gets the declaration's own signature
-/// back.
 fn (self: &var Lowerer) variadic_call_signature(
     tree: &ast::Ast,
     signature: SignatureHandle,
@@ -1573,8 +1320,6 @@ fn (self: &var Lowerer) variadic_call_signature(
     let return_type = declared.return_type;
     let pointer_type = declared.pointer_type;
     let requires_unsafe = declared.requires_unsafe;
-    // The node describes one call, not a declaration, so it is not itself
-    // variadic: its params already name every argument the call passes.
     let handle = try self.signature_nodes.add(self.allocator, Signature {
         params: move params,
         return_type: return_type,
@@ -1585,9 +1330,6 @@ fn (self: &var Lowerer) variadic_call_signature(
     return SignatureHandle { node: handle };
 }
 
-/// Returns the Param of one argument after a C variadic function's declared
-/// parameters: how a borrow of the place it names is passed, or the empty
-/// Param when it is not a borrow.
 fn (self: &var Lowerer) variadic_borrow_param(tree: &ast::Ast, arg: ast::Expression) -> !Param {
     let plain = Param { name: empty_name(), type_name: empty_name(), passing: Passing::Value };
     let prefix = ownership::prefix_expr(tree, arg) orelse return plain;
@@ -1613,46 +1355,34 @@ fn (self: &var Lowerer) variadic_borrow_param(tree: &ast::Ast, arg: ast::Express
     };
 }
 
-/// Returns one parameter of a signature, or null past the last.
 fn (self: &Lowerer) signature_param(signature: SignatureHandle, index: i64) -> ?Param {
     let node = self.signature_nodes.at(signature.node);
     return node.params.get(index);
 }
 
-/// Returns the number of parameters a signature declares.
 fn (self: &Lowerer) signature_param_count(signature: SignatureHandle) -> i64 {
     let node = self.signature_nodes.at(signature.node);
     return node.params.len();
 }
 
-/// Returns the parameter a call hands its argument at index over at, or
-/// null when the view has none there.
 fn (self: &Lowerer) view_param(view: ParamsView, index: i64) -> ?Param {
     let signature = view.signature orelse return null;
     return self.signature_param(signature, index + view.offset);
 }
 
-/// Returns the parameters of a signature.
 fn params_of(signature: SignatureHandle) -> ParamsView {
     return ParamsView { signature: signature, offset: 0 };
 }
 
-/// Drops the receiver, which a method call lowers on its own.
 fn params_after_self(signature: SignatureHandle) -> ParamsView {
     return ParamsView { signature: signature, offset: 1 };
 }
 
-/// Is a declaration a name used as a value refers to: the symbol it is
-/// registered under and its signature.
 struct ResolvedFunction {
     name: Name,
     signature: SignatureHandle,
 }
 
-/// Resolves the declaration a name used as a value refers to. A callee is
-/// qualified by the resolver; a name in any other position is not, so a
-/// module-local function is looked up under the module the reader is inside as
-/// well as under the name as written.
 fn (self: &var Lowerer) function_by_value_name(name: Name) -> !?ResolvedFunction {
     if self.signature_named(name) |signature| {
         return ResolvedFunction { name: name, signature: signature };
@@ -1672,8 +1402,6 @@ fn (self: &var Lowerer) function_by_value_name(name: Name) -> !?ResolvedFunction
     return null;
 }
 
-/// Appends the module prefix of the function being lowered, `::` included, and
-/// reports whether it has one.
 fn (self: &var Lowerer) append_current_module_prefix(out: &var string::String) -> !bool {
     let node = self.module.function_nodes.at(self.current.node);
     let retained = name_text(&self.module.names, node.name);
@@ -1693,7 +1421,6 @@ fn (self: &var Lowerer) append_current_module_prefix(out: &var string::String) -
     return true;
 }
 
-/// Returns the byte after the last `::` in a name, or 0 when it has none.
 fn last_namespace_end(bytes: []u8) -> i64 {
     var index = mem::len(bytes);
     while index > 1 {
@@ -1705,29 +1432,23 @@ fn last_namespace_end(bytes: []u8) -> i64 {
     return 0;
 }
 
-/// Spells the function pointer type a signature's name has as a value.
 fn (self: &var Lowerer) function_pointer_type(signature: SignatureHandle) -> !Name {
     let node = self.signature_nodes.at(signature.node);
     return node.pointer_type;
 }
 
-/// Returns the signature recorded under name.
 fn (self: &Lowerer) signature_named(name: Name) -> ?SignatureHandle {
     let retained = name_text(&self.module.names, name);
     let bytes = retained.as_bytes();
     return self.signatures.get(bytes);
 }
 
-/// Reports whether name is a declared function.
 fn (self: &Lowerer) has_signature(name: Name) -> bool {
     let retained = name_text(&self.module.names, name);
     let bytes = retained.as_bytes();
     return self.signatures.contains(bytes);
 }
 
-/// Gives each parameter that holds an array by value and whose elements are
-/// read the slot bind_read_storage gives a local. A parameter is made before
-/// the entry block, so the slot is there wherever it is read.
 fn (self: &var Lowerer) bind_param_read_storage(decl: FactsHandle, signature: SignatureHandle) -> !void {
     let count = self.signature_param_count(signature);
     var index = 0;
@@ -1747,9 +1468,6 @@ fn (self: &var Lowerer) bind_param_read_storage(decl: FactsHandle, signature: Si
     return;
 }
 
-/// Lowers one function into SSA blocks under an explicit IR symbol name. The
-/// function it builds wears the signature callers were given, rather than a
-/// second reading of the same declaration.
 fn (self: &var Lowerer) lower_function_named(
     tree: &var ast::Ast,
     decl: FactsHandle,
@@ -1804,18 +1522,10 @@ fn (self: &var Lowerer) lower_function_named(
         let facts = self.decl_param(decl, index);
         if self.signature_param(signature, index) |param| {
             try self.envs.bind(self.allocator, self.env, facts.name, param.value());
-            // A parameter that arrives as the caller's storage is a storage
-            // name like a lent local: reads load, assignments store, and
-            // address consumers take the pointer itself.
             if param.passing == Passing::CallerStorage {
                 try self.slots.append(self.allocator, facts.name);
                 try self.caller_storage_params.append(self.allocator, facts.name);
             } else {
-                // One that arrives as a value and is written through needs
-                // storage of its own, which is the copy it was handed. One
-                // that arrives as an address already reaches storage, and it
-                // is the caller's: wrapping it again would hand the callee a
-                // borrow of a borrow.
                 if self.is_index_written(facts.name) and self.holds_array_place(param.type_name) {
                     try self.add_slot(facts.name);
                 }
@@ -1847,20 +1557,12 @@ fn (self: &var Lowerer) lower_function_named(
         }
     }
     if !self.terminated() {
-        // A body that runs off its end returns what a written `return;`
-        // returns, which for `!void` is a wrapped success rather than a bare
-        // void.
         let value = try self.return_void_value();
         self.terminate(return_terminator(value));
     }
     return null;
 }
 
-/// Gives a parameter the type the callee sees and how the call hands it over.
-/// A `&var` parameter is the caller's own storage, because a write through it
-/// has to land there rather than in a copy. A `&` parameter cannot write, so a
-/// copy is the same observation and stays the cheaper shape -- except for
-/// unions, where matching needs an address and the copy is made for the call.
 fn (self: &var Lowerer) lower_param(facts: ParamFacts) -> !Param {
     let type_name = try self.resolve_bound_type(facts.type_name);
     var lowered = Param {
@@ -1874,7 +1576,6 @@ fn (self: &var Lowerer) lower_param(facts: ParamFacts) -> !Param {
     return lowered;
 }
 
-/// Applies `borrow_ir_type` to one parameter record.
 fn (self: &var Lowerer) borrow_ir_param(param: Param, elem: Name, mutable: bool) -> !Param {
     let passing = self.borrow_passing(elem, mutable);
     return Param {
@@ -1884,15 +1585,8 @@ fn (self: &var Lowerer) borrow_ir_param(param: Param, elem: Name, mutable: bool)
     };
 }
 
-/// Decides how a borrow of elem travels: what it is spelled as.
-/// `borrow_passing` is the other half; a parameter and a return ask the same
-/// question, so they get the same answer.
 fn (self: &var Lowerer) borrow_ir_type(elem: Name, mutable: bool) -> !Name {
     if mutable {
-        // A mutable slice borrow writes through the view's own pointer, never
-        // into the caller's binding -- element writes only, no re-pointing
-        // (ADR-0096) -- so the fat pointer itself is the storage and travels
-        // flat, exactly like a shared slice view.
         if self.module.names.starts_with(elem, "[]") {
             return elem;
         }
@@ -1901,29 +1595,15 @@ fn (self: &var Lowerer) borrow_ir_type(elem: Name, mutable: bool) -> !Name {
     if self.module.has_union(elem) {
         return self.module.names.prefixed("&", elem);
     }
-    // A borrow of an owner reaches the value the caller has, not a copy of
-    // it. An owner is where a container header lives, and the header is the
-    // storage it describes (ADR-0131): a copy of one stops seeing what the
-    // original goes on to own, so the two answer differently the moment
-    // anything writes through the original -- `b.show(b.put(v))` would show
-    // the value from before the put.
     if self.is_owner_type(elem) {
         return self.module.names.prefixed("&", elem);
     }
-    // A fixed array lends views into its own bytes, and a view the callee
-    // derives from a borrow may be returned to the caller. A copy made for
-    // the call would leave that view pointing into the callee's frame, so
-    // copy data that holds a fixed array travels as an address too. Other
-    // copy data has no interior a view can reach, so a borrow of it travels
-    // flat.
     if self.module.holds_fixed_array(elem) {
         return self.module.names.prefixed("&", elem);
     }
     return elem;
 }
 
-/// Decides how a borrow of elem is handed over, the other half of
-/// `borrow_ir_type`.
 fn (self: &Lowerer) borrow_passing(elem: Name, mutable: bool) -> Passing {
     if mutable {
         if self.module.names.starts_with(elem, "[]") {
@@ -1943,8 +1623,6 @@ fn (self: &Lowerer) borrow_passing(elem: Name, mutable: bool) -> Passing {
     return Passing::Value;
 }
 
-/// Gives a function's result the type it travels as, so a returned borrow
-/// follows the same rule a borrowed parameter does.
 fn (self: &var Lowerer) lower_return_type(name: Name) -> !Name {
     if is_empty(name) {
         return self.return_type(name);
@@ -1970,22 +1648,13 @@ fn (self: &var Lowerer) lower_return_type(name: Name) -> !Name {
     return self.return_type(spelling);
 }
 
-/// Parses one IR type spelling through the lowerer's table.
 fn (self: &var Lowerer) parse_type(name: Name) -> !typ::Type {
     let retained = name_text(&self.module.names, name);
     let bytes = retained.as_bytes();
     return self.types.parse(bytes);
 }
 
-/// Binds the type parameters in force, wherever they stand. It is not named
-/// `resolve_type`: project declares a `resolve_type` with a `&var` second
-/// parameter, and the IR lowering unions `&var` positions by method name. A
-/// parameter inside a static argument list counts: `std::array::Array<T>` is
-/// the receiver of every Array method, and lowering it as written would leave
-/// the instance carrying the parameter it was instantiated away from.
 fn (self: &var Lowerer) resolve_bound_type(name: Name) -> !Name {
-    // A `std::meta` form written where a type goes resolves first: it names
-    // a type through the capture in force rather than being one (ADR-0113).
     let resolved = try self.resolve_meta_type_deep(name);
     let args = self.current_args orelse return self.bind_static_lengths(resolved);
     if self.bound_type(args, resolved) |bound| {
@@ -2003,8 +1672,6 @@ fn (self: &var Lowerer) resolve_bound_type(name: Name) -> !Name {
     return self.bind_static_lengths(interned);
 }
 
-// bind_static_lengths evaluates the array lengths a type reads from the
-// static integers in force: an instance's values and `comptime for` captures.
 fn (self: &var Lowerer) bind_static_lengths(name: Name) -> !Name {
     if !self.has_static_ints() {
         return name;
@@ -2020,8 +1687,6 @@ fn (self: &var Lowerer) bind_static_lengths(name: Name) -> !Name {
     return self.module.names.intern_owned(move bound);
 }
 
-/// Binds the type parameters in force across a static argument list. A list is
-/// not a type, so each entry is resolved on its own.
 fn (self: &var Lowerer) resolve_type_args(list: Name) -> !Name {
     var args = try self.split_static_args(list);
     defer args.deinit(self.allocator);
@@ -2042,8 +1707,6 @@ fn (self: &var Lowerer) resolve_type_args(list: Name) -> !Name {
     return self.module.names.intern_owned(move out);
 }
 
-/// Returns what a type parameter is bound to in the bindings in force, or
-/// null when name is not a bound parameter.
 fn (self: &Lowerer) bound_type(args: GenericArgsHandle, name: Name) -> ?Name {
     let node = self.generic_args.at(args.node);
     var index = 0;
@@ -2056,15 +1719,11 @@ fn (self: &Lowerer) bound_type(args: GenericArgsHandle, name: Name) -> ?Name {
     return null;
 }
 
-/// Returns the number of type parameters the bindings bind.
 fn (self: &Lowerer) binding_count(args: GenericArgsHandle) -> i64 {
     let node = self.generic_args.at(args.node);
     return node.bindings.len();
 }
 
-/// Returns the compile-time value bound to name, or null: an expansion's
-/// integer-range capture first, then the static arguments of the instance
-/// being lowered.
 fn (self: &Lowerer) static_value(name: Name) -> ?StaticValue {
     var current = self.static_current;
     while current |handle| {
@@ -2086,8 +1745,6 @@ fn (self: &Lowerer) static_value(name: Name) -> ?StaticValue {
     return null;
 }
 
-/// Forwards a static value through an outer binding, so a generic passing its
-/// own static value on keeps the caller's argument.
 fn (self: &var Lowerer) resolve_static_value(text: Name) -> !Name {
     if self.static_value(text) |bound| {
         return bound.text;
@@ -2097,8 +1754,6 @@ fn (self: &var Lowerer) resolve_static_value(text: Name) -> !Name {
     if !staticexpr::is(bytes) {
         return text;
     }
-    // The checker evaluated the same text against the same names, so an
-    // expression reaching here evaluates.
     var env = try self.static_int_env();
     defer env.deinit(self.allocator);
     let outcome = try staticexpr::eval(self.allocator, bytes, &env);
@@ -2111,8 +1766,6 @@ fn (self: &var Lowerer) resolve_static_value(text: Name) -> !Name {
     }
 }
 
-/// Collects the integers the i64 static values stand for, in the order
-/// static_value searches them so the binding in force wins.
 fn (self: &Lowerer) static_int_env() -> !staticexpr::Env {
     var env = staticexpr::new_env(self.allocator);
     errdefer env.deinit(self.allocator);
@@ -2132,8 +1785,6 @@ fn (self: &Lowerer) static_int_env() -> !staticexpr::Env {
     return move env;
 }
 
-// has_static_ints reports whether any static value is in force: a capture, or
-// a value of the instance being lowered.
 fn (self: &Lowerer) has_static_ints() -> bool {
     if self.static_current |_| {
         return true;
@@ -2156,7 +1807,6 @@ fn (self: &Lowerer) add_static_int(env: &var staticexpr::Env, value: StaticValue
     return env.hide(self.allocator, name);
 }
 
-/// Returns what a function is running as when it holds no instance bindings.
 fn (self: &var Lowerer) clear_bindings() -> void {
     self.current_args = null;
     return;

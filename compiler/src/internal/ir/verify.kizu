@@ -7,19 +7,12 @@ import std::map;
 import std::mem;
 import std::string;
 
-// The rules every backend assumes of a module and none of them checks in full.
-// A failure comes back as one diagnostic without a span, reading `ir verify
-// error: ...`. The sets and maps are keyed by the bytes of the interned Name
-// of a value or block, read through the module's NameTable.
-
-/// Reports the first way a module is not well formed.
 pub fn verify(allocator: Allocator, module: &Module) -> !?diagnostic::Diagnostic {
     var types = typ::new(allocator);
     defer types.deinit(allocator);
     return verify_with_types(allocator, module, &var types);
 }
 
-/// Verifies module using the type table that produced it.
 fn verify_with_types(allocator: Allocator, module: &Module, types: &var typ::Table) -> !?diagnostic::Diagnostic {
     var verifier = try new_verifier(allocator, module);
     defer verifier.deinit(allocator);
@@ -33,12 +26,6 @@ fn verify_with_types(allocator: Allocator, module: &Module, types: &var typ::Tab
     return null;
 }
 
-/// Verifies function, which the caller has just appended to a module whose
-/// other functions already passed verify. A rule reads another function only
-/// through the parameters a call is checked against, and a function that was
-/// not there before is one no earlier call could have been checked against, so
-/// the other functions' verdict is unchanged and checking function alone
-/// reports what verifying the whole module again would.
 pub fn verify_appended(allocator: Allocator, module: &Module, function: Function) -> !?diagnostic::Diagnostic {
     var types = typ::new(allocator);
     defer types.deinit(allocator);
@@ -47,7 +34,6 @@ pub fn verify_appended(allocator: Allocator, module: &Module, function: Function
     return verifier.verify_function(module, &var types, function);
 }
 
-/// Indexes every function by name, which is what a call is checked against.
 fn new_verifier(allocator: Allocator, module: &Module) -> !Verifier {
     var verifier = Verifier {
         allocator: allocator,
@@ -68,11 +54,6 @@ fn new_verifier(allocator: Allocator, module: &Module) -> !Verifier {
     return move verifier;
 }
 
-/// Holds what a rule needs and the position it is reading: the functions a
-/// call can be checked against by name, and the function and block names every
-/// message starts with. The module and the type table are passed to each rule
-/// rather than held, and the block set a terminator is checked against lives
-/// in the function check.
 struct Verifier {
     allocator: Allocator,
     params: map::Map<[]u8, Function>,
@@ -81,15 +62,12 @@ struct Verifier {
     block_name: Name,
 }
 
-/// Is one value a verify failure interpolates: a Name for `%s`, an integer
-/// for `%d`; None fills the arguments a shorter format leaves unused.
 union VerifyArg {
     Str(Name),
     Int(i64),
     None,
 }
 
-/// Checks one function's blocks and the SSA property across them.
 fn (self: &var Verifier) verify_function(module: &Module, types: &var typ::Table, function: Function) -> !?diagnostic::Diagnostic {
     let node = module.function_nodes.at(function.node);
     self.fn_name = node.name;
@@ -120,8 +98,6 @@ fn (self: &var Verifier) verify_function(module: &Module, types: &var typ::Table
     if node.blocks.len() == 0 {
         return null;
     }
-    // Both dominance rules read the same definitions and the same tree, so
-    // they are built once here rather than once per rule.
     var defined_in = try value_defining_blocks(self.allocator, module, function);
     defer defined_in.deinit(self.allocator);
     var tree = try build_dominator_tree(self.allocator, module, function, &blocks, &preds);
@@ -132,17 +108,12 @@ fn (self: &var Verifier) verify_function(module: &Module, types: &var typ::Table
     return self.values_dominate_uses(module, function, &tree, &defined_in, &blocks);
 }
 
-/// Numbers a function's blocks by their position. Every rule below keys on
-/// that position rather than the name: a position indexes an array, so one map
-/// per function replaces one map per rule. The map is keyed by the id of the
-/// interned block name, which names the same text.
 struct BlockIndex {
     at: map::Map<i64, i64>,
     names: array::Array<Name>,
     handles: array::Array<Block>,
 }
 
-/// Builds the index for one function.
 fn block_index(allocator: Allocator, module: &Module, function: Function) -> !BlockIndex {
     var out = BlockIndex {
         at: map::new<i64, i64>(allocator),
@@ -162,28 +133,22 @@ fn block_index(allocator: Allocator, module: &Module, function: Function) -> !Bl
     return move out;
 }
 
-/// Returns the position of the block name spells, null when the function has
-/// no such block.
 fn (self: &BlockIndex) position_of(module: &Module, name: Name) -> ?i64 {
     return self.at.get(name_id(name));
 }
 
-/// Names the block standing at position.
 fn (self: &BlockIndex) name_at(position: i64) -> Name {
     return self.names.get_or_panic(position);
 }
 
-/// The number of blocks the index covers.
 fn (self: &BlockIndex) len() -> i64 {
     return self.names.len();
 }
 
-/// Returns the block standing at position.
 fn (self: &BlockIndex) block_at(position: i64) -> Block {
     return self.handles.get_or_panic(position);
 }
 
-/// Checks the declared slot an instruction fills, if it fills one.
 fn (self: &Verifier) verify_instr(module: &Module, types: &var typ::Table, instr: Instr) -> !?diagnostic::Diagnostic {
     let node = module.instrs.at(instr.node);
     match node.op {
@@ -199,8 +164,6 @@ fn (self: &Verifier) verify_instr(module: &Module, types: &var typ::Table, instr
     return null;
 }
 
-/// Checks the ABI signature retained beside a call whose declaration cannot be
-/// named.
 fn (self: &Verifier) verify_indirect_call(
     module: &Module,
     types: &var typ::Table,
@@ -246,13 +209,9 @@ fn (self: &Verifier) verify_indirect_call(
     return null;
 }
 
-/// Checks what a call hands to the function it names.
 fn (self: &Verifier) verify_call(module: &Module, node: &InstrNode, callee: Name) -> !?diagnostic::Diagnostic {
     let callee_text = name_text(&module.names, callee);
     let callee_bytes = callee_text.as_bytes();
-    // A call to a symbol this module does not define, or with an arity the
-    // lowerer built for an instruction rather than a function, has no
-    // declaration here to check against.
     let declared = self.params.get(callee_bytes) orelse return null;
     let declared_node = module.function_nodes.at(declared.node);
     if declared_node.params.len() != node.args.len() {
@@ -274,12 +233,6 @@ fn (self: &Verifier) verify_call(module: &Module, node: &InstrNode, callee: Name
     return null;
 }
 
-/// Reports whether a value of type got can fill param. It is the one slot not
-/// always filled by its own type: a parameter read through an address also
-/// accepts the value that address is taken of, which is what
-/// `Passing::CopyAddress` names, and the address the caller already holds,
-/// which a `&var T` binding is when the parameter asks for `&T`; the verifier
-/// reads the module without interning, so the dereference is compared as text.
 fn argument_fits(module: &Module, param: Param, got: Name) -> bool {
     if same_name(param.type_name, got) {
         return true;
@@ -298,9 +251,6 @@ fn argument_fits(module: &Module, param: Param, got: Name) -> bool {
     return mem::equal_bytes(deref, got_bytes);
 }
 
-/// Reports whether a `&var T` argument fills a `&T` parameter. The two spell
-/// the same address and the callee may only read through it, so handing over
-/// the one the caller already holds costs no copy of what it names.
 fn lends_shared_borrow(want: []u8, got: []u8) -> bool {
     if !mem::starts_with(want, "&") or mem::starts_with(want, "&var ") {
         return false;
@@ -311,7 +261,6 @@ fn lends_shared_borrow(want: []u8, got: []u8) -> bool {
     return mem::equal_bytes(deref_type_bytes(want), deref_type_bytes(got));
 }
 
-/// Returns T for `&T` and `&var T`, and the spelling itself otherwise.
 fn deref_type_bytes(name: []u8) -> []u8 {
     if mem::starts_with(name, "&var ") {
         return name[5..mem::len(name)];
@@ -322,7 +271,6 @@ fn deref_type_bytes(name: []u8) -> []u8 {
     return name;
 }
 
-/// Checks what a struct literal puts in each declared field.
 fn (self: &Verifier) struct_literal(module: &Module, node: &InstrNode) -> !?diagnostic::Diagnostic {
     let type_text = name_text(&module.names, node.result.type_name);
     let type_bytes = type_text.as_bytes();
@@ -350,7 +298,6 @@ fn (self: &Verifier) struct_literal(module: &Module, node: &InstrNode) -> !?diag
     return null;
 }
 
-/// Checks what a union constructor carries in its variant.
 fn (self: &Verifier) union_payload(module: &Module, node: &InstrNode) -> !?diagnostic::Diagnostic {
     let variant = module.union_variant(node.result.type_name, node.immediate) orelse return null;
     if is_empty(variant.payload) or node.args.len() != 1 {
@@ -369,8 +316,6 @@ fn (self: &Verifier) union_payload(module: &Module, node: &InstrNode) -> !?diagn
     return null;
 }
 
-/// Checks the payload an error union's success carries. The success type is
-/// compared by its rendered spelling.
 fn (self: &Verifier) success_wrap(module: &Module, types: &var typ::Table, node: &InstrNode) -> !?diagnostic::Diagnostic {
     if is_empty(node.result.type_name) {
         return null;
@@ -397,14 +342,11 @@ fn (self: &Verifier) success_wrap(module: &Module, types: &var typ::Table, node:
     return null;
 }
 
-/// Is the structure of one parsed error union spelling: whether it names an
-/// error set, and the success type it carries.
 struct ParsedErrorUnion {
     has_err: bool,
     ok: typ::Type,
 }
 
-/// Returns the parts of a parsed error union, null for any other type.
 fn error_union_parts_of(types: &typ::Table, value: typ::Type) -> ?ParsedErrorUnion {
     match typ::root_node(types, value) {
         ErrorUnion(node) => {
@@ -419,8 +361,6 @@ fn error_union_parts_of(types: &typ::Table, value: typ::Type) -> ?ParsedErrorUni
     return null;
 }
 
-/// Checks that a block ends, that it names blocks that exist, and that what it
-/// returns is what its function declared.
 fn (self: &Verifier) verify_terminator(
     module: &Module,
     types: &var typ::Table,
@@ -460,9 +400,6 @@ fn (self: &Verifier) verify_terminator(
     return null;
 }
 
-/// Reports whether a `ptr<T>` fills a `?ptr<T>` slot. The two spell the same
-/// machine value and the non-null one is a subset of the nullable one, so
-/// widening is always sound.
 fn fills_nullable_pointer(module: &Module, want: Name, got: Name) -> bool {
     let want_retained = name_text(&module.names, want);
     let want_bytes = want_retained.as_bytes();
@@ -477,11 +414,6 @@ fn fills_nullable_pointer(module: &Module, want: Name, got: Name) -> bool {
     return mem::equal_bytes(want_bytes[1..mem::len(want_bytes)], got_bytes);
 }
 
-/// Parses the IR spellings before asking the structural type query: `!T`
-/// declares no error set, so an `E!T` reaching it arrives with E absorbed,
-/// while a declared `E!T` named the one set it takes and absorbs nothing. A
-/// spelling that does not parse absorbs nothing; an empty spelling is the one
-/// such case a lowered module holds, and is answered here before parsing.
 fn absorbs_error_set(module: &Module, types: &var typ::Table, want: Name, got: Name) -> !bool {
     if is_empty(want) or is_empty(got) {
         return false;
@@ -500,16 +432,12 @@ fn absorbs_error_set(module: &Module, types: &var typ::Table, want: Name, got: N
     return got_parts.has_err and typ::equal(types, got_parts.ok, types, want_parts.ok);
 }
 
-/// Names one position that holds a value of a type its declaration did not ask
-/// for. Every type rule reports through here so the message reads the same.
 fn (self: &Verifier) fail(module: &Module, position: string::String, want: Name, got: Name) -> !diagnostic::Diagnostic {
     let want_text = name_text(&module.names, want);
     let got_text = name_text(&module.names, got);
     return self.fail_text(module, move position, want_text, got_text);
 }
 
-/// Builds the `fail` message from the spellings of the two types, for the
-/// rule whose declared type is rendered rather than interned.
 fn (self: &Verifier) fail_text(
     module: &Module,
     position: string::String,
@@ -532,10 +460,6 @@ fn (self: &Verifier) fail_text(
     return diagnostic::from_text(self.allocator, diagnostic::Severity::Error, ast::zero_span(), text);
 }
 
-/// Builds one verify failure from a format and its arguments in order, for
-/// every rule that is not a type rule: the `ir verify error: ` prefix and the
-/// function name are written first, then `%s` takes a Name and `%d` an
-/// integer. A format with fewer than seven verbs passes None for the rest.
 fn (self: &Verifier) failure(
     module: &Module,
     format: []u8,
@@ -596,17 +520,6 @@ fn append_verify_arg(allocator: Allocator, out: &var string::String, module: &Mo
     }
 }
 
-/// Checks the other half of what LLVM's verifier asks of a phi: one incoming
-/// for each block that jumps to the phi's block, and none from a block that
-/// does not. An incoming from a block that never reaches here reads a value on
-/// an edge that does not exist, and a predecessor with no incoming leaves the
-/// phi undefined on an edge that does.
-///
-/// An edge out of an unreachable block is still an edge, so it is still
-/// counted. phi_incoming_dominates exempts unreachable blocks, which is not
-/// a disagreement: that rule asks which paths reach a block, and an
-/// unreachable block is on none, while this one asks which blocks name it as
-/// a target.
 fn (self: &Verifier) phi_incoming_matches_predecessors(
     module: &Module,
     function: Function,
@@ -614,8 +527,6 @@ fn (self: &Verifier) phi_incoming_matches_predecessors(
     preds: &array::Array<array::Array<i64>>
 ) -> !?diagnostic::Diagnostic {
     let node = module.function_nodes.at(function.node);
-    // Two block-wide flag sets, reused: a rule that fails ends the whole
-    // verification, so only the path that continues has to clear them.
     var arrives = try flags(self.allocator, blocks.len());
     defer arrives.deinit(self.allocator);
     var named = try flags(self.allocator, blocks.len());
@@ -643,7 +554,6 @@ fn (self: &Verifier) phi_incoming_matches_predecessors(
     return null;
 }
 
-/// Returns count flags, all clear.
 fn flags(allocator: Allocator, count: i64) -> !array::Array<bool> {
     var out = array::new<bool>(allocator);
     errdefer out.deinit(allocator);
@@ -655,7 +565,6 @@ fn flags(allocator: Allocator, count: i64) -> !array::Array<bool> {
     return move out;
 }
 
-/// Sets the flag at each position in list.
 fn set_flags(out: &var array::Array<bool>, list: &array::Array<i64>, value: bool) -> !void {
     var index = 0;
     while list.get(index) |position| {
@@ -665,13 +574,6 @@ fn set_flags(out: &var array::Array<bool>, list: &array::Array<i64>, value: bool
     return;
 }
 
-/// Checks one phi against the blocks that jump to its own. Counting after the
-/// two membership passes is what makes it edges rather than names: a branch
-/// whose arms share a target reaches the block twice and needs two incoming,
-/// and a phi naming one block twice covers one edge, not two. Every incoming
-/// value has to be of the phi's own type as well: a backend writes the phi's
-/// type over each incoming, so a value of another type -- an array where the
-/// phi carries its address -- is text LLVM rejects.
 fn (self: &Verifier) phi_edges(
     module: &Module,
     block_name: Name,
@@ -740,8 +642,6 @@ fn (self: &Verifier) phi_edges(
     return null;
 }
 
-/// Returns the position the incoming edge leaves from when that block does
-/// jump to the one holding the phi, null otherwise.
 fn incoming_arrives(
     module: &Module,
     blocks: &BlockIndex,
@@ -755,10 +655,6 @@ fn incoming_arrives(
     return null;
 }
 
-/// Checks the SSA property LLVM's verifier enforces: a phi's incoming value
-/// must be defined in a block that dominates the predecessor it arrives from.
-/// A value that is not yet defined on that edge is read as whatever the
-/// register held.
 fn (self: &Verifier) phi_incoming_dominates(
     module: &Module,
     function: Function,
@@ -801,13 +697,6 @@ fn (self: &Verifier) phi_incoming_dominates(
     return null;
 }
 
-/// Checks for every operand what phi_incoming_dominates checks for a phi edge:
-/// a value is read only where its definition is on every path in, and within
-/// one block only after it.
-///
-/// A phi is the exception this rule leaves alone. Its operands arrive on
-/// edges rather than where it stands, so a value defined in the block a back
-/// edge leaves from is correct there and would look backwards here.
 fn (self: &Verifier) values_dominate_uses(
     module: &Module,
     function: Function,
@@ -841,10 +730,6 @@ fn (self: &Verifier) values_dominate_uses(
     return null;
 }
 
-/// Checks every value one instruction reads where it stands: its arguments,
-/// its field values, and the receiver of each cleanup. They are walked in
-/// place rather than gathered, because gathering costs one array per
-/// instruction and the walk reads each value once either way.
 fn (self: &Verifier) check_operands(
     module: &Module,
     tree: &DominatorTree,
@@ -882,9 +767,6 @@ fn (self: &Verifier) check_operands(
     return null;
 }
 
-/// Checks one operand read in block. above holds what the block has defined so
-/// far, which is what separates a read of an earlier instruction from a read
-/// of a later one.
 fn (self: &Verifier) dominates_use(
     module: &Module,
     tree: &DominatorTree,
@@ -896,7 +778,6 @@ fn (self: &Verifier) dominates_use(
 ) -> !?diagnostic::Diagnostic {
     let operand_text = name_text(&module.names, operand.name);
     let operand_bytes = operand_text.as_bytes();
-    // A param or a literal has no defining block and is read anywhere.
     let defined = defined_in.get(operand_bytes) orelse return null;
     let block_name = blocks.name_at(position);
     if defined.block == position {
@@ -920,17 +801,11 @@ fn (self: &Verifier) dominates_use(
     );
 }
 
-/// Is where one instruction result is defined: the block, and how far into it.
-/// The step is what tells a read of an earlier instruction from a read of a
-/// later one, which a set of what a block has defined so far would answer by
-/// being rebuilt for every block.
 struct Definition {
     block: i64,
     step: i64,
 }
 
-/// Maps each instruction result to where it is defined. Params and literals
-/// have no defining block and are available everywhere.
 fn value_defining_blocks(allocator: Allocator, module: &Module, function: Function) -> !map::Map<[]u8, Definition> {
     var defined = map::new<[]u8, Definition>(allocator);
     errdefer defined.deinit(allocator);
@@ -953,31 +828,13 @@ fn value_defining_blocks(allocator: Allocator, module: &Module, function: Functi
     return move defined;
 }
 
-/// Answers which blocks dominate which. It stores one immediate dominator per
-/// block rather than a set per block, and numbers the tree so a question
-/// compares two intervals instead of walking up the chain: a walk is as long
-/// as the tree is deep, and a run of ifs or a match with k arms is a tree as
-/// deep as it is long.
 struct DominatorTree {
-    // place[position] is where the block at position stands in reverse
-    // postorder, which is the numbering the walk compares against, or -1 when
-    // the entry cannot reach it.
     place: array::Array<i64>,
-    // idom[i] is the reverse-postorder position of the block standing at i's
-    // immediate dominator. The entry is its own.
     idom: array::Array<i64>,
-    // enter[i] and exit[i] bound the preorder numbers of the subtree under the
-    // block standing at i: a block is in it exactly when its own enter is in
-    // [enter[i], exit[i]).
     enter: array::Array<i64>,
     exit: array::Array<i64>,
 }
 
-/// Computes immediate dominators by the Cooper-Harvey-Kennedy iteration: walk
-/// the blocks in reverse postorder, and take each block's immediate dominator
-/// to be the meet of the ones already known for its predecessors. Storing sets
-/// instead costs a map per block and the entry count grows with the square of
-/// the block count, which a function of a few dozen blocks already feels.
 fn build_dominator_tree(
     allocator: Allocator,
     module: &Module,
@@ -1041,15 +898,10 @@ fn build_dominator_tree(
     return move tree;
 }
 
-/// Gives each block its preorder interval. A block's immediate dominator
-/// stands earlier in reverse postorder, so one backward pass sums every
-/// subtree's size and one forward pass hands each child the next free stretch
-/// of its parent's interval, with no recursion and no child lists.
 fn (self: &var DominatorTree) number(allocator: Allocator) -> !void {
     let count = self.idom.len();
     var size = array::new<i64>(allocator);
     defer size.deinit(allocator);
-    // next[i] is the first preorder number not yet handed to a child of i.
     var next = array::new<i64>(allocator);
     defer next.deinit(allocator);
     var at = 0;
@@ -1083,10 +935,6 @@ fn (self: &var DominatorTree) number(allocator: Allocator) -> !void {
     return;
 }
 
-/// Walks two blocks up the tree until they arrive at the same one, which is
-/// the nearest block dominating both. A block's immediate dominator always
-/// comes earlier in reverse postorder, so each step moves the higher position
-/// down and the walk ends.
 fn (self: &DominatorTree) meet(left: i64, right: i64) -> i64 {
     var left_at = left;
     var right_at = right;
@@ -1101,8 +949,6 @@ fn (self: &DominatorTree) meet(left: i64, right: i64) -> i64 {
     return left_at;
 }
 
-/// Reports whether every path reaching block passes through dominator. An
-/// unreachable block is reached by no path, so nothing is claimed about it.
 fn (self: &DominatorTree) dominates(dominator: i64, block: i64) -> bool {
     let at = self.place.get_or_panic(block);
     if at < 0 {
@@ -1116,10 +962,6 @@ fn (self: &DominatorTree) dominates(dominator: i64, block: i64) -> bool {
     return self.enter.get_or_panic(target) <= first and first < self.exit.get_or_panic(target);
 }
 
-/// Lists the blocks reachable from the entry, each after every block it can
-/// reach, then reversed. Predecessors therefore come first except across a
-/// back edge, which is what makes one forward pass enough for most of the
-/// dominator tree.
 fn reverse_postorder(
     allocator: Allocator,
     module: &Module,
@@ -1145,7 +987,6 @@ fn reverse_postorder(
     return move order;
 }
 
-/// Appends the block at position after every block it can reach.
 fn visit_postorder(
     allocator: Allocator,
     module: &Module,
@@ -1169,8 +1010,6 @@ fn visit_postorder(
     return order.append(allocator, position);
 }
 
-/// Derives the CFG edges from each block's terminator: the positions of the
-/// blocks that jump to each block, in block order.
 fn block_predecessors(
     allocator: Allocator,
     module: &Module,
@@ -1200,7 +1039,6 @@ fn block_predecessors(
     return move preds;
 }
 
-/// Records one edge.
 fn add_predecessor(allocator: Allocator, preds: &var array::Array<array::Array<i64>>, to: i64, from: i64) -> !void {
     if preds.at_mut(to) |list| {
         return list.append(allocator, from);

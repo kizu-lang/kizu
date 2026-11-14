@@ -5,19 +5,11 @@ import compiler::internal::typ;
 import std::arena;
 import std::array;
 
-// The lexical cleanup frames, the `defer` / `errdefer` statements that record
-// one cleanup each, and the emission of the recorded cleanups at block ends,
-// returns, loop exits and `try` propagation. A cleanup's arguments are a run
-// of the module's cleanup_args pool, so a Cleanup stays a copy value; what it
-// runs is an `Op` plus the symbol a `call.<f>` cleanup carries in `operand`.
-
-/// Opens a lexical cleanup frame for one block, and returns its index.
 fn (self: &var Lowerer) push_defer_frame() -> !i64 {
     try self.defer_frames.append(self.allocator, array::new<Cleanup>(self.allocator));
     return self.defer_frames.len() - 1;
 }
 
-/// Closes the innermost lexical cleanup frame.
 fn (self: &var Lowerer) pop_defer_frame() -> void {
     if self.defer_frames.pop() |frame| {
         frame.deinit(self.allocator);
@@ -25,18 +17,14 @@ fn (self: &var Lowerer) pop_defer_frame() -> void {
     return;
 }
 
-/// Records a checked deferred cleanup without emitting it now.
 fn (self: &var Lowerer) lower_defer_stmt(tree: &var ast::Ast, statement: ast::DeferStmt) -> !?diagnostic::Diagnostic {
     return self.record_cleanup(tree, statement.expr, false);
 }
 
-/// Records an error-path cleanup into the shared cleanup stack.
 fn (self: &var Lowerer) lower_err_defer_stmt(tree: &var ast::Ast, statement: ast::ErrDeferStmt) -> !?diagnostic::Diagnostic {
     return self.record_cleanup(tree, statement.expr, true);
 }
 
-/// Resolves a cleanup expression and registers it in the current frame.
-/// on_error marks errdefer entries that run only on error-return paths.
 fn (self: &var Lowerer) record_cleanup(tree: &var ast::Ast, expression: ast::Expression, on_error: bool) -> !?diagnostic::Diagnostic {
     let allocator = self.allocator;
     var cleanup = empty_cleanup();
@@ -52,11 +40,6 @@ fn (self: &var Lowerer) record_cleanup(tree: &var ast::Ast, expression: ast::Exp
     return null;
 }
 
-/// Reads the expression naming the one owner a deferred call consumes: the
-/// receiver of a method call, or the binding an argument marks `move`. The
-/// ownership checker names the same node when it retires an errdefer, which is
-/// how the two agree on which entry it was. A call that consumes nothing has
-/// none.
 fn cleanup_receiver(tree: &ast::Ast, expression: ast::Expression) -> ?arena::Handle<ast::ExpressionNode> {
     let call = ownership::call_expr(tree, deferred_call_expr(tree, expression)) orelse return null;
     if ownership::field_expr(tree, call.callee) |field| {
@@ -74,8 +57,6 @@ fn cleanup_receiver(tree: &ast::Ast, expression: ast::Expression) -> ?arena::Han
     return null;
 }
 
-/// Returns the expression a defer statement registers, under whatever markers
-/// it was written with.
 fn deferred_call_expr(tree: &ast::Ast, expression: ast::Expression) -> ast::Expression {
     var current = expression;
     while ast::marker_value(tree, current) |inner| {
@@ -84,15 +65,6 @@ fn deferred_call_expr(tree: &ast::Ast, expression: ast::Expression) -> ast::Expr
     return current;
 }
 
-/// Converts a deferred call into a void cleanup: the callee resolved now, the
-/// arguments read now, the call emitted at each exit.
-///
-/// The arguments are read where the defer is written, not where it runs, so
-/// what runs at scope exit is settled at the point the source names. The one
-/// exception is an owner the call consumes -- a by-value receiver, or an
-/// argument marked `move` -- which stays in its slot until the exit that
-/// runs the call, since the frame may still use it until then and the exit
-/// is what hands it over (load_cleanup_args).
 fn (self: &var Lowerer) cleanup_from_expr(
     tree: &var ast::Ast,
     expression: ast::Expression,
@@ -136,16 +108,11 @@ fn (self: &var Lowerer) cleanup_from_expr(
     return self.cleanup_from_function(tree, name, passed, &args, out);
 }
 
-/// Spells a callee expression for a diagnostic.
 fn (self: &var Lowerer) callee_name_text(tree: &ast::Ast, callee: ast::Expression) -> !Name {
     let rendered = try ast::render_expression(self.allocator, tree, callee);
     return self.module.names.intern_owned(move rendered);
 }
 
-/// Lowers a deferred call's arguments at the types the callee declares, the
-/// way a direct call does: a borrow parameter takes the caller's storage, a
-/// value parameter the value read now. A `move x` argument is the slot x lives
-/// in, loaded at the exit that runs the call.
 fn (self: &var Lowerer) lower_cleanup_args(
     tree: &var ast::Ast,
     params: ParamsView,
@@ -178,11 +145,6 @@ fn (self: &var Lowerer) lower_cleanup_args(
     return null;
 }
 
-/// Resolves a deferred call to a declared function or an extern one. The
-/// signature says the call returns void; a std primitive with no declared
-/// signature is not a thing a defer can name. passed holds the parameters args
-/// were lowered at: the callee's own, or with null exactly those, and for a C
-/// variadic call the ones variadic_call_signature added.
 fn (self: &var Lowerer) cleanup_from_function(
     tree: &var ast::Ast,
     name: Name,
@@ -217,10 +179,6 @@ fn (self: &var Lowerer) cleanup_from_function(
     return null;
 }
 
-/// Marks the arguments a cleanup loads at exit: a slot whose parameter takes
-/// the value itself. A slot handed to a `&` / `&var` parameter is what that
-/// parameter wants and is passed as it is. With no signature every slot is an
-/// owner, which is what a std container's runtime release takes.
 fn (self: &Lowerer) owner_loads(args: &array::Array<Value>, params: ParamsView) -> i64 {
     var loads = 0;
     var bit = 1;
@@ -243,27 +201,14 @@ fn (self: &Lowerer) owner_loads(args: &array::Array<Value>, params: ParamsView) 
     return loads;
 }
 
-/// Names what one std container's cleanup needs: the std type its wrapper is
-/// declared on, the runtime op a shallow cleanup lowers to, and the type
-/// argument that decides which of the two runs.
 struct ContainerCleanup {
     name: []u8,
     shallow_op: Op,
     type_arg: Name,
-    // The type argument whose values the container holds and would have to
-    // release: the element for an array, box, or arena, the value for a map.
-    // type_arg spells the whole instantiation, which for a map is `K, V` and
-    // names no type at all.
     owner_arg: Name,
-    // Whether the runtime op takes the allocator the release names. Every
-    // container header is now the value, and none of them keeps an allocator,
-    // so every op is handed one; the field is what says a container's release
-    // reads it (ADR-0132).
     shallow_names_allocator: bool,
 }
 
-/// Reports the cleanup shape of a std container type, and null for anything
-/// else.
 fn (self: &var Lowerer) std_container_cleanup(receiver_type: Name) -> !?ContainerCleanup {
     if try self.array_element_type(receiver_type) |elem| {
         return ContainerCleanup {
@@ -306,8 +251,6 @@ fn (self: &var Lowerer) std_container_cleanup(receiver_type: Name) -> !?Containe
     return null;
 }
 
-/// Returns a cleanup that runs op over args, with the arguments filed in the
-/// module's pool.
 fn (self: &var Lowerer) cleanup_of(op: Op, operand: Name, args: &array::Array<Value>, loads: i64) -> !Cleanup {
     let start = try self.module.add_cleanup_args(self.allocator, args);
     return Cleanup {
@@ -326,14 +269,10 @@ fn (self: &var Lowerer) cleanup_of(op: Op, operand: Name, args: &array::Array<Va
     };
 }
 
-/// Returns the record `std_container_call_op` fills, pointing at the
-/// scratch signature until it does.
 fn (self: &Lowerer) cleanup_call_op_slot() -> ContainerCallOp {
     return ContainerCallOp { symbol: empty_name(), signature: self.scratch_signature };
 }
 
-/// Resolves one receiver.method() cleanup into an IR instruction. args holds
-/// the receiver first, then the arguments the statement carried.
 fn (self: &var Lowerer) cleanup_from_method(
     tree: &var ast::Ast,
     receiver: Value,
@@ -344,11 +283,6 @@ fn (self: &var Lowerer) cleanup_from_method(
     let receiver_type = try self.deref_type(receiver.type_name);
     if try self.std_container_cleanup(receiver_type) |container| {
         if self.name_is(method, typ::cleanup_method()) {
-            // A container whose contents own something releases them first,
-            // and that loop lives in the std wrapper rather than in a runtime
-            // op: the cleanup calls its instance exactly like a direct call
-            // would. Plain contents have no loop to run, so they keep the
-            // runtime op.
             if !self.is_owner_type(container.owner_arg) {
                 var carried = array::new<Value>(self.allocator);
                 defer carried.deinit(self.allocator);
@@ -378,20 +312,14 @@ fn (self: &var Lowerer) cleanup_from_method(
     return try self.fail1(tree, "ir error: unknown cleanup method `%s`", Arg::Str(method));
 }
 
-/// Appends all active cleanups that run on an error-return path, including
-/// both defer and errdefer entries, in execution order.
 fn (self: &var Lowerer) error_cleanups(out: &var array::Array<Cleanup>) -> !void {
     return self.cleanups_from(0, true, out);
 }
 
-/// Appends active defer cleanups for a success exit. errdefer entries are
-/// skipped because they do not run when the block exits normally.
 fn (self: &var Lowerer) normal_cleanups(out: &var array::Array<Cleanup>) -> !void {
     return self.cleanups_from(0, false, out);
 }
 
-/// Appends cleanups from the requested frame depth inward. When include_error
-/// is false, errdefer (error-path) entries are skipped.
 fn (self: &var Lowerer) cleanups_from(depth: i64, include_error: bool, out: &var array::Array<Cleanup>) -> !void {
     var frame = self.defer_frames.len();
     while frame > depth {
@@ -412,7 +340,6 @@ fn (self: &var Lowerer) cleanups_from(depth: i64, include_error: bool, out: &var
     return;
 }
 
-/// Emits success-path cleanups before a normal function exit.
 fn (self: &var Lowerer) emit_normal_cleanups() -> !void {
     var cleanups = array::new<Cleanup>(self.allocator);
     defer cleanups.deinit(self.allocator);
@@ -420,8 +347,6 @@ fn (self: &var Lowerer) emit_normal_cleanups() -> !void {
     return self.emit_cleanups(&cleanups);
 }
 
-/// Emits error-path cleanups before an error-return exit, minus the ones a
-/// move retired before it.
 fn (self: &var Lowerer) emit_error_cleanups_for_return(statement: ast::Statement) -> !void {
     var cleanups = array::new<Cleanup>(self.allocator);
     defer cleanups.deinit(self.allocator);
@@ -430,22 +355,15 @@ fn (self: &var Lowerer) emit_error_cleanups_for_return(statement: ast::Statement
     return self.emit_cleanups(&cleanups);
 }
 
-/// Drops the errdefer cleanups whose receiver was moved before this try
-/// expression.
 fn (self: &var Lowerer) retire_cleanups_for_try(expression: ast::Expression, cleanups: &var array::Array<Cleanup>) -> !void {
     return self.retire_cleanups(CleanupExit::Try(expression), cleanups);
 }
 
-/// Names the exit an errdefer retirement is asked about: the return
-/// statement or the try expression the ownership checker recorded the
-/// retired receivers under.
 union CleanupExit {
     Return(ast::Statement),
     Try(ast::Expression),
 }
 
-/// Reports whether the ownership checker retired the errdefer on receiver
-/// before exit.
 fn (self: &Lowerer) retired_before(exit: CleanupExit, receiver: arena::Handle<ast::ExpressionNode>) -> bool {
     match exit {
         Return(statement) => return self.retired_for_return(statement, receiver),
@@ -453,9 +371,6 @@ fn (self: &Lowerer) retired_before(exit: CleanupExit, receiver: arena::Handle<as
     }
 }
 
-/// Reports whether one cleanup is an errdefer the checker retired before
-/// exit: only an errdefer retires, and only one written on a local names a
-/// receiver to retire by.
 fn (self: &Lowerer) cleanup_retired(exit: CleanupExit, cleanup: &Cleanup) -> bool {
     if !cleanup.on_error {
         return false;
@@ -464,9 +379,6 @@ fn (self: &Lowerer) cleanup_retired(exit: CleanupExit, cleanup: &Cleanup) -> boo
     return self.retired_before(exit, receiver);
 }
 
-/// Drops, in place, the errdefer cleanups whose receiver was moved before this
-/// error exit. The ownership checker decides which; lowering obeys, so the
-/// move rule has one implementation (ADR-0114).
 fn (self: &Lowerer) retire_cleanups(exit: CleanupExit, cleanups: &var array::Array<Cleanup>) -> !void {
     var kept = 0;
     var index = 0;
@@ -484,8 +396,6 @@ fn (self: &Lowerer) retire_cleanups(exit: CleanupExit, cleanups: &var array::Arr
     return;
 }
 
-/// Emits normal fallthrough cleanups for one lexical block. errdefer entries
-/// are skipped because the block exited without an error.
 fn (self: &var Lowerer) emit_cleanup_frame(frame: i64) -> !void {
     var cleanups = array::new<Cleanup>(self.allocator);
     defer cleanups.deinit(self.allocator);
@@ -504,9 +414,6 @@ fn (self: &var Lowerer) emit_cleanup_frame(frame: i64) -> !void {
     return self.emit_cleanups(&cleanups);
 }
 
-/// Appends cleanup instructions to the current block. An owner the cleanup
-/// consumes lives in a slot until here, so the slot is loaded at the exit that
-/// runs it.
 fn (self: &var Lowerer) emit_cleanups(cleanups: &array::Array<Cleanup>) -> !void {
     var index = 0;
     while cleanups.get(index) |cleanup| {
@@ -518,10 +425,6 @@ fn (self: &var Lowerer) emit_cleanups(cleanups: &array::Array<Cleanup>) -> !void
         if !is_empty(cleanup.extern_abi) {
             if self.last_instr() |instr| {
                 self.module.set_extern_call(instr, cleanup.extern_abi, cleanup.extern_name);
-                // The call written here is the foreign call the cleanup
-                // stood for, so it carries the same declared passing: a
-                // struct lent as `&S` reaches C as the address of a copy
-                // either way.
                 var param_index = 0;
                 while self.module.cleanup_param(cleanup, param_index) |param| {
                     param_index = param_index + 1;
@@ -534,8 +437,6 @@ fn (self: &var Lowerer) emit_cleanups(cleanups: &array::Array<Cleanup>) -> !void
     return;
 }
 
-/// Appends a cleanup's arguments with the slot-backed owners it consumes
-/// loaded into values and every other argument as it is.
 fn (self: &var Lowerer) load_cleanup_args(cleanup: Cleanup, out: &var array::Array<Value>) -> !void {
     var index = 0;
     while self.module.cleanup_arg(cleanup, index) |arg| {
@@ -552,9 +453,6 @@ fn (self: &var Lowerer) load_cleanup_args(cleanup: Cleanup, out: &var array::Arr
     return;
 }
 
-/// Returns a copy of cleanup whose arguments are already loaded, as a try
-/// needs: the loaded run is filed anew, so the frame's own entry keeps its
-/// slots for the exits still to come.
 fn (self: &var Lowerer) loaded_cleanup(cleanup: Cleanup) -> !Cleanup {
     var args = array::new<Value>(self.allocator);
     defer args.deinit(self.allocator);
@@ -566,7 +464,6 @@ fn (self: &var Lowerer) loaded_cleanup(cleanup: Cleanup) -> !Cleanup {
     return loaded;
 }
 
-/// Returns an empty cleanup record, the slot a resolver fills.
 fn empty_cleanup() -> Cleanup {
     return Cleanup {
         op: Op::Id,
