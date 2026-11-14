@@ -4,13 +4,6 @@ import compiler::internal::typ;
 import std::mem;
 import std::string;
 
-// Mechanical port of the error-union, optional and return family of
-// internal/llvm/emit.go: the `error.*` and `opt.*` instructions, and the
-// return from a function declared `!T`, `main` included. Go reads the
-// success and error halves of a spelling as strings; here they are the
-// owned Strings of ErrorUnionParts, released where they were read.
-
-/// Dispatches recoverable-result operations, the Go `writeErrorInstr`.
 fn (self: &var Emitter) write_error_instr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     match node.op {
         ErrorOk => return self.write_error_ok(module, node),
@@ -26,7 +19,6 @@ fn (self: &var Emitter) write_error_instr(module: &ir::Module, node: &ir::InstrN
     }
 }
 
-/// Builds a successful error-union value, the Go `writeErrorOK`.
 fn (self: &var Emitter) write_error_ok(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let result_text = ir::name_text(&module.names, node.result.type_name);
     let result_type = result_text.as_bytes();
@@ -73,10 +65,6 @@ fn (self: &var Emitter) write_error_ok(module: &ir::Module, node: &ir::InstrNode
     return try self.fail1("llvm error: error.ok result must be !T, got %s", Arg::Str(shown));
 }
 
-/// Builds a failed error-union value, the Go `writeErrorError`. The failure
-/// payload is a member of an error set, and its representation is already
-/// the global code. Go reads the parts of the result twice; the one read
-/// here serves both the shape check and the set check.
 fn (self: &var Emitter) write_error_error(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let result_text = ir::name_text(&module.names, node.result.type_name);
     let result_type = result_text.as_bytes();
@@ -95,11 +83,6 @@ fn (self: &var Emitter) write_error_error(module: &ir::Module, node: &ir::InstrN
             let shown = try self.own(module, arg.type_name);
             return try self.fail1("llvm error: error.error expects an error set member, got %s", Arg::Str(shown));
         }
-        // A declared `E!T` accepts the sets whose codes are a subset of E's:
-        // E itself and the sets it combines (ADR-0127). Codes are global, so
-        // any other set would lower to a union that claims E while holding a
-        // code E does not carry, and nothing below here records which set a
-        // union holds.
         let err_bytes = parts.err.as_bytes();
         if parts.err.len() > 0 and !module.error_set_fits(arg_bytes, err_bytes) {
             let arg_shown = try self.own(module, arg.type_name);
@@ -116,9 +99,6 @@ fn (self: &var Emitter) write_error_error(module: &ir::Module, node: &ir::InstrN
     return try self.fail1("llvm error: error.error result must be !T, got %s", Arg::Str(shown));
 }
 
-/// Tests an error union for success, the Go `writeErrorHas`, the way
-/// opt.has tests an optional for presence. `catch` and `else |err|` branch
-/// on it.
 fn (self: &var Emitter) write_error_has(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 {
         return try self.fail0("llvm error: error.has expects 1 arg");
@@ -138,9 +118,6 @@ fn (self: &var Emitter) write_error_has(module: &ir::Module, node: &ir::InstrNod
     return try self.fail1("llvm error: error.has expects !T, got %s", Arg::Str(shown));
 }
 
-/// Extracts the success payload of an error union, the Go
-/// `writeErrorValue`. The caller has already branched on success; a failed
-/// union's payload is only ever produced, never read.
 fn (self: &var Emitter) write_error_value(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 {
         return try self.fail0("llvm error: error.value expects 1 arg");
@@ -178,9 +155,6 @@ fn (self: &var Emitter) write_error_value(module: &ir::Module, node: &ir::InstrN
     return try self.fail1("llvm error: error.value expects an `E!T` with a payload, got %s", Arg::Str(shown));
 }
 
-/// Extracts the failure member of an error union as a value of its declared
-/// set, the Go `writeErrorCode`. The caller has already branched on failure,
-/// and a code is global, so extracting it converts nothing.
 fn (self: &var Emitter) write_error_code(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 {
         return try self.fail0("llvm error: error.code expects 1 arg");
@@ -210,8 +184,6 @@ fn (self: &var Emitter) write_error_code(module: &ir::Module, node: &ir::InstrNo
     return try self.fail1("llvm error: error.code expects `E!T`, got %s", Arg::Str(shown));
 }
 
-/// Builds a failed error union around one error code, the Go
-/// `writeErrorFailureCode`.
 fn (self: &var Emitter) write_error_failure_code(
     module: &ir::Module,
     result_name: ir::Name,
@@ -225,9 +197,6 @@ fn (self: &var Emitter) write_error_failure_code(
     );
 }
 
-/// Names whether an error union holds a success, the Go
-/// `writeErrorSucceeded`: its code is zero. The union is the operand it is,
-/// or the one kept in memory at addr.
 fn (self: &var Emitter) write_error_succeeded(
     module: &ir::Module,
     name: ir::Name,
@@ -239,8 +208,6 @@ fn (self: &var Emitter) write_error_succeeded(
     return self.line2("  %s = icmp eq i64 %s, 0", Arg::Str(name), Arg::Str(code));
 }
 
-/// Unwraps success or returns failure from the current function, the Go
-/// `writeErrorTry`.
 fn (self: &var Emitter) write_error_try(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 {
         return try self.fail0("llvm error: error.try expects 1 arg");
@@ -282,11 +249,6 @@ fn (self: &var Emitter) write_error_try(module: &ir::Module, node: &ir::InstrNod
         let ok_label = try self.helper_label(module, node.result.name, "try.ok");
         let err_label = try self.helper_label(module, node.result.name, "try.err");
         try self.write_error_succeeded(module, ok_bool, source, addr);
-        // A `try` passes a failure on rather than handling it, so the failure
-        // is the rare edge. Said outright because the optimizer's own guess
-        // reads `code == 0` as the unlikely side -- most values it meets are
-        // not zero -- and a call it takes for rare is one it no longer
-        // inlines.
         let expected = try self.suffixed(ok_bool, ".expected");
         try self.line2("  %s = call i1 @llvm.expect.i1(i1 %s, i1 true)", Arg::Str(expected), Arg::Str(ok_bool));
         try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(expected), Arg::Str(ok_label), Arg::Str(err_label));
@@ -301,8 +263,6 @@ fn (self: &var Emitter) write_error_try(module: &ir::Module, node: &ir::InstrNod
         if try self.write_error_failure_return(module, source, addr) |failed| {
             return move failed;
         }
-        // Marked after the cleanups: one that opens blocks of its own marks
-        // where it ends, and the block continues past the try, not past them.
         try self.mark_current_block_exit(module, ok_label);
         try self.line1("%s:", Arg::Str(ok_label));
         if mem::equal_bytes(success_bytes, "void") {
@@ -322,7 +282,6 @@ fn (self: &var Emitter) write_error_try(module: &ir::Module, node: &ir::InstrNod
     return try self.fail1("llvm error: error.try expects !T, got %s", Arg::Str(shown));
 }
 
-/// Dispatches optional-value operations, the Go `writeOptInstr`.
 fn (self: &var Emitter) write_opt_instr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     match node.op {
         OptSome => return self.write_opt_some(module, node),
@@ -336,7 +295,6 @@ fn (self: &var Emitter) write_opt_instr(module: &ir::Module, node: &ir::InstrNod
     }
 }
 
-/// Wraps a payload into a present optional, the Go `writeOptSome`.
 fn (self: &var Emitter) write_opt_some(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let result_text = ir::name_text(&module.names, node.result.type_name);
     let result_type = result_text.as_bytes();
@@ -344,8 +302,6 @@ fn (self: &var Emitter) write_opt_some(module: &ir::Module, node: &ir::InstrNode
         if node.args.len() == 1 {
             let addr = try self.address_arg(module, node, 0);
             if niche_optional_elem(module, result_type) |_| {
-                // The payload is the whole value: a live element never writes
-                // the zero its niche reserves.
                 if addr |kept| {
                     try self.write_memory_alias(module, node.result, kept);
                     return null;
@@ -375,7 +331,6 @@ fn (self: &var Emitter) write_opt_some(module: &ir::Module, node: &ir::InstrNode
     return try self.fail0("llvm error: opt.some expects one payload and a `?T` result");
 }
 
-/// Builds the empty optional, the Go `writeOptNull`.
 fn (self: &var Emitter) write_opt_null(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let result_text = ir::name_text(&module.names, node.result.type_name);
     let result_type = result_text.as_bytes();
@@ -398,9 +353,6 @@ fn (self: &var Emitter) write_opt_null(module: &ir::Module, node: &ir::InstrNode
     return null;
 }
 
-/// Tests whether an optional holds a value, the Go `writeOptHas`. Go records
-/// the result under the type `bool`; the type a ValueInfo records is never
-/// read, so the result is recorded under its own declared type.
 fn (self: &var Emitter) write_opt_has(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 {
         return try self.fail0("llvm error: opt.has expects 1 arg");
@@ -434,12 +386,6 @@ fn (self: &var Emitter) write_opt_has(module: &ir::Module, node: &ir::InstrNode)
     return null;
 }
 
-/// Tests whether a niche optional holds a value by reading the word its niche
-/// sits in and comparing it against the zero only an absent value writes, the
-/// Go `writeNichePresence`. The read is one extractvalue however deep the word
-/// is, so a niche a struct inherited costs what a bare pointer's costs. An
-/// optional kept in memory (memory.kizu) is read at addr, where the word is
-/// one load.
 fn (self: &var Emitter) write_niche_presence(
     module: &ir::Module,
     elem: []u8,
@@ -487,9 +433,6 @@ fn (self: &var Emitter) write_niche_presence(
     return null;
 }
 
-/// Spells the getelementptr indices that reach a niche from the address of
-/// the value it sits in: the extractvalue path niche_path wrote, each index
-/// an i32 after the zero that steps through the address itself.
 fn (self: &var Emitter) niche_address_indices(path: &string::String) -> !ir::Name {
     var indices = try string::from_bytes(self.allocator, "i32 0");
     defer indices.deinit(self.allocator);
@@ -502,7 +445,6 @@ fn (self: &var Emitter) niche_address_indices(path: &string::String) -> !ir::Nam
         let byte = path_bytes[at];
         at = at + 1;
         try indices.append_byte(self.allocator, byte);
-        // The path separates its indices with ", ".
         if byte == cast<u8>(32) {
             try indices.append_bytes(self.allocator, "i32 ");
         }
@@ -511,9 +453,6 @@ fn (self: &var Emitter) niche_address_indices(path: &string::String) -> !ir::Nam
     return self.names.intern(spelled);
 }
 
-/// Extracts the payload of an optional, the Go `writeOptValue`. The caller
-/// has already branched on presence; an absent payload is only ever
-/// produced, never read.
 fn (self: &var Emitter) write_opt_value(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 {
         return try self.fail0("llvm error: opt.value expects 1 arg");
@@ -552,10 +491,6 @@ fn (self: &var Emitter) write_opt_value(module: &ir::Module, node: &ir::InstrNod
     return try self.fail1("llvm error: opt.value expects `?T`, got %s", Arg::Str(shown));
 }
 
-/// Emits a return from a function declared as !T, the Go
-/// `writeErrorUnionReturn`. Lowering wraps every success in error.ok before
-/// it gets here, so what arrives is the union itself, a failure to name, or
-/// another union to absorb.
 fn (self: &var Emitter) write_error_union_return(module: &ir::Module, value: ir::Value) -> !?diagnostic::Diagnostic {
     let value_text = ir::name_text(&module.names, value.type_name);
     let value_type = value_text.as_bytes();
@@ -598,15 +533,11 @@ fn (self: &var Emitter) write_error_union_return(module: &ir::Module, value: ir:
     return try self.fail2("llvm error: cannot return %s from %s", Arg::Str(value_shown), Arg::Str(return_shown));
 }
 
-/// Is the structure of one parsed error union spelling: whether it names an
-/// error set, and the success type it carries.
 struct ParsedErrorUnion {
     has_err: bool,
     ok: typ::Type,
 }
 
-/// Returns the parts of a parsed error union, null for any other type, the
-/// Go `typ.ErrorUnionParts` on a parsed tree.
 fn parsed_error_union(types: &typ::Table, value: typ::Type) -> ?ParsedErrorUnion {
     match typ::root_node(types, value) {
         ErrorUnion(node) => {
@@ -621,13 +552,6 @@ fn parsed_error_union(types: &typ::Table, value: typ::Type) -> ?ParsedErrorUnion
     return null;
 }
 
-/// Reports whether one error union is returned straight from a function
-/// that declares no error set, which is the absorption `try` does written
-/// as a return, the Go `absorbsErrorUnionReturn` with `typ.AbsorbsErrorSet`
-/// inlined: the declared `!T` names no error set, the returned `E!T` does,
-/// and both carry the same success. Go answers false for a spelling that
-/// does not parse; an empty spelling is the one such case a lowered module
-/// holds, and is answered here before parsing.
 fn (self: &var Emitter) absorbs_error_union_return(module: &ir::Module, value: ir::Value) -> !bool {
     if ir::is_empty(self.current_return) or ir::is_empty(value.type_name) {
         return false;
@@ -646,12 +570,6 @@ fn (self: &var Emitter) absorbs_error_union_return(module: &ir::Module, value: i
     return got_parts.has_err and typ::equal(&self.types, got_parts.ok, &self.types, want_parts.ok);
 }
 
-/// Returns one error union as another, naming the failure on the way
-/// because the target describes its own with text, the Go
-/// `writeAbsorbedErrorUnionReturn`. Go registers the extracted success as
-/// a value and resolves it again in writeSuccessReturn; here the operand is
-/// handed over directly, as the synthetic name is the emitter's, not the
-/// module's.
 fn (self: &var Emitter) write_absorbed_error_union_return(module: &ir::Module, value: ir::Value) -> !?diagnostic::Diagnostic {
     let value_text = ir::name_text(&module.names, value.type_name);
     let value_type = value_text.as_bytes();
@@ -680,12 +598,6 @@ fn (self: &var Emitter) write_absorbed_error_union_return(module: &ir::Module, v
     return self.write_success_return(module, success_bytes, success_name);
 }
 
-/// Returns a success value as the error union around it, the Go
-/// `writeSuccessReturn`. An absorbed return arrives holding the success the
-/// source union carried, so the wrap is written here rather than by the
-/// lowerer that could not name the target union yet. Go takes the value
-/// and resolves its operand; here the operand arrives with the value's
-/// type, and is unused for `void`.
 fn (self: &var Emitter) write_success_return(module: &ir::Module, value_type: []u8, operand: ir::Name) -> !?diagnostic::Diagnostic {
     let synthetic = try self.next_synthetic_value("return.ok");
     let name = try self.percent(synthetic);
@@ -706,8 +618,6 @@ fn (self: &var Emitter) write_success_return(module: &ir::Module, value_type: []
     return null;
 }
 
-/// Maps main's !T result to process exit status, the Go
-/// `writeMainErrorUnionReturn`.
 fn (self: &var Emitter) write_main_error_union_return(module: &ir::Module, value: ir::Value) -> !?diagnostic::Diagnostic {
     let value_text = ir::name_text(&module.names, value.type_name);
     let value_type = value_text.as_bytes();
@@ -745,11 +655,6 @@ fn (self: &var Emitter) write_main_error_union_return(module: &ir::Module, value
     return null;
 }
 
-/// Maps main's returned std::process::ExitStatus to the process exit
-/// status, the Go `writeMainExitStatusReturn`: Success is 0, Failure is 1,
-/// and Specific carries its own code. The variant numbers and the payload
-/// type come from the union declaration, so the mapping follows the source
-/// rather than a table written here.
 fn (self: &var Emitter) write_main_exit_status_return(module: &ir::Module, value: ir::Value) -> !?diagnostic::Diagnostic {
     if module.union_variant_named("std::process::ExitStatus", "Failure") |failure| {
         if module.union_variant_named("std::process::ExitStatus", "Specific") |specific| {
@@ -761,7 +666,6 @@ fn (self: &var Emitter) write_main_exit_status_return(module: &ir::Module, value
     return try self.fail0("llvm error: unknown union variant in `std::process::ExitStatus`");
 }
 
-/// Writes the exit mapping once the ExitStatus variants are in hand.
 fn (self: &var Emitter) write_main_exit_status_value(
     module: &ir::Module,
     value: ir::Value,
@@ -815,10 +719,6 @@ fn (self: &var Emitter) write_main_exit_status_value(
     return try self.fail0("llvm error: unknown union variant in `std::process::ExitStatus`");
 }
 
-/// Names the failure a `main -> !T` process exits with, so it reports why
-/// it exits 1 instead of failing silently, the Go `writeMainErrorMessage`.
-/// The failure is one global code, and the spelling comes from the module's
-/// table of error names.
 fn (self: &var Emitter) write_main_error_message(
     module: &ir::Module,
     source: ir::Value,
@@ -835,9 +735,6 @@ fn (self: &var Emitter) write_main_error_message(
     return null;
 }
 
-/// Reports one error code by its spelling, the Go `writeMainErrorName`. An
-/// error carries nothing, so the text comes from the table of names rather
-/// than from the value, which is the number saying which member it is.
 fn (self: &var Emitter) write_main_error_name(module: &ir::Module, code_operand: ir::Name) -> !void {
     let synthetic = try self.next_synthetic_value("main.err.name");
     let name = try self.percent(synthetic);
@@ -855,10 +752,6 @@ fn (self: &var Emitter) write_main_error_name(module: &ir::Module, code_operand:
     return self.line2("  call void @kizu_main_error_message(ptr %s, i64 %s)", Arg::Str(ptr_name), Arg::Str(len_name));
 }
 
-/// Propagates a failed try from the current function, the Go
-/// `writeErrorFailureReturn`. The failed union is the operand it is, or is
-/// kept in memory at addr; one that is the function's own is returned as it
-/// is, and is never kept (reads_address).
 fn (self: &var Emitter) write_error_failure_return(
     module: &ir::Module,
     source: ir::Value,
@@ -889,10 +782,6 @@ fn (self: &var Emitter) write_error_failure_return(
     return null;
 }
 
-/// Extracts an error-union failure, the Go `failureCode`. A failure is one
-/// global code, so it reads the same i64 out of every union and needs no
-/// conversion. A union kept in memory (memory.kizu) is read at addr, and any
-/// other is the operand it is, with no addr.
 fn (self: &var Emitter) failure_code(
     module: &ir::Module,
     result_name: ir::Name,
