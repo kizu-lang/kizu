@@ -1,0 +1,114 @@
+import std::testing;
+
+// A local struct reads back what was last written to each place in it, and
+// what it was made with where nothing was written: whether the write went to
+// another field, another element, an element at an index known only at run
+// time, the whole inner struct, or through a call.
+
+struct Inner {
+    count: i64,
+    flag: bool,
+    small: u8,
+    data: [8]i64,
+}
+
+struct Outer {
+    inner: Inner,
+    tag: i64,
+}
+
+fn fresh(count: i64, tag: i64) -> Outer {
+    return Outer { inner: Inner { count: count, flag: true, small: cast<u8>(9), data: [8]i64{} }, tag: tag };
+}
+
+fn clear(outer: &var Outer) -> void {
+    outer.inner.count = 0;
+}
+
+fn poke(data: &var [8]i64, at: i64) -> void {
+    data[at] = 40 + at;
+}
+
+fn poke_deep(outer: &var Outer, depth: i64) -> void {
+    if depth > 0 {
+        poke_deep(outer, depth - 1);
+        return;
+    }
+    outer.inner.data[2] = 77;
+    return;
+}
+
+test "a write to one field leaves the others as they were made" {
+    var outer = Outer { inner: Inner { count: 1, flag: true, small: cast<u8>(9), data: [8]i64{} }, tag: 5 };
+    for 0..3 |k| {
+        clear(&var outer);
+    }
+    testing::expect_equal<i64>(0, outer.inner.data[7]);
+    testing::expect_equal<i64>(5, outer.tag);
+    testing::expect(outer.inner.flag);
+    testing::expect_equal<u8>(cast<u8>(9), outer.inner.small);
+    testing::expect_equal<i64>(0, outer.inner.count);
+}
+
+test "a write to one element leaves the others zero" {
+    var outer = Outer { inner: Inner { count: 1, flag: false, small: cast<u8>(0), data: [8]i64{} }, tag: 6 };
+    outer.inner.data[3] = 7;
+    testing::expect_equal<i64>(7, outer.inner.data[3]);
+    testing::expect_equal<i64>(0, outer.inner.data[2]);
+}
+
+test "a write at an index known only at run time is read back" {
+    let other = fresh(1, 5);
+    var outer = Outer { inner: Inner { count: 1, flag: false, small: cast<u8>(0), data: [8]i64{} }, tag: 6 };
+    let at = other.tag - 1;
+    outer.inner.data[at] = 11;
+    testing::expect_equal<i64>(11, outer.inner.data[4]);
+}
+
+test "a whole inner struct stored over the first replaces every field" {
+    var outer = Outer { inner: Inner { count: 1, flag: false, small: cast<u8>(0), data: [8]i64{} }, tag: 6 };
+    outer.inner = Inner { count: 2, flag: true, small: cast<u8>(3), data: [8]i64{} };
+    outer.inner.data[1] = 12;
+    testing::expect_equal<i64>(2, outer.inner.count);
+    testing::expect_equal<i64>(12, outer.inner.data[1]);
+    testing::expect(outer.inner.flag);
+}
+
+test "a call that writes through a borrow of a place is read back" {
+    var outer = Outer { inner: Inner { count: 1, flag: false, small: cast<u8>(0), data: [8]i64{} }, tag: 6 };
+    poke(&var outer.inner.data, 5);
+    testing::expect_equal<i64>(45, outer.inner.data[5]);
+    poke_deep(&var outer, 3);
+    testing::expect_equal<i64>(77, outer.inner.data[2]);
+}
+
+test "a struct made again on every turn starts from its own values" {
+    var total = 0;
+    for 0..4 |k| {
+        var outer = Outer { inner: Inner { count: k, flag: false, small: cast<u8>(0), data: [8]i64{} }, tag: k * 2 };
+        total = total + outer.inner.count + outer.tag + outer.inner.data[k];
+        outer.inner.data[k] = 100;
+        total = total + outer.inner.data[k];
+    }
+    // Each turn: k + 2k + 0 + 100.
+    testing::expect_equal<i64>(418, total);
+}
+
+test "a write in one turn is read in the next" {
+    var outer = Outer { inner: Inner { count: 0, flag: false, small: cast<u8>(0), data: [8]i64{} }, tag: 0 };
+    var seen = 0;
+    for 0..3 |k| {
+        seen = seen + outer.inner.data[0];
+        outer.inner.data[0] = k + 1;
+    }
+    testing::expect_equal<i64>(3, seen);
+}
+
+test "a struct written and never read leaves the rest of the function as it was" {
+    var outer = Outer { inner: Inner { count: 1, flag: false, small: cast<u8>(0), data: [8]i64{} }, tag: 6 };
+    outer.inner.count = 4;
+    outer.inner.data[6] = 13;
+    let copy = fresh(2, 3);
+    testing::expect_equal<i64>(2, copy.inner.count);
+    testing::expect_equal<i64>(3, copy.tag);
+}
