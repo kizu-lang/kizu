@@ -8,21 +8,13 @@ import std::map;
 import std::mem;
 import std::string;
 
-// The real declaration-collection work unit predeclares types, then dispatches
-// types, receiver methods, and impl assertions in three source-order passes.
-// This Checker boundary alone constructs source diagnostics from copy issues.
-
 struct CollectionMemberIssue {
     owner: ast::Text, member: ast::Text,
-    /// Where the field or variant is, zero for a member that has none; the
-    /// diagnostic points there, the Go loops that `diag.Locate` at `field.Span`.
     span: ast::Span,
 }
 
 struct CollectionNamedTypeIssue {
     name: ast::Text, type_name: Type,
-    /// span is where the declaration was written, or zero when the issue
-    /// has no single place.
     span: ast::Span,
 }
 
@@ -30,7 +22,6 @@ struct CollectionMemberTypeIssue {
     member: CollectionMemberIssue, type_name: Type,
 }
 
-/// One extern struct field C cannot lay out, reported at the declaration.
 struct CollectionExternFieldIssue {
     member: CollectionMemberIssue, type_name: Type,
     span: ast::Span,
@@ -40,7 +31,6 @@ struct CollectionImplMethodIssue {
     contract_name: ast::Text, type_name: ast::Text, method: FunctionHandle,
 }
 
-/// One declaration a rule refuses as a whole, reported where it was written.
 struct CollectionSpanIssue {
     name: ast::Text,
     span: ast::Span,
@@ -124,8 +114,6 @@ union DeclaredFunctionResult {
     Issue(TypeCollectionIssue),
 }
 
-// Registers types, receiver methods, then impl assertions in the same three
-// source-order passes as the shipping Checker's collectTypesAndMethods.
 fn (self: &var Checker) collect_types_and_methods(tree: &ast::Ast, program: &ast::Program) -> !?diagnostic::Diagnostic {
     let owners = try ast::deinit_owners(self.allocator, tree, program);
     errdefer owners.deinit(self.allocator);
@@ -139,14 +127,10 @@ fn (self: &var Checker) collect_types_and_methods(tree: &ast::Ast, program: &ast
         }
         index = index + 1;
     }
-    // Combined error sets resolve after every set is collected, so the sets
-    // they name may be declared later in the file.
     if try self.resolve_error_set_compositions(tree) |failed| {
         owners.deinit(self.allocator);
         return move failed;
     }
-    // An extern struct's fields may name an extern struct declared later, so
-    // their C representation is checked once every struct is known.
     index = 0;
     while program.declarations.get(index) |declaration| {
         if try self.validate_extern_struct_fields(tree, declaration) |issue| {
@@ -181,8 +165,6 @@ fn (self: &var Checker) collect_types_and_methods(tree: &ast::Ast, program: &ast
     }
     let handle = try self.deinit_owner_maps.add(self.allocator, move owners);
     self.deinit_owners = handle;
-    // The same shape, answering a different question: whose release names an
-    // allocator (ADR-0132). Generic cleanup asks it before calling a deinit.
     let names = try ast::release_names_allocator(self.allocator, tree, program);
     let names_handle = try self.deinit_owner_maps.add(self.allocator, move names);
     self.release_allocators = names_handle;
@@ -230,9 +212,6 @@ fn (self: &var Checker) collect_struct(
     return result;
 }
 
-/// Refuses the parts of a struct declaration a foreign ABI has no layout
-/// for, the Go `validateExternStructShape`: generics, `unsafe struct`, and
-/// any ABI but C.
 fn extern_struct_shape_issue(
     tree: &ast::Ast, declaration: &ast::StructDecl
 ) -> ?TypeCollectionIssue {
@@ -253,7 +232,6 @@ fn extern_struct_shape_issue(
     return null;
 }
 
-/// Reports whether the declaration promises a foreign layout.
 fn is_extern_struct_decl(tree: &ast::Ast, declaration: &ast::StructDecl) -> bool {
     let retained_abi = tree.texts.at(declaration.extern_abi.node);
     return retained_abi.len() > 0;
@@ -274,8 +252,6 @@ fn (self: &var Checker) collect_struct_fields(
                 if field.borrow {
                     return TypeCollectionIssue::StructBorrow(member);
                 }
-                // The foreign side reads the raw pointer fields; the struct's
-                // own invariant is its layout, which the compiler does check.
                 if !extern_struct {
                     if try self.kizu_struct_field_issue(
                         tree, declaration, owners, member, field_type
@@ -292,7 +268,6 @@ fn (self: &var Checker) collect_struct_fields(
     return null;
 }
 
-/// Checks what a field of a struct Kizu lays out may hold.
 fn (self: &var Checker) kizu_struct_field_issue(
     tree: &ast::Ast, declaration: &ast::StructDecl, owners: &map::Map<[]u8, bool>,
     member: CollectionMemberIssue, field_type: Type
@@ -319,9 +294,6 @@ fn (self: &var Checker) kizu_struct_field_issue(
     return null;
 }
 
-/// Limits an extern struct to what C lays out, the Go
-/// `validateExternStructFields`: scalars, raw pointers, and other extern
-/// structs.
 fn (self: &var Checker) validate_extern_struct_fields(
     tree: &ast::Ast, declaration_handle: ast::Declaration
 ) -> !?TypeCollectionIssue {
@@ -350,8 +322,6 @@ fn (self: &var Checker) validate_extern_struct_fields(
     }
 }
 
-/// Reports whether a type names a struct with a C layout, the Go
-/// `isExternStruct`.
 fn (self: &Checker) is_extern_struct(tree: &ast::Ast, value: Type) -> !bool {
     let text = try self.types.copy_text(self.allocator, value);
     defer text.deinit(self.allocator);
@@ -359,7 +329,6 @@ fn (self: &Checker) is_extern_struct(tree: &ast::Ast, value: Type) -> !bool {
     return self.is_extern_struct_name(tree, name);
 }
 
-/// Reports whether `name` is a struct with a C layout.
 fn (self: &Checker) is_extern_struct_name(tree: &ast::Ast, name: []u8) -> bool {
     let handle = self.metadata.structs.get(name) orelse return false;
     match tree.declarations.at(handle.node) {
@@ -384,8 +353,6 @@ fn (self: &var Checker) is_plain_data_type(tree: &ast::Ast, value: Type, seen: &
     if try self.types.optional_elem(value) |element| {
         return self.is_plain_data_type(tree, element, seen);
     }
-    // A function pointer is the address of a top-level function, which
-    // outlives the program: copying it creates no obligation.
     if self.types.is_function_pointer(value) {
         return true;
     }
@@ -402,8 +369,6 @@ fn (self: &var Checker) is_plain_data_type(tree: &ast::Ast, value: Type, seen: &
         mem::starts_with(name, "std::arena::Handle<") {
         return true;
     }
-    // A fixed-length array is its elements laid side by side, so it is plain
-    // data exactly when they are.
     if try self.types.buffer_elem(value) |element| {
         return self.is_plain_data_type(tree, element, seen);
     }
@@ -417,12 +382,6 @@ fn (self: &var Checker) is_plain_data_type(tree: &ast::Ast, value: Type, seen: &
     return self.is_plain_data_aggregate(tree, value, name, seen);
 }
 
-/// Walks a declared struct / union for is_plain_data_type, remembering the
-/// answer once declarations are complete, the Go `isPlainDataAggregate`. A
-/// type reached twice through different fields is walked once, not once per
-/// path. A true answer met no cut on seen, and a false one from the root of a
-/// walk had no path above it, so both hold anywhere; a false one inside a
-/// walk may come from that walk's path and is not kept.
 fn (self: &var Checker) is_plain_data_aggregate(tree: &ast::Ast, value: Type, name: []u8, seen: &var array::Array<Type>) -> !bool {
     if value.node |handle| {
         let entry = self.types.entries.at(handle);
@@ -443,9 +402,6 @@ fn (self: &var Checker) is_plain_data_aggregate(tree: &ast::Ast, value: Type, na
     return plain;
 }
 
-/// Checks the fields or payloads of a declared struct / union, the Go
-/// `walkPlainDataAggregate`. A declared deinit keeps the type move-only
-/// regardless of its fields.
 fn (self: &var Checker) walk_plain_data_aggregate(tree: &ast::Ast, value: Type, name: []u8, seen: &var array::Array<Type>) -> !bool {
     if self.metadata.impls.at(name) |methods| {
         if methods.contains(typ::cleanup_method()) {
@@ -756,8 +712,6 @@ fn (self: &var Checker) new_declared_function_type_in_scope(tree: &ast::Ast, dec
     return DeclaredFunctionResult::Value(handle);
 }
 
-// Keeps foreign ABIs explicit and limits the browser boundary to values with
-// one stable WebAssembly representation.
 fn (self: &Checker) validate_host_function_signature(
     tree: &ast::Ast,
     signature: &ast::FunctionSignature,
@@ -839,14 +793,6 @@ fn (self: &Checker) validate_host_function_signature(
     return null;
 }
 
-/// Limits a C function's boundary to what C can name, the Go
-/// `validateCHostFunctionTypes`: integers, floats, bool, raw pointers, and an
-/// extern struct, by value or lent as `&S` / `&var S`, which C receives as a
-/// pointer to the struct. A view, an owner, a Kizu struct, or an error union
-/// has no C representation; passing one hands C the address of something it
-/// cannot read, and taking one back hands Kizu a value C never built. How a
-/// struct by value travels is the target's C calling convention, which the
-/// backend follows (llvm/cabi.kizu).
 fn (self: &Checker) validate_c_host_function_types(
     tree: &ast::Ast,
     signature: &ast::FunctionSignature,
@@ -870,12 +816,6 @@ fn (self: &Checker) validate_c_host_function_types(
     return self.validate_c_variadic_function(tree, signature, params, return_type);
 }
 
-/// Refuses a C variadic declaration that passes or returns a struct by value,
-/// the Go `validateCVariadicFunction`. The backend rewrites such a struct
-/// into the registers or the memory the target's convention gives it
-/// (llvm/cabi.kizu), so the declared parameters are no longer one LLVM
-/// parameter each, and a variadic call has to say exactly where they end. A
-/// struct lent as `&S` is one pointer and stays allowed.
 fn (self: &Checker) validate_c_variadic_function(
     tree: &ast::Ast,
     signature: &ast::FunctionSignature,
@@ -907,12 +847,6 @@ fn (self: &Checker) validate_c_variadic_function(
     return null;
 }
 
-/// Limits a function C calls to what C can hand it and read back, the Go
-/// `validateCExportFunction`: integers, floats, bool and raw pointers. A
-/// borrow is refused even of an extern struct: C passes an address the
-/// compiler never saw made, and a safe borrow would promise it is live and
-/// unaliased. The symbol is the declaration's own identifier, so it may not
-/// be one the program entry or the runtime already names.
 fn (self: &Checker) validate_c_export_function(
     tree: &ast::Ast,
     signature: &ast::FunctionSignature,
@@ -956,8 +890,6 @@ fn (self: &Checker) validate_c_export_function(
     return null;
 }
 
-/// Reports what keeps one parameter off the C boundary, or null when C can
-/// receive it.
 fn (self: &Checker) c_host_param_issue(
     tree: &ast::Ast,
     signature: &ast::FunctionSignature,
@@ -979,8 +911,6 @@ fn (self: &Checker) c_host_param_issue(
     return TypeCollectionIssue::CHostParam(issue);
 }
 
-/// Describes one host boundary parameter for a diagnostic: its position,
-/// its type, and whether the declaration borrows it mutably.
 fn (self: &Checker) host_param_issue(
     signature: &ast::FunctionSignature,
     index: i64,
@@ -996,9 +926,6 @@ fn (self: &Checker) host_param_issue(
     };
 }
 
-/// Reports whether value has one C representation, the Go `cHostScalar`.
-// A C function pointer has one C representation when every type it passes
-// does: C holds it as the address of a function, null when optional.
 fn c_host_scalar(types: &TypeTable, value: Type) -> bool {
     return browser_host_scalar(types, value) or
         types.is_text(value, "f32") or types.is_text(value, "f64") or
@@ -1016,8 +943,6 @@ fn browser_host_scalar(types: &TypeTable, value: Type) -> bool {
         types.is_text(value, "usize") or types.is_text(value, "isize");
 }
 
-/// Reports whether the identifier after the last `::` of a resolved name
-/// starts with prefix, the Go `strings.HasPrefix(unqualifiedFunctionName(..))`.
 fn collection_leaf_starts_with(name: []u8, prefix: []u8) -> bool {
     var index = mem::len(name);
     while index > 1 {
@@ -1068,12 +993,6 @@ fn (self: &var Checker) collect_function_parameter(
         };
         return TypeCollectionIssue::ParamCompileTimeOnly(named);
     }
-    // A borrowed optional is read through capture, and a capture takes the
-    // payload out. Copy data comes out as a copy and the caller's optional
-    // still has it; an owner or a view would come out as the one value, and
-    // the caller's optional would still say it is there.
-    // A view is copied freely but is somebody's borrow, and an optional of
-    // one has nowhere to be kept (SPEC §7), so there is nothing to lend.
     if try self.types.optional_elem(parameter_type) |elem| {
         let lendable = try self.is_copy_type(tree, elem) and !self.types.is_slice_type(elem);
         if parameter.borrow and !lendable {
@@ -1244,9 +1163,7 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
             try append_collection_text(self.allocator, &var message, tree, impl_method.contract_name);
             try message.append_byte(self.allocator, cast<u8>(96));
         },
-        Resolution(_) => {
-            // Handled before message storage is created.
-},
+        Resolution(_) => {},
         UnionOptional(member) => {
             try message.append_bytes(self.allocator, "union payload `");
             try append_collection_member(self.allocator, &var message, tree, member, "::");
@@ -1562,8 +1479,6 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
     return move value;
 }
 
-/// Adds what C can carry and how to hand it the value, the Go
-/// `cHostTypeError` note and help.
 fn add_c_host_advice(allocator: Allocator, value: &var diagnostic::Diagnostic) -> !void {
     try value.with_note(allocator,
         "a C function passes only what C can name: an integer, a float, `bool`, `ptr<T>`, `ptr<const T>`, a nullable pointer, or an extern struct"
@@ -1573,8 +1488,6 @@ fn add_c_host_advice(allocator: Allocator, value: &var diagnostic::Diagnostic) -
     );
 }
 
-/// Adds what a C export can carry and how to take an address, the Go
-/// `cExportTypeError` note and help.
 fn add_c_export_advice(allocator: Allocator, value: &var diagnostic::Diagnostic) -> !void {
     try value.with_note(allocator,
         "a C export passes only what C can name: an integer, a float, `bool`, `ptr<T>`, `ptr<const T>`, or a nullable pointer"
@@ -1582,7 +1495,6 @@ fn add_c_export_advice(allocator: Allocator, value: &var diagnostic::Diagnostic)
     return value.with_help(allocator, "take an address C hands over as `ptr<T>` and read it under `unsafe`");
 }
 
-/// Writes `C export `name` parameter N has type `` for a parameter C cannot pass.
 fn (self: &Checker) append_c_export_param_head(
     message: &var string::String,
     tree: &ast::Ast,
@@ -1595,8 +1507,6 @@ fn (self: &Checker) append_c_export_param_head(
     return message.append_bytes(self.allocator, " has type `");
 }
 
-/// Spells a borrowed C parameter the way its declaration does, the Go
-/// `"&var " + spelled` / `"&" + spelled`.
 fn (self: &Checker) append_c_host_param_spelling(
     message: &var string::String,
     tree: &ast::Ast,
@@ -1614,7 +1524,6 @@ fn new_checker_diagnostic(allocator: Allocator, category: []u8, message: string:
     return new_checker_diagnostic_at(allocator, category, ast::zero_span(), move message);
 }
 
-/// Builds one collection diagnostic at span, the place the issue names.
 fn new_checker_diagnostic_at(
     allocator: Allocator,
     category: []u8,

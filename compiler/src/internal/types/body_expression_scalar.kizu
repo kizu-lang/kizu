@@ -6,11 +6,6 @@ import std::fmt;
 import std::mem;
 import std::string;
 
-// Ports the scalar, identifier, operator, and contextual-integer leaves used
-// by Checker.checkExpr. They stay private to the Checker module; the later
-// expression dispatcher calls them without an intermediate policy API.
-
-// Computes the static type of one literal-like expression.
 fn (self: &var Checker) check_scalar_expr(
     tree: &ast::Ast,
     expression: ast::Expression,
@@ -63,7 +58,6 @@ fn (self: &var Checker) check_scalar_expr(
     }
 }
 
-// Resolves a local name or an instantiated compile-time type parameter.
 fn (self: &var Checker) check_ident_expr(
     tree: &ast::Ast,
     scope: ScopeHandle,
@@ -112,9 +106,6 @@ fn (self: &var Checker) check_ident_expr(
             }
         }
     }
-    // A top-level function's name is the one value a function pointer takes.
-    // There is nothing else to build one from: Kizu has no closures, so the
-    // name is read here rather than through a conversion form.
     if try self.function_pointer_value(name) |value| {
         if try self.c_pointer_refusal(value) |refused| {
             var message = string::new(self.allocator);
@@ -141,12 +132,6 @@ fn (self: &var Checker) check_ident_expr(
     return try self.checker_message_at("type error", expression.span, move message);
 }
 
-// Returns the first type a C function's pointer type passes that a C
-// function pointer cannot, or null when it can carry them all, the Go
-// `cPointerRefusal`. A call by name passes a struct by value through the
-// convention the backend follows for that function; a call through a pointer
-// passes scalars and lends structs, which reach C as an address either way.
-// The declaration already limited what it lends to structs C lays out.
 fn (self: &var Checker) c_pointer_refusal(value: Type) -> !?Type {
     let parsed = self.types.lookup(value) orelse return null;
     match typ::root_node(&self.types.parsed, parsed) {
@@ -175,10 +160,6 @@ fn (self: &var Checker) c_pointer_refusal(value: Type) -> !?Type {
     }
 }
 
-// Resolves the declaration a name used as a value refers to. A callee is
-// qualified by the resolver; a name in any other position is not, so a
-// module-local function is looked up under the module the reader is inside as
-// well as under the name as written.
 fn (self: &var Checker) function_by_value_name(name: []u8) -> !?FunctionHandle {
     if self.metadata.functions_by_name.get(name) |handle| {
         return handle;
@@ -193,8 +174,6 @@ fn (self: &var Checker) function_by_value_name(name: []u8) -> !?FunctionHandle {
     return null;
 }
 
-// Appends the module prefix of the function being checked, `::` included, and
-// reports whether it has one.
 fn (self: &var Checker) append_current_module_prefix(out: &var string::String) -> !bool {
     let handle = self.current_function_handle() orelse return false;
     var appended = false;
@@ -209,7 +188,6 @@ fn (self: &var Checker) append_current_module_prefix(out: &var string::String) -
     return appended;
 }
 
-// Returns the byte after the last `::` in a name, or 0 when it has none.
 fn last_namespace_end(bytes: []u8) -> i64 {
     var index = mem::len(bytes);
     while index > 1 {
@@ -221,10 +199,6 @@ fn last_namespace_end(bytes: []u8) -> i64 {
     return 0;
 }
 
-// Returns the function pointer type a declared function's name has as a
-// value, and null for a name that declares none. A generic function has no
-// single signature, so its name is not a value. The spelling is built here
-// and interned, the way every other computed type reaches the table.
 fn (self: &var Checker) function_pointer_value(name: []u8) -> !?Type {
     let handle = try self.function_by_value_name(name) orelse return null;
     var text = string::new(self.allocator);
@@ -241,9 +215,6 @@ fn (self: &var Checker) function_pointer_value(name: []u8) -> !?Type {
     return try self.types.intern(bytes);
 }
 
-// Writes `fn(T, ...) -> R` for one declared function, with the borrow markers
-// its parameters were declared with. A function C calls or C defined has the
-// C calling convention, which its pointer type names: `extern "c" fn(...)`.
 fn (self: &var Checker) append_function_pointer_text(
     out: &var string::String,
     handle: FunctionHandle
@@ -301,9 +272,6 @@ fn (self: &var Checker) append_function_pointer_text(
     return out.append_string(self.allocator, &result);
 }
 
-// Treats a fit-checked literal as the expected type: an integer literal as
-// any integer type, a floating-point literal as `f32`, the Go
-// `coerceContextualLiteral`.
 fn (self: &Checker) coerce_contextual_literal(
     tree: &ast::Ast,
     expression: ast::Expression,
@@ -317,8 +285,6 @@ fn (self: &Checker) coerce_contextual_literal(
     return self.coerce_contextual_integer_literal(tree, expression, want, got, out);
 }
 
-// Treats an `f64` literal written where an `f32` is expected as that `f32`,
-// when its magnitude fits one, the Go `coerceContextualFloatLiteral`.
 fn (self: &Checker) coerce_contextual_float_literal(
     tree: &ast::Ast,
     expression: ast::Expression,
@@ -349,9 +315,6 @@ fn (self: &Checker) coerce_contextual_float_literal(
     return null;
 }
 
-// Returns the largest finite f32, (2 - 2^-23) * 2^127, built by exact steps
-// rather than spelled, since the spelling has more digits than the literal
-// path converts.
 fn f32_max() -> f64 {
     var value = 2.0 - 1.0 / 8388608.0;
     var index = 0;
@@ -362,8 +325,6 @@ fn f32_max() -> f64 {
     return value;
 }
 
-// Returns the value of a floating-point literal, possibly negated, and null
-// for any other expression, the Go `floatLiteralValue`.
 fn (self: &Checker) float_literal_value(tree: &ast::Ast, expression: ast::Expression) -> !?f64 {
     match tree.expressions.at(expression.node) {
         Float(value) => {
@@ -386,7 +347,6 @@ fn (self: &Checker) float_literal_value(tree: &ast::Ast, expression: ast::Expres
     }
 }
 
-// Treats a fit-checked integer literal as the expected integer type.
 fn (self: &Checker) coerce_contextual_integer_literal(
     tree: &ast::Ast,
     expression: ast::Expression,
@@ -422,7 +382,6 @@ fn (self: &Checker) coerce_contextual_integer_literal(
     return try self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-// Returns an interpreter-representable integer literal written at expression.
 fn integer_literal_value(tree: &ast::Ast, expression: ast::Expression) -> ?i64 {
     match tree.expressions.at(expression.node) {
         Int(value) => {
@@ -445,7 +404,6 @@ fn integer_literal_value(tree: &ast::Ast, expression: ast::Expression) -> ?i64 {
     }
 }
 
-// Checks the fixed-width bounds used by contextual integer typing.
 fn integer_literal_fits_type(table: &TypeTable, value: i64, type_name: Type) -> bool {
     if table.is_text(type_name, "i8") {
         return value >= -128 and value <= 127;
@@ -485,7 +443,6 @@ fn (self: &Checker) checker_integer_type(value: Type) -> bool {
     return false;
 }
 
-// Validates boolean logical operands.
 fn (self: &var Checker) check_logical(
     operator: []u8,
     left: Type,
@@ -507,10 +464,6 @@ fn (self: &var Checker) check_logical(
     return try self.checker_text_diagnostic_at(span, move message);
 }
 
-// Validates equality operands. Two error sets compare when one holds every
-// member of the other -- a set and a union it is part of. A member is one
-// value whichever set carries it (SPEC §11.2), so the comparison is the same
-// integer comparison it is inside one set.
 fn (self: &var Checker) check_equality(
     operator: []u8,
     left: Type,
@@ -539,10 +492,6 @@ fn (self: &var Checker) check_equality(
     return null;
 }
 
-// Reports whether a value of the type is one machine value, so that `==` on
-// it is one comparison (SPEC §6.9.1), the Go `comparesAsOneValue`. A struct,
-// an optional, a view or an array is several, and comparing those is a loop
-// the source writes.
 fn (self: &Checker) compares_as_one_value(value: Type) -> bool {
     let handle = value.node orelse return false;
     let entry = self.types.entries.at(handle);
@@ -565,7 +514,6 @@ fn (self: &Checker) compares_as_one_value(value: Type) -> bool {
     return false;
 }
 
-// Reports both operand types for a binary mismatch.
 fn (self: &Checker) operator_type_mismatch(
     operator: []u8,
     left: Type,
@@ -584,7 +532,6 @@ fn (self: &Checker) operator_type_mismatch(
     return move problem;
 }
 
-// Reports operands that do not belong to the required category.
 fn (self: &Checker) operator_operand_kind_error(
     operator: []u8,
     want: []u8,
@@ -616,7 +563,6 @@ fn (self: &Checker) append_operand_text(
     return self.append_checker_type(message, right);
 }
 
-// Reports whether operator returns bool for numeric operands.
 fn is_comparison(operator: []u8) -> bool {
     return mem::equal_bytes(operator, "<") or
         mem::equal_bytes(operator, "<=") or
@@ -635,10 +581,6 @@ fn is_shift(operator: []u8) -> bool {
     return mem::equal_bytes(operator, "<<") or mem::equal_bytes(operator, ">>");
 }
 
-// Lets an integer literal on one side of an operator take the integer type
-// of the other side, the way a literal argument takes its parameter's type
-// (SPEC §7.2), the Go `coerceBinaryLiteral`: `flags & 0x0F` with
-// `flags: u8` needs no cast. The literal must still fit that type.
 fn (self: &Checker) coerce_binary_literal(
     tree: &ast::Ast,
     expression: &ast::BinaryExpr,
@@ -699,8 +641,6 @@ fn (self: &Checker) coerce_binary_literal(
     return null;
 }
 
-// Refuses a shift by a negative literal here, where the source shows the
-// sign, instead of at run time; the Go `checkShiftLiteral`.
 fn (self: &Checker) check_shift_literal(
     tree: &ast::Ast,
     expression: &ast::BinaryExpr,
@@ -733,7 +673,6 @@ fn opposite_shift(operator: []u8) -> []u8 {
     return "<<";
 }
 
-// Returns the best source span retained on an expression.
 fn expression_span(tree: &ast::Ast, expression: ast::Expression) -> ast::Span {
     match tree.expressions.at(expression.node) {
         Ident(value) => return value.span,

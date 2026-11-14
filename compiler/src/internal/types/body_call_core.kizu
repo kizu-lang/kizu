@@ -8,7 +8,6 @@ import std::map;
 import std::mem;
 import std::string;
 
-// Validates one call and enforces the single borrow-optional consumption gate.
 fn (self: &var Checker) check_call_expr(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -38,10 +37,6 @@ fn (self: &var Checker) check_call_expr(
     return null;
 }
 
-// Validates a call made through a function pointer. The call is safe unless
-// the pointee carries an obligation, which is what `unsafe fn(...)` spells:
-// the marker is required for the same reason a direct call to an `unsafe fn`
-// requires it.
 fn (self: &var Checker) check_func_pointer_call(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -66,8 +61,6 @@ fn (self: &var Checker) check_func_pointer_call(
             return move problem;
         }
     }
-    // The pointee of an `extern "c" fn` may be C, which no check reached, so
-    // the call carries the obligation a direct extern call does.
     if self.types.function_pointer_is_c(pointer) {
         var operation = string::new(self.allocator);
         defer operation.deinit(self.allocator);
@@ -243,10 +236,6 @@ fn (self: &var Checker) check_call_expr_dispatch(
                     "use `std::io::blocking()`"
                 );
             }
-            // A binding shadows a declaration: a name bound to a function
-            // pointer is called through the pointer, not looked up as one.
-            // The lookup result is rebound before it is read: a capture of a
-            // Type is not usable as a value in the expression that follows.
             var bound = empty_type();
             if self.scopes.lookup(scope, name) |resolved| {
                 bound = resolved;
@@ -872,16 +861,10 @@ fn (self: &var Checker) check_print_call(
     return self.check_print_instance(tree, got, span, out);
 }
 
-/// Names the std generic every `print(value)` is a call to, the Go
-/// `stdlib.PrintFunction` (SPEC §14.1).
 fn print_function_name() -> []u8 {
     return "std::fmt::print";
 }
 
-// Checks the std body `print` stands for with the argument's type bound
-// (SPEC §14.1), the Go `checkPrintInstance`. The body is the one place that
-// says which types print, so a type it has no case for is refused there, at
-// this call.
 fn (self: &var Checker) check_print_instance(
     tree: &var ast::Ast,
     argument: Type,
@@ -938,11 +921,6 @@ fn (self: &Checker) named_arity_error(
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-/// Types the raw pointer to a view's first element, the Go `checkPtrOf`:
-/// `ptr_of(v)` gives `ptr<const T>` for any view, `mut_ptr_of(v)` gives
-/// `ptr<T>` and needs a writable one. Taking the address needs no `unsafe`,
-/// the way reading a raw pointer out of a field needs none: the operation
-/// that uses the pointer is the one that asks (SPEC §12).
 fn (self: &var Checker) check_ptr_of(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -964,8 +942,6 @@ fn (self: &var Checker) check_ptr_of(
         out.* = try self.pointer_type_to(elem, true);
         return null;
     }
-    // A writable view is a binding held as `&var []T`, the same thing an
-    // indexed assignment or a `&var v[a..b]` lends from (ADR-0096).
     var writable = false;
     match tree.expressions.at(argument.node) {
         Ident(identifier) => {
@@ -982,10 +958,6 @@ fn (self: &var Checker) check_ptr_of(
     return null;
 }
 
-/// Types `ptr_offset(p, count)`, the Go `checkPtrOffset`: the same pointer
-/// type, moved by count elements. Stepping past the allocation the pointer
-/// came from is what the `unsafe` marker answers for, the way Rust's
-/// `offset` asks.
 fn (self: &var Checker) check_ptr_offset(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1016,8 +988,6 @@ fn (self: &var Checker) check_ptr_offset(
     return null;
 }
 
-/// Types the element count of a raw pointer builtin as i64, the integer a
-/// view counts its elements in, the Go `checkPtrCount`.
 fn (self: &var Checker) check_ptr_count(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1045,9 +1015,6 @@ fn (self: &Checker) ptr_count_error(name: []u8, got: Type) -> !diagnostic::Diagn
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-/// Reports the two builtins that make a view over raw memory, the Go
-/// `isRawViewBuiltinName`. Each is a let initializer only, the way
-/// `as_slice` is: the binding is what the view's writability is read from.
 fn is_raw_view_builtin_name(name: []u8) -> bool {
     return mem::equal_bytes(name, "view_from_ptr") or mem::equal_bytes(name, "mut_view_from_ptr");
 }
@@ -1063,11 +1030,6 @@ fn (self: &Checker) raw_view_not_bound_error(name: []u8) -> !diagnostic::Diagnos
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-/// Recognizes `let v = view_from_ptr(p, count)` and `let v =
-/// mut_view_from_ptr(p, count)`, the Go `checkRawViewInitializer`, and
-/// returns the view type and its writability. The view borrows nothing the
-/// checker can name: that the memory holds count elements for as long as
-/// the view is used is what the `unsafe` marker answers for.
 fn (self: &var Checker) check_raw_view_initializer(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1140,7 +1102,6 @@ fn (self: &var Checker) check_raw_view_initializer(
     return null;
 }
 
-/// Spells `[]T` for an element type.
 fn (self: &var Checker) view_type_of(elem: Type) -> !Type {
     var spelling = try string::from_bytes(self.allocator, "[]");
     defer spelling.deinit(self.allocator);
@@ -1157,7 +1118,6 @@ fn (self: &Checker) mut_view_pointer_error(got: Type) -> !diagnostic::Diagnostic
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-/// Spells `ptr<const T>` or `ptr<T>` for an element type.
 fn (self: &var Checker) pointer_type_to(elem: Type, constant: bool) -> !Type {
     var spelling = try string::from_bytes(self.allocator, "ptr<");
     defer spelling.deinit(self.allocator);

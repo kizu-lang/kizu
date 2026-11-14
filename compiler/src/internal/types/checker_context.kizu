@@ -4,9 +4,6 @@ import std::map;
 import std::mem;
 import std::string;
 
-// Owns the maps selected while one generic instantiation is checked. A
-// selected map is a copy handle so entering a nested instance never moves a
-// Checker field that resolver calls may already reference.
 struct TypeValueFrameStore {
     allocator: Allocator,
     frames: arena::Arena<map::Map<[]u8, Type>>,
@@ -71,17 +68,12 @@ fn (self: &TypeValueFrameStore) len() -> i64 {
     return self.frames.at(handle).len();
 }
 
-// Applies the selected substitutions, or preserves value when no instance is
-// active.
 fn (self: &TypeValueFrameStore) substitute(table: &var TypeTable, value: Type) -> !Type {
     let handle = self.current orelse return value;
     let values = self.frames.at(handle);
     return table.substitute_type_params(self.allocator, value, values);
 }
 
-// Names one active compile-time field capture. Bindings form a lexical stack:
-// restoring its previous handle removes every name pushed by an expansion
-// without requiring deletion from std::map.
 struct MetaBinding {
     parent: ?arena::Handle<MetaBinding>,
     name: string::String,
@@ -135,11 +127,6 @@ fn (self: &MetaBindingStore) get(name: []u8) -> ?MetaFieldHandle {
     return null;
 }
 
-// Names one value a comptime expression may read, the Go `comptimeValues`
-// entry: an integer or bool static parameter of the instance being checked,
-// or an integer-range `comptime for` capture. The body also reads each as an
-// ordinary local. Bindings form a lexical stack the same way the field
-// captures do.
 struct ComptimeValueBinding {
     parent: ?arena::Handle<ComptimeValueBinding>,
     name: string::String,
@@ -174,10 +161,6 @@ fn (self: &var ComptimeValueStore) bind(
     return previous;
 }
 
-// enter replaces the readable names with the values an instance binds and
-// answers the handle that puts back the ones in force. It replaces rather
-// than adds: an instance body is its own function, and the captures and
-// static values of the body that called it are not in scope.
 fn (self: &var ComptimeValueStore) enter(
     values: &map::Map<[]u8, ComptimeValue>
 ) -> !?arena::Handle<ComptimeValueBinding> {
@@ -213,9 +196,6 @@ fn (self: &ComptimeValueStore) get(name: []u8) -> ?ComptimeValue {
     return null;
 }
 
-// Names one active `Function` static argument. Bindings form a lexical stack
-// the same way the field captures do: restoring the previous handle removes
-// every name an instantiation pushed.
 struct FunctionBinding {
     parent: ?arena::Handle<FunctionBinding>,
     name: string::String,
@@ -259,9 +239,6 @@ fn (self: &var FunctionBindingStore) restore(
     return;
 }
 
-// copy_target answers whether `name` is bound, copying what it is bound to.
-// A view into the arena would be a borrow of the store, which cannot leave it,
-// so the answer is a copy the caller owns.
 fn (self: &FunctionBindingStore) copy_target(
     allocator: Allocator,
     name: []u8,
@@ -286,8 +263,6 @@ fn (self: FunctionBindingStore) deinit(allocator: Allocator) -> void {
     return;
 }
 
-// Owns the mutable state local to one function or generic body check. Nested
-// instantiations select another arena record and restore the prior copy handle.
 struct BodyContext {
     return_type: Type,
     function: CurrentFunction,

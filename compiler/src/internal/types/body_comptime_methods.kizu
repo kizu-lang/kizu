@@ -8,20 +8,11 @@ import std::map;
 import std::mem;
 import std::string;
 
-// Ports the compile-time statement checks of internal/types/comptime.go and
-// meta.go, the receiver-sensitive Box / String / Arena method checks of
-// checker.go, and the per-declaration body drivers checkFunction and
-// checkTestDecl. Expansions add nodes to the mutable Ast; nothing here keeps
-// a borrow into it across a recursive check.
-
-// Names one union variant copied out of checker metadata so the variant list
-// can be retained without holding a metadata borrow.
 struct UnionVariantFacts {
     name: string::String,
     payload: Type,
 }
 
-// Checks only the branch selected by a compile-time bool.
 fn (self: &var Checker) check_comptime_if_stmt(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -59,8 +50,6 @@ fn (self: &var Checker) check_comptime_if_stmt(
     return null;
 }
 
-// Expands a compile-time loop and checks each expansion. The body is
-// ordinary Kizu code checked once per element, not a rewritten token stream.
 fn (self: &var Checker) check_comptime_for_stmt(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -78,8 +67,6 @@ fn (self: &var Checker) check_comptime_for_stmt(
     }
 }
 
-// Checks each expansion of a loop over a `std::meta` list, with the capture
-// naming one field per expansion.
 fn (self: &var Checker) check_comptime_for_list(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -119,15 +106,10 @@ fn (self: &var Checker) check_comptime_for_list(
         index = index + 1;
     }
     self.meta_bindings.restore(previous_meta);
-    // An empty struct expands to nothing, and nothing cannot return.
     out.* = returns and fields.len() > 0;
     return null;
 }
 
-// Expands an integer-range loop and checks each expansion with the capture
-// bound to that expansion's integer. The capture is an i64 local to the body
-// and a known integer to comptime expressions in it, so `comptime if i * k
-// != 0` folds per expansion (SPEC §13.1).
 fn (self: &var Checker) check_comptime_for_range(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -173,22 +155,14 @@ fn (self: &var Checker) check_comptime_for_range(
         value = value + 1;
     }
     self.comptime_values.restore(previous_values);
-    // An empty range expands to nothing, and nothing cannot return.
     out.* = returns and start < end;
     return null;
 }
 
-// Caps how many times one integer-range `comptime for` may expand. The
-// checker is the one place that counts, so the ownership checker and the
-// lowerer walk whatever range reaches them.
 fn max_comptime_range_expansions() -> i64 {
     return 1024;
 }
 
-// Evaluates the bounds of an integer-range `comptime for`. Both are comptime
-// integers, and the range is capped: each expansion is a copy of the body to
-// check and lower, so a range that wants thousands of them is asking for a
-// runtime loop.
 fn (self: &var Checker) comptime_range_bounds(
     tree: &ast::Ast,
     range: ast::ComptimeForRange,
@@ -237,8 +211,6 @@ fn (self: &var Checker) comptime_range_bounds(
     return null;
 }
 
-// Reads the list a `comptime for` walks. The two declared lists and an
-// integer range are the iterables; the range is its own path.
 fn (self: &var Checker) comptime_for_fields(
     tree: &ast::Ast,
     list: ast::Expression,
@@ -291,14 +263,12 @@ fn (self: &var Checker) comptime_for_named_fields(
     }
 }
 
-// Names the lists a `comptime for` accepts.
 fn (self: &Checker) comptime_for_list_error() -> !diagnostic::Diagnostic {
     return self.comptime_error(
         "comptime for expects `std::meta::public_fields<T>()` or `std::meta::variants<T>()`"
     );
 }
 
-// Lists a struct's public fields in declaration order.
 fn (self: &var Checker) comptime_public_fields(
     tree: &ast::Ast,
     type_arg: []u8,
@@ -313,7 +283,6 @@ fn (self: &var Checker) comptime_public_fields(
     return self.public_meta_fields(tree, owner, out);
 }
 
-// Lists an enum's tags or a union's variants in declaration order.
 fn (self: &var Checker) comptime_variants(
     tree: &ast::Ast,
     type_arg: []u8,
@@ -326,7 +295,6 @@ fn (self: &var Checker) comptime_variants(
     return self.variant_meta_fields(tree, owner, out);
 }
 
-// Resolves the one static argument a list form takes.
 fn (self: &var Checker) comptime_list_owner(
     tree: &ast::Ast,
     form: stdmeta::Form,
@@ -354,7 +322,6 @@ fn (self: &var Checker) comptime_list_owner(
     return try self.comptime_form_error(form, "` expects 1 static argument");
 }
 
-// Retains one meta field per enum tag or union variant of owner.
 fn (self: &var Checker) variant_meta_fields(
     tree: &ast::Ast,
     owner: Type,
@@ -393,8 +360,6 @@ fn (self: &var Checker) variant_meta_fields(
     return null;
 }
 
-// Retains one meta field per member of an error set, in declaration order,
-// each with the set that declared it.
 fn (self: &var Checker) error_member_meta_fields(
     owner: Type,
     handle: ErrorSetHandle,
@@ -458,10 +423,6 @@ fn (self: &Checker) meta_variants_type_error(owner: Type) -> !diagnostic::Diagno
     return self.comptime_message(move message);
 }
 
-// Checks the match a `comptime match` stands for, with the capture bound to
-// the arm's own variant while its body is checked. The dispatch itself is an
-// ordinary match, so exhaustiveness and payload binding are checked by the
-// rules match already has.
 fn (self: &var Checker) check_comptime_match_stmt(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -488,8 +449,6 @@ fn (self: &var Checker) check_comptime_match_stmt(
     return self.check_stmt(tree, scope, expanded, want_return, out);
 }
 
-// Reports whether any variant holds a payload, which is what makes the
-// second capture necessary.
 fn (self: &Checker) meta_fields_carry_payload(variants: &array::Array<MetaFieldHandle>) -> bool {
     var index = 0;
     while variants.get(index) |handle| {
@@ -502,7 +461,6 @@ fn (self: &Checker) meta_fields_carry_payload(variants: &array::Array<MetaFieldH
     return false;
 }
 
-// Builds the ordinary match every phase reads from the resolved variants.
 fn (self: &Checker) expand_comptime_match(
     tree: &var ast::Ast,
     statement: &ast::ComptimeMatchStmt,
@@ -554,7 +512,6 @@ fn (self: &Checker) comptime_match_capture_error(owner: Type) -> !diagnostic::Di
     return self.comptime_message(move message);
 }
 
-// Validates receiver-sensitive Box<T> methods.
 fn (self: &var Checker) check_box_receiver_method(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -642,8 +599,6 @@ fn (self: &Checker) box_local_receiver_error(name: []u8) -> !diagnostic::Diagnos
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-// Returns the identifier a receiver names directly, or null for any other
-// receiver shape.
 fn receiver_ident(tree: &ast::Ast, expression: ast::Expression) -> ?ast::IdentExpr {
     match tree.expressions.at(expression.node) {
         Ident(identifier) => return ast::IdentExpr {
@@ -654,7 +609,6 @@ fn receiver_ident(tree: &ast::Ast, expression: ast::Expression) -> ?ast::IdentEx
     }
 }
 
-// Validates receiver-sensitive String methods.
 fn (self: &var Checker) check_string_receiver_method(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -687,7 +641,6 @@ fn (self: &var Checker) check_string_receiver_method(
     return self.check_string_method(tree, scope, name, field.span, args, out);
 }
 
-// Validates owned String prototype methods.
 fn (self: &var Checker) check_string_method(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -706,12 +659,9 @@ fn (self: &var Checker) check_string_method(
             return null;
         }
         if mem::equal_bytes(name, "reserve") {
-            // The requested size itself can be refused, and memory can run
-            // out (ADR-0128).
             out.* = try self.intern_declared_error_type("std::string::GrowError", void_type);
             return null;
         }
-        // Growing needs memory and nothing else (ADR-0128).
         out.* = try self.intern_declared_error_type("std::mem::Error", void_type);
         return null;
     }
@@ -753,15 +703,12 @@ fn (self: &var Checker) check_string_method(
     return try self.std_missing_method_error("String", name);
 }
 
-// Validates the single argument each String mutator takes.
 fn (self: &var Checker) check_string_mutator_arg(
     tree: &var ast::Ast,
     scope: ScopeHandle,
     name: []u8,
     args: ast::ExpressionList
 ) -> !?diagnostic::Diagnostic {
-    // A growth names the allocator its storage comes from first: a String
-    // keeps none of its own (ADR-0132). `truncate` neither grows nor frees.
     var offset = 0;
     if is_string_grow_method(name) {
         offset = 1;
@@ -820,7 +767,6 @@ fn (self: &Checker) string_method_arg_count_error(
     return self.named_arity_error(label_bytes, expected, got);
 }
 
-/// Reports the String methods that may ask for storage.
 fn is_string_grow_method(name: []u8) -> bool {
     return mem::equal_bytes(name, "append_bytes") or
         mem::equal_bytes(name, "append_byte") or
@@ -828,7 +774,6 @@ fn is_string_grow_method(name: []u8) -> bool {
         mem::equal_bytes(name, "reserve");
 }
 
-/// Validates the leading Allocator a String growth names.
 fn (self: &var Checker) check_string_grow_allocator(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -863,7 +808,6 @@ fn (self: &Checker) string_method_string_arg_error(
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-// Reports whether a String method takes one argument and returns `!void`.
 fn is_string_mutator_method(name: []u8) -> bool {
     return mem::equal_bytes(name, "append_bytes") or
         mem::equal_bytes(name, "append_byte") or
@@ -872,17 +816,12 @@ fn is_string_mutator_method(name: []u8) -> bool {
         mem::equal_bytes(name, "truncate");
 }
 
-// Reports whether a String method can change owned storage.
 fn is_string_mutating_method(name: []u8) -> bool {
     return is_string_mutator_method(name) or
         mem::equal_bytes(name, "clear") or
         mem::equal_bytes(name, "deinit");
 }
 
-// Validates the receiver-sensitive std::arena::Arena<T> methods, then reads
-// the rest off std's declaration the way Array and Box do. What is left here
-// is what a declaration cannot state: which receiver place a method may come
-// from, and that `at_mut` hands out a borrow only a capture can consume.
 fn (self: &var Checker) check_arena_method(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -903,7 +842,6 @@ fn (self: &var Checker) check_arena_method(
     return self.check_arena_std_method(tree, scope, elem, name, args, out);
 }
 
-// Reads one Arena method off std's declaration.
 fn (self: &var Checker) check_arena_std_method(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -928,9 +866,6 @@ fn (self: &var Checker) check_arena_std_method(
     );
 }
 
-// Validates the arena_add primitive: the add is what buys the storage the
-// element goes in, so it names the allocator it buys from -- an arena header
-// keeps none of its own (ADR-0131, ADR-0132).
 fn (self: &var Checker) check_arena_add(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -965,8 +900,6 @@ fn (self: &var Checker) check_arena_add(
     return null;
 }
 
-// Validates std::arena::Arena<T>.at_mut(handle): capture conditions consume
-// the `?&var T` it returns, everywhere else refuses it.
 fn (self: &var Checker) check_arena_at_mut(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -987,8 +920,6 @@ fn (self: &var Checker) check_arena_at_mut(
             "`Arena.at_mut` requires mutable arena binding"
         );
     }
-    // The flag covers exactly this call: off while the argument is read,
-    // and back on for the result the call gate reads.
     self.capture_condition = false;
     if try self.check_arena_std_method(tree, scope, elem, "at_mut", args, out) |problem| {
         self.capture_condition = true;
@@ -998,7 +929,6 @@ fn (self: &var Checker) check_arena_at_mut(
     return null;
 }
 
-// Keeps arena cleanup on a place it may consume.
 fn (self: &var Checker) check_arena_cleanup_receiver(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1024,8 +954,6 @@ fn (self: &var Checker) check_arena_cleanup_receiver(
     return null;
 }
 
-// Validates the one handle argument an arena accessor takes against the
-// arena's element type. label names the accessor in errors.
 fn (self: &var Checker) check_arena_handle_arg(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1070,10 +998,6 @@ fn (self: &Checker) labeled_arg_type_error(
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-// Rejects a marker that covers no unproven operation after its value was
-// checked under the fresh marker `inner`. Both the expression and the
-// assignment-target paths go through here, so the rule for what a marker must
-// cover lives in one place.
 fn (self: &Checker) check_under_mark(
     tree: &ast::Ast,
     expression: &ast::UnsafeExpr,
@@ -1104,7 +1028,6 @@ fn (self: &Checker) check_under_mark(
     return null;
 }
 
-// Validates one function body against its signature.
 fn (self: &var Checker) check_function(
     tree: &var ast::Ast,
     function: FunctionHandle
@@ -1112,9 +1035,6 @@ fn (self: &var Checker) check_function(
     if self.function_is_extern(function) {
         return null;
     }
-    // A body with a compile-time value in `<...>` means something only once
-    // the value is bound -- a `Function` names the callee, an integer can
-    // decide a `comptime if` -- so it is checked once per instantiation.
     if self.function_has_value_static_param(function) {
         return null;
     }
@@ -1210,7 +1130,6 @@ fn (self: &Checker) function_implicit_return(function: FunctionHandle) -> bool {
     return false;
 }
 
-// Collects the type-valued static parameter names of one cached signature.
 fn (self: &Checker) signature_type_params(allocator: Allocator, function: FunctionHandle) -> !map::Map<[]u8, bool> {
     var names = map::new<[]u8, bool>(self.allocator);
     errdefer names.deinit(self.allocator);
@@ -1227,18 +1146,12 @@ fn (self: &Checker) signature_type_params(allocator: Allocator, function: Functi
     return move names;
 }
 
-// Validates a top-level test block as an errorable, parameterless body. The
-// synthetic function is retained in metadata only while its body is checked
-// so the body sees it as the current function.
 fn (self: &var Checker) check_test_decl(
     tree: &var ast::Ast,
     test: &ast::TestDecl
 ) -> !?diagnostic::Diagnostic {
     let retained_name = tree.texts.at(test.name.node);
     let source_name = retained_name.as_bytes();
-    // The name carries the module so the body reads its own module's names --
-    // a function pointer's value is looked up through the prefix of whatever
-    // is being checked, and a synthetic name without one finds nothing.
     var name = string::new(self.allocator);
     errdefer name.deinit(self.allocator);
     let retained_module = tree.texts.at(test.module.node);
