@@ -132,12 +132,37 @@ fn (self: &var Selector) select_float_binary(module: &ir::Module, node: &ir::Ins
     if kind < 0 or result.class != Class::Float or result.size != shape.size {
         return try self.fail_op(module, node);
     }
-    let lhs = try self.reg(module, left) orelse return try self.fail_op(module, node);
-    let rhs = try self.reg(module, right) orelse return try self.fail_op(module, node);
+    // x * 2 is x + x: the same bits for every x (exact but for overflow,
+    // which both round to the same infinity; a NaN x is the only NaN in
+    // either), and an add is the shorter latency, as LLVM selects it.
+    var operand = left;
+    var other = right;
+    if kind == float_mul() and self.is_float_two(left, shape) {
+        operand = right;
+        other = right;
+        kind = float_add();
+    } else if kind == float_mul() and self.is_float_two(right, shape) {
+        other = left;
+        kind = float_add();
+    }
+    let lhs = try self.reg(module, operand) orelse return try self.fail_op(module, node);
+    let rhs = try self.reg(module, other) orelse return try self.fail_op(module, node);
     let rd = self.func.new_vreg();
     try self.float_op(MOp::FBin, kind, shape.size, rd, lhs, rhs);
     try self.set_val(node.result.name, reg_val(rd));
     return null;
+}
+
+/// Reports whether a value is the float constant 2 of a shape.
+fn (self: &Selector) is_float_two(value: ir::Value, shape: Shape) -> bool {
+    let held = self.val(value.name);
+    if held.kind != ValKind::Const {
+        return false;
+    }
+    if shape.size == 4 {
+        return held.imm == 1073741824;
+    }
+    return held.imm == 4611686018427387904;
 }
 
 /// Makes the comparison of two floats a Flags value describes.
