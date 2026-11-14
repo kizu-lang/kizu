@@ -5,15 +5,6 @@ import std::fmt;
 import std::mem;
 import std::string;
 
-// Mechanical port of internal/wasm/vector.go. A vector `f64x2` and its kin
-// are the 128-bit `v128` of the simd proposal: a value type like a float,
-// living in a local, stored and loaded whole. Lane operations are spelled
-// with the shape prefix wasm uses, `f64x2.add`, which is the Kizu type name
-// itself.
-
-/// Returns the wasm value type one lane travels as outside the vector, the
-/// Go `vectorLaneWasmType`: a float lane is itself, an integer lane is the
-/// i32 or i64 the lane instructions take.
 fn vector_lane_wasm_type(elem: []u8) -> []u8 {
     if mem::equal_bytes(elem, "f32") or mem::equal_bytes(elem, "f64") {
         return elem;
@@ -24,8 +15,6 @@ fn vector_lane_wasm_type(elem: []u8) -> []u8 {
     return "i32";
 }
 
-/// Spells the lane read of one shape, the Go `vectorExtractLane`: the
-/// 16-bit shapes carry the sign in the instruction name.
 fn vector_extract_lane(elem: []u8) -> []u8 {
     if mem::equal_bytes(elem, "i16") {
         return "i16x8.extract_lane_s";
@@ -45,9 +34,6 @@ fn vector_extract_lane(elem: []u8) -> []u8 {
     return "i32x4.extract_lane";
 }
 
-/// Maps a Kizu arithmetic operator on a vector kind (see `typ::vector_kind`)
-/// to the lane-wise wasm operation, the Go `wasmVectorBinaryOp`. The kind
-/// is a number so the name returned is tied to nothing.
 fn wasm_vector_binary_op(names: &ir::NameTable, op: ir::Name, kind: i64) -> []u8 {
     if kind == 0 {
         if names.is(op, "-") { return "f64x2.sub"; }
@@ -76,8 +62,6 @@ fn wasm_vector_binary_op(names: &ir::NameTable, op: ir::Name, kind: i64) -> []u8
     return "i32x4.add";
 }
 
-/// Returns the shape prefix a signed-agnostic instruction uses: `u32x4` is
-/// spelled `i32x4` by wasm.
 fn vector_shape(typ: []u8) -> []u8 {
     if mem::equal_bytes(typ, "u64x2") { return "i64x2"; }
     if mem::equal_bytes(typ, "u32x4") { return "i32x4"; }
@@ -85,8 +69,6 @@ fn vector_shape(typ: []u8) -> []u8 {
     return typ;
 }
 
-/// Appends one Kizu lane value narrowed to what replace_lane takes, the Go
-/// `vectorLaneIn`.
 fn (self: &var Emitter) append_vector_lane_in(
     out: &var string::String,
     elem: []u8,
@@ -102,8 +84,6 @@ fn (self: &var Emitter) append_vector_lane_in(
     return;
 }
 
-/// Builds a vector from one value per lane, the Go `writeVectorNew`: a
-/// splat of the first lane, then a replace of each later one.
 fn (self: &var Emitter) write_vector_new(
     module: &ir::Module,
     node: &ir::InstrNode
@@ -120,8 +100,6 @@ fn (self: &var Emitter) write_vector_new(
         return try self.fail0("wasm error: vector.new expects one value per lane");
     }
     let shape = vector_shape(result_bytes);
-    // The nesting is written front to back: every replace opens first, the
-    // splat sits innermost, and each later lane closes one replace.
     var expression = string::new(self.allocator);
     errdefer expression.deinit(self.allocator);
     var open = lanes - 1;
@@ -151,9 +129,6 @@ fn (self: &var Emitter) write_vector_new(
     return self.write_scalar_result(module, node.result, expr);
 }
 
-/// Reads one lane, the Go `writeVectorLane`; the lane index is the
-/// instruction's immediate, and an integer lane is widened back to the i64
-/// it lives in, with the sign the lane type has.
 fn (self: &var Emitter) write_vector_lane(
     module: &ir::Module,
     node: &ir::InstrNode
