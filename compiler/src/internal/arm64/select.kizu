@@ -132,6 +132,8 @@ pub struct Selector {
     use_gen: array::Array<i64>,
     use_count: array::Array<i64>,
     cleanup_count: array::Array<i64>,
+    // By name id: each struct.new and buffer.new result (Build).
+    builds: array::Array<Build>,
     block_gen: array::Array<i64>,
     block_of: array::Array<i64>,
     ir_blocks: array::Array<ir::Block>,
@@ -202,6 +204,7 @@ pub fn new_selector(allocator: Allocator, arch: Arch) -> !Selector {
         use_gen: array::new<i64>(allocator),
         use_count: array::new<i64>(allocator),
         cleanup_count: array::new<i64>(allocator),
+        builds: array::new<Build>(allocator),
         block_gen: array::new<i64>(allocator),
         block_of: array::new<i64>(allocator),
         ir_blocks: array::new<ir::Block>(allocator),
@@ -852,7 +855,8 @@ pub fn (self: &var Selector) select_function(module: &ir::Module, function: ir::
         let _ = try self.func.add_block(self.allocator);
         try self.cold.append(self.allocator, false);
     }
-    // Count the uses of every value and bind every phi result.
+    // Count the uses of every value, bind every phi result and note what
+    // each new aggregate goes into.
     block_index = 0;
     while node.blocks.get(block_index) |block| {
         let mir = block_index;
@@ -862,6 +866,9 @@ pub fn (self: &var Selector) select_function(module: &ir::Module, function: ir::
         while block_node.instrs.get(instr_index) |instr| {
             instr_index = instr_index + 1;
             let instr_node = module.instrs.at(instr.node);
+            if instr_node.op == ir::Op::StructNew or instr_node.op == ir::Op::BufferNew {
+                try self.note_build(module, instr_node, mir);
+            }
             var arg_index = 0;
             while instr_node.args.get(arg_index) |arg| {
                 arg_index = arg_index + 1;

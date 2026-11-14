@@ -1032,6 +1032,118 @@ fn (self: &var Selector) select_field(module: &ir::Module, node: &ir::InstrNode,
     }
 }
 
+/// Is a struct.new or buffer.new result. A struct.new field whose value is
+/// such a result made in the same block, and used nowhere else, is built in
+/// place: the outer struct's address is chosen first, and the inner one is
+/// made at its field rather than in a slot of its own and copied in.
+struct Build {
+    gen: i64,
+    type_name: ir::Name,
+    // The IR block that makes it.
+    block: i64,
+    // A struct.new naming fewer fields than its struct declares, whose
+    // memory starts zeroed.
+    zero: bool,
+    // The struct.new taking it as the field named field, or empty.
+    into: ir::Name,
+    field: ir::Name,
+    // The address it is made at, once chosen; reg_none() before.
+    dest: i64,
+}
+
+fn (self: &Selector) build(name: ir::Name) -> ?Build {
+    let held = self.builds.get(ir::name_id(name)) orelse return null;
+    if held.gen != self.gen {
+        return null;
+    }
+    return held;
+}
+
+/// Records a struct.new or buffer.new made in IR block, and which of its
+/// field values are made in the same block for it.
+fn (self: &var Selector) note_build(module: &ir::Module, node: &ir::InstrNode, block: i64) -> !void {
+    var zero = false;
+    if node.op == ir::Op::StructNew {
+        let struct_text = ir::name_text(&module.names, node.result.type_name);
+        let struct_bytes = struct_text.as_bytes();
+        if module.structs.at(struct_bytes) |declared| {
+            zero = node.fields.len() < declared.fields.len();
+        }
+    }
+    let id = ir::name_id(node.result.name);
+    while self.builds.len() <= id {
+        try self.builds.append(self.allocator, Build {
+            gen: 0,
+            type_name: ir::empty_name(),
+            block: 0,
+            zero: false,
+            into: ir::empty_name(),
+            field: ir::empty_name(),
+            dest: reg_none()
+        });
+    }
+    try self.builds.set(id, Build {
+        gen: self.gen,
+        type_name: node.result.type_name,
+        block: block,
+        zero: zero,
+        into: ir::empty_name(),
+        field: ir::empty_name(),
+        dest: reg_none()
+    });
+    var index = 0;
+    while node.fields.get(index) |field| {
+        index = index + 1;
+        if self.build(field.value.name) |inner| {
+            if inner.block == block {
+                var noted = inner;
+                noted.into = node.result.name;
+                noted.field = field.name;
+                try self.builds.set(ir::name_id(field.value.name), noted);
+            }
+        }
+    }
+    return;
+}
+
+/// Returns whether a new aggregate is made at its field of the struct.new
+/// that is its one use.
+fn (self: &Selector) built_in_place(name: ir::Name) -> bool {
+    let held = self.build(name) orelse return false;
+    return !ir::is_empty(held.into) and self.uses(name) == 1;
+}
+
+/// Returns the address a struct.new or buffer.new result is made at,
+/// choosing it the first time it is asked for: its field of the struct it
+/// goes into when built in place, a fresh slot otherwise. Memory a
+/// struct.new does not fill in is zeroed when the address is chosen, before
+/// any field of it is made.
+fn (self: &var Selector) build_dest(module: &ir::Module, name: ir::Name) -> !?i64 {
+    let held = self.build(name) orelse return null;
+    if held.dest != reg_none() {
+        return held.dest;
+    }
+    let shape = self.shapes.of(module, held.type_name);
+    var address = reg_none();
+    if self.built_in_place(name) {
+        let outer = self.build(held.into) orelse return null;
+        let outer_text = ir::name_text(&module.names, outer.type_name);
+        let outer_bytes = outer_text.as_bytes();
+        let place = self.shapes.field_offset(module, outer_bytes, held.field) orelse return null;
+        let base = try self.build_dest(module, held.into) orelse return null;
+        address = try self.add_offset(base, place.offset);
+    } else {
+        address = try self.new_slot(shape);
+    }
+    if held.zero {
+        try self.zero_bytes(address, shape.size);
+    }
+    var chosen = held;
+    chosen.dest = address;
+    try self.builds.set(ir::name_id(name), chosen);
+    return address;
+}
+
 fn (self: &var Selector) select_struct_new(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let shape = self.shapes.of(module, node.result.type_name);
     if shape.class != Class::Aggregate {
@@ -1039,19 +1151,16 @@ fn (self: &var Selector) select_struct_new(module: &ir::Module, node: &ir::Instr
     }
     let struct_text = ir::name_text(&module.names, node.result.type_name);
     let struct_bytes = struct_text.as_bytes();
-    var declared_count = 0;
-    if module.structs.at(struct_bytes) |declared| {
-        declared_count = declared.fields.len();
-    } else {
+    if module.structs.at(struct_bytes) |declared| {} else {
         return try self.fail_op(module, node);
     }
-    let address = try self.new_slot(shape);
-    if node.fields.len() < declared_count {
-        try self.zero_bytes(address, shape.size);
-    }
+    let address = try self.build_dest(module, node.result.name) orelse return try self.fail_op(module, node);
     var index = 0;
     while node.fields.get(index) |field| {
         index = index + 1;
+        if self.built_in_place(field.value.name) {
+            continue;
+        }
         let place = self.shapes.field_offset(module, struct_bytes, field.name) orelse return try self.fail_op(module, node);
         if !try self.store_value(module, field.value, place.shape, address, place.offset) {
             return try self.fail_op(module, node);
@@ -1066,7 +1175,7 @@ fn (self: &var Selector) select_buffer_new(module: &ir::Module, node: &ir::Instr
     if shape.class != Class::Aggregate {
         return try self.fail_op(module, node);
     }
-    let address = try self.new_slot(shape);
+    let address = try self.build_dest(module, node.result.name) orelse return try self.fail_op(module, node);
     try self.zero_bytes(address, shape.size);
     try self.set_val(node.result.name, fresh_val(address));
     return null;
