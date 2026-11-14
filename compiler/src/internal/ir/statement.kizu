@@ -431,10 +431,12 @@ fn (self: &var Lowerer) assign_target_type(tree: &ast::Ast, target: ast::Express
 }
 
 /// Writes value into an assignment target. An identifier rebinds the SSA name.
-/// A field of a borrowed receiver stores through the borrow, while a field of
-/// a value receiver rebuilds the receiver aggregate and assigns that back
-/// through the same rule, so `a.b.c = v` reaches whichever of `a` and `a.b`
-/// owns memory. An explicit dereference stores through the borrowed pointer.
+/// A field of a borrowed receiver stores through the borrow. A field path
+/// rooted in storage stores through the projected address of its receiver, so
+/// `a.b.c = v` writes `c` alone rather than copying all of `a.b` out and back.
+/// A field of any other value receiver rebuilds the receiver aggregate and
+/// assigns that back through the same rule. An explicit dereference stores
+/// through the borrowed pointer.
 /// Any other target is rejected: dropping the store would silently compile the
 /// assignment away.
 fn (self: &var Lowerer) lower_assign_target(
@@ -456,11 +458,17 @@ fn (self: &var Lowerer) lower_assign_target(
         return null;
     }
     if ownership::field_expr(tree, target) |field| {
+        let field_name = try self.text_name(tree, field.name);
+        if try self.lower_field_storage(tree, field.receiver) |storage| {
+            if self.is_mutable_reference_type(storage.type_name) {
+                let _ = try self.emit_op2(Op::FieldRefSet, field_name, self.common.void_type, storage, value);
+                return null;
+            }
+        }
         var receiver = empty_value();
         if try self.lower_receiver_address(tree, field.receiver, &var receiver) |failed| {
             return move failed;
         }
-        let field_name = try self.text_name(tree, field.name);
         if self.is_reference_type(receiver.type_name) {
             let _ = try self.emit_op2(Op::FieldRefSet, field_name, self.common.void_type, receiver, value);
             return null;
