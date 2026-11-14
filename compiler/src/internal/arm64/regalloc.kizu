@@ -1615,17 +1615,72 @@ fn (self: &Ranges) intersect(a: i64, b: i64) -> bool {
     return false;
 }
 
-/// Reports whether some segment of v spans a marked position: counted
-/// prefix sums over positions, so each segment is one subtraction.
-fn (self: &Ranges) spans(v: i64, before: &array::Array<i64>, base: i64) -> bool {
-    var at = self.first.get_or_panic(v);
+/// Holds, for each row of marks that marks anything, how many positions
+/// before each one are marked: the entry for index k is twice the count
+/// before 2k, plus one if 2k is marked, so the count before 2k + 1 is one
+/// read as well. A row that marks nothing has no entries.
+struct Marks {
+    // Where each row's entries start, or -1.
+    rows: array::Array<i64>,
+    entries: array::Array<i64>,
+}
+
+/// Builds the counts from the marks of each index, two bits a row.
+fn build_marks(allocator: Allocator, index_marks: &array::Array<i64>) -> !Marks {
+    var marks = Marks { rows: array::new<i64>(allocator), entries: array::new<i64>(allocator) };
+    errdefer marks.deinit(allocator);
+    var any = 0;
+    var index = 0;
+    while index_marks.get(index) |bits| {
+        index = index + 1;
+        any = any | bits;
+    }
+    // One entry past the last index, where a segment ending there asks.
+    let span = index_marks.len() + 2;
+    var used_rows = 0;
+    for 0..10 |row| {
+        if ((any >> (2 * row)) & 3) != 0 {
+            used_rows = used_rows + 1;
+        }
+    }
+    try marks.entries.reserve(allocator, used_rows * span);
+    for 0..10 |row| {
+        if ((any >> (2 * row)) & 3) == 0 {
+            try marks.rows.append(allocator, 0 - 1);
+            continue;
+        }
+        try marks.rows.append(allocator, marks.entries.len());
+        var running = 0;
+        for 0..span |k| {
+            let bits = (index_marks.get(k) orelse 0) >> (2 * row);
+            let even = bits & 1;
+            try marks.entries.append(allocator, 2 * running + even);
+            running = running + even + ((bits >> 1) & 1);
+        }
+    }
+    return move marks;
+}
+
+/// Returns how many positions before pos the row marks, from its base.
+fn (self: &Marks) before(base: i64, pos: i64) -> i64 {
+    let entry = self.entries.get_or_panic(base + pos / 2);
+    return (entry >> 1) + (entry & (pos % 2));
+}
+
+/// Reports whether some segment of v spans a position the row marks.
+fn (self: &Marks) spans(ranges: &Ranges, v: i64, row: i64) -> bool {
+    let base = self.rows.get_or_panic(row);
+    if base < 0 {
+        return false;
+    }
+    var at = ranges.first.get_or_panic(v);
     while at >= 0 {
-        let from = self.seg_from.get_or_panic(at);
-        let to = self.seg_to.get_or_panic(at);
-        if before.get_or_panic(base + to + 1) - before.get_or_panic(base + from) > 0 {
+        let from = ranges.seg_from.get_or_panic(at);
+        let to = ranges.seg_to.get_or_panic(at);
+        if self.before(base, to + 1) - self.before(base, from) > 0 {
             return true;
         }
-        at = self.seg_next.get_or_panic(at);
+        at = ranges.seg_next.get_or_panic(at);
     }
     return false;
 }
@@ -1704,20 +1759,16 @@ fn allocate_laid_out(
         count = count + 1;
     }
     let positions = 2 * count + 2;
-    // Marks: hot calls (index 0), each argument register named (1 + r) and
+    // Marks: hot calls (row 0), each argument register named (1 + r) and
     // the NEON instructions, which write vector registers allocation does
-    // not track (9), as prefix counts over positions. amd64 has no NEON
-    // instructions; there 9 marks what names xmm0..xmm7: every call, float
-    // argument and float result.
-    let stride = positions + 1;
-    var marks = array::new<i64>(allocator);
-    defer marks.deinit(allocator);
-    for 0..10 * stride |_index| {
-        try marks.append(allocator, 0);
-    }
+    // not track (9). amd64 has no NEON instructions; there 9 marks what
+    // names xmm0..xmm7: every call, float argument and float result. Each
+    // index k gets the marks at its two positions, two bits a row.
     var cold_calls = array::new<i64>(allocator);
     defer cold_calls.deinit(allocator);
-    var index_at = 0;
+    var index_marks = array::new<i64>(allocator);
+    defer index_marks.deinit(allocator);
+    try index_marks.reserve(allocator, count);
     order_index = 0;
     while order.get(order_index) |block_id| {
         order_index = order_index + 1;
@@ -1726,41 +1777,32 @@ fn allocate_laid_out(
             var inst_index = 0;
             while block.insts.at(inst_index) |inst| {
                 inst_index = inst_index + 1;
-                let k = index_at;
-                index_at = index_at + 1;
+                let k = index_marks.len();
+                var bits = argument_marks(inst);
                 if inst.op == MOp::Call or inst.op == MOp::CallReg {
                     // A call on a cold path does not decide where values
                     // live: the registers it would clobber are saved around
                     // it instead.
                     if !is_cold {
-                        try bump(&var marks, 2 * k);
-                        try bump(&var marks, 2 * k + 1);
+                        bits = bits | 3;
                     } else if block.term != Term::Stop {
                         try cold_calls.append(allocator, k);
                     }
                     for 0..8 |r| {
-                        try bump(&var marks, (1 + r) * stride + 2 * k);
-                        try bump(&var marks, (1 + r) * stride + 2 * k + 1);
+                        bits = bits | (3 << (2 * (1 + r)));
                     }
                 }
                 if is_vector(inst.op) or (is_x86(arch) and names_float_args(inst.op)) {
-                    try bump(&var marks, 9 * stride + 2 * k);
-                    try bump(&var marks, 9 * stride + 2 * k + 1);
+                    bits = bits | (3 << 18);
                 }
-                try mark_arguments(&var marks, stride, inst, k);
+                try index_marks.append(allocator, bits);
             }
         }
-        index_at = index_at + 1;
+        // The end of a block marks nothing.
+        try index_marks.append(allocator, 0);
     }
-    for 0..10 |row| {
-        var running = 0;
-        for 0..stride |p| {
-            let at = row * stride + p;
-            let here = marks.get_or_panic(at);
-            try marks.set(at, running);
-            running = running + here;
-        }
-    }
+    var marks = try build_marks(allocator, &index_marks);
+    defer marks.deinit(allocator);
     // Liveness: use and def per block, then live-in / live-out to a fixed
     // point.
     var use_bits = array::new<i64>(allocator);
@@ -2119,10 +2161,10 @@ fn allocate_laid_out(
     var crosses_call = array::new<bool>(allocator);
     defer crosses_call.deinit(allocator);
     for 0..nv |v| {
-        var crosses = ranges.first.get_or_panic(v) >= 0 and ranges.spans(v, &marks, 0);
+        var crosses = ranges.first.get_or_panic(v) >= 0 and marks.spans(&ranges, v, 0);
         // A float register is clobbered by a vectorized loop too.
         if arch == Arch::Arm64 and float.get_or_panic(v) and !crosses {
-            crosses = ranges.first.get_or_panic(v) >= 0 and ranges.spans(v, &marks, 9 * stride);
+            crosses = ranges.first.get_or_panic(v) >= 0 and marks.spans(&ranges, v, 9);
         }
         try crosses_call.append(allocator, crosses);
     }
@@ -2287,7 +2329,7 @@ fn allocate_laid_out(
         var candidate_index = 0;
         while candidates.get(candidate_index) |r| {
             candidate_index = candidate_index + 1;
-            if !may_take(&ranges, &marks, stride, v, r, crosses, wants_float, arch) {
+            if !may_take(&ranges, &marks, v, r, crosses, wants_float, arch) {
                 continue;
             }
             if register_free(&ranges, &holders, &copy_of, &write_at, &write_next, &write_first, v, r) {
@@ -2318,7 +2360,7 @@ fn allocate_laid_out(
         candidate_index = 0;
         while candidates.get(candidate_index) |r| {
             candidate_index = candidate_index + 1;
-            if !may_take(&ranges, &marks, stride, v, r, crosses, wants_float, arch) {
+            if !may_take(&ranges, &marks, v, r, crosses, wants_float, arch) {
                 continue;
             }
             let cost = holders_weight(&ranges, &holders, &weight, v, r);
@@ -2440,13 +2482,13 @@ fn closes_cycle(avoid_src: &array::Array<i64>, avoid_dst: &array::Array<i64>, ph
     return false;
 }
 
-fn may_take(ranges: &Ranges, marks: &array::Array<i64>, stride: i64, v: i64, reg: i64, crosses: bool, float: bool, arch: Arch) -> bool {
+fn may_take(ranges: &Ranges, marks: &Marks, v: i64, reg: i64, crosses: bool, float: bool, arch: Arch) -> bool {
     if float or is_float_reg(reg) {
         if !float or !is_float_reg(reg) {
             return false;
         }
         if reg >= float_caller_saved_end(arch) {
-            return reg < float_named_end(arch) and !ranges.spans(v, marks, 9 * stride);
+            return reg < float_named_end(arch) and !marks.spans(ranges, v, 9);
         }
         return !crosses or reg < float_callee_saved_end(arch);
     }
@@ -2454,7 +2496,7 @@ fn may_take(ranges: &Ranges, marks: &array::Array<i64>, stride: i64, v: i64, reg
         return false;
     }
     if reg < arg_regs(arch) {
-        return !ranges.spans(v, marks, (1 + reg) * stride);
+        return !marks.spans(ranges, v, 1 + reg);
     }
     return (reg >= caller_saved_first() and reg <= caller_saved_last(arch)) or
         (reg >= callee_saved_first() and reg <= callee_saved_last(arch));
@@ -2589,27 +2631,28 @@ fn evict(
     return set.truncate(allocator, keep);
 }
 
-/// Marks each argument register an instruction names, read at 2k and
-/// written at 2k + 1.
-fn mark_arguments(marks: &var array::Array<i64>, stride: i64, inst: &MInst, k: i64) -> !void {
+/// Returns the marks of each argument register an instruction names, read
+/// at 2k (the row's low bit) and written at 2k + 1 (its high bit).
+fn argument_marks(inst: &MInst) -> i64 {
     let stores = inst.op == MOp::Store or inst.op == MOp::StoreIdx;
+    var bits = 0;
     if inst.rn >= 0 and inst.rn < 8 {
-        try bump(marks, (1 + inst.rn) * stride + 2 * k);
+        bits = bits | (1 << (2 * (1 + inst.rn)));
     }
     if inst.rm >= 0 and inst.rm < 8 {
-        try bump(marks, (1 + inst.rm) * stride + 2 * k);
+        bits = bits | (1 << (2 * (1 + inst.rm)));
     }
     if inst.ra >= 0 and inst.ra < 8 {
-        try bump(marks, (1 + inst.ra) * stride + 2 * k);
+        bits = bits | (1 << (2 * (1 + inst.ra)));
     }
     if inst.rd >= 0 and inst.rd < 8 {
         if stores {
-            try bump(marks, (1 + inst.rd) * stride + 2 * k);
+            bits = bits | (1 << (2 * (1 + inst.rd)));
         } else if writes_rd(inst.op) {
-            try bump(marks, (1 + inst.rd) * stride + 2 * k + 1);
+            bits = bits | (1 << (2 * (1 + inst.rd) + 1));
         }
     }
-    return;
+    return bits;
 }
 
 fn bump(table: &var array::Array<i64>, at: i64) -> !void {
