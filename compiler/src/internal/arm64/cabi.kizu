@@ -240,15 +240,55 @@ fn (self: &var Selector) c_copy_address(module: &ir::Module, arg: ir::Value) -> 
     return address;
 }
 
+/// Is what a call to C calls: the C function a symbol names, or, when reg
+/// is not reg_none(), the address that register holds. The call's
+/// arguments are its operands from first on.
+struct CCallee {
+    symbol: ir::Name,
+    reg: i64,
+    first: i64,
+}
+
+fn named_callee(symbol_name: ir::Name) -> CCallee {
+    return CCallee { symbol: symbol_name, reg: reg_none(), first: 0 };
+}
+
+/// Calls a C callee whose arguments are placed: count of them in general
+/// registers, sret, unless reg_none(), the memory of a struct result.
+fn (self: &var Selector) call_c_callee(module: &ir::Module, callee: CCallee, count: i64, sret: i64) -> !void {
+    if callee.reg != reg_none() {
+        var inst = blank(MOp::CallReg);
+        inst.rn = callee.reg;
+        inst.imm = count;
+        inst.ra = sret;
+        self.func.calls = true;
+        return self.inst(inst);
+    }
+    var symbol = string::new(self.allocator);
+    defer symbol.deinit(self.allocator);
+    let name_text = ir::name_text(&module.names, callee.symbol);
+    let name_bytes = name_text.as_bytes();
+    try append_c_symbol(self.allocator, &var symbol, name_bytes);
+    let symbol_bytes = symbol.as_bytes();
+    let sym = try self.syms.intern(symbol_bytes);
+    return self.call_sym(sym, count, sret);
+}
+
 /// Selects a call to C: the runtime's plain builtins and extern "c"
 /// functions, by the convention this file describes, or on amd64 by the
 /// System V one (sysv.kizu) or the Windows one (win64.kizu).
 fn (self: &var Selector) select_c_call(module: &ir::Module, node: &ir::InstrNode, symbol_name: ir::Name) -> !?diagnostic::Diagnostic {
+    return self.select_c_call_to(module, node, named_callee(symbol_name));
+}
+
+/// Selects a call to a C callee, named or through a pointer, by the
+/// target's C convention.
+fn (self: &var Selector) select_c_call_to(module: &ir::Module, node: &ir::InstrNode, callee: CCallee) -> !?diagnostic::Diagnostic {
     if self.arch == Arch::Amd64 {
-        return self.select_sysv_call(module, node, symbol_name);
+        return self.select_sysv_call(module, node, callee);
     }
     if self.arch == Arch::Amd64Windows {
-        return self.select_win64_call(module, node, symbol_name);
+        return self.select_win64_call(module, node, callee);
     }
     var args = CCallArgs {
         words: array::new<i64>(self.allocator),
@@ -257,9 +297,9 @@ fn (self: &var Selector) select_c_call(module: &ir::Module, node: &ir::InstrNode
         stacked: array::new<i64>(self.allocator),
     };
     defer args.deinit(self.allocator);
-    var index = 0;
+    var index = callee.first;
     while node.args.get(index) |arg| {
-        let at = index;
+        let at = index - callee.first;
         index = index + 1;
         let unnamed = node.variadic_fixed > 0 and at >= node.variadic_fixed;
         let stacks_unnamed = unnamed and self.stacks_variadics;
@@ -355,14 +395,7 @@ fn (self: &var Selector) select_c_call(module: &ir::Module, node: &ir::InstrNode
     if sret != reg_none() {
         try self.mov(8, sret);
     }
-    var symbol = string::new(self.allocator);
-    defer symbol.deinit(self.allocator);
-    let name_text = ir::name_text(&module.names, symbol_name);
-    let name_bytes = name_text.as_bytes();
-    try append_c_symbol(self.allocator, &var symbol, name_bytes);
-    let symbol_bytes = symbol.as_bytes();
-    let sym = try self.syms.intern(symbol_bytes);
-    try self.call_sym(sym, count, sret);
+    try self.call_c_callee(module, callee, count, sret);
     if !struct_result {
         try self.bind_result(module, result, reg_none(), true);
         return null;

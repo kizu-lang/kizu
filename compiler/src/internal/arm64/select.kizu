@@ -1554,15 +1554,16 @@ fn (self: &var Selector) select_call(module: &ir::Module, node: &ir::InstrNode) 
     return self.select_c_call(module, node, node.operand);
 }
 
-/// Checks that C can call a function the way this backend selects it: a
-/// scalar in each of at most eight argument registers and a scalar result.
-/// A struct C passes or returns by value goes by the target's aggregate
-/// rules, which this backend does not lower.
+/// Checks that C can call an `export "c"` function: each parameter a
+/// scalar in a general argument register or a float in a float one, and a
+/// scalar or float result. A struct C passes or returns by value goes by
+/// the target's aggregate rules, which this backend does not lower.
 fn (self: &var Selector) check_c_export(module: &ir::Module, node: &ir::FunctionNode) -> !?diagnostic::Diagnostic {
-    if self.ret.class != Class::Scalar and self.ret.class != Class::Void {
+    if self.ret.class != Class::Scalar and self.ret.class != Class::Float and self.ret.class != Class::Void {
         return try self.fail(module, "C export result type", node.return_type);
     }
     var words = 0;
+    var floats = 0;
     var index = 0;
     while node.params.get(index) |param| {
         index = index + 1;
@@ -1570,17 +1571,132 @@ fn (self: &var Selector) check_c_export(module: &ir::Module, node: &ir::Function
         if shape.class == Class::Void {
             continue;
         }
-        if shape.class != Class::Scalar {
+        if shape.class == Class::Float {
+            floats = floats + 1;
+        } else if shape.class == Class::Scalar {
+            words = words + 1;
+        } else {
             return try self.fail(module, "C export parameter type", param.type_name);
         }
-        words = words + 1;
     }
-    // C packs narrow stack arguments, so a word past the argument
-    // registers would be read from the wrong place.
-    if words > arg_regs(self.arch) {
+    // C packs narrow stack arguments, so an argument past the registers
+    // would be read from the wrong place. Under Windows a float takes the
+    // position a word would.
+    var over = words > arg_regs(self.arch) or floats > 8;
+    if self.arch == Arch::Amd64Windows {
+        over = words + floats > arg_regs(self.arch);
+    }
+    if over {
         return try self.fail(module, "C export parameter count", node.name);
     }
     return null;
+}
+
+/// Reports whether an `export "c"` function takes or returns a float,
+/// which C passes in a float register where the backend's own convention
+/// passes a general one: C calls such a function through a thunk
+/// (select_export_thunk) and the function itself keeps the backend's
+/// convention.
+pub fn export_takes_floats(module: &ir::Module, node: &ir::FunctionNode) -> bool {
+    if !module.names.is(node.export_abi, "c") {
+        return false;
+    }
+    if shape_of(module, node.return_type).class == Class::Float {
+        return true;
+    }
+    var index = 0;
+    while node.params.get(index) |param| {
+        index = index + 1;
+        if shape_of(module, param.type_name).class == Class::Float {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Returns the symbol of the thunk C calls an `export "c"` function taking
+/// or returning a float through.
+pub fn (self: &var Selector) export_thunk_symbol(module: &ir::Module, name: ir::Name) -> !ir::Name {
+    var out = try string::from_bytes(self.allocator, "_kz$c_");
+    defer out.deinit(self.allocator);
+    let text = ir::name_text(&module.names, name);
+    let bytes = text.as_bytes();
+    try append_mangled(self.allocator, &var out, bytes);
+    let out_bytes = out.as_bytes();
+    return self.syms.intern(out_bytes);
+}
+
+/// Selects the thunk C calls an `export "c"` function through when it takes
+/// or returns a float: it moves each argument from where the target's C
+/// convention puts it (check_c_export has checked they are all in
+/// registers) to where the backend's own puts it, calls the function, and
+/// moves a float result to the float result register.
+pub fn (self: &var Selector) select_export_thunk(module: &ir::Module, node: &ir::FunctionNode) -> !void {
+    self.gen = self.gen + 1;
+    self.func.reset(self.allocator);
+    self.cold.clear(self.allocator);
+    self.ir_blocks.clear(self.allocator);
+    self.entry_imm.clear(self.allocator);
+    self.entry_reg.clear(self.allocator);
+    self.is_main = false;
+    self.func.is_main = false;
+    self.fn_name = node.name;
+    let entry = try self.func.add_block(self.allocator);
+    try self.cold.append(self.allocator, false);
+    try self.start_block(entry);
+    var words = array::new<i64>(self.allocator);
+    defer words.deinit(self.allocator);
+    let positional = self.arch == Arch::Amd64Windows;
+    var ints = 0;
+    var floats = 0;
+    var index = 0;
+    while node.params.get(index) |param| {
+        index = index + 1;
+        let shape = shape_of(module, param.type_name);
+        if shape.class == Class::Void {
+            continue;
+        }
+        let position = ints + floats;
+        if shape.class == Class::Float {
+            let reg = self.func.new_vreg();
+            var inst = blank(MOp::FRet);
+            inst.rd = reg;
+            inst.imm = floats;
+            if positional {
+                inst.imm = position;
+            }
+            inst.width = shape.size;
+            try self.inst(inst);
+            try words.append(self.allocator, reg);
+            floats = floats + 1;
+            continue;
+        }
+        var word = ints;
+        if positional {
+            word = position;
+        }
+        try words.append(self.allocator, try self.param_word(word));
+        ints = ints + 1;
+    }
+    let count = try self.place_words(&words);
+    let body = try self.function_symbol(module, node.name);
+    try self.call_sym(body, count, reg_none());
+    let ret = shape_of(module, node.return_type);
+    if ret.class != Class::Void {
+        let result = self.func.new_vreg();
+        try self.mov(result, 0);
+        if ret.class == Class::Float {
+            var inst = blank(MOp::FArg);
+            inst.rn = result;
+            inst.imm = 0;
+            inst.width = ret.size;
+            try self.inst(inst);
+        } else {
+            try self.mov(0, result);
+        }
+    }
+    self.func.end(self.current, Term::Return, Cond::Eq, reg_none(), 0 - 1, 0 - 1);
+    return;
 }
 
 /// Selects the address of a function: one this module defines by its
@@ -1601,15 +1717,23 @@ fn (self: &var Selector) select_func_addr(module: &ir::Module, node: &ir::InstrN
         let text = ir::name_text(&module.names, node.operand);
         let bytes = text.as_bytes();
         var defined = false;
-        if self.callee(module, node.operand) |_| {
+        var thunk = false;
+        if self.callee(module, node.operand) |callee| {
             defined = true;
+            // C calls through the address, so it is the thunk's when the
+            // function has one.
+            thunk = export_takes_floats(module, module.function_nodes.at(callee.node));
         }
         if !defined or (mem::equal_bytes(bytes, "main") and !self.main_wraps) {
             // The package main is the C entry point when it returns
             // nothing, which no Kizu caller can call.
             return try self.fail_op(module, node);
         }
-        inst.sym = try self.function_symbol(module, node.operand);
+        if thunk {
+            inst.sym = try self.export_thunk_symbol(module, node.operand);
+        } else {
+            inst.sym = try self.function_symbol(module, node.operand);
+        }
     }
     let reg = self.func.new_vreg();
     inst.rd = reg;
@@ -1621,16 +1745,14 @@ fn (self: &var Selector) select_func_addr(module: &ir::Module, node: &ir::InstrN
 /// Selects a call through a function pointer, the first operand. A Kizu
 /// function pointer is called by the backend's own convention, as a call of
 /// the function by name is; the parameters of its type say which arguments
-/// go as the address of a copy. A C function pointer is called by the C
-/// convention, which agrees with that one for scalars and addresses, the
-/// only arguments and result it may have here.
+/// go as the address of a copy. A C function pointer is called by the
+/// target's C convention, as a C function called by name is.
 fn (self: &var Selector) select_indirect_call(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let callee = node.args.get(0) orelse return try self.fail_op(module, node);
-    let foreign = module.names.starts_with(callee.type_name, typ::c_func_head());
-    if foreign and node.args.len() > arg_regs(self.arch) + 1 {
-        return try self.fail_op(module, node);
-    }
     let target = try self.reg_nz(module, callee) orelse return try self.fail_op(module, node);
+    if module.names.starts_with(callee.type_name, typ::c_func_head()) {
+        return self.select_c_call_to(module, node, CCallee { symbol: ir::empty_name(), reg: target, first: 1 });
+    }
     var words = array::new<i64>(self.allocator);
     defer words.deinit(self.allocator);
     var index = 1;
@@ -1640,11 +1762,6 @@ fn (self: &var Selector) select_indirect_call(module: &ir::Module, node: &ir::In
             takes_address = takes_address_of(module, param, arg.type_name);
         }
         index = index + 1;
-        // A C parameter `&T` handed a T is the address of a copy, which C
-        // reads as the pointer it is; a struct by value is not lowered.
-        if foreign and !takes_address and self.shapes.of(module, arg.type_name).class != Class::Scalar {
-            return try self.fail(module, "C argument type", arg.type_name);
-        }
         if takes_address {
             let shape = self.shapes.of(module, arg.type_name);
             if shape.class == Class::Aggregate and !is_slice(module, arg.type_name) {
@@ -1667,9 +1784,6 @@ fn (self: &var Selector) select_indirect_call(module: &ir::Module, node: &ir::In
     if shape.class == Class::Unsupported {
         return try self.fail(module, "result type", node.result.type_name);
     }
-    if foreign and shape.class == Class::Aggregate {
-        return try self.fail(module, "C result type", node.result.type_name);
-    }
     var sret = reg_none();
     if shape.class == Class::Aggregate and !is_slice(module, node.result.type_name) {
         sret = try self.new_slot(shape);
@@ -1684,7 +1798,7 @@ fn (self: &var Selector) select_indirect_call(module: &ir::Module, node: &ir::In
     inst.ra = sret;
     self.func.calls = true;
     try self.inst(inst);
-    try self.bind_result(module, node.result, sret, foreign);
+    try self.bind_result(module, node.result, sret, false);
     return null;
 }
 
