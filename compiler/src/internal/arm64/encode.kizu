@@ -1,15 +1,5 @@
 import std::mem;
 
-// The AArch64 encodings of the instructions the printer writes, one 32-bit
-// word each, for the object the backend writes itself (obj.kizu). Each
-// function takes the operands of one instruction and returns the word the
-// assembler makes of it, including the assembler's rewrites (an alias, a
-// negative immediate). A word of -1 marks an operand no encoding holds,
-// which the assembler would refuse as well; the build stops on it.
-
-/// Returns the 5-bit field of a register: the stack pointer and the zero
-/// register are both 31, which the instruction reads as one or the other,
-/// and a float register is its d register's number.
 fn field(reg: i64) -> i64 {
     if reg == reg_sp() or reg == reg_zr() or reg < 0 {
         return 31;
@@ -20,7 +10,6 @@ fn field(reg: i64) -> i64 {
     return reg;
 }
 
-/// Returns the bit (26) that makes a load or store move a float register.
 fn float_data(data: i64) -> i64 {
     if is_float_reg(data) {
         return 1 << 26;
@@ -28,9 +17,6 @@ fn float_data(data: i64) -> i64 {
     return 0;
 }
 
-/// Encodes `op xd, xn, xm` as rrr prints it. An add or a subtract that
-/// names the stack pointer takes the extended-register form, as the
-/// shifted-register form reads 31 as the zero register.
 fn enc_rrr(op: []u8, rd: i64, rn: i64, rm: i64) -> i64 {
     let regs = (field(rm) << 16) | (field(rn) << 5) | field(rd);
     let sp = rd == reg_sp() or rn == reg_sp();
@@ -82,8 +68,6 @@ fn enc_rrr(op: []u8, rd: i64, rn: i64, rm: i64) -> i64 {
     return 0 - 1;
 }
 
-/// Encodes `op xd, xn, xm, <shift> #amount`: add or sub with lsl, add with
-/// lsr.
 fn enc_shifted(sub: bool, lsr: bool, rd: i64, rn: i64, rm: i64, amount: i64) -> i64 {
     var word = 0x8B000000;
     if sub {
@@ -95,7 +79,6 @@ fn enc_shifted(sub: bool, lsr: bool, rd: i64, rn: i64, rm: i64, amount: i64) -> 
     return word | (field(rm) << 16) | ((amount & 63) << 10) | (field(rn) << 5) | field(rd);
 }
 
-/// Encodes `madd` or `msub xd, xn, xm, xa`.
 fn enc_madd(sub: bool, rd: i64, rn: i64, rm: i64, ra: i64) -> i64 {
     var word = 0x9B000000;
     if sub {
@@ -104,10 +87,6 @@ fn enc_madd(sub: bool, rd: i64, rn: i64, rm: i64, ra: i64) -> i64 {
     return word | (field(rm) << 16) | (field(ra) << 10) | (field(rn) << 5) | field(rd);
 }
 
-/// Encodes an add or subtract of an immediate (setting the flags for cmp
-/// and cmn, whose rd is the zero register), the way the assembler reads
-/// `#imm`: a negative one is the other operation, and one that is a
-/// multiple of 4096 too wide for 12 bits goes in shifted.
 fn enc_add_imm(sub: bool, flags: bool, rd: i64, rn: i64, imm: i64) -> i64 {
     var negate = sub;
     var value = imm;
@@ -133,7 +112,6 @@ fn enc_add_imm(sub: bool, flags: bool, rd: i64, rn: i64, imm: i64) -> i64 {
     return word | (shift << 22) | (value << 10) | (field(rn) << 5) | field(rd);
 }
 
-/// Encodes `op xd, xn, #imm` as rri prints it.
 fn enc_rri(op: []u8, rd: i64, rn: i64, imm: i64) -> i64 {
     let regs = (field(rn) << 5) | field(rd);
     if mem::equal_bytes(op, "add") {
@@ -149,7 +127,6 @@ fn enc_rri(op: []u8, rd: i64, rn: i64, imm: i64) -> i64 {
         return 0 - 1;
     }
     if mem::equal_bytes(op, "lsl") {
-        // ubfm xd, xn, #(-imm mod 64), #(63 - imm)
         return 0xD3400000 | (((64 - imm) & 63) << 16) | ((63 - imm) << 10) | regs;
     }
     if mem::equal_bytes(op, "lsr") {
@@ -164,8 +141,6 @@ fn enc_rri(op: []u8, rd: i64, rn: i64, imm: i64) -> i64 {
     return 0 - 1;
 }
 
-/// Encodes `op xd, xn` as rr prints it. A mov naming the stack pointer is
-/// an add of 0, as the orr it otherwise is reads 31 as the zero register.
 fn enc_rr(op: []u8, rd: i64, rn: i64) -> i64 {
     if mem::equal_bytes(op, "mov") {
         if rd == reg_sp() or rn == reg_sp() {
@@ -185,8 +160,6 @@ fn enc_rr(op: []u8, rd: i64, rn: i64) -> i64 {
     return 0 - 1;
 }
 
-/// Encodes the 8-byte `fmov` rr prints when either register is a float
-/// one: between float registers, or across from a general one.
 fn enc_fmov_reg(rd: i64, rn: i64) -> i64 {
     if is_float_reg(rd) and is_float_reg(rn) {
         return enc_fmov_float(8, field(rd), field(rn));
@@ -200,8 +173,6 @@ fn enc_fmov_reg(rd: i64, rn: i64) -> i64 {
     return 0 - 1;
 }
 
-/// Encodes a move of a 16-bit chunk: movz, movn or movk, shifted by shift
-/// bits.
 fn enc_move_wide(base: i64, rd: i64, chunk: i64, shift: i64) -> i64 {
     return base | ((shift / 16) << 21) | ((chunk & 65535) << 5) | field(rd);
 }
@@ -212,8 +183,6 @@ fn movn() -> i64 { return 0x92800000; }
 
 fn movk() -> i64 { return 0xF2800000; }
 
-/// Encodes a logical operation with a bitmask immediate (and, or with the
-/// zero register as rd the ands of tst), or -1 when imm is not one.
 fn enc_logical_imm(base: i64, rd: i64, rn: i64, imm: i64) -> i64 {
     let bits = bitmask_fields(imm);
     if bits < 0 {
@@ -222,13 +191,10 @@ fn enc_logical_imm(base: i64, rd: i64, rn: i64, imm: i64) -> i64 {
     return base | (bits << 10) | (field(rn) << 5) | field(rd);
 }
 
-/// Returns N:immr:imms (13 bits) of a 64-bit bitmask immediate, or -1: a
-/// rotated run of ones repeated in elements of 2, 4, ..., 64 bits.
 fn bitmask_fields(imm: i64) -> i64 {
     if imm == 0 or imm == 0 - 1 {
         return 0 - 1;
     }
-    // The smallest element the value repeats in.
     var size = 64;
     while size > 2 {
         let half = size / 2;
@@ -242,7 +208,6 @@ fn bitmask_fields(imm: i64) -> i64 {
     if size < 64 {
         element = imm & ((1 << size) - 1);
     }
-    // Rotate the element right until its ones are one run at the bottom.
     let ones = count_ones(element, size);
     var rotation = 0;
     while rotation < size {
@@ -255,7 +220,6 @@ fn bitmask_fields(imm: i64) -> i64 {
     if rotation == size {
         return 0 - 1;
     }
-    // immr rotates the run back left into place: right by size - rotation.
     let immr = (size - rotation) % size;
     var n = 0;
     var imms = 0;
@@ -263,7 +227,6 @@ fn bitmask_fields(imm: i64) -> i64 {
         n = 1;
         imms = ones - 1;
     } else {
-        // The high bits of imms name the element size: 0 then 1s.
         imms = ((~(size * 2 - 1)) & 63) | (ones - 1);
     }
     return (n << 12) | (immr << 6) | imms;
@@ -286,7 +249,6 @@ fn low_ones(count: i64) -> i64 {
     return (1 << count) - 1;
 }
 
-/// Rotates the low size bits of value right by amount.
 fn rotate_right(value: i64, amount: i64, size: i64) -> i64 {
     if amount == 0 {
         return value;
@@ -295,13 +257,10 @@ fn rotate_right(value: i64, amount: i64, size: i64) -> i64 {
     if size < 64 {
         mask = (1 << size) - 1;
     }
-    // A logical shift right of the 64-bit pattern: clear what an arithmetic
-    // shift drags in.
     let low = (value >> amount) & ((1 << (64 - amount)) - 1);
     return (low | (value << (size - amount))) & mask;
 }
 
-/// Returns the condition field of cond.
 fn cond_field(cond: Cond) -> i64 {
     return match cond {
         Eq => 0,
@@ -319,9 +278,6 @@ fn cond_field(cond: Cond) -> i64 {
     };
 }
 
-/// Encodes a load or store of width bytes at [base + offset], in the form
-/// the mnemonic mem_op chose names: the unsigned scaled offset, or with
-/// unscaled the 9-bit signed one.
 fn enc_mem(load: bool, width: i64, signed: bool, unscaled: bool, data: i64, base: i64, offset: i64) -> i64 {
     var size = 3;
     if width == 4 {
@@ -331,7 +287,6 @@ fn enc_mem(load: bool, width: i64, signed: bool, unscaled: bool, data: i64, base
     } else if width == 1 {
         size = 0;
     }
-    // opc: 00 store, 01 load, 10 load signed into an x register.
     var opc = 0;
     if load {
         opc = 1;
@@ -355,8 +310,6 @@ fn enc_mem(load: bool, width: i64, signed: bool, unscaled: bool, data: i64, base
     return 0x39000000 | (size << 30) | (opc << 22) | ((offset / width) << 10) | regs;
 }
 
-/// Encodes a load or store of width bytes at [base + (index << shift)];
-/// shifted is whether the line spells the `lsl`.
 fn enc_mem_indexed(load: bool, width: i64, signed: bool, data: i64, base: i64, index: i64, shifted: bool) -> i64 {
     var size = 3;
     if width == 4 {
@@ -383,8 +336,6 @@ fn enc_mem_indexed(load: bool, width: i64, signed: bool, data: i64, base: i64, i
     return 0x38206800 | float_data(data) | (size << 30) | (opc << 22) | (field(index) << 16) | (s << 12) | (field(base) << 5) | field(data);
 }
 
-/// Encodes `stp` or `ldp` of two x registers, or two d registers, at
-/// [base + offset].
 fn enc_pair(load: bool, a: i64, b: i64, base: i64, offset: i64) -> i64 {
     var word = 0xA9000000;
     if is_float_reg(a) != is_float_reg(b) {
@@ -399,18 +350,14 @@ fn enc_pair(load: bool, a: i64, b: i64, base: i64, offset: i64) -> i64 {
     return word | (((offset / 8) & 127) << 15) | (field(b) << 10) | (field(base) << 5) | field(a);
 }
 
-/// Encodes the extensions Extend prints: sxtb, sxth, sxtw into an x
-/// register, uxtb, uxth and the mov of a w register into a w one.
 fn enc_extend(width: i64, signed: bool, rd: i64, rn: i64) -> i64 {
     let regs = (field(rn) << 5) | field(rd);
     if signed {
-        // sbfm xd, xn, #0, #(8 * width - 1)
         return 0x93400000 | ((8 * width - 1) << 10) | regs;
     }
     if width == 4 {
         return 0x2A0003E0 | (field(rn) << 16) | field(rd);
     }
-    // ubfm wd, wn, #0, #(8 * width - 1)
     return 0x53000000 | ((8 * width - 1) << 10) | regs;
 }
 
@@ -420,9 +367,6 @@ fn enc_ret() -> i64 { return 0xD65F03C0; }
 
 fn enc_brk() -> i64 { return 0xD4200020; }
 
-// Scalar floating point over d (width 8) or s (width 4) registers.
-
-/// Returns the type bit (22) of a scalar float op of width bytes.
 fn ftype(width: i64) -> i64 {
     if width == 4 {
         return 0;
@@ -430,7 +374,6 @@ fn ftype(width: i64) -> i64 {
     return 1 << 22;
 }
 
-/// Encodes `fmov` between a general and a float register of width bytes.
 fn enc_fmov(to_float: bool, width: i64, reg: i64, v: i64) -> i64 {
     if to_float {
         if width == 4 {
@@ -444,12 +387,10 @@ fn enc_fmov(to_float: bool, width: i64, reg: i64, v: i64) -> i64 {
     return 0x9E660000 | (v << 5) | field(reg);
 }
 
-/// Encodes `fmov vd, vn` between float registers of width bytes.
 fn enc_fmov_float(width: i64, vd: i64, vn: i64) -> i64 {
     return 0x1E204000 | ftype(width) | (vn << 5) | vd;
 }
 
-/// Encodes a float op of float_mnemonic's kind into vd from vn (and vm).
 fn enc_float(kind: i64, width: i64, vd: i64, vn: i64, vm: i64) -> i64 {
     var word = 0x1E202800;
     if kind == float_sub() {
@@ -488,7 +429,6 @@ fn enc_fcmp(width: i64, vn: i64, vm: i64) -> i64 {
     return 0x1E202000 | ftype(width) | (vm << 16) | (vn << 5);
 }
 
-/// Encodes `fcvt` from a float of width bytes to the other width.
 fn enc_fcvt(from: i64, vd: i64, vn: i64) -> i64 {
     if from == 4 {
         return 0x1E22C000 | (vn << 5) | vd;
@@ -496,8 +436,6 @@ fn enc_fcvt(from: i64, vd: i64, vn: i64) -> i64 {
     return 0x1E624000 | (vn << 5) | vd;
 }
 
-/// Encodes `fcvtzs`/`fcvtzu` of a float of from bytes into a register of
-/// width bytes.
 fn enc_fcvtz(signed: bool, width: i64, from: i64, rd: i64, vn: i64) -> i64 {
     var word = 0x1E390000;
     if signed {
@@ -509,7 +447,6 @@ fn enc_fcvtz(signed: bool, width: i64, from: i64, rd: i64, vn: i64) -> i64 {
     return word | ftype(from) | (vn << 5) | field(rd);
 }
 
-/// Encodes `scvtf`/`ucvtf` of an x register into a float of width bytes.
 fn enc_cvtf(signed: bool, width: i64, vd: i64, rn: i64) -> i64 {
     var word = 0x9E230000;
     if signed {
@@ -518,9 +455,6 @@ fn enc_cvtf(signed: bool, width: i64, vd: i64, rn: i64) -> i64 {
     return word | ftype(width) | (field(rn) << 5) | vd;
 }
 
-// NEON, over full q registers unless named otherwise.
-
-/// Returns the size field of lanes of width bytes.
 fn lane_size(width: i64) -> i64 {
     if width == 1 {
         return 0;
@@ -534,8 +468,6 @@ fn lane_size(width: i64) -> i64 {
     return 3;
 }
 
-/// Encodes a three-register NEON op with its base word and, for the ops
-/// over lanes, the lane width.
 fn enc_vvv(base: i64, sized: bool, width: i64, vd: i64, vn: i64, vm: i64) -> i64 {
     var size = 0;
     if sized {
@@ -544,8 +476,6 @@ fn enc_vvv(base: i64, sized: bool, width: i64, vd: i64, vn: i64, vm: i64) -> i64
     return base | size | (vm << 16) | (vn << 5) | vd;
 }
 
-/// Encodes `fadd`/`fsub`/`fmul`/`fdiv` over the f64 lanes of full
-/// registers, the FloatOp kind.
 fn enc_vfloat(kind: i64, vd: i64, vn: i64, vm: i64) -> i64 {
     var word = 0x4E60D400;
     if kind == float_sub() {
@@ -558,24 +488,19 @@ fn enc_vfloat(kind: i64, vd: i64, vn: i64, vm: i64) -> i64 {
     return word | (vm << 16) | (vn << 5) | vd;
 }
 
-/// Encodes `scvtf vd.2d, vn.2d`.
 fn enc_vscvtf(vd: i64, vn: i64) -> i64 {
     return 0x4E61D800 | (vn << 5) | vd;
 }
 
-/// Encodes the scalar `dup` (`mov`) of lane index of vn, of width bytes,
-/// into vd.
 fn enc_dup_lane(width: i64, vd: i64, vn: i64, index: i64) -> i64 {
     return 0x5E000400 | (lane_imm5(width, index) << 16) | (vn << 5) | vd;
 }
 
-/// Returns the imm5 field naming lane index of lanes of width bytes.
 fn lane_imm5(width: i64, index: i64) -> i64 {
     let size = lane_size(width);
     return (index << (size + 1)) | (1 << size);
 }
 
-/// Encodes a shift of each lane by imm: shl, or sshr/ushr.
 fn enc_vshift(base: i64, left: bool, width: i64, vd: i64, vn: i64, imm: i64) -> i64 {
     let esize = width * 8;
     var field_bits = esize + imm;
@@ -585,7 +510,6 @@ fn enc_vshift(base: i64, left: bool, width: i64, vd: i64, vn: i64, imm: i64) -> 
     return base | (field_bits << 16) | (vn << 5) | vd;
 }
 
-/// Encodes sshll/ushll(2) of lanes of width bytes by 0.
 fn enc_vxtl(signed: bool, high: bool, width: i64, vd: i64, vn: i64) -> i64 {
     var word = 0x2F00A400;
     if signed {

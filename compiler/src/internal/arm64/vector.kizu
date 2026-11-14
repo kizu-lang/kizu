@@ -1,75 +1,17 @@
 import compiler::internal::ir;
 import std::array;
 
-// Reduction loops over arrays and slices, run with NEON. A loop qualifies
-// when its header holds only phis, constants and the test `k < n`, its body
-// is acyclic and reads elements only as `a.get_or_panic(k)` or `s[k]`, of
-// integer arrays and slices that do not change in the loop, and everything
-// else the body computes is lane-wise integer arithmetic on the elements,
-// on k and on values from before the loop. Every other header phi is an
-// accumulator of one integer type: `acc op x` with op one of `+ - ^ & |`;
-// the join of a branch on a comparison of x and acc that picks one of them
-// (a minimum or a maximum); or the join of a branch on a comparison of lane
-// values that picks `acc op x` (op one of `+ - ^ |`) on one side and acc on
-// the other. Nothing in the body can fail but the bounds checks, so where
-// the loop enters with 0 <= k < n <= every length the elements up to n run
-// several registers at a time, each accumulator kept per lane, and the
-// lanes are folded into the phis before the scalar loop runs the rest. Any
-// other loop, or an entry the test rejects, runs the scalar loop alone.
-// Wrapping addition and the bitwise ops are associative and commutative,
-// and so are min and max, so the order the lanes fold in does not change
-// the result.
-//
-// The lanes are as wide as the accumulators. A narrower element is loaded
-// and extended (by its own signedness) to the lane width; on such a value
-// only the operations whose result the extension does not change run --
-// comparisons, `^ & |` and widening casts. A comparison makes a mask of all
-// ones; a conditional update adds x masked.
-//
-// The NEON loop reads one element. A loop that reads more, or multiplies
-// (NEON has no 64-bit lane multiply), runs in general registers instead
-// when its accumulators are words: behind the same test, without the bounds
-// checks, several elements a turn, each element read and extended to a word
-// as the lanes are. An unconditional accumulator is kept once per element
-// of the turn; a conditional one compares, picks x or 0 by the flags and
-// combines the pick (`acc op 0` is acc), kept once.
-//
-// A loop whose accumulators are `f64` runs in NEON lanes where
-// flanes.kizu covers it. Otherwise it runs in general registers too, with
-// its elements and the body's `+ - * /` on them in float registers. Either
-// way each accumulator stays one chain, combined with the elements one after
-// another in the order and with the operands the scalar loop has, so every
-// rounding is the one the scalar loop makes. Only the bounds checks and the
-// loop's own tests go. On amd64 the loops for general registers are the
-// only ones taken, under both conventions, for every loop the idioms cover
-// that they can run: over word accumulators, and over f64 accumulators,
-// whose values live in xmm registers there.
-//
-// The vector registers are not allocated: the loop names v0..v7 and
-// v16..v31 directly, holds none of them across a call, and leaves v8..v15,
-// whose low halves a callee preserves, alone.
-
-/// Is what a value of a candidate loop is to the vectorizer.
 enum Role {
-    // defined before the loop: the same in every lane
     Outside,
-    // the induction variable
     Index,
-    // an accumulator phi of the header
     Acc,
-    // computed from the element or k: one value per lane
     Elem,
-    // a constant defined in the loop
     Const,
-    // consumed by the pattern: the header test, the increment, an update
     Used,
-    // a comparison deciding a minimum or a maximum
     Compare,
-    // a comparison of lane values deciding a conditional update
     Mask,
 }
 
-/// Is how an accumulator combines.
 enum AccKind {
     Add,
     Sub,
@@ -82,10 +24,6 @@ enum AccKind {
     UMin,
 }
 
-/// Is one accumulator: phi takes update, which is phi combined with x --
-/// where cond is set, only in the lanes where cond is when. via is the
-/// binary op that combines; swapped, that it reads x first (`x op phi`),
-/// which a float accumulator keeps.
 struct Acc {
     phi: ir::Name,
     kind: AccKind,
@@ -97,7 +35,6 @@ struct Acc {
     swapped: bool,
 }
 
-/// Is what the planner learns of a loop.
 struct Plan {
     header: i64,
     latch: ir::Name,
@@ -105,7 +42,6 @@ struct Plan {
     n: ir::Value,
     array: ir::Value,
     load: ir::Name,
-    // The element's bytes and signedness, and the lanes' bytes.
     elem: i64,
     elem_signed: bool,
     width: i64,
@@ -114,24 +50,14 @@ struct Plan {
     inc: ir::Name,
     unroll: i64,
     uses_index: bool,
-    // The body multiplies; there is no 64-bit lane multiply.
     multiplies: bool,
-    // The loop runs in general registers: no lanes, the bounds tests gone.
     scalar: bool,
-    // The accumulators are `f64`, each one ordered chain.
     float: bool,
-    // How many unrolled copies run together: each of them has registers of
-    // its own for the values the body computes, and they run each op in
-    // turn. 1 runs each copy whole, the copies sharing the temporaries.
     group: i64,
-    // The loop runs as a float lane loop (flanes.kizu), copies copies of two
-    // lanes a turn.
     lanes: bool,
     copies: i64,
 }
 
-/// Is one element read of the body: name = source[k], source an array or a
-/// slice.
 struct Load {
     name: ir::Name,
     source: ir::Value,
@@ -140,7 +66,6 @@ struct Load {
     signed: bool,
 }
 
-/// Is the planner's working state, keyed by value name.
 struct Tables {
     roles: array::Array<Role>,
     inner: array::Array<i64>,
@@ -152,8 +77,6 @@ struct Tables {
     alias_from: array::Array<ir::Name>,
     alias_to: array::Array<ir::Name>,
     loads: array::Array<Load>,
-    // The values, ops and accumulators of a float lane loop (flanes.kizu),
-    // and its names' values, by name id, plus one.
     fvals: array::Array<FVal>,
     fops: array::Array<FOp>,
     faccs: array::Array<FAcc>,
@@ -217,8 +140,6 @@ fn set_vreg_slot(allocator: Allocator, tables: &var Tables, name: ir::Name, inde
     return tables.vreg.set(id, index);
 }
 
-/// Follows the casts a lane value passed through to the value its lanes
-/// hold.
 fn resolve(tables: &Tables, name: ir::Name) -> ir::Name {
     var at = name;
     var hops = 0;
@@ -253,8 +174,6 @@ fn is_select(kind: AccKind) -> bool {
     return kind == AccKind::SMax or kind == AccKind::SMin or kind == AccKind::UMax or kind == AccKind::UMin;
 }
 
-/// Returns the physical vector register of a pool index: v0..v7, then
-/// v16..v31.
 fn pool_reg(index: i64) -> i64 {
     if index < 8 {
         return index;
@@ -266,14 +185,7 @@ fn pool_size() -> i64 {
     return 24;
 }
 
-/// Vectorizes the loop headed by target when the jump from `from` enters it
-/// and it is a reduction the idioms cover: emits the guarded vector loop
-/// after the edge's copies and ends the block, which goes on to the header.
-/// Reports false, having emitted nothing, otherwise.
 fn (self: &var Selector) vectorize_entry(module: &ir::Module, from: ir::Name, target: ir::Name) -> !bool {
-    // The vector loops are NEON; amd64 takes only the loops for general
-    // registers, under both conventions: over words, and over f64
-    // accumulators, whose values live in xmm registers there.
     let header = self.block(target);
     if header < 0 or (self.preds.get(header) orelse 0) != 2 or !self.has_phis(module, target) {
         return false;
@@ -333,8 +245,6 @@ fn (self: &var Selector) vectorize_entry(module: &ir::Module, from: ir::Name, ta
     return true;
 }
 
-/// Reads the loop at plan.header into tables; reports whether it is one the
-/// idioms cover.
 fn (self: &var Selector) plan_loop(module: &ir::Module, from: ir::Name, plan: &var Plan, tables: &var Tables) -> !bool {
     let allocator = self.allocator;
     let header_block = self.ir_blocks.get(plan.header) orelse return false;
@@ -348,8 +258,6 @@ fn (self: &var Selector) plan_loop(module: &ir::Module, from: ir::Name, plan: &v
     if entry < 0 or exit < 0 or entry == plan.header or exit == plan.header {
         return false;
     }
-    // The header: phis entered from `from` and one latch, constants, then
-    // k < n.
     var tested = false;
     var index = 0;
     while header_node.instrs.get(index) |instr| {
@@ -422,7 +330,6 @@ fn (self: &var Selector) plan_loop(module: &ir::Module, from: ir::Name, plan: &v
         return false;
     }
     try set_role(allocator, tables, plan.k, Role::Index);
-    // The increment, and the accumulators' common type.
     index = 0;
     while header_node.instrs.get(index) |instr| {
         index = index + 1;
@@ -454,7 +361,6 @@ fn (self: &var Selector) plan_loop(module: &ir::Module, from: ir::Name, plan: &v
     if !try self.collect_body(module, plan, entry, exit, tables) {
         return false;
     }
-    // The uses inside the body, then the body's values, in order.
     var body_index = 0;
     while tables.body.get(body_index) |mir| {
         body_index = body_index + 1;
@@ -517,8 +423,6 @@ fn (self: &var Selector) plan_loop(module: &ir::Module, from: ir::Name, plan: &v
                     }
                 },
                 Cast => {
-                    // A cast nothing reads (left by a bounds test the
-                    // optimizer dropped) is not computed.
                     let dead = inner_uses(tables, node.result.name) == 0 and !ir::same_name(node.result.name, plan.inc);
                     if !dead and !try self.plan_cast(module, node, plan, tables) {
                         return false;
@@ -531,7 +435,6 @@ fn (self: &var Selector) plan_loop(module: &ir::Module, from: ir::Name, plan: &v
             }
         }
     }
-    // The branches: each a minimum, a maximum or a conditional update.
     var joined = 0;
     var decided = 0;
     body_index = 0;
@@ -550,7 +453,6 @@ fn (self: &var Selector) plan_loop(module: &ir::Module, from: ir::Name, plan: &v
     if joined != body_phis or decided != compares or ir::is_empty(plan.load) {
         return false;
     }
-    // Every header phi but k is one accumulator, updated by its latch value.
     index = 0;
     while header_node.instrs.get(index) |instr| {
         index = index + 1;
@@ -581,8 +483,6 @@ fn (self: &var Selector) plan_loop(module: &ir::Module, from: ir::Name, plan: &v
     if tables.accs.len() == 0 or inner_uses(tables, plan.inc) != 1 or role_of(tables, plan.inc) != Role::Used {
         return false;
     }
-    // Uses inside the loop: an accumulator feeds only its update (and its
-    // comparison, or the join that keeps it); an update only the header.
     var acc_index = 0;
     while tables.accs.get(acc_index) |acc| {
         acc_index = acc_index + 1;
@@ -626,8 +526,6 @@ fn (self: &var Selector) plan_loop(module: &ir::Module, from: ir::Name, plan: &v
     return true;
 }
 
-/// Reports whether a conditional update adds one, which the mask itself
-/// counts.
 fn counts_one(self: &Selector, acc: Acc) -> bool {
     if ir::is_empty(acc.cond) or !acc.when or acc.kind != AccKind::Add {
         return false;
@@ -636,8 +534,6 @@ fn counts_one(self: &Selector, acc: Acc) -> bool {
     return held.kind == ValKind::Const and held.imm == 1;
 }
 
-/// Returns how many vector registers the loop needs at plan.unroll, with
-/// the temporaries once for each of copies copies.
 fn (self: &Selector) pool_need(plan: &Plan, tables: &Tables, copies: i64) -> i64 {
     let unroll = plan.unroll;
     var need = unroll + tables.accs.len() * unroll + tables.invs.len() + tables.elems.len() * copies;
@@ -653,8 +549,6 @@ fn (self: &Selector) pool_need(plan: &Plan, tables: &Tables, copies: i64) -> i64
     return need;
 }
 
-/// Reports whether an accumulator updates under a mask, which takes a
-/// register for x masked.
 fn needs_masked(tables: &Tables) -> bool {
     var index = 0;
     while tables.accs.get(index) |acc| {
@@ -666,8 +560,6 @@ fn needs_masked(tables: &Tables) -> bool {
     return false;
 }
 
-/// Reports whether an accumulator is a 64-bit minimum or maximum, which
-/// takes a register for the comparison NEON has no single op for.
 fn needs_scratch(plan: &Plan, tables: &Tables) -> bool {
     var index = 0;
     while tables.accs.get(index) |acc| {
@@ -679,7 +571,6 @@ fn needs_scratch(plan: &Plan, tables: &Tables) -> bool {
     return false;
 }
 
-/// Binds a scalar constant of the loop.
 fn (self: &var Selector) plan_const(module: &ir::Module, node: &ir::InstrNode, tables: &var Tables) -> !bool {
     let shape = shape_of(module, node.result.type_name);
     if shape.class != Class::Scalar and shape.class != Class::Float or module.names.is(node.result.type_name, "bool") {
@@ -696,10 +587,6 @@ fn (self: &var Selector) plan_const(module: &ir::Module, node: &ir::InstrNode, t
     return true;
 }
 
-/// Collects the body into tables.body in an order where each block follows
-/// every body block that leads to it: the blocks reached from entry without
-/// passing the header. Reports false when the body has a cycle, leaves
-/// the loop other than through the header, or is entered from outside.
 fn (self: &var Selector) collect_body(module: &ir::Module, plan: &Plan, entry: i64, exit: i64, tables: &var Tables) -> !bool {
     let allocator = self.allocator;
     let count = self.ir_blocks.len();
@@ -775,9 +662,6 @@ fn (self: &var Selector) collect_body(module: &ir::Module, plan: &Plan, entry: i
     return true;
 }
 
-/// Plans an element load: `get_or_panic(k)` of an array, or `[k]` of a
-/// slice, the loop does not define, of an integer no wider than the lanes.
-/// The first load is plan.load.
 fn (self: &var Selector) plan_load(module: &ir::Module, node: &ir::InstrNode, slice: bool, plan: &var Plan, tables: &var Tables) -> !bool {
     if tables.loads.len() >= 4 {
         return false;
@@ -819,18 +703,6 @@ fn (self: &var Selector) plan_load(module: &ir::Module, node: &ir::InstrNode, sl
     return true;
 }
 
-/// Plans the loop for general registers, where it multiplies or reads
-/// more than one element: the 64-bit lanes NEON lacks a multiply for, and
-/// the vector loop reads one element; on amd64, any loop. It qualifies when
-/// the accumulators are words, each updating by `+ - ^ & |` -- or
-/// conditionally, by `+ - ^ |` under a comparison of word values -- the
-/// elements are read and extended to words as the lanes are, and the
-/// copies of the accumulators, the pointers and the uniform values leave
-/// registers for the temporaries: unrolled 4 times, else 2. Copies run in
-/// pairs when the elements of a pair fit beside them too, as a pair reads
-/// all its elements before it computes (and two words in a row from one
-/// source load as one pair); not more, as the values live through the loop
-/// take registers too.
 fn plan_scalar(plan: &var Plan, tables: &Tables, budget: i64) -> bool {
     if plan.width != 8 {
         return false;
@@ -849,14 +721,10 @@ fn plan_scalar(plan: &var Plan, tables: &Tables, budget: i64) -> bool {
             return false;
         }
     }
-    // k, when the body reads it, is one more register held.
     var held = tables.loads.len() + 1 + tables.invs.len() + 3;
     if plan.uses_index {
         held = held + 1;
     }
-    // A conditional accumulator is kept once: its pick is off the chain,
-    // which is one op an element, so copies of it would only take registers
-    // the turn can use.
     var once = 0;
     index = 0;
     while tables.accs.get(index) |acc| {
@@ -875,14 +743,9 @@ fn plan_scalar(plan: &var Plan, tables: &Tables, budget: i64) -> bool {
         return false;
     }
     plan.scalar = true;
-    // A float loop keeps the copies apart and in order: its chain takes
-    // the elements one by one, so they gain nothing by running together.
     if plan.float {
         return true;
     }
-    // In pairs, the three temporaries held allows become the elements of a
-    // pair and a register for each value the body computes from them, k
-    // and each conditional pick.
     var temps = tables.loads.len() + tables.elems.len() + once;
     if plan.uses_index {
         temps = temps + 1;
@@ -893,13 +756,6 @@ fn plan_scalar(plan: &var Plan, tables: &Tables, budget: i64) -> bool {
     return true;
 }
 
-/// Returns how many general registers a loop for general registers may
-/// hold at once: 20 of the 24 the allocator hands out on arm64; on amd64
-/// all 11, as allocation gives up the long ranges around the loop before
-/// the ones inside it, and a value read once a turn from the frame costs
-/// less than halving the turn. A float loop on amd64 keeps its
-/// accumulators and elements in xmm registers, so the general ones bound
-/// it no more than on arm64.
 fn word_budget(arch: Arch, float: bool) -> i64 {
     if is_x86(arch) and !float {
         return 11;
@@ -907,8 +763,6 @@ fn word_budget(arch: Arch, float: bool) -> i64 {
     return 20;
 }
 
-/// Plans a cast: of a constant, a constant of the new type; of a lane value,
-/// the same lanes when the new type is as wide as the lanes.
 fn (self: &var Selector) plan_cast(module: &ir::Module, node: &ir::InstrNode, plan: &var Plan, tables: &var Tables) -> !bool {
     let source = node.args.get(0) orelse return false;
     let role = role_of(tables, source.name);
@@ -941,8 +795,6 @@ fn (self: &var Selector) plan_cast(module: &ir::Module, node: &ir::InstrNode, pl
     return true;
 }
 
-/// Plans a binary op of the body and returns the role it gives its result,
-/// or null when the idioms do not cover it.
 fn (self: &var Selector) plan_binary(module: &ir::Module, node: &ir::InstrNode, plan: &var Plan, tables: &var Tables) -> !?Role {
     let allocator = self.allocator;
     let left = node.args.get(0) orelse return null;
@@ -951,7 +803,6 @@ fn (self: &var Selector) plan_binary(module: &ir::Module, node: &ir::InstrNode, 
     let rr = role_of(tables, right.name);
     let op = node.operand;
     if ir::same_name(node.result.name, plan.inc) {
-        // k + 1, the increment.
         var step = right;
         if rr == Role::Index {
             step = left;
@@ -1044,7 +895,6 @@ fn (self: &var Selector) plan_binary(module: &ir::Module, node: &ir::InstrNode, 
     if !lane_value(lr) or !lane_value(rr) or uniform(lr) and uniform(rr) {
         return null;
     }
-    // The extension of a narrower value survives only the bitwise ops.
     let wraps = module.names.is(op, "+") or module.names.is(op, "-") or module.names.is(op, "*") or
         module.names.is(op, "<<") or module.names.is(op, ">>");
     if wraps and shape.size != plan.width {
@@ -1072,9 +922,6 @@ fn (self: &var Selector) plan_binary(module: &ir::Module, node: &ir::InstrNode, 
     return Role::Elem;
 }
 
-/// Plans a binary op of the body of a loop over `f64` accumulators: an
-/// accumulator's `+` or `-` of an element value, or `+ - * /` of element
-/// values, all `f64`.
 fn (self: &var Selector) plan_float_binary(module: &ir::Module, node: &ir::InstrNode, plan: &var Plan, tables: &var Tables) -> !?Role {
     let allocator = self.allocator;
     let left = node.args.get(0) orelse return null;
@@ -1133,8 +980,6 @@ fn (self: &var Selector) plan_float_binary(module: &ir::Module, node: &ir::Instr
     return Role::Elem;
 }
 
-/// Notes what a lane operand needs: a register of its own when uniform, the
-/// index lanes when k.
 fn (self: &var Selector) lane_operand(name: ir::Name, role: Role, plan: &var Plan, tables: &var Tables) -> !void {
     if role == Role::Index {
         plan.uses_index = true;
@@ -1145,8 +990,6 @@ fn (self: &var Selector) lane_operand(name: ir::Name, role: Role, plan: &var Pla
     return;
 }
 
-/// Notes a value every lane takes alike; reports false when it is not held
-/// in a register or as a constant.
 fn (self: &var Selector) add_uniform(name: ir::Name, tables: &var Tables) -> !bool {
     let held = self.val(name);
     if held.kind != ValKind::Reg and held.kind != ValKind::Const {
@@ -1163,8 +1006,6 @@ fn (self: &var Selector) add_uniform(name: ir::Name, tables: &var Tables) -> !bo
     return true;
 }
 
-/// Returns the join a side of a branch reaches: the block a side ending in
-/// a jump goes to.
 fn (self: &Selector) side_join(module: &ir::Module, mir: i64) -> i64 {
     let block = self.ir_blocks.get(mir) orelse return 0 - 1;
     let node = module.blocks.at(block.node);
@@ -1174,17 +1015,12 @@ fn (self: &Selector) side_join(module: &ir::Module, mir: i64) -> i64 {
     return self.block(node.terminator.target);
 }
 
-/// Plans a branch of the body: a diamond or a triangle whose join's phis
-/// each pick x or an accumulator by a comparison of the two, or pick an
-/// accumulator's update or the accumulator itself by a mask. Returns how
-/// many phis it accounts for, or null.
 fn (self: &var Selector) plan_select(module: &ir::Module, block_name: ir::Name, term: ir::Terminator, plan: &Plan, tables: &var Tables) -> !?i64 {
     let allocator = self.allocator;
     let cond_role = role_of(tables, term.cond.name);
     if cond_role != Role::Compare and cond_role != Role::Mask or inner_uses(tables, term.cond.name) != 1 {
         return null;
     }
-    // The comparison is in this block.
     let here = self.block(block_name);
     let block = self.ir_blocks.get(here) orelse return null;
     let block_node = module.blocks.at(block.node);
@@ -1272,7 +1108,6 @@ fn (self: &var Selector) plan_select(module: &ir::Module, block_name: ir::Name, 
         } else {
             return null;
         }
-        // picks: x picks acc holds where x is taken.
         if !x_taken {
             picks = invert(picks);
         }
@@ -1313,9 +1148,6 @@ fn (self: &var Selector) plan_select(module: &ir::Module, block_name: ir::Name, 
     return phis;
 }
 
-/// Plans a join phi that keeps an accumulator's update on one side and the
-/// accumulator on the other: the update becomes conditional on the mask.
-/// For `!=` the mask is the equality, so the sides swap.
 fn (self: &var Selector) plan_masked(phi: ir::Name, taken: ir::Name, other: ir::Name, mask: ir::Name, inverted: bool, tables: &var Tables) -> !bool {
     var index = 0;
     while index < tables.accs.len() {
@@ -1355,7 +1187,6 @@ fn (self: &var Selector) vop(op: MOp, width: i64, vd: i64, vn: i64, vm: i64) -> 
     return self.inst(inst);
 }
 
-/// Combines x into acc lane by lane; scratch is a spare register.
 fn (self: &var Selector) combine(kind: AccKind, width: i64, acc: i64, x: i64, scratch: i64) -> !void {
     match kind {
         Add => return self.vop(MOp::VAdd, width, acc, acc, x),
@@ -1394,31 +1225,22 @@ fn (self: &var Selector) combine(kind: AccKind, width: i64, acc: i64, x: i64, sc
     }
 }
 
-/// Is where the loop's vector registers are, as pool indices.
 struct Pool {
-    // The element registers, one per unrolled copy.
     elems: i64,
-    // The index registers, one per copy, and the step they advance by.
     index: i64,
     step: i64,
     accs: i64,
     invs: i64,
-    // The temporaries, masked and scratch: each once, or once per copy
-    // (copies of them side by side) when the copies run together.
     temps: i64,
     masked: i64,
     scratch: i64,
     copies: i64,
 }
 
-/// Returns which of a temporary's registers copy u uses.
 fn (self: &Pool) copy(u: i64) -> i64 {
     return u % self.copies;
 }
 
-/// Returns the register of name, bound to slot, in unrolled copy u: a
-/// value the body computes (and k, in general registers) has one for each
-/// of copies copies running together, the uniform values one for all.
 fn per_copy(copies: i64, tables: &Tables, name: ir::Name, slot: i64, u: i64) -> i64 {
     let role = role_of(tables, name);
     if role == Role::Elem or role == Role::Mask or role == Role::Index {
@@ -1427,7 +1249,6 @@ fn per_copy(copies: i64, tables: &Tables, name: ir::Name, slot: i64, u: i64) -> 
     return slot;
 }
 
-/// Returns the pool index holding a lane value in unrolled copy u.
 fn lane_reg(plan: &Plan, pool: &Pool, tables: &Tables, name: ir::Name, u: i64) -> i64 {
     let held = resolve(tables, name);
     if ir::same_name(held, plan.load) {
@@ -1445,7 +1266,6 @@ fn (self: &var Selector) new_vector_block() -> !i64 {
     return block;
 }
 
-/// Emits the guard, the vector loop and the fold, ending at the header.
 fn (self: &var Selector) emit_vector_loop(module: &ir::Module, plan: &Plan, tables: &var Tables) -> !void {
     let allocator = self.allocator;
     let width = plan.width;
@@ -1486,8 +1306,6 @@ fn (self: &var Selector) emit_vector_loop(module: &ir::Module, plan: &Plan, tabl
     var sources = array::new<Val>(allocator);
     defer sources.deinit(allocator);
     let rest = try self.emit_guard(module, plan, tables, step, &var sources);
-    // The set-up: where the elements start and end, the uniform values and
-    // the index in their lanes, each accumulator's start value in its lanes.
     let data = sources.get_or_panic(0).reg;
     let ptr = self.func.new_vreg();
     var at = blank(MOp::AddShift);
@@ -1562,8 +1380,6 @@ fn (self: &var Selector) emit_vector_loop(module: &ir::Module, plan: &Plan, tabl
     let body = try self.new_vector_block();
     let fold = try self.new_vector_block();
     self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), body, 0 - 1);
-    // The loop: load the elements, compute each copy, combine. Copies
-    // that run together run each op in turn.
     try self.start_block(body);
     try self.load_lanes(plan, ptr, bytes);
     try self.op_imm(MOp::AddImm, ptr, ptr, bytes);
@@ -1608,8 +1424,6 @@ fn (self: &var Selector) emit_vector_loop(module: &ir::Module, plan: &Plan, tabl
     }
     try self.op3(MOp::Cmp, reg_none(), ptr, end);
     self.func.end(self.current, Term::Flags, Cond::Lo, reg_none(), body, fold);
-    // The fold: the copies into the first, the lanes into lane 0, into the
-    // phis; k moves past the elements done.
     try self.start_block(fold);
     index = 0;
     while tables.accs.get(index) |acc| {
@@ -1647,10 +1461,6 @@ fn (self: &var Selector) emit_vector_loop(module: &ir::Module, plan: &Plan, tabl
     return;
 }
 
-/// Emits the guard the unchecked loop runs behind -- 0 <= k, n <= the
-/// length of every source, k < n and a full step to run -- going to the
-/// header where it fails, and returns n - k. sources gets where each load's
-/// elements start and how many there are.
 fn (self: &var Selector) emit_guard(module: &ir::Module, plan: &Plan, tables: &Tables, step: i64, sources: &var array::Array<Val>) -> !i64 {
     let k = self.val(plan.k).reg;
     var n = 0 - 1;
@@ -1700,13 +1510,6 @@ fn (self: &var Selector) emit_guard(module: &ir::Module, plan: &Plan, tables: &T
     return rest;
 }
 
-/// Emits the loop for general registers behind the guard: plan.unroll
-/// elements a turn, each accumulator kept once per element of the turn and
-/// folded into its phi after, k moved past the elements done; the scalar
-/// loop runs the rest. Wrapping `+ - ^ & |` are associative and
-/// commutative, so splitting an accumulator does not change its result. A
-/// float accumulator is not split: one register takes the elements of the
-/// turn in order.
 fn (self: &var Selector) emit_scalar_loop(module: &ir::Module, plan: &Plan, tables: &var Tables) -> !void {
     let allocator = self.allocator;
     let unroll = plan.unroll;
@@ -1714,8 +1517,6 @@ fn (self: &var Selector) emit_scalar_loop(module: &ir::Module, plan: &Plan, tabl
     var sources = array::new<Val>(allocator);
     defer sources.deinit(allocator);
     let rest = try self.emit_guard(module, plan, tables, unroll, &var sources);
-    // The set-up: a pointer per load, where the first stops, the uniform
-    // values, each accumulator once per element of a turn.
     var ptrs = array::new<i64>(allocator);
     defer ptrs.deinit(allocator);
     let count = self.func.new_vreg();
@@ -1739,7 +1540,6 @@ fn (self: &var Selector) emit_scalar_loop(module: &ir::Module, plan: &Plan, tabl
     past.rm = count;
     past.imm = power_of_two(tables.loads.get_or_panic(0).elem);
     try self.inst(past);
-    // k of the turn's first element, when the body reads k.
     var turn_k = 0 - 1;
     if plan.uses_index {
         turn_k = self.func.new_vreg();
@@ -1781,9 +1581,6 @@ fn (self: &var Selector) emit_scalar_loop(module: &ir::Module, plan: &Plan, tabl
     let body = try self.new_vector_block();
     let fold = try self.new_vector_block();
     self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), body, 0 - 1);
-    // The loop: each element of the turn read, computed and combined.
-    // Copies that run together read all their elements first, a source's
-    // in order, then run each op in turn.
     try self.start_block(body);
     let each = plan.group;
     for 0..unroll / each |turn| {
@@ -1837,8 +1634,6 @@ fn (self: &var Selector) emit_scalar_loop(module: &ir::Module, plan: &Plan, tabl
             let x = resolve(tables, acc.x);
             let at = index * unroll + turn * each;
             index = index + 1;
-            // One chain in the order of the source: plan.group is 1, so
-            // the turn is the element, and x + acc keeps x first.
             let reg = accs.get_or_panic(at);
             let slot = vreg_slot(tables, x);
             var kind = float_add();
@@ -1862,7 +1657,6 @@ fn (self: &var Selector) emit_scalar_loop(module: &ir::Module, plan: &Plan, tabl
     }
     try self.op3(MOp::Cmp, reg_none(), ptrs.get_or_panic(0), end);
     self.func.end(self.current, Term::Flags, Cond::Lo, reg_none(), body, fold);
-    // The fold: the copies into the phis.
     try self.start_block(fold);
     index = 0;
     while tables.accs.get(index) |acc| {
@@ -1887,12 +1681,6 @@ fn (self: &var Selector) emit_scalar_loop(module: &ir::Module, plan: &Plan, tabl
     return;
 }
 
-/// Emits the accumulators' updates for element u of the turn, copy copy of
-/// the copies running together. A conditional update picks x or 0 by the
-/// flags of its comparison (or sets the 1 a count adds) and combines the
-/// pick: `acc op 0` is acc for `+ - ^ |`, so the pick stands for the
-/// branch. Every pick of a comparison follows it before anything sets the
-/// flags again; the combining comes after all of them.
 fn (self: &var Selector) word_updates(module: &ir::Module, plan: &Plan, tables: &Tables, accs: &array::Array<i64>, u: i64, copy: i64) -> !void {
     let allocator = self.allocator;
     let each = plan.group;
@@ -1950,10 +1738,6 @@ fn (self: &var Selector) word_updates(module: &ir::Module, plan: &Plan, tables: 
     return;
 }
 
-/// Emits the comparison of word values that mask names, for copy copy, and
-/// returns the condition that holds where the vector loop's mask is all
-/// ones: for `!=`, the equality (an accumulator's when says which side
-/// updates).
 fn (self: &var Selector) word_compare(module: &ir::Module, tables: &Tables, mask: ir::Name, copy: i64, copies: i64) -> !Cond {
     var body_index = 0;
     while tables.body.get(body_index) |mir| {
@@ -1977,7 +1761,6 @@ fn (self: &var Selector) word_compare(module: &ir::Module, tables: &Tables, mask
             }
             let lhs = per_copy(copies, tables, left_held, vreg_slot(tables, left_held), copy);
             let rhs = per_copy(copies, tables, right_held, vreg_slot(tables, right_held), copy);
-            // A constant side is compared as an immediate.
             let left_val = self.val(left_held);
             let right_val = self.val(right_held);
             if uniform(role_of(tables, right_held)) and right_val.kind == ValKind::Const {
@@ -1995,8 +1778,6 @@ fn (self: &var Selector) word_compare(module: &ir::Module, tables: &Tables, mask
     return Cond::Eq;
 }
 
-/// Returns the general-register op an accumulator of `+ - ^ & |` combines
-/// by.
 fn word_op(kind: AccKind) -> MOp {
     match kind {
         Sub => return MOp::Sub,
@@ -2007,8 +1788,6 @@ fn word_op(kind: AccKind) -> MOp {
     }
 }
 
-/// Emits one element op of the body in general registers for each of
-/// copies copies, each result in a register of its own.
 fn (self: &var Selector) word_binary(module: &ir::Module, node: &ir::InstrNode, tables: &var Tables, copies: i64) -> !void {
     let first = self.func.new_vregs(copies);
     try set_vreg_slot(self.allocator, tables, node.result.name, first);
@@ -2018,7 +1797,6 @@ fn (self: &var Selector) word_binary(module: &ir::Module, node: &ir::InstrNode, 
     return;
 }
 
-/// Emits copy of one element op of the body into dst.
 fn (self: &var Selector) word_copy(module: &ir::Module, node: &ir::InstrNode, tables: &Tables, dst: i64, copy: i64, copies: i64) -> !void {
     let left = node.args.get_or_panic(0);
     let right = node.args.get_or_panic(1);
@@ -2054,8 +1832,6 @@ fn (self: &var Selector) word_copy(module: &ir::Module, node: &ir::InstrNode, ta
     return;
 }
 
-/// Emits one `f64` element op of the body in float registers, the result in
-/// a register of its own.
 fn (self: &var Selector) double_binary(module: &ir::Module, node: &ir::InstrNode, tables: &var Tables) -> !void {
     let left = node.args.get_or_panic(0);
     let right = node.args.get_or_panic(1);
@@ -2081,9 +1857,6 @@ fn (self: &var Selector) dup(v: i64, reg: i64, width: i64) -> !void {
     return self.inst(inst);
 }
 
-/// Loads one turn's elements into the element registers, extended to the
-/// lane width: each extension splits a register's lanes into two
-/// registers, the high half first so the low half can stay in place.
 fn (self: &var Selector) load_lanes(plan: &Plan, ptr: i64, bytes: i64) -> !void {
     let unroll = plan.unroll;
     if plan.elem == plan.width {
@@ -2142,7 +1915,6 @@ fn (self: &var Selector) extend_lanes(op: MOp, size: i64, signed: bool, vd: i64,
     return self.inst(inst);
 }
 
-/// Emits one accumulator's update for unrolled copy u.
 fn (self: &var Selector) update_lanes(acc: Acc, plan: &Plan, pool: &Pool, tables: &Tables, reg: i64, u: i64) -> !void {
     let width = plan.width;
     if ir::is_empty(acc.cond) {
@@ -2150,7 +1922,6 @@ fn (self: &var Selector) update_lanes(acc: Acc, plan: &Plan, pool: &Pool, tables
     }
     let mask = lane_reg(plan, pool, tables, acc.cond, u);
     if counts_one(self, acc) {
-        // The mask is -1 where the update adds one.
         return self.vop(MOp::VSub, width, reg, reg, mask);
     }
     let x = lane_reg(plan, pool, tables, acc.x, u);
@@ -2163,8 +1934,6 @@ fn (self: &var Selector) update_lanes(acc: Acc, plan: &Plan, pool: &Pool, tables
     return self.combine(acc.kind, width, reg, masked, pool.scratch + pool.copy(u));
 }
 
-/// Emits one comparison of lane values for unrolled copy u: all ones where
-/// it holds (for `!=`, where its equality holds).
 fn (self: &var Selector) lane_compare(module: &ir::Module, node: &ir::InstrNode, plan: &Plan, pool: &Pool, tables: &Tables, u: i64) -> !void {
     let left = node.args.get_or_panic(0);
     let right = node.args.get_or_panic(1);
@@ -2185,14 +1954,11 @@ fn (self: &var Selector) lane_compare(module: &ir::Module, node: &ir::InstrNode,
         Lo => return self.vop(MOp::VCmHi, width, dst, rhs, lhs),
         Hs => return self.vop(MOp::VCmHs, width, dst, lhs, rhs),
         Ls => return self.vop(MOp::VCmHs, width, dst, rhs, lhs),
-        // Only a float comparison leaves these, and no float reaches a
-        // vectorized loop.
         Mi => return,
         Pl => return,
     }
 }
 
-/// Emits one element op of the body for unrolled copy u.
 fn (self: &var Selector) lane_binary(module: &ir::Module, node: &ir::InstrNode, plan: &Plan, pool: &Pool, tables: &Tables, u: i64) -> !void {
     let left = node.args.get_or_panic(0);
     let right = node.args.get_or_panic(1);

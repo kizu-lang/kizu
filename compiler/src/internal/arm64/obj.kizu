@@ -6,37 +6,23 @@ import std::mem;
 import std::sort;
 import std::string;
 
-// The object the backend writes itself: the bytes of each section the
-// printer fills, the symbols and relocations its instructions name, and
-// the branches within a function, patched when it ends (on x86-64, whose
-// jumps are short or near, laid out when it ends: amd64_encode.kizu). The
-// file the system linker reads is laid out from it by macho.kizu, elf.kizu
-// or coff.kizu, the way the system assembler lays out the same code, so the
-// object is byte for byte the one the assembler would make.
-
-/// Is one section the printer writes into.
 pub enum SectionKind {
     Text,
     DataConst,
     TextConst,
     Cstring,
-    // ELF's `.note.GNU-stack`, empty: the stack is not executable.
     Note,
 }
 
 struct Section {
     kind: SectionKind,
     bytes: string::String,
-    // log2 of the widest alignment asked for in it
     align: i64,
     relocs: array::Array<Reloc>,
-    // The section-start symbol: Mach-O's `ltmpN`, ELF's section symbol.
     start: i64,
-    // What ELF's last mapping symbol in it marks: none yet, code or data.
     mapped: SymbolKind,
 }
 
-// The relocation types of arm64 Mach-O.
 fn reloc_unsigned() -> i64 { return 0; }
 
 fn reloc_branch26() -> i64 { return 2; }
@@ -51,8 +37,6 @@ fn reloc_got_pageoff12() -> i64 { return 6; }
 
 fn reloc_addend() -> i64 { return 10; }
 
-/// Is one relocation: the instruction or word at address takes symbol's
-/// address plus addend, the way kind says.
 struct Reloc {
     address: i64,
     symbol: i64,
@@ -60,8 +44,6 @@ struct Reloc {
     addend: i64,
 }
 
-/// Is what a symbol is: one a line names, or one the ELF object adds of
-/// itself, a section symbol or a mapping symbol (`$x` code, `$d` data).
 enum SymbolKind {
     Named,
     Section,
@@ -69,25 +51,17 @@ enum SymbolKind {
     Data,
 }
 
-/// Is one symbol a line names or defines. section is -1 until it is
-/// defined; value is its offset in the section until the layout makes it
-/// an address.
 struct Symbol {
     kind: SymbolKind,
     name: ir::Name,
     section: i64,
     value: i64,
     global: bool,
-    // An assembler-local label (`L...`): kept out of the symbol table unless
-    // a relocation has to name it.
     temp: bool,
     named: bool,
-    // The position in the written table, once it is laid out.
     index: i64,
 }
 
-/// Is one branch to a block of the function being written, patched when
-/// the function ends: an imm26 (b) or an imm19 (b.cond, cbz, cbnz) word.
 struct Branch {
     at: i64,
     block: i64,
@@ -95,30 +69,21 @@ struct Branch {
     wide: bool,
 }
 
-/// Is the object being written.
 pub struct Obj {
     format: Format,
-    // The machine: x86-64 rather than AArch64.
     x86: bool,
     sections: array::Array<Section>,
     current: i64,
     symbols: array::Array<Symbol>,
-    // by_name[name id] is the symbol's index + 1, or 0.
     by_name: array::Array<i64>,
     block_at: array::Array<i64>,
     branches: array::Array<Branch>,
-    // x86-64: the jumps of the function being written and the places of
-    // the printer's own labels in it.
     jumps: array::Array<X86Jump>,
     local_at: array::Array<i64>,
-    // The symbol the code being written belongs to: the last one defined
-    // in the code section that is not assembler-local, or -1. Mach-O only.
     atom: i64,
-    // What no encoding holds, the first one met; empty when all did.
     pub failure: string::String,
 }
 
-/// Returns an empty object, to be written in format.
 pub fn new_obj(allocator: Allocator, format: Format) -> Obj {
     return Obj {
         format: format,
@@ -136,7 +101,6 @@ pub fn new_obj(allocator: Allocator, format: Format) -> Obj {
     };
 }
 
-/// Records the first line no encoding holds.
 fn (self: &var Obj) fail(allocator: Allocator, what: []u8, value: i64) -> !void {
     if self.failure.len() > 0 {
         return;
@@ -146,7 +110,6 @@ fn (self: &var Obj) fail(allocator: Allocator, what: []u8, value: i64) -> !void 
     return fmt::append_i64(allocator, &var self.failure, value);
 }
 
-/// Records the first line no encoding holds, by a message of its own.
 fn (self: &var Obj) fail_message(allocator: Allocator, message: []u8) -> !void {
     if self.failure.len() > 0 {
         return;
@@ -154,8 +117,6 @@ fn (self: &var Obj) fail_message(allocator: Allocator, message: []u8) -> !void {
     return self.failure.append_bytes(allocator, message);
 }
 
-/// Returns the symbol a name names, registering it on first sight: the
-/// order of first sight is the order of the local symbols.
 fn (self: &var Obj) symbol_of(allocator: Allocator, syms: &ir::NameTable, name: ir::Name) -> !i64 {
     let id = ir::name_id(name);
     while self.by_name.len() <= id {
@@ -183,12 +144,9 @@ fn (self: &var Obj) symbol_of(allocator: Allocator, syms: &ir::NameTable, name: 
     return index;
 }
 
-/// Enters a section, creating it and its start symbol the first time.
 pub fn (self: &var Obj) enter(allocator: Allocator, syms: &var ir::NameTable, given: SectionKind) -> !void {
     var kind = given;
     if self.format == Format::Coff and kind != SectionKind::Text {
-        // COFF keeps the strings, the tables and the error names in one
-        // `.rdata`, in the order they are written.
         kind = SectionKind::TextConst;
     }
     var index = 0;
@@ -201,10 +159,8 @@ pub fn (self: &var Obj) enter(allocator: Allocator, syms: &var ir::NameTable, gi
     }
     var start = self.symbols.len();
     if self.format == Format::Elf {
-        // The section symbol, in the table only if a relocation names it.
         try self.symbols.append(allocator, unnamed(SymbolKind::Section, index, 0));
     } else if self.format == Format::Coff {
-        // Every section has its symbol, which the writer adds.
         start = 0 - 1;
     } else {
         start = try self.start_symbol(allocator, syms, index);
@@ -221,7 +177,6 @@ pub fn (self: &var Obj) enter(allocator: Allocator, syms: &var ir::NameTable, gi
     return;
 }
 
-/// Returns a symbol the ELF object adds of itself, at value in section.
 fn unnamed(kind: SymbolKind, section: i64, value: i64) -> Symbol {
     return Symbol {
         kind: kind,
@@ -235,7 +190,6 @@ fn unnamed(kind: SymbolKind, section: i64, value: i64) -> Symbol {
     };
 }
 
-/// Returns the Mach-O section-start symbol `ltmpN` of the index-th section.
 fn (self: &var Obj) start_symbol(allocator: Allocator, syms: &var ir::NameTable, index: i64) -> !i64 {
     var label = try string::from_bytes(allocator, "ltmp");
     defer label.deinit(allocator);
@@ -250,9 +204,6 @@ fn (self: &var Obj) start_symbol(allocator: Allocator, syms: &var ir::NameTable,
     return start;
 }
 
-/// Marks what comes next in the current section, code or data, the way
-/// the ELF assembler does: a mapping symbol where it changes. Mach-O has
-/// none.
 fn (self: &var Obj) mark(allocator: Allocator, code: bool) -> !void {
     if self.format != Format::Elf or self.x86 {
         return;
@@ -274,7 +225,6 @@ fn (self: &var Obj) mark(allocator: Allocator, code: bool) -> !void {
     return;
 }
 
-/// Reports whether the current section is the code section.
 fn (self: &Obj) in_code() -> bool {
     if self.sections.at(self.current) |section| {
         return section.kind == SectionKind::Text;
@@ -282,7 +232,6 @@ fn (self: &Obj) in_code() -> bool {
     return false;
 }
 
-/// Returns how many bytes the current section holds.
 fn (self: &Obj) here() -> i64 {
     if self.sections.at(self.current) |section| {
         return section.bytes.len();
@@ -290,7 +239,6 @@ fn (self: &Obj) here() -> i64 {
     return 0;
 }
 
-/// Appends bytes to the current section.
 pub fn (self: &var Obj) bytes(allocator: Allocator, data: []u8) -> !void {
     try self.mark(allocator, false);
     if self.sections.at_mut(self.current) |section| {
@@ -299,7 +247,6 @@ pub fn (self: &var Obj) bytes(allocator: Allocator, data: []u8) -> !void {
     return;
 }
 
-/// Appends one byte to the current section.
 fn (self: &var Obj) byte(allocator: Allocator, value: i64) -> !void {
     if self.sections.at_mut(self.current) |section| {
         try section.bytes.append_byte(allocator, cast<u8>(value & 255));
@@ -307,7 +254,6 @@ fn (self: &var Obj) byte(allocator: Allocator, value: i64) -> !void {
     return;
 }
 
-/// Appends a little-endian value of size bytes.
 fn (self: &var Obj) little(allocator: Allocator, value: i64, size: i64) -> !void {
     for 0..size |at| {
         try self.byte(allocator, value >> (8 * at));
@@ -315,7 +261,6 @@ fn (self: &var Obj) little(allocator: Allocator, value: i64, size: i64) -> !void
     return;
 }
 
-/// Appends one instruction word, or records the failure a word of -1 marks.
 pub fn (self: &var Obj) word(allocator: Allocator, value: i64, what: []u8) -> !void {
     if value < 0 {
         try self.fail(allocator, what, value);
@@ -324,14 +269,11 @@ pub fn (self: &var Obj) word(allocator: Allocator, value: i64, what: []u8) -> !v
     return self.little(allocator, value, 4);
 }
 
-/// Appends a little-endian value of size bytes, a datum of the section.
 pub fn (self: &var Obj) datum(allocator: Allocator, value: i64, size: i64) -> !void {
     try self.mark(allocator, false);
     return self.little(allocator, value, size);
 }
 
-/// Pads the current section to 2^log2 bytes: with nops in code, zeros
-/// elsewhere, as the assembler pads.
 pub fn (self: &var Obj) align(allocator: Allocator, log2: i64) -> !void {
     var code = false;
     if self.sections.at_mut(self.current) |section| {
@@ -355,7 +297,6 @@ pub fn (self: &var Obj) align(allocator: Allocator, log2: i64) -> !void {
     return;
 }
 
-/// Registers a symbol `.globl` names.
 pub fn (self: &var Obj) global(allocator: Allocator, syms: &ir::NameTable, name: ir::Name) -> !void {
     let index = try self.symbol_of(allocator, syms, name);
     if self.symbols.at_mut(index) |symbol| {
@@ -364,7 +305,6 @@ pub fn (self: &var Obj) global(allocator: Allocator, syms: &ir::NameTable, name:
     return;
 }
 
-/// Defines a symbol here.
 pub fn (self: &var Obj) define(allocator: Allocator, syms: &ir::NameTable, name: ir::Name) -> !void {
     let index = try self.symbol_of(allocator, syms, name);
     let at = self.here();
@@ -383,10 +323,6 @@ pub fn (self: &var Obj) define(allocator: Allocator, syms: &ir::NameTable, name:
     return;
 }
 
-/// Appends a `bl` to name. In Mach-O a call into the function being
-/// written (its own recursion) is resolved here, as the assembler resolves
-/// a branch within one atom, and any other is left to the linker; in ELF
-/// the writer resolves a call to any local function of the section.
 pub fn (self: &var Obj) call(allocator: Allocator, syms: &ir::NameTable, name: ir::Name) -> !void {
     try self.mark(allocator, true);
     let index = try self.symbol_of(allocator, syms, name);
@@ -399,13 +335,11 @@ pub fn (self: &var Obj) call(allocator: Allocator, syms: &ir::NameTable, name: i
     return self.little(allocator, 0x94000000, 4);
 }
 
-/// Records a relocation of kind against name at the next word or quad.
 pub fn (self: &var Obj) relocate(allocator: Allocator, syms: &ir::NameTable, name: ir::Name, kind: i64) -> !void {
     try self.mark(allocator, self.in_code());
     return self.relocate_addend(allocator, syms, name, kind, 0);
 }
 
-/// Records a relocation of kind against name plus addend here.
 fn (self: &var Obj) relocate_addend(allocator: Allocator, syms: &ir::NameTable, name: ir::Name, kind: i64, addend: i64) -> !void {
     let index = try self.symbol_of(allocator, syms, name);
     let at = self.here();
@@ -415,7 +349,6 @@ fn (self: &var Obj) relocate_addend(allocator: Allocator, syms: &ir::NameTable, 
     return;
 }
 
-/// Starts a function: no block has a place yet.
 pub fn (self: &var Obj) begin_function(allocator: Allocator, blocks: i64) -> !void {
     self.block_at.clear(allocator);
     self.branches.clear(allocator);
@@ -427,15 +360,12 @@ pub fn (self: &var Obj) begin_function(allocator: Allocator, blocks: i64) -> !vo
     return;
 }
 
-/// Places a block here.
 pub fn (self: &var Obj) place_block(block: i64) -> !void {
     let at = self.here();
     try self.block_at.set(block, at);
     return;
 }
 
-/// Appends a branch to a block: word is the instruction with its offset
-/// field zero, wide whether that field is the imm26 of b.
 pub fn (self: &var Obj) branch(allocator: Allocator, word: i64, block: i64, wide: bool) -> !void {
     try self.mark(allocator, true);
     let at = self.here();
@@ -443,8 +373,6 @@ pub fn (self: &var Obj) branch(allocator: Allocator, word: i64, block: i64, wide
     return self.little(allocator, word, 4);
 }
 
-/// Ends a function: patches each branch with its block's offset, or on
-/// x86-64 lays its jumps out.
 pub fn (self: &var Obj) end_function(allocator: Allocator) -> !void {
     if self.x86 {
         return self.relax_jumps(allocator);
@@ -475,7 +403,6 @@ pub fn (self: &var Obj) end_function(allocator: Allocator) -> !void {
     return;
 }
 
-/// Overwrites size little-endian bytes at an offset of a section.
 fn (self: &var Obj) patch(section_index: i64, at: i64, value: i64, size: i64) -> !void {
     if self.sections.at_mut(section_index) |section| {
         let writable = section.bytes.as_mut_bytes();
@@ -486,8 +413,6 @@ fn (self: &var Obj) patch(section_index: i64, at: i64, value: i64, size: i64) ->
     return;
 }
 
-/// Returns a copy of a section's relocations, for a pass that rewrites them
-/// while it changes the rest of the Obj.
 fn (self: &Obj) relocs_of(allocator: Allocator, section_index: i64) -> !array::Array<Reloc> {
     var relocs = array::new<Reloc>(allocator);
     errdefer relocs.deinit(allocator);
@@ -501,7 +426,6 @@ fn (self: &Obj) relocs_of(allocator: Allocator, section_index: i64) -> !array::A
     return move relocs;
 }
 
-/// Replaces a section's relocations with relocs.
 fn (self: &var Obj) set_relocs(allocator: Allocator, section_index: i64, relocs: &array::Array<Reloc>) -> !void {
     if self.sections.at_mut(section_index) |section| {
         section.relocs.clear(allocator);
@@ -514,9 +438,6 @@ fn (self: &var Obj) set_relocs(allocator: Allocator, section_index: i64, relocs:
     return;
 }
 
-// Writing the file: the helpers macho.kizu, elf.kizu and coff.kizu share.
-
-/// Writes a little-endian value of size bytes.
 fn put(allocator: Allocator, out: &var string::String, value: i64, size: i64) -> !void {
     for 0..size |at| {
         try out.append_byte(allocator, cast<u8>((value >> (8 * at)) & 255));
@@ -524,7 +445,6 @@ fn put(allocator: Allocator, out: &var string::String, value: i64, size: i64) ->
     return;
 }
 
-/// Writes a name in a field of width bytes, padded with zeros.
 fn put_field(allocator: Allocator, out: &var string::String, name: []u8, width: i64) -> !void {
     try out.append_bytes(allocator, name);
     for mem::len(name)..width |_pad| {
@@ -533,7 +453,6 @@ fn put_field(allocator: Allocator, out: &var string::String, name: []u8, width: 
     return;
 }
 
-/// Pads out with zeros to at bytes.
 fn pad_to(allocator: Allocator, out: &var string::String, at: i64) -> !void {
     while out.len() < at {
         try out.append_byte(allocator, cast<u8>(0));
@@ -541,7 +460,6 @@ fn pad_to(allocator: Allocator, out: &var string::String, at: i64) -> !void {
     return;
 }
 
-/// Writes each section's contents at base plus its offset, zeros between.
 fn (self: &Obj) put_contents(allocator: Allocator, out: &var string::String, base: i64, offsets: &array::Array<i64>) -> !void {
     var section_index = 0;
     while self.sections.at(section_index) |section| {
@@ -556,10 +474,6 @@ fn round_to(value: i64, size: i64) -> i64 {
     return (value + size - 1) / size * size;
 }
 
-/// Builds a string table the way the assembler does: a zero byte, then the
-/// names ordered by their reversed spelling, greatest first, so a name that
-/// ends the one written before it is found at that one's tail rather than
-/// written again. offsets gets the offset of each of names, in order.
 fn merge_strings(
     allocator: Allocator,
     names: &array::Array<string::String>,
@@ -604,7 +518,6 @@ fn merge_strings(
         let name_bytes = name.as_bytes();
         let size = mem::len(name_bytes);
         var offset = 0;
-        // A name that ends the one written last is found at its tail.
         if previous_start >= 0 and previous_len >= size and
             tail_matches(out, previous_start + previous_len - size, name_bytes) {
             offset = previous_start + previous_len - size;
@@ -628,7 +541,6 @@ fn merge_strings(
     return;
 }
 
-/// Reports whether the bytes of out at start are name.
 fn tail_matches(out: &string::String, start: i64, name: []u8) -> bool {
     let all = out.as_bytes();
     return mem::equal_bytes(all[start..start + mem::len(name)], name);

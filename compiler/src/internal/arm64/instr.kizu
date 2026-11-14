@@ -6,12 +6,6 @@ import std::fmt;
 import std::mem;
 import std::string;
 
-// The per-instruction half of selection: each IR op into machine
-// instructions, and each terminator into how its machine block ends.
-
-/// Selects one instruction. next is the value the following instruction
-/// tests when next_op is CondFail (a check, or the block's branch when this
-/// is the last instruction): a comparison feeding only it stays in the flags.
 fn (self: &var Selector) select_instr(module: &ir::Module, node: &ir::InstrNode, next: ir::Value, next_op: ir::Op) -> !?diagnostic::Diagnostic {
     match node.op {
         Const => return self.select_const(module, node),
@@ -211,7 +205,6 @@ fn (self: &var Selector) select_const(module: &ir::Module, node: &ir::InstrNode)
     return null;
 }
 
-/// Names the label of the index-th string literal.
 fn (self: &var Selector) literal_label(index: i64) -> !ir::Name {
     var out = string_new(self.allocator);
     defer out.deinit(self.allocator);
@@ -221,7 +214,6 @@ fn (self: &var Selector) literal_label(index: i64) -> !ir::Name {
     return self.syms.intern(bytes);
 }
 
-/// Returns imm as a register of a shape holds it.
 fn normalize_imm(imm: i64, shape: Shape) -> i64 {
     if shape.size >= 8 {
         return imm;
@@ -243,8 +235,6 @@ fn normalize_imm(imm: i64, shape: Shape) -> i64 {
     return low;
 }
 
-/// Parses a decimal, `0x`, `0o` or `0b` integer with optional `-` and `_`,
-/// wrapping past 64 bits the way the machine does.
 fn parse_integer(bytes: []u8) -> ?i64 {
     var index = 0;
     var negative = false;
@@ -295,8 +285,6 @@ fn parse_integer(bytes: []u8) -> ?i64 {
     return value;
 }
 
-/// Returns value * base + digit modulo 2^64, through u64 so the wrap is
-/// defined.
 fn wrapping_mul_add(value: i64, base: i64, digit: i64) -> i64 {
     let wide = cast<u64>(value) * cast<u64>(base) + cast<u64>(digit);
     return cast<i64>(wide);
@@ -336,8 +324,6 @@ fn comparison(module: &ir::Module, op: ir::Name, signed: bool) -> ?Cond {
     return null;
 }
 
-/// Binds a comparison result: left in the flags when its one use is the
-/// check or branch right after it, otherwise made into 0 or 1 now.
 fn (self: &var Selector) bind_flags(module: &ir::Module, result: ir::Value, held: Val, next: ir::Value, next_op: ir::Op) -> !?diagnostic::Diagnostic {
     if next_op == ir::Op::CondFail and ir::same_name(next.name, result.name) and self.uses(result.name) == 1 {
         try self.set_val(result.name, held);
@@ -353,7 +339,6 @@ fn (self: &var Selector) bind_flags(module: &ir::Module, result: ir::Value, held
     return null;
 }
 
-/// Makes the comparison a Flags value describes.
 fn (self: &var Selector) flags_compare(module: &ir::Module, held: Val) -> !?Cond {
     if held.float > 0 {
         return self.float_compare(module, held);
@@ -462,8 +447,6 @@ fn (self: &var Selector) select_binary(module: &ir::Module, node: &ir::InstrNode
         let lhs = try self.reg_nz(module, left) orelse return try self.fail_op(module, node);
         var done = false;
         if right_val.kind == ValKind::Const {
-            // A dividend that is never negative divides the same either way,
-            // and unsigned needs no rounding toward zero.
             var signed = shape.signed;
             if signed and right_val.imm > 0 and self.ranges.dividend_non_negative(node.result.name) {
                 signed = false;
@@ -531,7 +514,6 @@ fn (self: &var Selector) select_binary(module: &ir::Module, node: &ir::InstrNode
     return null;
 }
 
-/// Returns log2 of a positive power of two, or -1.
 fn power_of_two(value: i64) -> i64 {
     if value <= 0 {
         return 0 - 1;
@@ -548,8 +530,6 @@ fn power_of_two(value: i64) -> i64 {
     return 0 - 1;
 }
 
-/// Selects `<<` and `>>` with the width rule: an amount at or past the
-/// width leaves 0, or the sign for a signed `>>`.
 fn (self: &var Selector) select_shift(module: &ir::Module, node: &ir::InstrNode, rd: i64, shape: Shape) -> !?diagnostic::Diagnostic {
     let left = node.args.get_or_panic(0);
     let right = node.args.get_or_panic(1);
@@ -689,8 +669,6 @@ fn (self: &var Selector) select_cast(module: &ir::Module, node: &ir::InstrNode) 
     return null;
 }
 
-/// Selects a check: the current block branches to a cold block that reports
-/// the failure, and selection goes on in a fresh block.
 fn (self: &var Selector) select_cond_fail(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let kind_text = ir::name_text(&module.names, node.immediate);
     let kind = kind_text.as_bytes();
@@ -711,8 +689,6 @@ fn (self: &var Selector) select_cond_fail(module: &ir::Module, node: &ir::InstrN
         return try self.fail_op(module, node);
     }
     let cond_value = node.args.get(0) orelse return try self.fail_op(module, node);
-    // The report's operands are read in the cold block, so they are made
-    // here, where they dominate it.
     var words = array::new<i64>(self.allocator);
     defer words.deinit(self.allocator);
     var index = 1;
@@ -733,8 +709,6 @@ fn (self: &var Selector) select_cond_fail(module: &ir::Module, node: &ir::InstrN
     return null;
 }
 
-/// Ends the current block on a bool value: to taken when it holds, to other
-/// otherwise.
 fn (self: &var Selector) branch_on(module: &ir::Module, cond_value: ir::Value, taken: i64, other: i64) -> !?diagnostic::Diagnostic {
     let held = self.val(cond_value.name);
     if held.kind == ValKind::Flags {
@@ -761,8 +735,6 @@ fn (self: &var Selector) new_cold_block() -> !i64 {
     return block;
 }
 
-/// Calls a runtime failure entry with the words and the source position,
-/// and ends the block: the entry does not return.
 fn (self: &var Selector) report_failure(entry: []u8, words: &array::Array<i64>, line: i64, column: i64) -> !void {
     var all = array::new<i64>(self.allocator);
     defer all.deinit(self.allocator);
@@ -792,16 +764,12 @@ fn (self: &var Selector) select_panic_fail(module: &ir::Module, node: &ir::Instr
         return try self.fail_op(module, node);
     }
     try self.report_failure("kizu_panic_fail", &words, node.span.start.line, node.span.start.column);
-    // Whatever the IR writes after it is unreachable; it goes in a block of
-    // its own that nothing jumps to.
     let rest = try self.new_cold_block();
     try self.start_block(rest);
     try self.set_val(node.result.name, no_val());
     return null;
 }
 
-/// Selects an explicit std::testing failure: the runtime reports the
-/// message at the position and stops.
 fn (self: &var Selector) select_test_fail(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let message = node.args.get(0) orelse return try self.fail_op(module, node);
     if !module.names.is(message.type_name, "[]u8") {
@@ -819,8 +787,6 @@ fn (self: &var Selector) select_test_fail(module: &ir::Module, node: &ir::InstrN
     return null;
 }
 
-/// Selects the start of a test: the runtime keeps the test's name and the
-/// file it was written in, so a failure can name both.
 fn (self: &var Selector) select_test_begin(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let name = node.args.get(0) orelse return try self.fail_op(module, node);
     let file = node.args.get(1) orelse return try self.fail_op(module, node);
@@ -838,8 +804,6 @@ fn (self: &var Selector) select_test_begin(module: &ir::Module, node: &ir::Instr
     return null;
 }
 
-/// Selects the mark a test leaves before each statement: the runtime keeps
-/// the statement's position for the note a failure prints.
 fn (self: &var Selector) select_test_mark(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     var words = array::new<i64>(self.allocator);
     defer words.deinit(self.allocator);
@@ -855,10 +819,6 @@ fn (self: &var Selector) select_test_mark(module: &ir::Module, node: &ir::InstrN
     return null;
 }
 
-/// Selects std::testing.expect_equal: when the two values differ, a cold
-/// block hands both to the runtime's report for their kind (bool, bytes, or
-/// an integer widened to i64 by its sign), which does not return. Scalars
-/// are held normalized, so a 64-bit compare is equality at their width.
 fn (self: &var Selector) select_test_expect_equal(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let left = node.args.get(0) orelse return try self.fail_op(module, node);
     let right = node.args.get(1) orelse return try self.fail_op(module, node);
@@ -876,7 +836,6 @@ fn (self: &var Selector) select_test_expect_equal(module: &ir::Module, node: &ir
         try self.call_c("kizu_bytes_equal", count);
         let returned = self.func.new_vreg();
         try self.mov(returned, 0);
-        // C leaves the bits above a _Bool result unspecified.
         let equal = self.func.new_vreg();
         try self.extend(equal, returned, 1, false);
         self.func.end(self.current, Term::NonZero, Cond::Ne, equal, cont, fail_block);
@@ -922,7 +881,6 @@ fn (self: &var Selector) select_local_slot(module: &ir::Module, node: &ir::Instr
         return try self.fail_op(module, node);
     }
     let held = self.val(value.name);
-    // An aggregate made for this slot alone becomes the slot.
     if held.kind == ValKind::Agg and held.fresh and self.uses(value.name) == 1 {
         try self.set_val(node.result.name, reg_val(held.reg));
         return null;
@@ -938,8 +896,6 @@ fn (self: &var Selector) select_local_slot(module: &ir::Module, node: &ir::Instr
 fn (self: &var Selector) select_ref_load(module: &ir::Module, node: &ir::InstrNode, next_op: ir::Op) -> !?diagnostic::Diagnostic {
     let pointer = node.args.get(0) orelse return try self.fail_op(module, node);
     let base = try self.reg_nz(module, pointer) orelse return try self.fail_op(module, node);
-    // A copy read only by the cleanups of the `try` right after it is read
-    // where the cleanup runs: nothing writes the memory in between.
     let uses = self.uses(node.result.name);
     if next_op == ir::Op::ErrorTry and uses > 0 and uses == self.cleanup_uses(node.result.name) {
         let shape = shape_of(module, node.result.type_name);
@@ -965,7 +921,6 @@ fn (self: &var Selector) select_ref_store(module: &ir::Module, node: &ir::InstrN
     return null;
 }
 
-/// Is which of the five field ops is being selected.
 enum FieldKind {
     Addr,
     Ref,
@@ -1064,8 +1019,6 @@ fn (self: &var Selector) select_buffer_new(module: &ir::Module, node: &ir::Instr
     return null;
 }
 
-/// Selects the address of element index of an array's storage, which the
-/// lowering has already checked the index against.
 fn (self: &var Selector) select_buffer_addr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let pointer = node.args.get(0) orelse return try self.fail_op(module, node);
     let position = node.args.get(1) orelse return try self.fail_op(module, node);
@@ -1091,8 +1044,6 @@ fn (self: &var Selector) select_buffer_addr(module: &ir::Module, node: &ir::Inst
     return null;
 }
 
-/// Selects a table.get: the value at index in the module's read-only copy
-/// of the table, an index at or past the last entry reading the last.
 fn (self: &var Selector) select_table_get(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let position = node.args.get(0) orelse return try self.fail_op(module, node);
     if node.args.len() != 1 {
@@ -1157,7 +1108,6 @@ fn (self: &var Selector) select_buffer_as_bytes(module: &ir::Module, node: &ir::
     return null;
 }
 
-/// Returns the pointer and length registers of a slice value.
 fn (self: &var Selector) slice_regs(module: &ir::Module, value: ir::Value) -> !?Val {
     let held = self.val(value.name);
     if held.kind == ValKind::Pair {
@@ -1184,8 +1134,6 @@ fn (self: &var Selector) select_slice_part(module: &ir::Module, node: &ir::Instr
     return null;
 }
 
-/// Returns the address of element index of a slice whose elements are size
-/// bytes.
 fn (self: &var Selector) element_addr(module: &ir::Module, ptr: i64, index: ir::Value, size: i64) -> !?i64 {
     let held = self.val(index.name);
     if held.kind == ValKind::Const {
@@ -1292,7 +1240,6 @@ fn (self: &var Selector) select_slice_slice(module: &ir::Module, node: &ir::Inst
     return null;
 }
 
-/// Returns the shape of the success value of an error union type.
 fn success_shape(module: &ir::Module, type_name: ir::Name) -> Shape {
     let text = ir::name_text(&module.names, type_name);
     let bytes = text.as_bytes();
@@ -1386,8 +1333,6 @@ fn (self: &var Selector) select_error_value(module: &ir::Module, node: &ir::Inst
     return null;
 }
 
-/// Selects a `try`: a failure returns from the function carrying its code,
-/// a success goes on with the payload.
 fn (self: &var Selector) select_error_try(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let source = node.args.get(0) orelse return try self.fail_op(module, node);
     if self.ret.class != Class::Aggregate or self.sret == reg_none() {
@@ -1432,8 +1377,6 @@ fn (self: &var Selector) select_array_new(module: &ir::Module, node: &ir::InstrN
     return null;
 }
 
-/// Returns the address of the array header an argument names: a reference
-/// to one or the header value itself, both held as an address.
 fn (self: &var Selector) header_addr(module: &ir::Module, value: ir::Value) -> !?i64 {
     if module.names.starts_with(value.type_name, "&") {
         return self.reg_nz(module, value);
@@ -1461,8 +1404,6 @@ fn (self: &var Selector) select_array_as_bytes(module: &ir::Module, node: &ir::I
     return null;
 }
 
-/// Binds an error union `E!void` made from a runtime's ok bool: code 0 when
-/// it holds, failure otherwise.
 fn (self: &var Selector) bool_result(module: &ir::Module, result: ir::Value, ok: i64, failure: i64) -> !void {
     let failure_reg = try self.imm_reg_nz(failure);
     try self.op_imm(MOp::CmpImm, reg_none(), ok, 0);
@@ -1507,8 +1448,6 @@ fn (self: &var Selector) select_array_append_bytes(module: &ir::Module, node: &i
     return null;
 }
 
-/// Releases an array's storage when it has any: the data pointer, measured
-/// by the capacity it was sized at.
 fn (self: &var Selector) select_array_deinit(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let array_value = node.args.get(0) orelse return try self.fail_op(module, node);
     let allocator_value = node.args.get(1) orelse return try self.fail_op(module, node);
@@ -1526,7 +1465,6 @@ fn (self: &var Selector) select_array_deinit(module: &ir::Module, node: &ir::Ins
     return null;
 }
 
-/// Releases the storage of the array header at an address when it has any.
 fn (self: &var Selector) release_array(header: i64, allocator_reg: i64, elem_size: i64) -> !void {
     let data = self.func.new_vreg();
     let capacity = self.func.new_vreg();
@@ -1556,9 +1494,6 @@ fn (self: &var Selector) release_array(header: i64, allocator_reg: i64, elem_siz
     return;
 }
 
-/// Runs the cleanups a failing `try` owes before it returns, in order. An
-/// argument marked to load is a slot the owner still lives in; it is read
-/// there at the exit.
 fn (self: &var Selector) run_cleanups(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     var index = 0;
     while node.cleanups.get(index) |cleanup| {
@@ -1588,8 +1523,6 @@ fn (self: &var Selector) run_cleanups(module: &ir::Module, node: &ir::InstrNode)
             try vals.append(self.allocator, self.val(arg.name));
             try types.append(self.allocator, arg.type_name);
         }
-        // An arena's storage is released the way an array's is: its header
-        // leads with the same three words.
         if cleanup.op == ir::Op::ArrayDeinit or cleanup.op == ir::Op::ArenaDeinit {
             let header = vals.get(0) orelse return try self.fail(module, "cleanup", cleanup.operand);
             let allocator_val = vals.get(1) orelse return try self.fail(module, "cleanup", cleanup.operand);
@@ -1629,8 +1562,6 @@ fn (self: &var Selector) run_cleanups(module: &ir::Module, node: &ir::InstrNode)
             try self.release_map(header.reg, allocator_reg, value.size);
             continue;
         }
-        // A Box cell is released as a `box.deinit` statement releases it; a
-        // payload with its own deinit arrives as a call cleanup instead.
         if cleanup.op == ir::Op::BoxDeinit {
             let cell_val = vals.get(0) orelse return try self.fail(module, "cleanup", cleanup.operand);
             let allocator_val = vals.get(1) orelse return try self.fail(module, "cleanup", cleanup.operand);
@@ -1712,8 +1643,6 @@ fn (self: &var Selector) select_terminator(module: &ir::Module, block_name: ir::
     }
 }
 
-/// Returns the block a branch to target goes to: target itself, or a block
-/// of the edge's own holding the phi copies when target has phis.
 fn (self: &var Selector) edge_block(module: &ir::Module, from: ir::Name, target: ir::Name) -> !?i64 {
     let block = self.block(target);
     if block < 0 {
@@ -1745,9 +1674,6 @@ fn (self: &Selector) has_phis(module: &ir::Module, target: ir::Name) -> bool {
     return module.instrs.at(first.node).op == ir::Op::Phi;
 }
 
-/// Copies what each phi of target takes along the edge from `from`: the
-/// aggregates first, into the phis' own slots, then the registers as one
-/// parallel copy.
 fn (self: &var Selector) edge_copies(module: &ir::Module, from: ir::Name, target: ir::Name) -> !?diagnostic::Diagnostic {
     let block = self.block(target);
     let ir_block = self.ir_blocks.get(block) orelse return null;
@@ -1775,7 +1701,6 @@ fn (self: &var Selector) edge_copies(module: &ir::Module, from: ir::Name, target
             try srcs.append(self.allocator, incoming);
         }
     }
-    // Aggregates read from the phis being written go through copies first.
     var temps = array::new<i64>(self.allocator);
     defer temps.deinit(self.allocator);
     index = 0;
@@ -1851,8 +1776,6 @@ fn find_incoming(phi: &ir::InstrNode, from: ir::Name) -> ?ir::Value {
     return null;
 }
 
-/// Selects a return: the result into x0 (x0 and x1 for a slice), or copied
-/// to where x8 pointed on entry.
 fn (self: &var Selector) select_return(module: &ir::Module, value: ir::Value) -> !?diagnostic::Diagnostic {
     if self.is_main {
         try self.mov_imm(0, 0);
@@ -1894,9 +1817,6 @@ fn (self: &var Selector) select_return(module: &ir::Module, value: ir::Value) ->
     return null;
 }
 
-/// Reports whether a returned `E!T` is absorbed into a declared `!T`, the
-/// return `try` would make. Every failure is one global code and both unions
-/// lay out as the code word and then T, so the bytes carry over unchanged.
 fn absorbs_return(module: &ir::Module, got: ir::Name, want: ir::Name) -> bool {
     let want_text = ir::name_text(&module.names, want);
     let want_bytes = want_text.as_bytes();
@@ -1917,12 +1837,10 @@ fn string_new(allocator: Allocator) -> string::String {
     return string::new(allocator);
 }
 
-/// Appends the decimal spelling of a value.
 pub fn append_decimal(allocator: Allocator, out: &var string::String, value: i64) -> !void {
     return fmt::append_i64(allocator, out, value);
 }
 
-/// Returns T of `E!T` or `!T`.
 fn error_union_success_of(bytes: []u8) -> []u8 {
     if typ::error_union_success(bytes) |success| {
         return success;
@@ -1930,8 +1848,6 @@ fn error_union_success_of(bytes: []u8) -> []u8 {
     return bytes[0..0];
 }
 
-/// Appends the bytes a quoted IR string literal spells, reading its escapes;
-/// reports false for a literal it cannot read.
 fn append_unquoted(allocator: Allocator, out: &var string::String, literal: []u8) -> !bool {
     let length = mem::len(literal);
     if length < 2 or literal[0] != cast<u8>(34) or literal[length - 1] != cast<u8>(34) {
@@ -1998,10 +1914,6 @@ fn deref_if(bytes: []u8, strip: bool) -> []u8 {
     return bytes;
 }
 
-/// Returns how many instructions an IR block costs when selected beside its
-/// predecessor and executed whichever way the branch goes, or -1 when it may
-/// not be: it must end in a jump and hold only pure scalar arithmetic that
-/// cannot trap.
 fn (self: &Selector) speculation_cost(module: &ir::Module, mir: i64) -> i64 {
     let ir_block = self.ir_blocks.get(mir) orelse return 0 - 1;
     let node = module.blocks.at(ir_block.node);
@@ -2035,8 +1947,6 @@ fn (self: &Selector) speculation_cost(module: &ir::Module, mir: i64) -> i64 {
                     return 0 - 1;
                 }
                 if module.names.is(instr_node.operand, "/") or module.names.is(instr_node.operand, "%") {
-                    // Only a division the constant divisor turns into
-                    // shifts and multiplies, which cannot trap.
                     let right = instr_node.args.get(1) orelse return 0 - 1;
                     if !self.defined_const(module, node, right) {
                         return 0 - 1;
@@ -2052,8 +1962,6 @@ fn (self: &Selector) speculation_cost(module: &ir::Module, mir: i64) -> i64 {
     return cost;
 }
 
-/// Reports whether a value is a nonzero constant: one already bound, or a
-/// const the block itself defines.
 fn (self: &Selector) defined_const(module: &ir::Module, node: &ir::BlockNode, value: ir::Value) -> bool {
     let held = self.val(value.name);
     if held.kind == ValKind::Const {
@@ -2073,18 +1981,12 @@ fn (self: &Selector) defined_const(module: &ir::Module, node: &ir::BlockNode, va
     return false;
 }
 
-/// Returns the block a side block jumps to.
 fn (self: &Selector) jump_target(module: &ir::Module, mir: i64) -> i64 {
     let ir_block = self.ir_blocks.get(mir) orelse return 0 - 1;
     let node = module.blocks.at(ir_block.node);
     return self.block(node.terminator.target);
 }
 
-/// Turns a branch into straight-line code when the paths it chooses between
-/// are a few pure instructions that meet again: both paths are computed and
-/// each phi where they meet takes its value by a conditional select. A
-/// diamond has a block on each side; a triangle has one, the other side
-/// going straight to the join.
 fn (self: &var Selector) if_convert(module: &ir::Module, block_name: ir::Name, term: ir::Terminator) -> !bool {
     let taken = self.block(term.target);
     let other = self.block(term.else_target);
@@ -2117,7 +2019,6 @@ fn (self: &var Selector) if_convert(module: &ir::Module, block_name: ir::Name, t
     if join < 0 or join == taken and side_taken >= 0 or join == other and side_other >= 0 {
         return false;
     }
-    // Every value the join's phis take must be a scalar register.
     let join_block = self.ir_blocks.get(join) orelse return false;
     let join_node = module.blocks.at(join_block.node);
     var index = 0;
@@ -2135,12 +2036,9 @@ fn (self: &var Selector) if_convert(module: &ir::Module, block_name: ir::Name, t
     if cond_held.kind != ValKind::Flags and cond_held.kind != ValKind::Reg {
         return false;
     }
-    // Select the sides here, where both run.
     let sides_from = self.selected_count();
     var taken_from = block_name;
     var other_from = block_name;
-    // A side runs only where its edge's test holds; its values are kept
-    // only then, so it may rely on the test.
     if side_taken >= 0 {
         if cond_held.kind == ValKind::Flags and cond_held.test and cond_held.cond == Cond::Eq {
             try self.fact_reg.append(self.allocator, cond_held.reg);
@@ -2194,11 +2092,6 @@ fn (self: &var Selector) if_convert(module: &ir::Module, block_name: ir::Name, t
     } else {
         try self.op_imm(MOp::CmpImm, reg_none(), cond_held.reg, 0);
     }
-    // A phi taking `b op x` from one side and b from the other takes
-    // `b op (x or 0)` instead, with op one of `+ - ^ |`: the same value,
-    // but an accumulator's chain through the loop is one op, not the op
-    // and the select. The selects go first, while the flags hold, then the
-    // ops; the side's own `b op x` is left to die.
     var updates = array::new<MInst>(self.allocator);
     defer updates.deinit(self.allocator);
     let start = self.func.copies.len();
@@ -2244,7 +2137,6 @@ fn (self: &var Selector) if_convert(module: &ir::Module, block_name: ir::Name, t
     return true;
 }
 
-/// Returns how many instructions the current block holds.
 fn (self: &Selector) selected_count() -> i64 {
     if self.func.blocks.at(self.current) |block| {
         return block.insts.len();
@@ -2252,9 +2144,6 @@ fn (self: &Selector) selected_count() -> i64 {
     return 0;
 }
 
-/// Finds, among the current block's instructions from `from` on, the one
-/// that sets rd to `base op x` with op one of `+ - ^ |`, base read first
-/// where the op does not commute.
 fn (self: &Selector) update_of(from: i64, rd: i64, base: i64) -> ?MInst {
     if self.func.blocks.at(self.current) |block| {
         return update_in(&block.insts, from, rd, base);
@@ -2287,9 +2176,6 @@ fn update_in(insts: &array::Array<MInst>, from: i64, rd: i64, base: i64) -> ?MIn
     return null;
 }
 
-/// Selects x where the side of `update` (`base op x`) runs and 0 where
-/// the other does, and queues `picked = base op that` in ops. on_taken
-/// tells that the update's side is the one cond picks.
 fn (self: &var Selector) conditional_update(
     update: MInst,
     base: i64,
@@ -2321,7 +2207,6 @@ fn (self: &var Selector) conditional_update(
             x = self.func.new_vreg();
             try self.mov_imm(x, update.imm);
         }
-        // cond picks the taken side; the other side's x goes where it fails.
         var pick = blank(MOp::CSel);
         pick.rd = chosen;
         pick.rn = x;
@@ -2340,8 +2225,6 @@ fn (self: &var Selector) conditional_update(
     return ops.append(self.allocator, combine);
 }
 
-/// Selects the instructions of a side block into the current block and
-/// marks it done. Reports false if one cannot be selected here.
 fn (self: &var Selector) select_side(module: &ir::Module, mir: i64) -> !bool {
     let ir_block = self.ir_blocks.get(mir) orelse return false;
     let node = module.blocks.at(ir_block.node);
@@ -2357,8 +2240,6 @@ fn (self: &var Selector) select_side(module: &ir::Module, mir: i64) -> !bool {
     return true;
 }
 
-/// Multiplies by a constant with shifts and adds when it is a power of two,
-/// one more than one, or one less than one. Reports false otherwise.
 fn (self: &var Selector) multiply_by_constant(rd: i64, value: i64, c: i64) -> !bool {
     if c == 0 {
         try self.mov_imm(rd, 0);
