@@ -5,17 +5,6 @@ import std::fmt;
 import std::mem;
 import std::string;
 
-// Mechanical port of internal/wasm/map.go. A Map value is the inline wasm32
-// header shared with native semantics: insertion-ordered entries plus an
-// open-addressed index, laid out the way runtime.c lays them out.
-//
-// An entry is a three-word header -- the key's hash, its length, and the key
-// itself when it is at most eight bytes or the address of a copy when it is
-// longer -- followed by the value rounded up to whole words. The index is
-// index_cap control bytes, each free or the top seven bits of the hash of the
-// entry its slot names, followed by index_cap 32-bit entry numbers: a lookup
-// that misses reads control bytes and nothing else.
-
 fn map_header_size() -> i64 {
     return 40;
 }
@@ -40,8 +29,6 @@ fn map_entry_value_offset() -> i64 {
     return 24;
 }
 
-/// Returns the width of one entry of a map whose values are value_size
-/// bytes, the Go `mapEntrySize`.
 fn map_entry_size(value_size: i64) -> i64 {
     return map_entry_header_size() + wasm_align_up(value_size, 8);
 }
@@ -75,8 +62,6 @@ fn is_wasm_map_op(op: ir::Op) -> bool {
     };
 }
 
-/// Reports whether an operation normalizes a key or value into addressed
-/// frame bytes before entering the generic runtime.
 fn is_wasm_map_temp_op(op: ir::Op) -> bool {
     return match op {
         MapInsert => true,
@@ -111,11 +96,6 @@ fn (self: &Emitter) uses_map_runtime(module: &ir::Module) -> bool {
     return false;
 }
 
-/// Emits the generic insertion-ordered hash table runtime, the Go
-/// `writeMapRuntime` and the helpers it writes. This literal is the same WAT
-/// written line-by-line by the Go seed; keys enter as bytes, or as the word an
-/// eight-byte key is, and values as measured addresses, so no helper depends
-/// on a source type or generated function shape.
 fn (self: &var Emitter) write_map_runtime() -> !void {
     let text =
         \\  (func $__map_read_tail (param $key i32) (param $length i64) (result i64)
@@ -692,8 +672,6 @@ fn (self: &var Emitter) map_expr3(format: []u8, a: Arg, b: Arg, c: Arg) -> !ir::
     return self.names.intern_owned(move out);
 }
 
-/// Measures K and V through either a direct or borrowed Map<K, V> and copies
-/// their canonical spellings into the caller-owned buffers.
 fn (self: &var Emitter) map_element_layouts(
     module: &ir::Module,
     node: &ir::InstrNode,
@@ -849,8 +827,6 @@ fn (self: &var Emitter) write_map_new(
     return null;
 }
 
-/// Normalizes a byte slice or integer key to the pointer/length ABI consumed
-/// by the shared hash runtime.
 fn (self: &var Emitter) write_map_key_parts(
     module: &ir::Module,
     key: ir::Value,
@@ -890,9 +866,6 @@ fn (self: &var Emitter) write_map_key_parts(
     return null;
 }
 
-/// Sets local to the address of the value stored for key, or 0, the Go
-/// `writeMapLookup`. A key of eight bytes is handed to the runtime as the
-/// word it is.
 fn (self: &var Emitter) write_map_lookup(
     module: &ir::Module,
     node: &ir::InstrNode,
@@ -938,17 +911,6 @@ fn (self: &var Emitter) write_map_lookup(
     return null;
 }
 
-// A lookup of an eight-byte key is written where it is made, since an engine
-// that compiles wasm calls a function as a function and a map read in a loop
-// would pay for the call on every iteration. It reads the index eight control
-// bytes at a time: an empty slot has its high bit set and a tag never does, so
-// one load answers for eight slots whether any holds the tag and where the
-// first empty one is. A group that would run past the last control byte is
-// left to `$__map_get_word`, which steps one slot at a time.
-
-/// Reports whether an instruction looks a Map value up by a key of eight
-/// bytes that is not a byte view, which the lookup reads as the word it is,
-/// the Go `isMapWordLookup`.
 fn (self: &var Emitter) is_map_word_lookup(module: &ir::Module, node: &ir::InstrNode) -> !bool {
     let looks_up = match node.op {
         MapGet => true,
@@ -993,8 +955,6 @@ fn (self: &var Emitter) is_map_word_lookup(module: &ir::Module, node: &ir::Instr
     return false;
 }
 
-/// Declares the locals the word-key lookups of a function work in, when it
-/// makes any, the Go `writeMapWordLocals`.
 fn (self: &var Emitter) write_map_word_locals(module: &ir::Module, function: &ir::FunctionNode) -> !void {
     var block_index = 0;
     while function.blocks.get(block_index) |block| {
@@ -1018,8 +978,6 @@ fn (self: &var Emitter) write_map_word_locals(module: &ir::Module, function: &ir
     return;
 }
 
-/// Sets local to the address of the value stored for the eight-byte key, or
-/// 0, hashing it the way `$__map_get_word` does, the Go `writeMapWordLookup`.
 fn (self: &var Emitter) write_map_word_lookup(
     local: ir::Name,
     map_expr: ir::Name,
@@ -1043,7 +1001,6 @@ fn (self: &var Emitter) write_map_word_lookup(
     return self.line1("            (local.set %s (local.get $__kizu_map_found))", Arg::Str(local));
 }
 
-/// Hashes the key and starts the probe at the group its hash names.
 fn (self: &var Emitter) write_map_word_hash() -> !void {
     let text =
         \\            (local.set $__kizu_map_found (i32.const 0))
@@ -1078,10 +1035,6 @@ fn (self: &var Emitter) write_map_word_hash() -> !void {
     return;
 }
 
-/// Loads one group of control bytes and marks the bytes before its first
-/// empty slot that may hold the tag. A byte equal to the tag is zero after the
-/// xor; the borrow test marks every zero byte and may also mark a byte above
-/// one, which the key comparison then turns away.
 fn (self: &var Emitter) write_map_word_group() -> !void {
     let text =
         \\                    (br $__kizu_map_done)))
@@ -1110,8 +1063,6 @@ fn (self: &var Emitter) write_map_word_group() -> !void {
     return;
 }
 
-/// Compares the entry one marked byte names, and moves to the next group once
-/// no marked byte holds the key and no slot in this one is empty.
 fn (self: &var Emitter) write_map_word_candidate() -> !void {
     let text =
         \\                        (i32.add (local.get $__kizu_map_index) (local.get $__kizu_map_capacity))
@@ -1253,8 +1204,6 @@ fn (self: &var Emitter) write_map_insert(
     }
 }
 
-/// Lowers a Map value lookup that copies into an optional, the Go
-/// `writeMapGet`.
 fn (self: &var Emitter) write_map_get(
     module: &ir::Module,
     node: &ir::InstrNode
@@ -1369,9 +1318,6 @@ fn (self: &var Emitter) write_map_get(
     return null;
 }
 
-/// Lowers Map.remove(allocator, key), the Go `writeMapRemove`: the runtime
-/// moves the value into the optional's payload before it releases the entry,
-/// and the tag says whether the key was there.
 fn (self: &var Emitter) write_map_remove(
     module: &ir::Module,
     node: &ir::InstrNode
@@ -1471,8 +1417,6 @@ fn (self: &var Emitter) write_map_remove(
     return null;
 }
 
-/// Lowers immutable and mutable borrowed Map value lookups, the Go
-/// `writeMapAt`.
 fn (self: &var Emitter) write_map_at(
     module: &ir::Module,
     node: &ir::InstrNode
@@ -1575,8 +1519,6 @@ fn (self: &var Emitter) write_map_at(
     return null;
 }
 
-/// Returns the WAT address of an insertion-ordered Map entry of a map whose
-/// values are value_size bytes, the Go `mapEntryAddress`.
 fn (self: &var Emitter) map_entry_address(
     map_value: ir::Name,
     index: ir::Name,
@@ -1590,8 +1532,6 @@ fn (self: &var Emitter) map_entry_address(
     );
 }
 
-/// Lowers the checked owner-value cleanup access, the Go
-/// `writeMapTakeValueAt`.
 fn (self: &var Emitter) write_map_take_value_at(
     module: &ir::Module,
     node: &ir::InstrNode
@@ -1641,8 +1581,6 @@ fn (self: &var Emitter) write_map_take_value_at(
     return self.write_load_value(module, node.result, value_field, 0);
 }
 
-/// Lowers insertion-ordered key access into an optional, the Go
-/// `writeMapKeyAt`.
 fn (self: &var Emitter) write_map_key_at(
     module: &ir::Module,
     node: &ir::InstrNode
@@ -1704,8 +1642,6 @@ fn (self: &var Emitter) write_map_key_at(
     let destination = try self.address_at(slot, payload_offset);
     let key_field = try self.address_at(entry, map_entry_key_offset());
     if mem::equal_bytes(key_bytes, "[]u8") {
-        // A key of at most eight bytes lies in the entry; a longer one is at
-        // the address the entry holds.
         let key_length_field = try self.address_at(entry, map_entry_key_len_offset());
         let key_length = try self.map_expr1("(i64.load %s)", Arg::Str(key_length_field));
         try self.line4(
@@ -1741,7 +1677,6 @@ fn (self: &var Emitter) write_map_key_at(
     return null;
 }
 
-/// Lowers Map key membership testing, the Go `writeMapContains`.
 fn (self: &var Emitter) write_map_contains(
     module: &ir::Module,
     node: &ir::InstrNode

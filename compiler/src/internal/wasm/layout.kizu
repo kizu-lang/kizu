@@ -5,56 +5,43 @@ import std::array;
 import std::mem;
 import std::string;
 
-// Mechanical port of internal/wasm/layout.go. WebAssembly locals hold scalar
-// values directly; aggregates are i32 addresses whose pointees use this one
-// deterministic wasm32 layout.
-
-/// Is the byte size and alignment of one Kizu value in wasm32 linear memory.
 struct WasmLayout {
     size: i64,
     align: i64,
 }
 
-/// Is a declared struct field and its byte offset.
 struct WasmFieldLayout {
     field: ir::Field,
     offset: i64,
 }
 
-/// Is one deterministic wasm32 layout or the reason it cannot be formed.
 union WasmLayoutResult {
     Layout(WasmLayout),
     Error(diagnostic::Diagnostic),
 }
 
-/// Is one declared field layout or the reason it cannot be formed.
 union WasmFieldLayoutResult {
     Field(WasmFieldLayout),
     Error(diagnostic::Diagnostic),
 }
 
-/// Is one byte offset or the reason it cannot be formed.
 union WasmOffsetResult {
     Offset(i64),
     Error(diagnostic::Diagnostic),
 }
 
-/// Returns the deterministic wasm32 layout of typ or its exact diagnostic.
 fn (self: &var Emitter) type_layout(module: &ir::Module, typ: ir::Name) -> !WasmLayoutResult {
     let retained = ir::name_text(&module.names, typ);
     let bytes = retained.as_bytes();
     return self.type_layout_bytes(module, bytes);
 }
 
-/// Returns the deterministic wasm32 layout of one canonical type spelling.
 fn (self: &var Emitter) type_layout_bytes(module: &ir::Module, typ: []u8) -> !WasmLayoutResult {
     var seen = array::new<string::String>(self.allocator);
     defer seen.deinit(self.allocator);
     return self.type_layout_visiting(module, typ, &var seen);
 }
 
-/// Computes a layout while rejecting recursive by-value aggregates. A
-/// recursive shape must cross an explicit pointer.
 fn (self: &var Emitter) type_layout_visiting(
     module: &ir::Module,
     typ: []u8,
@@ -63,8 +50,6 @@ fn (self: &var Emitter) type_layout_visiting(
     if wasm_primitive_layout(typ) |layout| {
         return WasmLayoutResult::Layout(layout);
     }
-    // A fixed-length array is its elements side by side, each already padded
-    // to its own alignment.
     if try self.buffer_size(typ) |size| {
         let elem = try self.buffer_elem(typ) orelse
             return WasmLayoutResult::Error(try self.fail0("wasm error: `[N]T` has no element"));
@@ -208,7 +193,6 @@ fn (self: &var Emitter) type_layout_visiting(
     ));
 }
 
-/// Returns scalar, pointer, and byte-view layouts.
 fn wasm_primitive_layout(typ: []u8) -> ?WasmLayout {
     if mem::equal_bytes(typ, "void") {
         return WasmLayout { size: 0, align: 1 };
@@ -245,15 +229,12 @@ fn wasm_primitive_layout(typ: []u8) -> ?WasmLayout {
     return null;
 }
 
-/// Reports whether a wasm local represents typ by an i32 address.
 fn (self: &var Emitter) is_memory_type(module: &ir::Module, typ_name: ir::Name) -> !bool {
     let retained = ir::name_text(&module.names, typ_name);
     let bytes = retained.as_bytes();
     return self.is_memory_type_bytes(module, bytes);
 }
 
-/// Reports whether a wasm local represents the type a spelling names by an
-/// i32 address, for a type the module may never name on its own.
 fn (self: &var Emitter) is_memory_type_bytes(module: &ir::Module, bytes: []u8) -> !bool {
     if mem::starts_with(bytes, "[]") {
         return true;
@@ -267,8 +248,6 @@ fn (self: &var Emitter) is_memory_type_bytes(module: &ir::Module, bytes: []u8) -
     if is_arena_wasm_type(bytes) {
         return true;
     }
-    // A fixed-length array lives in memory like a struct: the value is the
-    // address of its bytes, and a copy copies them.
     if is_buffer_wasm_type(bytes) {
         return true;
     }
@@ -282,21 +261,17 @@ fn (self: &var Emitter) is_memory_type_bytes(module: &ir::Module, bytes: []u8) -
     return module.structs.contains(bytes) or module.unions.contains(bytes);
 }
 
-/// Reports whether a declared scalar uses one wasm i64 value.
 fn is_named_i64_type(module: &ir::Module, typ: ir::Name) -> bool {
     let retained = ir::name_text(&module.names, typ);
     let bytes = retained.as_bytes();
     return is_named_i64_bytes(module, bytes);
 }
 
-/// Reports whether the declared scalar a spelling names uses one wasm i64
-/// value.
 fn is_named_i64_bytes(module: &ir::Module, bytes: []u8) -> bool {
     return module.enums.contains(bytes) or module.error_sets.contains(bytes) or
         is_arena_handle_wasm_type(bytes);
 }
 
-/// Returns a declared field and its byte offset.
 fn (self: &var Emitter) field_layout(
     module: &ir::Module,
     struct_name: []u8,
@@ -339,7 +314,6 @@ fn (self: &var Emitter) field_layout(
     ));
 }
 
-/// Returns the common start of a union's inline payload.
 fn (self: &var Emitter) union_payload_offset(
     module: &ir::Module,
     union_name: []u8
@@ -370,7 +344,6 @@ fn (self: &var Emitter) union_payload_offset(
     ));
 }
 
-/// Removes one reference or raw-pointer wrapper from a type spelling.
 fn deref_wasm_type(typ: []u8) -> []u8 {
     if mem::starts_with(typ, "&var ") {
         return typ[5..mem::len(typ)];
@@ -396,8 +369,6 @@ fn is_wasm_raw_pointer_type(typ: []u8) -> bool {
     return mem::starts_with(typ, "ptr<") and ir::ends_with_bytes(typ, ">");
 }
 
-/// Reports whether typ is a nullable raw pointer, the Go
-/// `isNullablePointerType`.
 fn is_wasm_nullable_pointer_type(typ: []u8) -> bool {
     return mem::starts_with(typ, "?ptr<") and ir::ends_with_bytes(typ, ">");
 }
