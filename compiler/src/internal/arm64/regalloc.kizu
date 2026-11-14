@@ -1666,7 +1666,78 @@ fn run_passes(allocator: Allocator, func: &var MFunction, arch: Arch) -> !void {
     try fold_frame_addresses(allocator, func);
     try remove_dead(allocator, func);
     try promote_slots(allocator, func);
+    if is_x86(arch) {
+        try store_immediates(allocator, func);
+    }
     try remove_dead(allocator, func);
+    return;
+}
+
+/// Has an amd64 store of a register that is one constant write the
+/// constant itself, which `mov` takes as an immediate (sign-extended from
+/// 32 bits for a word), so the constant needs no register where it is
+/// stored. A constant only stored is then dead.
+fn store_immediates(allocator: Allocator, func: &var MFunction) -> !void {
+    var def_count = array::new<i64>(allocator);
+    defer def_count.deinit(allocator);
+    var value = array::new<i64>(allocator);
+    defer value.deinit(allocator);
+    var constant = array::new<bool>(allocator);
+    defer constant.deinit(allocator);
+    for 0..func.vregs |_index| {
+        try def_count.append(allocator, 0);
+        try value.append(allocator, 0);
+        try constant.append(allocator, false);
+    }
+    var block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        block_id = block_id + 1;
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            if writes_rd(inst.op) and is_vreg(inst.rd) {
+                let id = inst.rd - first_vreg();
+                try add_to(&var def_count, id, 1);
+                if inst.op == MOp::MovImm {
+                    try value.set(id, inst.imm);
+                    try constant.set(id, true);
+                }
+            }
+            if inst.op == MOp::ParCopy {
+                var index = 0;
+                while index < inst.imm {
+                    let copy = func.copies.get_or_panic(inst.slot + index);
+                    index = index + 1;
+                    if is_vreg(copy.dst) {
+                        try add_to(&var def_count, copy.dst - first_vreg(), 1);
+                    }
+                }
+            }
+        }
+    }
+    block_id = 0;
+    while func.blocks.at_mut(block_id) |block| {
+        block_id = block_id + 1;
+        var inst_index = 0;
+        while inst_index < block.insts.len() {
+            var inst = block.insts.get_or_panic(inst_index);
+            inst_index = inst_index + 1;
+            if (inst.op != MOp::Store and inst.op != MOp::StoreIdx) or !is_vreg(inst.rd) {
+                continue;
+            }
+            let id = inst.rd - first_vreg();
+            if def_count.get_or_panic(id) != 1 or !constant.get_or_panic(id) {
+                continue;
+            }
+            let imm = value.get_or_panic(id);
+            if inst.width == 8 and !(imm >= 0 - 2147483648 and imm <= 2147483647) {
+                continue;
+            }
+            inst.rd = reg_imm();
+            inst.vec = imm;
+            try block.insts.set(inst_index - 1, inst);
+        }
+    }
     return;
 }
 

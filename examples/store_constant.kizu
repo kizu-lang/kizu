@@ -1,0 +1,193 @@
+import std::array;
+import std::float;
+import std::mem;
+import std::process;
+
+// Stores whose value is a constant: each width, the edges of what a 32-bit
+// immediate holds (sign-extended for a word), words past them, and floats,
+// whose bits are stored as they are.
+
+struct Fields {
+    byte: u8,
+    small: i8,
+    half: i16,
+    wide: u32,
+    signed: i32,
+    word: i64,
+    single: f32,
+    double: f64,
+}
+
+fn fill(fields: &var Fields, round: i64) -> void {
+    if round == 0 {
+        fields.byte = cast<u8>(255);
+        fields.small = cast<i8>(0 - 128);
+        fields.half = cast<i16>(0 - 1);
+        fields.wide = cast<u32>(4000000000);
+        fields.signed = cast<i32>(0 - 2147483648);
+        fields.word = 2147483647;
+        fields.single = cast<f32>(1.5);
+        fields.double = 0.0;
+    } else if round == 1 {
+        fields.byte = cast<u8>(128);
+        fields.small = cast<i8>(127);
+        fields.half = cast<i16>(32767);
+        fields.wide = cast<u32>(2147483648);
+        fields.signed = cast<i32>(2147483647);
+        fields.word = 0 - 2147483648;
+        fields.single = cast<f32>(0.0 - 2.0);
+        fields.double = float::from_bits(cast<u64>(0 - 0x7FFFFFFFFFFFFFFF - 1));
+    } else {
+        fields.byte = cast<u8>(0);
+        fields.small = cast<i8>(0 - 1);
+        fields.half = cast<i16>(0 - 32768);
+        fields.wide = cast<u32>(4294967295);
+        fields.signed = cast<i32>(0 - 1);
+        fields.word = 2147483648;
+        fields.single = cast<f32>(0.0);
+        fields.double = 1.5;
+    }
+    return;
+}
+
+fn show(fields: &Fields) -> void {
+    print(fields.byte);
+    print(fields.small);
+    print(fields.half);
+    print(fields.wide);
+    print(fields.signed);
+    print(fields.word);
+    print(fields.single);
+    print(fields.double);
+    print(float::bits(fields.double));
+    return;
+}
+
+fn words(allocator: Allocator, count: i64) -> !i64 {
+    var xs = array::new<i64>(allocator);
+    defer xs.deinit(allocator);
+    var i = 0;
+    while i < count {
+        try xs.append(allocator, 0 - 2147483648);
+        try xs.append(allocator, 2147483647);
+        try xs.append(allocator, 0 - 2147483649);
+        try xs.append(allocator, 1099511627776);
+        try xs.append(allocator, 0 - 1);
+        i = i + 1;
+    }
+    try xs.set(1, 2147483648);
+    var sum = 0;
+    for 0..xs.len() |k| {
+        sum = sum + xs.get_or_panic(k);
+    }
+    print(xs.get_or_panic(0));
+    print(xs.get_or_panic(1));
+    print(xs.get_or_panic(2));
+    print(xs.get_or_panic(3));
+    return sum;
+}
+
+fn narrow(allocator: Allocator, count: i64) -> !void {
+    var bytes = array::new<u8>(allocator);
+    defer bytes.deinit(allocator);
+    var halves = array::new<i16>(allocator);
+    defer halves.deinit(allocator);
+    var quads = array::new<u32>(allocator);
+    defer quads.deinit(allocator);
+    var singles = array::new<f32>(allocator);
+    defer singles.deinit(allocator);
+    var doubles = array::new<f64>(allocator);
+    defer doubles.deinit(allocator);
+    var i = 0;
+    while i < count {
+        try bytes.append(allocator, cast<u8>(200));
+        try halves.append(allocator, cast<i16>(0 - 300));
+        try quads.append(allocator, cast<u32>(3000000000));
+        try singles.append(allocator, cast<f32>(0.25));
+        try doubles.append(allocator, float::from_bits(cast<u64>(0 - 0x7FFFFFFFFFFFFFFF - 1)));
+        i = i + 1;
+    }
+    var byte_sum = 0;
+    for 0..count |k| {
+        byte_sum = byte_sum + cast<i64>(bytes.get_or_panic(k));
+    }
+    var half_sum = 0;
+    for 0..count |k| {
+        half_sum = half_sum + cast<i64>(halves.get_or_panic(k));
+    }
+    var quad_sum = 0;
+    for 0..count |k| {
+        quad_sum = quad_sum + cast<i64>(quads.get_or_panic(k));
+    }
+    print(byte_sum);
+    print(half_sum);
+    print(quad_sum);
+    print(singles.get_or_panic(count - 1));
+    print(float::bits(doubles.get_or_panic(count - 1)));
+    print(1.0 / doubles.get_or_panic(0));
+    return;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let count = 1000 + process::arg_count();
+    var fields = Fields {
+        byte: cast<u8>(1),
+        small: cast<i8>(1),
+        half: cast<i16>(1),
+        wide: cast<u32>(1),
+        signed: cast<i32>(1),
+        word: 1,
+        single: cast<f32>(1.0),
+        double: 1.0,
+    };
+    for 0..3 |round| {
+        fill(&var fields, round);
+        show(&fields);
+    }
+    print(try words(allocator, count));
+    try narrow(allocator, count);
+    return;
+}
+
+// run
+// features: struct std-array assignment cast
+// output:
+// 255
+// -128
+// -1
+// 4000000000
+// -2147483648
+// 2147483647
+// 1.5
+// 0.0
+// 0
+// 128
+// 127
+// 32767
+// 2147483648
+// 2147483647
+// -2147483648
+// -2.0
+// -0.0
+// 9223372036854775808
+// 0
+// -1
+// -32768
+// 4294967295
+// -1
+// 2147483648
+// 0.0
+// 1.5
+// 4609434218613702656
+// -2147483648
+// 2147483648
+// -2147483649
+// 1099511627776
+// 1097364144125001
+// 200000
+// -300000
+// 3000000000000
+// 0.25
+// 9223372036854775808
+// -inf
