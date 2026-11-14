@@ -3,19 +3,12 @@ import compiler::internal::diagnostic;
 import compiler::internal::ownership;
 import std::array;
 
-// The block and statement half of lowering: block scoping, statement dispatch,
-// let / assign / return lowering.
-
-/// Remembers what a name meant before a block rebound it.
 pub struct ScopedBinding {
     pub name: Name,
     pub value: Value,
     pub bound: bool,
 }
 
-/// Makes the declarations written directly in block local to it: the enclosing
-/// bindings are recorded and `restore_block_bindings` puts them back. Nested
-/// blocks scope themselves, so only this level is collected.
 fn (self: &var Lowerer) scope_block_bindings(
     tree: &ast::Ast,
     block: ast::Block,
@@ -35,9 +28,6 @@ fn (self: &var Lowerer) scope_block_bindings(
     return;
 }
 
-/// Puts the enclosing bindings back. Reverse order, so a name declared twice
-/// in one block ends on the binding that was in scope before either
-/// declaration.
 fn (self: &var Lowerer) restore_block_bindings(saved: &array::Array<ScopedBinding>) -> !void {
     var index = saved.len();
     while index > 0 {
@@ -53,23 +43,17 @@ fn (self: &var Lowerer) restore_block_bindings(saved: &array::Array<ScopedBindin
     return;
 }
 
-/// Lowers statements into the current block.
 fn (self: &var Lowerer) lower_block(tree: &var ast::Ast, block: ast::Block) -> !?diagnostic::Diagnostic {
     var ignored = empty_value();
     return self.lower_block_body(tree, block, false, &var ignored);
 }
 
-/// Is what a statement in value position produces: an expression written
-/// without a semicolon, or an `if` / `match` statement, which are both a
-/// statement and an expression.
 pub union TrailingValue {
     Expression(ast::Expression),
     If(ast::IfStmt),
     Match(ast::Statement),
 }
 
-/// Returns the value a statement produces when it stands in value position,
-/// and null when it has none.
 fn statement_value(tree: &ast::Ast, statement: ast::Statement) -> ?TrailingValue {
     if ownership::expr_stmt(tree, statement) |value| {
         if value.semicolon {
@@ -86,7 +70,6 @@ fn statement_value(tree: &ast::Ast, statement: ast::Statement) -> ?TrailingValue
     return null;
 }
 
-/// Returns the value a block ends with.
 fn trailing_value(tree: &ast::Ast, block: ast::Block) -> ?TrailingValue {
     let count = ownership::block_len(tree, block);
     if count == 0 {
@@ -96,8 +79,6 @@ fn trailing_value(tree: &ast::Ast, block: ast::Block) -> ?TrailingValue {
     return statement_value(tree, last);
 }
 
-/// Lowers a value-position statement's value, what `statement_value` or
-/// `trailing_value` found.
 fn (self: &var Lowerer) lower_trailing_value(
     tree: &var ast::Ast,
     value: TrailingValue,
@@ -110,9 +91,6 @@ fn (self: &var Lowerer) lower_trailing_value(
     }
 }
 
-/// Lowers the statements of a block, and its trailing expression as a value
-/// when one is wanted. The cleanup frame and the block's bindings are opened
-/// here and closed on both exits.
 fn (self: &var Lowerer) lower_block_body(
     tree: &var ast::Ast,
     block: ast::Block,
@@ -134,9 +112,6 @@ fn (self: &var Lowerer) lower_block_body(
     return null;
 }
 
-/// Lowers the statements of one block inside its open frame: every
-/// statement but a wanted trailing value, then that value, then the frame's
-/// fallthrough cleanups.
 fn (self: &var Lowerer) lower_block_statements(
     tree: &var ast::Ast,
     block: ast::Block,
@@ -193,9 +168,6 @@ fn (self: &var Lowerer) lower_block_statements(
     return null;
 }
 
-/// Tells the runtime which statement of the test body is about to run, so a
-/// failure inside whatever it calls can point back here. A statement with no
-/// position of its own records nothing.
 fn (self: &var Lowerer) emit_test_mark(tree: &ast::Ast, statement: ast::Statement) -> !void {
     let span = statement_span(tree, statement);
     if span.start.line == 0 {
@@ -210,9 +182,6 @@ fn (self: &var Lowerer) emit_test_mark(tree: &ast::Ast, statement: ast::Statemen
     return;
 }
 
-/// Is where a statement starts, as far as the tree records it: a statement
-/// carries no position of its own, so it is the first position inside the
-/// expression that leads it.
 fn statement_span(tree: &ast::Ast, statement: ast::Statement) -> ast::Span {
     match tree.statements.at(statement.node) {
         Let(value) => return leading_span(tree, value.value),
@@ -232,8 +201,6 @@ fn statement_span(tree: &ast::Ast, statement: ast::Statement) -> ast::Span {
     }
 }
 
-/// Is the first recorded position inside an expression: the span a node
-/// carries itself, or the first one inside a compound node.
 fn leading_span(tree: &ast::Ast, expression: ast::Expression) -> ast::Span {
     match tree.expressions.at(expression.node) {
         Ident(value) => return value.span,
@@ -248,8 +215,6 @@ fn leading_span(tree: &ast::Ast, expression: ast::Expression) -> ast::Span {
     }
 }
 
-/// Reads a compound expression left to right: the receiver before the field,
-/// the callee before the call, the operand before the operator.
 fn nested_leading_span(tree: &ast::Ast, expression: ast::Expression) -> ast::Span {
     match tree.expressions.at(expression.node) {
         Binary(value) => return first_span(leading_span(tree, value.left), value.operator_span),
@@ -266,7 +231,6 @@ fn nested_leading_span(tree: &ast::Ast, expression: ast::Expression) -> ast::Spa
     }
 }
 
-/// Is the first of two spans that carries a position.
 fn first_span(first: ast::Span, second: ast::Span) -> ast::Span {
     if first.start.line != 0 {
         return first;
@@ -274,7 +238,6 @@ fn first_span(first: ast::Span, second: ast::Span) -> ast::Span {
     return second;
 }
 
-/// Lowers one statement.
 fn (self: &var Lowerer) lower_stmt(tree: &var ast::Ast, statement: ast::Statement) -> !?diagnostic::Diagnostic {
     if ownership::let_stmt(tree, statement) |value| {
         return self.lower_let_stmt(tree, value);
@@ -303,8 +266,6 @@ fn (self: &var Lowerer) lower_stmt(tree: &var ast::Ast, statement: ast::Statemen
     return self.lower_body_stmt(tree, statement);
 }
 
-/// Lowers the statements that carry a body of their own, and the branches that
-/// leave one.
 fn (self: &var Lowerer) lower_body_stmt(tree: &var ast::Ast, statement: ast::Statement) -> !?diagnostic::Diagnostic {
     if ownership::if_stmt(tree, statement) |value| {
         return self.lower_if_stmt(tree, value);
@@ -325,7 +286,6 @@ fn (self: &var Lowerer) lower_body_stmt(tree: &var ast::Ast, statement: ast::Sta
         return self.lower_match_stmt(tree, statement);
     }
     if ownership::is_block_stmt(tree, statement) {
-        // Only a match arm body is a bare block statement (SPEC §6.12).
         return self.lower_block(tree, ast::Block { node: statement.node });
     }
     if ownership::comptime_if_stmt(tree, statement) |value| {
@@ -341,8 +301,6 @@ fn (self: &var Lowerer) lower_body_stmt(tree: &var ast::Ast, statement: ast::Sta
     return try self.fail1(tree, "ir error: unsupported statement %s", Arg::Str(kind));
 }
 
-/// Spells the node type an unsupported-statement failure names, in the
-/// `*ast.<Kind>` form those messages carry.
 fn statement_go_type(tree: &ast::Ast, statement: ast::Statement) -> []u8 {
     match tree.statements.at(statement.node) {
         Block(_) => return "*ast.BlockStmt",
@@ -365,12 +323,9 @@ fn statement_go_type(tree: &ast::Ast, statement: ast::Statement) -> []u8 {
     }
 }
 
-/// Binds one declaration to the value it was written with.
 fn (self: &var Lowerer) lower_let_stmt(tree: &var ast::Ast, statement: ast::LetStmt) -> !?diagnostic::Diagnostic {
     var value = empty_value();
     if statement.type_name |declared| {
-        // The declared type is the initializer's context, as a parameter
-        // type is an argument's.
         let want = try self.intern_type(tree, declared);
         if try self.lower_contextual_expr(tree, statement.value, want, &var value) |failed| {
             return move failed;
@@ -385,10 +340,6 @@ fn (self: &var Lowerer) lower_let_stmt(tree: &var ast::Ast, statement: ast::LetS
     return null;
 }
 
-/// Returns the declared type an assignment writes into, read without emitting
-/// anything so the value can be lowered against it. Empty means the lowerer
-/// cannot name the type from the target alone, and the value keeps the type it
-/// carries itself.
 fn (self: &var Lowerer) assign_target_type(tree: &ast::Ast, target: ast::Expression) -> !Name {
     if ownership::ident_expr(tree, target) |ident| {
         let name = try self.text_name(tree, ident.name);
@@ -414,8 +365,6 @@ fn (self: &var Lowerer) assign_target_type(tree: &ast::Ast, target: ast::Express
         return self.assign_target_type(tree, marked.value);
     }
     if ownership::index_expr(tree, target) |index| {
-        // An element write lands in the view's element type, read from the
-        // view the target names.
         if !index.slice {
             let container = try self.assign_target_type(tree, index.target);
             if self.module.names.starts_with(container, "[]") {
@@ -430,20 +379,12 @@ fn (self: &var Lowerer) assign_target_type(tree: &ast::Ast, target: ast::Express
     return empty_name();
 }
 
-/// Writes value into an assignment target. An identifier rebinds the SSA name.
-/// A field of a borrowed receiver stores through the borrow, while a field of
-/// a value receiver rebuilds the receiver aggregate and assigns that back
-/// through the same rule, so `a.b.c = v` reaches whichever of `a` and `a.b`
-/// owns memory. An explicit dereference stores through the borrowed pointer.
-/// Any other target is rejected: dropping the store would silently compile the
-/// assignment away.
 fn (self: &var Lowerer) lower_assign_target(
     tree: &var ast::Ast,
     target: ast::Expression,
     value: Value
 ) -> !?diagnostic::Diagnostic {
     if ownership::unsafe_expr(tree, target) |marked| {
-        // The marker says who owns the obligation, not where the store goes.
         return self.lower_assign_target(tree, marked.value, value);
     }
     if ownership::ident_expr(tree, target) |ident| {
@@ -469,8 +410,6 @@ fn (self: &var Lowerer) lower_assign_target(
         return self.lower_assign_target(tree, field.receiver, updated);
     }
     if ownership::deref_expr(tree, target) |deref| {
-        // `.*` through a `&var` parameter names the same storage the bare
-        // name does, so both spellings assign through the same rule.
         if ownership::ident_expr(tree, deref.receiver) |ident| {
             let name = try self.text_name(tree, ident.name);
             if self.is_storage_param(name) or self.is_lent_place(name) {
@@ -508,9 +447,6 @@ fn (self: &var Lowerer) lower_assign_target(
     return try self.fail1(tree, "ir error: unsupported assignment target `%s`", Arg::Str(rendered));
 }
 
-/// Stores one byte through a writable slice view. The bounds test is emitted
-/// here for the same reason lower_index_expr emits it: every backend inherits
-/// one check from one place.
 fn (self: &var Lowerer) lower_index_assign(
     tree: &var ast::Ast,
     target: ast::Expression,
@@ -537,7 +473,6 @@ fn (self: &var Lowerer) lower_index_assign(
     return null;
 }
 
-/// Lowers explicit returns and wraps !T success values.
 fn (self: &var Lowerer) lower_return_stmt(
     tree: &var ast::Ast,
     statement: ast::Statement,
@@ -558,8 +493,6 @@ fn (self: &var Lowerer) lower_return_stmt(
     let current_return = self.module.function_return(self.current);
     if try self.error_union_parts(current_return) |parts| {
         if same_name(value.type_name, parts.success) {
-            // A `!void` success carries no payload, so its wrap takes no
-            // operand.
             if self.name_is(parts.success, "void") {
                 value = try self.emit0(Op::ErrorOk, current_return);
             } else {
@@ -581,18 +514,9 @@ fn (self: &var Lowerer) lower_return_stmt(
     return null;
 }
 
-/// Lowers `return f()` where f's error union fails through this function's the
-/// way `try f()` would: a failure leaves through the error path, running the
-/// errdefer cleanups the ownership checker kept for this return, and a success
-/// is wrapped as this function's own. It is how a narrower set returns into
-/// the one the function declares (ADR-0127), and how an errdefer runs when the
-/// value handed back is a failure. A union returned as the function's own type
-/// with no errdefer to run passes through unchanged, and null says so.
 fn (self: &var Lowerer) propagate_returned_failure(statement: ast::Statement, value: Value) -> !?Value {
     let current_return = self.module.function_return(self.current);
     let returns = try self.error_union_parts(current_return) orelse return null;
-    // A value of the success type is a success even when that type is itself
-    // an error union (`E!!T`).
     if same_name(value.type_name, returns.success) {
         return null;
     }
@@ -610,8 +534,6 @@ fn (self: &var Lowerer) propagate_returned_failure(statement: ast::Statement, va
     if same_name(value.type_name, current_return) and !runs_errdefer {
         return null;
     }
-    // A `!T` return absorbs any union where it is returned (the backends
-    // rebuild it), so it only goes through here to run an errdefer.
     if is_empty(returns.err) and !runs_errdefer {
         return null;
     }
@@ -636,7 +558,6 @@ fn (self: &var Lowerer) propagate_returned_failure(statement: ast::Statement, va
     return try self.emit1(Op::ErrorOk, current_return, unwrapped);
 }
 
-/// Lowers `return;`, the no-value arm of `lower_return_stmt`.
 fn (self: &var Lowerer) lower_void_return() -> !?diagnostic::Diagnostic {
     try self.emit_normal_cleanups();
     let value = try self.return_void_value();
@@ -644,9 +565,6 @@ fn (self: &var Lowerer) lower_void_return() -> !?diagnostic::Diagnostic {
     return null;
 }
 
-/// Reports whether v was defined by an error.error instruction in the current
-/// block. Such a return exits through the error path and must run errdefer
-/// cleanups.
 fn (self: &Lowerer) produces_error_value(value: Value) -> bool {
     let node = self.module.blocks.at(self.block.node);
     var index = node.instrs.len();
@@ -662,8 +580,6 @@ fn (self: &Lowerer) produces_error_value(value: Value) -> bool {
     return false;
 }
 
-/// Returns the type a returned value has to have: the success type of a `!T`
-/// function, or the return type itself.
 fn (self: &var Lowerer) return_value_type() -> !Name {
     let current_return = self.module.function_return(self.current);
     if try self.error_union_success_type(current_return) |success| {
@@ -672,7 +588,6 @@ fn (self: &var Lowerer) return_value_type() -> !Name {
     return current_return;
 }
 
-/// Returns the correct SSA return value for void-like returns.
 fn (self: &var Lowerer) return_void_value() -> !Value {
     let current_return = self.module.function_return(self.current);
     if try self.error_union_success_type(current_return) |success| {

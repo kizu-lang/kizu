@@ -5,17 +5,10 @@ import std::fmt;
 import std::mem;
 import std::string;
 
-// Block and value allocation, the instruction emitters, and the type spelling
-// helpers. The arity is in the emitter's name (emit0 .. emit3, emit_imm1 ..,
-// emit_op1 ..), so an emit builds no argument list; a call with an argument
-// list uses emit_with.
-
-/// Appends a basic block to the current function.
 fn (self: &var Lowerer) new_block(name: Name) -> !Block {
     return try self.module.add_block(self.current, name);
 }
 
-/// Creates a stable block label: `prefix.N`.
 fn (self: &var Lowerer) next_block_name(prefix: []u8) -> !Name {
     self.next_block = self.next_block + 1;
     var out = try string::from_bytes(self.allocator, prefix);
@@ -25,7 +18,6 @@ fn (self: &var Lowerer) next_block_name(prefix: []u8) -> !Name {
     return self.module.names.intern_owned(move out);
 }
 
-/// Creates a fresh SSA value: `%N` of the given type.
 fn (self: &var Lowerer) next(type_name: Name) -> !Value {
     self.next_value = self.next_value + 1;
     var out = try string::from_bytes(self.allocator, "%");
@@ -35,24 +27,19 @@ fn (self: &var Lowerer) next(type_name: Name) -> !Value {
     return Value { name: name, type_name: type_name };
 }
 
-/// Reports whether the current block has ended.
 fn (self: &Lowerer) terminated() -> bool {
     return self.module.block_terminated(self.block);
 }
 
-/// Ends the current block.
 fn (self: &var Lowerer) terminate(terminator: Terminator) -> void {
     self.module.set_terminator(self.block, terminator);
     return;
 }
 
-/// Returns the label of the current block.
 fn (self: &Lowerer) block_label() -> Name {
     return self.module.block_name(self.block);
 }
 
-/// Returns the last instruction emitted into the current block, or null for
-/// an empty block.
 fn (self: &Lowerer) last_instr() -> ?Instr {
     let node = self.module.blocks.at(self.block.node);
     let count = node.instrs.len();
@@ -62,9 +49,6 @@ fn (self: &Lowerer) last_instr() -> ?Instr {
     return node.instrs.get(count - 1);
 }
 
-/// Appends a generic instruction with an argument list. The result type is
-/// resolved against the instantiation in force, so a type parameter never
-/// reaches the backend.
 fn (self: &var Lowerer) emit_with(
     op: Op,
     operand: Name,
@@ -85,22 +69,18 @@ fn (self: &var Lowerer) emit_with(
     return result;
 }
 
-/// Appends an instruction with no operands.
 fn (self: &var Lowerer) emit0(op: Op, type_name: Name) -> !Value {
     return self.emit_imm0(op, type_name, empty_name());
 }
 
-/// Appends an instruction with one operand.
 fn (self: &var Lowerer) emit1(op: Op, type_name: Name, a: Value) -> !Value {
     return self.emit_imm1(op, type_name, empty_name(), a);
 }
 
-/// Appends an instruction with two operands.
 fn (self: &var Lowerer) emit2(op: Op, type_name: Name, a: Value, b: Value) -> !Value {
     return self.emit_imm2(op, type_name, empty_name(), a, b);
 }
 
-/// Appends an instruction with three operands.
 fn (self: &var Lowerer) emit3(op: Op, type_name: Name, a: Value, b: Value, c: Value) -> !Value {
     let resolved = try self.resolve_bound_type(type_name);
     let result = try self.next(resolved);
@@ -113,7 +93,6 @@ fn (self: &var Lowerer) emit3(op: Op, type_name: Name, a: Value, b: Value, c: Va
     return result;
 }
 
-/// Appends an instruction with an immediate and no operands.
 fn (self: &var Lowerer) emit_imm0(op: Op, type_name: Name, immediate: Name) -> !Value {
     let resolved = try self.resolve_bound_type(type_name);
     let result = try self.next(resolved);
@@ -122,7 +101,6 @@ fn (self: &var Lowerer) emit_imm0(op: Op, type_name: Name, immediate: Name) -> !
     return result;
 }
 
-/// Appends an instruction with an immediate and one operand.
 fn (self: &var Lowerer) emit_imm1(op: Op, type_name: Name, immediate: Name, a: Value) -> !Value {
     let resolved = try self.resolve_bound_type(type_name);
     let result = try self.next(resolved);
@@ -133,7 +111,6 @@ fn (self: &var Lowerer) emit_imm1(op: Op, type_name: Name, immediate: Name, a: V
     return result;
 }
 
-/// Appends an instruction with an immediate and two operands.
 fn (self: &var Lowerer) emit_imm2(op: Op, type_name: Name, immediate: Name, a: Value, b: Value) -> !Value {
     let resolved = try self.resolve_bound_type(type_name);
     let result = try self.next(resolved);
@@ -145,8 +122,6 @@ fn (self: &var Lowerer) emit_imm2(op: Op, type_name: Name, immediate: Name, a: V
     return result;
 }
 
-/// Appends an instruction that carries a name (`field.<f>`, `unary.<op>`)
-/// with one operand.
 fn (self: &var Lowerer) emit_op1(op: Op, operand: Name, type_name: Name, a: Value) -> !Value {
     let resolved = try self.resolve_bound_type(type_name);
     let result = try self.next(resolved);
@@ -157,8 +132,6 @@ fn (self: &var Lowerer) emit_op1(op: Op, operand: Name, type_name: Name, a: Valu
     return result;
 }
 
-/// Appends an instruction that carries a name (`field.set.<f>`,
-/// `binary.<op>`) with two operands.
 fn (self: &var Lowerer) emit_op2(op: Op, operand: Name, type_name: Name, a: Value, b: Value) -> !Value {
     let resolved = try self.resolve_bound_type(type_name);
     let result = try self.next(resolved);
@@ -170,18 +143,15 @@ fn (self: &var Lowerer) emit_op2(op: Op, operand: Name, type_name: Name, a: Valu
     return result;
 }
 
-/// Appends a typed constant instruction.
 fn (self: &var Lowerer) emit_const(type_name: Name, immediate: Name) -> !Value {
     return self.emit_imm0(Op::Const, type_name, immediate);
 }
 
-/// Appends a typed constant from literal text.
 fn (self: &var Lowerer) emit_const_text(type_name: Name, immediate: []u8) -> !Value {
     let interned = try self.module.names.intern(immediate);
     return self.emit_imm0(Op::Const, type_name, interned);
 }
 
-/// Normalizes omitted function returns to void.
 fn (self: &Lowerer) return_type(name: Name) -> Name {
     if is_empty(name) {
         return self.common.void_type;
@@ -189,7 +159,6 @@ fn (self: &Lowerer) return_type(name: Name) -> Name {
     return name;
 }
 
-/// Returns the type produced by a binary operator.
 fn (self: &Lowerer) binary_result_type(op: Name, left: Name) -> Name {
     let retained = name_text(&self.module.names, op);
     let bytes = retained.as_bytes();
@@ -202,24 +171,18 @@ fn (self: &Lowerer) binary_result_type(op: Name, left: Name) -> Name {
     return left;
 }
 
-/// Resolves a struct field type: `unknown` when the struct or field is not
-/// declared.
 fn (self: &var Lowerer) field_type(struct_name: Name, field_name: Name) -> !Name {
     return self.module.field_type(struct_name, field_name);
 }
 
-/// Names T for `std::array::Array<T>`.
 fn (self: &var Lowerer) array_element_type(name: Name) -> !?Name {
     return self.module.names.generic_arg_of(name, "std::array::Array");
 }
 
-/// Names T for `std::mem::Box<T>`.
 fn (self: &var Lowerer) box_element_type(name: Name) -> !?Name {
     return self.module.names.generic_arg_of(name, "std::mem::Box");
 }
 
-/// Names K and V for a `std::map::Map<K, V>` spelling the checker has already
-/// accepted.
 fn (self: &var Lowerer) map_key_value_type(name: Name, key_out: &var Name) -> !?Name {
     let args_text = try self.module.names.generic_arg_of(name, "std::map::Map") orelse return null;
     var args = try self.split_static_args(args_text);
@@ -235,27 +198,21 @@ fn (self: &var Lowerer) map_key_value_type(name: Name, key_out: &var Name) -> !?
     return args.get_or_panic(1);
 }
 
-/// Names the `K, V` argument list a `std::map::Map` wrapper is instantiated
-/// with. Both static parameters name the instance, so a caller that only
-/// wanted V would pick the wrong one.
 fn (self: &var Lowerer) map_static_args(name: Name) -> !?Name {
     var key = empty_name();
     let value = try self.map_key_value_type(name, &var key) orelse return null;
     return try self.module.names.joined(key, ", ", value);
 }
 
-/// Reports whether a type spelling is one std::map::Map accepts as a key.
 fn (self: &var Lowerer) name_is_map_key(value: Name) -> bool {
     return self.module.names.is_map_key(value);
 }
 
-/// Names `std::map::Map<K, V>`.
 fn (self: &var Lowerer) map_type_name(key: Name, value: Name) -> !Name {
     let args = try self.module.names.joined(key, ", ", value);
     return self.module.names.wrapped("std::map::Map<", args, ">");
 }
 
-/// Names T for `std::arena::Arena<T>`, and `unknown` for any other spelling.
 fn (self: &var Lowerer) arena_element_type(name: Name) -> !Name {
     if try self.module.names.generic_arg_of(name, "std::arena::Arena") |elem| {
         return elem;
@@ -263,14 +220,10 @@ fn (self: &var Lowerer) arena_element_type(name: Name) -> !Name {
     return self.common.unknown;
 }
 
-/// Names `std::arena::Handle<T>` for an element type T.
 fn (self: &var Lowerer) arena_handle_type(elem: Name) -> !Name {
     return self.module.names.wrapped("std::arena::Handle<", elem, ">");
 }
 
-/// Splits a static argument list, and reports no arguments for a spelling that
-/// is not one. Every caller checks the count it wanted, so a malformed list
-/// falls through the same path a wrong count does.
 fn (self: &var Lowerer) split_static_args(args: Name) -> !array::Array<Name> {
     let args_copy = try self.module.names.copy(args);
     defer args_copy.deinit(self.allocator);
@@ -282,8 +235,6 @@ fn (self: &var Lowerer) split_static_args(args: Name) -> !array::Array<Name> {
     return array::new<Name>(self.allocator);
 }
 
-/// Names `std::map::Map<K, V>` and V for the argument list a map constructor
-/// was written with; null when the list is not a supported map shape.
 fn (self: &var Lowerer) map_instance_type(type_arg: Name, value_out: &var Name) -> !?Name {
     var args = try self.split_static_args(type_arg);
     defer args.deinit(self.allocator);
@@ -299,8 +250,6 @@ fn (self: &var Lowerer) map_instance_type(type_arg: Name, value_out: &var Name) 
     return try self.map_type_name(key, value_type);
 }
 
-/// Returns the result type of a checked host-runtime builtin, or null for any
-/// other name.
 fn runtime_builtin_return_type(name: []u8) -> ?[]u8 {
     if mem::equal_bytes(name, "std::internal::builtin::io_blocking") or
         mem::equal_bytes(name, "std::internal::builtin::io_failing") {
@@ -325,20 +274,15 @@ fn runtime_builtin_return_type(name: []u8) -> ?[]u8 {
     return null;
 }
 
-/// Is the error and success side of one `E!T` / `!T` spelling; err is
-/// empty for `!T`.
 pub struct ErrorUnionParts {
     pub err: Name,
     pub success: Name,
 }
 
-/// Splits Error and T for `Error!T`, or empty Error and T for `!T`; null for a
-/// spelling that is not an error union.
 fn (self: &var Lowerer) error_union_parts(result: Name) -> !?ErrorUnionParts {
     return error_union_parts_in(&var self.types, &var self.module.names, result);
 }
 
-/// Splits one error union spelling through a type table.
 fn error_union_parts_in(types: &var typ::Table, names: &var NameTable, result: Name) -> !?ErrorUnionParts {
     if is_empty(result) {
         return null;
@@ -372,7 +316,6 @@ fn error_union_parts_in(types: &var typ::Table, names: &var NameTable, result: N
     };
 }
 
-/// Returns T for `!T` or `Error!T`; null for any other spelling.
 fn (self: &var Lowerer) error_union_success_type(result: Name) -> !?Name {
     if try self.error_union_parts(result) |parts| {
         return parts.success;
@@ -380,7 +323,6 @@ fn (self: &var Lowerer) error_union_success_type(result: Name) -> !?Name {
     return null;
 }
 
-/// Returns T for `!T` or `Error!T`, and `unknown` for any other spelling.
 fn (self: &var Lowerer) error_union_element_type(result: Name) -> !Name {
     if try self.error_union_success_type(result) |success| {
         return success;
@@ -388,23 +330,16 @@ fn (self: &var Lowerer) error_union_element_type(result: Name) -> !Name {
     return self.common.unknown;
 }
 
-/// Names T for an optional value type `?T`.
 fn (self: &var Lowerer) optional_elem_type(type_name: Name) -> !?Name {
     return self.module.names.optional_elem(type_name);
 }
 
-/// What a capture or `orelse` opens: the type it binds and the ops that ask
-/// whether there is something and what it is, by the kind of the condition. An
-/// optional carries a payload beside its tag; a nullable pointer is its own
-/// tag, null or not.
 pub struct Openable {
     pub elem: Name,
     pub has_op: Op,
     pub value_op: Op,
 }
 
-/// Classifies type_name for opening, and reports null when it is neither
-/// an optional nor a nullable raw pointer.
 fn (self: &var Lowerer) openable(type_name: Name) -> !?Openable {
     if try self.module.names.optional_elem(type_name) |elem| {
         return Openable { elem: elem, has_op: Op::OptHas, value_op: Op::OptValue };
@@ -415,82 +350,66 @@ fn (self: &var Lowerer) openable(type_name: Name) -> !?Openable {
     return null;
 }
 
-/// Reports whether a type is a local borrow.
 fn (self: &Lowerer) is_reference_type(name: Name) -> bool {
     return self.module.names.is_reference_type(name);
 }
 
-/// Reports whether name is `&var T`.
 fn (self: &Lowerer) is_mutable_reference_type(name: Name) -> bool {
     return self.module.names.is_mutable_reference_type(name);
 }
 
-/// Names T for `&T` and `&var T`.
 fn (self: &var Lowerer) deref_type(name: Name) -> !Name {
     return self.module.names.deref_type(name);
 }
 
-/// Names T for `ptr<T>` and `ptr<const T>`.
 fn (self: &var Lowerer) raw_pointer_elem(name: Name) -> !?Name {
     return self.module.names.raw_pointer_elem(name);
 }
 
-/// Reports whether an IR type spelling is a fixed-length stack buffer.
 fn (self: &Lowerer) is_buffer_ir_type(name: Name) -> bool {
     return self.module.names.is_buffer_type(name);
 }
 
-/// Reports whether a type carries a deinit contract.
 fn (self: &Lowerer) is_owner_type(name: Name) -> bool {
     let retained = name_text(&self.module.names, name);
     let bytes = retained.as_bytes();
     return ast::owner_type(&self.deinit_owners, bytes);
 }
 
-/// Reports whether releasing a type names an allocator (ADR-0132).
 fn (self: &Lowerer) release_names_allocator(name: Name) -> bool {
     let retained = name_text(&self.module.names, name);
     let bytes = retained.as_bytes();
     return ast::release_names(&self.release_allocators, bytes);
 }
 
-/// Names the text of one Ast text.
 fn (self: &var Lowerer) text_name(tree: &ast::Ast, text: ast::Text) -> !Name {
     return self.module.names.intern_text(tree, text);
 }
 
-/// Names the rendering of one expression.
 fn (self: &var Lowerer) expression_name(tree: &ast::Ast, expression: ast::Expression) -> !Name {
     let rendered = try ast::render_expression(self.allocator, tree, expression);
     return self.module.names.intern_owned(move rendered);
 }
 
-/// Names one literal text.
 fn (self: &var Lowerer) name(text: []u8) -> !Name {
     return self.module.names.intern(text);
 }
 
-/// Reports whether a name spells text.
 fn (self: &Lowerer) name_is(name: Name, text: []u8) -> bool {
     return self.module.names.is(name, text);
 }
 
-/// Reports whether an Ast text spells bytes.
 fn text_is(tree: &ast::Ast, text: ast::Text, want: []u8) -> bool {
     let retained = tree.texts.at(text.node);
     let bytes = retained.as_bytes();
     return mem::equal_bytes(bytes, want);
 }
 
-/// Appends an Ast text's bytes to out. A caller that needs the spelling
-/// while the tree is also borrowed for writing copies it here first: a view
-/// into the tree cannot outlive that borrow.
 fn append_text(allocator: Allocator, tree: &ast::Ast, text: ast::Text, out: &var string::String) -> !void {
     let retained = tree.texts.at(text.node);
     return out.append_string(allocator, retained);
 }
 
-/// Reports whether an Ast text is empty.
 fn text_empty(tree: &ast::Ast, text: ast::Text) -> bool {
     let retained = tree.texts.at(text.node);
     return retained.len() == 0;

@@ -7,13 +7,6 @@ import std::array;
 import std::map;
 import std::string;
 
-// The `std::meta` forms and the `comptime for` / `comptime match` expansions
-// that bind their captures. A capture is a MetaField (lower.kizu), and the
-// captures in force are the binding chain behind `bind_meta_field` /
-// `restore_meta` / `meta_field`.
-
-/// Lowers the body once per field. The loop itself has no runtime form: what
-/// reaches the IR is the expansions, in field order.
 fn (self: &var Lowerer) lower_comptime_for_stmt(tree: &var ast::Ast, statement: ast::ComptimeForStmt) -> !?diagnostic::Diagnostic {
     match statement.iterable {
         List(list) => return self.lower_comptime_for_list(tree, statement, list),
@@ -21,8 +14,6 @@ fn (self: &var Lowerer) lower_comptime_for_stmt(tree: &var ast::Ast, statement: 
     }
 }
 
-/// Lowers the body once per field of a `std::meta` list, with the capture
-/// naming that field.
 fn (self: &var Lowerer) lower_comptime_for_list(
     tree: &var ast::Ast,
     statement: ast::ComptimeForStmt,
@@ -49,9 +40,6 @@ fn (self: &var Lowerer) lower_comptime_for_list(
     return null;
 }
 
-/// Lowers the body once per integer in the range, with the capture bound as a
-/// static value: a read of it in the body is the constant, and a comptime
-/// condition on it folds (lower_ident_expr, const_int).
 fn (self: &var Lowerer) lower_comptime_for_range(
     tree: &var ast::Ast,
     statement: ast::ComptimeForStmt,
@@ -81,8 +69,6 @@ fn (self: &var Lowerer) lower_comptime_for_range(
     return null;
 }
 
-/// Binds one integer-range capture as an i64 static value for the length of
-/// one expansion; `restore_static` with the mark taken before unbinds it.
 fn (self: &var Lowerer) bind_static_int(name: Name, value: i64) -> !void {
     let text = try self.module.names.intern_i64(value);
     let bound = StaticValue { name: name, typ: self.common.i64_type, text: text };
@@ -92,13 +78,11 @@ fn (self: &var Lowerer) bind_static_int(name: Name, value: i64) -> !void {
     return;
 }
 
-/// Puts the static bindings in force before a bind back.
 fn (self: &var Lowerer) restore_static(mark: StaticMark) -> void {
     self.static_current = mark.previous;
     return;
 }
 
-/// Reads the list a `comptime for` walks.
 fn (self: &var Lowerer) comptime_for_fields(
     tree: &var ast::Ast,
     list: ast::Expression,
@@ -122,14 +106,12 @@ fn (self: &var Lowerer) comptime_for_fields(
     }
 }
 
-/// Names the lists a `comptime for` accepts.
 fn (self: &Lowerer) comptime_for_list_error() -> !diagnostic::Diagnostic {
     return self.fail0(
         "ir error: comptime for expects `std::meta::public_fields<T>()` or `std::meta::variants<T>()`"
     );
 }
 
-/// Lists an enum's tags or a union's variants in declaration order.
 fn (self: &var Lowerer) variants(tree: &var ast::Ast, type_arg: Name, out: &var array::Array<MetaField>) -> !?diagnostic::Diagnostic {
     if declared_in(&self.module.names, &self.enum_decls, type_arg) |declaration| {
         match tree.declarations.at(declaration.node) {
@@ -183,10 +165,6 @@ fn (self: &var Lowerer) variants(tree: &var ast::Ast, type_arg: Name, out: &var 
     );
 }
 
-/// Lists an error set's members in declaration order, each with the set that
-/// declared it. A `{ }` set's members were numbered as they were declared, so
-/// their codes put them in order; a combined set walks the sets it names, in
-/// the order it named them.
 fn (self: &var Lowerer) error_members(owner: Name, set_name: Name, out: &var array::Array<MetaField>) -> !void {
     var origins = array::new<Name>(self.allocator);
     defer origins.deinit(self.allocator);
@@ -233,7 +211,6 @@ fn (self: &var Lowerer) error_members(owner: Name, set_name: Name, out: &var arr
     return;
 }
 
-/// Orders members by their codes, which is their declaration order.
 fn sort_by_code(members: &var array::Array<string::String>, codes: &var array::Array<i64>) -> void {
     var index = 0;
     while index < codes.len() {
@@ -254,7 +231,6 @@ fn sort_by_code(members: &var array::Array<string::String>, codes: &var array::A
     return;
 }
 
-/// Lists a struct's public fields in declaration order.
 fn (self: &var Lowerer) public_fields(tree: &var ast::Ast, type_arg: Name, out: &var array::Array<MetaField>) -> !?diagnostic::Diagnostic {
     let declaration = declared_in(&self.module.names, &self.struct_decls, type_arg) orelse return try self.struct_expected(tree, type_arg);
     match tree.declarations.at(declaration.node) {
@@ -279,7 +255,6 @@ fn (self: &var Lowerer) public_fields(tree: &var ast::Ast, type_arg: Name, out: 
     return null;
 }
 
-/// Rejects a `public_fields` list over other than a struct.
 fn (self: &var Lowerer) struct_expected(tree: &ast::Ast, type_arg: Name) -> !diagnostic::Diagnostic {
     let form_name = try self.form_name(stdmeta::Form::PublicFields);
     return self.fail2(
@@ -287,20 +262,16 @@ fn (self: &var Lowerer) struct_expected(tree: &ast::Ast, type_arg: Name) -> !dia
     );
 }
 
-/// Returns the declaration one of the declaration indexes holds under a type
-/// name.
 fn declared_in(names: &NameTable, decls: &map::Map<[]u8, ast::Declaration>, type_arg: Name) -> ?ast::Declaration {
     let retained = name_text(names, type_arg);
     let bytes = retained.as_bytes();
     return decls.get(bytes);
 }
 
-/// Names the source spelling of a form for a diagnostic.
 fn (self: &var Lowerer) form_name(form: stdmeta::Form) -> !Name {
     return self.module.names.intern(stdmeta::spelling(form));
 }
 
-/// Identifies the `std::meta` form a name spells, or null for any other name.
 fn (self: &Lowerer) meta_form(name: Name) -> ?stdmeta::Form {
     let retained = name_text(&self.module.names, name);
     let bytes = retained.as_bytes();
@@ -308,7 +279,6 @@ fn (self: &Lowerer) meta_form(name: Name) -> ?stdmeta::Form {
     return identified.form;
 }
 
-/// Resolves the capture named in a form's static arguments.
 fn (self: &var Lowerer) meta_capture(tree: &var ast::Ast, form: stdmeta::Form, type_arg: Name, out: &var MetaField) -> !?diagnostic::Diagnostic {
     var args = try self.split_static_args(type_arg);
     defer args.deinit(self.allocator);
@@ -330,8 +300,6 @@ fn (self: &var Lowerer) meta_capture(tree: &var ast::Ast, form: stdmeta::Form, t
     return null;
 }
 
-/// Binds one capture for the length of one expansion; `restore_meta` with the
-/// mark taken before unbinds it. An empty name binds nothing.
 fn (self: &var Lowerer) bind_meta_field(name: Name, field: MetaField) -> !void {
     if is_empty(name) {
         return;
@@ -340,13 +308,11 @@ fn (self: &var Lowerer) bind_meta_field(name: Name, field: MetaField) -> !void {
     return;
 }
 
-/// Puts the captures in force before a bind back.
 fn (self: &var Lowerer) restore_meta(mark: MetaMark) -> void {
     self.meta_current = mark.previous;
     return;
 }
 
-/// Returns the capture bound to name.
 fn (self: &Lowerer) meta_field(name: Name) -> ?MetaField {
     var current = self.meta_current;
     while current |handle| {
@@ -359,9 +325,6 @@ fn (self: &Lowerer) meta_field(name: Name) -> ?MetaField {
     return null;
 }
 
-/// Lists the variants a `comptime match` arm body is written against; the arm
-/// finds its own by tag. A match written by hand carries no capture and gets
-/// none.
 fn (self: &var Lowerer) match_arm_variants(allocator: Allocator, tree: &var ast::Ast, meta_capture: ast::Text, meta_owner: ast::Text, out: &var array::Array<MetaField>) -> !?diagnostic::Diagnostic {
     if text_empty(tree, meta_capture) {
         return null;
@@ -370,10 +333,6 @@ fn (self: &var Lowerer) match_arm_variants(allocator: Allocator, tree: &var ast:
     return self.variants(tree, owner, out);
 }
 
-/// Lowers the match a `comptime match` stands for, with the capture bound to
-/// the arm's own variant while its body is lowered. The value is lowered first
-/// because it is what names the declaration the arms come from, and lowering
-/// it twice would emit it twice.
 fn (self: &var Lowerer) lower_comptime_match_stmt(tree: &var ast::Ast, statement: ast::ComptimeMatchStmt) -> !?diagnostic::Diagnostic {
     var subject = MatchSubject {
         value: empty_value(), union_value: empty_value(), enum_name: empty_name(), union_name: empty_name(),
@@ -395,7 +354,6 @@ fn (self: &var Lowerer) lower_comptime_match_stmt(tree: &var ast::Ast, statement
     return self.lower_match_body(tree, subject, MatchNode::Statement(expanded));
 }
 
-/// Builds the ordinary match a `comptime match` stands for.
 fn (self: &Lowerer) expand_comptime_match(
     tree: &var ast::Ast,
     statement: ast::ComptimeMatchStmt,
@@ -428,8 +386,6 @@ fn (self: &Lowerer) expand_comptime_match(
     return try tree.add_statement(ast::StatementNode::Match(move expanded));
 }
 
-/// Lowers one `std::meta` form. handled reports whether the callee was a form
-/// at all, leaving every other call to the ordinary paths.
 fn (self: &var Lowerer) lower_meta_apply(tree: &var ast::Ast, name: Name, type_arg: Name, args: ast::ExpressionList, out: &var Value, handled: &var bool) -> !?diagnostic::Diagnostic {
     handled.* = false;
     let form = self.meta_form(name) orelse return null;
@@ -454,7 +410,6 @@ fn (self: &var Lowerer) lower_meta_apply(tree: &var ast::Ast, name: Name, type_a
     }
 }
 
-/// Lowers `field_name<T, f>` / `variant_name<T, v>` to the quoted name.
 fn (self: &var Lowerer) lower_meta_capture_name(
     tree: &var ast::Ast,
     form: stdmeta::Form,
@@ -465,8 +420,6 @@ fn (self: &var Lowerer) lower_meta_capture_name(
     if try self.meta_capture(tree, form, type_arg, &var field) |failed| {
         return move failed;
     }
-    // The bare tag of an enum or union, and the declaring set's
-    // `Origin::Member` for an error (SPEC §11.2).
     var spelling = string::new(self.allocator);
     defer spelling.deinit(self.allocator);
     if !is_empty(field.origin) {
@@ -480,7 +433,6 @@ fn (self: &var Lowerer) lower_meta_capture_name(
     return null;
 }
 
-/// Lowers `type_name<T>` to the quoted spelling of the type T resolves to.
 fn (self: &var Lowerer) lower_meta_type_name(type_arg: Name, out: &var Value) -> !?diagnostic::Diagnostic {
     let subject = try self.resolve_type_args(type_arg);
     let subject_copy = try self.module.names.copy(subject);
@@ -491,7 +443,6 @@ fn (self: &var Lowerer) lower_meta_type_name(type_arg: Name, out: &var Value) ->
     return null;
 }
 
-/// Lowers a predicate written as a call to the constant it answers.
 fn (self: &var Lowerer) lower_meta_predicate(
     tree: &var ast::Ast,
     form: stdmeta::Form,
@@ -510,8 +461,6 @@ fn (self: &var Lowerer) lower_meta_predicate(
     return null;
 }
 
-/// Lowers `std::meta::field<T, f>(value)` as the field read it is defined to
-/// be (ADR-0113).
 fn (self: &var Lowerer) lower_meta_field_borrow(
     tree: &var ast::Ast,
     form: stdmeta::Form,
@@ -539,8 +488,6 @@ fn (self: &var Lowerer) lower_meta_field_borrow(
     return self.lower_field_expr(tree, path, out);
 }
 
-/// Lowers `std::meta::variant<T, v>(payload)` as the `T::v(payload)` it is
-/// defined to be (ast::variant_expansion).
 fn (self: &var Lowerer) lower_meta_variant(
     tree: &var ast::Ast,
     form: stdmeta::Form,
@@ -560,14 +507,6 @@ fn (self: &var Lowerer) lower_meta_variant(
     return self.lower_expr(tree, expanded, out);
 }
 
-/// Lowers `std::meta::construct<T, worker>(args...)` as the code it stands
-/// for. The expansion is built in one place
-/// (ast::construct_expansion_from_names), so what is emitted here is what the
-/// two checkers already read; lowering adds no rule of its own.
-///
-/// The statements go in a cleanup frame of their own: the `errdefer` each
-/// owner field registers protects the fields already built, and it must not
-/// outlive the literal that takes them.
 fn (self: &var Lowerer) lower_meta_construct(
     tree: &var ast::Ast,
     type_arg: Name,
@@ -598,8 +537,6 @@ fn (self: &var Lowerer) lower_meta_construct(
         self.pop_defer_frame();
         return move failed;
     }
-    // The union carries the enclosing function's error set, the same set the
-    // expansion's `try`s already propagate into (ADR-0128).
     var result_type = try self.module.names.prefixed("!", owner);
     let current_return = self.module.function_return(self.current);
     if try self.error_union_parts(current_return) |parts| {
@@ -612,8 +549,6 @@ fn (self: &var Lowerer) lower_meta_construct(
     return null;
 }
 
-/// Builds the statements and literal `std::meta::construct<T, worker>(...)`
-/// stands for.
 fn (self: &Lowerer) expand_meta_construct(
     tree: &var ast::Ast,
     owner: Name,
@@ -643,10 +578,6 @@ fn (self: &Lowerer) expand_meta_construct(
     );
 }
 
-/// Lowers the statements of one construct expansion in order. The expansion
-/// registers cleanups the way a block does, which is the one place
-/// `errdefer` is accepted; the statements are a block in everything but the
-/// braces.
 fn (self: &var Lowerer) lower_construct_statements(
     tree: &var ast::Ast,
     statements: &array::Array<ast::Statement>
@@ -667,8 +598,6 @@ fn (self: &var Lowerer) lower_construct_statements(
     return null;
 }
 
-/// Is the wrapper at the root of one type spelling, what
-/// `resolve_meta_type_deep` rebuilds around the resolved inner spelling.
 enum WrapperKind {
     ErrorUnion,
     Optional,
@@ -677,16 +606,11 @@ enum WrapperKind {
     Other,
 }
 
-/// Resolves the forms inside a wrapped spelling. A worker returns
-/// `!std::meta::field_type<T, f>`, so the form sits under the error union
-/// rather than at the top, and the wrapper is rebuilt around what the form
-/// resolved to.
 fn (self: &var Lowerer) resolve_meta_type_deep(text: Name) -> !Name {
     let resolved = try self.resolve_meta_type_text(text);
     if !same_name(resolved, text) {
         return resolved;
     }
-    // The empty spelling does not parse; it is handed back as it is.
     if is_empty(text) {
         return text;
     }
@@ -778,7 +702,6 @@ fn (self: &var Lowerer) resolve_meta_type_deep(text: Name) -> !Name {
     }
 }
 
-/// Answers a compile-time predicate about a type.
 fn (self: &var Lowerer) meta_predicate(
     tree: &var ast::Ast,
     form: stdmeta::Form,
@@ -868,8 +791,6 @@ fn (self: &var Lowerer) meta_predicate(
     }
 }
 
-/// Answers a `std::meta` predicate written as a comptime condition, and
-/// reports whether the call was one.
 fn (self: &var Lowerer) meta_predicate_call(tree: &var ast::Ast, call: ast::CallExpr, out: &var bool) -> !bool {
     let apply = ownership::type_apply_expr(tree, call.callee) orelse return false;
     let name = try self.expression_name(tree, apply.callee);
@@ -887,7 +808,6 @@ fn (self: &var Lowerer) meta_predicate_call(tree: &var ast::Ast, call: ast::Call
     return true;
 }
 
-/// Identifies the predicate form a name spells, or null for any other name.
 fn (self: &Lowerer) predicate_form(name: Name) -> ?stdmeta::Form {
     let retained = name_text(&self.module.names, name);
     let bytes = retained.as_bytes();
@@ -897,8 +817,6 @@ fn (self: &Lowerer) predicate_form(name: Name) -> ?stdmeta::Form {
     return self.meta_form(name);
 }
 
-/// Rewrites the forms written where a type goes. Text with no form in it comes
-/// back unchanged.
 fn (self: &var Lowerer) resolve_meta_type_text(text: Name) -> !Name {
     let copied = try self.module.names.copy(text);
     defer copied.deinit(self.allocator);
@@ -922,9 +840,6 @@ fn (self: &var Lowerer) resolve_meta_type_text(text: Name) -> !Name {
     }
 }
 
-/// Resolves `field_type<T, f>` / `variant_type<T, v>` to the bound capture's
-/// type, or returns text unchanged when the capture is unbound or carries no
-/// type.
 fn (self: &Lowerer) capture_type_text(text: Name, args: &array::Array<Name>) -> Name {
     if args.len() != 2 {
         return text;
@@ -936,8 +851,6 @@ fn (self: &Lowerer) capture_type_text(text: Name, args: &array::Array<Name>) -> 
     return field.typ;
 }
 
-/// Resolves `element<C>` to the element type of the container C, or returns
-/// text unchanged when C holds no element.
 fn (self: &var Lowerer) element_type_text(text: Name, args: &array::Array<Name>) -> !Name {
     if args.len() != 1 {
         return text;
