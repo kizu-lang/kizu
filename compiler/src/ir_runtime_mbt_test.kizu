@@ -17,24 +17,6 @@ import std::process;
 import std::string;
 import std::testing;
 
-// The programs here come from the Quint models in spec/ir/bounds.qnt and
-// spec/ir/defer.qnt (spec/ir/README.md says what they cover);
-// scripts/ir-mbt samples them into compiler/tests/mbt/ir_{bounds,defer}.json.
-// Neither property is a shape of the IR: an index check is right when an
-// index out of range still stops the program, and a cleanup is right when it
-// runs on the exits SPEC §6.3.1 names. So each fixture is rendered as one
-// Kizu program, one function per case, lowered and optimized for wasm32-wasi
-// in process the way `kizu build --target wasm32-wasi --emit wasm --opt`
-// does, and run under node's WASI on every input the model predicts; what it
-// prints is compared with the model. The node driver is
-// compiler/tests/mbt/wasi_runs.mjs.
-//
-// node is required; when PATH has none the replay says so on stderr and
-// checks nothing. KIZU_MBT_FIXTURE=<file> replays
-// another fixture of the test's model.
-
-/// One case of a bounds or defer fixture: the statement tokens and, per
-/// input, `<input>: <what main prints>`.
 pub struct RuntimeMbtCase {
     pub bucket: string::String,
     pub prog: array::Array<string::String>,
@@ -46,30 +28,23 @@ pub struct RuntimeMbtFixture {
     pub cases: array::Array<RuntimeMbtCase>,
 }
 
-/// The model a fixture samples, which decides how a case is written as a
-/// function, how main calls it, and how a run's output is read.
 enum RuntimeMbtModel {
     Bounds,
     Defer,
 }
 
-/// One run of the module as the node driver reports it. code is spelled the
-/// way the driver's JSON has it: a number, or `"trap"` with its quotes.
 struct RuntimeMbtResult {
     code: string::String,
     stdout: string::String,
     stderr: string::String,
 }
 
-/// One run: case case_index on one input, and what the model says it prints.
 struct RuntimeMbtRun {
     case_index: i64,
     input: string::String,
     want: string::String,
 }
 
-/// Shapes with a known answer, one per line as `bucket|statements|expect`,
-/// the lists separated by `;`. They mirror spec/ir/bounds_test.qnt.
 fn runtime_mbt_bounds_known_shapes() -> []u8 {
     return
         \\for-over-length|for 0;read I;end|3 0: 33 3;0 0: 0 0
@@ -84,8 +59,6 @@ fn runtime_mbt_bounds_known_shapes() -> []u8 {
     ;
 }
 
-/// Shapes with a known answer, as for bounds. They mirror
-/// spec/ir/defer_test.qnt.
 fn runtime_mbt_defer_known_shapes() -> []u8 {
     return
         \\loop-and-exits|defer 1;errdefer 2;loop 5;defer 3;continue 0;break 1;note 100;end;return 2;fail 3;note 101|00: 100 3 100 3 101 1 0;01: 3 3 101 1 0;02: 3 101 1 0;04: 100 3 100 3 1 0;08: 100 3 100 3 2 1 -1
@@ -103,7 +76,6 @@ fn runtime_mbt_new_case(allocator: Allocator) -> RuntimeMbtCase {
     };
 }
 
-/// Appends each `;`-separated field of text to out.
 fn runtime_mbt_split(allocator: Allocator, out: &var array::Array<string::String>, text: []u8) -> !void {
     var start = 0;
     var index = 0;
@@ -122,7 +94,6 @@ fn runtime_mbt_split(allocator: Allocator, out: &var array::Array<string::String
     return;
 }
 
-/// Reads the known shapes, one `bucket|statements|expect` per line.
 fn runtime_mbt_known_cases(allocator: Allocator, shapes: []u8) -> !array::Array<RuntimeMbtCase> {
     var cases = array::new<RuntimeMbtCase>(allocator);
     errdefer cases.deinit(allocator);
@@ -153,8 +124,6 @@ fn runtime_mbt_known_cases(allocator: Allocator, shapes: []u8) -> !array::Array<
     return move cases;
 }
 
-/// Reads the cases of a fixture in compiler/tests/mbt, or the one
-/// KIZU_MBT_FIXTURE names.
 fn runtime_mbt_read_fixture(io: Io, allocator: Allocator, name: []u8) -> !RuntimeMbtFixture {
     var path = string::new(allocator);
     defer path.deinit(allocator);
@@ -171,7 +140,6 @@ fn runtime_mbt_read_fixture(io: Io, allocator: Allocator, name: []u8) -> !Runtim
     return json::decode<RuntimeMbtFixture>(allocator, bytes);
 }
 
-/// The index of the first byte in text, or its length.
 fn runtime_mbt_byte_index(text: []u8, byte: u8) -> i64 {
     var index = 0;
     while mem::byte_at(text, index) |at| {
@@ -188,7 +156,6 @@ fn runtime_mbt_is_space(byte: u8) -> bool {
         byte == cast<u8>(13);
 }
 
-/// How many space-separated words text has.
 fn runtime_mbt_word_count(text: []u8) -> i64 {
     var count = 0;
     var in_word = false;
@@ -205,7 +172,6 @@ fn runtime_mbt_word_count(text: []u8) -> i64 {
     return count;
 }
 
-/// Word n of a whitespace-separated text, or an empty text.
 fn runtime_mbt_word(text: []u8, n: i64) -> []u8 {
     var word = -1;
     var start = 0;
@@ -231,8 +197,6 @@ fn runtime_mbt_word(text: []u8, n: i64) -> []u8 {
     return "";
 }
 
-/// Appends the words of text joined by one space, the Go
-/// `strings.Join(strings.Fields(text), " ")`.
 fn runtime_mbt_append_fields(allocator: Allocator, out: &var string::String, text: []u8) -> !void {
     let count = runtime_mbt_word_count(text);
     var n = 0;
@@ -246,7 +210,6 @@ fn runtime_mbt_append_fields(allocator: Allocator, out: &var string::String, tex
     return;
 }
 
-/// Appends text without the whitespace around it.
 fn runtime_mbt_append_trimmed(allocator: Allocator, out: &var string::String, text: []u8) -> !void {
     var start = 0;
     var end = mem::len(text);
@@ -271,7 +234,6 @@ fn runtime_mbt_contains(text: []u8, wanted: []u8) -> bool {
     return false;
 }
 
-/// The value of a decimal text with an optional `-`, or null.
 fn runtime_mbt_integer(text: []u8) -> ?i64 {
     var index = 0;
     var negative = false;
@@ -326,9 +288,6 @@ fn runtime_mbt_write_list(io: Io, label: []u8, values: &array::Array<string::Str
     return io::write_stderr_line(io, "]");
 }
 
-/// The program's decimal(text) reads a non-negative decimal argument: std has
-/// no parser, and an input read at run time is one the optimizer cannot see
-/// through.
 fn runtime_mbt_decimal_fn() -> []u8 {
     return
         \\fn decimal(text: []u8) -> i64 {
@@ -343,7 +302,6 @@ fn runtime_mbt_decimal_fn() -> []u8 {
     ;
 }
 
-/// How many arguments one run of the model takes.
 fn runtime_mbt_width(model: RuntimeMbtModel) -> i64 {
     match model {
         Bounds => return 3,
@@ -397,7 +355,6 @@ fn runtime_mbt_prelude(allocator: Allocator, model: RuntimeMbtModel, out: &var s
     return out.append_bytes(allocator, runtime_mbt_decimal_fn());
 }
 
-/// Writes main's call of case n.
 fn runtime_mbt_dispatch(allocator: Allocator, model: RuntimeMbtModel, out: &var string::String, n: i64) -> !void {
     try out.append_bytes(allocator, "    if which == ");
     try fmt::append_i64(allocator, out, n);
@@ -421,8 +378,6 @@ fn runtime_mbt_dispatch(allocator: Allocator, model: RuntimeMbtModel, out: &var 
     return runtime_mbt_line(allocator, out, "    }");
 }
 
-/// Frames the dispatches as run_case(at), which runs the case whose
-/// arguments start at at.
 fn runtime_mbt_main_head(allocator: Allocator, model: RuntimeMbtModel, out: &var string::String) -> !void {
     match model {
         Bounds => return out.append_bytes(allocator,
@@ -465,8 +420,6 @@ fn runtime_mbt_main_tail(allocator: Allocator, model: RuntimeMbtModel, out: &var
     }
 }
 
-/// Writes case n as a function. Returns false for a case that is not well
-/// formed (an unknown statement or index, an unbalanced end).
 fn runtime_mbt_render(
     allocator: Allocator,
     model: RuntimeMbtModel,
@@ -480,8 +433,6 @@ fn runtime_mbt_render(
     }
 }
 
-/// Writes the chosen cases as one program whose main runs the cases its
-/// arguments name one after another, printing a line `=` after each.
 fn runtime_mbt_render_cases(
     allocator: Allocator,
     model: RuntimeMbtModel,
@@ -529,8 +480,6 @@ fn runtime_mbt_render_cases(
     return true;
 }
 
-/// Spells an index token as a Kizu expression; loop is the innermost loop's
-/// id, or empty outside a loop. Returns false for a token it does not know.
 fn runtime_mbt_bounds_index(allocator: Allocator, out: &var string::String, token: []u8, loop: []u8) -> !bool {
     if mem::equal_bytes(token, "K") {
         try out.append_bytes(allocator, "k");
@@ -558,9 +507,6 @@ fn runtime_mbt_bounds_index(allocator: Allocator, out: &var string::String, toke
     return false;
 }
 
-/// Writes one bounds program as case<n>(a, k, allocator). An open block is
-/// kept as its kind and loop id: `i` for an if, `f<id>` for a for, `w<id>`
-/// for a while, whose end steps its counter.
 fn runtime_mbt_render_bounds(
     allocator: Allocator,
     out: &var string::String,
@@ -692,8 +638,6 @@ fn runtime_mbt_render_bounds(
     return true;
 }
 
-/// A bounds input `<len> <k>` as the program's arguments; k is passed as
-/// k + 1 so it is never negative.
 fn runtime_mbt_bounds_args(allocator: Allocator, out: &var array::Array<string::String>, input: []u8) -> !bool {
     if runtime_mbt_word_count(input) != 2 {
         return false;
@@ -708,7 +652,6 @@ fn runtime_mbt_bounds_args(allocator: Allocator, out: &var array::Array<string::
     return true;
 }
 
-/// Writes `if bit(x, <b>) {`, body, `}` at depth.
 fn runtime_mbt_defer_guarded(
     allocator: Allocator,
     out: &var string::String,
@@ -726,8 +669,6 @@ fn runtime_mbt_defer_guarded(
     return runtime_mbt_line(allocator, out, "}");
 }
 
-/// Writes one defer program as case<n>(x): bit b of x decides each
-/// condition, a loop runs twice, and note(id) prints id.
 fn runtime_mbt_render_defer(
     allocator: Allocator,
     out: &var string::String,
@@ -742,7 +683,6 @@ fn runtime_mbt_render_defer(
     while prog.at(index) |stmt_string| {
         index = index + 1;
         let stmt = stmt_string.as_bytes();
-        // A statement is a word and at most one argument.
         if runtime_mbt_word_count(stmt) > 2 {
             return false;
         }
@@ -799,7 +739,6 @@ fn runtime_mbt_render_defer(
     return true;
 }
 
-/// A defer input, the bits of x in decimal, as the program's argument.
 fn runtime_mbt_defer_args(allocator: Allocator, out: &var array::Array<string::String>, input: []u8) -> !bool {
     let x = runtime_mbt_integer(input) orelse return false;
     var text = string::new(allocator);
@@ -809,8 +748,6 @@ fn runtime_mbt_defer_args(allocator: Allocator, out: &var array::Array<string::S
     return true;
 }
 
-/// Appends an input's arguments to out. Returns false for an input the
-/// model does not read.
 fn runtime_mbt_args(
     allocator: Allocator,
     model: RuntimeMbtModel,
@@ -823,9 +760,6 @@ fn runtime_mbt_args(
     }
 }
 
-/// Writes what one run printed in the model's terms: the lines joined, or
-/// how the run ended when it did not exit 0. For bounds, a stop with nothing
-/// printed and the bounds panic on stderr is `panic`.
 fn runtime_mbt_printed(
     allocator: Allocator,
     model: RuntimeMbtModel,
@@ -853,7 +787,6 @@ fn runtime_mbt_printed(
     return;
 }
 
-/// The path of a node on PATH, or an empty text.
 fn runtime_mbt_find_node(io: Io, allocator: Allocator) -> !string::String {
     let path = process::env("PATH") orelse return string::new(allocator);
     var start = 0;
@@ -889,7 +822,6 @@ fn runtime_mbt_exists(io: Io, path: &string::String) -> !bool {
     }
 }
 
-/// Removes the module a replay wrote; one left behind is only litter.
 fn runtime_mbt_remove(io: Io, path: []u8) -> void {
     if fs::remove_file(io, path) {} else |_| {}
     return;
@@ -901,7 +833,6 @@ fn runtime_mbt_ends_with_slash(text: &string::String) -> bool {
     return length > 0 and bytes[length - 1] == cast<u8>(47);
 }
 
-/// A path of this run's own for the module under TMPDIR.
 fn runtime_mbt_module_path(allocator: Allocator, label: []u8) -> !string::String {
     var path = string::new(allocator);
     errdefer path.deinit(allocator);
@@ -921,10 +852,6 @@ fn runtime_mbt_module_path(allocator: Allocator, label: []u8) -> !string::String
     return move path;
 }
 
-/// Lowers, optimizes and encodes a program the way
-/// `kizu build --target wasm32-wasi --emit wasm --opt` does, and writes the
-/// module to path when path is not empty; or, when a stage rejects the
-/// program, appends its message to problem.
 fn runtime_mbt_build(
     io: Io,
     allocator: Allocator,
@@ -1009,8 +936,6 @@ fn runtime_mbt_build(
     }
 }
 
-/// Builds the chosen cases as one program, writing the module to path when
-/// it is not empty. Appends why it did not build to problem.
 fn runtime_mbt_build_chosen(
     io: Io,
     allocator: Allocator,
@@ -1029,7 +954,6 @@ fn runtime_mbt_build_chosen(
     return runtime_mbt_build(io, allocator, source_bytes, path, problem);
 }
 
-/// Writes case n's statements and its function to stderr.
 fn runtime_mbt_write_program(io: Io, allocator: Allocator, model: RuntimeMbtModel, n: i64, c: &RuntimeMbtCase) -> !void {
     try runtime_mbt_write_list(io, "program [", &c.prog);
     var function = string::new(allocator);
@@ -1043,10 +967,6 @@ fn runtime_mbt_write_program(io: Io, allocator: Allocator, model: RuntimeMbtMode
     return;
 }
 
-/// Finds the cases among chosen that do not build on their own by halving
-/// the set, marks the others in built, and reports each that does not: the
-/// model predicts what each prints, so a program the compiler rejects
-/// diverges. Returns how many do not build.
 fn runtime_mbt_split_build(
     io: Io,
     allocator: Allocator,
@@ -1102,7 +1022,6 @@ fn runtime_mbt_split_build(
     return failed + try runtime_mbt_split_build(io, allocator, model, cases, &second, built);
 }
 
-/// Appends the text field name of an object to out; false when it has none.
 fn runtime_mbt_text_field(
     allocator: Allocator,
     fields: &map::Map<[]u8, json::Value>,
@@ -1121,7 +1040,6 @@ fn runtime_mbt_text_field(
     return false;
 }
 
-/// Reads one result of the node driver into r.
 fn runtime_mbt_read_result(allocator: Allocator, item: &json::Value, r: &var RuntimeMbtResult) -> !bool {
     match item {
         Obj(fields) => {
@@ -1147,7 +1065,6 @@ fn runtime_mbt_read_result(allocator: Allocator, item: &json::Value, r: &var Run
     }
 }
 
-/// Reads the node driver's answer, one result per run.
 fn runtime_mbt_read_results(allocator: Allocator, document: &json::Value, out: &var array::Array<RuntimeMbtResult>) -> !bool {
     match document {
         Arr(items) => {
@@ -1172,9 +1089,6 @@ fn runtime_mbt_read_results(allocator: Allocator, document: &json::Value, out: &
     }
 }
 
-/// Runs the module once per argument list in one node process through
-/// compiler/tests/mbt/wasi_runs.mjs.
-/// Appends why it could not to problem.
 fn runtime_mbt_run_wasi(
     io: Io,
     allocator: Allocator,
@@ -1213,7 +1127,6 @@ fn runtime_mbt_run_wasi(
     try command.arg(allocator, "compiler/tests/mbt/wasi_runs.mjs");
     command.set_stdin(net::Stdio::Pipe);
     command.set_stdout(net::Stdio::Pipe);
-    // The driver writes to stderr only when it fails; it goes to the test's.
     command.set_stderr(net::Stdio::Inherit);
     var child = try command.spawn(io);
     defer child.deinit();
@@ -1244,11 +1157,6 @@ fn runtime_mbt_run_wasi(
     return;
 }
 
-/// Builds every case into one program, runs it on each input the cases
-/// name, and reports on stderr each case that does not build and each run
-/// whose output differs from the model, the first of a case with its
-/// program. Returns how many cases diverged, or -1 when the replay itself
-/// could not run; without a node on PATH it reports that and returns 0.
 fn runtime_mbt_replay(
     io: Io,
     allocator: Allocator,
@@ -1287,7 +1195,6 @@ fn runtime_mbt_replay(
             n = n + 1;
         }
     } else {
-        // Find the cases that do not build on their own and build the rest.
         failures = try runtime_mbt_split_build(io, allocator, model, cases, &all, &var built);
         var kept = array::new<i64>(allocator);
         defer kept.deinit(allocator);
@@ -1367,8 +1274,6 @@ fn runtime_mbt_replay(
         return -1;
     }
 
-    // A case reports its first divergent run with its program; a case that
-    // did not build has reported already.
     var reported = array::new<bool>(allocator);
     defer reported.deinit(allocator);
     n = 0;
