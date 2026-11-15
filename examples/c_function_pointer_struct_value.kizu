@@ -1,0 +1,50 @@
+// A C function pointer passes an `extern "c" struct` by value the way a call
+// by name does: the target's C calling convention decides registers or memory,
+// whether the address is a declared C function or one known only at run time.
+//
+// The second half is the shape of an API that hands out function addresses:
+// the address travels as `void *`, and the caller casts it back to the C
+// signature of the function behind it.
+extern "c" struct Quotient {
+    quot: i64,
+    rem: i64,
+}
+
+/// C's `double complex`, which C lays out as two doubles.
+extern "c" struct Complex {
+    re: f64,
+    im: f64,
+}
+
+extern "c" fn lldiv(numer: i64, denom: i64) -> Quotient
+@link_library("m")
+extern "c" fn csqrt(value: Complex) -> Complex
+fn apply(f: extern "c" fn(Complex) -> Complex, value: Complex) -> Complex {
+    // SAFETY: f takes any complex value.
+    return unsafe f(value);
+}
+
+fn main() -> void {
+    let root = apply(csqrt, Complex { re: -4.0, im: 0.0 });
+    print(root.re);
+    print(root.im);
+
+    let divide = lldiv;
+    // SAFETY: the address leaves as `void *`, the way such an API hands it over.
+    let address = unsafe cast<ptr<const u8>>(divide);
+    // SAFETY: the address is lldiv's, which has this signature.
+    let found = unsafe cast<extern "c" fn(i64, i64) -> Quotient>(address);
+    // SAFETY: lldiv divides by any nonzero denominator.
+    let division = unsafe found(-9, 4);
+    print(division.quot);
+    print(division.rem);
+    return;
+}
+
+// run
+// features: extern-c extern-struct function-pointer link-library unsafe
+// output:
+// 0.0
+// 2.0
+// -2
+// -1
