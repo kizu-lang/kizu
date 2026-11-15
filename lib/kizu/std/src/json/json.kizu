@@ -6,30 +6,12 @@
 // owned output. `write_*_field` pairs the key and the value in one call, so
 // a key can never be left without a value.
 pub struct Encoder {
-    // The allocator its buffer grows from. A String keeps none of its own
-    // (ADR-0132), and an encoder is handed one at construction, so it holds
-    // that one rather than asking for it again at every write.
     allocator: Allocator,
     out: std::string::String,
-    // The nesting state exists to detect misuse, not to drive output. Each
-    // open container holds one bit in two i64 stacks: `kinds` records object
-    // (1) or array (0), `nonempty` records whether the container has written
-    // an element yet (comma placement). Push is *2, pop is /2, so the check
-    // area holds 62 levels; deeper nesting traps.
     depth: i64,
     kinds: i64,
     nonempty: i64,
     top_written: bool,
-    // What one level of indent writes: `indent_width` copies of
-    // `indent_byte`. A width of zero writes the compact form, so the shape of
-    // the document does not depend on which encoder made it -- only the
-    // whitespace between its parts does.
-    //
-    // The unit is two scalars rather than the bytes themselves because a
-    // `[]u8` field would make this a view-carrying type, and a view-carrying
-    // type cannot be lent a view: `write_bytes_field(name, string.as_bytes())`
-    // would stop compiling (SPEC §9). Which is also why the choice of space or
-    // tab lives in the constructor's name instead.
     indent_byte: u8,
     indent_width: i64,
 }
@@ -311,9 +293,6 @@ pub fn encode_value<T>(encoder: &var std::json::Encoder, value: &T) -> std::mem:
     return;
 }
 
-// encode_container_value writes the containers, which carry their contents
-// rather than being one: an array becomes a JSON array, a map becomes an
-// object keyed by its own keys, and a box is the value it holds.
 fn encode_container_value<T>(encoder: &var std::json::Encoder, value: &T) -> std::mem::Error!void {
     comptime if std::meta::is_array<T>() {
         try encoder.begin_array();
@@ -332,8 +311,6 @@ fn encode_container_value<T>(encoder: &var std::json::Encoder, value: &T) -> std
     return;
 }
 
-// encode_elements writes an array's elements into the array already open, in
-// index order.
 fn encode_elements<T>(encoder: &var std::json::Encoder, value: &T) -> std::mem::Error!void {
     var index = 0;
     while index < value.len() {
@@ -345,9 +322,6 @@ fn encode_elements<T>(encoder: &var std::json::Encoder, value: &T) -> std::mem::
     return;
 }
 
-// encode_entries writes a map's entries into the object already open. The
-// order is `key_at`'s insertion order, so the same map encodes the same way
-// every run.
 fn encode_entries<T>(encoder: &var std::json::Encoder, value: &T) -> std::mem::Error!void {
     var index = 0;
     while value.key_at(index) |key| {
@@ -359,11 +333,6 @@ fn encode_entries<T>(encoder: &var std::json::Encoder, value: &T) -> std::mem::E
     return;
 }
 
-// encode_fields writes a struct's public fields into the object already open.
-//
-// An optional field is opened here rather than in encode_field: `?T` cannot be
-// a static argument (ADR-0101), so the optional is unwrapped at run time and
-// what recurses is the type it holds.
 fn encode_fields<T>(encoder: &var std::json::Encoder, value: &T) -> std::mem::Error!void {
     comptime for std::meta::public_fields<T>() |f| {
         comptime if std::meta::is_optional<std::meta::field_type<T, f>>() {
@@ -387,8 +356,6 @@ fn encode_fields<T>(encoder: &var std::json::Encoder, value: &T) -> std::mem::Er
     return;
 }
 
-// encode_field writes one named field. Each case enters through a call that
-// carries the key, so the key and its value are written together.
 fn encode_field<T>(
     encoder: &var std::json::Encoder,
     name: []u8,
@@ -436,8 +403,6 @@ fn encode_field<T>(
     return;
 }
 
-// encode_container_field is encode_container_value with the key written by the
-// call that opens the container.
 fn encode_container_field<T>(
     encoder: &var std::json::Encoder,
     name: []u8,
@@ -460,15 +425,6 @@ fn encode_container_field<T>(
     return;
 }
 
-// encode_variant_value writes one variant of an enum or union. A variant that
-// carries nothing is the string naming it; one that carries a payload is the
-// single-key object `{"Name": payload}`. An enum is the case where no variant
-// carries anything, so it needs no rule of its own: `Color::Red` is `"Red"`
-// because that is what a payload-free variant is.
-//
-// `Value` is the exception, and takes the first branch: its variants name
-// JSON's own shapes rather than a program's, so tagging them would wrap a
-// document that already says what it is.
 fn encode_variant_value<T>(encoder: &var std::json::Encoder, value: &T) -> std::mem::Error!void {
     comptime if T == type<std::json::Value> {
         try encode_any_value(encoder, value);
@@ -490,8 +446,6 @@ fn encode_variant_value<T>(encoder: &var std::json::Encoder, value: &T) -> std::
     return;
 }
 
-// encode_variant_field is encode_variant_value with the key written by the
-// call that opens the value.
 fn encode_variant_field<T>(
     encoder: &var std::json::Encoder,
     name: []u8,
@@ -517,9 +471,6 @@ fn encode_variant_field<T>(
     return;
 }
 
-// encode_any_value writes a `Value` as the document it was read from, so a
-// document that came in through `decode<Value>` goes back out unchanged apart
-// from whitespace.
 fn encode_any_value(
     encoder: &var std::json::Encoder,
     value: &std::json::Value,
@@ -547,8 +498,6 @@ fn encode_any_value(
     return;
 }
 
-// encode_any_field is encode_any_value with the key written by the call that
-// opens the value.
 fn encode_any_field(
     encoder: &var std::json::Encoder,
     name: []u8,
@@ -577,8 +526,6 @@ fn encode_any_field(
     return;
 }
 
-// encode_any_elements writes a `Value` array's elements into the array already
-// open, in index order.
 fn encode_any_elements(
     encoder: &var std::json::Encoder,
     items: &std::array::Array<std::json::Value>,
@@ -591,9 +538,6 @@ fn encode_any_elements(
     return;
 }
 
-// encode_any_entries writes a `Value` object's entries into the object already
-// open, in the order the document wrote them. The value is reached by a borrow
-// rather than by `get`, the way any owner value leaves a map.
 fn encode_any_entries(
     encoder: &var std::json::Encoder,
     entries: &std::map::Map<[]u8, std::json::Value>,
@@ -683,8 +627,6 @@ fn (self: &var Encoder) pop(close: u8) -> std::mem::Error!void {
     self.depth = self.depth - 1;
     self.kinds = self.kinds / 2;
     self.nonempty = self.nonempty / 2;
-    // An empty container stays on one line: there is nothing to indent, and
-    // `{\n}` reads as a container whose contents went missing.
     if had_element {
         try self.break_line(self.depth);
     }
@@ -739,18 +681,6 @@ fn hex_digit(value: u8) -> u8 {
     return cast<u8>(87) + value;
 }
 
-// --- decode ------------------------------------------------------------
-//
-// decode reads bytes straight into `T`. There is no document object between
-// them: a DOM would need its own place to live, would have to defend against
-// untrusted input on its own, and would leave two routes to a value -- one
-// through the DOM and one into a type (ADR-0115, #1626).
-//
-// Parse state is two arguments, `bytes: []u8` and `index: &var i64`, rather
-// than a cursor struct. A struct holding a view cannot be passed as `&var`
-// (ADR-0100), so splitting the state keeps `decode<T>` an ordinary generic
-// free function.
-
 pub error Error {
     // The bytes are not JSON at this point.
     UnexpectedToken,
@@ -779,9 +709,6 @@ pub error Error {
 // catch a decode and match the members of both sets.
 pub error DecodeError = Error or std::mem::Error;
 
-// max_depth bounds nesting so a deep document cannot exhaust the stack. There
-// is no input size limit: the caller already holds the bytes and decides how
-// many there are.
 fn max_depth() -> i64 {
     return 128;
 }
@@ -791,8 +718,6 @@ fn is_space(byte: u8) -> bool {
         or byte == cast<u8>(10) or byte == cast<u8>(13);
 }
 
-// skip_space advances past whitespace and leaves index on the next byte, or on
-// the end of input.
 fn skip_space(bytes: []u8, index: &var i64) -> void {
     while std::mem::byte_at(bytes, index.*) |byte| {
         if !is_space(byte) {
@@ -803,14 +728,11 @@ fn skip_space(bytes: []u8, index: &var i64) -> void {
     return;
 }
 
-// peek_byte reads the next non-space byte without consuming it.
 fn peek_byte(bytes: []u8, index: &var i64) -> ?u8 {
     skip_space(bytes, index);
     return std::mem::byte_at(bytes, index.*);
 }
 
-// expect_byte consumes one specific byte, and fails when the document has
-// something else there.
 fn expect_byte(bytes: []u8, index: &var i64, want: u8) -> Error!void {
     if peek_byte(bytes, index) |byte| {
         if byte == want {
@@ -821,7 +743,6 @@ fn expect_byte(bytes: []u8, index: &var i64, want: u8) -> Error!void {
     return Error::UnexpectedToken;
 }
 
-// expect_literal consumes one of the three bare words JSON has.
 fn expect_literal(bytes: []u8, index: &var i64, word: []u8) -> Error!void {
     skip_space(bytes, index);
     if std::mem::slice(bytes, index.*, index.* + std::mem::len(word)) |seen| {
@@ -833,7 +754,6 @@ fn expect_literal(bytes: []u8, index: &var i64, word: []u8) -> Error!void {
     return Error::UnexpectedToken;
 }
 
-// decode_bool reads `true` or `false`.
 fn decode_bool(bytes: []u8, index: &var i64) -> Error!bool {
     if peek_byte(bytes, index) |byte| {
         if byte == cast<u8>(116) {
@@ -848,7 +768,6 @@ fn decode_bool(bytes: []u8, index: &var i64) -> Error!bool {
     return Error::UnexpectedToken;
 }
 
-// decode_null reads `null`.
 fn decode_null(bytes: []u8, index: &var i64) -> Error!void {
     try expect_literal(bytes, index, "null");
     return;
@@ -858,24 +777,12 @@ fn is_digit(byte: u8) -> bool {
     return byte >= cast<u8>(48) and byte <= cast<u8>(57);
 }
 
-// A Number is where one JSON number sits in the document, and whether it is
-// spelled as an integer. The grammar is RFC 8259's: an optional minus, an
-// integer part with no leading zero, an optional fraction, an optional
-// exponent. What the digits are worth is decided by the type that asked for
-// them, so scanning and converting are two steps.
 struct Number {
     start: i64,
     end: i64,
-    // False when the spelling has a fraction or an exponent. `1.0` and `1e0`
-    // are floats even though they are worth an integer: `i64` refuses them
-    // rather than deciding what `1.5` would truncate to, and `Value` reads
-    // them as `F64` so a document that said float stays float.
     integral: bool,
 }
 
-// scan_number reads past one number and reports where it was. It stops at the
-// first byte the grammar does not allow, so `01` is the number `0` followed by
-// a `1` the caller then refuses, the way JSON asks.
 fn scan_number(bytes: []u8, index: &var i64) -> Error!Number {
     skip_space(bytes, index);
     let start = index.*;
@@ -884,7 +791,6 @@ fn scan_number(bytes: []u8, index: &var i64) -> Error!Number {
             index.* = index.* + 1;
         }
     }
-    // The integer part is a lone `0`, or digits starting with another one.
     if std::mem::byte_at(bytes, index.*) |byte| {
         if byte == cast<u8>(48) {
             index.* = index.* + 1;
@@ -923,7 +829,6 @@ fn scan_number(bytes: []u8, index: &var i64) -> Error!Number {
     return Number { start: start, end: index.*, integral: integral };
 }
 
-// skip_digits advances past a run of digits and returns how many there were.
 fn skip_digits(bytes: []u8, index: &var i64) -> i64 {
     var count = 0;
     while std::mem::byte_at(bytes, index.*) |byte| {
@@ -936,10 +841,6 @@ fn skip_digits(bytes: []u8, index: &var i64) -> i64 {
     return count;
 }
 
-// integer_of is the `i64` a number is worth. A fraction or an exponent is
-// `InvalidNumber` rather than a truncation, and so is a magnitude past the
-// type: JSON allows both, `i64` can hold neither, and rounding silently would
-// hide the difference from the caller.
 fn integer_of(bytes: []u8, number: &Number) -> Error!i64 {
     if !number.integral {
         return Error::InvalidNumber;
@@ -952,8 +853,6 @@ fn integer_of(bytes: []u8, number: &Number) -> Error!i64 {
             at = at + 1;
         }
     }
-    // Accumulated below zero, because the minimum is one past the maximum in
-    // magnitude and has to fit while it is being read.
     var value = 0;
     while at < number.end {
         if std::mem::byte_at(bytes, at) |byte| {
@@ -975,11 +874,6 @@ fn integer_of(bytes: []u8, number: &Number) -> Error!i64 {
     return 0 - value;
 }
 
-// float_of is the `f64` nearest to a number. `std::float::parse` reads the
-// JSON grammar as a subset of its own, so a slice scan_number accepted is one
-// it reads. A magnitude past the type comes back as an infinity, which JSON
-// has no spelling for, so it is `InvalidNumber` the way an integer past `i64`
-// is; a magnitude below the smallest subnormal is zero, the nearest value.
 fn float_of(allocator: Allocator, bytes: []u8, number: &Number) -> std::json::DecodeError!f64 {
     if std::mem::slice(bytes, number.start, number.end) |text| {
         if try std::float::parse(allocator, text) |value| {
@@ -992,13 +886,11 @@ fn float_of(allocator: Allocator, bytes: []u8, number: &Number) -> std::json::De
     return Error::UnexpectedToken;
 }
 
-// decode_i64 reads a number spelled as an integer.
 fn decode_i64(bytes: []u8, index: &var i64) -> Error!i64 {
     let number = try scan_number(bytes, index);
     return integer_of(bytes, &number);
 }
 
-// decode_f64 reads any number JSON has.
 fn decode_f64(allocator: Allocator, bytes: []u8, index: &var i64) -> std::json::DecodeError!f64 {
     let number = try scan_number(bytes, index);
     return float_of(allocator, bytes, &number);
@@ -1017,7 +909,6 @@ fn hex_value(byte: u8) -> ?i64 {
     return null;
 }
 
-// read_hex4 reads the four hex digits of a `\uXXXX` escape.
 fn read_hex4(bytes: []u8, index: &var i64) -> Error!i64 {
     var value = 0;
     var count = 0;
@@ -1037,7 +928,6 @@ fn read_hex4(bytes: []u8, index: &var i64) -> Error!i64 {
     return value;
 }
 
-// append_utf8 writes one code point as UTF-8.
 fn append_utf8(allocator: Allocator, out: &var std::string::String, code: i64) -> std::json::DecodeError!void {
     if code < 128 {
         try out.append_byte(allocator, cast<u8>(code));
@@ -1061,9 +951,6 @@ fn append_utf8(allocator: Allocator, out: &var std::string::String, code: i64) -
     return;
 }
 
-// decode_escape reads what follows a `\` and appends the character it names.
-// A `\uXXXX` above the basic plane arrives as a surrogate pair, so the high
-// half consumes its low half here; a half on its own names no character.
 fn decode_escape(allocator: Allocator, bytes: []u8, index: &var i64, out: &var std::string::String) -> std::json::DecodeError!void {
     if std::mem::byte_at(bytes, index.*) |byte| {
         index.* = index.* + 1;
@@ -1100,8 +987,6 @@ fn decode_escape(allocator: Allocator, bytes: []u8, index: &var i64, out: &var s
     return Error::InvalidEscape;
 }
 
-// pair_surrogate joins a high surrogate with the low half that must follow it,
-// and returns any other code point unchanged.
 fn pair_surrogate(bytes: []u8, index: &var i64, code: i64) -> Error!i64 {
     if code < 55296 or code > 57343 {
         return code;
@@ -1118,7 +1003,6 @@ fn pair_surrogate(bytes: []u8, index: &var i64, code: i64) -> Error!i64 {
     return 65536 + (code - 55296) * 1024 + (low - 56320);
 }
 
-// decode_string reads a JSON string into an owned buffer, undoing escapes.
 fn decode_string(
     allocator: Allocator,
     bytes: []u8,
@@ -1141,9 +1025,6 @@ fn decode_string(
     return Error::UnexpectedToken;
 }
 
-// skip_value advances past one complete value without building it. Scanning an
-// object records where each value starts and comes back for the ones the type
-// asks for, so the values in between are only measured, never decoded.
 fn skip_value(bytes: []u8, index: &var i64, depth: i64) -> Error!void {
     if depth > max_depth() {
         return Error::DepthExceeded;
@@ -1171,8 +1052,6 @@ fn skip_value(bytes: []u8, index: &var i64, depth: i64) -> Error!void {
     return Error::UnexpectedToken;
 }
 
-// skip_string advances past a string. Escapes are not undone here, only
-// stepped over, so that a `\"` does not end the string.
 fn skip_string(bytes: []u8, index: &var i64) -> Error!void {
     try expect_byte(bytes, index, cast<u8>(34));
     while std::mem::byte_at(bytes, index.*) |byte| {
@@ -1221,8 +1100,6 @@ fn skip_array(bytes: []u8, index: &var i64, depth: i64) -> Error!void {
     return;
 }
 
-// comma_or_close consumes the byte that separates or ends a sequence, and
-// reports whether another element follows.
 fn comma_or_close(bytes: []u8, index: &var i64, close: u8) -> Error!bool {
     if peek_byte(bytes, index) |byte| {
         if byte == cast<u8>(44) {
@@ -1253,9 +1130,6 @@ pub struct Scan {
     pub members: std::array::Array<Member>,
 }
 
-// scan_object records every key of one object and where its value begins.
-// Duplicate keys are an error: keeping one of the two would silently drop a
-// value the document meant to carry.
 fn scan_object(
     allocator: Allocator,
     bytes: []u8,
@@ -1292,7 +1166,6 @@ fn scan_object(
     return Scan { members: move members };
 }
 
-// member_at finds where the value of the key spelled at key_at begins.
 fn member_at(
     members: &std::array::Array<Member>,
     bytes: []u8,
@@ -1308,7 +1181,6 @@ fn member_at(
     return null;
 }
 
-// member_named finds where the value of one field's key begins.
 fn member_named(
     members: &std::array::Array<Member>,
     bytes: []u8,
@@ -1324,8 +1196,6 @@ fn member_named(
     return null;
 }
 
-// key_equals compares the string spelled at key_at with a field name, undoing
-// escapes as it walks so that `"\u0061"` matches `a`.
 fn key_equals(bytes: []u8, key_at: i64, name: []u8) -> bool {
     var index = key_at + 1;
     var seen = 0;
@@ -1355,7 +1225,6 @@ fn key_equals(bytes: []u8, key_at: i64, name: []u8) -> bool {
     return false;
 }
 
-// same_key compares two keys of the same document.
 fn same_key(bytes: []u8, left_at: i64, right_at: i64) -> bool {
     var left = left_at;
     var right = right_at;
@@ -1380,9 +1249,6 @@ fn same_key(bytes: []u8, left_at: i64, right_at: i64) -> bool {
     return false;
 }
 
-// escape_byte reads one escape that names a single byte, which is what a key
-// matching a Kizu field name can hold. A multi-byte escape names no field, so
-// it stops the comparison rather than being decoded.
 fn escape_byte(bytes: []u8, index: &var i64) -> ?u8 {
     if std::mem::byte_at(bytes, index.*) |byte| {
         index.* = index.* + 1;
@@ -1416,8 +1282,6 @@ fn escape_byte(bytes: []u8, index: &var i64) -> ?u8 {
     return null;
 }
 
-// hex4_value reads four hex digits without failing the whole parse: a key that
-// does not match is not an error, it is a different key.
 fn hex4_value(bytes: []u8, index: &var i64) -> ?i64 {
     var value = 0;
     var count = 0;
@@ -1494,10 +1358,6 @@ pub fn decode_ignore_unknown<T>(allocator: Allocator, bytes: []u8) -> std::json:
     return decode_value<T>(allocator, bytes, &var index, true);
 }
 
-// check_one_document walks the bytes once before anything is built, so that a
-// malformed document is refused before it has allocated. It is also what lets
-// `decode` return its value directly: nothing can fail after the value exists,
-// so there is no error path that would have to release it.
 fn check_one_document(bytes: []u8) -> std::json::DecodeError!void {
     var index = 0;
     try skip_value(bytes, &var index, 0);
@@ -1505,8 +1365,6 @@ fn check_one_document(bytes: []u8) -> std::json::DecodeError!void {
     return;
 }
 
-// expect_end refuses trailing bytes: a second document after the first is not
-// one document, and accepting it would hide half the input.
 fn expect_end(bytes: []u8, index: &var i64) -> Error!void {
     skip_space(bytes, index);
     if std::mem::byte_at(bytes, index.*) |_| {
@@ -1515,17 +1373,6 @@ fn expect_end(bytes: []u8, index: &var i64) -> Error!void {
     return;
 }
 
-// decode_value reads one value as a `T`, dispatching on what `T` is. The set
-// of types is the one `encode_value` writes, so a document this produces is
-// one that produced it (原理 9). Two types are written but not read here.
-//
-// `[]u8` is a view, so it can only name a run of bytes the document already
-// holds, and the bytes an escape stands for are not in it. Whether a string
-// carries an escape is known at parse time, not from the type, so the owning
-// `std::string::String` is the one route.
-//
-// `?T` is read by decode_optional instead, because an optional cannot be a
-// static argument (ADR-0101) and so cannot reach this dispatch.
 fn decode_value<T>(
     allocator: Allocator,
     bytes: []u8,
@@ -1570,10 +1417,6 @@ fn decode_value<T>(
     }
 }
 
-// decode_any reads one value as a `Value`, deciding what it is from the byte
-// that starts it. This is the route for documents whose shape is not known in
-// advance; it is the same parser the typed route uses, so both are behind the
-// same defenses.
 fn decode_any(
     allocator: Allocator,
     bytes: []u8,
@@ -1633,8 +1476,6 @@ fn decode_any_array(
     return std::json::Value::Arr(move items);
 }
 
-// decode_any_object keeps the keys in document order. Duplicates are an error
-// here too: which of the two survived would otherwise depend on the reader.
 fn decode_any_object(
     allocator: Allocator,
     bytes: []u8,
@@ -1656,8 +1497,6 @@ fn decode_any_object(
         var key = try decode_string(allocator, bytes, index);
         defer key.deinit(allocator);
         let name = key.as_bytes();
-        // Refused before the value is built, the way `scan_object` refuses one:
-        // keeping either of the two would silently drop what the other carried.
         if entries.contains(name) {
             return Error::DuplicateField;
         }
@@ -1669,9 +1508,6 @@ fn decode_any_object(
     return std::json::Value::Obj(move entries);
 }
 
-// decode_container_value reads the containers, mirroring what
-// `encode_container_value` writes: a JSON array becomes an array, an object
-// becomes a map keyed by its own keys, and a box is the value it holds.
 fn decode_container_value<T>(
     allocator: Allocator,
     bytes: []u8,
@@ -1690,9 +1526,6 @@ fn decode_container_value<T>(
     }
 }
 
-// decode_array reads a JSON array into an owned collection. Each element is
-// decoded as the array's element type, so an element the type cannot hold is
-// an error rather than a value quietly skipped.
 fn decode_array<T>(
     allocator: Allocator,
     bytes: []u8,
@@ -1717,11 +1550,6 @@ fn decode_array<T>(
     return move items;
 }
 
-// decode_map reads a JSON object into an owned map. Unlike a struct, a map has
-// no field list to check keys against, so every key of the document is one the
-// map holds and `ignore_unknown` has nothing to decide. The key is unescaped
-// into a String first, then copied into the map by `insert`, so no key points
-// back into the document.
 fn decode_map<T>(
     allocator: Allocator,
     bytes: []u8,
@@ -1743,8 +1571,6 @@ fn decode_map<T>(
         var key = try decode_string(allocator, bytes, index);
         defer key.deinit(allocator);
         let name = key.as_bytes();
-        // Refused before the value is built, the way `scan_object` refuses one:
-        // keeping either of the two would silently drop what the other carried.
         if entries.contains(name) {
             return Error::DuplicateField;
         }
@@ -1756,11 +1582,6 @@ fn decode_map<T>(
     return move entries;
 }
 
-// decode_variant reads one variant of an enum or union. The two shapes are the
-// two `encode_variant_value` writes: a variant that carries nothing is the
-// string naming it, and one that carries a payload is the single-key object
-// `{"Name": payload}`. Which one a document holds is read from the byte that
-// starts it, so a tag and a payload variant cannot be confused for each other.
 fn decode_variant<T>(
     allocator: Allocator,
     bytes: []u8,
@@ -1776,16 +1597,11 @@ fn decode_variant<T>(
     return decode_variant_payload<T>(allocator, bytes, index, ignore_unknown);
 }
 
-// decode_variant_tag reads the string naming a variant that carries nothing.
-// The name is compared where it lies, so a tag costs no allocation and an
-// escaped spelling still names the variant it spells.
 fn decode_variant_tag<T>(bytes: []u8, index: &var i64) -> std::json::DecodeError!T {
     let name_at = index.*;
     try skip_string(bytes, index);
     comptime for std::meta::variants<T>() |v| {
-        comptime if std::meta::has_payload<T, v>() {
-            // A variant carrying a payload is never written as a bare string.
-} else {
+        comptime if std::meta::has_payload<T, v>() {} else {
             if key_equals(bytes, name_at, std::meta::variant_name<T, v>()) {
                 return std::meta::variant<T, v>();
             }
@@ -1794,9 +1610,6 @@ fn decode_variant_tag<T>(bytes: []u8, index: &var i64) -> std::json::DecodeError
     return Error::UnknownField;
 }
 
-// decode_variant_payload reads the single-key object naming a variant and the
-// value it carries. A second key would name a second variant, and a value can
-// only be one of them, so anything but one key is refused.
 fn decode_variant_payload<T>(
     allocator: Allocator,
     bytes: []u8,
@@ -1816,18 +1629,12 @@ fn decode_variant_payload<T>(
                     let payload = try decode_value<std::meta::variant_type<T, v>>(allocator, bytes, &var at, ignore_unknown);
                     return std::meta::variant<T, v>(move payload);
                 }
-            } else {
-                // A variant carrying nothing is written as a bare string.
-}
+            } else {}
         }
     }
     return Error::UnknownField;
 }
 
-// decode_struct fills every public field of `T` from one object. The keys
-// arrive in document order and the fields are filled in declaration order, so
-// the object is scanned once into the offsets of its values, and each field
-// comes back for the one it names.
 fn decode_struct<T>(
     allocator: Allocator,
     bytes: []u8,
@@ -1837,16 +1644,11 @@ fn decode_struct<T>(
     var scan = try scan_object(allocator, bytes, index, 0);
     defer scan.deinit(allocator);
     if !ignore_unknown {
-        // Checked before anything is built: a document `T` cannot hold is
-        // refused while there is still nothing to release.
         try reject_unknown<T>(bytes, &scan);
     }
     return std::meta::construct<T, decode_field>(allocator, bytes, &scan, ignore_unknown);
 }
 
-// reject_unknown refuses a key `T` has no field for. Dropping it silently
-// would lose data the document carried, so the caller has to say which it
-// wants by calling `decode_ignore_unknown` instead (原理 3).
 fn reject_unknown<T>(bytes: []u8, scan: &std::json::Scan) -> Error!void {
     var index = 0;
     while scan.members.at(index) |member| {
@@ -1858,7 +1660,6 @@ fn reject_unknown<T>(bytes: []u8, scan: &std::json::Scan) -> Error!void {
     return;
 }
 
-// names_field reports whether one key names a public field of `T`.
 fn names_field<T>(bytes: []u8, key_at: i64) -> bool {
     comptime for std::meta::public_fields<T>() |f| {
         if key_equals(bytes, key_at, std::meta::field_name<T, f>()) {
@@ -1868,13 +1669,6 @@ fn names_field<T>(bytes: []u8, key_at: i64) -> bool {
     return false;
 }
 
-// decode_field reads the value one field names out of a scanned object. It is
-// the worker `construct` calls once per field: `f` is bound to that field, so
-// the name it looks up and the type it returns both come from `f`.
-//
-// An optional field is the one field a document may leave out (ADR-0121). Both
-// ways of saying so read the same, because `?T` cannot hold the difference:
-// `"nick": null` and no `nick` key at all are `null`.
 fn decode_field<T, f: Field>(
     allocator: Allocator,
     bytes: []u8,
@@ -1897,10 +1691,6 @@ fn decode_field<T, f: Field>(
     }
 }
 
-// decode_optional reads one value as an `?E`. The optional is opened here
-// rather than in decode_value for the reason encode_fields opens one: `?E`
-// cannot be a static argument (ADR-0101), so `null` is answered first and what
-// recurses is the type the optional holds.
 fn decode_optional<T>(
     allocator: Allocator,
     bytes: []u8,
@@ -1913,8 +1703,6 @@ fn decode_optional<T>(
             return null;
         }
     }
-    // Bound, not returned directly: the implicit wrap into `?E` reaches a value
-    // of type `E`, not the `!E` a call to a fallible function is.
     let held = try decode_value<std::meta::element<T>>(allocator, bytes, index, ignore_unknown);
     return move held;
 }

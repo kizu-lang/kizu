@@ -107,6 +107,10 @@ union TypeCollectionIssue {
     CExportBorrowParam(CollectionHostParamIssue),
     CExportParam(CollectionHostParamIssue),
     CExportReturn(CollectionNamedTypeIssue),
+    GpuExportMethod(ast::Text),
+    GpuExportStaticParams(ast::Text),
+    GpuExportParam(CollectionHostParamIssue),
+    GpuExportReturn(CollectionNamedTypeIssue),
 }
 
 union DeclaredFunctionResult {
@@ -733,7 +737,8 @@ fn (self: &Checker) validate_host_function_signature(
     }
     if mem::len(export_abi) > 0 and
         !mem::equal_bytes(export_abi, "c") and
-        !mem::equal_bytes(export_abi, "browser") {
+        !mem::equal_bytes(export_abi, "browser") and
+        !mem::equal_bytes(export_abi, "gpu") {
         return TypeCollectionIssue::UnsupportedExportAbi(signature.export_abi);
     }
     let retained_library = tree.texts.at(signature.link_library.node);
@@ -747,6 +752,9 @@ fn (self: &Checker) validate_host_function_signature(
     }
     if mem::equal_bytes(export_abi, "c") {
         return self.validate_c_export_function(tree, signature, params, return_type);
+    }
+    if mem::equal_bytes(export_abi, "gpu") {
+        return self.validate_gpu_export_function(signature, params, return_type);
     }
     let browser_import = mem::equal_bytes(extern_abi, "browser");
     let browser_export = mem::equal_bytes(export_abi, "browser");
@@ -792,6 +800,61 @@ fn (self: &Checker) validate_host_function_signature(
         return TypeCollectionIssue::BrowserHostReturn(issue);
     }
     return null;
+}
+
+fn (self: &Checker) validate_gpu_export_function(
+    signature: &ast::FunctionSignature,
+    params: &array::Array<Type>,
+    return_type: Type
+) -> ?TypeCollectionIssue {
+    if signature.receiver {
+        return TypeCollectionIssue::GpuExportMethod(signature.name);
+    }
+    if signature.static_params.len() > 0 {
+        return TypeCollectionIssue::GpuExportStaticParams(signature.name);
+    }
+    var index = 0;
+    while params.get(index) |parameter_type| {
+        var borrow = false;
+        var mut_borrow = false;
+        if signature.params.at(index) |parameter| {
+            borrow = parameter.borrow;
+            mut_borrow = parameter.mut_borrow;
+        }
+        let element_view = gpu_element_view(&self.types, parameter_type);
+        let accepted = (!borrow and !mut_borrow and
+            (element_view or gpu_element(&self.types, parameter_type))) or
+            (mut_borrow and element_view);
+        if !accepted {
+            return TypeCollectionIssue::GpuExportParam(
+                self.host_param_issue(signature, index, parameter_type)
+            );
+        }
+        index = index + 1;
+    }
+    if !self.types.is_text(return_type, "void") {
+        let issue = CollectionNamedTypeIssue {
+            name: signature.name, type_name: return_type, span: signature.span
+        };
+        return TypeCollectionIssue::GpuExportReturn(issue);
+    }
+    return null;
+}
+
+fn gpu_element(types: &TypeTable, value: Type) -> bool {
+    return types.is_text(value, "i8") or types.is_text(value, "i16") or
+        types.is_text(value, "i32") or types.is_text(value, "i64") or
+        types.is_text(value, "u8") or types.is_text(value, "u16") or
+        types.is_text(value, "u32") or types.is_text(value, "u64") or
+        types.is_text(value, "f32");
+}
+
+fn gpu_element_view(types: &TypeTable, value: Type) -> bool {
+    return types.is_text(value, "[]i8") or types.is_text(value, "[]i16") or
+        types.is_text(value, "[]i32") or types.is_text(value, "[]i64") or
+        types.is_text(value, "[]u8") or types.is_text(value, "[]u16") or
+        types.is_text(value, "[]u32") or types.is_text(value, "[]u64") or
+        types.is_text(value, "[]f32");
 }
 
 fn (self: &Checker) validate_c_host_function_types(
@@ -1348,6 +1411,36 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
             try fmt::append_i64(self.allocator, &var message, host_param.index);
             try message.append_bytes(self.allocator, " has unsupported type ");
             try self.append_checker_type(&var message, host_param.type_name);
+        },
+        GpuExportMethod(name) => {
+            try message.append_bytes(self.allocator, "gpu export ");
+            try append_function_name(self.allocator, &var message, tree, name);
+            try message.append_bytes(self.allocator, " cannot be a method");
+        },
+        GpuExportStaticParams(name) => {
+            try message.append_bytes(self.allocator, "gpu export ");
+            try append_function_name(self.allocator, &var message, tree, name);
+            try message.append_bytes(self.allocator, " cannot have static parameters");
+        },
+        GpuExportParam(host_param) => {
+            span = host_param.span;
+            try message.append_bytes(self.allocator, "gpu export ");
+            try append_function_name(self.allocator, &var message, tree, host_param.name);
+            try message.append_bytes(self.allocator, " parameter ");
+            try fmt::append_i64(self.allocator, &var message, host_param.index);
+            try message.append_bytes(self.allocator, " has type ");
+            try self.append_checker_type(&var message, host_param.type_name);
+            try message.append_bytes(self.allocator,
+                "; a gpu export takes integer or f32 values, views of them, and `&var` views"
+            );
+        },
+        GpuExportReturn(named) => {
+            span = named.span;
+            try message.append_bytes(self.allocator, "gpu export ");
+            try append_function_name(self.allocator, &var message, tree, named.name);
+            try message.append_bytes(self.allocator, " returns ");
+            try self.append_checker_type(&var message, named.type_name);
+            try message.append_bytes(self.allocator, "; a gpu export returns void");
         },
         BrowserHostReturn(named) => {
             span = named.span;

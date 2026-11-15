@@ -19,6 +19,15 @@
 #      on LLVM, which `kizu build` defaults to only where the direct backend
 #      is not the target's.
 #
+# Step 1's test and steps 2-4 use nothing of each other, so the full form
+# runs them as two lanes side by side: the seed test, and stage1's build with
+# all that follows it. Each lane writes its own log, shown once both are done,
+# and the run fails if either lane does. The seed test lane gets a TMPDIR and
+# a build cache of its own (a subdirectory of KIZU_CACHE_DIR, which the cache
+# does not read, or target/seed/seed-test-cache when it is unset): the two
+# lanes test the same compiler/, and the scratch names they write are stamped
+# with the time, not the process.
+#
 # --check-only stops after the seed and stage1 have checked compiler/; nothing
 # is tested. --stage1-only builds stage1 and nothing else. Either way stage1
 # is left at target/seed/stage1/bin/kizu.
@@ -46,26 +55,76 @@ echo "seed: $(KIZU_LIB_DIR='' "$seed" version)"
 scripts/gen-selfhost-version.sh
 
 if [ "$mode" != stage1 ]; then KIZU_LIB_DIR='' "$seed" check compiler; fi
-if [ "$mode" = full ]; then KIZU_LIB_DIR='' "$seed" test compiler; fi
 
 stage1="$root/target/seed/stage1/bin/kizu"
-rm -rf "$root/target/seed/stage1"
-mkdir -p "$(dirname "$stage1")"
-KIZU_LIB_DIR='' "$seed" build --target native -o "$stage1" compiler
-
-export KIZU_LIB_DIR="$root/lib/kizu"
-echo "stage1: $("$stage1" version)"
-if [ "$mode" = stage1 ]; then exit 0; fi
-"$stage1" check compiler
-if [ "$mode" = check ]; then exit 0; fi
-"$stage1" test compiler
-scripts/check-sources.sh "$stage1"
-
-"$stage1" test compiler/tests/harness
-"$stage1" run compiler/tests/harness -- behavior "$stage1"
-
 stage2="$root/target/seed/stage2/bin/kizu"
-rm -rf "$root/target/seed/stage2"
-mkdir -p "$(dirname "$stage2")"
-"$stage1" build --target native --backend llvm -o "$stage2" compiler
-"$stage1" run compiler/tests/harness -- bootstrap "$stage2"
+
+stage1_lane() {
+  rm -rf "$root/target/seed/stage1"
+  mkdir -p "$(dirname "$stage1")"
+  KIZU_LIB_DIR='' "$seed" build --target native -o "$stage1" compiler
+
+  export KIZU_LIB_DIR="$root/lib/kizu"
+  echo "stage1: $("$stage1" version)"
+  if [ "$mode" = stage1 ]; then return 0; fi
+  "$stage1" check compiler
+  if [ "$mode" = check ]; then return 0; fi
+  "$stage1" test compiler
+  scripts/check-sources.sh "$stage1"
+
+  "$stage1" test compiler/tests/harness
+  "$stage1" run compiler/tests/harness -- behavior "$stage1"
+
+  rm -rf "$root/target/seed/stage2"
+  mkdir -p "$(dirname "$stage2")"
+  "$stage1" build --target native --backend llvm -o "$stage2" compiler
+  "$stage1" run compiler/tests/harness -- bootstrap "$stage2"
+}
+
+seed_test_lane() {
+  export KIZU_CACHE_DIR="$seed_test_cache"
+  export TMPDIR="$lanes/seed-test.tmp"
+  mkdir -p "$KIZU_CACHE_DIR" "$TMPDIR"
+  KIZU_LIB_DIR='' "$seed" test compiler
+}
+
+if [ "$mode" != full ]; then
+  stage1_lane
+  exit 0
+fi
+
+lanes="$root/target/seed/lanes"
+rm -rf "$lanes"
+mkdir -p "$lanes"
+if [ -n "${KIZU_CACHE_DIR:-}" ]; then
+  seed_test_cache="$KIZU_CACHE_DIR/seed-test"
+else
+  seed_test_cache="$root/target/seed/seed-test-cache"
+fi
+
+(set -x; seed_test_lane) >"$lanes/seed-test.log" 2>&1 &
+seed_test_pid=$!
+(set -x; stage1_lane) >"$lanes/stage1.log" 2>&1 &
+stage1_pid=$!
+trap 'kill "$seed_test_pid" "$stage1_pid" 2>/dev/null' INT TERM
+
+seed_test_status=0
+wait "$seed_test_pid" || seed_test_status=$?
+stage1_status=0
+wait "$stage1_pid" || stage1_status=$?
+trap - INT TERM
+
+for lane in seed-test stage1; do
+  echo "==> lane $lane ($lanes/$lane.log)"
+  cat "$lanes/$lane.log"
+done
+failed=0
+if [ "$seed_test_status" -ne 0 ]; then
+  echo "lane seed-test failed with status $seed_test_status; its last command is the one above that failed" >&2
+  failed=1
+fi
+if [ "$stage1_status" -ne 0 ]; then
+  echo "lane stage1 failed with status $stage1_status; its last command is the one above that failed" >&2
+  failed=1
+fi
+exit "$failed"

@@ -1,12 +1,3 @@
-// A TLS 1.3 connection (RFC 8446), either side: the record layer that
-// seals and opens records under the keys the schedule in
-// key_schedule.kizu derives, the buffers a socket's bytes pass through
-// on their way to being messages, and what both sides do after the
-// handshake -- application data, key updates, alerts, closing. The
-// handshakes themselves are client.kizu and server.kizu, each driving
-// its own machine from handshake.kizu.
-
-// Alert descriptions (RFC 8446 §6.2).
 fn alert_close_notify() -> u8 {
     return 0;
 }
@@ -65,25 +56,16 @@ pub enum Role {
 pub struct Connection {
     stream: std::net::TcpStream,
     role: std::tls::Role,
-    // The client's state, read when the role is Client, and the
-    // server's when it is Server.
     state: std::tls::State,
     server_state: std::tls::ServerState,
     suite: std::tls::CipherSuite,
-    // The handshake messages so far, laid end to end, for the transcript
-    // hash; emptied once the handshake is done.
     transcript: std::string::String,
-    // Bytes read from the socket and not yet taken as records.
     inbound: std::string::String,
     inbound_at: i64,
-    // Handshake content opened from records and not yet taken as messages.
     handshake: std::string::String,
     handshake_at: i64,
-    // Application data opened from records and not yet handed out.
     plain: std::string::String,
     plain_at: i64,
-    // The secrets and keys of each direction; an empty read key is a
-    // handshake still in the clear.
     read_secret: std::string::String,
     read_key: std::string::String,
     read_iv: std::string::String,
@@ -93,19 +75,13 @@ pub struct Connection {
     write_iv: std::string::String,
     write_sequence: i64,
     handshake_secret: std::string::String,
-    // The peer's public key, from the first certificate of its chain,
-    // and what kind it is; a client's, for the server's CertificateVerify.
     peer_key: std::string::String,
     peer_key_algorithm: std::crypto::x509::KeyAlgorithm,
     certificate_requested: bool,
-    // The host the client asked for in its server_name; a server's.
     server_name: std::string::String,
-    // Where the handshake draws its randomness (entropy.kizu).
     entropy: std::tls::Entropy,
 }
 
-// new_connection is a connection over `stream` with nothing done yet,
-// drawing from `entropy`.
 fn new_connection(
     allocator: Allocator,
     stream: std::net::TcpStream,
@@ -142,8 +118,6 @@ fn new_connection(
     };
 }
 
-// connected reports whether the handshake is done and the connection
-// open, whichever side this is.
 fn (self: &std::tls::Connection) connected() -> bool {
     if self.role == Role::Client {
         return self.state == std::tls::State::Connected;
@@ -195,8 +169,6 @@ pub fn (self: &std::tls::Connection) cipher_suite() -> std::tls::CipherSuite {
     return self.suite;
 }
 
-// advance_with moves the state machine by `event`, or sends the alert a
-// refusal calls for and fails.
 fn (self: &var std::tls::Connection) advance_with(
     io: Io,
     allocator: Allocator,
@@ -215,7 +187,6 @@ fn (self: &var std::tls::Connection) advance_with(
     return;
 }
 
-// advance_server_with is `advance_with` for the server's machine.
 fn (self: &var std::tls::Connection) advance_server_with(
     io: Io,
     allocator: Allocator,
@@ -230,9 +201,6 @@ fn (self: &var std::tls::Connection) advance_server_with(
     return;
 }
 
-// advance_shared moves whichever machine this side runs by an event
-// both sides can meet after the handshake: application data, an alert,
-// a key update. What a client alone takes, a server refuses.
 fn (self: &var std::tls::Connection) advance_shared(
     io: Io,
     allocator: Allocator,
@@ -250,8 +218,6 @@ fn (self: &var std::tls::Connection) advance_shared(
     return std::tls::Error::UnexpectedMessage;
 }
 
-// server_event_of is the server's event for one a client sees too, or
-// null for a message only a server sends.
 fn server_event_of(event: std::tls::Event) -> ?std::tls::ServerEvent {
     match event {
         Certificate => return std::tls::ServerEvent::Certificate,
@@ -266,15 +232,12 @@ fn server_event_of(event: std::tls::Event) -> ?std::tls::ServerEvent {
     return null;
 }
 
-// hash_transcript writes the hash of the handshake so far.
 fn (self: &std::tls::Connection) hash_transcript(out: &var []u8) -> void {
     let transcript = self.transcript.as_bytes();
     std::tls::transcript_hash(transcript, out);
     return;
 }
 
-// agree_or_alert writes the x25519 shared secret, or alerts on a point
-// of low order.
 fn (self: &var std::tls::Connection) agree_or_alert(
     io: Io,
     allocator: Allocator,
@@ -290,7 +253,6 @@ fn (self: &var std::tls::Connection) agree_or_alert(
     }
 }
 
-// install_read_secret derives a read traffic secret and its keys.
 fn (self: &var std::tls::Connection) install_read_secret(
     allocator: Allocator,
     base: []u8,
@@ -323,8 +285,6 @@ fn (self: &var std::tls::Connection) install_write_secret(
     return;
 }
 
-// rekey_read derives the read key and IV from the read secret and
-// starts the sequence over.
 fn (self: &var std::tls::Connection) rekey_read(allocator: Allocator) -> std::mem::Error!void {
     var key_buffer = [32]u8{};
     var iv_buffer = [12]u8{};
@@ -369,7 +329,6 @@ fn (self: &std::tls::Connection) derive_write_keys(key: &var []u8, iv: &var []u8
     return;
 }
 
-// derive_keys is traffic_key with the key cut to the suite's length.
 fn derive_keys(suite: std::tls::CipherSuite, secret: []u8, key: &var []u8, iv: &var []u8) -> void {
     if std::tls::key_length(suite) == 16 {
         var short_buffer = [16]u8{};
@@ -384,7 +343,6 @@ fn derive_keys(suite: std::tls::CipherSuite, secret: []u8, key: &var []u8, iv: &
     return;
 }
 
-// scheme_hash is the hash a verifiable scheme signs over.
 fn scheme_hash(scheme: i64) -> std::crypto::Hash {
     if scheme == std::tls::signature_rsa_pss_rsae_sha384()
         or scheme == std::tls::signature_ecdsa_secp384r1_sha384() {
@@ -409,8 +367,6 @@ fn (self: &var std::tls::Connection) check_finished_shape(
     }
 }
 
-// finished_matches reports whether the peer's verify_data is what the
-// transcript so far calls for under its handshake secret.
 fn (self: &std::tls::Connection) finished_matches(verify_data: []u8) -> bool {
     var hash_buffer = [32]u8{};
     let hash = hash_buffer.as_mut_bytes();
@@ -424,9 +380,6 @@ fn (self: &std::tls::Connection) finished_matches(verify_data: []u8) -> bool {
     return std::crypto::equal_constant_time(expected_bytes, verify_data);
 }
 
-// derive_application_secrets writes the server's and the client's
-// application traffic secrets from the master secret and the transcript
-// through the server's Finished, which both sides derive at that point.
 fn (self: &std::tls::Connection) derive_application_secrets(server: &var []u8, client: &var []u8) -> void {
     var master_buffer = [32]u8{};
     let master = master_buffer.as_mut_bytes();
@@ -442,8 +395,6 @@ fn (self: &std::tls::Connection) derive_application_secrets(server: &var []u8, c
     return;
 }
 
-// own_finished writes this side's verify_data over the transcript so
-// far under its handshake secret.
 fn (self: &std::tls::Connection) own_finished(out: &var []u8) -> void {
     var hash_buffer = [32]u8{};
     let hash = hash_buffer.as_mut_bytes();
@@ -454,9 +405,6 @@ fn (self: &std::tls::Connection) own_finished(out: &var []u8) -> void {
     return;
 }
 
-// certificate_verify_digest writes the digest under `kind` of what a
-// server's CertificateVerify signs: 64 spaces, the context string, a
-// zero, and the transcript hash so far (RFC 8446 §4.4.3).
 fn (self: &std::tls::Connection) certificate_verify_digest(
     allocator: Allocator,
     kind: std::crypto::Hash,
@@ -493,8 +441,6 @@ fn (self: &var std::tls::Connection) set_write_secret(allocator: Allocator, secr
     return;
 }
 
-// take_key_update turns the read secret over (RFC 8446 §7.2) and, when
-// the peer asked, does the same for the write secret after telling it.
 fn (self: &var std::tls::Connection) take_key_update(
     io: Io,
     allocator: Allocator,
@@ -545,8 +491,6 @@ fn (self: &var std::tls::Connection) update_write_secret(allocator: Allocator) -
     return;
 }
 
-// next_secret writes the secret that follows the read or the write
-// secret in a key update (RFC 8446 §7.2).
 fn (self: &std::tls::Connection) next_secret(read: bool, out: &var []u8) -> void {
     if read {
         let secret = self.read_secret.as_bytes();
@@ -558,8 +502,6 @@ fn (self: &std::tls::Connection) next_secret(read: bool, out: &var []u8) -> void
     return;
 }
 
-// next_handshake_message takes records until one whole handshake
-// message is held and copies it to `out`.
 fn (self: &var std::tls::Connection) next_handshake_message(
     io: Io,
     allocator: Allocator,
@@ -588,9 +530,6 @@ fn (self: &var std::tls::Connection) next_handshake_message(
     return;
 }
 
-// next_handshake_message_ready is `next_handshake_message` for a caller
-// that must not wait: false when no whole message has arrived, with the
-// bytes so far kept.
 fn (self: &var std::tls::Connection) next_handshake_message_ready(
     io: Io,
     allocator: Allocator,
@@ -619,15 +558,12 @@ fn (self: &var std::tls::Connection) next_handshake_message_ready(
     return false;
 }
 
-// pending_message_length is the length of the next whole handshake
-// message held, or null when none is whole yet.
 fn (self: &std::tls::Connection) pending_message_length() -> ?i64 {
     let held = self.handshake.as_bytes();
     let pending = held[self.handshake_at..std::mem::len(held)];
     return std::tls::message_length(pending);
 }
 
-// copy_pending appends the next `length` held handshake bytes to `out`.
 fn (self: &std::tls::Connection) copy_pending(
     allocator: Allocator,
     out: &var std::string::String,
@@ -638,9 +574,6 @@ fn (self: &std::tls::Connection) copy_pending(
     return;
 }
 
-// take_other_record handles a record that is not handshake content: a
-// change_cipher_spec is ignored (RFC 8446 §5), an alert closes, and
-// application data before the handshake is done is out of order.
 fn (self: &var std::tls::Connection) take_other_record(
     io: Io,
     allocator: Allocator,
@@ -666,8 +599,6 @@ fn (self: &var std::tls::Connection) take_other_record(
     return std::tls::Error::UnexpectedMessage;
 }
 
-// take_alert reads an alert: close_notify ends the connection cleanly
-// (`Error::Closed`), anything else is the peer's fatal alert.
 fn (self: &var std::tls::Connection) take_alert(
     io: Io,
     allocator: Allocator,
@@ -685,8 +616,6 @@ fn (self: &var std::tls::Connection) take_alert(
     return std::tls::Error::Alert;
 }
 
-// read_record takes one record off the socket, opens it when the keys
-// are on, appends its content to `out`, and returns its type.
 fn (self: &var std::tls::Connection) read_record(
     io: Io,
     allocator: Allocator,
@@ -720,13 +649,11 @@ fn (self: &var std::tls::Connection) read_record(
     }
 }
 
-// held_byte is byte `offset` of the record at the front of what is held.
 fn (self: &std::tls::Connection) held_byte(offset: i64) -> u8 {
     let held = self.inbound.as_bytes();
     return held[self.inbound_at + offset];
 }
 
-// copy_held appends bytes `from` up to `to` of the record at the front.
 fn (self: &std::tls::Connection) copy_held(
     allocator: Allocator,
     out: &var std::string::String,
@@ -738,8 +665,6 @@ fn (self: &std::tls::Connection) copy_held(
     return;
 }
 
-// open_held opens the `length` bytes of record at the front under the
-// read keys and returns the content type.
 fn (self: &std::tls::Connection) open_held(
     allocator: Allocator,
     out: &var std::string::String,
@@ -753,7 +678,6 @@ fn (self: &std::tls::Connection) open_held(
     return opened;
 }
 
-// consume drops `count` bytes from the front of what is held.
 fn (self: &var std::tls::Connection) consume(count: i64) -> void {
     self.inbound_at = self.inbound_at + count;
     if self.inbound_at == self.inbound.len() {
@@ -763,8 +687,6 @@ fn (self: &var std::tls::Connection) consume(count: i64) -> void {
     return;
 }
 
-// fill reads from the socket until `count` bytes are held past what
-// has been taken. The socket closing first is `Error::Closed`.
 fn (self: &var std::tls::Connection) fill(io: Io, allocator: Allocator, count: i64) -> std::tls::Failure!void {
     while self.inbound.len() - self.inbound_at < count {
         let got = try self.stream.read_into(io, allocator, &var self.inbound, 16384 + 256 + 5);
@@ -776,8 +698,6 @@ fn (self: &var std::tls::Connection) fill(io: Io, allocator: Allocator, count: i
     return;
 }
 
-// fill_ready is `fill` for a caller that must not wait: false when the
-// bytes have not all arrived yet.
 fn (self: &var std::tls::Connection) fill_ready(io: Io, allocator: Allocator, count: i64) -> std::tls::Failure!bool {
     while self.inbound.len() - self.inbound_at < count {
         let got = try self.stream.read_ready(io, allocator, &var self.inbound, 16384 + 256 + 5) orelse return false;
@@ -789,8 +709,6 @@ fn (self: &var std::tls::Connection) fill_ready(io: Io, allocator: Allocator, co
     return true;
 }
 
-// read_record_ready is `read_record` for a caller that must not wait: null
-// when the record has not all arrived, its bytes so far kept.
 fn (self: &var std::tls::Connection) read_record_ready(
     io: Io,
     allocator: Allocator,
@@ -811,8 +729,6 @@ fn (self: &var std::tls::Connection) read_record_ready(
     return kind;
 }
 
-// send writes one record of `content`: in the clear before the keys are
-// on, sealed after.
 fn (self: &var std::tls::Connection) send(
     io: Io,
     allocator: Allocator,
@@ -832,9 +748,6 @@ fn (self: &var std::tls::Connection) send(
     return;
 }
 
-// send_plain writes one record of `content` in the clear, whatever keys
-// are on: the hellos, and the change_cipher_spec of §D.4. The record
-// version is the 0x0303 every TLS 1.3 record carries (§5.1).
 fn (self: &var std::tls::Connection) send_plain(
     io: Io,
     allocator: Allocator,
@@ -855,7 +768,6 @@ fn (self: &var std::tls::Connection) send_plain(
     return;
 }
 
-// seal appends one record of `content` sealed under the write keys.
 fn (self: &std::tls::Connection) seal(
     allocator: Allocator,
     content_type: u8,
@@ -868,8 +780,6 @@ fn (self: &std::tls::Connection) seal(
     return;
 }
 
-// fail sends a fatal alert and closes the connection's state. What the
-// send itself fails with is not the failure being reported, and is not.
 fn (self: &var std::tls::Connection) fail(io: Io, allocator: Allocator, description: u8) -> std::mem::Error!void {
     if self.closed() {
         return;
@@ -960,9 +870,6 @@ pub fn (self: &var std::tls::Connection) read_ready(
     return count;
 }
 
-// take_record keeps one opened record: application data is held for the
-// caller, handshake content is taken as post-handshake messages, and the
-// rest is judged; true is the peer's close_notify.
 fn (self: &var std::tls::Connection) take_record(
     io: Io,
     allocator: Allocator,
@@ -987,7 +894,6 @@ fn (self: &var std::tls::Connection) take_record(
     return false;
 }
 
-// take_plain hands out up to `max` of the application data held.
 fn (self: &var std::tls::Connection) take_plain(
     allocator: Allocator,
     out: &var std::string::String,
@@ -1002,7 +908,6 @@ fn (self: &var std::tls::Connection) take_plain(
     return take;
 }
 
-// copy_plain appends the next `count` bytes of application data held.
 fn (self: &std::tls::Connection) copy_plain(
     allocator: Allocator,
     out: &var std::string::String,
@@ -1013,8 +918,6 @@ fn (self: &std::tls::Connection) copy_plain(
     return;
 }
 
-// take_post_handshake handles the handshake messages held after the
-// handshake: NewSessionTicket is taken and ignored, KeyUpdate applied.
 fn (self: &var std::tls::Connection) take_post_handshake(io: Io, allocator: Allocator) -> std::tls::Failure!void {
     while true {
         let length = self.pending_message_length() orelse return;

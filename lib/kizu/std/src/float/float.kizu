@@ -1,16 +1,3 @@
-// Floating-point values as text, and the bits underneath.
-//
-// A float is a sign, an exponent, and a mantissa laid out in 64 bits by IEEE
-// 754. `bits` and `from_bits` are the one place that layout is visible: a
-// `cast` converts the value, not its representation. They are the two trusted
-// primitives everything else here rests on.
-//
-// `append` writes the shortest decimal that reads back as the same value, and
-// `parse` reads a decimal to the nearest value, rounding to even on a tie.
-// Both are exact: the digit loops run on integers of unbounded width, never
-// on floats whose rounding would have to be argued about. That costs a few
-// allocations per conversion and buys the same answer on every target.
-
 // bits returns the IEEE 754 binary64 representation of value.
 pub fn bits(value: f64) -> u64 {
     return std::internal::builtin::f64_bits(value);
@@ -21,8 +8,14 @@ pub fn from_bits(bits: u64) -> f64 {
     return std::internal::builtin::f64_from_bits(bits);
 }
 
-// The bias of the exponent field and the exponent of the smallest subnormal
-// step, as binary64 lays them out.
+pub fn bits_f32(value: f32) -> u32 {
+    return std::internal::builtin::f32_bits(value);
+}
+
+pub fn from_bits_f32(bits: u32) -> f32 {
+    return std::internal::builtin::f32_from_bits(bits);
+}
+
 fn exponent_bias() -> i64 { return 1075; }
 
 fn min_exponent() -> i64 { return -1074; }
@@ -116,7 +109,6 @@ fn signed(value: f64, negative: bool) -> f64 {
     return value;
 }
 
-// A Scan walks the text once, left to right.
 struct Scan {
     text: []u8,
     index: i64,
@@ -134,9 +126,6 @@ fn (self: &Scan) rest_is(word: []u8) -> bool {
     return std::mem::equal_bytes(rest, word);
 }
 
-// A Decimal is the significant digits of a number, most significant first
-// and without leading zeros, and the power of ten the digit string is
-// multiplied by: the value is digits * 10^exponent.
 struct Decimal {
     digits: std::array::Array<u8>,
     exponent: i64,
@@ -147,8 +136,6 @@ fn (self: Decimal) deinit(allocator: Allocator) -> void {
     return;
 }
 
-// read_decimal reads `digits[.digits][e[+-]digits]`, requiring at least one
-// digit before the exponent, and reports whether the text had that shape.
 fn (self: &var Scan) read_decimal(allocator: Allocator, out: &var Decimal) -> std::mem::Error!bool {
     var seen_digit = false;
     var seen_dot = false;
@@ -174,8 +161,6 @@ fn (self: &var Scan) read_decimal(allocator: Allocator, out: &var Decimal) -> st
         if out.digits.len() == 0 and ch == cast<u8>(48) {
             continue;
         }
-        // Digits past the 800th cannot move the nearest double, but a nonzero
-        // one still decides a tie, so it is kept as a sticky 1.
         if out.digits.len() >= 800 {
             dropped = dropped + 1;
             if seen_dot {
@@ -230,8 +215,6 @@ fn (self: &var Scan) read_decimal(allocator: Allocator, out: &var Decimal) -> st
             out.exponent = out.exponent + power;
         }
     }
-    // Trailing zeros of the digit string move into the exponent so the
-    // integer the digits spell is as small as it can be.
     while out.digits.len() > 0 and out.digits.get_or_panic(out.digits.len() - 1) == 0 {
         let _ = out.digits.pop();
         out.exponent = out.exponent + 1;
@@ -239,15 +222,11 @@ fn (self: &var Scan) read_decimal(allocator: Allocator, out: &var Decimal) -> st
     return true;
 }
 
-// decimal_to_f64 converts digits * 10^exponent to the nearest double.
 fn decimal_to_f64(allocator: Allocator, decimal: &Decimal) -> std::mem::Error!f64 {
     let count = decimal.digits.len();
     if count == 0 {
         return 0.0;
     }
-    // The magnitude is between 10^(count + exponent - 1) and 10^(count +
-    // exponent); past 309 digits it is beyond the largest double, and below
-    // 10^-325 it rounds to zero even from the last subnormal.
     let magnitude = count + decimal.exponent;
     if magnitude > 310 {
         return from_bits(infinity_bits());
@@ -270,14 +249,10 @@ fn decimal_to_f64(allocator: Allocator, decimal: &Decimal) -> std::mem::Error!f6
             return cast<f64>(leading) / exact_power_of_ten(0 - scale);
         }
     }
-    // Anything else starts from an approximation and is corrected by exact
-    // comparison until the double is the nearest one (Clinger's AlgorithmR).
     let guess = approximate_scaled(cast<f64>(leading), scale);
     return refine(allocator, decimal, guess);
 }
 
-// exact_power_of_ten returns 10^n for 0 <= n <= 22, every one of which a
-// double holds exactly.
 fn exact_power_of_ten(n: i64) -> f64 {
     var value = 1.0;
     var index = 0;
@@ -288,10 +263,6 @@ fn exact_power_of_ten(n: i64) -> f64 {
     return value;
 }
 
-// approximate_scaled returns leading * 10^scale within a few units of the
-// last place, which is all a starting guess needs. The scaling is applied to
-// the value a chunk at a time, so no intermediate overflows or vanishes
-// unless the result itself does.
 fn approximate_scaled(leading: f64, scale: i64) -> f64 {
     var value = leading;
     var remaining = scale;
@@ -312,16 +283,11 @@ fn approximate_scaled(leading: f64, scale: i64) -> f64 {
     return value;
 }
 
-// refine moves guess one unit in the last place at a time toward the exact
-// value of the decimal until it is the nearest double. Each step compares the
-// two as integers, so the answer does not depend on how good the guess was.
 fn refine(allocator: Allocator, decimal: &Decimal, guess: f64) -> std::mem::Error!f64 {
     var current = bits(guess) & ~sign_bit();
     if current >= infinity_bits() {
         current = infinity_bits() - 1;
     }
-    // Each step moves one unit toward the exact value and never past it, so
-    // the loop ends; a good guess makes it end in one or two steps.
     while true {
         let direction = try compare_to_double(allocator, decimal, current);
         if direction == 0 {
@@ -339,10 +305,6 @@ fn refine(allocator: Allocator, decimal: &Decimal, guess: f64) -> std::mem::Erro
     return from_bits(current);
 }
 
-// compare_to_double decides where the exact decimal lies relative to the
-// double with bit pattern raw: 0 when raw is the nearest double, 1 when the
-// next double up is nearer (or equally near with raw odd), -1 when the next
-// one down is.
 fn compare_to_double(allocator: Allocator, decimal: &Decimal, raw: u64) -> std::mem::Error!i64 {
     let field = cast<i64>(raw >> 52);
     var mantissa = raw & fraction_mask();
@@ -351,9 +313,6 @@ fn compare_to_double(allocator: Allocator, decimal: &Decimal, raw: u64) -> std::
         mantissa = mantissa | hidden_bit();
         exponent = field - exponent_bias();
     }
-    // x = digits * 10^e10, z = m * 2^k. Both become integers under one common
-    // scale, along with the unit u = 2^k and the half unit below z when z is
-    // a power of two and the gap beneath it is half the size.
     var x = try big_from_digits(allocator, &decimal.digits);
     defer x.deinit(allocator);
     var z = try big_from_u64(allocator, mantissa);
@@ -379,8 +338,6 @@ fn compare_to_double(allocator: Allocator, decimal: &Decimal, raw: u64) -> std::
     var gap = try big_difference(allocator, &x, &z);
     defer gap.deinit(allocator);
     try gap.shl(allocator, 1);
-    // Below a power of two the neighbour is half a unit away, so the tie
-    // point is a quarter of the unit rather than half.
     if order < 0 and mantissa == hidden_bit() and exponent > min_exponent() {
         try gap.shl(allocator, 1);
     }
@@ -394,11 +351,6 @@ fn compare_to_double(allocator: Allocator, decimal: &Decimal, raw: u64) -> std::
     return order;
 }
 
-// shortest_digits writes the shortest digit string that reads back as the
-// double with bit pattern raw (positive, finite, nonzero), and the position of
-// the decimal point: the value is 0.d1d2...dn * 10^point. This is the
-// free-format algorithm of Steele and White with Burger and Dybvig's exact
-// integer scaling.
 fn shortest_digits(
     allocator: Allocator,
     raw: u64,
@@ -414,9 +366,6 @@ fn shortest_digits(
     }
     let even = mantissa & 1 == 0;
     let unequal_gaps = mantissa == hidden_bit() and field > 1;
-    // r / s is the value, and (r - m_minus) / s and (r + m_plus) / s are the
-    // midpoints to the neighbouring doubles, all scaled by the same 2 (or 4
-    // when the lower gap is half the upper one).
     var r = try big_from_u64(allocator, mantissa);
     defer r.deinit(allocator);
     var s = try big_from_u64(allocator, 1);
@@ -444,8 +393,6 @@ fn shortest_digits(
             try s.shl(allocator, 1);
         }
     }
-    // Estimate the decimal exponent from the binary one; the estimate is at
-    // most one too small, and the check below corrects that.
     let estimate = estimate_point(mantissa, exponent);
     if estimate >= 0 {
         try s.mul_pow10(allocator, estimate);
@@ -495,7 +442,6 @@ fn shortest_digits(
             try digits.append(allocator, cast<u8>(digit + 1));
             return;
         }
-        // Both neighbours are in range: pick the one nearer to the value.
         var twice = try big_clone(allocator, &r);
         defer twice.deinit(allocator);
         try twice.shl(allocator, 1);
@@ -510,9 +456,6 @@ fn shortest_digits(
     return;
 }
 
-// estimate_point returns ceil(log10(m * 2^e)) computed from the binary
-// exponent alone, minus a hair so it is never too large; the caller fixes an
-// estimate that is one too small.
 fn estimate_point(mantissa: u64, exponent: i64) -> i64 {
     var width = 0;
     var probe = mantissa;
@@ -528,8 +471,6 @@ fn estimate_point(mantissa: u64, exponent: i64) -> i64 {
     return estimate;
 }
 
-// append_decimal renders digits and the point position in the spelling
-// `append` promises.
 fn append_decimal(
     allocator: Allocator,
     out: &var std::string::String,
@@ -596,8 +537,6 @@ fn append_integer(allocator: Allocator, out: &var std::string::String, value: i6
     return out.append_byte(allocator, cast<u8>(48 + value % 10));
 }
 
-// A Big is a non-negative integer of unbounded width: base 2^32 limbs, least
-// significant first, with no zero limb on top.
 struct Big {
     limbs: std::array::Array<u32>,
 }
@@ -623,8 +562,6 @@ fn big_from_digits(allocator: Allocator, digits: &std::array::Array<u8>) -> std:
     var big = try big_from_u64(allocator, 0);
     errdefer big.deinit(allocator);
     var index = 0;
-    // Nine digits at a time: 10^9 fits a limb, so each step is one multiply
-    // and one add across the limbs.
     while index < digits.len() {
         var chunk = cast<u32>(0);
         var factor = cast<u32>(1);
@@ -652,7 +589,6 @@ fn big_clone(allocator: Allocator, source: &Big) -> std::mem::Error!Big {
     return Big { limbs: move limbs };
 }
 
-// big_difference returns |left - right| as a new integer.
 fn big_difference(allocator: Allocator, left: &Big, right: &Big) -> std::mem::Error!Big {
     if big_compare(left, right) >= 0 {
         var out = try big_clone(allocator, left);
@@ -664,7 +600,6 @@ fn big_difference(allocator: Allocator, left: &Big, right: &Big) -> std::mem::Er
     return move out;
 }
 
-// store_limb overwrites one limb; index is always within the array here.
 fn store_limb(limbs: &var std::array::Array<u32>, index: i64, value: u32) -> void {
     if limbs.at_mut(index) |slot| {
         slot.* = value;
@@ -732,7 +667,6 @@ fn (self: &var Big) add(allocator: Allocator, other: &Big) -> std::mem::Error!vo
     return;
 }
 
-// sub subtracts other from self, which must not be smaller.
 fn (self: &var Big) sub(other: &Big) -> void {
     var borrow = cast<u64>(0);
     var index = 0;
@@ -775,8 +709,6 @@ fn (self: &var Big) shl(allocator: Allocator, count: i64) -> std::mem::Error!voi
         }
     }
     if whole > 0 {
-        // Make room on top, then move every limb up by `whole` places and
-        // zero the bottom.
         var added = 0;
         while added < whole {
             try self.limbs.append(allocator, cast<u32>(0));
@@ -810,7 +742,6 @@ fn (self: &var Big) mul_pow10(allocator: Allocator, count: i64) -> std::mem::Err
     return;
 }
 
-// big_compare returns -1, 0, or 1 as left is below, equal to, or above right.
 fn big_compare(left: &Big, right: &Big) -> i64 {
     if left.limbs.len() != right.limbs.len() {
         if left.limbs.len() < right.limbs.len() {
