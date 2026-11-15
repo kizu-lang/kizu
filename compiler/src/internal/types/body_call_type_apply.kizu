@@ -16,14 +16,8 @@ struct CheckedStaticArgs {
     bindings: StaticBindings,
 }
 
-// StaticBindings is what one call binds the compile-time value parameters of a
-// generic to: fields, function names, and integer or bool values. Each is part
-// of which instance the call names, and each is readable in that instance's
-// body through the form that reads it.
 struct StaticBindings {
     fields: map::Map<[]u8, MetaFieldHandle>,
-    // What each `Function` static parameter of this call was given. A body
-    // that calls one is checked against the function it names.
     functions: map::Map<[]u8, string::String>,
     values: map::Map<[]u8, ComptimeValue>,
 }
@@ -83,7 +77,6 @@ union CheckedFieldStaticArgResult {
     Problem(diagnostic::Diagnostic),
 }
 
-// Validates a call target with explicit static arguments.
 fn (self: &var Checker) check_type_apply_call_expr(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -98,8 +91,6 @@ fn (self: &var Checker) check_type_apply_call_expr(
     if try self.reject_unknown_builtin(name_bytes) |problem| {
         return move problem;
     }
-    // A resolved list (ast::TypeApplyExpr) is bound already, so nothing in it
-    // is read through the type parameters in force.
     var instantiated = string::new(self.allocator);
     defer instantiated.deinit(self.allocator);
     if expression.resolved {
@@ -332,13 +323,6 @@ fn (self: &Checker) pointer_cast_arg_error(
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-// Adds where a generic body was instantiated to an error found while checking
-// it. Each call the error passes through appends its instance, so a chain of
-// std generics reads outward from the body that failed to the call the program
-// wrote. An error raised with no position of its own --
-// `std::meta::unsupported<T>()` names a type, not a line -- takes the first
-// call outside std it reaches: that is the line the program can change, and a
-// position inside std would send the reader into the library.
 fn (self: &Checker) annotate_instantiation(
     problem: diagnostic::Diagnostic,
     span: ast::Span,
@@ -369,8 +353,6 @@ fn (self: &Checker) annotate_instantiation(
     return move annotated;
 }
 
-// Reports whether the body being checked belongs to the standard library,
-// the one package with the `std::` root.
 fn (self: &Checker) checking_std() -> bool {
     if self.current_function_handle() |handle| {
         if self.metadata.functions.at(handle.index) |function| {
@@ -381,7 +363,6 @@ fn (self: &Checker) checking_std() -> bool {
     return false;
 }
 
-// Validates a source generic call with explicit static arguments.
 fn (self: &var Checker) check_generic_user_type_apply(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -475,9 +456,6 @@ fn (self: &var Checker) check_generic_user_type_apply_checked(
     ) |problem| {
         return move problem;
     }
-    // A type argument that stands for the set of an `E!T` has to be a set.
-    // Said here, before any argument is compared against a signature that
-    // could not be spelled.
     var index = 0;
     while index < facts.parameter_count {
         let declared = self.callable_param_facts(handle, index) orelse
@@ -529,10 +507,6 @@ fn (self: &var Checker) check_generic_user_type_apply_checked(
     return null;
 }
 
-// function_has_value_static_param reports whether a declaration takes a
-// compile-time value in `<...>`. Such a body means something only once the
-// value is bound: a `Function` names the callee, and an integer or bool can
-// decide a `comptime if`.
 fn (self: &Checker) function_has_value_static_param(function: FunctionHandle) -> bool {
     if self.metadata.functions.at(function.index) |value| {
         var index = 0;
@@ -560,7 +534,6 @@ fn (self: &Checker) function_return_type(function: FunctionHandle) -> Type {
     return empty_type();
 }
 
-// A resolved list (ast::TypeApplyExpr) names its fields directly.
 fn (self: &var Checker) check_static_args(
     tree: &ast::Ast,
     function: FunctionHandle,
@@ -594,8 +567,6 @@ fn (self: &var Checker) check_static_args(
     return CheckedStaticArgsResult::Value(move checked);
 }
 
-// Checks one static argument against its declared parameter and records the
-// accepted value in checked.
 fn (self: &var Checker) check_static_arg(
     allocator: Allocator,
     tree: &ast::Ast,
@@ -636,7 +607,6 @@ fn (self: &var Checker) check_static_arg(
             try checked.substitutions.insert(allocator, parameter_name, resolved);
         } else {
             if self.types.is_text(parameter_type, "Field") {
-                // An expression is refused before it is read as a field name.
                 if staticexpr::is(argument_bytes) {
                     if try self.check_static_expr_arg(
                         function_name, parameter_name, parameter_type, argument_bytes
@@ -663,9 +633,6 @@ fn (self: &var Checker) check_static_arg(
                 }
             } else {
                 if self.types.is_text(parameter_type, "Function") {
-                    // The argument may itself be the `Function` parameter of
-                    // the generic doing the call, in which case the name to
-                    // record is what that one was given.
                     var target = string::new(allocator);
                     errdefer target.deinit(allocator);
                     let forwarded = try self.function_bindings.copy_target(
@@ -694,10 +661,6 @@ fn (self: &var Checker) check_static_arg(
     return null;
 }
 
-// static_value_of reads an integer or bool static argument: a literal, a
-// name bound to one where the call is written -- a static parameter of the
-// generic doing the call, or an integer-range `comptime for` capture -- or a
-// parenthesized integer expression over such names.
 fn (self: &Checker) static_value_of(argument: []u8) -> !?ComptimeValue {
     if self.comptime_values.get(argument) |bound| {
         return bound;
@@ -815,7 +778,6 @@ fn (self: &var Checker) bind_static_meta_fields(fields: &map::Map<[]u8, MetaFiel
     return;
 }
 
-// A resolved argument is a field name and never a capture.
 fn (self: &var Checker) field_static_arg(
     tree: &ast::Ast,
     function: FunctionHandle,
@@ -965,9 +927,6 @@ fn (self: &Checker) check_static_value_arg(
     );
 }
 
-// check_static_expr_arg validates a parenthesized static expression: it fills
-// an integer parameter, and every name in it is a compile-time integer where
-// the call is written.
 fn (self: &Checker) check_static_expr_arg(
     function_name: []u8,
     parameter_name: []u8,
@@ -1000,17 +959,12 @@ fn (self: &Checker) check_static_expr_arg(
     }
 }
 
-// eval_static_expr evaluates a static expression against the integers the
-// comptime-readable names stand for where the call is written. The innermost
-// binding of a name is the one in force, so the walk from the current binding
-// outward binds it first.
 fn (self: &Checker) eval_static_expr(argument: []u8) -> !staticexpr::Outcome {
     let env = try self.comptime_env();
     defer env.deinit(self.allocator);
     return staticexpr::eval(self.allocator, argument, &env);
 }
 
-// comptime_env binds the integers the comptime-readable names stand for.
 fn (self: &Checker) comptime_env() -> !staticexpr::Env {
     var env = staticexpr::new_env(self.allocator);
     errdefer env.deinit(self.allocator);
@@ -1020,7 +974,13 @@ fn (self: &Checker) comptime_env() -> !staticexpr::Env {
         let bound = binding.value;
         let name = binding.name.as_bytes();
         match bound {
-            Integer(value) => try env.bind(self.allocator, name, value),
+            Integer(value) => {
+                if self.is_length_value(name) {
+                    try env.bind(self.allocator, name, value);
+                } else {
+                    try env.hide(self.allocator, name);
+                }
+            },
             _ => try env.hide(self.allocator, name),
         }
         current = binding.parent;
@@ -1028,7 +988,11 @@ fn (self: &Checker) comptime_env() -> !staticexpr::Env {
     return move env;
 }
 
-// values_env binds the integers one call gives its static value parameters.
+fn (self: &Checker) is_length_value(name: []u8) -> bool {
+    let declared = self.static_values.get(name) orelse return true;
+    return self.types.is_text(declared, "i64");
+}
+
 fn (self: &Checker) values_env(values: &map::Map<[]u8, ComptimeValue>) -> !staticexpr::Env {
     var env = staticexpr::new_env(self.allocator);
     errdefer env.deinit(self.allocator);
@@ -1045,10 +1009,6 @@ fn (self: &Checker) values_env(values: &map::Map<[]u8, ComptimeValue>) -> !stati
     return move env;
 }
 
-// instance_type is a signature type as one instance sees it: the type
-// arguments substituted, and each array length that reads a static value
-// evaluated against values. A length values make no array stays as written;
-// check_instance_lengths refused the call that made it.
 fn (self: &var Checker) instance_type(
     declared: Type,
     substitutions: &map::Map<[]u8, Type>,
@@ -1070,9 +1030,6 @@ fn (self: &var Checker) instance_type(
     }
 }
 
-// check_instance_lengths evaluates the array lengths the instance's signature
-// reads from its static values, so a length the call makes 0 or negative is
-// refused at the call that made it.
 fn (self: &var Checker) check_instance_lengths(
     handle: FunctionHandle,
     parameter_count: i64,
@@ -1088,8 +1045,6 @@ fn (self: &var Checker) check_instance_lengths(
             declared = facts.typ;
         }
         index = index + 1;
-        // Only the declaration writes a length that waits: a type argument
-        // is a type of the caller's, whose lengths are bound.
         if !self.types.has_static_length(declared) {
             continue;
         }
@@ -1105,11 +1060,6 @@ fn (self: &var Checker) check_instance_lengths(
     return null;
 }
 
-// accepts_comptime_value reports whether a name bound to a comptime value --
-// an integer-range capture, or a static value the calling instance was given
-// -- may fill a static parameter of type want. It forwards the way a literal
-// of its kind would: a bool fills a bool parameter, an integer any other
-// value parameter, and neither names a function or a field.
 fn (self: &Checker) accepts_comptime_value(want: Type, bound: ComptimeValue) -> bool {
     if self.types.is_text(want, "Function") or self.types.is_text(want, "Field") {
         return false;
@@ -1175,7 +1125,6 @@ fn (self: &Checker) static_value_kind_error(
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-// Validates the std-only Map constructor and method primitives.
 fn (self: &var Checker) check_builtin_map_type_apply(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1602,7 +1551,6 @@ fn (self: &Checker) map_expected_arg_error(
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-// Routes std-only generic runtime primitives.
 fn (self: &var Checker) check_builtin_type_apply(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1690,11 +1638,6 @@ fn (self: &var Checker) check_builtin_type_apply(
     );
 }
 
-/// Validates `task_new<T>(io, allocator, entry, state, stack)`. The entry is a
-/// top-level function the runtime calls on the task's own stack, so what
-/// crosses is its address and the address of the state the caller lent it.
-/// Neither is a closure and neither carries a borrow of anything else, which
-/// is why the worker is told its Io and its allocator (ADR-0146).
 fn (self: &var Checker) check_task_new(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1755,8 +1698,6 @@ fn (self: &var Checker) check_task_new(
     return null;
 }
 
-/// Validates `task_set_spawn<T>(set, io, allocator, entry, state, stack)`,
-/// the owned-state counterpart of task_new.
 fn (self: &var Checker) check_task_set_spawn(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1832,11 +1773,6 @@ fn (self: &var Checker) check_task_set_spawn(
     return null;
 }
 
-/// Validates `thread_pool_each<T, E>(pool, data, chunk, worker)` and, with
-/// states, `thread_pool_each<T, S, E>(pool, data, chunk, states, worker)`. The
-/// runtime hands each chunk of data to the worker as its own `&var []T` and
-/// returns the first failure a worker reported; what T and S may hold is the
-/// ownership checker's rule, because it is about what a chunk can reach.
 fn (self: &var Checker) check_thread_pool_each(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1853,7 +1789,6 @@ fn (self: &var Checker) check_thread_pool_each(
     }
     var shape = array::new<stdprim::ArgKind>(self.allocator);
     defer shape.deinit(self.allocator);
-    // The data's slot is checked as a view, not by its kind.
     try shape.append(self.allocator, stdprim::ArgKind::I64);
     try shape.append(self.allocator, stdprim::ArgKind::I64);
     try shape.append(self.allocator, stdprim::ArgKind::I64);
@@ -1865,10 +1800,6 @@ fn (self: &var Checker) check_thread_pool_each(
     return null;
 }
 
-/// Validates `thread_pool_each_lane<T, E>(pool, allocator, data, length,
-/// stride, worker)` and its `<T, S, E>` form with states before the worker.
-/// The round can also run out of memory for the lane runs, so E has to hold
-/// std::thread::Error as well as whatever the worker fails with.
 fn (self: &var Checker) check_thread_pool_each_lane(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1909,8 +1840,6 @@ fn (self: &var Checker) check_thread_pool_each_lane(
     return null;
 }
 
-/// A pool round's `<T, E>` or `<T, S, E>`: the element, the per-thread state
-/// (empty without one), and the error set its worker fails with.
 struct ThreadRoundTypeArgs {
     elem: string::String,
     state: string::String,
@@ -1924,8 +1853,6 @@ fn (self: ThreadRoundTypeArgs) deinit(allocator: Allocator) -> void {
     return;
 }
 
-/// Splits a pool round's static arguments; null when there are not two or
-/// three or the last is not an error set.
 fn (self: &var Checker) thread_round_type_args(type_arg: []u8) -> !?ThreadRoundTypeArgs {
     var parts = try split_generic_args(self.allocator, type_arg) orelse return null;
     defer parts.deinit(self.allocator);
@@ -1979,7 +1906,6 @@ fn (self: &var Checker) thread_round_type_args_error(
     return try self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-/// Names `E!void`, what a pool round returns.
 fn (self: &var Checker) thread_round_result(set: []u8) -> !Type {
     var result = try string::from_bytes(self.allocator, set);
     defer result.deinit(self.allocator);
@@ -1988,8 +1914,6 @@ fn (self: &var Checker) thread_round_result(set: []u8) -> !Type {
     return self.types.intern(bytes);
 }
 
-/// Validates a round's arguments: `shape` up to the worker, with the data at
-/// data_index, then the states when the round has them, then the worker.
 fn (self: &var Checker) check_thread_round_args(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -2034,8 +1958,6 @@ fn (self: &var Checker) check_thread_round_args(
         return move problem;
     }
     if has_state {
-        // An Array rather than a view: S may own memory, and a view over
-        // owners is not something a program holds (SPEC §7.1).
         var states_want = try string::from_bytes(self.allocator, "&var std::array::Array<");
         defer states_want.deinit(self.allocator);
         let state = parts.state.as_bytes();
@@ -2053,8 +1975,6 @@ fn (self: &var Checker) check_thread_round_args(
     return self.check_thread_worker_arg(tree, scope, label, parts, worker_arg);
 }
 
-/// Validates an `&var X` a pool round writes through, which a std wrapper
-/// forwards already lent, so X alone is accepted too.
 fn (self: &var Checker) check_thread_borrowed_arg(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -2075,9 +1995,6 @@ fn (self: &var Checker) check_thread_borrowed_arg(
     return null;
 }
 
-/// Validates the `fn(&var []T, i64) -> E!void`, or with a state
-/// `fn(&var S, &var []T, i64) -> E!void`, a pool round calls once per chunk
-/// or lane.
 fn (self: &var Checker) check_thread_worker_arg(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -2133,9 +2050,6 @@ fn (self: &Checker) task_arg_error(
     return try self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-/// Validates `mem_allocator_from<T>(state, alloc, free)`. The header the
-/// runtime writes lives at the front of the state, so T has to have reserved
-/// it: its first field is `std::mem::AllocatorHeader` (ADR-0129).
 fn (self: &var Checker) check_allocator_from(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -2198,9 +2112,6 @@ fn (self: &var Checker) check_allocator_from(
     return null;
 }
 
-/// Refuses a state whose type has not reserved the room the runtime writes
-/// its header into.
-/// Reports whether a state type declares the allocator header first.
 fn (self: &Checker) state_reserves_header(
     tree: &ast::Ast,
     type_arg: []u8
@@ -2213,8 +2124,6 @@ fn (self: &Checker) state_reserves_header(
     return mem::equal_bytes(bytes, "std::mem::AllocatorHeader");
 }
 
-/// Returns the declared type of a struct's first field, and null when the
-/// declaration is not a struct or has no fields.
 fn first_field_type(tree: &ast::Ast, declaration: ast::Declaration) -> ?typ::Type {
     match tree.declarations.at(declaration.node) {
         Struct(declared) => {
@@ -2289,17 +2198,12 @@ fn (self: &var Checker) check_builtin_arena_type_apply(
         "type error", ast::zero_span(), "invalid Arena primitive name"
     );
     if mem::equal_bytes(method, "deinit") {
-        // The raw primitive frees the storage through the allocator the
-        // release names: the header keeps none of its own (ADR-0131).
         if try self.check_release_allocator(tree, scope, "Arena", method, args, 1) |problem| {
             return move problem;
         }
         out.* = try self.types.void_type();
         return null;
     }
-    // Only std::arena's own bodies reach a primitive, so the capture rule
-    // `Arena.at_mut` carries at a call site is not restated here: the wrapper
-    // returns the borrow optional, and the rule applies where it is called.
     if mem::equal_bytes(method, "add") {
         return self.check_arena_add(tree, scope, element, args, 1, out);
     }
@@ -2706,7 +2610,6 @@ fn (self: &var Checker) intern_single_argument_type(base: []u8, argument: Type) 
     return self.types.intern(bytes);
 }
 
-// Interns `Set!T` for a declared error set spelled by the caller (ADR-0128).
 fn (self: &var Checker) intern_declared_error_type(set: []u8, value: Type) -> !Type {
     var text = string::new(self.allocator);
     defer text.deinit(self.allocator);
@@ -2717,9 +2620,6 @@ fn (self: &var Checker) intern_declared_error_type(set: []u8, value: Type) -> !T
     return self.types.intern(bytes);
 }
 
-/// Validates the single Allocator a release names. A value keeps no copy of
-/// the allocator that made it (ADR-0132), so the call spells it, the same way
-/// the construction did. `offset` skips the receiver a primitive carries.
 fn (self: &var Checker) check_release_allocator(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -2807,7 +2707,6 @@ fn (self: &Checker) testing_equal_arg_error(
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-// Checks one concrete generic body and memoizes its static argument set.
 fn (self: &var Checker) check_generic_instantiation(
     tree: &var ast::Ast,
     function: FunctionHandle,
@@ -2842,8 +2741,6 @@ fn (self: &var Checker) check_generic_instantiation(
     return null;
 }
 
-// bind_static_functions makes the `Function` arguments of one instantiation
-// readable by the calls written against them.
 fn (self: &var Checker) bind_static_functions(
     functions: &map::Map<[]u8, string::String>
 ) -> !void {
@@ -2914,9 +2811,7 @@ fn (self: &var Checker) check_generic_instantiation_bound(
         if parameter.is_type {
             try type_params.insert(allocator, parameter_name, true);
         } else {
-            if !self.types.is_text(parameter.type_name, "bool") and
-                !self.types.is_text(parameter.type_name, "Function") and
-                !self.types.is_text(parameter.type_name, "Field") {
+            if self.types.is_text(parameter.type_name, "i64") {
                 try type_params.insert(allocator, parameter_name, false);
             }
             let defined = try self.define_scope_param(
@@ -3017,10 +2912,6 @@ fn (self: &var Checker) check_instantiated_body(
     return null;
 }
 
-// resolve_instance_type rewrites the `std::meta` forms a declaration wrote into
-// the types they name, now that this instantiation has bound what they read.
-// A declaration writes `std::meta::field_type<T, f>` because neither name is
-// bound where it is written; the instance is where both are.
 fn (self: &var Checker) resolve_instance_type(
     tree: &ast::Ast,
     declared: Type,
@@ -3132,8 +3023,6 @@ fn (self: &Checker) instance_key(
                 try key.append_byte(self.allocator, cast<u8>(46));
                 try key.append_bytes(self.allocator, bound_bytes);
             }
-            // Each integer or bool value is its own instance: the body can
-            // fold a `comptime if` differently for each.
             if bindings.values.get(parameter_name) |bound| {
                 try key.append_byte(self.allocator, cast<u8>(46));
                 try append_comptime_value_text(self.allocator, &var key, bound);
@@ -3146,8 +3035,6 @@ fn (self: &Checker) instance_key(
     return null;
 }
 
-// append_comptime_value_text spells an integer or bool value the way a static
-// argument does, which is how an instance key tells two bindings apart.
 fn append_comptime_value_text(
     allocator: Allocator,
     out: &var string::String,
@@ -3166,19 +3053,10 @@ fn append_comptime_value_text(
     return;
 }
 
-/// Bounds how deep generic instantiation may nest. A body whose own calls grow
-/// their type argument never repeats an instance, so no memo stops it and the
-/// checker would run forever; a bound turns that into a diagnostic. Reflection
-/// walks nest by struct depth, so real programs stay far below this.
-///
-/// The bound is what says the compiler stops before its stack does, so it is
-/// set where the shorter of the two stacks holds: an unoptimized build of
-/// this compiler spends about 150KB per level, which leaves it no room at 64.
 fn max_instantiation_depth() -> i64 {
     return 32;
 }
 
-/// The bound as the diagnostic spells it.
 fn depth_bound_text() -> []u8 {
     return "32";
 }
@@ -3264,7 +3142,6 @@ fn copy_type_value_map(
     return move copied;
 }
 
-// Rejects element graphs whose storage rules are not yet Array-safe.
 fn (self: &var Checker) reject_array_element_type(
     tree: &ast::Ast,
     element: Type

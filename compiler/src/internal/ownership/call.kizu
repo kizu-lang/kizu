@@ -8,14 +8,6 @@ import std::map;
 import std::mem;
 import std::string;
 
-// The call funnel: the call dispatch, declared-function calls and their
-// argument lends, the view and allocation carrier predicates, qualified
-// builtin and fs / io primitive checks, and the call-scoped borrow activation
-// and conflict rules.
-
-/// Validates ownership effects of builtin and user calls. It is the funnel
-/// every call form passes through, so the tied-allocator taint of the result
-/// is recorded here once, and no call path can forget it.
 fn (self: &var Checker) check_call(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -23,8 +15,6 @@ fn (self: &var Checker) check_call(
     call: ast::CallExpr,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
-    // The call consumes what its arguments handed it; what stays pending
-    // after it is its own result, when that result owns something.
     let pending = self.pending_owner_temps.len();
     let places = self.pending_moved_places.len();
     let outer = self.method_call;
@@ -43,10 +33,6 @@ fn (self: &var Checker) check_call(
     return null;
 }
 
-/// Is the one gate for every call that produces a borrow optional: legal
-/// inside a capture condition, legal as the value of a declared
-/// borrow-optional return when every tied binding is a borrowed parameter (the
-/// borrow must survive the frame), refused everywhere else.
 fn (self: &var Checker) check_borrow_optional_result(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -93,7 +79,6 @@ fn (self: &var Checker) check_borrow_optional_result(
     return null;
 }
 
-/// Routes a call expression to its checker by callee shape.
 fn (self: &var Checker) dispatch_call_expr(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -121,9 +106,6 @@ fn (self: &var Checker) dispatch_call_expr(
         return null;
     }
     let user_name = try self.names.intern_text(tree, name);
-    // A binding shadows a declaration: a name bound to a function pointer is
-    // called through the pointer. Its signature carries the same move and
-    // borrow effects as a directly named function.
     if self.lookup_text(tree, env, name) |value| {
         let bound = self.binding(value).type_name;
         if self.name_is_function_pointer(bound) {
@@ -134,16 +116,12 @@ fn (self: &var Checker) dispatch_call_expr(
     return self.check_user_call(tree, env, user_name, call.args, sanctioned, out);
 }
 
-/// Reports whether an interned type name spells a function pointer.
 fn (self: &Checker) name_is_function_pointer(value: Name) -> bool {
     let retained = name_text(&self.names, value);
     let bytes = retained.as_bytes();
     return typ::is_func_spelling(bytes);
 }
 
-/// Applies the move and borrow effects carried by a function pointer's
-/// signature. Indirection changes how code is reached, not what each
-/// parameter receives.
 fn (self: &var Checker) check_func_pointer_call(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -167,7 +145,6 @@ fn (self: &var Checker) check_func_pointer_call(
     return self.check_callable_call(tree, env, name, function, args, sanctioned, out);
 }
 
-/// Records one checked indirect-call &var argument once.
 fn (self: &var Checker) record_function_pointer_mut_borrow(argument: ast::Expression) -> !void {
     var index = 0;
     while self.result.function_pointer_mut_borrows.get(index) |known| {
@@ -179,8 +156,6 @@ fn (self: &var Checker) record_function_pointer_mut_borrow(argument: ast::Expres
     return self.result.function_pointer_mut_borrows.append(self.allocator, argument);
 }
 
-/// Retains a concrete function pointer signature as an ownership-facing
-/// FunctionInfo, or returns its cached handle.
 fn (self: &var Checker) function_pointer_handle(pointer: Name) -> !?FunctionHandle {
     let copied = try self.names.copy(pointer);
     defer copied.deinit(self.allocator);
@@ -253,9 +228,6 @@ fn (self: &var Checker) function_pointer_handle(pointer: Name) -> !?FunctionHand
     return handle;
 }
 
-/// Validates one declared-function call. sanctioned marks the callers that tie
-/// a factory result themselves and so may skip the tied-allocator let-binding
-/// requirement.
 fn (self: &var Checker) check_user_call(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -264,8 +236,6 @@ fn (self: &var Checker) check_user_call(
     sanctioned: bool,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
-    // A call written against a `Function` static parameter is a call to what
-    // this instantiation bound it to.
     let called = try self.resolve_called_function(name);
     let function = self.function_named(called) orelse
         return try self.error1(tree, ast::zero_span(), "move error: undefined function `%s`", Arg::Str(called));
@@ -277,9 +247,6 @@ fn (self: &var Checker) check_user_call(
     return self.check_callable_call(tree, env, name, function, args, sanctioned, out);
 }
 
-/// Applies one resolved signature at a call site. Direct and indirect calls
-/// share this path so neither can lose move, borrow, handle, or capability
-/// effects while choosing how the callee is reached.
 fn (self: &var Checker) check_callable_call(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -292,10 +259,6 @@ fn (self: &var Checker) check_callable_call(
     let info = self.functions.at(function.index);
     let param_count = info.params.len();
     let count = arg_count(tree, args);
-    // The arguments after a C variadic function's declared parameters are
-    // scalars, raw pointers and borrows of extern structs, the only things
-    // the type checker lets through: a borrow is held for the call like a
-    // declared borrow parameter's argument, and the rest are read.
     let variadic_tail = info.variadic and count > param_count;
     if count != param_count and !variadic_tail {
         return try self.error3(
@@ -308,9 +271,6 @@ fn (self: &var Checker) check_callable_call(
     if try self.check_call_handle_pairing(tree, env, function, 0, &none, args) |failed| {
         return move failed;
     }
-    // A tied-allocator factory call is only legal where something ties its
-    // result (the let recognizer, a param-rooted return — those pass
-    // sanctioned); anywhere else the tie would silently drop.
     if !sanctioned and self.names.is(self.return_type_name(function), "Allocator") and
         try self.call_ties_allocator(tree, function, args, env) {
         return try self.error1(
@@ -339,8 +299,6 @@ fn (self: &var Checker) check_callable_call(
         index = index + 1;
     }
     while arg_at(tree, args, index) |arg| {
-        // A `&var` argument is written through, not read, the way
-        // check_user_call_arg leaves a mutable borrow parameter's alone.
         if borrow_prefix(tree, arg) |prefix| {
             if text_equals(tree, prefix.operator, "&var") {
                 index = index + 1;
@@ -360,8 +318,6 @@ fn (self: &var Checker) check_callable_call(
     return null;
 }
 
-/// Applies one argument's ownership effect for a user call: a shared borrow
-/// reads, a lent view or allocator reads, anything else moves.
 fn (self: &var Checker) check_user_call_arg(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -386,11 +342,6 @@ fn (self: &var Checker) check_user_call_arg(
     return self.move_expr(tree, env, arg, &var ignored);
 }
 
-/// Reports whether arg is a borrow-class view lent to a `[]u8` parameter under
-/// a caller that ties the result itself — the let recognizer, which records
-/// the view as a borrow source of the binding. In every other context the view
-/// would escape untracked, so the lend stays refused and the move path rejects
-/// it.
 fn (self: &var Checker) sanctioned_view_lend(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -409,10 +360,6 @@ fn (self: &var Checker) sanctioned_view_lend(
     return false;
 }
 
-/// Reports whether arg is a tied capability binding lent to a capability
-/// parameter. The lend itself is free -- a capability is copied into every
-/// call that takes one -- and what the callee's result may carry out is
-/// covered by pend_tied_allocator_args at the call site.
 fn (self: &Checker) capability_arg_lend(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -424,10 +371,6 @@ fn (self: &Checker) capability_arg_lend(
     return self.capability_return(param.type_name);
 }
 
-/// Records the tie obligation of a call that consumed a tied allocator
-/// argument and returns something that can carry its memory. The obligation is
-/// discharged by the `let` that binds the result; anything else leaves it
-/// pending and check_block rejects the statement.
 fn (self: &var Checker) pend_tied_allocator_args(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -447,11 +390,6 @@ fn (self: &var Checker) pend_tied_allocator_args(
     return;
 }
 
-/// Reports a return type that can hold memory the callee allocated: owners and
-/// aggregates. Scalars carry nothing, a view carries only the view channel (a
-/// view of callee-allocated memory cannot leave the callee — its owner would
-/// leak there), and an Allocator result is the factory recognizer's job, not a
-/// taint.
 fn (self: &var Checker) allocation_carrying_return_type(type_name: Name) -> !bool {
     if try self.view_free_return_type(type_name) or self.names.is(type_name, "Allocator") {
         return false;
@@ -460,11 +398,6 @@ fn (self: &var Checker) allocation_carrying_return_type(type_name: Name) -> !boo
     return !self.names.starts_with(payload, "&") and !self.names.starts_with(payload, "[]");
 }
 
-/// Reports whether arg is a tracked view binding lent to a plain `[]u8`
-/// parameter for the call's duration (SPEC §9: a borrow argument ends with the
-/// call statement). Lending is only safe when the callee cannot retain the
-/// view past the statement: neither the return type nor any `&var` parameter
-/// it could write into may carry a view out.
 fn (self: &var Checker) view_arg_lend(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -487,19 +420,12 @@ fn (self: &var Checker) view_arg_lend(
         !try self.view_smuggling_params(function);
 }
 
-/// Reports whether arg names a `&var []u8` borrow parameter: its backing
-/// outlives the frame, but the binding itself cannot move, so passing it on is
-/// a lend rather than a copy.
 fn (self: &Checker) borrowed_view_param_arg(tree: &ast::Ast, env: ScopeHandle, arg: ast::Expression) -> bool {
     let value = self.lookup_ident(tree, env, arg) orelse return false;
     let record = self.binding(value);
     return record.borrowed_param and self.names.is_view_type(record.type_name);
 }
 
-/// Reports whether fn declares a `&var` parameter whose type can hold a view:
-/// a callee could store a lent view through it, so the storage outliving the
-/// call makes lending unsafe. A `&var []u8` slot cannot be re-pointed
-/// (ADR-0096) and is exempt.
 fn (self: &var Checker) view_smuggling_params(function: FunctionHandle) -> !bool {
     var index = 0;
     while self.param_at(function, index) |param| {
@@ -514,8 +440,6 @@ fn (self: &var Checker) view_smuggling_params(function: FunctionHandle) -> !bool
     return false;
 }
 
-/// Reports a return type that cannot carry a view out: scalars and void, with
-/// or without an error union.
 fn (self: &var Checker) view_free_return_type(type_name: Name) -> !bool {
     let payload = try self.names.after_bang(type_name);
     return self.names.is(payload, "void") or self.names.is(payload, "bool") or
@@ -524,19 +448,12 @@ fn (self: &var Checker) view_free_return_type(type_name: Name) -> !bool {
         self.names.is(payload, "u64") or self.names.is(payload, "f64");
 }
 
-/// Reports whether a value of type_name can hold a view: view spellings
-/// themselves, and declared structs or unions any of whose field types carry
-/// one. Generic containers follow the storage they actually retain: Map copies
-/// its byte key and Handle stores only an opaque ID.
 fn (self: &var Checker) view_carrying_type(type_name: Name) -> !bool {
     var seen = map::new<[]u8, bool>(self.allocator);
     defer seen.deinit(self.allocator);
     return self.view_carrying_type_seen(type_name, &var seen);
 }
 
-/// Reports whether a retained value can keep an Io or Allocator alive. TaskSet
-/// already carries its selected capabilities; another one inside state could
-/// launder a frame tie through the task copy.
 fn (self: &var Checker) capability_carrying_type(type_name: Name) -> !bool {
     var seen = map::new<[]u8, bool>(self.allocator);
     defer seen.deinit(self.allocator);
@@ -591,14 +508,11 @@ fn (self: &var Checker) capability_carrying_type_seen(
     return false;
 }
 
-/// Strips the wrappers a view rides through: the success of `!T` and the
-/// payload of `?T` carry their views the same way.
 fn (self: &var Checker) view_carrier_payload(type_name: Name) -> !Name {
     let after = try self.names.after_bang(type_name);
     return self.names.optional_payload_name(after);
 }
 
-/// Is view_carrying_type with a cycle guard over named types.
 fn (self: &var Checker) view_carrying_type_seen(type_name: Name, seen: &var map::Map<[]u8, bool>) -> !bool {
     let payload = try self.view_carrier_payload(type_name);
     if self.names.is_view_type(payload) or self.names.starts_with(payload, "&") {
@@ -634,8 +548,6 @@ fn (self: &var Checker) view_carrying_type_seen(type_name: Name, seen: &var map:
     return false;
 }
 
-/// Follows only the generic values the runtime type retains. Map copies its
-/// byte key, and Handle retains no value of T.
 fn (self: &var Checker) generic_args_carry_view(
     base: Name,
     text: Name,
@@ -669,9 +581,6 @@ fn (self: &var Checker) generic_args_carry_view(
     return false;
 }
 
-/// Reports a struct type a let binding may capture views into. View-only
-/// values ride the borrow class; owner values keep both their explicit deinit
-/// obligation and their borrow targets.
 fn (self: &var Checker) view_capture_struct_type(type_name: Name) -> !bool {
     if self.names.contains_byte(type_name, cast<u8>(33)) {
         return false;
@@ -682,8 +591,6 @@ fn (self: &var Checker) view_capture_struct_type(type_name: Name) -> !bool {
     return self.view_carrying_type(type_name);
 }
 
-/// Resolves expr to the first borrow-class binding backing the view it yields,
-/// or null when there is none; see borrow_class_view_roots.
 fn (self: &var Checker) borrow_class_view_root(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -695,13 +602,6 @@ fn (self: &var Checker) borrow_class_view_root(
     return roots.get(0);
 }
 
-/// Resolves expr to the borrow-class bindings backing the view it yields — a
-/// local view binding, or a view-capturing struct whose `[]u8` field is read —
-/// through the forms that derive a view from a view without leaving its
-/// storage: a slice, a read back through `&[]u8`, an `orelse` / `catch`
-/// default, and the tails of an `if` or `match` expression. Empty for params,
-/// statics, and owned values, whose views are free: a parameter outlives the
-/// frame, so what it backs cannot dangle here.
 fn (self: &var Checker) borrow_class_view_roots(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -744,11 +644,6 @@ fn (self: &var Checker) borrow_class_view_roots(
     return self.place_view_roots(tree, env, expression, false, out);
 }
 
-/// Resolves a named place — a binding or a field path into one — to its
-/// borrow-class root when the place has the view type, or with reference set
-/// also a reference to it: a `let r = &view` binding carries the view's own
-/// type with the view as its borrow target, a `&[]u8` parameter the reference
-/// type, and a deref reads either back as the view itself.
 fn (self: &var Checker) place_view_roots(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -777,7 +672,6 @@ fn (self: &var Checker) place_view_roots(
     return merge_view_root(self.allocator, out, root);
 }
 
-/// Resolves the view roots of the value a block yields.
 fn (self: &var Checker) block_value_view_roots(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -792,8 +686,6 @@ fn (self: &var Checker) block_value_view_roots(
     return self.stmt_value_view_roots(tree, env, last, out);
 }
 
-/// Resolves the view roots of the value a tail statement yields — an
-/// expression, or a nested `if`, `match`, or block.
 fn (self: &var Checker) stmt_value_view_roots(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -829,7 +721,6 @@ fn (self: &var Checker) stmt_value_view_roots(
     return;
 }
 
-/// Appends root unless out already holds it.
 fn merge_view_root(allocator: Allocator, out: &var array::Array<BindingHandle>, root: BindingHandle) -> !void {
     var index = 0;
     while out.get(index) |known| {
@@ -841,7 +732,6 @@ fn merge_view_root(allocator: Allocator, out: &var array::Array<BindingHandle>, 
     return out.append(allocator, root);
 }
 
-/// Validates calls whose callee is a dotted expression.
 fn (self: &var Checker) check_field_call(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -873,7 +763,6 @@ fn (self: &var Checker) check_field_call(
     return self.check_method_call_expr(tree, env, callee, field, args, out);
 }
 
-/// Validates ownership for source-loaded qualified calls.
 fn (self: &var Checker) check_qualified_source_call(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -893,7 +782,6 @@ fn (self: &var Checker) check_qualified_source_call(
     return self.check_user_call(tree, env, name, args, sanctioned, out);
 }
 
-/// Validates ownership for std:: namespace prototype calls.
 fn (self: &var Checker) check_qualified_builtin(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -920,9 +808,6 @@ fn (self: &var Checker) check_qualified_builtin(
     return self.check_io_builtin(tree, bytes, args, handled, out);
 }
 
-/// Renders the qualified name a dotted callee spells, the `qualified_name` of
-/// a field callee: the namespace chain joined by `::`, or null when the callee
-/// is not one.
 fn (self: &var Checker) qualified_field_callee(tree: &ast::Ast, field: ast::FieldExpr) -> !?Name {
     if !field.namespace or !qualified_name_shape(tree, field.receiver) {
         return null;
@@ -932,9 +817,6 @@ fn (self: &var Checker) qualified_field_callee(tree: &ast::Ast, field: ast::Fiel
     return try self.names.format("%s::%s", receiver, name, empty_name());
 }
 
-/// Refuses a builtin primitive this checker does not know. The type checker
-/// rejects these first in a full run; this keeps the rule true of this checker
-/// on its own, which is how its own tests read it.
 fn (self: &var Checker) reject_unknown_builtin(tree: &ast::Ast, name: []u8) -> !?diagnostic::Diagnostic {
     if !mem::starts_with(name, "std::internal::builtin::") or stdprim::primitive(name) {
         return null;
@@ -943,7 +825,6 @@ fn (self: &var Checker) reject_unknown_builtin(tree: &ast::Ast, name: []u8) -> !
     return try self.error1(tree, ast::zero_span(), "move error: `%s` is not a primitive", Arg::Str(spelled));
 }
 
-/// Validates declarative core and fs ownership effects.
 fn (self: &var Checker) check_qualified_std_builtin(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -961,7 +842,6 @@ fn (self: &var Checker) check_qualified_std_builtin(
     return self.check_fs_builtin(tree, env, name, args, handled, out);
 }
 
-/// Validates declarative core primitive ownership effects.
 fn (self: &var Checker) check_simple_core_builtin(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -996,7 +876,6 @@ fn (self: &var Checker) check_simple_core_builtin(
     return null;
 }
 
-/// Reads one declarative primitive argument without moving it.
 fn (self: &var Checker) check_core_arg(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -1040,7 +919,6 @@ fn (self: &var Checker) check_core_arg(
     return null;
 }
 
-/// Renders declarative primitive arguments for diagnostics.
 fn core_ownership_args_text(allocator: Allocator, out: &var string::String, signature: &stdprim::CoreSignature) -> !void {
     if signature.args_len() == 0 {
         return out.append_bytes(allocator, "0 args");
@@ -1060,7 +938,6 @@ fn core_ownership_args_text(allocator: Allocator, out: &var string::String, sign
     return;
 }
 
-/// Validates ownership for filesystem host primitives.
 fn (self: &var Checker) check_fs_builtin(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -1096,8 +973,6 @@ fn (self: &var Checker) check_fs_builtin(
     return null;
 }
 
-/// Reads a &var std::string::String destination argument without moving the
-/// buffer behind it.
 fn (self: &var Checker) check_string_out_arg(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -1144,7 +1019,6 @@ fn (self: &var Checker) check_string_out_arg(
     );
 }
 
-/// Validates ownership effects for std::fs::write_file.
 fn (self: &var Checker) check_fs_write_file(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -1182,7 +1056,6 @@ fn (self: &var Checker) check_fs_write_file(
     return null;
 }
 
-/// Validates ownership effects for std::fs::rename.
 fn (self: &var Checker) check_fs_rename(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -1220,7 +1093,6 @@ fn (self: &var Checker) check_fs_rename(
     return null;
 }
 
-/// Validates common std::fs Io and path arguments.
 fn (self: &var Checker) check_fs_path_only(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -1253,7 +1125,6 @@ fn (self: &var Checker) check_fs_path_only(
     return null;
 }
 
-/// Validates the explicit allocator and borrowed path of std::fs::read_dir.
 fn (self: &var Checker) check_fs_read_dir(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -1293,7 +1164,6 @@ fn (self: &var Checker) check_fs_read_dir(
     return null;
 }
 
-/// Reads and validates an explicit Io argument.
 fn (self: &var Checker) check_io_arg(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -1313,7 +1183,6 @@ fn (self: &var Checker) check_io_arg(
     return null;
 }
 
-/// Validates std::io constructor ownership effects.
 fn (self: &var Checker) check_io_builtin(
     tree: &ast::Ast,
     name: []u8,
@@ -1335,7 +1204,6 @@ fn (self: &var Checker) check_io_builtin(
     return null;
 }
 
-/// Validates ownership effects for builtin calls.
 fn (self: &var Checker) check_builtin_call(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -1372,9 +1240,6 @@ fn (self: &var Checker) check_builtin_call(
     return null;
 }
 
-/// Marks identifier arguments that are borrowed for this call; first_param
-/// skips a method receiver. On an error every borrow activated so far is
-/// released again.
 fn (self: &var Checker) activate_borrow_args(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -1398,10 +1263,6 @@ fn (self: &var Checker) activate_borrow_args(
     return null;
 }
 
-/// Marks the places a C variadic call borrows after its declared parameters;
-/// first is the position of the first such argument. No parameter says which
-/// of those arguments are borrows, so the `&` / `&var` written at the call
-/// does; from there each is held like a declared borrow parameter's argument.
 fn (self: &var Checker) activate_variadic_borrows(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -1421,9 +1282,6 @@ fn (self: &var Checker) activate_variadic_borrows(
     return null;
 }
 
-/// Marks the place one borrowed argument names as borrowed for the call and
-/// adds it to borrowed. On an error it releases what borrowed already holds,
-/// so the caller has nothing left to undo.
 fn (self: &var Checker) activate_borrow_arg(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -1465,16 +1323,12 @@ fn (self: &var Checker) activate_borrow_arg(
     return null;
 }
 
-/// Releases and forgets every borrow activate_borrow_args recorded before it
-/// failed, and returns no list: the caller sees no borrow left to release.
 fn (self: &var Checker) release_activated_args(borrowed: &var array::Array<TemporaryBorrow>) -> !void {
     try self.release_temporary_borrows(borrowed);
     while borrowed.pop() |_| {}
     return;
 }
 
-/// Resolves call-scoped borrowable places and ignores non-place shared values;
-/// found reports whether a place was resolved into out.
 fn (self: &var Checker) call_borrow_target(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -1512,7 +1366,6 @@ fn (self: &var Checker) call_borrow_target(
     return null;
 }
 
-/// Rejects aliasing that would overlap a mutable borrow.
 fn (self: &var Checker) check_borrow_conflict(
     tree: &ast::Ast,
     env: ?ScopeHandle,
@@ -1522,9 +1375,6 @@ fn (self: &var Checker) check_borrow_conflict(
     return self.check_borrow_conflict_for_field(tree, env, value, empty_name(), mutable);
 }
 
-/// Rejects overlapping whole-value or field borrows. Field paths conflict when
-/// they alias: one path names the other or a struct containing it, so `a.b`
-/// collides with `a.b.c` while `a.b` and `a.c` stay disjoint.
 fn (self: &var Checker) check_borrow_conflict_for_field(
     tree: &ast::Ast,
     env: ?ScopeHandle,
@@ -1538,17 +1388,12 @@ fn (self: &var Checker) check_borrow_conflict_for_field(
     return null;
 }
 
-/// Answers the conflict check_borrow_conflict_for_field reports, without where
-/// the live borrow was taken.
 fn (self: &var Checker) borrow_conflict_for_field(
     tree: &ast::Ast,
     value: BindingHandle,
     field: Name,
     mutable: bool
 ) -> !?diagnostic::Diagnostic {
-    // A value one of whose fields has been taken out no longer matches its
-    // own type, and a borrow hands the whole of it to someone who will read
-    // the field that is gone.
     if try self.partially_consumed_field(value) |consumed| {
         if !same_name(consumed, field) {
             return try self.error3(
@@ -1564,7 +1409,6 @@ fn (self: &var Checker) borrow_conflict_for_field(
     return self.check_value_borrow_conflict(tree, value, mutable);
 }
 
-/// Rejects a field borrow that overlaps a live one.
 fn (self: &Checker) check_field_borrow_conflict(
     tree: &ast::Ast,
     value: BindingHandle,
@@ -1600,8 +1444,6 @@ fn (self: &Checker) check_field_borrow_conflict(
     return null;
 }
 
-/// Rejects a whole-value borrow that overlaps a live one, including a borrow
-/// of any of its fields.
 fn (self: &Checker) check_value_borrow_conflict(
     tree: &ast::Ast,
     value: BindingHandle,
@@ -1629,7 +1471,6 @@ fn (self: &Checker) check_value_borrow_conflict(
     return null;
 }
 
-/// Reads the printed value without taking ownership.
 fn (self: &var Checker) check_print_call(
     tree: &var ast::Ast,
     env: ScopeHandle,

@@ -15,7 +15,9 @@
 #   4. stage1 builds stage2, and the harness requires stage2 to rebuild
 #      itself byte for byte. Stage2 is the one asked: stage1 was compiled by
 #      the seed, and only a compiler the current source compiled is expected
-#      to reproduce itself.
+#      to reproduce itself. Both builds name --backend llvm: bootstrap stays
+#      on LLVM, which `kizu build` defaults to only where the direct backend
+#      is not the target's.
 #
 # --check-only stops after the seed and stage1 have checked compiler/; nothing
 # is tested. --stage1-only builds stage1 and nothing else. Either way stage1
@@ -65,5 +67,5 @@ scripts/check-sources.sh "$stage1"
 stage2="$root/target/seed/stage2/bin/kizu"
 rm -rf "$root/target/seed/stage2"
 mkdir -p "$(dirname "$stage2")"
-"$stage1" build --target native -o "$stage2" compiler
+"$stage1" build --target native --backend llvm -o "$stage2" compiler
 "$stage1" run compiler/tests/harness -- bootstrap "$stage2"

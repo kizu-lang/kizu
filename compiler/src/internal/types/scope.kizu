@@ -4,17 +4,10 @@ import std::array;
 import std::map;
 import std::string;
 
-// ScopeStore owns lexical scopes in one arena so parent edges remain copy
-// handles instead of stored borrows. Each scope owns one binding map; the
-// checker outside this file turns the copy-only duplicate and unread results
-// into diagnostics.
-
-/// Identifies one lexical scope retained by a ScopeStore.
 pub struct ScopeHandle {
     node: arena::Handle<Scope>,
 }
 
-// Keeps every fact about one lexical name in one record.
 struct ScopeBinding {
     typ: Type,
     mutable: bool,
@@ -25,7 +18,6 @@ struct ScopeBinding {
     unread: ?ast::Span,
 }
 
-// Is the copy-only metadata queried without counting a value read.
 struct BindingFacts {
     mutable: bool,
     borrowed: bool,
@@ -33,19 +25,16 @@ struct BindingFacts {
     signature_param: bool,
 }
 
-// Owns the bindings declared directly in one lexical scope.
 struct Scope {
     parent: ?ScopeHandle,
     bindings: map::Map<[]u8, ScopeBinding>,
 }
 
-/// Owns every lexical scope created during one checker phase.
 pub struct ScopeStore {
     allocator: Allocator,
     scopes: arena::Arena<Scope>,
 }
 
-/// Creates empty lexical scope storage.
 pub fn new_scope_store(allocator: Allocator) -> ScopeStore {
     return ScopeStore {
         allocator: allocator,
@@ -53,7 +42,6 @@ pub fn new_scope_store(allocator: Allocator) -> ScopeStore {
     };
 }
 
-/// Creates a lexical scope below parent, or a root when parent is null.
 pub fn (self: &var ScopeStore) new_scope(parent: ?ScopeHandle) -> !ScopeHandle {
     return ScopeHandle {
         node: try self.scopes.add(self.allocator, Scope {
@@ -63,7 +51,6 @@ pub fn (self: &var ScopeStore) new_scope(parent: ?ScopeHandle) -> !ScopeHandle {
     };
 }
 
-/// Marks one already-defined local as unread.
 pub fn (self: &var ScopeStore) declare_local(
     scope: ScopeHandle,
     name: []u8,
@@ -80,7 +67,6 @@ pub fn (self: &var ScopeStore) declare_local(
     return;
 }
 
-/// Defines one plain local. False reports a duplicate binding.
 pub fn (self: &var ScopeStore) define(
     scope: ScopeHandle,
     name: []u8,
@@ -93,7 +79,6 @@ pub fn (self: &var ScopeStore) define(
     return self.define_binding(scope, name, move binding);
 }
 
-/// Defines one non-borrow local while preserving view provenance.
 pub fn (self: &var ScopeStore) define_with_source(
     scope: ScopeHandle,
     name: []u8,
@@ -106,7 +91,6 @@ pub fn (self: &var ScopeStore) define_with_source(
     return self.define_binding(scope, name, move binding);
 }
 
-/// Defines a borrowed local and retains its source owners.
 pub fn (self: &var ScopeStore) define_param_with_source(
     scope: ScopeHandle,
     name: []u8,
@@ -162,7 +146,6 @@ fn (self: &var ScopeStore) define_binding(
     return false;
 }
 
-/// Resolves a name and records a value read on the defining scope.
 pub fn (self: &var ScopeStore) lookup(scope: ScopeHandle, name: []u8) -> ?Type {
     var current = optional_scope(scope);
     while current |handle| {
@@ -199,7 +182,6 @@ fn optional_scope(scope: ScopeHandle) -> ?ScopeHandle {
     return scope;
 }
 
-/// Reports whether a resolved local may be assigned.
 pub fn (self: &ScopeStore) is_mutable(scope: ScopeHandle, name: []u8) -> bool {
     if self.binding_facts(scope, name) |facts| {
         return facts.mutable;
@@ -207,7 +189,6 @@ pub fn (self: &ScopeStore) is_mutable(scope: ScopeHandle, name: []u8) -> bool {
     return false;
 }
 
-/// Reports whether a resolved name is a mutable signature borrow.
 pub fn (self: &ScopeStore) is_mut_borrowed_param(scope: ScopeHandle, name: []u8) -> bool {
     if self.binding_facts(scope, name) |facts| {
         return facts.mut_borrow and facts.signature_param;
@@ -215,7 +196,6 @@ pub fn (self: &ScopeStore) is_mut_borrowed_param(scope: ScopeHandle, name: []u8)
     return false;
 }
 
-/// Reports whether a resolved name is a borrow binding.
 pub fn (self: &ScopeStore) is_borrowed(scope: ScopeHandle, name: []u8) -> bool {
     if self.binding_facts(scope, name) |facts| {
         return facts.borrowed;
@@ -223,7 +203,6 @@ pub fn (self: &ScopeStore) is_borrowed(scope: ScopeHandle, name: []u8) -> bool {
     return false;
 }
 
-/// Reports whether a resolved name is a mutable borrow binding.
 pub fn (self: &ScopeStore) is_mut_borrowed(scope: ScopeHandle, name: []u8) -> bool {
     if self.binding_facts(scope, name) |facts| {
         return facts.mut_borrow;

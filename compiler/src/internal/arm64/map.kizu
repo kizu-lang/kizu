@@ -4,23 +4,10 @@ import compiler::internal::typ;
 import std::array;
 import std::mem;
 
-// std::map::Map. A map is its header in memory, five words the runtime owns
-// (entries, count, capacity, index, index capacity), and every operation
-// but len and new is a call into the hosted runtime with the header's
-// address. The runtime has one key form, a (pointer, length) pair: a `[]u8`
-// key is that pair, and an integer key goes to a slot of its own width.
-// Each call that touches entries names the value's width, which the
-// header does not keep. Lookup, insertion order and hashing are the
-// runtime's alone, so what a program observes matches the LLVM backend,
-// which makes the same calls.
-
-/// Is the size of the runtime's map header.
 fn map_header_size() -> i64 {
     return 40;
 }
 
-/// Returns V of a `std::map::Map<K, V>` spelling behind any borrow, or an
-/// empty spelling when it names no map.
 fn map_value_type(name: []u8) -> []u8 {
     let args = container_elem(name);
     var depth = 0;
@@ -39,7 +26,6 @@ fn map_value_type(name: []u8) -> []u8 {
     return args[0..0];
 }
 
-/// Returns the shape of the value a map argument holds.
 fn map_value_shape(module: &ir::Module, map_value: ir::Value) -> Shape {
     let text = ir::name_text(&module.names, map_value.type_name);
     let bytes = text.as_bytes();
@@ -50,8 +36,6 @@ fn map_value_shape(module: &ir::Module, map_value: ir::Value) -> Shape {
     return shape_of_bytes(module, value_type, 1);
 }
 
-/// Returns the (pointer, length) pair the runtime hashes a key as: a `[]u8`
-/// key is its own pair, an integer key its bytes in a slot of its width.
 fn (self: &var Selector) map_key(module: &ir::Module, key: ir::Value) -> !?Val {
     if module.names.is(key.type_name, "[]u8") {
         return self.slice_regs(module, key);
@@ -72,8 +56,6 @@ fn (self: &var Selector) map_key(module: &ir::Module, key: ir::Value) -> !?Val {
     return pair_val(slot, width);
 }
 
-/// Returns the address a value can be read from by the runtime, which only
-/// copies out of it: an aggregate's own memory, or a slot it is stored to.
 fn (self: &var Selector) value_source(module: &ir::Module, value: ir::Value, shape: Shape) -> !?i64 {
     let held = self.val(value.name);
     if shape.class == Class::Aggregate and held.kind == ValKind::Agg {
@@ -86,7 +68,6 @@ fn (self: &var Selector) value_source(module: &ir::Module, value: ir::Value, sha
     return slot;
 }
 
-/// Selects the map ops.
 fn (self: &var Selector) select_map(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     match node.op {
         MapNew => {
@@ -128,7 +109,6 @@ fn (self: &var Selector) select_map(module: &ir::Module, node: &ir::InstrNode) -
     }
 }
 
-/// Releases a map's storage through the runtime.
 fn (self: &var Selector) release_map(header: i64, allocator_reg: i64, value_size: i64) -> !void {
     var words = array::new<i64>(self.allocator);
     defer words.deinit(self.allocator);
@@ -139,8 +119,6 @@ fn (self: &var Selector) release_map(header: i64, allocator_reg: i64, value_size
     return self.call_c("kizu_map_deinit", count);
 }
 
-/// Selects Map.insert(allocator, key, value): the runtime copies the value
-/// in, and a refused allocation is the allocator's OutOfMemory.
 fn (self: &var Selector) select_map_insert(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let map_value = node.args.get(0) orelse return try self.fail_op(module, node);
     let allocator_value = node.args.get(1) orelse return try self.fail_op(module, node);
@@ -170,9 +148,6 @@ fn (self: &var Selector) select_map_insert(module: &ir::Module, node: &ir::Instr
     return null;
 }
 
-/// Selects the lookups by key: contains is the runtime's answer, at and
-/// at_mut are the value's address or null (the niche optional `?&V`), and
-/// get copies the value out when it is there.
 fn (self: &var Selector) select_map_lookup(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let map_value = node.args.get(0) orelse return try self.fail_op(module, node);
     let key = node.args.get(1) orelse return try self.fail_op(module, node);
@@ -206,11 +181,6 @@ fn (self: &var Selector) select_map_lookup(module: &ir::Module, node: &ir::Instr
     return null;
 }
 
-/// Binds `?V` from a nullable pointer to a value: a copy of it when the
-/// pointer is set, absent otherwise. A scalar niche optional is the word
-/// itself; any other is a slot, as select_optional holds it -- an aggregate
-/// niche optional is the value's bytes with absence as all zero, and the
-/// tagged one is `{ i8, V }`.
 fn (self: &var Selector) optional_from_pointer(module: &ir::Module, node: &ir::InstrNode, pointer: i64, shape: Shape) -> !?diagnostic::Diagnostic {
     let optional = self.shapes.optional_layout(module, node.result.type_name) orelse return try self.fail_op(module, node);
     let present = try self.new_join();
@@ -251,8 +221,6 @@ fn (self: &var Selector) optional_from_pointer(module: &ir::Module, node: &ir::I
     return null;
 }
 
-/// Selects Map.remove(allocator, key): the runtime moves the value into a
-/// slot before it releases the entry and answers whether the key was there.
 fn (self: &var Selector) select_map_remove(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let map_value = node.args.get(0) orelse return try self.fail_op(module, node);
     let allocator_value = node.args.get(1) orelse return try self.fail_op(module, node);
@@ -288,9 +256,6 @@ fn (self: &var Selector) select_map_remove(module: &ir::Module, node: &ir::Instr
     return self.optional_from_pointer(module, node, pointer, shape);
 }
 
-/// Selects Map.key_at(index): the runtime fills a `{ i8, ptr, i64 }` slot,
-/// which is `?[]u8` itself; an integer key is read through the pointer when
-/// the slot is set.
 fn (self: &var Selector) select_map_key_at(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let map_value = node.args.get(0) orelse return try self.fail_op(module, node);
     let index = node.args.get(1) orelse return try self.fail_op(module, node);
@@ -341,9 +306,6 @@ fn (self: &var Selector) select_map_key_at(module: &ir::Module, node: &ir::Instr
     return self.optional_from_pointer(module, node, pointer, key_shape);
 }
 
-/// Selects the value move Map.deinit's cascade makes at insertion position
-/// index; past the end is the bounds failure, which only a broken runtime
-/// reaches.
 fn (self: &var Selector) select_map_take_value_at(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let map_value = node.args.get(0) orelse return try self.fail_op(module, node);
     let index = node.args.get(1) orelse return try self.fail_op(module, node);

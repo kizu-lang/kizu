@@ -1,36 +1,18 @@
 import std::array;
 import std::map;
 
-// Reading a local slot's starting value without the slot. A slot whose
-// address never leaves the function is only reached through the field and
-// constant-index addresses taken from it, so the place each read and each
-// write touches is a path of field names and indexes from the slot. A read
-// whose path no write in the function overlaps sees the value the slot was
-// made with, wherever it runs: a slot made again in a loop is made with the
-// same value. Such a read becomes that value, and a slot left with only
-// writes is never read, so it goes with its writes and the value it was made
-// from.
-//
-// A path step is a field's name id times two, or an index times two plus one.
-// A slot's paths are kept in one pool, each access naming its run.
-
-/// Is how an address was taken from another: the value it was taken from and
-/// the step, or no step for an id that copies it.
 struct SlotLink {
     parent: i64,
     step: i64,
     has_step: bool,
 }
 
-/// Is one local slot: the value it was made with, and what its uses allow.
 struct SlotRoot {
     init: Value,
     escaped: bool,
     reads_kept: bool,
 }
 
-/// Is one read or write of a slot: the slot, its path, and for a read the
-/// instruction and the value it reads.
 struct SlotAccess {
     root: i64,
     start: i64,
@@ -39,8 +21,6 @@ struct SlotAccess {
     result: Value,
 }
 
-/// Is what a read is known to hold at its path: nothing known, zero, or a
-/// value.
 enum StartKind {
     Unknown,
     Zero,
@@ -52,7 +32,6 @@ struct StartValue {
     value: Value,
 }
 
-/// Is what the pass learns of one function's slots.
 struct SlotScan {
     links: map::Map<i64, SlotLink>,
     roots: map::Map<i64, i64>,
@@ -92,14 +71,10 @@ fn (self: SlotScan) deinit(allocator: Allocator) -> void {
     return;
 }
 
-/// Returns how many steps a path may have. An address taken deeper is treated
-/// as one that leaves the function.
 fn slot_path_limit() -> i64 {
     return 32;
 }
 
-/// Replaces reads of local slots with the value the slot was made with, and
-/// removes slots nothing reads any more.
 pub fn forward_slot_reads(allocator: Allocator, module: &var Module) -> !void {
     var index = 0;
     while module.functions.get(index) |function| {
@@ -138,8 +113,6 @@ fn forward_slot_reads_in(allocator: Allocator, module: &var Module, function: Fu
     return remove_dead_slots(allocator, module, function, &scan, &dead);
 }
 
-/// Records the slots, the addresses taken from values, the aggregates built,
-/// and the i64 constants of a function.
 fn scan_slot_defs(allocator: Allocator, module: &var Module, function: Function, scan: &var SlotScan) -> !void {
     var block_index = 0;
     while function_block_at(module, function, block_index) |block| {
@@ -161,8 +134,6 @@ fn scan_slot_defs(allocator: Allocator, module: &var Module, function: Function,
     if scan.slots.len() == 0 {
         return;
     }
-    // An index is read as a constant wherever the constant is defined, so
-    // every constant is known before the first address is linked.
     block_index = 0;
     while function_block_at(module, function, block_index) |block| {
         block_index = block_index + 1;
@@ -187,9 +158,6 @@ fn scan_slot_defs(allocator: Allocator, module: &var Module, function: Function,
     return;
 }
 
-/// Returns how an instruction's result is an address taken from its first
-/// argument: a field address, an element address at an index known to be
-/// inside the array, or an id.
 fn slot_link_of(module: &var Module, consts: &map::Map<i64, i64>, instr: Instr) -> !?SlotLink {
     let node = module.instrs.at(instr.node);
     if node.args.len() == 0 {
@@ -221,7 +189,6 @@ fn slot_link_of(module: &var Module, consts: &map::Map<i64, i64>, instr: Instr) 
     return SlotLink { parent: base, step: at * 2 + 1, has_step: true };
 }
 
-/// Returns the slot an address was taken from, or null for any other value.
 fn slot_of(scan: &SlotScan, value: i64) -> ?i64 {
     var current = value;
     var depth = 0;
@@ -236,8 +203,6 @@ fn slot_of(scan: &SlotScan, value: i64) -> ?i64 {
     return null;
 }
 
-/// Appends the path of an address taken from a slot to the pool, and returns
-/// where it starts.
 fn push_slot_path(allocator: Allocator, scan: &var SlotScan, value: i64) -> !i64 {
     let start = scan.paths.len();
     var current = value;
@@ -250,7 +215,6 @@ fn push_slot_path(allocator: Allocator, scan: &var SlotScan, value: i64) -> !i64
         }
         current = link.parent;
     }
-    // The steps were met from the address back to the slot.
     var low = start;
     var high = scan.paths.len() - 1;
     while low < high {
@@ -263,9 +227,6 @@ fn push_slot_path(allocator: Allocator, scan: &var SlotScan, value: i64) -> !i64
     return start;
 }
 
-/// Sorts every use of a slot address into the reads, the writes and the
-/// address steps, marks a slot whose address is used any other way as
-/// escaped, and counts the uses of every value.
 fn scan_slot_uses(allocator: Allocator, module: &var Module, function: Function, scan: &var SlotScan) -> !void {
     var block_index = 0;
     while function_block_at(module, function, block_index) |block| {
@@ -282,7 +243,6 @@ fn scan_slot_uses(allocator: Allocator, module: &var Module, function: Function,
     return;
 }
 
-/// Counts a use the pass does not sort, and marks a slot it reaches escaped.
 fn note_other_use(allocator: Allocator, scan: &var SlotScan, value: Value) -> !void {
     let id = name_id(value.name);
     try count_slot_use(allocator, scan, id);
@@ -302,7 +262,6 @@ fn count_slot_use(allocator: Allocator, scan: &var SlotScan, id: i64) -> !void {
     return scan.uses.insert(allocator, id, count);
 }
 
-/// Sorts the uses one instruction makes.
 fn scan_instr_uses(allocator: Allocator, module: &Module, instr: Instr, scan: &var SlotScan) -> !void {
     let node = module.instrs.at(instr.node);
     let op = node.op;
@@ -339,10 +298,6 @@ fn scan_instr_uses(allocator: Allocator, module: &Module, instr: Instr, scan: &v
     return;
 }
 
-/// Records the first argument of an instruction as an access of a slot when
-/// it is one the pass sorts, and reports whether it was: an address step, a
-/// read, or a write through it. A value that is no slot address is left to
-/// note_other_use, which only counts it.
 fn note_slot_access(
     allocator: Allocator,
     module: &Module,
@@ -396,8 +351,6 @@ fn note_slot_access(
     return true;
 }
 
-/// Replaces one read with the value its slot was made with there, when no
-/// write overlaps it, and reports whether it did.
 fn forward_slot_read(allocator: Allocator, module: &var Module, scan: &var SlotScan, read: SlotAccess) -> !bool {
     let slot = scan.slots.get_or_panic(read.root);
     if slot.escaped {
@@ -447,8 +400,6 @@ fn forward_slot_read(allocator: Allocator, module: &var Module, scan: &var SlotS
     return true;
 }
 
-/// Reports whether one access's path is a prefix of the other's: two paths
-/// that part at some step reach places that do not overlap.
 fn paths_overlap(scan: &SlotScan, left: SlotAccess, right: SlotAccess) -> bool {
     var index = 0;
     while index < left.len and index < right.len {
@@ -460,9 +411,6 @@ fn paths_overlap(scan: &SlotScan, left: SlotAccess, right: SlotAccess) -> bool {
     return true;
 }
 
-/// Returns what the value a slot was made with holds at a read's path: a
-/// field of a struct built here, anything inside a zeroed array built here,
-/// or the value the path ends at.
 fn start_value_at(module: &Module, scan: &SlotScan, init: Value, read: SlotAccess) -> StartValue {
     var current = init;
     var index = 0;
@@ -500,8 +448,6 @@ fn start_value_at(module: &Module, scan: &SlotScan, init: Value, read: SlotAcces
     return StartValue { kind: StartKind::Unknown, value: empty_value() };
 }
 
-/// Collects the slots nothing reads and nothing else reaches, and the
-/// aggregates built only to make them.
 fn collect_dead_slots(allocator: Allocator, module: &Module, scan: &SlotScan, dead: &var map::Map<i64, bool>) -> !void {
     var index = 0;
     while scan.slots.get(index) |slot| {
@@ -515,9 +461,6 @@ fn collect_dead_slots(allocator: Allocator, module: &Module, scan: &SlotScan, de
     return;
 }
 
-/// Adds an aggregate built for one use only, and the ones built for its
-/// fields, to the values to remove. Slots are keyed below zero by their
-/// number, values by their name id.
 fn collect_dead_build(allocator: Allocator, module: &Module, scan: &SlotScan, value: Value, dead: &var map::Map<i64, bool>) -> !void {
     let id = name_id(value.name);
     let instr = scan.builds.get(id) orelse return;
@@ -535,8 +478,6 @@ fn collect_dead_build(allocator: Allocator, module: &Module, scan: &SlotScan, va
     return;
 }
 
-/// Removes the dead slots, every address taken from them, the writes through
-/// those addresses, and the aggregates built only for them.
 fn remove_dead_slots(
     allocator: Allocator,
     module: &var Module,
@@ -575,9 +516,6 @@ fn remove_dead_slots(
     return;
 }
 
-/// Reports whether an instruction belongs to a dead slot: the slot itself, an
-/// address taken from it, an access through one, or an aggregate built only
-/// for it.
 fn is_dead_slot_instr(module: &Module, scan: &SlotScan, dead: &map::Map<i64, bool>, instr: Instr) -> bool {
     let node = module.instrs.at(instr.node);
     let result = name_id(node.result.name);

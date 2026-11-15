@@ -7,38 +7,26 @@ import std::map;
 import std::mem;
 import std::string;
 
-// How a namespace chain or a type name written in one module is read as a
-// package-qualified name.
-
-/// Is one resolved namespace chain: the qualified function it stands for,
-/// nothing when the chain names no function, or the module error that
-/// refuses it.
 union NamespaceResolution {
     Name(string::String),
     Missing,
     Failed(diagnostic::Diagnostic),
 }
 
-/// Is one resolved name spelling, or the module error that refuses it.
 union NameResolution {
     Name(string::String),
     Failed(diagnostic::Diagnostic),
 }
 
-/// Is one rewritten type, or the module error that stopped the rewrite.
 union TypeNodeResolution {
     Type(typ::Type),
     Failed(diagnostic::Diagnostic),
 }
 
-/// Renames type paths from the table resolve_type_node built: the path
-/// callback map_names takes cannot reach the loader, so every name is
-/// resolved before the walk and looked up during it.
 struct NameRenames {
     resolved: map::Map<[]u8, string::String>,
 }
 
-/// Appends parts[start..end] joined by `::`.
 fn append_path(allocator: Allocator, out: &var string::String, parts: &array::Array<string::String>, start: i64, end: i64) -> !void {
     var index = start;
     while index < end {
@@ -53,7 +41,6 @@ fn append_path(allocator: Allocator, out: &var string::String, parts: &array::Ar
     return;
 }
 
-/// Joins parts[start..end] with `::`.
 fn join_path(allocator: Allocator, parts: &array::Array<string::String>, start: i64, end: i64) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
@@ -61,8 +48,6 @@ fn join_path(allocator: Allocator, parts: &array::Array<string::String>, start: 
     return move out;
 }
 
-/// Joins a namespace target and the parts after the alias: the module-qualified
-/// name a chain through an import spells.
 fn join_under(allocator: Allocator, target: &string::String, parts: &array::Array<string::String>) -> !string::String {
     var out = try copy_string(allocator, target);
     errdefer out.deinit(allocator);
@@ -71,7 +56,6 @@ fn join_under(allocator: Allocator, target: &string::String, parts: &array::Arra
     return move out;
 }
 
-/// Splits a `::` separated name into its segments.
 fn split_path(allocator: Allocator, name: []u8) -> !array::Array<string::String> {
     var parts = array::new<string::String>(allocator);
     errdefer parts.deinit(allocator);
@@ -91,7 +75,6 @@ fn split_path(allocator: Allocator, name: []u8) -> !array::Array<string::String>
     return move parts;
 }
 
-/// Reports whether name spells a path through a namespace.
 fn has_path_separator(name: []u8) -> bool {
     var index = 0;
     while index + 1 < mem::len(name) {
@@ -103,7 +86,6 @@ fn has_path_separator(name: []u8) -> bool {
     return false;
 }
 
-/// Reports whether the first part of a chain is exactly bytes.
 fn first_part_is(parts: &array::Array<string::String>, bytes: []u8) -> bool {
     if parts.at(0) |first| {
         return text_is(first, bytes);
@@ -111,14 +93,12 @@ fn first_part_is(parts: &array::Array<string::String>, bytes: []u8) -> bool {
     return false;
 }
 
-/// Copies the bytes of one retained text.
 fn text_copy(allocator: Allocator, tree: &ast::Ast, text: ast::Text) -> !string::String {
     let retained = tree.texts.at(text.node);
     let bytes = retained.as_bytes();
     return string::from_bytes(allocator, bytes);
 }
 
-/// Copies what the first part of a chain is bound to in a file's namespaces.
 fn (self: &Loader) namespace_target(
     file: arena::Handle<ModuleFile>,
     parts: &array::Array<string::String>
@@ -133,7 +113,6 @@ fn (self: &Loader) namespace_target(
     return null;
 }
 
-/// Records that a chain was reached through the namespace its first part names.
 fn (self: &var Loader) use_first(file: arena::Handle<ModuleFile>, parts: &array::Array<string::String>) -> !void {
     if parts.at(0) |first| {
         let first_bytes = first.as_bytes();
@@ -142,20 +121,16 @@ fn (self: &var Loader) use_first(file: arena::Handle<ModuleFile>, parts: &array:
     return;
 }
 
-/// Returns what a name declared in file's module is filed under.
 fn (self: &Loader) qualify_in(file: arena::Handle<ModuleFile>, name: []u8) -> !string::String {
     let group = self.files.at(file).group;
     return self.qualify_name(group, name);
 }
 
-/// Reports whether an export index holds name.
 fn index_holds(index: &map::Map<[]u8, Export>, name: &string::String) -> bool {
     let bytes = name.as_bytes();
     return index.contains(bytes);
 }
 
-/// Reports whether an export index holds name as something file may not
-/// reach: declared by another module and not public.
 fn (self: &Loader) index_hides(
     index: &map::Map<[]u8, Export>,
     file: arena::Handle<ModuleFile>,
@@ -169,7 +144,6 @@ fn (self: &Loader) index_hides(
     return false;
 }
 
-/// Reports whether a module at file may name module_path.
 fn (self: &Loader) reachable(file: arena::Handle<ModuleFile>, module_path: []u8) -> !bool {
     let from = try self.module_path_copy(file);
     defer from.deinit(self.allocator);
@@ -177,8 +151,6 @@ fn (self: &Loader) reachable(file: arena::Handle<ModuleFile>, module_path: []u8)
     return reachable_from(module_path, from_bytes);
 }
 
-/// Reports a name the file spells that resolution refuses: the text around
-/// the quoted chain says why.
 fn (self: &Loader) name_error(
     before: []u8,
     parts: &array::Array<string::String>,
@@ -194,7 +166,6 @@ fn (self: &Loader) name_error(
     return module_error(self.allocator, move text);
 }
 
-/// Resolves the receiver of Type::Tag namespace lookups.
 fn (self: &var Loader) resolve_type_namespace_receiver(
     tree: &ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -207,7 +178,6 @@ fn (self: &var Loader) resolve_type_namespace_receiver(
     return null;
 }
 
-/// Resolves a complete module-qualified namespace chain.
 fn (self: &var Loader) resolve_namespace_path(
     tree: &ast::Ast,
     file: arena::Handle<ModuleFile>,
@@ -220,7 +190,6 @@ fn (self: &var Loader) resolve_namespace_path(
     return NamespaceResolution::Missing;
 }
 
-/// Resolves local or imported function namespace parts.
 fn (self: &var Loader) resolve_namespace_parts(
     file: arena::Handle<ModuleFile>,
     parts: &array::Array<string::String>
@@ -262,9 +231,6 @@ fn (self: &var Loader) resolve_namespace_parts(
     return NamespaceResolution::Missing;
 }
 
-/// Refuses a std path the file never brought into scope. It speaks only for
-/// paths that name a std module: a chain that names nothing there is somebody
-/// else's error, and saying `import it` would name a fix that does not exist.
 fn (self: &Loader) reject_unbound_std(
     file: arena::Handle<ModuleFile>,
     parts: &array::Array<string::String>
@@ -305,10 +271,6 @@ fn (self: &Loader) reject_unbound_std(
     return try module_error(self.allocator, move text);
 }
 
-/// Returns how many leading segments of parts spell the longest std module
-/// path that prefixes them, or 0 when none does. A path names the deepest
-/// module it can, so `std::path::internal::bits::is_slash` is an item of
-/// `std::path::internal::bits` rather than of `std::path`.
 fn (self: &Loader) std_module_prefix(parts: &array::Array<string::String>) -> !i64 {
     var size = parts.len();
     while size >= 2 {
@@ -323,9 +285,6 @@ fn (self: &Loader) std_module_prefix(parts: &array::Array<string::String>) -> !i
     return 0;
 }
 
-/// Validates visibility for a call into std. A name std does not declare is
-/// one the compiler provides itself -- `std::arena::Arena` has no Kizu source
-/// -- so it passes through to the checker that knows about it.
 fn (self: &Loader) resolve_std_function(
     file: arena::Handle<ModuleFile>,
     name: &string::String,
@@ -337,7 +296,6 @@ fn (self: &Loader) resolve_std_function(
     return NamespaceResolution::Name(try copy_string(self.allocator, name));
 }
 
-/// Validates visibility for a call through an import alias.
 fn (self: &Loader) resolve_imported_function(
     file: arena::Handle<ModuleFile>,
     target: &string::String,
@@ -354,7 +312,6 @@ fn (self: &Loader) resolve_imported_function(
     return NamespaceResolution::Name(try copy_string(self.allocator, &name));
 }
 
-/// Resolves namespace parts only when they name a type.
 fn (self: &var Loader) resolve_type_namespace_parts(
     file: arena::Handle<ModuleFile>,
     parts: &array::Array<string::String>
@@ -371,8 +328,6 @@ fn (self: &var Loader) resolve_type_namespace_parts(
             let name_bytes = name.as_bytes();
             let reachable = try self.reachable(file, name_bytes);
             if !reachable {
-                // resolve_namespace_parts says why; this one has no way to
-                // report it.
                 return null;
             }
             let target_bytes = target.as_bytes();
@@ -393,7 +348,6 @@ fn (self: &var Loader) resolve_type_namespace_parts(
     return null;
 }
 
-/// Returns identifier segments from a namespace expression.
 fn namespace_parts(allocator: Allocator, tree: &ast::Ast, expr: ast::Expression) -> !?array::Array<string::String> {
     match tree.expressions.at(expr.node) {
         Ident(value) => {
@@ -417,10 +371,7 @@ fn namespace_parts(allocator: Allocator, tree: &ast::Ast, expr: ast::Expression)
     }
 }
 
-/// Rewrites a source type name into its package-qualified form.
 fn (self: &var Loader) resolve_type(tree: &var ast::Ast, file: arena::Handle<ModuleFile>, name: []u8) -> !NameResolution {
-    // The table has no optional parse, and every spelling that reaches this
-    // point was produced by the parser, so a parse failure is propagated.
     let parsed = try tree.types.parse(name);
     let outcome = try self.resolve_type_node(self.allocator, tree, file, parsed);
     match outcome {
@@ -429,8 +380,6 @@ fn (self: &var Loader) resolve_type(tree: &var ast::Ast, file: arena::Handle<Mod
     }
 }
 
-/// Rewrites every name a type mentions to its package-qualified form, keeping
-/// the structure around it.
 fn (self: &var Loader) resolve_type_node(
     allocator: Allocator,
     tree: &var ast::Ast,
@@ -458,7 +407,6 @@ fn (self: &var Loader) resolve_type_node(
     return TypeNodeResolution::Type(try typ::map_names<NameRenames>(&var tree.types, value, &var renames));
 }
 
-/// Lists the name paths a type mentions, in the order map_names visits them.
 fn collect_type_names(
     allocator: Allocator,
     table: &typ::Table,
@@ -497,9 +445,6 @@ fn collect_type_names(
     return;
 }
 
-/// Rewrites one path to the spelling resolve_type_node resolved it to. Every
-/// path of the type was resolved before the walk, so the fallback copy is the
-/// shape the lookup forces rather than a case that occurs.
 fn (self: &var NameRenames) rename_path(
     allocator: Allocator,
     path: &array::Array<string::String>
@@ -514,7 +459,6 @@ fn (self: &var NameRenames) rename_path(
     return split_path(allocator, joined_bytes);
 }
 
-/// Resolves one non-generic type base.
 fn (self: &var Loader) resolve_base(file: arena::Handle<ModuleFile>, name: []u8) -> !NameResolution {
     if mem::starts_with(name, "std::") {
         try self.use_namespace(self.allocator, file, std_root());
@@ -544,7 +488,6 @@ fn (self: &var Loader) resolve_base(file: arena::Handle<ModuleFile>, name: []u8)
     return NameResolution::Name(try string::from_bytes(self.allocator, name));
 }
 
-/// Resolves an imported module type by last-segment alias.
 fn (self: &var Loader) resolve_qualified_base(file: arena::Handle<ModuleFile>, name: []u8) -> !NameResolution {
     let parts = try split_path(self.allocator, name);
     defer parts.deinit(self.allocator);
@@ -582,7 +525,6 @@ fn (self: &var Loader) resolve_qualified_base(file: arena::Handle<ModuleFile>, n
     return NameResolution::Failed(try module_error(self.allocator, move text));
 }
 
-/// Reports source-level types that do not need module lookup.
 fn is_primitive_type(name: []u8) -> bool {
     return mem::equal_bytes(name, "bool") or mem::equal_bytes(name, "i8") or
         mem::equal_bytes(name, "i16") or mem::equal_bytes(name, "i32") or

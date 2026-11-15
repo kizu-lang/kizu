@@ -14,43 +14,12 @@ import std::process;
 import std::string;
 import std::testing;
 
-// The programs here come from the Quint model of the `unsafe` marker check in
-// spec/unsafecap/unsafecap.qnt (README.md there says what it covers);
-// scripts/unsafecap-mbt samples them into compiler/tests/mbt/unsafecap.json.
-// Each case is two functions, g and f, and the diagnostic classes the model
-// allows: this runner renders it to a two-file Kizu module, runs the type
-// check and then the ownership check the way `kizu check` does, and compares
-// the class of the first diagnostic. A divergence is either a checker bug or a
-// model bug, and which one is a question for SPEC.md: record it in
-// findings/unsafecap-quint-findings.md rather than adjusting either side to
-// agree.
-//
-// A statement is written as
-//
-//     stmt  := ["$ "] form           "$ " is the `// SAFETY:` line before it
-//     form  := "print" E
-//            | ("ptr_write" | "vol_write" | "deref_set" | "field_set") M E
-//            | ("view" | "deref_borrow" | "field_borrow") M
-//            | "defer" M ("ev" | "uv" | "sv")
-//            | "bind" ("safe" | "unsafe" | "extern") ("sf" | "uf" | "ext") M
-//     M     := "-" | "!"+             the statement's own markers
-//     E     := L | "!"* "(" L "+" L ")" | "!"* "{" ["$"] L ";" ["$"] L "}"
-//     L     := "!"* atom              each "!" is one `unsafe`
-//
-// with the atoms of uc_atom_source. The fields are separated by single spaces.
-//
-// The files of compiler/src share one namespace, so the names here carry a
-// `uc_` prefix to stay clear of the other replays.
-
-/// One generated function: `fn` or `unsafe` (an `unsafe fn`), in the file
-/// that declares Buf ("home") or the other file of the module ("away").
 pub struct UcFunc {
     pub kind: string::String,
     pub file: string::String,
     pub body: array::Array<string::String>,
 }
 
-/// One program of the fixture.
 pub struct UcCase {
     pub bucket: string::String,
     pub g: UcFunc,
@@ -58,22 +27,11 @@ pub struct UcCase {
     pub expect: array::Array<string::String>,
 }
 
-/// The fixture file. Its cases are read as JSON values and copied into
-/// UcCase by uc_case_from: json::decode of a struct with a field named `f`
-/// inside an array fails at comptime ("capture `f` belongs to UcFixture, not
-/// UcCase"), the name of the field handle std::json's decode_field takes.
 pub struct UcFixture {
     pub note: string::String,
     pub cases: array::Array<json::Value>,
 }
 
-/// Shapes whose verdict SPEC §12 and the examples fix, one per line as
-/// `name|g kind|g file|g body|f kind|f file|f body|classes`, statements and
-/// classes separated by `,`. They mirror spec/unsafecap/unsafecap_test.qnt, so
-/// a harness that renders or classifies wrongly fails here before it disagrees
-/// with the model anywhere else. The last ones of the plain shapes are the
-/// forms a checker that ignored markers, leaked them into a callee, or let a
-/// function be bound at a laxer pointer type would accept.
 fn uc_known_shapes() -> []u8 {
     return
         \\marked|fn|home||fn|home|$ ptr_write ! lit|
@@ -132,13 +90,6 @@ fn uc_known_shapes() -> []u8 {
     ;
 }
 
-/// Shapes on which the checker and SPEC §12 are known to disagree
-/// (findings/unsafecap-quint-findings.md, F3), in the form of known_shapes
-/// with one more field: the class the checker reports ("?" for a message
-/// outside the model). The test fails if the checker stops doing what is
-/// written here, so a fix shows up as a prompt to move the shape into
-/// known_shapes. Two markers on a form the checker reads with one are a form
-/// error, not an unused marker. Both reject; the diagnostic differs.
 fn uc_known_divergences() -> []u8 {
     return
         \\doubleMarkedView|fn|home||fn|home|$ view !!|Unused|?
@@ -147,16 +98,10 @@ fn uc_known_divergences() -> []u8 {
     ;
 }
 
-/// The checker's answer to `let r = &var p.*;` with no marker. SPEC §12 counts
-/// that initializer as a `ptr_deref` and says a missing marker's diagnostic
-/// names the kind; the checker names the form instead, and classify maps it
-/// to Missing:ptr_deref (findings/unsafecap-quint-findings.md, F2).
 fn uc_raw_borrow_form_message() -> []u8 {
     return "a raw pointer's value is borrowed by an `unsafe` binding";
 }
 
-/// What the generated functions call and touch. It is the frame
-/// spec/unsafecap/unsafecap.qnt describes.
 fn uc_prelude() -> []u8 {
     return
         \\extern "c" fn ext() -> i64
@@ -194,7 +139,6 @@ fn uc_prelude() -> []u8 {
     ;
 }
 
-/// The parameter list of g and f.
 fn uc_params() -> []u8 {
     return
         \\p: ptr<i64>, b: &var Buf, fu: unsafe fn() -> i64, fe: extern "c" fn() -> i64, fs: fn() -> i64
@@ -205,7 +149,6 @@ fn uc_safety_line() -> []u8 {
     return "// SAFETY: the model says this marker is the one that covers it";
 }
 
-/// The Kizu an operand stands for, or "" for one the fixture does not have.
 fn uc_atom_source(atom: []u8) -> []u8 {
     if mem::equal_bytes(atom, "lit") { return "1"; }
     if mem::equal_bytes(atom, "sf") { return "sf()"; }
@@ -226,7 +169,6 @@ fn uc_atom_source(atom: []u8) -> []u8 {
     return "";
 }
 
-/// The function pointer type a binding names, or "".
 fn uc_fn_type(name: []u8) -> []u8 {
     if mem::equal_bytes(name, "safe") { return "fn() -> i64"; }
     if mem::equal_bytes(name, "unsafe") { return "unsafe fn() -> i64"; }
@@ -238,7 +180,6 @@ fn uc_fn_type(name: []u8) -> []u8 {
     return "";
 }
 
-/// How many fields each statement form has, or 0 for an unknown form.
 fn uc_arity(form: []u8) -> i64 {
     if mem::equal_bytes(form, "print") { return 2; }
     if mem::equal_bytes(form, "ptr_write") { return 3; }
@@ -253,15 +194,11 @@ fn uc_arity(form: []u8) -> i64 {
     return 0;
 }
 
-/// One rendered program: the file that declares Buf, and the other file of
-/// the module, empty when no function is there.
 struct UcSources {
     home: string::String,
     away: string::String,
 }
 
-/// Writes a case as the two files of one module, or returns false for one
-/// that is not well formed.
 fn uc_render(allocator: Allocator, out: &var UcSources, c: &UcCase) -> !bool {
     try out.home.append_bytes(allocator, uc_prelude());
     if !try uc_render_func(allocator, out, "g", &c.g) {
@@ -270,7 +207,6 @@ fn uc_render(allocator: Allocator, out: &var UcSources, c: &UcCase) -> !bool {
     return uc_render_func(allocator, out, "f", &c.f);
 }
 
-/// Writes one generated function with its statements into the file it is in.
 fn uc_render_func(allocator: Allocator, sources: &var UcSources, name: []u8, f: &UcFunc) -> !bool {
     var text = string::new(allocator);
     defer text.deinit(allocator);
@@ -320,7 +256,6 @@ fn uc_line(allocator: Allocator, out: &var string::String, text: []u8) -> !void 
     return out.append_byte(allocator, cast<u8>(10));
 }
 
-/// Writes the SAFETY line when the statement asked for one.
 fn uc_comment(allocator: Allocator, out: &var string::String, safety: bool) -> !void {
     if safety {
         return uc_line(allocator, out, uc_safety_line());
@@ -328,7 +263,6 @@ fn uc_comment(allocator: Allocator, out: &var string::String, safety: bool) -> !
     return;
 }
 
-/// Appends n `unsafe ` prefixes.
 fn uc_markers(allocator: Allocator, out: &var string::String, n: i64) -> !void {
     var count = 0;
     while count < n {
@@ -338,7 +272,6 @@ fn uc_markers(allocator: Allocator, out: &var string::String, n: i64) -> !void {
     return;
 }
 
-/// Reads a statement's own markers: "-" for none or "!"+, or -1.
 fn uc_mark_word(word: []u8) -> i64 {
     if mem::equal_bytes(word, "-") {
         return 0;
@@ -349,7 +282,6 @@ fn uc_mark_word(word: []u8) -> i64 {
     return mem::len(word);
 }
 
-/// The number of "!" a token starts with.
 fn uc_leading_marks(text: []u8) -> i64 {
     var count = 0;
     while mem::byte_at(text, count) |byte| {
@@ -361,7 +293,6 @@ fn uc_leading_marks(text: []u8) -> i64 {
     return count;
 }
 
-/// Writes one statement of the fixture syntax; id names its bindings.
 fn uc_render_stmt(allocator: Allocator, out: &var string::String, id: []u8, text: []u8) -> !bool {
     let safety = mem::starts_with(text, "$ ");
     var start = 0;
@@ -393,8 +324,6 @@ fn uc_render_stmt(allocator: Allocator, out: &var string::String, id: []u8, text
             try uc_line(allocator, out, bytes);
             return true;
         }
-        // The statement's own markers come right after the form, except for a
-        // binding, where they come last.
         var at = 1;
         if mem::equal_bytes(form_bytes, "bind") {
             at = 3;
@@ -415,7 +344,6 @@ fn uc_render_stmt(allocator: Allocator, out: &var string::String, id: []u8, text
     return false;
 }
 
-/// Renders the expression in field at of fields into out.
 fn uc_render_field_expr(
     allocator: Allocator,
     out: &var string::String,
@@ -430,8 +358,6 @@ fn uc_render_field_expr(
     return false;
 }
 
-/// Writes a statement that carries markers: prefix is them, put where the
-/// statement's operation is.
 fn uc_render_marked(
     allocator: Allocator,
     out: &var string::String,
@@ -562,7 +488,6 @@ fn uc_render_marked(
     return false;
 }
 
-/// Writes one operand with its markers.
 fn uc_render_leaf(allocator: Allocator, out: &var string::String, text: []u8) -> !bool {
     let m = uc_leading_marks(text);
     let source = uc_atom_source(text[m..mem::len(text)]);
@@ -574,8 +499,6 @@ fn uc_render_leaf(allocator: Allocator, out: &var string::String, text: []u8) ->
     return true;
 }
 
-/// Writes an expression. A Block's inner statements go on lines of their own,
-/// one level in, each with its own `// SAFETY:` when the token says so.
 fn uc_render_expr(allocator: Allocator, out: &var string::String, id: []u8, text: []u8) -> !bool {
     let m = uc_leading_marks(text);
     let rest = text[m..mem::len(text)];
@@ -620,12 +543,9 @@ fn uc_render_expr(allocator: Allocator, out: &var string::String, id: []u8, text
         try out.append_bytes(allocator, "    }");
         return true;
     }
-    // A lone operand's markers are the operand's.
     return uc_render_leaf(allocator, out, text);
 }
 
-/// Writes one of the two statements of a Block, `let t = l;` first and the
-/// value `t + (l)` second.
 fn uc_render_block_part(allocator: Allocator, out: &var string::String, id: []u8, part: []u8, first: bool) -> !bool {
     var start = 0;
     if mem::starts_with(part, "$") {
@@ -657,9 +577,6 @@ fn uc_render_block_part(allocator: Allocator, out: &var string::String, id: []u8
     return true;
 }
 
-/// Loads and checks one program the way `kizu check` does, and appends the
-/// first diagnostic, with its notes and help, to out; out stays empty when the
-/// program passes.
 fn uc_check_sources(io: Io, allocator: Allocator, sources: &UcSources, out: &var string::String) -> !void {
     var tree = ast::new(allocator);
     defer tree.deinit(allocator);
@@ -722,8 +639,6 @@ fn uc_append_first(
         let text = try first.error(allocator, &loader.sources);
         defer text.deinit(allocator);
         if text.len() == 0 {
-            // A diagnostic always says something; one that does not still
-            // has to count as a rejection.
             return out.append_bytes(allocator, "(empty diagnostic)");
         }
         return out.append_string(allocator, &text);
@@ -731,10 +646,6 @@ fn uc_append_first(
     return;
 }
 
-/// Appends the diagnostic class of a checker message, as the model's Kind has
-/// them: "" for none, "?" for a message the model does not know. A missing
-/// marker is told apart by the help line, which compiler/src/internal/unsafecap
-/// writes for each kind of operation.
 fn uc_classify(allocator: Allocator, out: &var string::String, message: []u8) -> !void {
     if mem::len(message) == 0 {
         return;
@@ -756,9 +667,6 @@ fn uc_classify(allocator: Allocator, out: &var string::String, message: []u8) ->
         return out.append_bytes(allocator, "?");
     }
     if uc_contains_bytes(message, uc_raw_borrow_form_message()) {
-        // `let r = &var p.*;` with no marker: the checker reads the form
-        // `unsafe &var p.*` as one, so it names the form instead of the
-        // missing marker (findings/unsafecap-quint-findings.md, F2).
         return out.append_bytes(allocator, "Missing:ptr_deref");
     }
     if uc_contains_bytes(message, "`unsafe` covers no operation that needs it") {
@@ -776,8 +684,6 @@ fn uc_classify(allocator: Allocator, out: &var string::String, message: []u8) ->
     return out.append_bytes(allocator, "?");
 }
 
-/// Describes how the checker's answer got diverged from the classes expect
-/// allows, into problem; problem stays empty when it did not.
 fn uc_compare(
     allocator: Allocator,
     problem: &var string::String,
@@ -811,9 +717,6 @@ fn uc_compare(
     return problem.append_bytes(allocator, got);
 }
 
-/// Renders and checks one case, appending the checker's answer to got and
-/// the rendered files to sources. Returns false for a case that is not well
-/// formed.
 fn uc_run_case(io: Io, allocator: Allocator, c: &UcCase, sources: &var UcSources, got: &var string::String) -> !bool {
     if !try uc_render(allocator, sources, c) {
         return false;
@@ -829,8 +732,6 @@ fn uc_new_sources(allocator: Allocator) -> UcSources {
     };
 }
 
-/// Checks one case against expect and reports on stderr how the checker
-/// diverged from the model. Returns whether it diverged.
 fn uc_diverges(io: Io, allocator: Allocator, c: &UcCase) -> !bool {
     var sources = uc_new_sources(allocator);
     defer sources.deinit(allocator);
@@ -851,7 +752,6 @@ fn uc_diverges(io: Io, allocator: Allocator, c: &UcCase) -> !bool {
     return true;
 }
 
-/// Writes a divergence, the case and its rendered files to stderr.
 fn uc_report(io: Io, c: &UcCase, problem: &string::String, sources: &UcSources) -> !void {
     let bucket = c.bucket.as_bytes();
     try io::write_stderr(io, bucket);
@@ -931,7 +831,6 @@ fn uc_ends_with(text: []u8, suffix: []u8) -> bool {
     return mem::equal_bytes(text[start..mem::len(text)], suffix);
 }
 
-/// The index of the first byte in text, or its length.
 fn uc_byte_index(text: []u8, byte: u8) -> i64 {
     var index = 0;
     while mem::byte_at(text, index) |at| {
@@ -943,8 +842,6 @@ fn uc_byte_index(text: []u8, byte: u8) -> i64 {
     return index;
 }
 
-/// Appends each separator-delimited field of text to out; an empty text has
-/// none.
 fn uc_split_fields(allocator: Allocator, out: &var array::Array<string::String>, text: []u8, separator: u8) -> !void {
     if mem::len(text) == 0 {
         return;
@@ -966,7 +863,6 @@ fn uc_split_fields(allocator: Allocator, out: &var array::Array<string::String>,
     return;
 }
 
-/// The bytes of field at of fields, or "".
 fn uc_field_at(fields: &array::Array<string::String>, at: i64) -> []u8 {
     if fields.at(at) |field| {
         let bytes = field.as_bytes();
@@ -975,7 +871,6 @@ fn uc_field_at(fields: &array::Array<string::String>, at: i64) -> []u8 {
     return "";
 }
 
-/// Reads one line of known_shapes or known_divergences.
 fn uc_known_case(allocator: Allocator, fields: &array::Array<string::String>) -> !UcCase {
     var c = UcCase {
         bucket: string::new(allocator),
@@ -995,9 +890,6 @@ fn uc_known_case(allocator: Allocator, fields: &array::Array<string::String>) ->
     return move c;
 }
 
-/// Copies one case of the fixture out of its JSON value. A member that is
-/// missing or of another type stays empty, and the case then fails to render
-/// or to agree.
 fn uc_case_from(allocator: Allocator, value: &json::Value) -> !UcCase {
     var c = UcCase {
         bucket: string::new(allocator),
@@ -1029,7 +921,6 @@ fn uc_member(value: &json::Value, key: []u8) -> ?&json::Value {
     }
 }
 
-/// Appends the string member key of an object value, if it has one.
 fn uc_append_text(allocator: Allocator, out: &var string::String, value: &json::Value, key: []u8) -> !void {
     if uc_member(value, key) |member| {
         match member {
@@ -1040,7 +931,6 @@ fn uc_append_text(allocator: Allocator, out: &var string::String, value: &json::
     return;
 }
 
-/// Appends each string of the array member key of an object value.
 fn uc_append_texts(
     allocator: Allocator,
     out: &var array::Array<string::String>,
@@ -1077,7 +967,6 @@ fn uc_new_func(allocator: Allocator) -> UcFunc {
     };
 }
 
-/// Splits a table of known_shapes' form into its lines, each split at `|`.
 fn uc_table_rows(allocator: Allocator, table: []u8) -> !array::Array<array::Array<string::String>> {
     var rows = array::new<array::Array<string::String>>(allocator);
     errdefer rows.deinit(allocator);
@@ -1113,9 +1002,6 @@ test "unsafe model harness agrees on the known shapes and notices each flipped v
         if try uc_diverges(io, allocator, &c) {
             failures = failures + 1;
         }
-        // The same program with the opposite verdict must diverge: a renderer
-        // whose programs all fail the same way, or a classifier that agrees
-        // with anything, would let a flipped shape through.
         var flipped = array::new<string::String>(allocator);
         defer flipped.deinit(allocator);
         if c.expect.len() == 0 {
@@ -1170,8 +1056,6 @@ test "unsafe model known divergences still diverge the recorded way" {
         let recorded = uc_field_at(fields, 8);
         let kind_bytes = kind.as_bytes();
         if problem.len() == 0 {
-            // The checker now agrees with the model: move the shape to
-            // known_shapes and update findings/unsafecap-quint-findings.md.
             failures = failures + 1;
             try io::write_stderr(io, name);
             try io::write_stderr_line(io, ": the checker now agrees with the model");
@@ -1188,8 +1072,6 @@ test "unsafe model known divergences still diverge the recorded way" {
     testing::expect_equal<i64>(0, failures);
 }
 
-// F2, which classify hides from the other tests: once the checker reports a
-// missing marker here, the mapping in classify is no longer needed.
 test "unsafe model known raw borrow diagnostic names the form" {
     let allocator = mem::page_allocator();
     let io = io::blocking();
@@ -1211,13 +1093,10 @@ test "unsafe model known raw borrow diagnostic names the form" {
     defer got.deinit(allocator);
     testing::expect(try uc_run_case(io, allocator, &c, &var sources, &var got));
     let message = got.as_bytes();
-    // The checker accepting an unmarked raw borrow fails here too.
     testing::expect(uc_contains_bytes(message, uc_raw_borrow_form_message()));
     testing::expect(!uc_contains_bytes(message, "requires `unsafe`"));
 }
 
-// A kind added to the model or to compiler/src/internal/unsafecap is a kind
-// the other must learn.
 test "unsafe model known shapes cover every operation kind" {
     let allocator = mem::page_allocator();
     let rows = try uc_table_rows(allocator, uc_known_shapes());
@@ -1256,8 +1135,6 @@ test "unsafe model known shapes cover every operation kind" {
 test "unsafe marker checker agrees with the sampled model programs" {
     let allocator = mem::page_allocator();
     let io = io::blocking();
-    // KIZU_MBT_FIXTURE replays another fixture, such as a wider sample than
-    // the checked-in one.
     var path = "compiler/tests/mbt/unsafecap.json";
     if process::env("KIZU_MBT_FIXTURE") |other| {
         path = other;

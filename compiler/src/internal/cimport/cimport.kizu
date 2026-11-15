@@ -4,23 +4,11 @@ import std::mem;
 import std::sort;
 import std::string;
 
-// The supported subset of a C header becomes Kizu extern declarations. A Kizu
-// error value carries no text, so each helper returns the import error text as
-// `?string::String` (null is success) and writes what it built through a
-// `&var` parameter, the way internal/manifest already does. The prototype
-// pattern is one index scan over the space-normalized statement, and the
-// primitive table is a lookup function.
-
-/// Is either the extern declarations a header maps to, or the import error
-/// text.
 pub union ImportResult {
     Declarations(string::String),
     Error(string::String),
 }
 
-// Names the three spans `match_function` finds in one normalized statement:
-// the return type is [0, return_end), the function name is [name_start,
-// name_end) and the parameter list is [params_start, params_end).
 struct FunctionMatch {
     return_end: i64,
     name_start: i64,
@@ -29,23 +17,16 @@ struct FunctionMatch {
     params_end: i64,
 }
 
-// Walks the semicolon-separated statements of the comment-free header: [start,
-// end) is the current statement and end starts at -1, the separator in front
-// of the first one. Text after the last `;` is a statement too.
 struct StatementCursor {
     start: i64,
     end: i64,
 }
 
-// Walks the whitespace-separated fields of a byte range: [start, end) is the
-// current field and end is where the next scan resumes.
 struct FieldCursor {
     start: i64,
     end: i64,
 }
 
-/// Converts the supported C function prototypes in header into Kizu extern
-/// declarations, sorted and joined by newlines.
 pub fn import_header(allocator: Allocator, header: []u8) -> !ImportResult {
     var clean = try strip_comments(allocator, header);
     defer clean.deinit(allocator);
@@ -60,9 +41,6 @@ pub fn import_header(allocator: Allocator, header: []u8) -> !ImportResult {
     return ImportResult::Declarations(move joined);
 }
 
-// import_statements imports every non-empty statement of a comment-free
-// header. It takes the header as a view because a loop over bytes borrowed
-// from a String in the same scope as that String's cleanup is refused.
 fn import_statements(
     allocator: Allocator,
     clean: []u8,
@@ -81,8 +59,6 @@ fn import_statements(
     return null;
 }
 
-// join_lines concatenates the sorted declarations with one newline between
-// adjacent ones and none after the last.
 fn join_lines(
     allocator: Allocator,
     decls: &array::Array<string::String>
@@ -100,7 +76,6 @@ fn join_lines(
     return move out;
 }
 
-// import_statement imports one semicolon-terminated C declaration.
 fn import_statement(
     allocator: Allocator,
     stmt: []u8,
@@ -147,7 +122,6 @@ fn import_statement(
     return move failure;
 }
 
-// import_params imports a function parameter list into out.
 fn import_params(
     allocator: Allocator,
     raw: []u8,
@@ -174,9 +148,6 @@ fn import_params(
     return null;
 }
 
-// import_param imports one C parameter declaration into out. A parameter whose
-// last field carries a pointer star is unnamed and is named after its
-// position.
 fn import_param(
     allocator: Allocator,
     raw: []u8,
@@ -217,8 +188,6 @@ fn import_param(
     return null;
 }
 
-// c_type_to_kizu maps a limited C type spelling to a Kizu type written into
-// out, one `ptr<...>` around the element per pointer star.
 fn c_type_to_kizu(
     allocator: Allocator,
     raw: []u8,
@@ -260,8 +229,6 @@ fn c_type_to_kizu(
     return null;
 }
 
-// normalize_c_base drops qualifiers, reports whether the element is const and
-// returns the remaining fields joined by single spaces.
 fn normalize_c_base(
     allocator: Allocator,
     raw: []u8,
@@ -287,7 +254,6 @@ fn normalize_c_base(
     return move out;
 }
 
-// reject_unsupported reports the C features outside the supported subset.
 fn reject_unsupported(allocator: Allocator, stmt: []u8) -> !?string::String {
     let trimmed = trim_space(stmt);
     if mem::starts_with(trimmed, "#") {
@@ -311,7 +277,6 @@ fn reject_unsupported(allocator: Allocator, stmt: []u8) -> !?string::String {
     return null;
 }
 
-// import_error starts one message with the prefix every import error has.
 fn import_error(allocator: Allocator, text: []u8) -> !string::String {
     var out = try string::from_bytes(allocator, "c import error: ");
     errdefer out.deinit(allocator);
@@ -319,12 +284,6 @@ fn import_error(allocator: Allocator, text: []u8) -> !string::String {
     return move out;
 }
 
-// match_function is `^(.+?)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)$` over a
-// space-normalized statement. The lazy first group makes the leftmost split
-// win, so the scan returns at the first space a name and an open parenthesis
-// follow, and the greedy last group ends at the closing parenthesis the anchor
-// pins to the last byte. Normalization left single ASCII spaces, so each `\s`
-// run here is one byte.
 fn match_function(bytes: []u8) -> ?FunctionMatch {
     let length = mem::len(bytes);
     if length == 0 or bytes[length - 1] != cast<u8>(41) {
@@ -359,9 +318,6 @@ fn match_function(bytes: []u8) -> ?FunctionMatch {
     return null;
 }
 
-// primitive_spelling is the primitive type table: the Kizu spelling of one C
-// primitive, or empty bytes when the table has no entry. No entry spells as
-// nothing, so empty says unknown without a second return value.
 fn primitive_spelling(element: []u8) -> []u8 {
     if mem::equal_bytes(element, "void") { return "void"; }
     if mem::equal_bytes(element, "char") { return "i8"; }
@@ -391,8 +347,6 @@ fn primitive_spelling(element: []u8) -> []u8 {
     return "";
 }
 
-// strip_comments removes block comments and then line comments, in that order:
-// a `/*` inside a line comment is still a block comment.
 fn strip_comments(allocator: Allocator, input: []u8) -> !string::String {
     var no_block = string::new(allocator);
     defer no_block.deinit(allocator);
@@ -401,8 +355,6 @@ fn strip_comments(allocator: Allocator, input: []u8) -> !string::String {
     return strip_line_comments(allocator, bytes);
 }
 
-// strip_block_comments writes input into out with each `/* ... */` replaced by
-// one space. A `/*` that nothing closes is not a comment and stays as it is.
 fn strip_block_comments(allocator: Allocator, input: []u8, out: &var string::String) -> !void {
     let length = mem::len(input);
     var index = 0;
@@ -420,7 +372,6 @@ fn strip_block_comments(allocator: Allocator, input: []u8, out: &var string::Str
     return;
 }
 
-// strip_line_comments returns input with every line cut at its first `//`.
 fn strip_line_comments(allocator: Allocator, input: []u8) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
@@ -439,8 +390,6 @@ fn strip_line_comments(allocator: Allocator, input: []u8) -> !string::String {
     return move out;
 }
 
-// normalize_spaces joins the whitespace-separated fields of input with single
-// spaces, dropping leading and trailing whitespace.
 fn normalize_spaces(allocator: Allocator, input: []u8) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
@@ -454,7 +403,6 @@ fn normalize_spaces(allocator: Allocator, input: []u8) -> !string::String {
     return move out;
 }
 
-// normalize_pointer_stars makes C pointer stars easy to split.
 fn normalize_pointer_stars(allocator: Allocator, input: []u8) -> !string::String {
     var spaced = string::new(allocator);
     defer spaced.deinit(allocator);
@@ -472,7 +420,6 @@ fn normalize_pointer_stars(allocator: Allocator, input: []u8) -> !string::String
     return normalize_spaces(allocator, bytes);
 }
 
-// trim_space returns input without its leading and trailing whitespace.
 fn trim_space(input: []u8) -> []u8 {
     var cursor = FieldCursor { start: 0, end: 0 };
     var start = 0;
@@ -488,8 +435,6 @@ fn trim_space(input: []u8) -> []u8 {
     return input[start..end];
 }
 
-// next moves to the statement after the current separator and reports false
-// past the last one.
 fn (self: &var StatementCursor) next(source: []u8) -> bool {
     if self.end >= mem::len(source) {
         return false;
@@ -499,8 +444,6 @@ fn (self: &var StatementCursor) next(source: []u8) -> bool {
     return true;
 }
 
-// next moves to the following whitespace-separated field and reports false
-// once only whitespace is left.
 fn (self: &var FieldCursor) next(source: []u8) -> bool {
     let length = mem::len(source);
     var index = self.end;
@@ -522,12 +465,6 @@ fn (self: &var FieldCursor) next(source: []u8) -> bool {
     return true;
 }
 
-// space_width reports how many bytes the White_Space scalar at index takes, or
-// 0 when the bytes there are not one. Fields split and trim on the Unicode
-// White_Space set, not the ASCII set alone, so a non-breaking space separates
-// fields too. Every member outside ASCII starts with one of four lead bytes,
-// and a UTF-8 continuation byte can never be one of them, so scanning byte by
-// byte cannot report a false space inside another scalar.
 fn space_width(bytes: []u8, index: i64) -> i64 {
     let length = mem::len(bytes);
     let first = bytes[index];
@@ -539,7 +476,6 @@ fn space_width(bytes: []u8, index: i64) -> i64 {
     }
     if first == cast<u8>(194) and index + 1 < length {
         let second = bytes[index + 1];
-        // U+0085 NEL and U+00A0 NO-BREAK SPACE.
         if second == cast<u8>(133) or second == cast<u8>(160) {
             return 2;
         }
@@ -549,12 +485,10 @@ fn space_width(bytes: []u8, index: i64) -> i64 {
     }
     let second = bytes[index + 1];
     let third = bytes[index + 2];
-    // U+1680 OGHAM SPACE MARK.
     if first == cast<u8>(225) and second == cast<u8>(154) and third == cast<u8>(128) {
         return 3;
     }
     if first == cast<u8>(226) and second == cast<u8>(128) {
-        // U+2000..U+200A, U+2028, U+2029 and U+202F.
         if third >= cast<u8>(128) and third <= cast<u8>(138) {
             return 3;
         }
@@ -562,20 +496,15 @@ fn space_width(bytes: []u8, index: i64) -> i64 {
             return 3;
         }
     }
-    // U+205F MEDIUM MATHEMATICAL SPACE.
     if first == cast<u8>(226) and second == cast<u8>(129) and third == cast<u8>(159) {
         return 3;
     }
-    // U+3000 IDEOGRAPHIC SPACE.
     if first == cast<u8>(227) and second == cast<u8>(128) and third == cast<u8>(128) {
         return 3;
     }
     return 0;
 }
 
-// last_field_start returns where the last space-separated field of a
-// normalized parameter begins. Everything before the space in front of it is
-// the type.
 fn last_field_start(bytes: []u8) -> i64 {
     var index = mem::len(bytes);
     while index > 0 {
@@ -587,7 +516,6 @@ fn last_field_start(bytes: []u8) -> i64 {
     return 0;
 }
 
-// block_comment_end returns where the `*/` closing a block comment starts.
 fn block_comment_end(bytes: []u8, from: i64) -> ?i64 {
     let length = mem::len(bytes);
     var index = from;
@@ -600,8 +528,6 @@ fn block_comment_end(bytes: []u8, from: i64) -> ?i64 {
     return null;
 }
 
-// find_byte returns the index of the first byte at or after start, or the
-// length when there is none.
 fn find_byte(bytes: []u8, start: i64, byte: u8) -> i64 {
     let length = mem::len(bytes);
     var index = start;
@@ -614,7 +540,6 @@ fn find_byte(bytes: []u8, start: i64, byte: u8) -> i64 {
     return length;
 }
 
-// count_byte counts one byte over the whole range.
 fn count_byte(bytes: []u8, byte: u8) -> i64 {
     let length = mem::len(bytes);
     var count = 0;
@@ -628,7 +553,6 @@ fn count_byte(bytes: []u8, byte: u8) -> i64 {
     return count;
 }
 
-// without_byte copies bytes with every occurrence of one byte dropped.
 fn without_byte(allocator: Allocator, bytes: []u8, byte: u8) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
@@ -643,12 +567,10 @@ fn without_byte(allocator: Allocator, bytes: []u8, byte: u8) -> !string::String 
     return move out;
 }
 
-// starts_at reports whether needle begins at index.
 fn starts_at(bytes: []u8, index: i64, needle: []u8) -> bool {
     return mem::starts_with(bytes[index..mem::len(bytes)], needle);
 }
 
-// contains reports whether needle appears anywhere.
 fn contains(bytes: []u8, needle: []u8) -> bool {
     let last = mem::len(bytes) - mem::len(needle);
     var index = 0;
@@ -661,7 +583,6 @@ fn contains(bytes: []u8, needle: []u8) -> bool {
     return false;
 }
 
-// is_name_start reports the C identifier lead bytes `[A-Za-z_]`.
 fn is_name_start(byte: u8) -> bool {
     if byte >= cast<u8>(65) and byte <= cast<u8>(90) {
         return true;
@@ -672,7 +593,6 @@ fn is_name_start(byte: u8) -> bool {
     return byte == cast<u8>(95);
 }
 
-// is_name_byte reports the C identifier bytes `[A-Za-z0-9_]`.
 fn is_name_byte(byte: u8) -> bool {
     if byte >= cast<u8>(48) and byte <= cast<u8>(57) {
         return true;

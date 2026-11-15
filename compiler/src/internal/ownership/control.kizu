@@ -5,11 +5,6 @@ import std::arena;
 import std::array;
 import std::map;
 
-// The assignment, expression statement, if / while / for / match statement,
-// and branch agreement checks, together with the capture recognizers those
-// statements share.
-
-/// Moves the assigned value into an existing binding.
 fn (self: &var Checker) check_assign_stmt(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -20,10 +15,6 @@ fn (self: &var Checker) check_assign_stmt(
     }
     var ignored = empty_name();
     if self.direct_assignment_root(tree, env, statement.target) |target| {
-        // The binding keeps the type it was declared with. What is assigned
-        // fits that type without always being spelled as it -- `null`, the
-        // payload a `?T` wraps, a value written through a `&var` -- so its
-        // type says nothing about whether the binding copies.
         let target_type = self.binding(target).type_name;
         if try self.move_contextual_expr(tree, env, statement.value, target_type, &var ignored) |failed| {
             return move failed;
@@ -35,9 +26,6 @@ fn (self: &var Checker) check_assign_stmt(
             );
             return try self.with_borrower(move problem, env, target);
         }
-        // Overwriting a live owner silently drops it (ADR-0091). A `&var`
-        // parameter always points at a live value the caller still owns, so
-        // the same rule stops overwriting an owned type through it.
         if try self.binding_needs_consume(target) or
             (self.is_mut_borrow_param(target) and try self.value_type_needs_consume(self.allocator, target_type)) {
             return try self.error1(
@@ -78,9 +66,6 @@ fn (self: &var Checker) check_assign_stmt(
     return self.read_expr(tree, env, statement.target, &var ignored);
 }
 
-/// Returns the element an assignment writes into: the target of `a[i] = x`, or
-/// the indexed receiver of `a[i].f = x`, whose field is stored by writing the
-/// element.
 fn element_write_target(tree: &ast::Ast, target: ast::Expression) -> ast::Expression {
     var element = target;
     while true {
@@ -94,8 +79,6 @@ fn element_write_target(tree: &ast::Ast, target: ast::Expression) -> ast::Expres
     return element;
 }
 
-/// Returns the place a chain of element indexes starts from: `s.m` for
-/// `s.m[i][j]`.
 fn indexed_place(tree: &ast::Ast, expression: ast::Expression) -> ast::Expression {
     var place = expression;
     while true {
@@ -109,9 +92,6 @@ fn indexed_place(tree: &ast::Ast, expression: ast::Expression) -> ast::Expressio
     return place;
 }
 
-/// Reports whether an assignment target is an element of an array held in a
-/// binding or a field path of one. The type checker has already refused every
-/// other shape of indexed write but a view's.
 fn (self: &var Checker) is_array_element_write(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -135,9 +115,6 @@ fn (self: &var Checker) is_array_element_write(
     return self.names.is_buffer_type(place_type);
 }
 
-/// Checks a write into an element of an array. The write lands in the array's
-/// storage, so it waits for every borrow of that place -- a view the array
-/// lent is the usual one -- the way a field write does.
 fn (self: &var Checker) check_array_element_assign(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -173,9 +150,6 @@ fn (self: &var Checker) check_array_element_assign(
     return self.check_assignment_borrow_conflict(tree, env, place);
 }
 
-/// Rejects assigning over a live owner field. The assignment releases nothing,
-/// so the value the field held leaks. A field the owner's own deinit has
-/// consumed is not live, so re-filling it stays allowed.
 fn (self: &var Checker) check_owner_field_overwrite(
     tree: &ast::Ast,
     root: BindingHandle,
@@ -196,7 +170,6 @@ fn (self: &var Checker) check_owner_field_overwrite(
     );
 }
 
-/// Reads standalone expressions; normal calls handle argument moves.
 fn (self: &var Checker) check_expr_stmt(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -209,9 +182,6 @@ fn (self: &var Checker) check_expr_stmt(
     return self.check_discarded_owner(tree, expression, produced);
 }
 
-/// Rejects an expression statement that produces an owner. Cleanup obligations
-/// are tracked per binding, so a value that is never bound is never tracked;
-/// binding the value is what makes the obligation visible.
 fn (self: &var Checker) check_discarded_owner(
     tree: &ast::Ast,
     expression: ast::Expression,
@@ -227,7 +197,6 @@ fn (self: &var Checker) check_discarded_owner(
     );
 }
 
-/// Is the recognized capture condition of an if / while, or its plain read.
 struct CaptureCondition {
     is_borrow_cond: bool,
     borrow_cond: ContainerBorrowCondition,
@@ -239,8 +208,6 @@ fn (self: CaptureCondition) deinit(allocator: Allocator) -> void {
     return;
 }
 
-/// Reads the condition of a capturing if / while: the borrow-optional
-/// recognizer first, the sanctioned plain read otherwise.
 fn (self: &var Checker) read_capture_head(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -260,14 +227,11 @@ fn (self: &var Checker) read_capture_head(
     return null;
 }
 
-/// Merges possible moves from either branch into the outer scope.
 fn (self: &var Checker) check_if_stmt(
     tree: &var ast::Ast,
     env: ScopeHandle,
     statement: ast::IfStmt
 ) -> !?diagnostic::Diagnostic {
-    // The condition's product is held by the capture, or was a bool: the
-    // branches start with nothing of it pending.
     let pending = self.pending_owner_temps.len();
     let places = self.pending_moved_places.len();
     var head = try self.new_capture_condition();
@@ -277,15 +241,7 @@ fn (self: &var Checker) check_if_stmt(
     }
     let left = try self.store.clone_scope(env);
     let left_scope = try self.store.child(left);
-    // Both clones come first, so what the capture records about a field
-    // lands on the binding the branches were cloned from rather than on one
-    // of them. Opening a `?Owner` field discharges its cleanup on both paths
-    // — the value is released where it is there and there is nothing to
-    // release where it is not — so it is not a branch that consumed it.
     let right = try self.store.clone_scope(env);
-    // The tie borrows the branch's clone of each container: the branch body
-    // is checked against that clone, so only its bindings make its mutations
-    // wait.
     var consumes_field = false;
     if try self.define_capture(
         tree, statement.capture, statement.condition, &head, false, env, left_scope, &var consumes_field
@@ -308,7 +264,6 @@ fn (self: &var Checker) check_if_stmt(
         }
         right_live = !self.block_terminates(tree, alternative);
     }
-    // A branch that always returns cannot affect the code after the if.
     let left_live = !self.block_terminates(tree, statement.consequence);
     if try self.check_branch_consume_agreement(tree, env, left, right, left_live, right_live) |failed| {
         return move failed;
@@ -322,8 +277,6 @@ fn (self: &var Checker) check_if_stmt(
     return null;
 }
 
-/// Binds `else |err|`: the failure member, one scalar error code, a plain copy
-/// with no obligations of its own.
 fn (self: &var Checker) define_if_err_capture(
     tree: &ast::Ast,
     statement: ast::IfStmt,
@@ -357,10 +310,6 @@ fn (self: &Checker) new_capture_condition() -> !CaptureCondition {
     };
 }
 
-/// Sanctions the one direct user call whose optional payload can carry an
-/// input view. The capture records that provenance after the call is read;
-/// nested calls remain ordinary calls and cannot borrow a local view past
-/// their statement.
 fn (self: &var Checker) read_capture_condition(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -392,10 +341,6 @@ fn (self: &var Checker) read_capture_condition(
     return null;
 }
 
-/// Rejects an owner only one surviving branch consumes. After the merge the
-/// value is unusable, so the branch that did not consume it can neither
-/// release it nor hand it on, and cleaning up after the if would double-free
-/// the branch that already did. Both paths must agree.
 fn (self: &var Checker) check_branch_consume_agreement(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -404,8 +349,6 @@ fn (self: &var Checker) check_branch_consume_agreement(
     left_live: bool,
     right_live: bool
 ) -> !?diagnostic::Diagnostic {
-    // A branch that always returns had its own obligations checked at that
-    // return, so it puts nothing on the path that continues past the if.
     if !left_live or !right_live {
         return null;
     }
@@ -435,7 +378,6 @@ fn (self: &var Checker) check_branch_consume_agreement(
     );
 }
 
-/// Keeps the binding declared later of a candidate and the one found so far.
 fn (self: &Checker) later_binding(current: ?BindingHandle, candidate: BindingHandle) -> ?BindingHandle {
     let seen = current orelse return candidate;
     if self.binding(candidate).id > self.binding(seen).id {
@@ -444,9 +386,6 @@ fn (self: &Checker) later_binding(current: ?BindingHandle, candidate: BindingHan
     return seen;
 }
 
-/// Rejects an owner field only one surviving branch cleaned: past the merge
-/// the branch that left it alone can no longer release it, and releasing it
-/// after the if would release twice what the other branch already did.
 fn (self: &var Checker) check_branch_field_consume_agreement(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -496,16 +435,11 @@ fn (self: &var Checker) check_branch_field_consume_agreement(
     );
 }
 
-/// Is the loop form whose turn a region checks: what check_while_stmt and
-/// check_for_stmt hand check_loop_region.
 union LoopTurn {
     While(ast::WhileStmt),
     For(ast::ForStmt),
 }
 
-/// Checks a `while` loop: the condition runs once per turn like the body does,
-/// so it is read against the loop's clone, and what it binds is the turn's
-/// own.
 fn (self: &var Checker) check_while_stmt(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -514,12 +448,6 @@ fn (self: &var Checker) check_while_stmt(
     return self.check_loop_region(tree, env, statement.label, statement.body, LoopTurn::While(statement));
 }
 
-/// Checks one loop's body as a region the program enters an unknown number of
-/// times, whatever loop form wrote it. The turn runs against a clone of the
-/// scope: entering binds what the turn produces — a capture, an index — into
-/// the body's scope, leaving checks what the turn must have consumed, and the
-/// body as a whole consumes nothing declared outside it, since zero turns
-/// would leave that unreleased and two would release it twice.
 fn (self: &var Checker) check_loop_region(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -542,9 +470,6 @@ fn (self: &var Checker) check_loop_region(
     return null;
 }
 
-/// Checks one turn inside its loop region: what the turn produces is bound,
-/// the body is checked, and what the turn must have consumed is checked — the
-/// enter, body, and leave steps of `check_loop_region`.
 fn (self: &var Checker) check_loop_turn(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -562,9 +487,6 @@ fn (self: &var Checker) check_loop_turn(
     return self.leave_loop_turn(tree, child, turn);
 }
 
-/// Binds what one turn of the loop produces into the body's scope: the
-/// capture a `while` condition yields, read against the loop's clone, or the
-/// index a `for` counts.
 fn (self: &var Checker) enter_loop_turn(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -574,8 +496,6 @@ fn (self: &var Checker) enter_loop_turn(
 ) -> !?diagnostic::Diagnostic {
     match turn {
         While(statement) => {
-            // The condition's product is held by the capture, or was a
-            // bool: the body starts with nothing of it pending.
             let pending = self.pending_owner_temps.len();
             let places = self.pending_moved_places.len();
             var head = try self.new_capture_condition();
@@ -583,7 +503,6 @@ fn (self: &var Checker) enter_loop_turn(
             if try self.read_capture_head(tree, clone, statement.condition, statement.capture, &var head) |failed| {
                 return move failed;
             }
-            // Borrow the loop's clone of each container, as in check_if_stmt.
             var consumes_field = false;
             if try self.define_capture(
                 tree, statement.capture, statement.condition, &head, true, env, child, &var consumes_field
@@ -603,8 +522,6 @@ fn (self: &var Checker) enter_loop_turn(
     }
 }
 
-/// Checks what one turn of the loop must have consumed before it ends: the
-/// payload a `while` capture bound.
 fn (self: &var Checker) leave_loop_turn(
     tree: &var ast::Ast,
     child: ScopeHandle,
@@ -616,9 +533,6 @@ fn (self: &var Checker) leave_loop_turn(
     }
 }
 
-/// Rejects a loop body that consumes a binding declared outside it. The body
-/// runs an unknown number of times: zero leaves the value unreleased, two
-/// release it twice.
 fn (self: &var Checker) check_loop_consumes_nothing_outside(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -646,7 +560,6 @@ fn (self: &var Checker) check_loop_consumes_nothing_outside(
     );
 }
 
-/// Rejects a loop body that releases a field of a value declared outside it.
 fn (self: &var Checker) check_loop_cleans_no_outer_field(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -691,10 +604,6 @@ fn (self: &var Checker) check_loop_cleans_no_outer_field(
     );
 }
 
-/// Builds the `|name|` payload binding for an optional condition. The
-/// payload's class rides on its type: an owner payload owes a consume before
-/// the branch ends, a view payload is a free view like a parameter's, and a
-/// copy payload is a plain copy.
 fn (self: &var Checker) new_capture_binding(
     tree: &ast::Ast,
     name: ast::Text,
@@ -709,25 +618,12 @@ fn (self: &var Checker) new_capture_binding(
     return move value;
 }
 
-/// Is the classification of a capture condition whose payload owns memory, the
-/// `optional_owner_field_capture` result: the field's root binding, the field
-/// name, and whether the payload may be consumed there.
 struct OptionalOwnerFieldCapture {
     root: ?BindingHandle,
     field: Name,
     consumable: bool,
 }
 
-/// Classifies a capture condition whose payload owns memory; null when the
-/// condition is not such a capture or hands the payload over (which the caller
-/// leaves alone).
-///
-/// A read of storage does not hand the payload over, so the capture borrows
-/// — the way a container accessor's `?&V` does (ADR-0104). The one place a
-/// field is owned is its type's own deinit, where the receiver arrived by
-/// value and direct field cleanup is already allowed. Reading storage is the
-/// default answer, not the recognized one: an owner payload becomes owned
-/// only where something positively hands it over (原理 8).
 fn (self: &var Checker) optional_owner_field_capture(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -744,9 +640,6 @@ fn (self: &var Checker) optional_owner_field_capture(
     let direct = try self.direct_field_root(tree, env, condition) orelse
         return OptionalOwnerFieldCapture { root: null, field: empty_name(), consumable: false };
     if self.names.contains_byte(direct.path, cast<u8>(46)) {
-        // A nested path reads storage the same way a direct one does, and
-        // cleanup through one is refused anyway (ADR-0067), so it borrows
-        // with no field to attribute the obligation to.
         return OptionalOwnerFieldCapture { root: null, field: empty_name(), consumable: false };
     }
     return OptionalOwnerFieldCapture {
@@ -756,11 +649,6 @@ fn (self: &var Checker) optional_owner_field_capture(
     };
 }
 
-/// Reports whether the condition produces the payload rather than reading it
-/// out of storage. A call produces one — `Array.pop` moves the element out, a
-/// function returning `?T` hands back what it built. The comptime field form
-/// is the exception: it is spelled as a call but reads one field of a borrowed
-/// struct (ADR-0113).
 fn (self: &var Checker) hands_over_optional_payload(tree: &ast::Ast, condition: ast::Expression) -> !bool {
     let call = call_expr(tree, unwrap_expression_markers(tree, condition)) orelse return false;
     let apply = type_apply_expr(tree, call.callee) orelse return true;
@@ -775,9 +663,6 @@ fn (self: &var Checker) hands_over_optional_payload(tree: &ast::Ast, condition: 
     return true;
 }
 
-/// Strips the markers that wrap an expression without changing where its value
-/// came from: `try` forwards a call's success value, and `unsafe` only records
-/// who owns the obligation.
 pub fn unwrap_expression_markers(tree: &ast::Ast, expression: ast::Expression) -> ast::Expression {
     var current = expression;
     while true {
@@ -794,10 +679,6 @@ pub fn unwrap_expression_markers(tree: &ast::Ast, expression: ast::Expression) -
     return current;
 }
 
-/// Applies the owner-field split to one capture binding: a borrow everywhere
-/// but the owner's deinit, and there a consumable payload whose cleanup counts
-/// toward the field's obligation. is_field_capture reports whether the
-/// condition was one; consumes whether the body has to consume the payload.
 fn (self: &var Checker) tie_optional_owner_field_capture(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -818,8 +699,6 @@ fn (self: &var Checker) tie_optional_owner_field_capture(
     }
     let root = classified.root orelse return null;
     if in_loop {
-        // The condition reads the same storage every turn, so the payload the
-        // first turn released would be released again by the second.
         return try self.error2(
             tree, ast::zero_span(),
             "move error: `while` cannot consume owner field `%s.%s`; the condition reads the same storage every turn, so use `if`",
@@ -831,10 +710,6 @@ fn (self: &var Checker) tie_optional_owner_field_capture(
     return null;
 }
 
-/// Builds the binding a `|name|` capture introduces, ties it to what it
-/// borrows, and defines it in the body's scope. It reports whether the payload
-/// is one the body has to consume — true only for an owner field opened inside
-/// that field's own type deinit.
 fn (self: &var Checker) define_capture(
     tree: &var ast::Ast,
     name: ast::Text,
@@ -878,11 +753,6 @@ fn (self: &var Checker) define_capture(
     return null;
 }
 
-/// Rejects a capture body that dropped an owner payload it was handed. A
-/// payload produced by the condition is the body's to consume (SPEC §7), and
-/// one opened out of an owner field inside that field's deinit discharged the
-/// field's cleanup when the capture bound, so leaving either here would
-/// release nothing (ADR-0091). A borrowed payload owes nothing and passes.
 fn (self: &var Checker) check_capture_payload_consumed(
     tree: &ast::Ast,
     name: ast::Text,
@@ -898,10 +768,6 @@ fn (self: &var Checker) check_capture_payload_consumed(
     return try self.leak_error(tree, value, plain_exit());
 }
 
-/// Ties a view-carrying capture to the containers its condition call read: the
-/// captured view may alias their storage, so each stays share-borrowed until
-/// the capture's last use, and mutation or deinit waits — the same exclusion
-/// `let view = string.as_bytes()` gets.
 fn (self: &var Checker) tie_view_capture(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -929,15 +795,10 @@ fn (self: &var Checker) tie_view_capture(
         try capture.borrow_targets.append(self.allocator, source);
         index = index + 1;
     }
-    // The condition handed the payload over; a payload that owns something
-    // is the capture's to release even while its views tie it here.
     capture.owns_tied = try self.value_type_needs_consume(self.allocator, capture.type_name);
     return null;
 }
 
-/// Lists the storage and borrow-class view sources a capture-condition call
-/// reads. Declared functions derive sources from their signatures; the
-/// syntactic container walk covers builtin accessors.
 fn (self: &var Checker) cond_view_sources(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -971,7 +832,6 @@ fn (self: &var Checker) cond_view_sources(
     return null;
 }
 
-/// Adds one unseen source, for `cond_view_sources`.
 fn add_source(allocator: Allocator, sources: &var array::Array<BorrowSource>, source: BorrowSource) -> !void {
     var index = 0;
     while sources.get(index) |seen| {
@@ -983,8 +843,6 @@ fn add_source(allocator: Allocator, sources: &var array::Array<BorrowSource>, so
     return sources.append(allocator, source);
 }
 
-/// Adds the source one receiver or argument expression reads, for
-/// `cond_view_sources`.
 fn (self: &var Checker) add_cond_view_source(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -1001,9 +859,6 @@ fn (self: &var Checker) add_cond_view_source(
     return add_source(self.allocator, sources, BorrowSource { target: value, field: empty_name() });
 }
 
-/// Rejects `orelse` over a view optional produced from an owned container: the
-/// result is a bare view no binding ties back to the container, so it could
-/// outlive a mutation. A capture ties the view for exactly its scope instead.
 fn (self: &var Checker) refuse_container_view_orelse(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -1029,8 +884,6 @@ fn (self: &var Checker) refuse_container_view_orelse(
     );
 }
 
-/// Checks a `for` loop. The range is fixed, but its length is not known here,
-/// so the body is under the same rule as a while body.
 fn (self: &var Checker) check_for_stmt(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -1046,10 +899,6 @@ fn (self: &var Checker) check_for_stmt(
     return self.check_loop_region(tree, env, statement.label, statement.body, LoopTurn::For(statement));
 }
 
-/// Checks a `break` or `continue`: it names a loop the statement sits in, and
-/// leaving that loop's body early skips the releases the body has not reached
-/// yet, so what the body declared since the loop began must already be
-/// consumed.
 fn (self: &var Checker) check_loop_branch_label(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -1061,8 +910,6 @@ fn (self: &var Checker) check_loop_branch_label(
     return self.check_owners_consumed(tree, env, start.since_id, LeakExit { kind: kind, span: ast::zero_span() });
 }
 
-/// Finds the loop a branch names: the innermost one of this function for a
-/// bare branch, the one carrying the label otherwise.
 fn (self: &var Checker) loop_start_for(tree: &ast::Ast, label: ast::Text) -> !?LoopStart {
     let wanted = try self.names.intern_text(tree, label);
     let bare = text_empty(tree, label);
@@ -1077,30 +924,23 @@ fn (self: &var Checker) loop_start_for(tree: &ast::Ast, label: ast::Text) -> !?L
     return null;
 }
 
-/// Records a loop the body about to be checked sits in. The watermark is taken
-/// before the loop defines anything, so a capture the condition binds counts
-/// as the body's own.
 fn (self: &var Checker) enter_loop(tree: &ast::Ast, label: ast::Text) -> !void {
     let name = try self.names.intern_text(tree, label);
     try self.loop_starts.append(self.allocator, LoopStart { label: name, since_id: self.store.next_id });
     return;
 }
 
-/// Leaves the innermost loop `enter_loop` entered.
 fn (self: &var Checker) leave_loop() -> void {
     let _ = self.loop_starts.pop();
     return;
 }
 
-/// Merges possible moves from enum or union match arms into the outer scope.
 fn (self: &var Checker) check_match_stmt(
     tree: &var ast::Ast,
     env: ScopeHandle,
     statement: ast::Statement
 ) -> !?diagnostic::Diagnostic {
     let head = match_stmt_head(tree, statement) orelse return null;
-    // The value's product is held by the arm that binds it: the arms start
-    // with nothing of it pending.
     let pending = self.pending_owner_temps.len();
     let places = self.pending_moved_places.len();
     var value_type = empty_name();
@@ -1129,9 +969,6 @@ fn (self: &var Checker) check_match_stmt(
             return move failed;
         }
     }
-    // Every arm starts from the state the match was reached in. Cloning
-    // inside the loop would start each arm from what the arms before it
-    // merged back, so an arm would inherit a cleanup only one other arm ran.
     var live = array::new<ScopeHandle>(self.allocator);
     defer live.deinit(self.allocator);
     let context = MatchArmContext {
@@ -1158,7 +995,6 @@ fn (self: &var Checker) check_match_stmt(
     return null;
 }
 
-/// Carries what every arm of one match is checked against.
 struct MatchArmContext {
     value: ast::Expression,
     value_type: Name,
@@ -1170,8 +1006,6 @@ struct MatchArmContext {
     meta_capture: ast::Text,
 }
 
-/// Checks each arm against the state the match was reached in and collects the
-/// scopes of the arms that continue past it.
 fn (self: &var Checker) check_match_stmt_arms(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -1181,8 +1015,6 @@ fn (self: &var Checker) check_match_stmt_arms(
     live: &var array::Array<ScopeHandle>
 ) -> !?diagnostic::Diagnostic {
     let base = try self.store.clone_scope(env);
-    // One arm runs: what one arm produces -- a `return f()` is a statement
-    // of its own -- is not live in the next.
     let pending = self.pending_owner_temps.len();
     let places = self.pending_moved_places.len();
     var index = 0;
@@ -1224,8 +1056,6 @@ fn (self: &var Checker) check_match_stmt_arms(
     return null;
 }
 
-/// Binds the `comptime match` capture to the arm's own variant while its body
-/// is checked; a match written by hand binds nothing.
 fn (self: &var Checker) bind_arm_meta_field(
     tree: &ast::Ast,
     meta_capture: ast::Text,
@@ -1241,8 +1071,6 @@ fn (self: &var Checker) bind_arm_meta_field(
         owner: empty_name(), name: empty_name(), typ: empty_name(), variant: false, origin: empty_name()
     };
     if has_arm_variants {
-        // An arm that qualifies its set names the member the way a combined
-        // set keeps two same-named members apart.
         let qualified = !text_empty(tree, arm.tag_set);
         var index = 0;
         while arm_variants.get(index) |variant| {
@@ -1266,9 +1094,6 @@ fn (self: &var Checker) bind_arm_meta_field(
     return self.meta_fields.bind(self.allocator, bytes, field);
 }
 
-/// Rejects an owner field only some of the arms that continue past the match
-/// cleaned. It is the branch rule an if already follows, read across every
-/// surviving arm.
 fn (self: &var Checker) check_arm_field_consume_agreement(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -1322,9 +1147,6 @@ fn (self: &var Checker) check_arm_field_consume_agreement(
     );
 }
 
-/// Reports whether every arm that carries this binding made the same decision
-/// about one of its fields. arms holds each surviving arm's bindings_by_id, in
-/// arm order.
 fn (self: &Checker) field_cleanup_agrees(
     arms: &array::Array<map::Map<i64, BindingHandle>>,
     id: i64,
@@ -1349,8 +1171,6 @@ fn (self: &Checker) field_cleanup_agrees(
     return true;
 }
 
-/// Rejects a match arm that drops an owned payload it moved out of the
-/// scrutinee (ADR-0091).
 fn (self: &var Checker) check_arm_payload_consumed(
     tree: &ast::Ast,
     arm: ast::MatchArm,
@@ -1366,8 +1186,6 @@ fn (self: &var Checker) check_arm_payload_consumed(
     return try self.leak_error(tree, value, plain_exit());
 }
 
-/// Returns the binding of a matched value that is an owned named local, the
-/// one thing a moving match must mark consumed.
 fn (self: &Checker) match_scrutinee_owner(tree: &ast::Ast, env: ScopeHandle, value: ast::Expression) -> ?BindingHandle {
     let owner = self.lookup_ident(tree, env, value) orelse return null;
     let record = self.binding(owner);
@@ -1377,10 +1195,6 @@ fn (self: &Checker) match_scrutinee_owner(tree: &ast::Ast, env: ScopeHandle, val
     return owner;
 }
 
-/// Reports whether the matched value owns its payloads: an owned named local,
-/// or a call temporary the match consumes for free. Borrows, projections, and
-/// calls that may return borrows match in borrow mode and their aggregate
-/// payloads cannot move out.
 fn (self: &var Checker) match_scrutinee_owned(tree: &var ast::Ast, env: ScopeHandle, value: ast::Expression) -> !bool {
     if self.match_scrutinee_owner(tree, env, value) |_| {
         return true;
@@ -1395,18 +1209,11 @@ fn (self: &var Checker) match_scrutinee_owned(tree: &var ast::Ast, env: ScopeHan
         }
     }
     if try self.called_user_function(tree, env, call.callee) |called| {
-        // A borrow-typed return is a view of caller state, not a fresh
-        // temporary (ADR-0098: provenance is structural).
         return !self.names.starts_with(self.return_type_name(called.function), "&");
     }
-    // An unresolved namespace call is a variant constructor: a fresh
-    // temporary.
     return true;
 }
 
-/// Marks an owned matched value moved when any arm binds a payload that moves
-/// out. One arm moving is enough: which arm runs is not known statically, so
-/// the value is unavailable in the arm bodies and after the match either way.
 fn (self: &var Checker) consume_moved_from_scrutinee(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -1430,8 +1237,6 @@ fn (self: &var Checker) consume_moved_from_scrutinee(
     return null;
 }
 
-/// Reports whether any arm binds a payload an owned match moves out rather
-/// than copies.
 fn (self: &var Checker) match_moves_payload(
     tree: &ast::Ast,
     arms: &array::Array<ast::MatchArm>,
@@ -1451,22 +1256,12 @@ fn (self: &var Checker) match_moves_payload(
     return false;
 }
 
-/// Marks an owner union's deinit receiver moved. The dispatch moves the active
-/// payload out for cleanup, so `self` is unavailable inside the arm bodies and
-/// after the match; a second read or re-match of the deinitialized union is
-/// then a use-after-move.
 fn (self: &var Checker) consume_owner_union_receiver(tree: &ast::Ast, env: ScopeHandle, value: ast::Expression) -> !void {
     let owner = self.lookup_ident(tree, env, value) orelse return;
     try self.store.set_moved(owner, true);
     return self.store.set_moved_at(owner, value);
 }
 
-/// Binds one union variant payload for a match arm. Scalar payloads bind as
-/// copies from any match; declared aggregates move out of an owned scrutinee
-/// (ADR-0090); view payloads and aggregate payloads of a borrowed scrutinee
-/// stay borrowed so they cannot escape. Inside an owner union's own `deinit`
-/// the active owner payload is bound as an owned local so it can be cleaned
-/// through its explicit `deinit`. Inactive variants are never bound.
 fn (self: &var Checker) define_match_arm_payload(
     tree: &ast::Ast,
     arm: ast::MatchArm,
@@ -1504,13 +1299,6 @@ fn (self: &var Checker) define_match_arm_payload(
     return null;
 }
 
-/// Binds a payload as a `&var` borrow of where it lies when the match reads a
-/// mutable borrow place -- a `&var` borrow binding by name, or a field path
-/// rooted at a `var` local or a `&var` borrow -- and the payload is a declared
-/// aggregate or an owner. The place is mutably borrowed for the arm, as a
-/// `&var` argument would borrow it, so nothing else reads or moves it while
-/// the arm holds the payload. A `var` local matched by name is not such a
-/// place: it owns what it holds (ADR-0090).
 fn (self: &var Checker) tie_match_payload_reference(
     tree: &ast::Ast,
     value: &var Binding,
@@ -1548,33 +1336,22 @@ fn (self: &var Checker) tie_match_payload_reference(
     return null;
 }
 
-/// Reports whether a payload has an inside a mutable borrow can reach: a
-/// declared struct or union, or a type with a deinit contract. Scalars, enums
-/// and views copy.
 fn (self: &var Checker) payload_binds_by_reference(payload: Name) -> !bool {
     return self.is_struct(payload) or self.is_union(payload) or
         try self.value_type_needs_consume(self.allocator, payload);
 }
 
-/// Says what a match on an owned value may do with one bound payload: copy it
-/// out, move it out, or keep it borrowed.
 pub enum MatchPayloadClass {
     Borrows,
     Copies,
     Moves,
 }
 
-/// Sorts a payload type for a match on an owned value. Only types positively
-/// known to be provenance-free copies or declared aggregates escape the arm;
-/// views and anything unclassified stay borrowed, so an unhandled type errs
-/// toward rejection, never toward escape (ADR-0090).
 fn (self: &var Checker) classify_match_payload(type_name: Name) -> !MatchPayloadClass {
-    // A fixed-length array of copies is itself a copy, whatever the spelling.
     if self.names.is_buffer_type(type_name) and try self.is_copy_type(type_name) {
         return MatchPayloadClass::Copies;
     }
     if !self.names.is_plain_name(type_name) {
-        // []T, &T, ?T, E!T: views and wrappers keep borrow handling.
         return MatchPayloadClass::Borrows;
     }
     if self.names.is_raw_pointer(type_name) {
@@ -1584,17 +1361,12 @@ fn (self: &var Checker) classify_match_payload(type_name: Name) -> !MatchPayload
         return MatchPayloadClass::Copies;
     }
     let base = try self.names.generic_base_or_self(type_name);
-    // A declared aggregate moves out, and so does any value with a deinit
-    // contract: an owned scrutinee hands its std container payload over the
-    // same way it hands a struct over, and the arm then owes the release.
     if self.is_struct(base) or self.is_union(base) or try self.value_type_needs_consume(self.allocator, type_name) {
         return MatchPayloadClass::Moves;
     }
     return MatchPayloadClass::Borrows;
 }
 
-/// Is the declaration a match dispatches on, the `match_tags` result: the enum
-/// tags, error set members, or union variants of the scrutinee type.
 pub enum MatchTagKind {
     Enum,
     ErrorSet,
@@ -1606,14 +1378,10 @@ pub struct MatchTags {
     pub type_name: Name,
 }
 
-/// Returns known tags for enum and union match ownership checks; null when the
-/// type is neither.
 fn (self: &Checker) match_tags(type_name: Name) -> !?MatchTags {
     if self.is_enum(type_name) {
         return MatchTags { kind: MatchTagKind::Enum, type_name: type_name };
     }
-    // An error carries nothing, so matching one moves nothing, which is what
-    // a tag enum arm already means here.
     if self.is_error_set(type_name) {
         return MatchTags { kind: MatchTagKind::ErrorSet, type_name: type_name };
     }
@@ -1623,9 +1391,6 @@ fn (self: &Checker) match_tags(type_name: Name) -> !?MatchTags {
     return null;
 }
 
-/// Reports whether a match arm names a known tag. A qualified arm
-/// (`FsError::NotFound =>`) resolves through the set it names; whether that
-/// set fits the matched value is the types checker's question.
 fn (self: &Checker) match_arm_tag_known(tree: &ast::Ast, tags: MatchTags, arm: &ast::MatchArm) -> bool {
     if !text_empty(tree, arm.tag_set) {
         let retained_set = tree.texts.at(arm.tag_set.node);
@@ -1640,7 +1405,6 @@ fn (self: &Checker) match_arm_tag_known(tree: &ast::Ast, tags: MatchTags, arm: &
     return self.match_tag_known(tree, tags, arm.tag);
 }
 
-/// Reports whether the matched declaration has a tag.
 fn (self: &Checker) match_tag_known(tree: &ast::Ast, tags: MatchTags, tag: ast::Text) -> bool {
     let retained = tree.texts.at(tag.node);
     let bytes = retained.as_bytes();
@@ -1658,8 +1422,6 @@ fn (self: &Checker) union_has_variant(union_name: Name, variant: []u8) -> bool {
     return false;
 }
 
-/// Returns the payload type of the union variant an arm names: empty for
-/// enums, error sets, and payload-free variants.
 fn (self: &Checker) union_payload_for_tag(tree: &ast::Ast, tags: MatchTags, tag: ast::Text) -> Name {
     if tags.kind != MatchTagKind::Union {
         return empty_name();

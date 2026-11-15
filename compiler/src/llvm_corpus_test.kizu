@@ -14,16 +14,6 @@ import std::mem;
 import std::string;
 import std::testing;
 
-// Each case of the LLVM corpus in compiler/tests/llvm carries its expectation
-// block: the LLVM IR emitted for the lowered module (`// emit:`) and for the
-// optimized one (`// opt:`), or the failure a stage reports. The std functions
-// a case pulls in are dropped before emitting, as in the IR corpus; the
-// selfhost test compares them through the `build --emit-llvm` command. This
-// runner loads every case through this loader, type- and ownership-checks it,
-// lowers it with this module, emits it with this emitter, and requires the
-// same bytes.
-
-/// The blank line plus `// llvm` line that ends a case input.
 fn llvm_marker() -> []u8 {
     return
         \\
@@ -33,7 +23,6 @@ fn llvm_marker() -> []u8 {
     ;
 }
 
-/// Separates one case into its input and its expectation block.
 fn split_llvm_case(data: []u8) -> ?i64 {
     let marker = llvm_marker();
     let marker_len = mem::len(marker);
@@ -49,7 +38,6 @@ fn split_llvm_case(data: []u8) -> ?i64 {
     return null;
 }
 
-/// Appends text as one expectation line: embedded newlines become `\n`.
 fn append_folded_llvm_line(allocator: Allocator, out: &var string::String, text: []u8) -> !void {
     var index = 0;
     while mem::byte_at(text, index) |byte| {
@@ -64,7 +52,6 @@ fn append_folded_llvm_line(allocator: Allocator, out: &var string::String, text:
     return out.append_byte(allocator, cast<u8>(10));
 }
 
-/// Appends emitted text with every line prefixed by `// `.
 fn append_emitted(allocator: Allocator, out: &var string::String, text: []u8) -> !void {
     try out.append_bytes(allocator, "// ");
     var index = 0;
@@ -78,9 +65,6 @@ fn append_emitted(allocator: Allocator, out: &var string::String, text: []u8) ->
     return out.append_byte(allocator, cast<u8>(10));
 }
 
-/// Drops the std functions of a module: the functions whose symbol starts with
-/// `std::`, in place, keeping the others in order. The dropped list comes back
-/// in reverse so the caller can restore the module with `restore_functions`.
 fn keep_user_functions(allocator: Allocator, module: &var ir::Module) -> !array::Array<ir::Function> {
     var reversed = array::new<ir::Function>(allocator);
     errdefer reversed.deinit(allocator);
@@ -100,8 +84,6 @@ fn keep_user_functions(allocator: Allocator, module: &var ir::Module) -> !array:
     return move reversed;
 }
 
-/// Puts every function back in its original order after an emission that
-/// saw the user functions only.
 fn restore_functions(allocator: Allocator, module: &var ir::Module, reversed: &array::Array<ir::Function>) -> !void {
     module.functions.clear(allocator);
     var index = reversed.len();
@@ -112,7 +94,6 @@ fn restore_functions(allocator: Allocator, module: &var ir::Module, reversed: &a
     return;
 }
 
-/// Appends the `// ` + folded text of one failed stage.
 fn append_llvm_failure(
     allocator: Allocator,
     sources: &source::SourceMap,
@@ -127,8 +108,6 @@ fn append_llvm_failure(
     return append_folded_llvm_line(allocator, out, bytes);
 }
 
-/// Appends one section: the LLVM IR emitted for the user functions of a
-/// module, which is left as it was.
 fn emit_llvm_section(
     allocator: Allocator,
     sources: &source::SourceMap,
@@ -149,8 +128,6 @@ fn emit_llvm_section(
     return restore_functions(allocator, module, &dropped);
 }
 
-/// Appends the same `check failed:` line to both sections, the way a case
-/// records a program the front end rejects.
 fn append_check_failure(
     allocator: Allocator,
     sources: &source::SourceMap,
@@ -165,11 +142,6 @@ fn append_check_failure(
     return append_llvm_failure(allocator, sources, failed, "// check failed: ", out);
 }
 
-/// Renders the expectation block of one case: `// emit:` then `// opt:`.
-/// Optimize rewrites the module in place, so the one lowering is emitted, then
-/// optimized, then emitted again -- the emitter reads the module, so the
-/// optimized module is the one a fresh lowering would give, and the front end,
-/// the costly half, runs once per case.
 fn render_llvm_case(
     io: Io,
     allocator: Allocator,

@@ -4,10 +4,6 @@ import std::fmt;
 import std::mem;
 import std::string;
 
-// A cond_fail keeps its dynamic values in SSA and selects one small WASI
-// runtime entry. Only the entries a module uses, their stderr data, and
-// proc_exit are emitted.
-
 struct WasmPanicSpec {
     kind: []u8,
     helper: []u8,
@@ -161,8 +157,6 @@ fn panic_data_text(key: []u8) -> ?[]u8 {
     return null;
 }
 
-/// Records checked failures before the header and data are written, so a
-/// module without one gains neither proc_exit nor panic helpers.
 fn (self: &var Emitter) collect_panic_kinds(module: &ir::Module) -> !void {
     var function_index = 0;
     while module.functions.get(function_index) |function| {
@@ -226,8 +220,6 @@ fn (self: &var Emitter) collect_panic_kinds(module: &ir::Module) -> !void {
     return;
 }
 
-/// Assigns fixed-order linear-memory data for only the checked failures the
-/// module uses.
 fn (self: &var Emitter) record_used_panic_data(offset: i64) -> !i64 {
     if self.panic_kinds.len() == 0 {
         return offset;
@@ -293,7 +285,6 @@ fn (self: &var Emitter) record_panic_data(key: []u8, text: []u8, offset: i64) ->
     return offset + length;
 }
 
-/// Calls one runtime failure when its checked condition is true.
 fn (self: &var Emitter) write_cond_fail(
     module: &ir::Module,
     node: &ir::InstrNode
@@ -336,7 +327,6 @@ fn (self: &var Emitter) write_cond_fail(
     return try self.fail("wasm error: unknown cond_fail kind `%s`", Arg::Str(shown));
 }
 
-/// Reports one dynamic []u8 panic message and stops.
 fn (self: &var Emitter) write_panic_fail(
     module: &ir::Module,
     node: &ir::InstrNode
@@ -344,7 +334,6 @@ fn (self: &var Emitter) write_panic_fail(
     return self.write_message_fail(module, node, "panic.fail");
 }
 
-/// Is the shared instruction boundary for panic.fail and test.fail.
 fn (self: &var Emitter) write_message_fail(
     module: &ir::Module,
     node: &ir::InstrNode,
@@ -375,8 +364,6 @@ fn (self: &var Emitter) write_message_fail(
     return null;
 }
 
-/// Writes only the kind-specific checked failures this module uses, plus the
-/// shared stderr, position, integer, and exit boundary.
 fn (self: &var Emitter) write_panic_runtime() -> !void {
     try self.write_panic_exit_helper();
     try self.write_panic_at_helper();
@@ -424,7 +411,6 @@ fn (self: &var Emitter) write_panic_runtime() -> !void {
     return;
 }
 
-/// Ends a checked failure without relying on an engine trap message.
 fn (self: &var Emitter) write_panic_exit_helper() -> !void {
     try self.line("  (func $__panic_exit");
     if !self.is_browser() {
@@ -435,7 +421,6 @@ fn (self: &var Emitter) write_panic_exit_helper() -> !void {
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
-/// Appends an optional source position and one newline.
 fn (self: &var Emitter) write_panic_at_helper() -> !void {
     let at = self.data_ref("panic.at");
     let colon = self.data_ref("panic.colon");
@@ -452,8 +437,6 @@ fn (self: &var Emitter) write_panic_at_helper() -> !void {
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
-/// Writes `runtime error: summary`, an optional position, and a newline to
-/// stderr.
 fn (self: &var Emitter) write_panic_summary_helper() -> !void {
     let prefix = self.data_ref("panic.prefix");
     try self.line("  (func $__panic_summary (param $ptr i32) (param $len i32)");
@@ -465,7 +448,6 @@ fn (self: &var Emitter) write_panic_summary_helper() -> !void {
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
-/// Reports a dynamic summary and terminates.
 fn (self: &var Emitter) write_panic_fail_helper() -> !void {
     try self.line("  (func $__panic_fail (param $ptr i32) (param $len i32)");
     try self.line("      (param $line i64) (param $column i64)");
@@ -476,7 +458,6 @@ fn (self: &var Emitter) write_panic_fail_helper() -> !void {
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
-/// Writes the context carried by bounds(index, length).
 fn (self: &var Emitter) write_panic_bounds_helper() -> !void {
     let summary = self.data_ref("panic.bounds.summary");
     let note = self.data_ref("panic.bounds.note");
@@ -495,7 +476,6 @@ fn (self: &var Emitter) write_panic_bounds_helper() -> !void {
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
-/// Writes the context carried by range(start, end, length).
 fn (self: &var Emitter) write_panic_range_helper() -> !void {
     let summary = self.data_ref("panic.range.summary");
     let note = self.data_ref("panic.range.note");
@@ -517,7 +497,6 @@ fn (self: &var Emitter) write_panic_range_helper() -> !void {
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
-/// Writes a checked failure with no dynamic context.
 fn (self: &var Emitter) write_simple_panic_helper(spec: WasmPanicSpec) -> !void {
     let summary = self.data_ref(spec.summary_key);
     try self.line1("  (func $%s (param $line i64) (param $column i64)", Arg::Lit(spec.helper));

@@ -1,23 +1,10 @@
 import std::array;
 import std::map;
 
-// Removing a counted loop that does nothing. A loop can go only when leaving
-// it out cannot be told apart from running it: it ends, it does nothing
-// but compute values, and nothing after it reads a value it computed. Ending
-// is shown for one shape, the one a `for` over a range lowers to: the header
-// compares a counter with a bound fixed before the loop, the counter starts
-// outside and comes back from the one block that jumps back, one more than
-// it was, and the blocks between the header and that jump hold no loop of
-// their own. The counter then rises by one each turn and stays below the
-// bound, so it cannot wrap, and the loop runs out.
-
-/// Returns how many blocks a loop body may have for the pass to look at it.
 fn empty_loop_block_limit() -> i64 {
     return 64;
 }
 
-/// Turns the header of each counted loop that does nothing into a jump past
-/// the loop, and removes the blocks no path reaches any more.
 pub fn remove_empty_loops(allocator: Allocator, module: &var Module) -> !void {
     var index = 0;
     while module.functions.get(index) |function| {
@@ -27,7 +14,6 @@ pub fn remove_empty_loops(allocator: Allocator, module: &var Module) -> !void {
     return;
 }
 
-/// Is where one value is defined: its instruction and the block holding it.
 struct LoopDef {
     instr: Instr,
     block: i64,
@@ -93,8 +79,6 @@ fn remove_empty_loops_in(allocator: Allocator, module: &var Module, function: Fu
     return fold_trivial_phis(allocator, module, function);
 }
 
-/// Returns the block a loop headed by the block at header leaves to, when the
-/// loop is a counted one that does nothing.
 fn empty_loop_exit(
     allocator: Allocator,
     module: &var Module,
@@ -113,7 +97,6 @@ fn empty_loop_exit(
     if body == header or exit == header {
         return null;
     }
-    // The blocks the body reaches before it jumps back to the header.
     var inside = map::new<i64, bool>(allocator);
     defer inside.deinit(allocator);
     try inside.insert(allocator, header, true);
@@ -142,8 +125,6 @@ fn empty_loop_exit(
             try stack.append(allocator, next);
         }
     }
-    // The loop is entered only through the header, from one block outside and
-    // the one latch inside.
     var latch = -1;
     var outside = -1;
     var pred_count = 0;
@@ -190,12 +171,7 @@ fn empty_loop_exit(
     return term.else_target;
 }
 
-/// Reports whether the blocks of a loop body hold no cycle of their own:
-/// every path from the body's first block reaches the header.
 fn body_is_acyclic(allocator: Allocator, module: &Module, blocks: &BlockIndex, order: &array::Array<i64>, header: i64) -> !bool {
-    // A block is done once every block after it is: repeat over the body,
-    // marking a block whose successors are all done or the header, until a
-    // pass marks nothing. A body that leaves blocks unmarked has a cycle.
     var done = map::new<i64, bool>(allocator);
     defer done.deinit(allocator);
     var progress = true;
@@ -226,9 +202,6 @@ fn body_is_acyclic(allocator: Allocator, module: &Module, blocks: &BlockIndex, o
     return done.len() == order.len();
 }
 
-/// Reports whether a header's condition is `counter < bound` on i64, with the
-/// bound defined outside the loop and the counter a phi of the header that
-/// the latch feeds with the counter plus one.
 fn counter_runs_out(
     module: &Module,
     blocks: &BlockIndex,
@@ -290,7 +263,6 @@ fn counter_runs_out(
     return amount == 1;
 }
 
-/// Reports whether the header and the body only compute values.
 fn loop_only_computes(module: &Module, blocks: &BlockIndex, order: &array::Array<i64>, header: i64) -> bool {
     if !block_only_computes(module, blocks.block_at(header)) {
         return false;
@@ -317,7 +289,6 @@ fn block_only_computes(module: &Module, block: Block) -> bool {
     return true;
 }
 
-/// Reports whether a block outside the loop reads a value the loop defines.
 fn loop_value_read_outside(module: &Module, blocks: &BlockIndex, defs: &map::Map<i64, LoopDef>, inside: &map::Map<i64, bool>) -> bool {
     var position = 0;
     while position < blocks.len() {

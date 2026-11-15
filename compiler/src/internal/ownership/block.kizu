@@ -4,20 +4,12 @@ import compiler::internal::typ;
 import std::array;
 import std::map;
 
-// The block, statement dispatch, cleanup registration, consume obligation, and
-// return checks.
-
-/// Validates statements in a lexical block. The errdefer entries the block
-/// registers are dropped again on every exit.
 fn (self: &var Checker) check_block(
     tree: &var ast::Ast,
     env: ScopeHandle,
     block: ast::Block
 ) -> !?diagnostic::Diagnostic {
     let err_defer_mark = self.live_err_defers.len();
-    // The block leaves nothing of its own pending either: a `return` is a
-    // statement too, and a body checked once per expansion starts each time
-    // from what its enclosing statement held.
     let pending_mark = self.pending_owner_temps.len();
     let places_mark = self.pending_moved_places.len();
     if try self.check_block_statements(tree, env, block) |failed| {
@@ -41,12 +33,7 @@ fn (self: &var Checker) check_block_statements(
     defer last_uses.deinit(self.allocator);
     var defers = array::new<ast::Statement>(self.allocator);
     defer defers.deinit(self.allocator);
-    // Bindings declared inside this block carry ids above the watermark; the
-    // fall-through leak check below is scoped to exactly those.
     let binding_mark = self.store.id_mark();
-    // A statement starts with the owners its enclosing expression, if any,
-    // still holds pending; what the statement itself produces is settled by
-    // the time it ends.
     let pending_mark = self.pending_owner_temps.len();
     let places_mark = self.pending_moved_places.len();
     var index = 0;
@@ -92,7 +79,6 @@ fn (self: &var Checker) check_block_statements(
     return self.check_owners_consumed(tree, env, binding_mark, plain_exit());
 }
 
-/// Drops errdefer entries registered inside an exited block.
 fn (self: &var Checker) restore_err_defers(mark: i64) -> void {
     while self.live_err_defers.len() > mark {
         let _ = self.live_err_defers.pop();
@@ -100,7 +86,6 @@ fn (self: &var Checker) restore_err_defers(mark: i64) -> void {
     return;
 }
 
-/// Validates one statement.
 fn (self: &var Checker) check_stmt(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -112,7 +97,6 @@ fn (self: &var Checker) check_stmt(
     return null;
 }
 
-/// Validates one statement by its form.
 fn (self: &var Checker) check_stmt_form(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -139,8 +123,6 @@ fn (self: &var Checker) check_stmt_form(
     return self.check_body_stmt(tree, env, statement);
 }
 
-/// Checks the statements that carry a body of their own, and the branches that
-/// leave one.
 fn (self: &var Checker) check_body_stmt(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -165,7 +147,6 @@ fn (self: &var Checker) check_body_stmt(
         return self.check_match_stmt(tree, env, statement);
     }
     if is_block_stmt(tree, statement) {
-        // Only a match arm body is a bare block statement (SPEC §6.12).
         return self.check_block(tree, env, ast::Block { node: statement.node });
     }
     if comptime_if_stmt(tree, statement) |value| {
@@ -180,7 +161,6 @@ fn (self: &var Checker) check_body_stmt(
     return try self.error0(ast::zero_span(), "move error: unsupported statement *ast.RecoveredStmt");
 }
 
-/// Registers a cleanup that runs on every later exit of this block.
 fn (self: &var Checker) check_defer_stmt(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -189,7 +169,6 @@ fn (self: &var Checker) check_defer_stmt(
     return self.register_cleanup(tree, env, CleanupKind::Defer, statement.expr);
 }
 
-/// Registers a cleanup that runs on every later error exit of this block.
 fn (self: &var Checker) check_err_defer_stmt(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -198,13 +177,11 @@ fn (self: &var Checker) check_err_defer_stmt(
     return self.register_cleanup(tree, env, CleanupKind::ErrDefer, statement.expr);
 }
 
-/// Is the exit set a registered cleanup runs on.
 enum CleanupKind {
     Defer,
     ErrDefer,
 }
 
-/// Names the statement that registers a cleanup of this kind.
 fn cleanup_keyword(kind: CleanupKind) -> []u8 {
     match kind {
         Defer => return "defer",
@@ -212,15 +189,6 @@ fn cleanup_keyword(kind: CleanupKind) -> []u8 {
     }
 }
 
-/// Validates one deferred call and records it. The call's arguments are read
-/// where the statement is written (ADR-0132); the one argument the call
-/// consumes -- a receiver its method takes by value, or an argument marked
-/// `move` -- is the owner the registration is about. A value carries one
-/// registration at most. What differs between the kinds is when the call runs:
-/// a defer discharges the owner's consume obligation (ADR-0091) from here on,
-/// while an errdefer is not applied at normal block exit, so it never blocks a
-/// success-path move and its owner is re-validated at each error-return path
-/// that can run it.
 fn (self: &var Checker) register_cleanup(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -260,19 +228,11 @@ fn (self: &var Checker) register_cleanup(
     }
 }
 
-/// Is the one owner a deferred call consumes when it runs, with the expression
-/// that names it, as `read_deferred_call` returns them. A call that consumes
-/// nothing has none.
 struct DeferredOwner {
     value: ?BindingHandle,
     expression: ast::Expression,
 }
 
-/// Reads a deferred call's receiver and arguments without consuming anything,
-/// and fills the one owner the call will consume when it runs. A method
-/// receiver is that owner when the method takes it by value; an argument is
-/// when it is marked `move`. Two owners in one call would need two
-/// registrations to retire separately, so a call may consume at most one.
 fn (self: &var Checker) read_deferred_call(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -316,9 +276,6 @@ fn (self: &var Checker) read_deferred_call(
     return null;
 }
 
-/// Records the declaration a registered cleanup's method call reaches. The
-/// call runs at the exit, so it is not checked as a call here, and the
-/// receiver's type is what names the method.
 fn (self: &var Checker) record_deferred_method_callee(
     tree: &ast::Ast,
     callee: ast::Expression,
@@ -338,8 +295,6 @@ fn (self: &var Checker) record_deferred_method_callee(
     return self.record_method_callee(callee, method_call_key(tree, callee), self.functions.at(function.index).name);
 }
 
-/// Reads one `move x` argument of a deferred call and makes `x` the owner the
-/// call consumes, for each argument `read_deferred_call` reads.
 fn (self: &var Checker) read_moved_deferred_arg(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -372,9 +327,6 @@ fn (self: &var Checker) read_moved_deferred_arg(
     return null;
 }
 
-/// Reports whether calling method on value takes the value over: read from the
-/// method's signature for a user type, and from the one cleanup name for std
-/// storage, whose `deinit` is the call that ends it.
 fn (self: &var Checker) method_consumes_receiver(value: BindingHandle, tree: &ast::Ast, method: ast::Text) -> !bool {
     let type_name = self.binding(value).type_name;
     let receiver_type = try self.names.generic_base_or_self(type_name);
@@ -387,9 +339,6 @@ fn (self: &var Checker) method_consumes_receiver(value: BindingHandle, tree: &as
     return self.value_type_needs_consume(self.allocator, type_name);
 }
 
-/// Rejects a second cleanup registration for one value. A `defer` already
-/// releases it on every exit and an `errdefer` on every error exit, so another
-/// of either would release it twice on the path both run.
 fn (self: &var Checker) check_cleanup_not_registered(
     tree: &var ast::Ast,
     value: BindingHandle,
@@ -413,9 +362,6 @@ fn (self: &var Checker) check_cleanup_not_registered(
     );
 }
 
-/// Checks the tie between a release and the allocator it names: a
-/// `deinit(allocator)` releases with the allocator that made the value
-/// (ADR-0132). The arguments themselves are read by read_deferred_call.
 fn (self: &var Checker) check_deferred_release_args(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -432,8 +378,6 @@ fn (self: &var Checker) check_deferred_release_args(
     return self.check_release_tie(tree, env, label, receiver, argument);
 }
 
-/// Names a release the way its diagnostics spell it: the receiver type's own
-/// name, without the module path or static arguments.
 fn (self: &var Checker) release_label(receiver_type: Name) -> !Name {
     let borrowed = try self.names.trim_prefix(receiver_type, "&var ");
     let owned = try self.names.trim_prefix(borrowed, "&");
@@ -442,14 +386,6 @@ fn (self: &var Checker) release_label(receiver_type: Name) -> !Name {
     return self.names.format("%s.deinit", tail, empty_name(), empty_name());
 }
 
-/// Reports the active errdefer cleanups that this error-return path must skip,
-/// and rejects the ones it cannot run.
-///
-/// A consumed receiver retires its cleanup (ADR-0114). A move hands the
-/// obligation to a new owner and an explicit `deinit` discharges it outright;
-/// either way the value is gone, so running the cleanup here would release
-/// what this frame no longer holds. A borrowed receiver is different: it is
-/// still live and cannot be consumed at all, so it stays an error.
 fn (self: &var Checker) validate_err_defer_receivers(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -468,9 +404,6 @@ fn (self: &var Checker) validate_err_defer_receivers(
             try retired.append(self.allocator, entry.receiver);
             continue;
         }
-        // A method call's reservation of its receiver is not a borrow the
-        // frame holds at an error exit inside the arguments: the call has
-        // not begun, and the receiver's cleanup may run.
         let record = self.binding(value);
         if record.active_borrows - record.reservations > 0 or record.active_mut_borrows > 0 {
             return try self.error1(
@@ -483,9 +416,6 @@ fn (self: &var Checker) validate_err_defer_receivers(
     return null;
 }
 
-/// Reports whether a type carries a deinit contract, the class of values
-/// ADR-0091 requires every exit path to consume. Owner-ness has one
-/// definition, ast.DeinitOwners, seeded per program.
 fn (self: &var Checker) value_type_needs_consume(allocator: Allocator, type_name: Name) -> !bool {
     let retained = name_text(&self.names, type_name);
     let bytes = retained.as_bytes();
@@ -497,10 +427,6 @@ fn (self: &var Checker) value_type_needs_consume(allocator: Allocator, type_name
     return needs;
 }
 
-/// Reports whether a struct field owes cleanup. A `?Owner` field owes it on
-/// the path where the value is there, so the field carries the obligation the
-/// same way a plain owner field does; the deinit that discharges it opens the
-/// optional first.
 fn (self: &var Checker) field_type_needs_consume(type_name: Name) -> !bool {
     if try self.names.optional_elem(type_name) |elem| {
         return self.value_type_needs_consume(self.allocator, elem);
@@ -508,10 +434,6 @@ fn (self: &var Checker) field_type_needs_consume(type_name: Name) -> !bool {
     return self.value_type_needs_consume(self.allocator, type_name);
 }
 
-/// Reports whether a produced value owes cleanup once it is unwrapped: `?T`
-/// and `E!T` are the two ways an owner reaches a caller without being the type
-/// itself, and both are consumed the moment the value is bound, so the
-/// obligation is the element's.
 fn (self: &var Checker) result_type_needs_consume(type_name: Name) -> !bool {
     var current = type_name;
     while true {
@@ -528,8 +450,6 @@ fn (self: &var Checker) result_type_needs_consume(type_name: Name) -> !bool {
     return false;
 }
 
-/// Reports whether a binding still owes its cleanup: an owned deinit-carrying
-/// value that no move, deinit, or registered defer has discharged yet.
 fn (self: &var Checker) binding_needs_consume(value: BindingHandle) -> !bool {
     let record = self.binding(value);
     if record.moved or record.deinitialized or record.defer_cleanup {
@@ -547,9 +467,6 @@ fn (self: &var Checker) binding_needs_consume(value: BindingHandle) -> !bool {
     return self.value_type_needs_consume(self.allocator, record.type_name);
 }
 
-/// Reports whether a value taken apart field by field has nothing left to
-/// consume. A type that declares its own deinit holds one more obligation that
-/// no field consume reaches, so it never reads as done here.
 fn (self: &var Checker) all_owner_fields_consumed(value: BindingHandle) -> !bool {
     let type_name = self.binding(value).type_name;
     if !self.store.has_field_deinit(value) or self.declares_deinit(type_name) {
@@ -569,16 +486,12 @@ fn (self: &var Checker) all_owner_fields_consumed(value: BindingHandle) -> !bool
     return true;
 }
 
-/// Reports whether a type's author wrote its cleanup.
 fn (self: &Checker) declares_deinit(type_name: Name) -> bool {
     let retained = name_text(&self.names, type_name);
     let bytes = retained.as_bytes();
     return ast::owner_type(&self.declared_deinits, bytes);
 }
 
-/// Names the exit a leak check guards. An early error exit points its
-/// diagnostic at the exit that leaks — a later cleanup exists but is never
-/// reached — while a plain exit points at the declaration nothing ever cleans.
 pub enum LeakExitKind {
     Plain,
     Try,
@@ -596,10 +509,6 @@ pub fn plain_exit() -> LeakExit {
     return LeakExit { kind: LeakExitKind::Plain, span: ast::zero_span() };
 }
 
-/// Rejects an exit that would leak a live owner. since_id limits the check to
-/// bindings declared after that watermark: a function exit passes 0 and checks
-/// everything live, a block fall-through passes the id the block started at.
-/// On an error path a registered errdefer cleanup counts as the consume.
 fn (self: &var Checker) check_owners_consumed(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -608,7 +517,6 @@ fn (self: &var Checker) check_owners_consumed(
 ) -> !?diagnostic::Diagnostic {
     let error_path = exit.kind == LeakExitKind::Try or exit.kind == LeakExitKind::ErrorReturn;
     var leaked = none_binding();
-    // Only a value whose type carries a deinit contract can need consuming.
     var walker = self.store.walk_owners(env);
     while walker.next(&self.store) |value| {
         if self.binding(value).id <= since_id or !try self.binding_needs_consume(value) {
@@ -629,8 +537,6 @@ fn (self: &var Checker) check_owners_consumed(
     return try self.leak_error(tree, found, exit);
 }
 
-/// Reports one unconsumed owner: at the early error exit that skips its
-/// cleanup, or at its declaration when nothing ever cleans it.
 fn (self: &Checker) leak_error(tree: &ast::Ast, value: BindingHandle, exit: LeakExit) -> !diagnostic::Diagnostic {
     let name = self.binding(value).name;
     if exit.kind == LeakExitKind::Try {
@@ -667,10 +573,6 @@ fn (self: &Checker) leak_error(tree: &ast::Ast, value: BindingHandle, exit: Leak
     );
 }
 
-/// Rejects assigning over a binding that a `defer` or `errdefer` names. A
-/// registered cleanup releases the value that was live when it was written,
-/// not whatever the name later stands for, so an overwrite would leave the
-/// cleanup holding a value the name no longer means.
 fn (self: &var Checker) check_cleanup_receiver_overwrite(
     tree: &ast::Ast,
     target: BindingHandle,
@@ -695,7 +597,6 @@ fn (self: &var Checker) check_cleanup_receiver_overwrite(
     );
 }
 
-/// Reports whether an active errdefer cleans up the binding with this id.
 fn (self: &Checker) err_defer_covers_id(id: i64) -> bool {
     if id == 0 {
         return false;
@@ -710,8 +611,6 @@ fn (self: &Checker) err_defer_covers_id(id: i64) -> bool {
     return false;
 }
 
-/// Reports whether a block always exits through a return, in which case its
-/// fall-through path is unreachable and branch effects cannot leak past it.
 fn (self: &Checker) block_terminates(tree: &ast::Ast, block: ast::Block) -> bool {
     let count = block_len(tree, block);
     if count == 0 {
@@ -721,8 +620,6 @@ fn (self: &Checker) block_terminates(tree: &ast::Ast, block: ast::Block) -> bool
     return self.stmt_terminates(tree, last);
 }
 
-/// Reports whether a statement always returns. Exhaustiveness of a match is
-/// the type checker's promise, so all arms returning is enough here.
 fn (self: &Checker) stmt_terminates(tree: &ast::Ast, statement: ast::Statement) -> bool {
     if is_return_stmt(tree, statement) {
         return true;
@@ -761,9 +658,6 @@ fn (self: &Checker) match_arm_body(tree: &ast::Ast, statement: ast::Statement, i
     }
 }
 
-/// Applies deferred cleanup effects in reverse order. A cleanup runs where its
-/// block ends but was written at its `defer`, which is where a diagnostic
-/// about it points.
 fn (self: &var Checker) check_deferred_cleanups(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -779,22 +673,17 @@ fn (self: &var Checker) check_deferred_cleanups(
         if try self.check_expr_stmt(tree, env, deferred.expr) |failed| {
             return diagnostic::locate(move failed, tree.statement_span(statement));
         }
-        // A later defer may release a source retained by the value just
-        // consumed. Model runtime's reverse order one cleanup at a time.
         try self.release_last_use_borrows(env, 0, &no_later_uses);
     }
     return null;
 }
 
-/// Rejects borrowed values before applying normal move rules.
 fn (self: &var Checker) check_return_stmt(
     tree: &var ast::Ast,
     env: ScopeHandle,
     statement: ast::Statement,
     value: ast::ReturnStmt
 ) -> !?diagnostic::Diagnostic {
-    // A deinit owes its receiver's owner fields on every path that leaves
-    // it, not only on the one that falls off the end.
     if self.current_function |function| {
         if try self.check_deinit_completeness(tree, function, env) |failed| {
             return move failed;
@@ -808,10 +697,6 @@ fn (self: &var Checker) check_return_stmt(
     if done {
         return null;
     }
-    // An error return runs active errdefer cleanups before the function
-    // exits, so their receivers must still be valid here. A success return
-    // transfers the owner instead and must not be blocked by the cleanup it
-    // skips.
     let error_path = try self.return_takes_error_path(tree, env, returned);
     if error_path {
         var retired = array::new<ast::Expression>(self.allocator);
@@ -827,8 +712,6 @@ fn (self: &var Checker) check_return_stmt(
     let saved = self.borrow_return;
     if self.current_function |function| {
         if self.names.is_borrow_optional(self.return_type_name(function)) {
-            // A declared borrow-optional return is the second consumer of
-            // `?&T`: the returned borrow flows on to the caller's capture.
             self.borrow_return = true;
         }
     }
@@ -847,10 +730,6 @@ fn (self: &var Checker) check_return_stmt(
     return self.check_owners_consumed(tree, env, 0, exit);
 }
 
-/// Reports whether returning expr exits through the error path. What decides
-/// it is the type of the returned value: a member of an error set fails, and
-/// so does an error union being propagated, whether either is written out or
-/// bound to a local first.
 fn (self: &var Checker) return_takes_error_path(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -866,7 +745,6 @@ fn (self: &var Checker) return_takes_error_path(
     return false;
 }
 
-/// Reads the type of a returned expression without moving it.
 fn (self: &var Checker) returned_type_name(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -890,10 +768,6 @@ fn (self: &var Checker) returned_type_name(
     return out;
 }
 
-/// Vets a returned value for frame escapes: borrowed bindings, arena handles,
-/// and tied-allocator factory calls. done means the return is fully checked
-/// here, including any consume checking it needs; every error comes back with
-/// done set.
 fn (self: &var Checker) check_return_value_escapes(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -901,11 +775,6 @@ fn (self: &var Checker) check_return_value_escapes(
     done: &var bool
 ) -> !?diagnostic::Diagnostic {
     done.* = true;
-    // A view still backed by a borrow — the binding itself, a view derived
-    // from it, or a struct literal capturing either — leaves with its ties.
-    // Ties to parameters flow on to the caller, which ties the result to what
-    // it lent (ADR-0098), so such a view may go; one tied to local state is
-    // refused where the value is consumed, as any other escape is.
     var roots = array::new<BindingHandle>(self.allocator);
     defer roots.deinit(self.allocator);
     try self.returned_view_roots(tree, env, returned, &var roots);
@@ -960,15 +829,11 @@ fn (self: &var Checker) check_return_value_escapes(
     return null;
 }
 
-/// Forgets the views the checked return handed out.
 fn (self: &var Checker) clear_returned_views() -> void {
     while self.returned_views.pop() |_| {}
     return;
 }
 
-/// Resolves the borrow-class bindings backing the views a returned expression
-/// carries out — the expression's own, or those of every field of a struct
-/// literal it builds.
 fn (self: &var Checker) returned_view_roots(
     tree: &ast::Ast,
     env: ScopeHandle,
@@ -987,7 +852,6 @@ fn (self: &var Checker) returned_view_roots(
     return self.borrow_class_view_roots(tree, env, expression, out);
 }
 
-/// Reports whether every binding's provenance ends in parameters.
 fn (self: &Checker) param_rooted_all(roots: &array::Array<BindingHandle>) -> bool {
     var index = 0;
     while roots.get(index) |root| {
@@ -999,8 +863,6 @@ fn (self: &Checker) param_rooted_all(roots: &array::Array<BindingHandle>) -> boo
     return true;
 }
 
-/// Records the expressions whose view a return hands out — the returned
-/// expression and, through struct literals, their field values.
 fn (self: &var Checker) record_returned_views(tree: &ast::Ast, expression: ast::Expression) -> !void {
     try self.returned_views.append(self.allocator, expression);
     let unwrapped = unwrap_expression_markers(tree, expression);
@@ -1014,8 +876,6 @@ fn (self: &var Checker) record_returned_views(tree: &ast::Ast, expression: ast::
     return;
 }
 
-/// Completes the return path once Arena.at is known to be the returned borrow,
-/// including the ordinary owner-exit check.
 fn (self: &var Checker) check_arena_borrow_return_exit(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -1031,9 +891,6 @@ fn (self: &var Checker) check_arena_borrow_return_exit(
     return self.check_owners_consumed(tree, env, 0, plain_exit());
 }
 
-/// Validates the structural source of a direct Arena.at borrow return. A
-/// source rooted in a borrow parameter outlives the frame by contract; a
-/// source rooted in local state would dangle.
 fn (self: &var Checker) check_arena_borrow_return(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -1066,11 +923,6 @@ fn (self: &var Checker) check_arena_borrow_return(
     return null;
 }
 
-/// Handles `return <factory>(...)` for tied-allocator factories. Sources
-/// rooted in the caller's own parameters travel with the signature — the
-/// caller re-derives the tie from its arguments — while a source rooted in
-/// local state would dangle and is rejected. Every error comes back with
-/// handled set.
 fn (self: &var Checker) check_tied_allocator_return(
     tree: &var ast::Ast,
     env: ScopeHandle,
@@ -1111,8 +963,6 @@ fn (self: &var Checker) check_tied_allocator_return(
     return self.check_tied_factory_call(tree, env, called.name, call, &var ignored);
 }
 
-/// Reports whether a binding's provenance chain ends only in function
-/// parameters.
 fn (self: &Checker) param_rooted_binding(value: BindingHandle) -> bool {
     if self.has_borrow_targets(value) {
         var index = 0;
@@ -1128,9 +978,6 @@ fn (self: &Checker) param_rooted_binding(value: BindingHandle) -> bool {
     return record.borrowed_param and !record.local_borrow;
 }
 
-/// Permits returning a borrowed source parameter. Every borrow parameter is a
-/// presumed provenance source (ADR-0098), so what remains to check is that the
-/// parameter's shape matches the declared borrow return.
 fn (self: &var Checker) borrowed_return_allowed(
     tree: &ast::Ast,
     name: ast::Text,

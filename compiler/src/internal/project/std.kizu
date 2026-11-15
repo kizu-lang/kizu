@@ -11,27 +11,18 @@ import std::path;
 import std::sort;
 import std::string;
 
-// std is a package with a manifest and a source tree, resolved by the same
-// loader as a program's own package. A program pays for the part of std it
-// imports rather than for all of it.
-
-/// Is the manifest file every package root carries.
 fn manifest_file_name() -> []u8 {
     return "kizu.toml";
 }
 
-/// Names the std package root inside the library tree.
 fn std_dir_name() -> []u8 {
     return "std";
 }
 
-/// Names the std module that spells `print`: every program loads it (SPEC
-/// §14.1).
 fn print_module_path() -> []u8 {
     return "std::fmt";
 }
 
-/// Reads the std manifest and source tree from the library tree.
 fn (self: &Loader) read_std_graph() -> !GraphResult {
     let lib_dir = self.lib_dir.as_bytes();
     let dir = try path::join(self.allocator, lib_dir, std_dir_name());
@@ -64,8 +55,6 @@ fn (self: &Loader) read_std_graph() -> !GraphResult {
     }
 }
 
-/// Reports a file the library tree does not have, naming the tree so the
-/// reader can point the compiler somewhere else.
 fn (self: &Loader) missing_lib_file(file: []u8) -> !diagnostic::Diagnostic {
     var text = string::new(self.allocator);
     defer text.deinit(self.allocator);
@@ -85,7 +74,6 @@ fn (self: &Loader) missing_lib_file(file: []u8) -> !diagnostic::Diagnostic {
     return move built;
 }
 
-/// Records which paths name a module of the standard library with sources.
 fn (self: &var Loader) remember_std_modules(graph: &Graph) -> !void {
     let allocator = self.allocator;
     var index = 0;
@@ -98,25 +86,18 @@ fn (self: &var Loader) remember_std_modules(graph: &Graph) -> !void {
     return;
 }
 
-/// Reports whether path names a module of the standard library.
 fn (self: &Loader) std_module(module_path: []u8) -> bool {
     return self.std_modules.contains(module_path);
 }
 
-/// Walks std modules, pulling in what each one names.
 struct StdLoader {
     allocator: Allocator,
     io: Io,
-    // paths lists every std module path with sources, in sorted order.
     paths: array::Array<string::String>,
     visited: map::Map<[]u8, bool>,
     out: array::Array<string::String>,
 }
 
-/// Returns the std modules a set of import paths reaches as a graph, each
-/// module after the modules it is built on. The file texts the walk read are
-/// added to sources, so the parse that follows does not open the same files
-/// again.
 fn (self: &Loader) std_modules_for(
     graph: &Graph,
     imports: &array::Array<string::String>,
@@ -174,7 +155,6 @@ fn (self: &Loader) std_modules_for(
     };
 }
 
-/// Copies one module record with allocator.
 fn clone_module(allocator: Allocator, module: &Module) -> !Module {
     var files = array::new<string::String>(allocator);
     errdefer files.deinit(allocator);
@@ -197,9 +177,6 @@ fn clone_module(allocator: Allocator, module: &Module) -> !Module {
     };
 }
 
-/// Returns the std modules one import path names. Importing the package root
-/// names every module a program outside std may reach, because that is what a
-/// path through the root can spell.
 fn (self: &StdLoader) named(import_path: []u8) -> !array::Array<string::String> {
     var wanted = array::new<string::String>(self.allocator);
     errdefer wanted.deinit(self.allocator);
@@ -225,15 +202,12 @@ fn (self: &StdLoader) named(import_path: []u8) -> !array::Array<string::String> 
     return move wanted;
 }
 
-/// Adds one std module after adding the modules its source names.
 fn (self: &var StdLoader) visit(
     allocator: Allocator,
     graph: &Graph,
     module_path: []u8,
     sources: &var map::Map<[]u8, string::String>
 ) -> !void {
-    // Marked on the way in: a module already being visited is one this walk
-    // reached through itself, and adding it again would not end.
     if self.visited.contains(module_path) {
         return;
     }
@@ -264,9 +238,6 @@ fn (self: &var StdLoader) visit(
     return self.out.append(self.allocator, try string::from_bytes(self.allocator, module_path));
 }
 
-/// Returns the std modules a source names. std modules reach their siblings
-/// through the package root namespace rather than through imports, so what one
-/// is built on is read off the names it writes.
 fn (self: &StdLoader) references(text: &string::String) -> !array::Array<string::String> {
     let text_bytes = text.as_bytes();
     var seen = try scan_std_paths(self.allocator, text_bytes);
@@ -284,8 +255,6 @@ fn (self: &StdLoader) references(text: &string::String) -> !array::Array<string:
     return move modules;
 }
 
-/// Records the std module paths a source names, skipping the ones inside string
-/// literals and comments by reading tokens rather than text.
 fn scan_std_paths(allocator: Allocator, text: []u8) -> !map::Map<[]u8, bool> {
     var seen = map::new<[]u8, bool>(allocator);
     errdefer seen.deinit(allocator);
@@ -300,9 +269,6 @@ fn scan_std_paths(allocator: Allocator, text: []u8) -> !map::Map<[]u8, bool> {
             !mem::equal_bytes(text[current.start..current.end], std_root()) {
             continue;
         }
-        // Read the namespace chain: every prefix shorter than the whole chain
-        // is a module this source could be built on, and the last segment names
-        // an item.
         var prefix = try string::from_bytes(allocator, std_root());
         defer prefix.deinit(allocator);
         var segments = 1;
@@ -327,7 +293,6 @@ fn scan_std_paths(allocator: Allocator, text: []u8) -> !map::Map<[]u8, bool> {
     return move seen;
 }
 
-/// Parses the std modules this program imports, and puts them before it.
 fn (self: &var Loader) load_std(tree: &var ast::Ast) -> !?diagnostic::Diagnostic {
     let outcome_2 = try self.read_std_graph();
     match outcome_2 {
@@ -340,11 +305,7 @@ fn (self: &var Loader) load_std(tree: &var ast::Ast) -> !?diagnostic::Diagnostic
             defer std_sources.deinit(self.allocator);
             let std_graph = try self.std_modules_for(&graph, &imports, &var std_sources);
             defer std_graph.deinit(self.allocator);
-            // The walk that decided which modules to load already read them,
-            // so the parse takes that text rather than opening the same files
-            // again.
             try self.add_source_overrides(&var std_sources);
-            // Numbering std's error sets reads the graph this load resolved.
             try self.std_graph.append(self.allocator, move graph);
             return self.load_package(tree, &std_graph, false, true);
         },
@@ -352,15 +313,11 @@ fn (self: &var Loader) load_std(tree: &var ast::Ast) -> !?diagnostic::Diagnostic
     }
 }
 
-/// Returns the std paths this program's modules declare they import, in a
-/// stable order.
 fn (self: &Loader) std_import_paths(tree: &ast::Ast) -> !array::Array<string::String> {
     var seen = map::new<[]u8, bool>(self.allocator);
     defer seen.deinit(self.allocator);
     var paths = array::new<string::String>(self.allocator);
     errdefer paths.deinit(self.allocator);
-    // `print` is spelled in std::fmt (SPEC §14.1), so every program reaches
-    // that module whether or not it imports it.
     let print_module = try string::from_bytes(self.allocator, print_module_path());
     errdefer print_module.deinit(self.allocator);
     try set_insert(self.allocator, &var seen, &print_module);
@@ -400,7 +357,6 @@ fn (self: &Loader) std_import_paths(tree: &ast::Ast) -> !array::Array<string::St
     return move paths;
 }
 
-/// Reports whether an import's first segment is the std root.
 fn import_starts_with_std(tree: &ast::Ast, value: &ast::ImportDecl) -> bool {
     if value.path.at(0) |first| {
         let text = tree.texts.at(first.node);
@@ -409,7 +365,6 @@ fn import_starts_with_std(tree: &ast::Ast, value: &ast::ImportDecl) -> bool {
     return false;
 }
 
-/// Joins an import's segments with `::`.
 pub fn join_import_path(
     allocator: Allocator,
     tree: &ast::Ast,
@@ -429,8 +384,6 @@ pub fn join_import_path(
     return move out;
 }
 
-/// Records source text a caller already read, keyed the way parse_module looks
-/// it up.
 fn (self: &var Loader) add_source_overrides(
     sources: &var map::Map<[]u8, string::String>
 ) -> !void {
@@ -447,29 +400,16 @@ fn (self: &var Loader) add_source_overrides(
     return;
 }
 
-/// Is every error set std declares, with the number each member lowers to, and
-/// the first code available to error sets a program declares itself. The
-/// runtime refers to them all whatever a program uses, so they are read from
-/// the whole of std rather than from the modules one program imported.
-/// Numbering is global: an error value is one integer, and that integer means
-/// the same member in every error union it travels through. Code 0 is reserved
-/// for "no error".
 pub struct StdErrorCodes {
     pub sets: map::Map<[]u8, map::Map<[]u8, i64>>,
     pub base: i64,
 }
 
-/// Is the std error set numbering or the reason std could not be read.
 pub union StdErrorCodesResult {
     Codes(StdErrorCodes),
     Error(diagnostic::Diagnostic),
 }
 
-/// Reads std once for the numbers its error set members lower to. Modules are
-/// read in module-path order and files in path order, so the numbers a build
-/// assigns depend on what std declares and on nothing else. The caller reads
-/// it once per lowering and passes the codes on. A loader that has loaded a
-/// program numbers the graph that load resolved.
 pub fn (self: &Loader) std_error_codes() -> !StdErrorCodesResult {
     if self.std_graph.at(0) |graph| {
         return self.number_std_error_sets(graph);
@@ -484,8 +424,6 @@ pub fn (self: &Loader) std_error_codes() -> !StdErrorCodesResult {
     }
 }
 
-/// Numbers the error sets of every std module in graph, modules in graph
-/// order and files in path order.
 fn (self: &Loader) number_std_error_sets(graph: &Graph) -> !StdErrorCodesResult {
     var sets = map::new<[]u8, map::Map<[]u8, i64>>(self.allocator);
     errdefer sets.deinit(self.allocator);
@@ -509,13 +447,6 @@ fn (self: &Loader) number_std_error_sets(graph: &Graph) -> !StdErrorCodesResult 
     return StdErrorCodesResult::Codes(StdErrorCodes { sets: move sets, base: code });
 }
 
-/// Reads one std file and records the error sets it declares under their
-/// module-qualified names, numbering members from code on. Only the names and
-/// their order decide the numbers, so the source is read as tokens rather than
-/// parsed: an error set is declared at the top level only, which is where the
-/// brackets around a token are all closed, and `error` followed by a name
-/// begins one nowhere else. A file in which `error` cannot be a token is not
-/// lexed.
 fn (self: &Loader) collect_error_sets(
     allocator: Allocator,
     file: []u8,
@@ -578,14 +509,6 @@ fn (self: &Loader) collect_error_sets(
     return null;
 }
 
-/// Reports whether `error` may be a token of text, without lexing it. False
-/// means every occurrence of the five bytes is provably not that token: one
-/// with a letter or `_` before it or a name byte after it is part of a longer
-/// name or number, and one with `//` earlier on its line and no `"` there is
-/// inside a comment, or inside a string a previous line opened. This holds
-/// while `//` is the only comment and `"` the only quote that can put `//`
-/// on a line before a token; a digit before `error` does not rule it out, as
-/// `1error` lexes as `1` and `error`.
 fn may_spell_error(text: []u8) -> bool {
     let word = "error";
     let width = mem::len(word);
@@ -603,9 +526,6 @@ fn may_spell_error(text: []u8) -> bool {
     return false;
 }
 
-/// Reports whether the `error` at text[at..at + width] may be a token: no
-/// letter or `_` before it, no name byte after it, and not `//` before it on
-/// its line unless a `"` is there too.
 fn error_token_possible_at(text: []u8, at: i64, width: i64) -> bool {
     if at > 0 and name_letter(text[at - 1]) {
         return false;
@@ -627,21 +547,15 @@ fn error_token_possible_at(text: []u8, at: i64, width: i64) -> bool {
     return !slashes;
 }
 
-/// Reports whether byte is an ASCII letter or `_`, what can begin a name.
 fn name_letter(byte: u8) -> bool {
     return (byte >= cast<u8>(97) and byte <= cast<u8>(122)) or
         (byte >= cast<u8>(65) and byte <= cast<u8>(90)) or byte == cast<u8>(95);
 }
 
-/// Reports whether byte can continue a name: a letter, `_`, or a digit.
 fn name_byte(byte: u8) -> bool {
     return name_letter(byte) or (byte >= cast<u8>(48) and byte <= cast<u8>(57));
 }
 
-/// Reads what follows `error Name`: the member names of a `{ A, B }` set, in
-/// order, or none for a `= A or B;` set, which keeps no codes of its own. It
-/// stops after the `{ }` list, or on the `=`, so the caller's bracket depth
-/// stays right, and reports false for anything else.
 fn scan_error_set_members(
     allocator: Allocator,
     scanner: &var lexer::Lexer,
@@ -674,8 +588,6 @@ fn scan_error_set_members(
     return false;
 }
 
-/// Reports a std error set that is neither a `{ }` list of names nor an `=`
-/// combination, naming the file it is in.
 fn malformed_error_set(allocator: Allocator, file: []u8, name: []u8) -> !diagnostic::Diagnostic {
     var text = string::new(allocator);
     defer text.deinit(allocator);

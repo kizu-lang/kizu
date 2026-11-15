@@ -10,30 +10,20 @@ import std::process;
 import std::string;
 import std::time;
 
-// The local store of build artifacts. A builder callback cannot cross a Kizu
-// module boundary (no closures), so getting or building an artifact is split
-// in two: `get_or_build_artifact` answers hit or miss, the caller runs its
-// builder on a miss, and `finish_artifact` stores what was built.
-
-/// Included in cache keys so incompatible formats do not collide.
 pub fn version() -> []u8 {
     return "native-v1";
 }
 
-/// Bounds the local cache to 256 MiB by default.
 pub fn default_max_bytes() -> i64 {
     return 268435456;
 }
 
-/// Stores local Kizu build artifacts.
 pub struct Cache {
     pub dir: string::String,
     pub max_bytes: i64,
     scratch_sequence: i64,
 }
 
-/// Describes one cached build artifact. The field names are the JSON keys of
-/// the metadata file.
 pub struct Entry {
     pub key: string::String,
     pub target: string::String,
@@ -42,45 +32,34 @@ pub struct Entry {
     pub output: string::String,
     pub size_bytes: i64,
     pub created_at: string::String,
-    /// When a build last read or stored the artifact: what eviction orders by.
-    /// An entry written before the field existed has none and is ordered by
-    /// created_at.
     pub used_at: ?string::String,
 }
 
-/// Summarizes cache state.
 pub struct Status {
     pub dir: string::String,
     pub max_bytes: i64,
     pub size_bytes: i64,
     pub entries: i64,
-    /// The entries and bytes of each artifact kind, sorted by kind.
     pub kinds: array::Array<KindStatus>,
 }
 
-/// The share of the cache one artifact kind holds.
 pub struct KindStatus {
     pub kind: string::String,
     pub entries: i64,
     pub size_bytes: i64,
 }
 
-/// What `prune` reports: the entries removed and the bytes freed.
 pub struct PruneResult {
     pub entries: i64,
     pub bytes: i64,
 }
 
-/// Keys one artifact.
 pub struct CacheInput {
     pub key: string::String,
     pub target: string::String,
     pub source_hash: string::String,
 }
 
-/// A miss the caller builds: it builds into `scratch` and hands the plan to
-/// `finish_artifact`, or abandons it with `discard_artifact` when its builder
-/// failed.
 pub struct PendingArtifact {
     pub input: CacheInput,
     pub scratch: string::String,
@@ -88,13 +67,11 @@ pub struct PendingArtifact {
     pub output: string::String,
 }
 
-/// What `get_or_build_artifact` decided.
 pub union ArtifactPlan {
     Hit,
     Miss(PendingArtifact),
 }
 
-/// Returns the default local cache.
 pub fn new(io: Io, allocator: Allocator) -> !Cache {
     var dir = string::new(allocator);
     errdefer dir.deinit(allocator);
@@ -106,8 +83,6 @@ pub fn new(io: Io, allocator: Allocator) -> !Cache {
     };
 }
 
-/// Decides the cache directory: a non-empty KIZU_CACHE_DIR wins, else the
-/// platform cache directory plus `kizu`.
 fn resolve_cache_dir(io: Io, allocator: Allocator, out: &var string::String) -> !void {
     if process::env("KIZU_CACHE_DIR") |given| {
         if mem::len(given) > 0 {
@@ -118,8 +93,6 @@ fn resolve_cache_dir(io: Io, allocator: Allocator, out: &var string::String) -> 
     return out.append_bytes(allocator, "/kizu");
 }
 
-/// Appends the lowercase hex SHA-256 digest of bytes to out, the hash a
-/// caller spells one of an artifact's inputs by inside a target.
 pub fn (self: &Cache) append_content_hash(
     allocator: Allocator,
     bytes: []u8,
@@ -128,8 +101,6 @@ pub fn (self: &Cache) append_content_hash(
     return sha256::append_hex_digest(allocator, bytes, out);
 }
 
-/// Keys an artifact by everything it is made of: the cache format, the target,
-/// the name, and the bytes it is built from.
 pub fn (self: &Cache) new_input(
     allocator: Allocator,
     name: []u8,
@@ -160,10 +131,6 @@ pub fn (self: &Cache) new_input(
     };
 }
 
-/// Answers hit or miss for one artifact built from content the compiler
-/// carries itself: on a hit out_path names the stored artifact, on a miss it
-/// names where the artifact will be once the caller builds into the plan's
-/// scratch path and finishes.
 pub fn (self: &var Cache) get_or_build_artifact(
     io: Io,
     allocator: Allocator,
@@ -204,9 +171,6 @@ pub fn (self: &var Cache) get_or_build_artifact(
     });
 }
 
-/// Moves what the builder made into place, records it and enforces the size
-/// limit: the artifact is renamed from the scratch path first, so an entry
-/// never promises a file that is not there yet.
 pub fn (self: &Cache) finish_artifact(
     io: Io,
     allocator: Allocator,
@@ -218,7 +182,6 @@ pub fn (self: &Cache) finish_artifact(
     return self.enforce_limit(io, allocator);
 }
 
-/// Stats, renames and records one built artifact.
 fn (self: &Cache) install_artifact(
     io: Io,
     allocator: Allocator,
@@ -232,8 +195,6 @@ fn (self: &Cache) install_artifact(
     return self.write_meta(io, allocator, &pending.input, stored_bytes, info.size);
 }
 
-/// Records that a build read the entry's artifact, so eviction takes what no
-/// build has asked for longest rather than what was made first.
 fn (self: &Cache) mark_used(io: Io, allocator: Allocator, key: &string::String) -> !void {
     let key_bytes = key.as_bytes();
     if try self.read_entry(io, allocator, key_bytes) |entry| {
@@ -248,8 +209,6 @@ fn (self: &Cache) mark_used(io: Io, allocator: Allocator, key: &string::String) 
     return;
 }
 
-/// Abandons a miss whose builder failed: what was half-built is removed, and
-/// nothing is recorded.
 pub fn (self: &Cache) discard_artifact(
     io: Io,
     allocator: Allocator,
@@ -261,7 +220,6 @@ pub fn (self: &Cache) discard_artifact(
     return;
 }
 
-/// Removes the scratch file when the builder left one behind.
 fn remove_scratch(io: Io, pending: &PendingArtifact) -> !void {
     let scratch_bytes = pending.scratch.as_bytes();
     let found = try fs::exists(io, scratch_bytes);
@@ -271,8 +229,6 @@ fn remove_scratch(io: Io, pending: &PendingArtifact) -> !void {
     return;
 }
 
-/// Reports whether a key has both the entry that accounts for it and the file
-/// that entry names: an entry whose artifact is gone is a miss.
 pub fn (self: &Cache) has_artifact(io: Io, allocator: Allocator, key: []u8) -> !?Entry {
     if try self.read_entry(io, allocator, key) |entry| {
         errdefer entry.deinit(allocator);
@@ -290,8 +246,6 @@ pub fn (self: &Cache) has_artifact(io: Io, allocator: Allocator, key: []u8) -> !
     return null;
 }
 
-/// Reports a hit with the key still owned by a CacheInput, so the caller
-/// keeps no borrow of the input alive and can move it afterwards.
 fn (self: &Cache) artifact_hit(io: Io, allocator: Allocator, key: &string::String) -> !bool {
     let key_bytes = key.as_bytes();
     if try self.has_artifact(io, allocator, key_bytes) |entry| {
@@ -301,9 +255,6 @@ fn (self: &Cache) artifact_hit(io: Io, allocator: Allocator, key: &string::Strin
     return false;
 }
 
-/// Records what one stored artifact is and how much room it takes. It is
-/// written after the artifact it describes, so an entry never promises a file
-/// that is not there yet.
 fn (self: &Cache) write_meta(
     io: Io,
     allocator: Allocator,
@@ -335,7 +286,6 @@ fn (self: &Cache) write_meta(
     );
 }
 
-/// Writes one metadata entry with its created_at and used_at stamps.
 fn (self: &Cache) write_entry(
     io: Io,
     allocator: Allocator,
@@ -357,7 +307,6 @@ fn (self: &Cache) write_entry(
     );
 }
 
-/// Encodes the fields of one entry and writes them under its key.
 fn (self: &Cache) write_fields(
     io: Io,
     allocator: Allocator,
@@ -394,21 +343,16 @@ fn (self: &Cache) write_fields(
     return;
 }
 
-/// Appends the present moment as an RFC 3339 stamp.
 fn append_now(allocator: Allocator, out: &var string::String) -> !void {
     let now = date::from_unix(time::unix(process::unix_millis()));
     return now.append_iso(allocator, out);
 }
 
-/// Writes one owned value as an entry field.
 fn write_field(encoder: &var json::Encoder, name: []u8, value: &string::String) -> !void {
     let bytes = value.as_bytes();
     return encoder.write_bytes_field(name, bytes);
 }
 
-/// Reads one metadata entry. A read that fails for any reason is a miss, and
-/// so is a file std::json cannot decode: a stale or corrupt entry never
-/// becomes a failure of the caller.
 pub fn (self: &Cache) read_entry(io: Io, allocator: Allocator, key: []u8) -> !?Entry {
     let meta = try self.meta_path(allocator, key);
     defer meta.deinit(allocator);
@@ -430,8 +374,6 @@ pub fn (self: &Cache) read_entry(io: Io, allocator: Allocator, key: []u8) -> !?E
     }
 }
 
-/// Reads all metadata entries in directory order. The order is unobservable
-/// (sums, and an eviction sort that re-orders by time), so it is not sorted.
 pub fn (self: &Cache) entries(io: Io, allocator: Allocator, out: &var array::Array<Entry>) -> !void {
     let dir_bytes = self.dir.as_bytes();
     let dir_found = try fs::exists(io, dir_bytes);
@@ -455,17 +397,11 @@ pub fn (self: &Cache) entries(io: Io, allocator: Allocator, out: &var array::Arr
     return;
 }
 
-/// Reads the entry one metadata file holds and appends it.
 fn append_entry_at(io: Io, allocator: Allocator, full: []u8, out: &var array::Array<Entry>) -> !void {
-    // A concurrent process may evict an entry between the walk and the read:
-    // work that is gone is a miss, not a failure, and every other read failure
-    // propagates. A file std::json cannot decode is skipped.
     if fs::read_file(io, allocator, full, mem::Limit::Unlimited) |text| {
         defer text.deinit(allocator);
         let data = text.as_bytes();
         if json::decode_ignore_unknown<Entry>(allocator, data) |entry| {
-            // std::json reads `created_at` as a String, so an entry whose
-            // stamp is not an RFC 3339 moment is skipped here.
             if created_moment(&entry) |_| {
                 try out.append(allocator, move entry);
             } else {
@@ -485,7 +421,6 @@ fn append_entry_at(io: Io, allocator: Allocator, full: []u8, out: &var array::Ar
     return;
 }
 
-/// Returns current cache size and entry count.
 pub fn (self: &Cache) status(io: Io, allocator: Allocator) -> !Status {
     var all = array::new<Entry>(allocator);
     defer all.deinit(allocator);
@@ -512,7 +447,6 @@ pub fn (self: &Cache) status(io: Io, allocator: Allocator) -> !Status {
     };
 }
 
-/// The kind of artifact an entry holds: the first segment of its target.
 pub fn entry_kind(entry: &Entry) -> []u8 {
     let target = entry.target.as_bytes();
     var end = 0;
@@ -526,9 +460,6 @@ pub fn entry_kind(entry: &Entry) -> []u8 {
     return target;
 }
 
-/// Adds one entry to the share of its kind, keeping the kinds sorted: a
-/// kind seen first is appended and moved down past every kind it sorts
-/// before.
 fn count_kind(allocator: Allocator, kinds: &var array::Array<KindStatus>, entry: &Entry) -> !void {
     let kind = entry_kind(entry);
     var at = 0;
@@ -555,7 +486,6 @@ fn count_kind(allocator: Allocator, kinds: &var array::Array<KindStatus>, entry:
     return;
 }
 
-/// Orders two kinds by name.
 fn kind_before(kinds: &array::Array<KindStatus>, left: i64, right: i64) -> bool {
     if kinds.at(left) |a| {
         if kinds.at(right) |b| {
@@ -567,7 +497,6 @@ fn kind_before(kinds: &array::Array<KindStatus>, left: i64, right: i64) -> bool 
     return false;
 }
 
-/// Removes every cache entry.
 pub fn (self: &Cache) prune(io: Io, allocator: Allocator) -> !PruneResult {
     var all = array::new<Entry>(allocator);
     defer all.deinit(allocator);
@@ -583,9 +512,6 @@ pub fn (self: &Cache) prune(io: Io, allocator: Allocator) -> !PruneResult {
     return PruneResult { entries: count, bytes: bytes };
 }
 
-/// Removes the entries used longest ago until the cache fits max_bytes: what
-/// the stored files measure is asked first, and the entries are read and
-/// ordered only when that is over the limit.
 pub fn (self: &Cache) enforce_limit(io: Io, allocator: Allocator) -> !void {
     let stored = try self.stored_bytes(io, allocator);
     if stored <= self.max_bytes {
@@ -628,8 +554,6 @@ pub fn (self: &Cache) enforce_limit(io: Io, allocator: Allocator) -> !void {
     return;
 }
 
-/// Sums the sizes of the stored artifacts. An artifact whose entry is gone
-/// still counts: it takes the room all the same.
 fn (self: &Cache) stored_bytes(io: Io, allocator: Allocator) -> !i64 {
     let dir_bytes = self.dir.as_bytes();
     var listed = try fs::read_dir(io, allocator, dir_bytes);
@@ -646,8 +570,6 @@ fn (self: &Cache) stored_bytes(io: Io, allocator: Allocator) -> !i64 {
             continue;
         }
         let item_path = item.path.as_bytes();
-        // A concurrent process may evict an artifact between the listing
-        // and the stat; gone takes no room.
         if fs::metadata(io, item_path) |info| {
             size = size + info.size;
         } else |err| {
@@ -660,8 +582,6 @@ fn (self: &Cache) stored_bytes(io: Io, allocator: Allocator) -> !i64 {
     return size;
 }
 
-/// Removes the metadata and artifact files of one entry when they are there;
-/// one already gone is not an error.
 fn (self: &Cache) remove_entry_files(io: Io, allocator: Allocator, entry: &Entry) -> !void {
     let key_bytes = entry.key.as_bytes();
     let meta = try self.meta_path(allocator, key_bytes);
@@ -682,8 +602,6 @@ fn (self: &Cache) remove_entry_files(io: Io, allocator: Allocator, entry: &Entry
     return;
 }
 
-/// The moment the entry was last used: used_at when the entry has one, else
-/// created_at.
 fn used_moment(entry: &Entry) -> ?date::DateTime {
     if entry.used_at |used| {
         let stamp = used.as_bytes();
@@ -698,7 +616,6 @@ fn used_moment(entry: &Entry) -> ?date::DateTime {
     return created_moment(entry);
 }
 
-/// The moment `created_at` spells, null when it is not an RFC 3339 stamp.
 fn created_moment(entry: &Entry) -> ?date::DateTime {
     let stamp = entry.created_at.as_bytes();
     if date::parse_datetime(stamp) |moment| {
@@ -710,8 +627,6 @@ fn created_moment(entry: &Entry) -> ?date::DateTime {
     }
 }
 
-/// Orders two entries by the moment they were last used and then by key, the
-/// order `enforce_limit` evicts in.
 fn entry_before(all: &array::Array<Entry>, left: i64, right: i64) -> bool {
     if all.at(left) |a| {
         if all.at(right) |b| {
@@ -730,7 +645,6 @@ fn entry_before(all: &array::Array<Entry>, left: i64, right: i64) -> bool {
     return false;
 }
 
-/// Returns the metadata path for key.
 pub fn (self: &Cache) meta_path(allocator: Allocator, key: []u8) -> !string::String {
     var name = string::new(allocator);
     defer name.deinit(allocator);
@@ -741,7 +655,6 @@ pub fn (self: &Cache) meta_path(allocator: Allocator, key: []u8) -> !string::Str
     return path::join(allocator, dir_bytes, name_bytes);
 }
 
-/// Returns the file name the artifact for key is stored under.
 pub fn output_name(allocator: Allocator, key: []u8) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
@@ -750,19 +663,16 @@ pub fn output_name(allocator: Allocator, key: []u8) -> !string::String {
     return move out;
 }
 
-/// Reads `output_name` with the key still owned by a CacheInput.
 fn output_name_of(allocator: Allocator, key: &string::String) -> !string::String {
     let key_bytes = key.as_bytes();
     return output_name(allocator, key_bytes);
 }
 
-/// Returns the artifact path for name.
 pub fn (self: &Cache) output_path(allocator: Allocator, name: []u8) -> !string::String {
     let dir_bytes = self.dir.as_bytes();
     return path::join(allocator, dir_bytes, name);
 }
 
-/// Reads `output_path` with the name still owned by a String.
 fn (self: &Cache) output_path_of(allocator: Allocator, name: &string::String) -> !string::String {
     let name_bytes = name.as_bytes();
     return self.output_path(allocator, name_bytes);

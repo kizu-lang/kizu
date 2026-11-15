@@ -2,32 +2,17 @@ import std::array;
 import std::mem;
 import std::string;
 
-// A static argument travels through the compiler as text, the way a type
-// argument does, so the parser records an expression in one canonical spelling
-// -- every operation in its own parentheses, as in `((n1 * k2) % 24)` -- and
-// each checker evaluates that text against the compile-time names in force
-// where the call is written.
-//
-// Kizu has no closures, so the caller fills an Env with the integers its names
-// stand for before evaluating; a name the Env lacks is not known.
-
-/// Is the compile-time names an expression may use, in lookup order: the first
-/// binding of a name wins, so a caller binds its innermost scope first. A name
-/// bound to something other than an integer is still recorded, so it hides an
-/// outer integer of the same name.
 pub struct Env {
     names: array::Array<string::String>,
     values: array::Array<i64>,
     integers: array::Array<bool>,
 }
 
-/// Is what evaluating an expression gives: its value, or why it has none.
 pub union Outcome {
     Value(i64),
     Problem(string::String),
 }
 
-/// Returns an empty Env.
 pub fn new_env(allocator: Allocator) -> Env {
     return Env {
         names: array::new<string::String>(allocator),
@@ -36,7 +21,6 @@ pub fn new_env(allocator: Allocator) -> Env {
     };
 }
 
-/// Releases the names the Env copied.
 pub fn (self: Env) deinit(allocator: Allocator) -> void {
     self.names.deinit(allocator);
     self.values.deinit(allocator);
@@ -44,13 +28,10 @@ pub fn (self: Env) deinit(allocator: Allocator) -> void {
     return;
 }
 
-/// Binds name to an integer unless an earlier binding already spells name.
 pub fn (self: &var Env) bind(allocator: Allocator, name: []u8, value: i64) -> !void {
     return self.record(allocator, name, value, true);
 }
 
-/// Records that name stands for something other than an integer, unless an
-/// earlier binding already spells name.
 pub fn (self: &var Env) hide(allocator: Allocator, name: []u8) -> !void {
     return self.record(allocator, name, 0, false);
 }
@@ -67,8 +48,6 @@ fn (self: &var Env) record(allocator: Allocator, name: []u8, value: i64, integer
     return;
 }
 
-/// Returns the integer name stands for, or null when the Env binds no
-/// integer to it.
 pub fn (self: &Env) lookup(name: []u8) -> ?i64 {
     let index = self.index_of(name);
     if index < 0 {
@@ -93,14 +72,10 @@ fn (self: &Env) index_of(name: []u8) -> i64 {
     return -1;
 }
 
-/// Reports whether a static argument is an expression rather than a name, a
-/// literal, or a type. Only an expression starts with a parenthesis.
 pub fn is(text: []u8) -> bool {
     return mem::len(text) > 0 and text[0] == cast<u8>(40);
 }
 
-/// Parses the decimal spelling of an i64, with an optional leading `-`; the
-/// checkers read a bound value with it.
 pub fn parse_i64(text: []u8) -> ?i64 {
     let size = mem::len(text);
     var index = 0;
@@ -112,8 +87,6 @@ pub fn parse_i64(text: []u8) -> ?i64 {
     if index == size {
         return null;
     }
-    // Accumulate toward the sign so -9223372036854775808 parses without
-    // passing through a positive value that does not fit.
     var value = 0;
     while index < size {
         let byte = text[index];
@@ -137,7 +110,6 @@ pub fn parse_i64(text: []u8) -> ?i64 {
     return value;
 }
 
-/// Evaluates canonical expression text against the integers env binds.
 pub fn eval(allocator: Allocator, text: []u8, env: &Env) -> !Outcome {
     var pos = 0;
     let outcome = try term(allocator, text, &var pos, env);
@@ -159,9 +131,6 @@ pub fn eval(allocator: Allocator, text: []u8, env: &Env) -> !Outcome {
     }
 }
 
-// term reads one operand: a literal, a name, a negation, or a parenthesized
-// binary operation. The canonical spelling needs no precedence: each
-// operation carries its own parentheses.
 fn term(allocator: Allocator, text: []u8, pos: &var i64, env: &Env) -> !Outcome {
     let size = mem::len(text);
     if pos.* >= size {
@@ -193,7 +162,6 @@ fn term(allocator: Allocator, text: []u8, pos: &var i64, env: &Env) -> !Outcome 
         if parse_i64(digits) |value| {
             return Outcome::Value(value);
         }
-        // A literal past the i64 range.
         var message = string::new(allocator);
         errdefer message.deinit(allocator);
         try message.append_bytes(allocator, "strconv.ParseInt: parsing ");
@@ -229,7 +197,6 @@ fn term(allocator: Allocator, text: []u8, pos: &var i64, env: &Env) -> !Outcome 
     return Outcome::Problem(move message);
 }
 
-// operation reads `(left op right)`.
 fn operation(allocator: Allocator, text: []u8, pos: &var i64, env: &Env) -> !Outcome {
     let size = mem::len(text);
     pos.* = pos.* + 1;
@@ -300,8 +267,6 @@ fn malformed(allocator: Allocator, text: []u8) -> !Outcome {
     return Outcome::Problem(move message);
 }
 
-/// Returns the compile-time names text reads, in the order it reads them. A
-/// literal is not a name: a name starts with a letter or `_`.
 pub fn names(allocator: Allocator, text: []u8) -> !array::Array<string::String> {
     var out = array::new<string::String>(allocator);
     errdefer out.deinit(allocator);
@@ -325,7 +290,6 @@ pub fn names(allocator: Allocator, text: []u8) -> !array::Array<string::String> 
     return move out;
 }
 
-/// Reports whether env binds an integer to every name text reads.
 pub fn binds_all(allocator: Allocator, text: []u8, env: &Env) -> !bool {
     let read = try names(allocator, text);
     defer read.deinit(allocator);

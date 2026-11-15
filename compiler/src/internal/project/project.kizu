@@ -14,49 +14,36 @@ import std::path;
 import std::sort;
 import std::string;
 
-// Module loading and resolution, plus where the library tree is and what it is
-// called. Every file of a load is parsed into one caller-owned Ast, so the
-// merged program is a list of declaration handles into that one graph.
-
-/// Is the namespace the standard library lives under.
 pub fn std_root() -> []u8 {
     return "std";
 }
 
-/// Names the directory a package keeps its own modules in.
 pub fn internal_segment() -> []u8 {
     return "internal";
 }
 
-/// Identifies the ordered source files in one directory module.
 pub struct Module {
     pub path: string::String,
     pub files: array::Array<string::String>,
     pub test_files: array::Array<string::String>,
 }
 
-/// Is the deterministic module list resolved from a manifest.
 pub struct Graph {
     pub package_name: string::String,
     pub modules: array::Array<Module>,
-    /// Is the directory the manifest is in, what an `@embed_file` path is
-    /// relative to. A program outside any package has none: it is empty.
     pub root: string::String,
 }
 
-/// Is one resolved graph or the reason it could not be resolved.
 pub union GraphResult {
     Graph(Graph),
     Error(diagnostic::Diagnostic),
 }
 
-/// Is one loaded program or the diagnostic that stopped the load.
 pub union LoadResult {
     Program(ast::Program),
     Error(diagnostic::Diagnostic),
 }
 
-/// Builds a span-less `module error` diagnostic from already joined text.
 fn module_error(allocator: Allocator, text: string::String) -> !diagnostic::Diagnostic {
     defer text.deinit(allocator);
     let bytes = text.as_bytes();
@@ -68,8 +55,6 @@ fn module_error(allocator: Allocator, text: string::String) -> !diagnostic::Diag
     return move built;
 }
 
-/// Starts one `module error: ` message that the caller finishes and hands to
-/// `module_error`.
 fn module_error_text(allocator: Allocator) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
@@ -77,38 +62,32 @@ fn module_error_text(allocator: Allocator) -> !string::String {
     return move out;
 }
 
-/// Copies one owned string with allocator.
 fn copy_string(allocator: Allocator, value: &string::String) -> !string::String {
     let bytes = value.as_bytes();
     return string::from_bytes(allocator, bytes);
 }
 
-/// Reports whether two owned strings hold the same bytes.
 fn same_text(left: &string::String, right: &string::String) -> bool {
     let left_bytes = left.as_bytes();
     let right_bytes = right.as_bytes();
     return mem::equal_bytes(left_bytes, right_bytes);
 }
 
-/// Reports whether an owned string holds exactly bytes.
 fn text_is(value: &string::String, bytes: []u8) -> bool {
     let value_bytes = value.as_bytes();
     return mem::equal_bytes(value_bytes, bytes);
 }
 
-/// Reports whether a string set holds key.
 fn set_contains(set: &map::Map<[]u8, bool>, key: &string::String) -> bool {
     let bytes = key.as_bytes();
     return set.contains(bytes);
 }
 
-/// Adds key to a string set.
 fn set_insert(allocator: Allocator, set: &var map::Map<[]u8, bool>, key: &string::String) -> !void {
     let bytes = key.as_bytes();
     return set.insert(allocator, bytes, true);
 }
 
-/// Returns this module's deterministic production or test source set.
 fn (self: &Module) source_files(
     allocator: Allocator,
     include_tests: bool
@@ -131,7 +110,6 @@ fn (self: &Module) source_files(
     return move files;
 }
 
-/// Reports whether a package source joins its module only for tests.
 pub fn is_test_file(file: []u8) -> bool {
     let base = path::basename(file);
     let suffix = "_test.kizu";
@@ -143,9 +121,6 @@ pub fn is_test_file(file: []u8) -> bool {
     return mem::equal_bytes(base[base_len - suffix_len..base_len], suffix);
 }
 
-/// Maps configured source files to Kizu module paths. A module named after the
-/// package itself is not required: the package name is a namespace its modules
-/// reach each other through whether or not a module answers to it.
 pub fn resolve_modules(
     io: Io,
     allocator: Allocator,
@@ -190,7 +165,6 @@ pub fn resolve_modules(
     });
 }
 
-/// Walks one directory of a source root and groups Kizu files by directory.
 fn collect_source_root(
     io: Io,
     allocator: Allocator,
@@ -236,8 +210,6 @@ fn collect_source_root(
     return null;
 }
 
-/// Files one source under its directory module, refusing a file that two roots
-/// would file under different modules.
 fn record_source_file(
     allocator: Allocator,
     modules: &var array::Array<Module>,
@@ -278,7 +250,6 @@ fn record_source_file(
     return null;
 }
 
-/// Returns the index of the module at path, adding an empty one when it is new.
 fn module_slot(
     allocator: Allocator,
     modules: &var array::Array<Module>,
@@ -299,7 +270,6 @@ fn module_slot(
     return index;
 }
 
-/// Converts a source directory into a Kizu module path.
 fn source_module_path(
     allocator: Allocator,
     package_name: []u8,
@@ -314,7 +284,6 @@ fn source_module_path(
     if mem::len(dir) <= root_len {
         return move out;
     }
-    // dir is below source_root, so the relative part starts after the slash.
     let rel = dir[root_len + 1..mem::len(dir)];
     if mem::len(rel) == 0 {
         return move out;
@@ -332,7 +301,6 @@ fn source_module_path(
     return move out;
 }
 
-/// Orders modules by module path and each module's files by name.
 fn sort_modules(modules: &var array::Array<Module>) -> !void {
     var index = 0;
     while modules.at_mut(index) |module| {
@@ -340,8 +308,6 @@ fn sort_modules(modules: &var array::Array<Module>) -> !void {
         try sort::strings(&var module.test_files);
         index = index + 1;
     }
-    // Insertion sort on the path: module lists are short and Array carries no
-    // comparator sort for structs.
     var outer = 1;
     while outer < modules.len() {
         var inner = outer;
@@ -357,7 +323,6 @@ fn sort_modules(modules: &var array::Array<Module>) -> !void {
     return;
 }
 
-/// Reports whether the module at `left` sorts before the one at `right`.
 fn module_before(modules: &array::Array<Module>, left: i64, right: i64) -> bool {
     if modules.at(left) |left_module| {
         if modules.at(right) |right_module| {
@@ -369,8 +334,6 @@ fn module_before(modules: &array::Array<Module>, left: i64, right: i64) -> bool 
     return false;
 }
 
-/// Orders bytes lexicographically by unsigned byte value; a prefix sorts
-/// before the longer text.
 pub fn bytes_less(left: []u8, right: []u8) -> bool {
     var index = 0;
     while true {
@@ -395,17 +358,12 @@ pub fn bytes_less(left: []u8, right: []u8) -> bool {
     return false;
 }
 
-/// Reports whether path names a module an `internal` segment hides, returning
-/// the hidden module and the path it is internal to.
 pub struct InternalModule {
     pub internal: bool,
     pub module_end: i64,
     pub scope_end: i64,
 }
 
-/// Returns the module an `internal` segment hides, the path that module is
-/// internal to, and whether path passes through one at all, as byte offsets
-/// into path.
 pub fn internal_module(module_path: []u8) -> InternalModule {
     let none = InternalModule { internal: false, module_end: 0, scope_end: 0 };
     var start = 0;
@@ -418,7 +376,6 @@ pub fn internal_module(module_path: []u8) -> InternalModule {
             module_path[index] == cast<u8>(58) and module_path[index + 1] == cast<u8>(58);
         if at_end or at_sep {
             if segment > 0 and mem::equal_bytes(module_path[start..index], internal_segment()) {
-                // The hidden module is this segment plus the next one, when any.
                 var module_end = index;
                 if at_sep {
                     var next = index + 2;
@@ -444,7 +401,6 @@ pub fn internal_module(module_path: []u8) -> InternalModule {
     return none;
 }
 
-/// Reports whether a module at `from` may name `module_path`.
 pub fn reachable_from(module_path: []u8, from: []u8) -> bool {
     let found = internal_module(module_path);
     if !found.internal {
@@ -461,7 +417,6 @@ pub fn reachable_from(module_path: []u8, from: []u8) -> bool {
         from[mem::len(scope)] == cast<u8>(58) and from[mem::len(scope) + 1] == cast<u8>(58);
 }
 
-/// Reports whether a bound name stands for the standard library.
 pub fn is_std_path(module_path: []u8) -> bool {
     let root = std_root();
     if mem::equal_bytes(module_path, root) {
@@ -473,67 +428,45 @@ pub fn is_std_path(module_path: []u8) -> bool {
         module_path[root_len] == cast<u8>(58) and module_path[root_len + 1] == cast<u8>(58);
 }
 
-/// Names one module's visibility record for a declared type or function.
 struct Export {
     group: arena::Handle<ModuleGroup>,
     public: bool,
 }
 
-/// Owns the files that share one directory-derived module namespace.
 struct ModuleGroup {
     path: string::String,
     pkg: string::String,
     files: array::Array<arena::Handle<ModuleFile>>,
-    // imports is the union of file-local imports used for dependency ordering.
     imports: map::Map<[]u8, string::String>,
 }
 
-/// Is one source file and its file-local import scope.
 struct ModuleFile {
     group: arena::Handle<ModuleGroup>,
     file: string::String,
     program: ast::Program,
-    // imports is the declared import set and defines the dependency edges the
-    // ordering and cycle checks walk: alias -> path.
     imports: map::Map<[]u8, string::String>,
-    // namespaces is what name resolution sees: the imports plus the package
-    // root namespace, which is reachable without an import and is not an edge.
     namespaces: map::Map<[]u8, string::String>,
-    // used records the namespaces resolution actually went through.
     used: map::Map<[]u8, bool>,
 }
 
-/// Owns everything one load of a package and its std modules accumulates.
 pub struct Loader {
     allocator: Allocator,
     io: Io,
     lib_dir: string::String,
     groups: arena::Arena<ModuleGroup>,
     group_by_path: map::Map<[]u8, arena::Handle<ModuleGroup>>,
-    // std_order and order are the load order: std before the package that
-    // imports it, and inside each package a module after the ones it is built
-    // on.
     std_order: array::Array<arena::Handle<ModuleGroup>>,
     order: array::Array<arena::Handle<ModuleGroup>>,
     files: arena::Arena<ModuleFile>,
     packages: map::Map<[]u8, bool>,
-    // std_modules is the set of std module paths that have sources, read once
-    // the std graph is resolved; resolution asks it whether a path names a
-    // std module.
     std_modules: map::Map<[]u8, bool>,
     types: map::Map<[]u8, Export>,
     functions: map::Map<[]u8, Export>,
     source_overrides: map::Map<[]u8, string::String>,
-    // std_graph holds the std graph load_std resolved, so numbering std's
-    // error sets reads it rather than resolving it again.
     std_graph: array::Array<Graph>,
-    /// Registers every loaded file, so that diagnostics can name paths.
     pub sources: source::SourceMap,
 }
 
-/// Creates a loader that reads std from `lib_dir`. Every file of a load is
-/// parsed into the caller-owned syntax graph the load functions receive, so
-/// the merged program's handles stay valid after the loader is released.
 pub fn new_loader(io: Io, allocator: Allocator, lib_dir: []u8) -> !Loader {
     return Loader {
         allocator: allocator,
@@ -554,8 +487,6 @@ pub fn new_loader(io: Io, allocator: Allocator, lib_dir: []u8) -> !Loader {
     };
 }
 
-/// Resolves one program that is not part of a package: a graph of one module
-/// with no path to qualify by, read by the same code a package module is.
 pub fn (self: &var Loader) load_source(
     tree: &var ast::Ast,
     file: []u8,
@@ -581,8 +512,6 @@ pub fn (self: &var Loader) load_source(
     return self.load_program_with_sources(tree, &graph, false);
 }
 
-/// Gives one module file the text a load reads in place of what the file
-/// system holds.
 pub fn (self: &var Loader) override_source(file: []u8, text: []u8) -> !void {
     let cleaned = try path::clean(self.allocator, file);
     defer cleaned.deinit(self.allocator);
@@ -593,7 +522,6 @@ pub fn (self: &var Loader) override_source(file: []u8, text: []u8) -> !void {
     );
 }
 
-/// Parses every module in graph and returns a qualified package program.
 pub fn (self: &var Loader) load_program(
     tree: &var ast::Ast,
     graph: &Graph
@@ -601,7 +529,6 @@ pub fn (self: &var Loader) load_program(
     return self.load_program_with_sources(tree, graph, false);
 }
 
-/// Parses production and test files into one qualified package program.
 pub fn (self: &var Loader) load_test_program(
     tree: &var ast::Ast,
     graph: &Graph
@@ -609,10 +536,6 @@ pub fn (self: &var Loader) load_test_program(
     return self.load_program_with_sources(tree, graph, true);
 }
 
-/// Parses the selected package view and its reachable std modules. std is
-/// loaded here too, as the package it is: every frontend that reads a Kizu
-/// program comes through this, so a program means the same thing whichever one
-/// read it.
 fn (self: &var Loader) load_program_with_sources(
     tree: &var ast::Ast,
     graph: &Graph,
@@ -633,7 +556,6 @@ fn (self: &var Loader) load_program_with_sources(
     return self.program(tree);
 }
 
-/// Parses one package's selected module files and records their groups.
 fn (self: &var Loader) load_package(
     tree: &var ast::Ast,
     graph: &Graph,
@@ -697,9 +619,6 @@ fn (self: &var Loader) load_package(
     return null;
 }
 
-/// Parses one module source file from an override or disk. `root` is the
-/// directory of the manifest the file's package has, empty for a file outside
-/// any package.
 fn (self: &var Loader) parse_module_file(
     tree: &var ast::Ast,
     file: []u8,
@@ -716,8 +635,6 @@ fn (self: &var Loader) parse_module_file(
     return self.parse_module_source(tree, file, move text, root);
 }
 
-/// Parses one graph module source string into the shared syntax graph and
-/// fills in the files its `@embed_file` calls name.
 fn (self: &var Loader) parse_module_source(
     tree: &var ast::Ast,
     file: []u8,
@@ -749,17 +666,9 @@ fn (self: &var Loader) parse_module_source(
         }
         return LoadResult::Program(move program);
     }
-    // The map just received the file, so the lookup cannot miss; the empty
-    // program is only the shape the optional forces here.
     return LoadResult::Program(ast::new_program(self.allocator));
 }
 
-/// Reads the file an `@embed_file` call names into the literal the call
-/// stands for. The path is relative to the package's kizu.toml, so the bytes
-/// do not depend on the directory the compiler is run from, and a file outside
-/// any package has nothing to resolve it against. The text is read on every
-/// load: what the program holds is what the file holds now, and the build
-/// cache, keyed by the code the literal ends up in, follows it.
 fn (self: &Loader) embed_file(
     tree: &var ast::Ast,
     expression: ast::Expression,
@@ -767,7 +676,6 @@ fn (self: &Loader) embed_file(
 ) -> !?diagnostic::Diagnostic {
     let embed = embedded_file(tree, expression) orelse return null;
     let span = tree.spans.at(embed.span).*;
-    // A copy, because filling the literal in adds to the texts the path is in.
     let path_text = try copy_string(self.allocator, tree.texts.at(embed.path.node));
     defer path_text.deinit(self.allocator);
     let path_bytes = path_text.as_bytes();
@@ -796,8 +704,6 @@ fn (self: &Loader) embed_file(
     }
 }
 
-/// Returns the file an expression the parser listed as an `@embed_file` call
-/// names.
 fn embedded_file(tree: &ast::Ast, expression: ast::Expression) -> ?ast::EmbedFile {
     match tree.expressions.at(expression.node) {
         String(value) => return value.embed,
@@ -805,8 +711,6 @@ fn embedded_file(tree: &ast::Ast, expression: ast::Expression) -> ?ast::EmbedFil
     }
 }
 
-/// Builds the located `<prefix>"<path>"<suffix>` diagnostic for an
-/// `@embed_file` the loader could not fill in.
 fn (self: &Loader) embed_error(
     path_bytes: []u8,
     span: ast::Span,

@@ -2,21 +2,6 @@ import compiler::internal::diagnostic;
 import compiler::internal::ir;
 import compiler::internal::typ;
 
-// Vector values (SPEC §7.3): an `f64x2`, `i32x4` and the rest are an
-// aggregate of 16 bytes aligned to 16, the lanes in order from the lowest
-// address, the layout the LLVM backend's `<2 x double>` has in memory. Like
-// any aggregate the value lives in a frame slot and goes between Kizu
-// functions by address, so moves, phis, calls, fields and containers need
-// nothing of their own; a C call or export with a vector is refused with
-// the other aggregates.
-//
-// The operations work one lane at a time through the scalar instructions:
-// a float lane is the same IEEE 754 operation the scalar of its type is, an
-// integer lane wraps at its width the way LLVM's vector `add`, `sub` and
-// `mul` do.
-
-/// Returns the shape of a vector type's lane and its lane count, or null
-/// for any other type.
 fn vector_lane(module: &ir::Module, type_name: ir::Name) -> ?VectorLane {
     let text = ir::name_text(&module.names, type_name);
     let bytes = text.as_bytes();
@@ -28,21 +13,17 @@ fn vector_lane(module: &ir::Module, type_name: ir::Name) -> ?VectorLane {
     return VectorLane { shape: lane, count: typ::vector_lanes(bytes) };
 }
 
-/// Is the lane of one vector type.
 struct VectorLane {
     shape: Shape,
     count: i64,
 }
 
-/// Reports whether a type is a vector.
 fn is_vector_type(module: &ir::Module, type_name: ir::Name) -> bool {
     let text = ir::name_text(&module.names, type_name);
     let bytes = text.as_bytes();
     return typ::is_vector(bytes);
 }
 
-/// Selects `vector.new`: each lane value stored at its place in a fresh
-/// slot.
 fn (self: &var Selector) select_vector_new(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let lane = vector_lane(module, node.result.type_name) orelse return try self.fail_op(module, node);
     if node.args.len() != lane.count {
@@ -61,8 +42,6 @@ fn (self: &var Selector) select_vector_new(module: &ir::Module, node: &ir::Instr
     return null;
 }
 
-/// Selects `vector.lane`: the lane the literal index names, read out of the
-/// vector's memory.
 fn (self: &var Selector) select_vector_lane(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let vector = node.args.get(0) orelse return try self.fail_op(module, node);
     let lane = vector_lane(module, vector.type_name) orelse return try self.fail_op(module, node);
@@ -79,8 +58,6 @@ fn (self: &var Selector) select_vector_lane(module: &ir::Module, node: &ir::Inst
     return null;
 }
 
-/// Selects `+ - *` of two vectors and `/` of two float vectors, lane by
-/// lane into a fresh slot.
 fn (self: &var Selector) select_vector_binary(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let left = node.args.get_or_panic(0);
     let right = node.args.get_or_panic(1);
@@ -130,8 +107,6 @@ fn (self: &var Selector) select_vector_binary(module: &ir::Module, node: &ir::In
     return null;
 }
 
-/// Selects unary `-` of a vector, lane by lane: a float lane's sign flipped,
-/// an integer lane negated with wrapping.
 fn (self: &var Selector) select_vector_unary(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let source = node.args.get(0) orelse return try self.fail_op(module, node);
     let lane = vector_lane(module, node.result.type_name) orelse return try self.fail_op(module, node);

@@ -3,16 +3,6 @@ import compiler::internal::ir;
 import compiler::internal::llvm;
 import std::array;
 
-// Array element access and optionals. An array is its header in memory:
-// data pointer, length, capacity, three words. An append writes into the
-// reserved tail when there is room and asks the runtime to grow otherwise;
-// an indexed access tests the index against the length unsigned, so a
-// negative index is out of range without a second test. An optional whose
-// element has a niche (a reference, a Box, a function, an arena handle, or a
-// struct that holds one) is the element itself, zero when absent; any other
-// is `{ i8, T }` in memory.
-
-/// Returns the shape of the element of the container a value names.
 fn element_shape(module: &ir::Module, container: ir::Value) -> Shape {
     let text = ir::name_text(&module.names, container.type_name);
     let bytes = text.as_bytes();
@@ -26,7 +16,6 @@ fn (self: &var Selector) new_join() -> !i64 {
     return block;
 }
 
-/// Stores a value as an array element at data + index * size.
 fn (self: &var Selector) store_element(module: &ir::Module, data: i64, index: i64, value: ir::Value, shape: Shape) -> !bool {
     let shift = power_of_two(shape.size);
     if is_word(shape) and shift >= 0 {
@@ -44,7 +33,6 @@ fn (self: &var Selector) store_element(module: &ir::Module, data: i64, index: i6
     return self.store_value(module, value, shape, address, 0);
 }
 
-/// Returns data + index * size in a register.
 fn (self: &var Selector) scaled_addr(data: i64, index: i64, size: i64) -> !i64 {
     let address = self.func.new_vreg();
     let shift = power_of_two(size);
@@ -67,7 +55,6 @@ fn (self: &var Selector) scaled_addr(data: i64, index: i64, size: i64) -> !i64 {
     return address;
 }
 
-/// Loads element index of an array's data as a value of type_name.
 fn (self: &var Selector) load_element(module: &ir::Module, data: i64, index: i64, type_name: ir::Name) -> !?Val {
     let shape = self.shapes.of(module, type_name);
     let shift = power_of_two(shape.size);
@@ -87,8 +74,6 @@ fn (self: &var Selector) load_element(module: &ir::Module, data: i64, index: i64
     return self.load_value(module, type_name, address, 0, true);
 }
 
-/// Selects Array.append(value): the fast path stores into the reserved
-/// tail; the slow path grows the storage through the runtime first.
 fn (self: &var Selector) select_array_append(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let array_value = node.args.get(0) orelse return try self.fail_op(module, node);
     let allocator_value = node.args.get(1) orelse return try self.fail_op(module, node);
@@ -106,9 +91,6 @@ fn (self: &var Selector) select_array_append(module: &ir::Module, node: &ir::Ins
     return null;
 }
 
-/// Appends value at length, the length header holds, and returns the
-/// register of the code it leaves: 0, or the out-of-memory failure when the
-/// storage could not grow. An arena's add is this append too.
 fn (self: &var Selector) append_at(module: &ir::Module, header: i64, length: i64, allocator_reg: i64, value: ir::Value, elem: Shape) -> !?i64 {
     let capacity = self.func.new_vreg();
     try self.load(capacity, header, 16, 8, true);
@@ -118,7 +100,6 @@ fn (self: &var Selector) append_at(module: &ir::Module, header: i64, length: i64
     let join = try self.new_join();
     try self.op3(MOp::Cmp, reg_none(), length, capacity);
     self.func.end(self.current, Term::Flags, Cond::Lt, reg_none(), fast, slow);
-    // Slow: grow to at least one more, or fail.
     try self.start_block(slow);
     let data_old = self.func.new_vreg();
     try self.load(data_old, header, 0, 8, false);
@@ -152,7 +133,6 @@ fn (self: &var Selector) append_at(module: &ir::Module, header: i64, length: i64
     try self.store(new_data, header, 0, 8);
     try self.store(new_capacity, header, 16, 8);
     self.func.end(self.current, Term::Jump, Cond::Eq, reg_none(), fast, 0 - 1);
-    // Fast: store at the old length and count it.
     try self.start_block(fast);
     let data = self.func.new_vreg();
     try self.load(data, header, 0, 8, false);
@@ -168,8 +148,6 @@ fn (self: &var Selector) append_at(module: &ir::Module, header: i64, length: i64
     return code;
 }
 
-/// Selects Array.set(index, value): out of range is the array's
-/// OutOfBounds failure.
 fn (self: &var Selector) select_array_set(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let array_value = node.args.get(0) orelse return try self.fail_op(module, node);
     let index = node.args.get(1) orelse return try self.fail_op(module, node);
@@ -182,8 +160,6 @@ fn (self: &var Selector) select_array_set(module: &ir::Module, node: &ir::InstrN
     let index_reg = try self.reg_nz(module, index) orelse return try self.fail_op(module, node);
     let length = self.func.new_vreg();
     try self.load(length, header, 8, 8, true);
-    // The code is set on each path, so a `try` right after it resolves
-    // on each path without testing.
     let code = self.func.new_vreg();
     let store_block = try self.new_join();
     let out_of_range = try self.new_cold_block();
@@ -206,8 +182,6 @@ fn (self: &var Selector) select_array_set(module: &ir::Module, node: &ir::InstrN
     return null;
 }
 
-/// Selects Array.get_or_panic(index): out of range reports the bounds
-/// failure at the call's position.
 fn (self: &var Selector) select_array_get_or_panic(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let array_value = node.args.get(0) orelse return try self.fail_op(module, node);
     let index = node.args.get(1) orelse return try self.fail_op(module, node);
@@ -233,8 +207,6 @@ fn (self: &var Selector) select_array_get_or_panic(module: &ir::Module, node: &i
     return null;
 }
 
-/// Selects Array.at / at_mut: the element's address when the index is in
-/// range, null otherwise -- the niche optional `?&T`.
 fn (self: &var Selector) select_array_at(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let array_value = node.args.get(0) orelse return try self.fail_op(module, node);
     let index = node.args.get(1) orelse return try self.fail_op(module, node);
@@ -249,8 +221,6 @@ fn (self: &var Selector) select_array_at(module: &ir::Module, node: &ir::InstrNo
     return null;
 }
 
-/// Returns a register holding the address of element index, or null when
-/// the index is out of range.
 fn (self: &var Selector) element_or_null(header: i64, index_reg: i64, size: i64) -> !i64 {
     let length = self.func.new_vreg();
     let data = self.func.new_vreg();
@@ -268,9 +238,6 @@ fn (self: &var Selector) element_or_null(header: i64, index_reg: i64, size: i64)
     return checked;
 }
 
-/// Selects Array.get: `?T` holding a copy of the element when the index is
-/// in range. A niche optional is bound from the element's address, null out
-/// of range, the way Map.get binds one.
 fn (self: &var Selector) select_array_get(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let array_value = node.args.get(0) orelse return try self.fail_op(module, node);
     let index = node.args.get(1) orelse return try self.fail_op(module, node);
@@ -307,11 +274,6 @@ fn (self: &var Selector) select_array_get(module: &ir::Module, node: &ir::InstrN
     return null;
 }
 
-// ---- optionals ----
-
-/// Is how one optional type is held: the element itself with absence as
-/// zero in the word its niche sits in (at `word`), or `{ i8, T }` with the
-/// payload at offset.
 struct OptionalLayout {
     niche: bool,
     shape: Shape,
@@ -323,9 +285,6 @@ fn (self: &var Shapes) optional_layout(module: &ir::Module, type_name: ir::Name)
     let text = ir::name_text(&module.names, type_name);
     let bytes = text.as_bytes();
     if llvm::niche_optional_elem(module, bytes) |elem| {
-        // A niche optional is its element, the address or index word itself
-        // or a struct that reaches one through a field; an absent one is the
-        // element's zero.
         let inner = shape_of_bytes(module, elem, 1);
         if inner.class != Class::Scalar and inner.class != Class::Aggregate {
             return null;
@@ -337,15 +296,10 @@ fn (self: &var Shapes) optional_layout(module: &ir::Module, type_name: ir::Name)
     if shape.class != Class::Aggregate {
         return null;
     }
-    // The payload follows the tag byte at its own alignment.
     let payload_align = shape.align;
     return OptionalLayout { niche: false, shape: shape, offset: round_up(1, payload_align), word: 0 };
 }
 
-/// Returns the byte offset of the word a niche sits in: the value itself
-/// for an address or an arena handle, and for a struct the first field that
-/// has a niche, followed down -- the path the LLVM backend's `niche_path`
-/// reads.
 fn niche_word_offset(module: &ir::Module, elem: []u8) -> ?i64 {
     if module.structs.at(elem) |declared| {
         var offset = 0;
@@ -446,10 +400,6 @@ fn (self: &var Selector) select_optional(module: &ir::Module, node: &ir::InstrNo
     }
 }
 
-// ---- tagged unions ----
-
-/// Selects the union ops: a union is its tag word and then the active
-/// variant's payload at offset 8.
 fn (self: &var Selector) select_union(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     match node.op {
         UnionNew => {
@@ -503,8 +453,6 @@ fn (self: &var Selector) select_union(module: &ir::Module, node: &ir::InstrNode)
     }
 }
 
-/// Selects slice.compare: -1, 0 or 1 as left orders before, with or after
-/// right, by memcmp over the shared length and then by length.
 fn (self: &var Selector) select_slice_compare(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let left = node.args.get(0) orelse return try self.fail_op(module, node);
     let right = node.args.get(1) orelse return try self.fail_op(module, node);
@@ -554,7 +502,6 @@ fn (self: &var Selector) select_slice_compare(module: &ir::Module, node: &ir::In
     return null;
 }
 
-/// Selects Array.clear, truncate, pop_or_panic, pop and reserve.
 fn (self: &var Selector) select_array_shrink(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let array_value = node.args.get(0) orelse return try self.fail_op(module, node);
     let header = try self.header_addr(module, array_value) orelse return try self.fail_op(module, node);
@@ -640,9 +587,6 @@ fn (self: &var Selector) select_array_shrink(module: &ir::Module, node: &ir::Ins
                 return try self.fail_op(module, node);
             }
             if optional.niche {
-                // The last element's address, null when the array is empty,
-                // binds the niche optional as Map.get does; the element is
-                // copied out before anything can reuse its place.
                 let pointer = self.func.new_vreg();
                 try self.mov_imm(pointer, 0);
                 let length = self.func.new_vreg();
@@ -691,8 +635,6 @@ fn (self: &var Selector) select_array_shrink(module: &ir::Module, node: &ir::Ins
     }
 }
 
-/// Selects Array.swap(left, right): both in range swaps the elements, either
-/// out of range is the array's OutOfBounds failure and changes nothing.
 fn (self: &var Selector) select_array_swap(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let array_value = node.args.get(0) orelse return try self.fail_op(module, node);
     let left = node.args.get(1) orelse return try self.fail_op(module, node);

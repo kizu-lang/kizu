@@ -5,28 +5,6 @@ import std::map;
 import std::mem;
 import std::string;
 
-// The scan over emitted text that every register and label a function reads is
-// defined in it. The sets are keyed by the bytes of each token, and the
-// per-function definition set carries the function's ordinal instead of being
-// replaced, as a Map cannot be emptied.
-
-/// Checks that every register and label a function reads is defined in that
-/// function, or is a module-level named type. The emitter resolves values by
-/// name while blocks are written out of control-flow order, so a resolution
-/// bug produces text clang rejects with a bare SSA name and no source
-/// position. This scan reports the same defect as an error that names the
-/// function, before the text leaves the package.
-///
-/// It also checks that every `alloca` sits in its function's entry block. An
-/// alloca anywhere else allocates on every execution and is reclaimed only
-/// when the function returns, so one inside a loop grows the stack a slot
-/// per turn until the program dies on the guard page — a failure with
-/// nothing in source to point at. hoist_allocas_to_entry is what holds this;
-/// the scan is what says so if it ever stops.
-///
-/// The scan checks existence and placement only. It pins no instruction
-/// shape: any text where read names are defined somewhere in the function,
-/// and every alloca is in the entry block, passes.
 fn verify_emitted_text(allocator: Allocator, text: []u8) -> !?diagnostic::Diagnostic {
     var types = map::new<[]u8, bool>(allocator);
     defer types.deinit(allocator);
@@ -123,7 +101,6 @@ fn verify_emitted_text(allocator: Allocator, text: []u8) -> !?diagnostic::Diagno
     return null;
 }
 
-/// Reports whether a name is defined in the function being scanned.
 fn defined_in(defs: &map::Map<[]u8, i64>, name: []u8, ordinal: i64) -> bool {
     if defs.get(name) |seen| {
         return seen == ordinal;
@@ -131,8 +108,6 @@ fn defined_in(defs: &map::Map<[]u8, i64>, name: []u8, ordinal: i64) -> bool {
     return false;
 }
 
-/// Returns the offset of the newline that ends the line starting at start,
-/// or the text length for the last line.
 fn line_end(text: []u8, start: i64) -> i64 {
     var index = start;
     while mem::byte_at(text, index) |byte| {
@@ -144,14 +119,12 @@ fn line_end(text: []u8, start: i64) -> i64 {
     return mem::len(text);
 }
 
-/// Extracts the symbol a `define` line declares.
 fn define_name(line: []u8) -> []u8 {
     let start = index_of_byte(line, 0, 64) orelse return line;
     let end = index_of_byte(line, start, 40) orelse return line[start + 1..mem::len(line)];
     return line[start + 1..end];
 }
 
-/// Returns the first offset at or after start holding byte, or null.
 fn index_of_byte(line: []u8, start: i64, byte: i64) -> ?i64 {
     var index = start;
     while mem::byte_at(line, index) |ch| {
@@ -163,7 +136,6 @@ fn index_of_byte(line: []u8, start: i64, byte: i64) -> ?i64 {
     return null;
 }
 
-/// Extracts the name of a module-level `%name = type ...` line.
 fn type_def_name(line: []u8) -> ?[]u8 {
     let name_end = leading_percent_name_end(line) orelse return null;
     if !mem::starts_with(line[name_end..mem::len(line)], " = type ") {
@@ -172,7 +144,6 @@ fn type_def_name(line: []u8) -> ?[]u8 {
     return line[1..name_end];
 }
 
-/// Extracts the label a block-opening `name:` line defines.
 fn label_def_name(line: []u8) -> ?[]u8 {
     let length = mem::len(line);
     if length < 2 or line[length - 1] != cast<u8>(58) {
@@ -189,7 +160,6 @@ fn label_def_name(line: []u8) -> ?[]u8 {
     return name;
 }
 
-/// Extracts the register a `  %name = ...` body line defines.
 fn instruction_def(line: []u8) -> ?[]u8 {
     let trimmed = trim_left_spaces(line);
     let name_end = leading_percent_name_end(trimmed) orelse return null;
@@ -199,8 +169,6 @@ fn instruction_def(line: []u8) -> ?[]u8 {
     return trimmed[1..name_end];
 }
 
-/// Returns where the `%name` head of a line ends; null when the line does not
-/// start with one.
 fn leading_percent_name_end(line: []u8) -> ?i64 {
     if !mem::starts_with(line, "%") {
         return null;
@@ -218,7 +186,6 @@ fn leading_percent_name_end(line: []u8) -> ?i64 {
     return end;
 }
 
-/// Drops the leading spaces of a line.
 fn trim_left_spaces(line: []u8) -> []u8 {
     var start = 0;
     while mem::byte_at(line, start) |ch| {
@@ -230,9 +197,6 @@ fn trim_left_spaces(line: []u8) -> []u8 {
     return line[start..mem::len(line)];
 }
 
-/// Appends each `%name` token in a line in order, skipping quoted spans. Each
-/// token is the pair of offsets it occupies in the enclosing text, so the scan
-/// reads the same bytes back without retaining any.
 fn append_percent_tokens(allocator: Allocator, base: i64, line: []u8, out: &var array::Array<i64>) -> !void {
     var in_quote = false;
     var index = 0;
@@ -263,7 +227,6 @@ fn append_percent_tokens(allocator: Allocator, base: i64, line: []u8, out: &var 
     return;
 }
 
-/// Reports bytes valid in an unquoted LLVM identifier.
 fn is_llvm_name_byte(ch: u8) -> bool {
     return ch == cast<u8>(45) or ch == cast<u8>(36) or ch == cast<u8>(46) or ch == cast<u8>(95) or
         (ch >= cast<u8>(97) and ch <= cast<u8>(122)) or (ch >= cast<u8>(65) and ch <= cast<u8>(90)) or

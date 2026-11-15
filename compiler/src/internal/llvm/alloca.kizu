@@ -4,34 +4,11 @@ import std::array;
 import std::mem;
 import std::string;
 
-// The pass over one function's body text that moves every alloca into the
-// entry block. The lines are offsets into the body and the result is written
-// straight to the caller's String, so no line is copied.
-
-/// Is the half-open byte range of one body line.
 struct LineSpan {
     start: i64,
     end: i64,
 }
 
-/// Moves every `alloca` in a function body into its entry block. LLVM folds an
-/// entry-block alloca into the function's frame, allocated once when the
-/// function is entered; an alloca anywhere else allocates on every execution
-/// and is only reclaimed when the function returns. A loop body holding one
-/// therefore grows the stack a slot per turn, and a program that loops long
-/// enough dies on the guard page with nothing in source to point at.
-///
-/// The move is sound for the allocas this backend writes. Each has a fixed
-/// size and reads no register, so the entry block can hold it; and the slots
-/// they name are argument buffers, out-parameters, and locals, none of which
-/// outlive the turn that wrote them, so sharing one slot across turns
-/// changes nothing.
-///
-/// An alloca with an element count is neither: the count is a register the
-/// entry block does not have yet, and a fresh slot per turn is the point of
-/// writing one. This refuses instead of moving it, because reclaiming the
-/// stack around a dynamic alloca is a decision about the loop it sits in —
-/// llvm.stacksave and llvm.stackrestore — not something this can invent.
 fn hoist_allocas_to_entry(allocator: Allocator, body: []u8, out: &var string::String) -> !?diagnostic::Diagnostic {
     var lines = array::new<LineSpan>(allocator);
     defer lines.deinit(allocator);
@@ -101,11 +78,6 @@ fn hoist_allocas_to_entry(allocator: Allocator, body: []u8, out: &var string::St
     return null;
 }
 
-/// Adds one line to the run being built, or closes the run and starts a new
-/// one when the line does not follow it in the body. Lines that were already
-/// adjacent are copied once, with the newline the body already holds between
-/// them: only the hoisted allocas break a function into pieces, so most of it
-/// is two or three copies rather than one per line.
 fn extend_run(allocator: Allocator,
     out: &var string::String,
     body: []u8,
@@ -127,8 +99,6 @@ fn extend_run(allocator: Allocator,
     return;
 }
 
-/// Appends one run of the joined body: a newline separates it from the run
-/// before.
 fn append_run(allocator: Allocator, out: &var string::String, body: []u8, run: LineSpan, written: i64) -> !void {
     if written > 0 {
         try out.append_byte(allocator, cast<u8>(10));
@@ -136,8 +106,6 @@ fn append_run(allocator: Allocator, out: &var string::String, body: []u8, run: L
     return out.append_bytes(allocator, body[run.start..run.end]);
 }
 
-/// Refuses an alloca that takes an element count. Only the attributes that
-/// describe the one slot -- align, addrspace, inalloca -- may follow the type.
 fn reject_counted_alloca(allocator: Allocator, line: []u8) -> !?diagnostic::Diagnostic {
     let trimmed = trim_left_spaces(line);
     let name_end = leading_percent_name_end(trimmed) orelse return null;
@@ -169,9 +137,6 @@ fn reject_counted_alloca(allocator: Allocator, line: []u8) -> !?diagnostic::Diag
     return null;
 }
 
-/// Returns the offset of the next comma at or after start that separates
-/// operands, leaving the ones inside an aggregate type spelling alone; null
-/// when no operand follows.
 fn top_level_comma(text: []u8, start: i64) -> ?i64 {
     var depth = 0;
     var index = start;
@@ -190,8 +155,6 @@ fn top_level_comma(text: []u8, start: i64) -> ?i64 {
     return null;
 }
 
-/// Returns the first space-separated word of an operand; empty when the
-/// operand is blank.
 fn first_field(operand: []u8) -> []u8 {
     var start = 0;
     while mem::byte_at(operand, start) |ch| {
@@ -210,14 +173,12 @@ fn first_field(operand: []u8) -> []u8 {
     return operand[start..end];
 }
 
-/// Reports whether a body line is a register-defining alloca.
 fn is_alloca_line(line: []u8) -> bool {
     let trimmed = trim_left_spaces(line);
     let name_end = leading_percent_name_end(trimmed) orelse return false;
     return mem::starts_with(trimmed[name_end..mem::len(trimmed)], " = alloca ");
 }
 
-/// Reports whether a body line opens a basic block.
 fn is_block_label_line(line: []u8) -> bool {
     if label_def_name(line) |_| {
         return true;

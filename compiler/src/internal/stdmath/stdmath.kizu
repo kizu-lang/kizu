@@ -4,16 +4,6 @@ import std::math;
 import std::mem;
 import std::string;
 
-// The f64 arithmetic a comptime expression folds. The compiler calls std
-// itself: `sin_with<false>` is the unfused kernel every build runs, computed
-// here on the host, so the folded bits are the ones the program computes
-// whichever host folds them. A call's arguments come as their count and the
-// first value, which is all the five functions read; the callers still
-// evaluate every argument, so an error in a surplus one is reported.
-
-/// Evaluates one std::math function a compile-time float expression may call,
-/// by its qualified name; null when the name is not one of them or the
-/// argument count does not fit it.
 pub fn call(name: []u8, count: i64, first: f64) -> ?f64 {
     if mem::equal_bytes(name, "std::math::pi") and count == 0 {
         return math::pi<f64>();
@@ -33,7 +23,6 @@ pub fn call(name: []u8, count: i64, first: f64) -> ?f64 {
     return null;
 }
 
-/// Reports whether name is a std::math function `call` evaluates.
 pub fn names(name: []u8) -> bool {
     return mem::equal_bytes(name, "std::math::pi") or
         mem::equal_bytes(name, "std::math::tau") or
@@ -42,8 +31,6 @@ pub fn names(name: []u8) -> bool {
         mem::equal_bytes(name, "std::math::cos");
 }
 
-/// Evaluates + - * / on two floats, each rounded once; null when op is not one
-/// of them.
 pub fn binary(op: []u8, left: f64, right: f64) -> ?f64 {
     if mem::equal_bytes(op, "+") {
         return left + right;
@@ -60,7 +47,6 @@ pub fn binary(op: []u8, left: f64, right: f64) -> ?f64 {
     return null;
 }
 
-/// Evaluates a float comparison; null when op is not one.
 pub fn compare(op: []u8, left: f64, right: f64) -> ?bool {
     if mem::equal_bytes(op, "==") {
         return left == right;
@@ -83,13 +69,10 @@ pub fn compare(op: []u8, left: f64, right: f64) -> ?bool {
     return null;
 }
 
-/// Reports whether a folded value can be a constant: a literal names a finite
-/// float, so an infinity or NaN at compile time is the program's error.
 pub fn finite(value: f64) -> bool {
     return !float::is_nan(value) and !float::is_infinite(value);
 }
 
-/// Spells a value not `finite` the way the diagnostic names it.
 pub fn non_finite_spelling(value: f64) -> []u8 {
     if float::is_nan(value) {
         return "NaN";
@@ -100,11 +83,6 @@ pub fn non_finite_spelling(value: f64) -> []u8 {
     return "+Inf";
 }
 
-/// Spells a folded float as IR constant text: C99 hexadecimal with the
-/// shortest mantissa (`0x1.921fb54442d18p+01`). It names the bits exactly,
-/// which a decimal spelling can only do through a correctly rounded
-/// conversion. A subnormal is normalized, so every nonzero value leads with
-/// `1`.
 pub fn literal(allocator: Allocator, value: f64) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit(allocator);
@@ -120,8 +98,6 @@ pub fn literal(allocator: Allocator, value: f64) -> !string::String {
             lead = cast<u8>(48);
             exponent = 0;
         } else {
-            // A subnormal is fraction * 2^-1074; shift its leading bit up to
-            // the hidden position, where a normal value keeps it.
             exponent = -1022;
             while fraction & hidden_bit() == 0 {
                 fraction = fraction << 1;
@@ -134,8 +110,6 @@ pub fn literal(allocator: Allocator, value: f64) -> !string::String {
     try out.append_byte(allocator, lead);
     if fraction != 0 {
         try out.append_byte(allocator, cast<u8>(46));
-        // Thirteen hex digits hold the 52 fraction bits; the shortest
-        // spelling drops the trailing zeros.
         var shift = 48;
         while shift >= 0 and fraction != 0 {
             let digit = (fraction >> cast<u64>(shift)) & 15;
@@ -158,10 +132,6 @@ pub fn literal(allocator: Allocator, value: f64) -> !string::String {
     return move out;
 }
 
-/// Reads a C99 hexadecimal float, `[-]0x<hex>[.<hex>]p[+-]<decimal>`, to the
-/// nearest f64 with ties to even, which is what the backends need to read
-/// `literal`'s spelling back. Null for any other spelling, and for a magnitude
-/// no f64 holds.
 pub fn parse_literal(text: []u8) -> ?f64 {
     var index = 0;
     var negative = false;
@@ -178,8 +148,6 @@ pub fn parse_literal(text: []u8) -> ?f64 {
         return null;
     }
     index = index + 2;
-    // The value is mantissa * 2^exponent. Digits past 60 bits cannot reach
-    // the 53 a double keeps, but a nonzero one still decides a tie.
     var mantissa = cast<u64>(0);
     var exponent = 0;
     var sticky = false;
@@ -238,7 +206,6 @@ pub fn parse_literal(text: []u8) -> ?f64 {
         if ch < cast<u8>(48) or ch > cast<u8>(57) {
             return null;
         }
-        // Past this bound every value is zero or overflows either way.
         if written < 100000 {
             written = written * 10 + cast<i64>(ch - cast<u8>(48));
         }
@@ -256,8 +223,6 @@ pub fn parse_literal(text: []u8) -> ?f64 {
     return float::from_bits(magnitude);
 }
 
-/// Rounds mantissa * 2^exponent (plus a sticky bit below it) to the nearest
-/// binary64 with ties to even and returns its bits; null when it overflows.
 fn round_to_f64(mantissa: u64, exponent: i64, sticky: bool) -> ?u64 {
     if mantissa == 0 {
         return cast<u64>(0);
@@ -266,8 +231,6 @@ fn round_to_f64(mantissa: u64, exponent: i64, sticky: bool) -> ?u64 {
     while length < 64 and mantissa >> cast<u64>(length) != 0 {
         length = length + 1;
     }
-    // The leading bit is 2^(exponent + length - 1); a double keeps 53 bits
-    // below it, or fewer where the result is subnormal.
     var scale = exponent + length - 1 - 52;
     if scale < -1074 {
         scale = -1074;
@@ -291,7 +254,6 @@ fn round_to_f64(mantissa: u64, exponent: i64, sticky: bool) -> ?u64 {
             }
             half = cast<u64>(1) << cast<u64>(drop - 1);
         }
-        // Past 64 dropped bits the whole mantissa sits below half a unit.
         let above = drop <= 64 and (rest > half or
             (rest == half and (sticky or significand & 1 == 1)));
         if above {
@@ -303,8 +265,6 @@ fn round_to_f64(mantissa: u64, exponent: i64, sticky: bool) -> ?u64 {
         }
     }
     if significand < hidden_bit() {
-        // Subnormal, or rounded up into the smallest normal, whose bits are
-        // the same integer.
         return significand;
     }
     let biased = scale + 52 + 1023;

@@ -3,27 +3,10 @@ import compiler::internal::ir;
 import std::mem;
 import std::string;
 
-// The hosted Array runtime declarations and the `array.*` instructions. The
-// helpers other container files share (write_null_failure,
-// write_array_bool_result, write_array_optional_load_result,
-// write_stack_value, write_static_string_global, array_result_labels,
-// element_size_operand) live in llvm.kizu.
-
-/// Reports whether a lowered IR type is a std::array::Array<T>.
 fn is_array_llvm_type(typ_name: []u8) -> bool {
     return mem::starts_with(typ_name, "std::array::Array<") and ir::ends_with_bytes(typ_name, ">");
 }
 
-/// Copies the type an instruction measures into out. A container spells its
-/// element in its own type, so the two can never disagree and no instruction
-/// can arrive without one -- a cleanup carries no immediate, and a release
-/// measured against a missing type would free the wrong number of bytes.
-///
-/// Which value carries it depends on the instruction: a constructor names the
-/// container it returns, and everything else was handed the container it works
-/// on. Reading whichever happens to match would take the wrong answer for an
-/// element that is itself a container, where the result of a `pop` is an Array
-/// whose own element is not what the outer storage is sized by.
 fn (self: &var Emitter) instr_element_type(
     module: &ir::Module,
     node: &ir::InstrNode,
@@ -49,8 +32,6 @@ fn (self: &var Emitter) instr_element_type(
     return self.copy_container_arg(spelling[start..mem::len(spelling)], out);
 }
 
-/// Reports the instructions whose container is the value they return rather
-/// than the one they were handed.
 fn container_constructor(op: ir::Op) -> bool {
     return match op {
         ArrayNew => true,
@@ -61,8 +42,6 @@ fn container_constructor(op: ir::Op) -> bool {
     };
 }
 
-/// Copies what a constructor's result holds: the element for an Array, Arena
-/// or Box, and the value for a Map, which is what its storage is sized by.
 fn (self: &var Emitter) container_element_of_result(
     module: &ir::Module,
     type_name: ir::Name,
@@ -78,8 +57,6 @@ fn (self: &var Emitter) container_element_of_result(
     return self.copy_container_arg(spelling, out);
 }
 
-/// Copies the static argument a container spelling carries, taking a Map's
-/// value rather than its key.
 fn (self: &var Emitter) copy_container_arg(spelling: []u8, out: &var string::String) -> !bool {
     if is_array_llvm_type(spelling) {
         try out.append_bytes(self.allocator, spelling[18..mem::len(spelling) - 1]);
@@ -102,44 +79,26 @@ fn (self: &var Emitter) copy_container_arg(spelling: []u8, out: &var string::Str
     return false;
 }
 
-/// Names the runtime's KizuArray header in emitted modules. Element access
-/// reads these fields rather than calling the runtime for each one: `kizu ir
-/// compiler` reaches an element 264 million times in one run, and a call the
-/// optimizer cannot see through costs more than the access. runtime.c asserts
-/// the same offsets, so the two spellings cannot drift apart.
 fn array_header_type() -> []u8 {
     return "%kizu.array";
 }
 
-/// The field index of the element storage.
 fn array_field_data() -> i64 {
     return 0;
 }
 
-/// The field index of the element count.
 fn array_field_len() -> i64 {
     return 1;
 }
 
-/// The field index of the reserved element count.
 fn array_field_capacity() -> i64 {
     return 2;
 }
 
-/// What array_header_type occupies: three words, the same three a Rust `Vec`
-/// carries. Neither the element size nor the allocator is among them -- the
-/// compiler knows T at every call that needs it and the source names the
-/// allocator at every call that needs one (ADR-0132) -- so a header carrying
-/// either would carry what the caller already has, in every array and in every
-/// element of an array of arrays.
 pub fn array_header_size() -> i64 {
     return 24;
 }
 
-/// Writes declarations for the hosted Array runtime. The header a call names
-/// is nocapture: the runtime keeps no copy of its address, so a reserve before
-/// a loop of appends leaves the header a local whose fields can live in
-/// registers.
 fn (self: &var Emitter) write_array_runtime_decls(module: &ir::Module) -> !void {
     if !self.uses_array_header(module) {
         return;
@@ -156,9 +115,6 @@ fn (self: &var Emitter) write_array_runtime_decls(module: &ir::Module) -> !void 
     return self.line("");
 }
 
-/// Returns the address of one header field. An array is the header, so what a
-/// handle names is always the address of one, never null, and the field
-/// address is inbounds.
 fn (self: &var Emitter) array_field_addr(handle: ir::Name, field: i64, name: []u8) -> !ir::Name {
     let synthetic = try self.next_synthetic_value(name);
     let addr = try self.percent(synthetic);
@@ -169,14 +125,12 @@ fn (self: &var Emitter) array_field_addr(handle: ir::Name, field: i64, name: []u
     return addr;
 }
 
-/// Loads one i64 header field into the named register.
 fn (self: &var Emitter) array_load_field(handle: ir::Name, field: i64, name: []u8, into: ir::Name) -> !void {
     let addr = try self.array_field_addr(handle, field, name);
     let tag = self.tbaa_tag(TbaaKind::Count);
     return self.line3("  %s = load i64, ptr %s%s", Arg::Str(into), Arg::Str(addr), Arg::Lit(tag));
 }
 
-/// Loads the header's storage pointer.
 fn (self: &var Emitter) array_data(handle: ir::Name) -> !ir::Name {
     let data_addr = try self.array_field_addr(handle, array_field_data(), "array.data.addr");
     let data_synthetic = try self.next_synthetic_value("array.data");
@@ -186,8 +140,6 @@ fn (self: &var Emitter) array_data(handle: ir::Name) -> !ir::Name {
     return data;
 }
 
-/// Returns the address of the element at index of the storage data points at,
-/// given the lowered element type.
 fn (self: &var Emitter) array_element_at(data: ir::Name, elem_type: ir::Name, index: ir::Name) -> !ir::Name {
     let elem_synthetic = try self.next_synthetic_value("array.elem");
     let elem_addr = try self.percent(elem_synthetic);
@@ -198,11 +150,6 @@ fn (self: &var Emitter) array_element_at(data: ir::Name, elem_type: ir::Name, in
     return elem_addr;
 }
 
-/// Returns the address of the element at index. The stride is the element
-/// type, which is what array.new sized the elements by, and the index is not
-/// checked here. The same for an element spelled out rather than named by the
-/// module, for the instructions that read their element from the value they
-/// were handed.
 fn (self: &var Emitter) array_element_addr_bytes(
     module: &ir::Module,
     handle: ir::Name,
@@ -213,7 +160,6 @@ fn (self: &var Emitter) array_element_addr_bytes(
     return self.array_element_addr_of(handle, elem_type, index);
 }
 
-/// Writes the address of one element slot, given the lowered element type.
 fn (self: &var Emitter) array_element_addr_of(
     handle: ir::Name,
     elem_type: ir::Name,
@@ -223,10 +169,6 @@ fn (self: &var Emitter) array_element_addr_of(
     return self.array_element_at(data, elem_type, index);
 }
 
-/// Returns the address of the element at index, or null when index is outside
-/// the array. The comparison is unsigned, so a negative index is out of range
-/// without a second test -- the same answer the runtime gave by returning a
-/// null element pointer.
 fn (self: &var Emitter) array_checked_element(
     module: &ir::Module,
     node: &ir::InstrNode,
@@ -256,8 +198,6 @@ fn (self: &var Emitter) array_checked_element(
     return checked;
 }
 
-/// Traps when index is outside the array. The comparison is unsigned, so a
-/// negative index is out of range without a second test.
 fn (self: &var Emitter) write_bounds_failure(
     module: &ir::Module,
     node: &ir::InstrNode,
@@ -280,10 +220,6 @@ fn (self: &var Emitter) write_bounds_failure(
     return self.line1("%s:", Arg::Str(ok_label));
 }
 
-/// Reports whether emitted values or aggregate definitions need the concrete
-/// Array header. An external call can exchange an Array without leaving a
-/// local array instruction, and reachability can leave a declared struct after
-/// removing every function that used it.
 fn (self: &Emitter) uses_array_header(module: &ir::Module) -> bool {
     if self.uses_array_runtime(module) {
         return true;
@@ -291,8 +227,6 @@ fn (self: &Emitter) uses_array_header(module: &ir::Module) -> bool {
     return self.module_has_runtime_header_type(module, "std::array::Array<");
 }
 
-/// Reports whether this module calls the hosted Array runtime. An arena op
-/// also needs these declarations because its storage uses that runtime.
 fn (self: &Emitter) uses_array_runtime(module: &ir::Module) -> bool {
     var index = 0;
     while module.functions.get(index) |function| {
@@ -316,10 +250,6 @@ fn (self: &Emitter) uses_array_runtime(module: &ir::Module) -> bool {
     return false;
 }
 
-/// Dispatches the Array operations that act on the container as a whole --
-/// lifetime, size, and bulk views. Anything that reaches into a single element
-/// falls through to write_array_element_instr, which also owns the error for
-/// instructions neither half recognises.
 fn (self: &var Emitter) write_array_instr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     match node.op {
         ArrayNew => return self.write_array_new(module, node),
@@ -335,10 +265,6 @@ fn (self: &var Emitter) write_array_instr(module: &ir::Module, node: &ir::InstrN
     }
 }
 
-/// Dispatches the Array operations that move or borrow a single element. All
-/// of them go through a pointer to one element slot -- read out of the header
-/// here for the ones that only need an address, handed back by the runtime for
-/// pop -- so they share the failure plumbing.
 fn (self: &var Emitter) write_array_element_instr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     match node.op {
         ArrayAppend => return self.write_array_append(module, node),
@@ -357,7 +283,6 @@ fn (self: &var Emitter) write_array_element_instr(module: &ir::Module, node: &ir
     }
 }
 
-/// Exchanges two initialized slots without copying ownership.
 fn (self: &var Emitter) write_array_swap(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 3 or !module.names.is(node.args.get_or_panic(1).type_name, "i64") or
         !module.names.is(node.args.get_or_panic(2).type_name, "i64") or !module.names.is(node.result.type_name, "std::array::Error!void") {
@@ -404,8 +329,6 @@ fn (self: &var Emitter) write_array_swap(module: &ir::Module, node: &ir::InstrNo
     let right_value_synthetic = try self.next_synthetic_value("array.swap.right");
     let right_value = try self.percent(right_value_synthetic);
     if try self.is_memory_value_type(module, elem_bytes) {
-        // An element kept in memory moves through a slot rather than a
-        // register; swapping a slot with itself copies it in place.
         try self.line2("  %s = alloca %s", Arg::Str(left_value), Arg::Str(elem_type));
         try self.write_memory_copy(left_value, left_addr, elem_type);
         try self.write_memory_copy(left_addr, right_addr, elem_type);
@@ -427,12 +350,6 @@ fn (self: &var Emitter) write_array_swap(module: &ir::Module, node: &ir::InstrNo
     return self.write_array_bool_result(module, node.result, ok_name, FailureKey::ArraySwap);
 }
 
-/// Lowers std::array::new<T>(allocator) to the header value an empty array is:
-/// three zero words. An empty array owns no storage, so it needs none, and it
-/// keeps nothing about how to grow either -- the allocator the constructor
-/// names is read by the checker, which requires every later call that
-/// allocates or releases to name the same one (ADR-0132). So the construction
-/// costs no instruction at all.
 fn (self: &var Emitter) write_array_new(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let result_text = ir::name_text(&module.names, node.result.type_name);
     let result_type = result_text.as_bytes();
@@ -444,7 +361,6 @@ fn (self: &var Emitter) write_array_new(module: &ir::Module, node: &ir::InstrNod
     return null;
 }
 
-/// Lowers Array.append(value) and preserves !void failure flow.
 fn (self: &var Emitter) write_array_append(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 3 or !module.names.is(node.result.type_name, "std::mem::Error!void") {
         return try self.fail0(
@@ -465,15 +381,6 @@ fn (self: &var Emitter) write_array_append(module: &ir::Module, node: &ir::Instr
     return self.write_array_bool_result(module, node.result, ok_name, FailureKey::ArrayAppend);
 }
 
-/// Writes into the reserved tail when there is one and otherwise hands the
-/// append back to the runtime. Growing the storage is what the runtime owns.
-/// The slow path is given the handle as it came, not the readable stand-in, so
-/// a null handle still comes back as the failure it is.
-///
-/// It returns the length the append started from, the index the element lands
-/// at. An array has no use for it; an arena hands it back as the handle that
-/// names the element (ADR-0131). The load dominates the join, so the name is
-/// readable wherever the ok phi is.
 fn (self: &var Emitter) write_array_append_paths(
     module: &ir::Module,
     node: &ir::InstrNode,
@@ -518,10 +425,6 @@ fn (self: &var Emitter) write_array_append_paths(
     let storage = try self.percent(storage_synthetic);
     let allocator = try self.operand(module, node.args.get_or_panic(1));
     let size = try self.element_size_operand_bytes(module, elem_bytes);
-    // The answer comes back through a slot of the caller's rather than as a
-    // returned pair: C returns a two-word struct in registers on System V and
-    // AAPCS64 but through memory on Windows, and a slot is the one spelling
-    // every convention agrees on.
     try self.line1("  %s = alloca { ptr, i64 }, align 8", Arg::Str(storage));
     try self.line6(
         "  call void @kizu_array_grow(ptr %s, ptr %s, ptr %s, i64 %s, i64 %s, i64 %s)",
@@ -571,7 +474,6 @@ fn (self: &var Emitter) write_array_append_paths(
     return length;
 }
 
-/// Lowers Array.len().
 fn (self: &var Emitter) write_array_len(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 or !module.names.is(node.result.type_name, "i64") {
         return try self.fail0("llvm error: array.len expects Array<T> -> i64");
@@ -584,7 +486,6 @@ fn (self: &var Emitter) write_array_len(module: &ir::Module, node: &ir::InstrNod
     return null;
 }
 
-/// Lowers Array.capacity().
 fn (self: &var Emitter) write_array_capacity(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 or !module.names.is(node.result.type_name, "i64") {
         return try self.fail0("llvm error: array.capacity expects Array<T> -> i64");
@@ -597,7 +498,6 @@ fn (self: &var Emitter) write_array_capacity(module: &ir::Module, node: &ir::Ins
     return null;
 }
 
-/// Lowers Array.reserve(additional).
 fn (self: &var Emitter) write_array_reserve(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 3 or !module.names.is(node.args.get_or_panic(2).type_name, "i64") or
         !module.names.is(node.result.type_name, "std::mem::Error!void") {
@@ -625,8 +525,6 @@ fn (self: &var Emitter) write_array_reserve(module: &ir::Module, node: &ir::Inst
     return self.write_array_bool_result(module, node.result, ok_name, FailureKey::ArrayReserve);
 }
 
-/// Lowers Array.append_bytes(bytes) for a u8 array: the run is copied into the
-/// reserved tail when it fits, and only growing goes to the runtime.
 fn (self: &var Emitter) write_array_append_bytes(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 3 or !module.names.is(node.args.get_or_panic(2).type_name, "[]u8") or
         !module.names.is(node.result.type_name, "std::mem::Error!void") {
@@ -689,7 +587,6 @@ fn (self: &var Emitter) write_array_append_bytes(module: &ir::Module, node: &ir:
     return self.write_array_bool_result(module, node.result, ok_name, FailureKey::ArrayAppendBytes);
 }
 
-/// Lowers Array.pop().
 fn (self: &var Emitter) write_array_pop(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 {
         return try self.fail0("llvm error: array.pop expects Array<T> -> ?T");
@@ -702,18 +599,6 @@ fn (self: &var Emitter) write_array_pop(module: &ir::Module, node: &ir::InstrNod
     return self.write_array_optional_load_result(module, node, ptr_name);
 }
 
-/// Shortens the array by one and returns the address of the element that left
-/// it, or null when there was none. The length is read, tested and written
-/// where the pop is, rather than behind a call the optimizer cannot see the
-/// length change through.
-///
-/// Only a pop that finds an element writes the length, which is the shape a
-/// loop that pops until the array is empty needs to be understood whole: LLVM
-/// folds such a loop into one store of zero. Writing the unchanged length on
-/// the empty side as well reads the same, but LLVM 16 takes that form for a
-/// count that falls on every turn -- the last one too, which finds nothing --
-/// and when it vectorizes the loop it leaves the length at -1 whenever the
-/// turns come out a multiple of the vector width.
 fn (self: &var Emitter) array_pop_element(
     module: &ir::Module,
     node: &ir::InstrNode,
@@ -761,7 +646,6 @@ fn (self: &var Emitter) array_pop_element(
     return into;
 }
 
-/// Moves the last element out or traps on an empty Array.
 fn (self: &var Emitter) write_array_pop_or_panic(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 {
         return try self.fail0("llvm error: array.pop_or_panic expects Array<T> -> T");
@@ -784,7 +668,6 @@ fn (self: &var Emitter) write_array_pop_or_panic(module: &ir::Module, node: &ir:
     return null;
 }
 
-/// Lowers Array.get(index).
 fn (self: &var Emitter) write_array_get(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 2 or !module.names.is(node.args.get_or_panic(1).type_name, "i64") {
         return try self.fail0("llvm error: array.get expects Array<T>, i64 -> ?T");
@@ -803,7 +686,6 @@ fn (self: &var Emitter) write_array_get(module: &ir::Module, node: &ir::InstrNod
     return self.write_array_optional_load_result(module, node, checked);
 }
 
-/// Lowers Array.get_or_panic(index).
 fn (self: &var Emitter) write_array_get_or_panic(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 2 or !module.names.is(node.args.get_or_panic(1).type_name, "i64") {
         return try self.fail0("llvm error: array.get_or_panic expects Array<T>, i64 -> T");
@@ -821,9 +703,6 @@ fn (self: &var Emitter) write_array_get_or_panic(module: &ir::Module, node: &ir:
     let len_synthetic = try self.next_synthetic_value("array.get.panic.len");
     let len_name = try self.percent(len_synthetic);
     try self.array_load_field(handle, array_field_len(), "array.get.panic.len", len_name);
-    // The storage pointer is read before the check, beside the length: a
-    // loop that checks every element then reads both where the loop is
-    // sure to, and they move out of it together.
     let data = try self.array_data(handle);
     try self.write_bounds_failure(module, node, index.operand, len_name);
     let elem_type = try self.llvm_type(module, elem_bytes);
@@ -839,9 +718,6 @@ fn (self: &var Emitter) write_array_get_or_panic(module: &ir::Module, node: &ir:
     return null;
 }
 
-/// Lowers Array.at(index) and Array.at_mut(index) to a borrow optional: the
-/// runtime's nullable element pointer becomes the payload and its presence,
-/// branch-free.
 fn (self: &var Emitter) write_array_at(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 2 or !module.names.is(node.args.get_or_panic(1).type_name, "i64") {
         return try self.fail0("llvm error: array.at expects Array<T>, i64 -> ?&T");
@@ -860,7 +736,6 @@ fn (self: &var Emitter) write_array_at(module: &ir::Module, node: &ir::InstrNode
     return self.write_borrow_optional_result(module, node, checked);
 }
 
-/// Lowers Array.set(index, value) and preserves !void failure flow.
 fn (self: &var Emitter) write_array_set(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 3 or !module.names.is(node.args.get_or_panic(1).type_name, "i64") or
         !module.names.is(node.result.type_name, "std::array::Error!void") {
@@ -882,8 +757,6 @@ fn (self: &var Emitter) write_array_set(module: &ir::Module, node: &ir::InstrNod
     return self.write_array_bool_result(module, node.result, ok_name, FailureKey::ArrayBounds);
 }
 
-/// Writes value at index when index is inside the array and leaves ok_name
-/// saying whether it did.
 fn (self: &var Emitter) write_array_checked_store(
     module: &ir::Module,
     node: &ir::InstrNode,
@@ -927,7 +800,6 @@ fn (self: &var Emitter) write_array_checked_store(
     );
 }
 
-/// Lowers the raw Array storage truncate primitive.
 fn (self: &var Emitter) write_array_truncate(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 2 or !module.names.is(node.args.get_or_panic(1).type_name, "i64") or
         !module.names.is(node.result.type_name, "std::array::Error!void") {
@@ -944,8 +816,6 @@ fn (self: &var Emitter) write_array_truncate(module: &ir::Module, node: &ir::Ins
     let count_tag = self.tbaa_tag(TbaaKind::Count);
     try self.line3(
         "  %s = load i64, ptr %s%s", Arg::Str(held), Arg::Str(length_addr), Arg::Lit(count_tag));
-    // An unsigned compare answers both halves of "between zero and the length"
-    // with one test, the way a checked element access answers its index.
     try self.line3(
         "  %s = icmp ule i64 %s, %s", Arg::Str(ok_name), Arg::Str(length.operand), Arg::Str(held));
     let kept_synthetic = try self.next_synthetic_value("array.truncate.kept");
@@ -960,7 +830,6 @@ fn (self: &var Emitter) write_array_truncate(module: &ir::Module, node: &ir::Ins
     return self.write_array_bool_result(module, node.result, ok_name, FailureKey::ArrayTruncate);
 }
 
-/// Lowers the raw Array storage clear primitive.
 fn (self: &var Emitter) write_array_clear(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 or !module.names.is(node.result.type_name, "void") {
         return try self.fail0("llvm error: array.clear expects Array<T> -> void");
@@ -973,8 +842,6 @@ fn (self: &var Emitter) write_array_clear(module: &ir::Module, node: &ir::InstrN
     return null;
 }
 
-/// Lowers Array<T>.as_bytes() / as_slice(): the view is the same {ptr, len}
-/// pair whatever it counts, and the length counts elements.
 fn (self: &var Emitter) write_array_as_bytes(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 or !module.names.starts_with(node.result.type_name, "[]") {
         return try self.fail0("llvm error: array.as_bytes expects Array<T> -> []T");
@@ -997,7 +864,6 @@ fn (self: &var Emitter) write_array_as_bytes(module: &ir::Module, node: &ir::Ins
     return null;
 }
 
-/// Lowers Array.deinit().
 fn (self: &var Emitter) write_array_deinit(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 2 or !module.names.is(node.result.type_name, "void") {
         return try self.fail0("llvm error: array.deinit expects Array<T>, Allocator -> void");
@@ -1005,24 +871,12 @@ fn (self: &var Emitter) write_array_deinit(module: &ir::Module, node: &ir::Instr
     return self.write_container_storage_release(module, node, "array.deinit");
 }
 
-/// Releases the storage a container header owns: the data pointer, measured by
-/// the capacity it was sized at. Array.deinit and Arena.deinit are both this,
-/// since the two are the same header and whatever owners the elements held are
-/// already gone by the time either runs.
-///
-/// A container that never grew owns no bytes, and releasing it asks nothing of
-/// the allocator, so that test is written here rather than behind the call: a
-/// scratch array a function declares and deinits on every call, and mostly
-/// leaves empty, otherwise pays a call into the runtime for each.
 fn (self: &var Emitter) write_container_storage_release(
     module: &ir::Module,
     node: &ir::InstrNode,
     what: []u8
 ) -> !?diagnostic::Diagnostic {
     let container = try self.operand(module, node.args.get_or_panic(0));
-    // A cleanup carries no immediate, so the element the release measures is
-    // read from the container it was handed: the one place the type is written
-    // down either way.
     var elem = string::new(self.allocator);
     defer elem.deinit(self.allocator);
     if !try self.instr_element_type(module, node, &var elem) {
@@ -1042,8 +896,6 @@ fn (self: &var Emitter) write_container_storage_release(
     defer bytes_name.deinit(self.allocator);
     try bytes_name.append_bytes(self.allocator, ".bytes");
     let bytes_label = bytes_name.as_bytes();
-    // An arena's header leads with the array's three fields but is not the
-    // same type, so the extract names whichever one it was handed.
     var header = array_header_type();
     let container_type = ir::name_text(&module.names, node.args.get_or_panic(0).type_name);
     let container_bytes = container_type.as_bytes();
@@ -1085,7 +937,6 @@ fn (self: &var Emitter) write_container_storage_release(
     return null;
 }
 
-/// Reads one field out of a container header value.
 fn (self: &var Emitter) array_field_of(header: []u8, value: ir::Name, field: i64, name: []u8) -> !ir::Name {
     let synthetic = try self.next_synthetic_value(name);
     let out = try self.percent(synthetic);

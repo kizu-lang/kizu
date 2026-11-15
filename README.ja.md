@@ -218,7 +218,7 @@ just wasi-smoke      # wasm の例を wasmtime で走らせる
 - `kizu build --target wasm32-wasi [--opt] --emit wasm -o <out> <file|package>` は binary `.wasm` を書きます。binary を暗黙に terminal へ出力することはありません。
 - `kizu build --target wasm32-browser [--opt] [--emit wat] [-o <out>] <file|package>` は inspection 用の browser-hosted WAT を出力します。
 - `kizu build --target wasm32-browser [--opt] --emit wasm -o <out> <file|package>` は browser 用 `.wasm` を書きます。host adapter と capability 境界は [`docs/wasm-browser.md`](docs/wasm-browser.md) にあります。
-- `kizu build --target native [--opt] [--triple <triple>] [--cpu <cpu>] [--abi <abi>] [--libc on|off] [--runtime hosted|freestanding] [--emit exe|obj|llvm] [--linker clang] [-o <out>] <file>` は native executable を link します。
+- `kizu build --target native [--backend direct|llvm] [--opt] [--triple <triple>] [--cpu <cpu>] [--abi <abi>] [--libc on|off] [--runtime hosted|freestanding] [--emit exe|obj|llvm] [--linker clang] [-o <out>] <file>` は native executable を link します。 `--backend` はコード生成器を選びます。darwin-arm64・linux-amd64・windows-amd64 の既定は `direct`(compiler が machine code をエンコードして object を自分で書く)、他の target は `llvm` です。`kizu run` と `kizu test` も `--backend` を受けます。
 - `kizu cache status` / `kizu cache prune` はローカルビルドキャッシュの表示と削除です。
 - `kizu import-c-header <file>` は対応する C prototype を Kizu extern に変換します。
 - `kizu version` は binary が何であるかを表示します。

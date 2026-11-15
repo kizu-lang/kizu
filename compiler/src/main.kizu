@@ -28,33 +28,11 @@ import std::path;
 import std::process;
 import std::string;
 
-// The CLI:
-// `parse` prints the program a file parses to, `fmt` validates and formats a
-// file, `init` scaffolds a package, `check` loads a file or a package with its
-// std modules, type-checks it, and ownership-checks it,
-// `ir` lowers a checked file or package to typed SSA IR and prints it,
-// `build --emit-llvm` prints the LLVM IR the lowered module emits to,
-// `build --target wasm32-wasi` and `build --target wasm32-browser` emit
-// WebAssembly text or binary for one source file, and the browser target can
-// emit the binary beside its JavaScript ESM host,
-// `build --target native` links a program into the executable it names,
-// `run` / `test` build a temporary executable and run it, forwarding
-// the child's exit status through `std::process::ExitStatus` (ADR-0085),
-// `import-c-header` prints the externs a C header maps to,
-// and `version` names the binary from the VCS state it was generated with.
-
-/// Dispatches the command line and maps each command's exit code to the
-/// `std::process::ExitStatus` the process ends with: 0 is Success, and any
-/// other code is Specific, so a child's status crosses `run` unchanged.
 fn main() -> !process::ExitStatus {
-    // The compiler allocates and releases about eighteen million small blocks
-    // in one run, so it brings its own allocator rather than paying libc's
-    // general one for each (ADR-0129).
     var pool = try pool::new(mem::page_allocator());
     defer pool.deinit(mem::page_allocator());
     let allocator = pool::allocator_of(&var pool);
     let io = io::blocking();
-    // std::process counts the user arguments only; arg(0) is the first one.
     let count = process::arg_count();
     var next = 0;
     var lib_dir = string::new(allocator);
@@ -146,7 +124,6 @@ fn main() -> !process::ExitStatus {
     return process::ExitStatus::Specific(1);
 }
 
-/// Writes the line printed for a command this binary does not have.
 fn report_unknown_command(io: Io, allocator: Allocator, command: []u8) -> !void {
     var message = try string::from_bytes(allocator, "error: unknown command `");
     defer message.deinit(allocator);
@@ -156,14 +133,11 @@ fn report_unknown_command(io: Io, allocator: Allocator, command: []u8) -> !void 
     return io::write_stderr_line(io, message_bytes);
 }
 
-/// Is one source file read, or the message the CLI prints for its failure.
 union SourceRead {
     Text(string::String),
     Failed(string::String),
 }
 
-/// Reads one file, naming a failure by the step it stops at. The path is the
-/// caller's, so the error itself does not have to carry it.
 fn read_source_file(io: Io, allocator: Allocator, path: []u8) -> !SourceRead {
     if fs::read_file(io, allocator, path, mem::Limit::Unlimited) |text| {
         return SourceRead::Text(move text);
@@ -175,11 +149,6 @@ fn read_source_file(io: Io, allocator: Allocator, path: []u8) -> !SourceRead {
     }
 }
 
-/// Appends the message one read failure prints: the syscall that failed, the
-/// path, and the reason. `open` names a failure to open and `read` one to
-/// read. The runtime folds every read-stage errno into ReadFailed, so a
-/// directory is recognized by asking the file system rather than by the error
-/// alone.
 fn append_read_failure(allocator: Allocator,
     io: Io,
     out: &var string::String,
@@ -201,7 +170,6 @@ fn append_read_failure(allocator: Allocator,
     return out.append_bytes(allocator, reason);
 }
 
-/// Reports the failure the runtime raises once the file is already open.
 fn read_stage_failure(failed: fs::Error) -> bool {
     return match failed {
         ReadFailed => true,
@@ -209,7 +177,6 @@ fn read_stage_failure(failed: fs::Error) -> bool {
     };
 }
 
-/// Returns the reason text the C library gives one open failure from errno.
 fn open_failure_reason(failed: fs::Error) -> []u8 {
     return match failed {
         NotFound => "no such file or directory",
@@ -227,8 +194,6 @@ fn open_failure_reason(failed: fs::Error) -> []u8 {
     };
 }
 
-/// Reports whether a path names a directory, answering without a failure of
-/// its own: a path the file system cannot describe is not one.
 fn is_directory(io: Io, path: []u8) -> bool {
     let found = fs::exists(io, path) catch false;
     if !found {
@@ -238,7 +203,6 @@ fn is_directory(io: Io, path: []u8) -> bool {
     return info.is_dir;
 }
 
-/// Writes one top-level failure line, prefixed `error: `.
 fn write_error_line(io: Io, allocator: Allocator, message: []u8) -> !void {
     var line = try string::from_bytes(allocator, "error: ");
     defer line.deinit(allocator);
@@ -247,7 +211,6 @@ fn write_error_line(io: Io, allocator: Allocator, message: []u8) -> !void {
     return io::write_stderr_line(io, bytes);
 }
 
-/// Turns one read failure message into the diagnostic a load reports.
 fn load_read_failure(allocator: Allocator, message: &string::String) -> !project::LoadResult {
     let bytes = message.as_bytes();
     let failed = try diagnostic::from_text(allocator,
@@ -258,7 +221,6 @@ fn load_read_failure(allocator: Allocator, message: &string::String) -> !project
     return project::LoadResult::Error(move failed);
 }
 
-/// Maps one command exit code to the ExitStatus main returns.
 fn exit_of(code: i64) -> process::ExitStatus {
     if code == 0 {
         return process::ExitStatus::Success;
@@ -266,9 +228,6 @@ fn exit_of(code: i64) -> process::ExitStatus {
     return process::ExitStatus::Specific(cast<u8>(code));
 }
 
-/// Names what a lowered module produces: its IR dump, LLVM IR, WebAssembly
-/// text or binary, the browser binary beside its ESM host, or nothing but the
-/// promise that lowering and IR verify succeeded, which is what `check` prints.
 enum Output {
     Ir,
     Llvm,
@@ -280,7 +239,6 @@ enum Output {
     Check,
 }
 
-/// Maps one output family to the target visible during compile-time selection.
 fn output_target(output: Output) -> stdtarget::Target {
     if output == Output::WasmBrowser or output == Output::WasmBrowserBinary or
         output == Output::WasmBrowserEsm {
@@ -292,8 +250,6 @@ fn output_target(output: Output) -> stdtarget::Target {
     return stdtarget::host();
 }
 
-/// Closes an executable module over its entry and the exports one target can
-/// enter before a backend validates host capabilities.
 fn keep_target_program(
     allocator: Allocator,
     module: &var ir::Module,
@@ -308,10 +264,6 @@ fn keep_target_program(
     );
 }
 
-/// Keeps what the artifact is entered by. An executable is entered at `main`
-/// and at each C export; an object is linked into a host that has its own
-/// entry, so its C exports are all it has, and a `main` would be a second
-/// entry the host's link refuses.
 fn keep_native_roots(
     allocator: Allocator,
     module: &var ir::Module,
@@ -351,9 +303,6 @@ fn keep_native_roots(
     return null;
 }
 
-/// Runs one `[--opt] <target>` command: `ir`, `build --emit-llvm` and `build
-/// --target wasm32-wasi` take the same shape. A lone `--opt` names the flag,
-/// not a file.
 fn opt_file_command(
     io: Io,
     allocator: Allocator,
@@ -380,8 +329,6 @@ fn opt_file_command(
     return 1;
 }
 
-/// Runs `build <--emit-llvm|--target> ...`: anything else names no build this
-/// binary has.
 fn build_command(io: Io, allocator: Allocator, lib_dir: []u8, next: i64, count: i64) -> !i64 {
     if count - next < 3 {
         try usage(io);
@@ -446,9 +393,6 @@ enum WasmBuildParseIssue {
     MissingSource,
 }
 
-/// Parses and runs the explicit WAT, binary wasm, or browser ESM artifact
-/// command. Binary files and ESM directories require `-o`; the legacy
-/// no-option form still writes WAT to stdout.
 fn wasm_build_command(
     io: Io,
     allocator: Allocator,
@@ -571,9 +515,6 @@ fn parse_wasm_build_options(
     return null;
 }
 
-/// Reports the user-input failure returned by the wasm option parser. Runtime
-/// failures still use `!`; malformed command lines are typed data with the
-/// invalid format retained as payload instead of being collapsed to null.
 fn report_wasm_build_parse_issue(
     io: Io,
     issue: WasmBuildParseIssue,
@@ -602,9 +543,6 @@ fn report_wasm_build_parse_issue(
     return;
 }
 
-/// Runs `version`: the binary names itself and takes nothing else. The line is
-/// generated with the compiler, because a selfhost build has no linker flag to
-/// stamp and no build info to read.
 fn version_command(io: Io, next: i64, count: i64) -> !i64 {
     if count - next != 1 {
         try usage(io);
@@ -615,16 +553,16 @@ fn version_command(io: Io, next: i64, count: i64) -> !i64 {
     return 0;
 }
 
-/// Writes the usage lines for the commands this binary has.
 fn usage(io: Io) -> !void {
     try io::write_stderr_line(io, "usage: kizu <parse|run|check|test> <file> [-- args...]");
-    try io::write_stderr_line(io, "usage: kizu test [--seed N] <file|package> [-- args...]");
-    try io::write_stderr_line(io, "usage: kizu test [--seed N] [--triple T] -o file <file|package>");
+    try io::write_stderr_line(io, "usage: kizu run [--backend direct|llvm] <file|package> [-- args...]");
+    try io::write_stderr_line(io, "usage: kizu test [--seed N] [--backend direct|llvm] <file|package> [-- args...]");
+    try io::write_stderr_line(io, "usage: kizu test [--seed N] [--backend direct|llvm] [--triple T] -o file <file|package>");
     try io::write_stderr_line(io, "usage: kizu init [path]");
     try io::write_stderr_line(io, "usage: kizu fmt [--write] <file>");
     try io::write_stderr_line(io, "usage: kizu ir [--opt] <file>");
     try io::write_stderr_line(io, "usage: kizu build --emit-llvm [--opt] <file>");
-    try io::write_stderr_line(io, "usage: kizu build --target native [native-options] <file>");
+    try io::write_stderr_line(io, "usage: kizu build --target native [--backend direct|llvm] [native-options] <file>");
     try io::write_stderr_line(io, "usage: kizu build --target wasm32-wasi [--emit wat] [--opt] [-o file] <file|package>");
     try io::write_stderr_line(io, "usage: kizu build --target wasm32-wasi --emit wasm -o file [--opt] <file|package>");
     try io::write_stderr_line(io, "usage: kizu build --target wasm32-browser [--emit wat] [--opt] [-o file] <file|package>");
@@ -635,7 +573,6 @@ fn usage(io: Io) -> !void {
     return io::write_stderr_line(io, "usage: kizu version");
 }
 
-/// Runs `cache <status|prune>`.
 fn cache_command(io: Io, allocator: Allocator, action: []u8, next: i64, count: i64) -> !i64 {
     if count - next != 2 {
         try usage(io);
@@ -692,7 +629,6 @@ fn cache_command(io: Io, allocator: Allocator, action: []u8, next: i64, count: i
     return 1;
 }
 
-/// Writes one `label: value` stdout line.
 fn write_count_line(io: Io, allocator: Allocator, label: []u8, value: i64) -> !void {
     var line = string::new(allocator);
     defer line.deinit(allocator);
@@ -702,7 +638,6 @@ fn write_count_line(io: Io, allocator: Allocator, label: []u8, value: i64) -> !v
     return io::write_stdout_line(io, line_bytes);
 }
 
-/// Prints the Kizu extern declarations a C header maps to.
 fn import_c_header_command(io: Io, allocator: Allocator, target: []u8) -> !i64 {
     let read = try read_source_file(io, allocator, target);
     match read {
@@ -716,8 +651,6 @@ fn import_c_header_command(io: Io, allocator: Allocator, target: []u8) -> !i64 {
     }
 }
 
-/// Prints the declarations one read C header maps to, once the header is in
-/// hand.
 fn import_c_header_source(io: Io, allocator: Allocator, source_text: string::String) -> !i64 {
     defer source_text.deinit(allocator);
     let source_bytes = source_text.as_bytes();
@@ -741,12 +674,7 @@ fn import_c_header_source(io: Io, allocator: Allocator, source_text: string::Str
     }
 }
 
-/// Decides the library tree std is read from: the caller says where it is, or
-/// it sits next to the running binary. Nothing is searched for, and the
-/// current directory is never consulted -- a program has to mean the same
-/// thing whatever directory it is compiled from.
 fn resolve_lib_dir(io: Io, allocator: Allocator, out: &var string::String) -> !void {
-    // An empty value names no tree, the same as an unset one.
     if process::env("KIZU_LIB_DIR") |from_env| {
         if mem::len(from_env) > 0 {
             return out.append_bytes(allocator, from_env);
@@ -755,8 +683,6 @@ fn resolve_lib_dir(io: Io, allocator: Allocator, out: &var string::String) -> !v
     let executable = try process::executable_path(allocator);
     defer executable.deinit(allocator);
     let executable_bytes = executable.as_bytes();
-    // An install reached through a symlink names the tree beside the real
-    // binary, so resolve it; a path that cannot be resolved is used as it is.
     let resolved = fs::real_path(io, allocator, executable_bytes) catch
         return append_lib_dir_beside(allocator, out, executable_bytes);
     defer resolved.deinit(allocator);
@@ -764,7 +690,6 @@ fn resolve_lib_dir(io: Io, allocator: Allocator, out: &var string::String) -> !v
     return append_lib_dir_beside(allocator, out, resolved_bytes);
 }
 
-/// Appends `<prefix>/lib/kizu` for an executable at `<prefix>/bin/kizu`.
 fn append_lib_dir_beside(
     allocator: Allocator,
     out: &var string::String,
@@ -798,8 +723,6 @@ fn (self: InitPackageNameResult) deinit(allocator: Allocator) -> void {
     self.name.deinit(allocator);
 }
 
-/// Prints or rewrites one source file in canonical form, including parse
-/// validation and move-marker insertion.
 fn fmt_command(
     io: Io,
     allocator: Allocator,
@@ -841,7 +764,6 @@ fn fmt_command(
     }
 }
 
-/// Formats one read source file, once the file is in hand.
 fn format_source(
     io: Io,
     allocator: Allocator,
@@ -881,7 +803,6 @@ fn format_source(
     return 0;
 }
 
-/// Reports whether an argument selects in-place formatting.
 fn is_fmt_write_flag(argument: []u8) -> bool {
     return mem::equal_bytes(argument, "--write") or mem::equal_bytes(argument, "-w");
 }
@@ -890,7 +811,6 @@ fn starts_with_dash(argument: []u8) -> bool {
     return mem::len(argument) > 0 and argument[0] == cast<u8>(45);
 }
 
-/// Validates syntax before token formatting.
 fn validate_fmt_parse(io: Io, allocator: Allocator, file: []u8) -> !bool {
     let read = try read_source_file(io, allocator, file);
     match read {
@@ -904,8 +824,6 @@ fn validate_fmt_parse(io: Io, allocator: Allocator, file: []u8) -> !bool {
     }
 }
 
-/// Parses one read source file for `fmt`, the rest of `validate_fmt_parse`
-/// once the file is in hand.
 fn validate_fmt_source(
     io: Io,
     allocator: Allocator,
@@ -940,9 +858,6 @@ fn validate_fmt_source(
     return true;
 }
 
-/// Inserts every missing move marker after successful load, type, and
-/// ownership checks. Any diagnostic leaves source unchanged so `check` remains
-/// the command that reports it.
 fn insert_move_markers(
     io: Io,
     allocator: Allocator,
@@ -1014,7 +929,6 @@ fn insert_move_markers(
     }
 }
 
-/// Converts a one-based line and column to a byte offset.
 fn line_column_offset(source_text: []u8, line_value: i64, column: i64) -> ?i64 {
     if line_value < 1 or column < 1 {
         return null;
@@ -1093,7 +1007,6 @@ fn write_fmt_outside_error(
     return io::write_stderr_line(io, bytes);
 }
 
-/// Scaffolds a minimal package.
 fn init_command(
     io: Io,
     allocator: Allocator,
@@ -1185,7 +1098,6 @@ fn init_command(
     return 0;
 }
 
-/// Derives and validates the namespace from target.
 fn init_package_name(
     allocator: Allocator,
     target: []u8
@@ -1207,7 +1119,6 @@ fn init_package_name(
     return InitPackageNameResult { name: move name, failed: failed };
 }
 
-/// Maps a directory spelling to an identifier.
 fn normalize_init_package_name(
     allocator: Allocator,
     name: []u8
@@ -1254,7 +1165,6 @@ fn ends_with_byte(value: &string::String, byte: u8) -> bool {
     return bytes[value.len() - 1] == byte;
 }
 
-/// Reports whether name is an identifier-like package root.
 fn is_valid_init_package_name(name: []u8) -> bool {
     if mem::len(name) == 0 {
         return false;
@@ -1278,7 +1188,6 @@ fn is_valid_init_package_name(name: []u8) -> bool {
     return true;
 }
 
-/// Creates target or rejects a non-directory.
 fn ensure_init_target(io: Io, target: []u8) -> !bool {
     if try fs::exists(io, target) {
         let info = try fs::metadata(io, target);
@@ -1288,7 +1197,6 @@ fn ensure_init_target(io: Io, target: []u8) -> !bool {
     return true;
 }
 
-/// Returns the first init file that already exists.
 fn reject_existing_init_files(
     io: Io,
     allocator: Allocator,
@@ -1314,7 +1222,6 @@ fn retained_path_exists(io: Io, retained: &string::String) -> !bool {
     return fs::exists(io, bytes);
 }
 
-/// Renders the minimal manifest.
 fn init_manifest(allocator: Allocator, package_name: []u8) -> !string::String {
     var out = try string::from_bytes(allocator, "[package]");
     errdefer out.deinit(allocator);
@@ -1341,9 +1248,6 @@ fn init_manifest(allocator: Allocator, package_name: []u8) -> !string::String {
     return move out;
 }
 
-/// Writes a new init file after the earlier rejection pass. std has no
-/// exclusive-create primitive, so a concurrent creator between the check and
-/// write remains the recorded fs gap.
 fn write_new_file(io: Io, file: []u8, content: []u8) -> !void {
     return fs::write_file(io, file, content);
 }
@@ -1373,7 +1277,6 @@ fn write_init_path_error(
     return io::write_stderr_line(io, bytes);
 }
 
-/// Writes one diagnostic the way the CLI reports errors.
 fn report(
     io: Io,
     allocator: Allocator,
@@ -1386,7 +1289,6 @@ fn report(
     return io::write_stderr_line(io, bytes);
 }
 
-/// Parses a source file and prints its AST summary.
 fn parse_file(io: Io, allocator: Allocator, file: []u8) -> !i64 {
     let read = try read_source_file(io, allocator, file);
     match read {
@@ -1400,8 +1302,6 @@ fn parse_file(io: Io, allocator: Allocator, file: []u8) -> !i64 {
     }
 }
 
-/// Parses one read source file and prints its AST summary, once the file is in
-/// hand.
 fn parse_source(io: Io, allocator: Allocator, file: []u8, text: string::String) -> !i64 {
     errdefer text.deinit(allocator);
     var sources = source::new(allocator);
@@ -1435,9 +1335,6 @@ fn parse_source(io: Io, allocator: Allocator, file: []u8, text: string::String) 
     return 0;
 }
 
-/// Writes the installed browser runtime beside the binary it loads. The
-/// runtime is read before the output directory is created, so a broken
-/// installation cannot leave a wasm-only directory that looks complete.
 fn write_browser_esm(
     io: Io,
     allocator: Allocator,
@@ -1481,16 +1378,6 @@ fn write_browser_esm(
     return true;
 }
 
-/// Lowers a checked file or package to typed SSA IR and prints it, the LLVM IR
-/// emitted from it, or the WASI WebAssembly text emitted from it: a package
-/// also gets the `main` entry wrapper the native build adds. The text is
-/// emitted fresh every time (ADR-0126).
-///
-/// `Output::Check` runs the same lowering and stops once the module is
-/// verified: `check: ok` promises the checkers and the IR verifier accept the
-/// program, so a lowering gap surfaces here rather than at the first `run`.
-/// Emitting is left to `run`, `build` and `test`, and check does not prune to
-/// the entry closure, which only chose what the emitter sees.
 fn lower_target(
     io: Io,
     allocator: Allocator,
@@ -1585,9 +1472,6 @@ fn lower_target(
                         output == Output::WasmBrowser or
                         output == Output::WasmBrowserBinary or
                         output == Output::WasmBrowserEsm {
-                        // A wasm module exposes only target-selected entry /
-                        // export roots, so unreachable functions must not drag
-                        // unused host capabilities into its imports.
                         var export_abi = "";
                         if output == Output::WasmBrowser or
                             output == Output::WasmBrowserBinary or
@@ -1676,9 +1560,6 @@ fn lower_target(
                         try io::write_stdout_line(io, text_bytes);
                         return 0;
                     }
-                    // The dump shows what a build would keep: std::fmt is
-                    // loaded for every program (SPEC §14.1), and its
-                    // unreached bodies are not the program's.
                     try keep_target_program(allocator, &var lowerer.module, "c");
                     let rendered = try ir::render(allocator, &lowerer.module);
                     defer rendered.deinit(allocator);
@@ -1691,10 +1572,6 @@ fn lower_target(
     }
 }
 
-/// Exposes the root module main as the native entrypoint, so a package uses
-/// the same entry rule as a single file: `fn main`. It writes IR by hand, so
-/// it verifies what it produced: the one function it added, since lowering
-/// already verified the rest.
 fn add_package_main(allocator: Allocator, module: &var ir::Module, entry: []u8) -> !?diagnostic::Diagnostic {
     if module.function_named("main") |_| {
         return null;
@@ -1729,7 +1606,6 @@ fn add_package_main(allocator: Allocator, module: &var ir::Module, entry: []u8) 
     return ir::verify_appended(allocator, module, main_function);
 }
 
-/// Reports whether path names a package root: a directory or a manifest.
 fn is_package_root(io: Io, target: []u8) -> !bool {
     let exists = try fs::exists(io, target);
     if !exists {
@@ -1742,8 +1618,6 @@ fn is_package_root(io: Io, target: []u8) -> !bool {
     return mem::equal_bytes(path::basename(target), "kizu.toml");
 }
 
-/// Loads one loose source file together with the std it imports, reporting a
-/// read failure as the diagnostic the load path carries.
 fn load_one_file(
     io: Io,
     allocator: Allocator,
@@ -1765,8 +1639,6 @@ fn load_one_file(
     }
 }
 
-/// Loads the target as a package when it is a package root, else as one file
-/// resolved together with the std it imports.
 fn load_target(
     io: Io,
     allocator: Allocator,
@@ -1813,8 +1685,6 @@ fn load_target(
     }
 }
 
-/// Resolves and loads the package one manifest text declares, once the
-/// manifest is in hand.
 fn load_manifest_package(
     io: Io,
     allocator: Allocator,
@@ -1857,15 +1727,12 @@ fn load_manifest_package(
     }
 }
 
-/// Names which native command a lowered module is built for.
 enum NativeCommand {
     Build,
     Run,
     Test,
 }
 
-/// Returns the native link options `run` and `test` build with: the defaults
-/// `build --target native` parses to, with no output named.
 fn default_native_options(allocator: Allocator) -> !native::Options {
     var libc = try string::from_bytes(allocator, "on");
     errdefer libc.deinit(allocator);
@@ -1888,7 +1755,7 @@ fn default_native_options(allocator: Allocator) -> !native::Options {
         opt: false,
         thinlto: false,
         direct: false,
-        own_backend: false,
+        own_backend: true,
         libraries: array::new<string::String>(allocator),
         frameworks: array::new<string::String>(allocator),
         library_search: array::new<string::String>(allocator),
@@ -1896,10 +1763,6 @@ fn default_native_options(allocator: Allocator) -> !native::Options {
     };
 }
 
-/// Fills what the linker resolves foreign symbols from: the libraries and
-/// frameworks the module's remaining extern calls declared, and the search
-/// paths the package manifest names for them. A loose file has no manifest and
-/// so no search paths of its own.
 fn set_link_inputs(
     io: Io,
     allocator: Allocator,
@@ -1955,9 +1818,6 @@ fn set_link_inputs(
     }
 }
 
-/// Resolves manifest search directories against the package root, so the
-/// linker is handed the same directory whichever directory the build is run
-/// from.
 fn append_search_paths(
     allocator: Allocator,
     root: []u8,
@@ -1979,34 +1839,42 @@ fn append_search_paths(
     return;
 }
 
-/// Runs `run <file|package> [-- args...]`: everything after `--` goes to the
-/// built program.
 fn run_command(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, next: i64, count: i64) -> !i64 {
-    let child_start = next + 3;
+    var options = try default_native_options(allocator);
+    defer options.deinit(allocator);
+    var first = next;
+    if mem::equal_bytes(target, "--backend") {
+        if count - next < 3 {
+            try usage(io);
+            try io::write_stderr_line(io, "error: missing value after --backend");
+            return 1;
+        }
+        let backend = try process::arg(next + 2);
+        if !try select_backend(io, allocator, backend, &var options) {
+            return 1;
+        }
+        first = next + 2;
+        if count - first < 2 {
+            try usage(io);
+            try io::write_stderr_line(io, "error: missing source file");
+            return 1;
+        }
+    }
+    let path = try process::arg(first + 1);
+    let child_start = first + 3;
     var child_count = 0;
-    if count - next >= 3 {
-        let separator = try process::arg(next + 2);
+    if count - first >= 3 {
+        let separator = try process::arg(first + 2);
         if mem::equal_bytes(separator, "--") {
             child_count = count - child_start;
         }
     }
-    var options = try default_native_options(allocator);
-    defer options.deinit(allocator);
-    return native_target(io, allocator, lib_dir, target, NativeCommand::Run, &var options, null, child_start, child_count);
+    return native_target(io, allocator, lib_dir, path, NativeCommand::Run, &var options, null, child_start, child_count);
 }
 
-/// Runs `test [--seed N] [--triple T] [-o file] <file|package> [-- args...]`.
-/// A seed on the command line is what std::testing::seed answers, so a failed
-/// randomized run replays (SPEC §14.5). With -o the test executable is built
-/// for the machine --triple names and written there instead of being run, so
-/// it takes no program args, and --triple needs -o since an executable for
-/// another machine cannot run here. The tests are built with the direct
-/// backend where the target has it; `--backend llvm` builds them through LLVM
-/// instead, and `--backend` takes `direct` as build does.
 fn test_command(io: Io, allocator: Allocator, lib_dir: []u8, next: i64, count: i64) -> !i64 {
     var options = try default_native_options(allocator);
     defer options.deinit(allocator);
-    options.own_backend = true;
     var seed: ?i64 = null;
     var path_index = next + 1;
     while path_index < count {
@@ -2040,7 +1908,7 @@ fn test_command(io: Io, allocator: Allocator, lib_dir: []u8, next: i64, count: i
                 return 1;
             }
             let backend_bytes = backend.as_bytes();
-            if !try select_backend(io, allocator, backend_bytes, true, &var options) {
+            if !try select_backend(io, allocator, backend_bytes, &var options) {
                 return 1;
             }
             continue;
@@ -2088,7 +1956,6 @@ fn test_command(io: Io, allocator: Allocator, lib_dir: []u8, next: i64, count: i
     return native_target(io, allocator, lib_dir, path, NativeCommand::Test, &var options, seed, child_start, child_count);
 }
 
-/// Reads the decimal seed `--seed` was given.
 fn parse_seed(text: []u8) -> ?i64 {
     let length = mem::len(text);
     var index = 0;
@@ -2115,7 +1982,6 @@ fn parse_seed(text: []u8) -> ?i64 {
     return value;
 }
 
-/// Runs `build --target native [native-options] <file|package>`.
 fn build_native_command(io: Io, allocator: Allocator, lib_dir: []u8, first: i64, count: i64) -> !i64 {
     var options = try default_native_options(allocator);
     defer options.deinit(allocator);
@@ -2129,7 +1995,6 @@ fn build_native_command(io: Io, allocator: Allocator, lib_dir: []u8, first: i64,
     return native_target(io, allocator, lib_dir, target_bytes, NativeCommand::Build, &var options, null, 0, 0);
 }
 
-/// Parses native build flags and derives defaults.
 fn parse_native_build_args(
     io: Io,
     allocator: Allocator,
@@ -2158,7 +2023,7 @@ fn parse_native_build_args(
                 return 1;
             }
             let backend_bytes = backend.as_bytes();
-            if !try select_backend(io, allocator, backend_bytes, false, options) {
+            if !try select_backend(io, allocator, backend_bytes, options) {
                 return 1;
             }
             continue;
@@ -2239,22 +2104,17 @@ fn parse_native_build_args(
     return 0;
 }
 
-/// Sets the backend `--backend` named, reporting false after printing why
-/// for a name it does not take. `llvm` is a name only where the command's
-/// default is another backend, as `kizu test`'s is.
-fn select_backend(io: Io, allocator: Allocator, name: []u8, llvm: bool, options: &var native::Options) -> !bool {
+fn select_backend(io: Io, allocator: Allocator, name: []u8, options: &var native::Options) -> !bool {
     options.own_backend = false;
     if mem::equal_bytes(name, "direct") {
         options.direct = true;
         return true;
     }
-    if llvm and mem::equal_bytes(name, "llvm") {
+    if mem::equal_bytes(name, "llvm") {
         options.direct = false;
         return true;
     }
     if mem::equal_bytes(name, "asm") {
-        // The backend writes no assembly text: each target it takes
-        // gets its object directly, and Darwin x86_64 none at all.
         try io::write_stderr_line(
             io, "error: --backend asm (assembly text) was removed; --backend direct takes a Darwin or Linux arm64, or a Linux or Windows x86_64 target"
         );
@@ -2270,8 +2130,6 @@ fn select_backend(io: Io, allocator: Allocator, name: []u8, llvm: bool, options:
     return false;
 }
 
-/// Reads the value following a flag into one option and returns the next
-/// argument index; a missing value prints the usage and reports -1.
 fn take_flag_value(
     io: Io,
     allocator: Allocator,
@@ -2295,7 +2153,6 @@ fn take_flag_value(
     return index + 1;
 }
 
-/// Maps a source path to the default target/native artifact.
 fn default_native_output(allocator: Allocator, path: []u8, emit: []u8, out: &var string::String) -> !void {
     let base = path::basename(path);
     let ext = path::extension(base);
@@ -2315,11 +2172,6 @@ fn default_native_output(allocator: Allocator, path: []u8, emit: []u8, out: &var
     return;
 }
 
-/// Lowers a checked file or package and hands it to the native backend. Test
-/// loads package test files and replaces `main` with an entry that runs every
-/// test block; Build and Run expose the package main. Build with `--opt` runs
-/// the typed-SSA optimizer before the toolchain's, the way `build --emit-llvm
-/// --opt` does.
 fn native_target(
     io: Io,
     allocator: Allocator,
@@ -2435,9 +2287,6 @@ fn native_target(
                         return 1;
                     }
                     let darwin = build_target == stdtarget::Target::NativeDarwin;
-                    // The C calling convention is the machine's, and on
-                    // x86-64 the OS's too, since Windows passes a struct by
-                    // value its own way.
                     var arch = llvm::Arch::Other;
                     if build_target == stdtarget::Target::NativeWindows {
                         if native::target_is_x86_64(options, &host) {
@@ -2448,11 +2297,6 @@ fn native_target(
                     } else if native::target_is_x86_64(options, &host) {
                         arch = llvm::Arch::X86_64;
                     }
-                    // A debug build is one unit per module, so the objects of
-                    // the modules an edit did not touch are reused; an
-                    // optimized build is one, which clang optimizes whole,
-                    // unless it is linked with ThinLTO, which optimizes
-                    // across one unit per module in the link.
                     var split = llvm::Split::PerModule;
                     if options.thinlto {
                         split = llvm::Split::PerModuleLTO;
@@ -2461,19 +2305,19 @@ fn native_target(
                     }
                     var units = array::new<string::String>(allocator);
                     defer units.deinit(allocator);
-                    // The targets the backend of internal/arm64 writes an
-                    // object for: Mach-O for Darwin arm64, ELF for Linux
-                    // arm64 and x86-64, COFF for Windows x86-64.
                     let linux = build_target == stdtarget::Target::NativeLinux;
                     let windows = build_target == stdtarget::Target::NativeWindows;
                     let arm = (darwin or linux) and arch == llvm::Arch::Arm64;
                     let amd = linux and arch == llvm::Arch::X86_64;
                     let amd_windows = windows and arch == llvm::Arch::X86_64Windows;
-                    if options.own_backend and (arm or amd or amd_windows) {
+                    if options.own_backend and ((darwin and arm) or amd or amd_windows) {
                         options.direct = true;
                     }
+                    if options.direct and options.thinlto {
+                        try io::write_stderr_line(io, "error: --thinlto optimizes LLVM bitcode in the link; build with --backend llvm");
+                        return 1;
+                    }
                     if options.direct {
-                        // Its machine code, written as an object here.
                         if !arm and !amd and !amd_windows {
                             try io::write_stderr_line(io, "error: --backend direct needs a Darwin or Linux arm64, or a Linux or Windows x86_64 target");
                             return 1;
@@ -2507,8 +2351,6 @@ fn native_target(
                         try report(io, allocator, &loader.sources, &failed);
                         return 1;
                     }
-                    // Build, and a test built with -o, write the
-                    // executable where they were asked instead of running it.
                     if options.output.len() > 0 {
                         if try native::build(io, allocator, &var temps, options, &host, &units, &std_errors.sets) |failed| {
                             defer failed.deinit(allocator);
@@ -2541,8 +2383,6 @@ fn native_target(
     }
 }
 
-/// Emits a lowered module as the texts of the units the native link compiles:
-/// one per module when split, and one otherwise.
 fn emit_unit_texts(
     allocator: Allocator,
     module: &var ir::Module,
@@ -2567,9 +2407,6 @@ fn emit_unit_texts(
     return null;
 }
 
-/// Builds an entry that runs every lowered test block in order. It writes IR
-/// by hand, so it ends by verifying what it produced, the same way
-/// `internal/ir` verifies what it returns.
 fn add_test_main(allocator: Allocator, module: &var ir::Module, seed: ?i64) -> !?diagnostic::Diagnostic {
     var test_names = array::new<ir::Name>(allocator);
     defer test_names.deinit(allocator);
@@ -2582,7 +2419,6 @@ fn add_test_main(allocator: Allocator, module: &var ir::Module, seed: ?i64) -> !
         );
         return move failed;
     }
-    // Loose-file lowering may already contain a native main; tests replace it.
     var reversed = array::new<ir::Function>(allocator);
     defer reversed.deinit(allocator);
     while module.functions.pop() |function| {
@@ -2598,8 +2434,6 @@ fn add_test_main(allocator: Allocator, module: &var ir::Module, seed: ?i64) -> !
         }
         try module.functions.append(allocator, function);
     }
-    // A test body returns `!void`, so the entry tries each result: the first
-    // failing test returns its message instead of letting the run report ok.
     let bang_void = try module.names.intern("!void");
     let void_name = try module.names.intern("void");
     let main_name = try module.names.intern("main");
@@ -2661,15 +2495,9 @@ fn add_test_main(allocator: Allocator, module: &var ir::Module, seed: ?i64) -> !
     let ok_instr = module.blank_instr(ok, ir::Op::ErrorOk, ir::empty_name(), ir::empty_name());
     let _ = try module.add_instr(allocator, block, move ok_instr);
     module.set_terminator(block, ir::return_terminator(ok));
-    // Lowering verified the rest, and dropping a main it had takes away only
-    // a declaration calls were checked against, so the new main is all that
-    // is left to check.
     return ir::verify_appended(allocator, module, main_function);
 }
 
-/// Runs a linked executable with the arguments after `--` and returns its exit
-/// status. std::process::spawn_wait8 carries at most eight arguments, so the
-/// program and up to seven of its own fit.
 fn execute_built(allocator: Allocator, exe: []u8, arg_start: i64, arg_count: i64) -> !i64 {
     var a0 = try string::from_bytes(allocator, exe);
     defer a0.deinit(allocator);

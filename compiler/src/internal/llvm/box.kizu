@@ -3,14 +3,10 @@ import compiler::internal::ir;
 import std::mem;
 import std::string;
 
-// The hosted Box runtime declarations and the `box.*` instructions.
-
-/// Reports whether a lowered IR type is a std::mem::Box<T>.
 fn is_box_llvm_type(typ_name: []u8) -> bool {
     return mem::starts_with(typ_name, "std::mem::Box<") and ir::ends_with_bytes(typ_name, ">");
 }
 
-/// Writes declarations for the hosted Box runtime.
 fn (self: &var Emitter) write_box_runtime_decls(module: &ir::Module) -> !void {
     if !self.uses_box_runtime(module) {
         return;
@@ -20,7 +16,6 @@ fn (self: &var Emitter) write_box_runtime_decls(module: &ir::Module) -> !void {
     return self.line("");
 }
 
-/// Reports whether this module uses std::mem::Box lowering.
 fn (self: &Emitter) uses_box_runtime(module: &ir::Module) -> bool {
     var index = 0;
     while module.functions.get(index) |function| {
@@ -43,7 +38,6 @@ fn (self: &Emitter) uses_box_runtime(module: &ir::Module) -> bool {
     return false;
 }
 
-/// Dispatches runtime-backed Box operations.
 fn (self: &var Emitter) write_box_instr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     match node.op {
         BoxNew => return self.write_box_new(module, node),
@@ -58,9 +52,6 @@ fn (self: &var Emitter) write_box_instr(module: &ir::Module, node: &ir::InstrNod
     }
 }
 
-/// Lowers std::mem::box<T>(allocator, value). The runtime hands back the
-/// payload pointer or null, and the recoverable result is built branch-free:
-/// the null test selects the failure code.
 fn (self: &var Emitter) write_box_new(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let result_text = ir::name_text(&module.names, node.result.type_name);
     let result_type = result_text.as_bytes();
@@ -127,17 +118,12 @@ fn (self: &var Emitter) write_box_new(module: &ir::Module, node: &ir::InstrNode)
     }
 }
 
-/// Reports whether a type the module names is std::mem::Box<T>:
-/// `is_box_llvm_type` on an IR value's type.
 fn is_box_name(names: &ir::NameTable, typ_name: ir::Name) -> bool {
     let retained = ir::name_text(names, typ_name);
     let bytes = retained.as_bytes();
     return is_box_llvm_type(bytes);
 }
 
-/// Lowers Box.borrow() and Box.borrow_mut(). A Box value is its payload
-/// pointer, so a borrow that travels as a pointer is that pointer under the
-/// borrow's type, and one that travels as a copy loads the payload.
 fn (self: &var Emitter) write_box_borrow(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 1 or !is_box_name(&module.names, node.args.get_or_panic(0).type_name) {
         let op = try self.op_name(module, node);
@@ -158,7 +144,6 @@ fn (self: &var Emitter) write_box_borrow(module: &ir::Module, node: &ir::InstrNo
     return null;
 }
 
-/// Lowers Box.deinit(): the runtime releases the cell.
 fn (self: &var Emitter) write_box_deinit(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 2 or !module.names.is(node.result.type_name, "void") {
         return try self.fail0("llvm error: box.deinit expects Box<T>, Allocator -> void");
@@ -180,8 +165,6 @@ fn (self: &var Emitter) write_box_deinit(module: &ir::Module, node: &ir::InstrNo
     return null;
 }
 
-/// Lowers the box_take primitive `Box.deinit` forwards to when the payload
-/// owns something: it moves out before the runtime releases the cell.
 fn (self: &var Emitter) write_box_take(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     if node.args.len() != 2 or !is_box_name(&module.names, node.args.get_or_panic(0).type_name) {
         return try self.fail0("llvm error: box.take expects Box<T>, Allocator -> T");

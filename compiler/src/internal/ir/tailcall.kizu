@@ -3,26 +3,6 @@ import std::fmt;
 import std::map;
 import std::string;
 
-// Turning a function's tail calls to itself into jumps back to its start. A
-// site keeps the block's handle and position, the call's handle, and the
-// operator its accumulator's `binary.` op carries, empty for a call returned
-// as it is.
-
-/// Turns a function's calls to itself in tail position into jumps back to its
-/// start. A call whose result the function returns as it is becomes a jump
-/// with the call's arguments as the new parameters. A call whose result is
-/// combined with another value by one integer operation that is associative
-/// and commutative -- `+`, `*`, `|` or `^`, which wrap -- and then returned
-/// becomes a jump too, with the other value folded into an accumulator that
-/// every other return combines with what it returns: the operation gives the
-/// same bits in either order, so `fib(n - 1) + fib(n - 2)` can run the second
-/// call as the next iteration of a loop.
-///
-/// The calls the function makes run in the order they did, and a recursion
-/// that used one frame per level runs in one; nothing else about what the
-/// function does changes. A function is left alone unless every parameter is
-/// a scalar a phi can carry, since a parameter at an address would be read
-/// from the frame the loop keeps writing.
 pub fn eliminate_tail_recursion(allocator: Allocator, module: &var Module) -> !void {
     var index = 0;
     while module.functions.get(index) |function| {
@@ -32,8 +12,6 @@ pub fn eliminate_tail_recursion(allocator: Allocator, module: &var Module) -> !v
     return;
 }
 
-/// Is one return a tail call ends in: the block, the call, and for an
-/// accumulated call the operator and the value it combines the result with.
 struct TailSite {
     block: Block,
     position: i64,
@@ -42,8 +20,6 @@ struct TailSite {
     other: Value,
 }
 
-/// Returns the constant an accumulator operator starts from: null for an
-/// operator that is not one.
 fn accumulator_identity(module: &Module, operator: Name) -> ?i64 {
     if module.names.is(operator, "+") {
         return 0;
@@ -60,7 +36,6 @@ fn accumulator_identity(module: &Module, operator: Name) -> ?i64 {
     return null;
 }
 
-/// Rewrites a function when it has a tail call to itself.
 fn eliminate_tail_recursion_in(allocator: Allocator, module: &var Module, function: Function) -> !void {
     let node = module.function_nodes.at(function.node);
     if node.blocks.len() == 0 or module.names.is(node.name, "main") or !is_empty(node.export_abi) {
@@ -99,15 +74,11 @@ fn eliminate_tail_recursion_in(allocator: Allocator, module: &var Module, functi
     return rewrite_tail_recursion(allocator, module, function, &sites, op);
 }
 
-/// Reports whether a value of a type is one register a loop phi can carry on
-/// every backend.
 fn is_loop_scalar(module: &Module, type_name: Name) -> bool {
     return module.names.is(type_name, "bool") or module.names.is(type_name, "f32") or
         module.names.is(type_name, "f64") or is_wrapping_integer(module, type_name);
 }
 
-/// Reports whether a type is an integer type, whose `+`, `*` and bitwise
-/// operations wrap.
 fn is_wrapping_integer(module: &Module, type_name: Name) -> bool {
     let names = &module.names;
     return names.is(type_name, "i8") or names.is(type_name, "i16") or names.is(type_name, "i32") or
@@ -116,10 +87,6 @@ fn is_wrapping_integer(module: &Module, type_name: Name) -> bool {
         names.is(type_name, "usize");
 }
 
-/// Returns the tail call a block ends in: a return of a call to the function,
-/// or of one accumulator operation on such a call and a value that does not
-/// depend on it. Only pure instructions may stand between the call and the
-/// return.
 fn tail_site_of(module: &Module, function: Function, block: Block, position: i64) -> ?TailSite {
     let function_node = module.function_nodes.at(function.node);
     let block_node = module.blocks.at(block.node);
@@ -151,10 +118,6 @@ fn tail_site_of(module: &Module, function: Function, block: Block, position: i64
     return null;
 }
 
-/// Returns the site a call makes when what follows it in its block, from
-/// `after` on, is pure instructions that do not read its result, then one
-/// accumulator operation on the result and another value that the block
-/// returns.
 fn accumulated_site(module: &Module, block: Block, position: i64, call: Instr, after: i64) -> ?TailSite {
     let block_node = module.blocks.at(block.node);
     let last = block_node.instrs.len() - 1;
@@ -193,7 +156,6 @@ fn accumulated_site(module: &Module, block: Block, position: i64, call: Instr, a
     return TailSite { block: block, position: position, call: call, op: combine_node.operand, other: other };
 }
 
-/// Reports whether an instruction reads the value a name names.
 fn reads_value(module: &Module, instr: Instr, name: Name) -> bool {
     var slot = 0;
     while instr_read_at(module, instr, slot) |value| {
@@ -205,12 +167,6 @@ fn reads_value(module: &Module, instr: Instr, name: Name) -> bool {
     return false;
 }
 
-/// Puts a new entry block before the function's body, turns the old entry into
-/// a loop header whose phis stand for the parameters and the accumulator, and
-/// turns each site into a jump to it. A parameter's phi is named after it, and
-/// a parameter's name is an identifier, which holds no dot, so the
-/// accumulator's values are named under `%tre.acc.` where no parameter's phi
-/// can be.
 fn rewrite_tail_recursion(
     allocator: Allocator,
     module: &var Module,
@@ -320,8 +276,6 @@ fn rewrite_tail_recursion(
     return set_function_blocks(allocator, module, function, &blocks);
 }
 
-/// Replaces one site's call, and its accumulator operation, by a jump to the
-/// loop header feeding the header's phis.
 fn rewrite_tail_site(
     allocator: Allocator,
     module: &var Module,
@@ -374,7 +328,6 @@ fn rewrite_tail_site(
     return;
 }
 
-/// Returns the argument at index of an instruction, null past the last.
 fn call_arg_at(module: &Module, instr: Instr, index: i64) -> ?Value {
     let node = module.instrs.at(instr.node);
     return node.args.get(index);

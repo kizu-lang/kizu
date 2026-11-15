@@ -7,35 +7,15 @@ import std::array;
 import std::mem;
 import std::string;
 
-// Instruction selection: one IR function into machine IR over virtual
-// registers. A scalar value is one register; a slice is two (pointer and
-// length); every other aggregate is memory the backend holds the address of.
-// An SSA value never changes, so an aggregate read out of another aggregate
-// may share its memory; one read through a reference is copied, since the
-// memory behind a reference can change. A comparison whose only use is the
-// branch or the check right after it is not materialized: it is compared
-// where it is used and the branch reads the flags.
-//
-// Blocks are selected in reverse postorder, so a value is selected before
-// any use the IR lets it reach. Phi results are bound before any block is
-// selected, since a predecessor can come before the block that joins.
-
-/// Is how one IR value is held.
 pub enum ValKind {
     None,
-    // reg holds it.
     Reg,
-    // A constant: imm, materialized where it is used.
     Const,
-    // A slice: reg holds the pointer and reg2 the length.
     Pair,
-    // An aggregate in memory at the address reg holds.
     Agg,
-    // A comparison not yet made: lhs <cond> rhs, made where it is used.
     Flags,
 }
 
-/// Is what the selector knows about one IR value.
 pub struct Val {
     pub kind: ValKind,
     pub reg: i64,
@@ -44,19 +24,11 @@ pub struct Val {
     pub cond: Cond,
     pub lhs: ir::Value,
     pub rhs: ir::Value,
-    // For an aggregate phi, its frame slot; otherwise -1.
     pub slot: i64,
-    // Marks an aggregate in a slot of its own no other value shares, so a
-    // local.slot of its one use can take the slot instead of copying it.
     pub fresh: bool,
-    // For x % 2^k, the register of x and 2^k - 1, so a test of the
-    // remainder against zero is `tst x, #mask`. For a Flags value, test
-    // marks that comparison.
     pub masked: i64,
     pub mask: i64,
     pub test: bool,
-    // For a Flags value comparing floats, their width in bytes; 0 for
-    // integers.
     pub float: i64,
     gen: i64,
 }
@@ -115,14 +87,10 @@ fn const_val(imm: i64) -> Val {
     return val;
 }
 
-/// Selects machine code for the functions of one module and owns what the
-/// whole output shares: the symbols called and the string literals.
 pub struct Selector {
     pub allocator: Allocator,
     pub syms: ir::NameTable,
     pub literals: array::Array<ir::Name>,
-    // The words of every table.get's table, one after another, and where
-    // each table starts.
     pub table_words: array::Array<i64>,
     pub table_starts: array::Array<i64>,
     pub func: MFunction,
@@ -132,60 +100,36 @@ pub struct Selector {
     use_gen: array::Array<i64>,
     use_count: array::Array<i64>,
     cleanup_count: array::Array<i64>,
-    // By name id: each struct.new and buffer.new result (Build).
     builds: array::Array<Build>,
     block_gen: array::Array<i64>,
     block_of: array::Array<i64>,
     ir_blocks: array::Array<ir::Block>,
-    // Per IR block (by its MIR index): how many terminators name it, and
-    // whether if-conversion already selected it into its predecessor.
     preds: array::Array<i64>,
     absorbed: array::Array<bool>,
     current: i64,
     cache_imm: array::Array<i64>,
     cache_reg: array::Array<i64>,
-    // Constants that take more than one move, made once at the function's
-    // entry rather than in every block that uses them.
     entry_imm: array::Array<i64>,
     entry_reg: array::Array<i64>,
-    // What holds where the code being selected runs: reg & mask == 0, from
-    // the branch that leads there.
     fact_reg: array::Array<i64>,
     fact_mask: array::Array<i64>,
-    // The ranges of the function's integer values, worked out only when it
-    // divides: a division is what reads them.
     ranges: ValueRanges,
     divides: bool,
     ret_type: ir::Name,
     pub oom: i64,
     pub oob: i64,
-    // Whether the package main returns an error union, so a C entry point
-    // of the backend's own calls it.
     pub main_wraps: bool,
     ret: Shape,
     sret: i64,
     is_main: bool,
-    // Whether a pool round calls its worker through the thunk without a
-    // state, and through the one with.
     pub invokes: bool,
     pub state_invokes: bool,
-    // The state types a task set starts workers with, each once: every one
-    // gets a thunk of its own (select_task_invoke).
     pub task_invokes: array::Array<ir::Name>,
-    // Whether the function being selected is an `export "c"` one, which C
-    // calls with narrow arguments not extended past 32 bits.
     exports_c: bool,
-    // Whether a variadic C callee takes every unnamed argument on the
-    // stack, as Darwin's does, rather than as it takes a named one.
     pub stacks_variadics: bool,
     fn_name: ir::Name,
-    // By name id: 1 + where module.functions holds the function of that
-    // name, or 0 for a name no function has (index_functions). A call
-    // looks its callee up here rather than walking every function.
     callees: array::Array<i64>,
-    // The shape of each type the module names, worked out once.
     shapes: Shapes,
-    // The machine the module is selected for.
     pub arch: Arch,
 }
 
@@ -238,8 +182,6 @@ pub fn new_selector(allocator: Allocator, arch: Arch) -> !Selector {
     };
 }
 
-/// Indexes the module's functions by name for callee, the first one of a
-/// name winning as it does for ir::Module.function_named.
 pub fn (self: &var Selector) index_functions(module: &ir::Module) -> !void {
     self.callees.clear(self.allocator);
     var index = 0;
@@ -254,8 +196,6 @@ pub fn (self: &var Selector) index_functions(module: &ir::Module) -> !void {
     return;
 }
 
-/// Returns the module's function named name, or null: what
-/// ir::Module.function_named answers, from the index_functions table.
 fn (self: &Selector) callee(module: &ir::Module, name: ir::Name) -> ?ir::Function {
     let at = self.callees.get(ir::name_id(name)) orelse return null;
     if at == 0 {
@@ -264,7 +204,6 @@ fn (self: &Selector) callee(module: &ir::Module, name: ir::Name) -> ?ir::Functio
     return module.functions.get(at - 1);
 }
 
-/// Builds the failure the backend reports for what it does not lower.
 fn finish_failure(allocator: Allocator, module: &ir::Module, text: &var string::String, fn_name: ir::Name) -> !diagnostic::Diagnostic {
     try text.append_bytes(allocator, " in function `");
     try module.names.append_to(text, fn_name);
@@ -304,8 +243,6 @@ fn arch_name(arch: Arch) -> []u8 {
     return "arm64";
 }
 
-// ---- tables keyed by name id, valid for the current function only ----
-
 fn grow_to(allocator: Allocator, table: &var array::Array<i64>, id: i64) -> !void {
     while table.len() <= id {
         try table.append(allocator, 0);
@@ -341,8 +278,6 @@ fn (self: &Selector) uses(name: ir::Name) -> i64 {
 }
 
 fn (self: &var Selector) count_use(module: &ir::Module, value: ir::Value) -> !void {
-    // An operand can be a literal itself, `0: State`, with no instruction
-    // defining it.
     if self.val(value.name).kind == ValKind::None and !ir::is_empty(value.name) {
         let text = ir::name_text(&module.names, value.name);
         let bytes = text.as_bytes();
@@ -385,7 +320,6 @@ fn (self: &var Selector) count_cleanup_use(value: ir::Value) -> !void {
     return self.cleanup_count.set(id, self.gen * 1000000 + seen + 1);
 }
 
-/// Returns how many of a value's uses are cleanup arguments.
 fn (self: &Selector) cleanup_uses(name: ir::Name) -> i64 {
     let id = ir::name_id(name);
     let packed = self.cleanup_count.get(id) orelse return 0;
@@ -411,8 +345,6 @@ fn (self: &Selector) block(name: ir::Name) -> i64 {
     }
     return self.block_of.get(id) orelse 0 - 1;
 }
-
-// ---- emitting ----
 
 fn (self: &var Selector) inst(inst: MInst) -> !void {
     return self.func.emit(self.allocator, self.current, inst);
@@ -496,7 +428,6 @@ fn (self: &var Selector) start_block(mir: i64) -> !void {
     return;
 }
 
-/// Returns a register holding imm in the current block, made once a block.
 fn (self: &var Selector) imm_reg(imm: i64) -> !i64 {
     if imm == 0 {
         return reg_zr();
@@ -528,8 +459,6 @@ fn (self: &var Selector) imm_reg(imm: i64) -> !i64 {
     return reg;
 }
 
-/// Returns a register holding imm that may be an operand where the zero
-/// register cannot: a base, a multiplicand, a compared value.
 fn (self: &var Selector) imm_reg_nz(imm: i64) -> !i64 {
     if imm == 0 {
         let reg = self.func.new_vreg();
@@ -539,8 +468,6 @@ fn (self: &var Selector) imm_reg_nz(imm: i64) -> !i64 {
     return self.imm_reg(imm);
 }
 
-/// Returns the register of a scalar value, making a constant or a deferred
-/// comparison where it is asked for. A constant zero is the zero register.
 fn (self: &var Selector) reg(module: &ir::Module, value: ir::Value) -> !?i64 {
     let held = self.val(value.name);
     match held.kind {
@@ -560,7 +487,6 @@ fn (self: &var Selector) reg(module: &ir::Module, value: ir::Value) -> !?i64 {
     }
 }
 
-/// Returns the register of a scalar value, never the zero register.
 fn (self: &var Selector) reg_nz(module: &ir::Module, value: ir::Value) -> !?i64 {
     let held = self.val(value.name);
     if held.kind == ValKind::Const {
@@ -569,7 +495,6 @@ fn (self: &var Selector) reg_nz(module: &ir::Module, value: ir::Value) -> !?i64 
     return self.reg(module, value);
 }
 
-/// Makes a deferred comparison and returns the condition the flags hold.
 fn (self: &var Selector) compare(module: &ir::Module, held: Val) -> !?Cond {
     let left = self.val(held.lhs.name);
     let right = self.val(held.rhs.name);
@@ -610,14 +535,11 @@ fn (self: &var Selector) frame_addr(slot: i64, offset: i64) -> !i64 {
     return reg;
 }
 
-/// Returns the address of a fresh frame slot sized for a shape.
 fn (self: &var Selector) new_slot(shape: Shape) -> !i64 {
     let slot = try self.func.add_slot(self.allocator, shape.size, shape.align);
     return self.frame_addr(slot, 0);
 }
 
-/// Returns the address of an aggregate value, putting a slice in memory
-/// when it is held in registers.
 fn (self: &var Selector) addr(module: &ir::Module, value: ir::Value) -> !?i64 {
     let held = self.val(value.name);
     if held.kind == ValKind::Agg {
@@ -630,8 +552,6 @@ fn (self: &var Selector) addr(module: &ir::Module, value: ir::Value) -> !?i64 {
         try self.store(held.reg2, reg, 8, 8);
         return reg;
     }
-    // An `E!void` held as its code in a register goes to memory as the one
-    // word it is.
     if held.kind == ValKind::Reg or held.kind == ValKind::Const {
         let shape = self.shapes.of(module, value.type_name);
         if shape.class != Class::Aggregate {
@@ -642,7 +562,6 @@ fn (self: &var Selector) addr(module: &ir::Module, value: ir::Value) -> !?i64 {
     return null;
 }
 
-/// Puts a coded error union in a slot of its own and returns the address.
 fn (self: &var Selector) code_slot(held: Val) -> !i64 {
     let slot = try self.func.add_slot(self.allocator, 8, 8);
     let reg = try self.frame_addr(slot, 0);
@@ -654,8 +573,6 @@ fn (self: &var Selector) code_slot(held: Val) -> !i64 {
     return reg;
 }
 
-/// Reports whether a type is an error union with no payload, which the
-/// selector may hold as its code alone.
 fn (self: &var Shapes) is_coded(module: &ir::Module, type_name: ir::Name) -> bool {
     let shape = self.of(module, type_name);
     if shape.class != Class::Aggregate or shape.size != 8 {
@@ -669,7 +586,6 @@ fn (self: &var Shapes) is_coded(module: &ir::Module, type_name: ir::Name) -> boo
     return false;
 }
 
-/// Copies size bytes from src to dst, both addresses.
 fn (self: &var Selector) copy_bytes(dst: i64, src: i64, size: i64) -> !void {
     if size > 256 {
         try self.mov(0, dst);
@@ -697,7 +613,6 @@ fn (self: &var Selector) copy_bytes(dst: i64, src: i64, size: i64) -> !void {
     return;
 }
 
-/// Zeroes size bytes at an address.
 fn (self: &var Selector) zero_bytes(dst: i64, size: i64) -> !void {
     if size > 256 {
         try self.mov(0, dst);
@@ -721,8 +636,6 @@ fn (self: &var Selector) zero_bytes(dst: i64, size: i64) -> !void {
     return;
 }
 
-/// Stores a value of a shape at base + offset: a scalar as its width, a
-/// slice as its two words, an aggregate by copying it.
 fn (self: &var Selector) store_value(module: &ir::Module, value: ir::Value, shape: Shape, base: i64, offset: i64) -> !bool {
     if shape.class == Class::Void {
         return true;
@@ -755,10 +668,6 @@ fn (self: &var Selector) store_value(module: &ir::Module, value: ir::Value, shap
     return true;
 }
 
-/// Reads a value of a type out of memory at base + offset: a scalar is
-/// loaded, a slice loaded as its two words, and any other aggregate copied
-/// into a slot of its own when copy is set, or shared when the memory
-/// cannot change.
 fn (self: &var Selector) load_value(module: &ir::Module, type_name: ir::Name, base: i64, offset: i64, copy: bool) -> !?Val {
     let shape = self.shapes.of(module, type_name);
     match shape.class {
@@ -797,7 +706,6 @@ fn is_slice(module: &ir::Module, type_name: ir::Name) -> bool {
     return module.names.starts_with(type_name, "[]");
 }
 
-/// Normalizes a register holding a result of a shape narrower than a word.
 fn (self: &var Selector) normalize(reg: i64, shape: Shape) -> !i64 {
     if shape.size >= 8 {
         return reg;
@@ -807,9 +715,6 @@ fn (self: &var Selector) normalize(reg: i64, shape: Shape) -> !i64 {
     return out;
 }
 
-// ---- functions ----
-
-/// Selects one function into self.func.
 pub fn (self: &var Selector) select_function(module: &ir::Module, function: ir::Function) -> !?diagnostic::Diagnostic {
     self.gen = self.gen + 1;
     self.func.reset(self.allocator);
@@ -855,8 +760,6 @@ pub fn (self: &var Selector) select_function(module: &ir::Module, function: ir::
         let _ = try self.func.add_block(self.allocator);
         try self.cold.append(self.allocator, false);
     }
-    // Count the uses of every value, bind every phi result and note what
-    // each new aggregate goes into.
     block_index = 0;
     while node.blocks.get(block_index) |block| {
         let mir = block_index;
@@ -968,13 +871,10 @@ pub fn (self: &var Selector) select_function(module: &ir::Module, function: ir::
     return null;
 }
 
-/// Reports whether the function being selected is the backend's own entry
-/// point, which has no entry constants.
 fn (self: &Selector) is_main_wrapper() -> bool {
     return self.is_main and self.ir_blocks.len() == 0;
 }
 
-/// Puts the hoisted constants at the start of the entry block.
 fn (self: &var Selector) place_entry_constants() -> !void {
     if self.entry_imm.len() == 0 {
         return;
@@ -1005,8 +905,6 @@ fn (self: &var Selector) place_entry_constants() -> !void {
     return;
 }
 
-/// Orders the blocks reachable from the entry so that each comes after
-/// every block that dominates it.
 fn (self: &var Selector) reverse_postorder(module: &ir::Module, node: &ir::FunctionNode, order: &var array::Array<i64>) -> !void {
     let count = node.blocks.len();
     var state = array::new<i64>(self.allocator);
@@ -1051,7 +949,6 @@ fn (self: &var Selector) reverse_postorder(module: &ir::Module, node: &ir::Funct
     return;
 }
 
-/// Binds a phi result before any block is selected.
 fn (self: &var Selector) bind_phi(module: &ir::Module, node: &ir::InstrNode, mir: i64) -> !?diagnostic::Diagnostic {
     let shape = self.shapes.of(module, node.result.type_name);
     match shape.class {
@@ -1087,10 +984,8 @@ fn (self: &var Selector) bind_phi(module: &ir::Module, node: &ir::InstrNode, mir
     }
 }
 
-/// Binds each parameter to the register or stack word it arrives in.
 fn (self: &var Selector) select_params(module: &ir::Module, params: &array::Array<ir::Param>) -> !?diagnostic::Diagnostic {
     if self.is_main {
-        // The C entry point hands argc and argv to the runtime first.
         try self.call_c("kizu_runtime_init_args", 2);
         return null;
     }
@@ -1131,7 +1026,6 @@ fn (self: &var Selector) select_params(module: &ir::Module, params: &array::Arra
     return null;
 }
 
-/// Returns a register holding the word-th incoming argument word.
 fn (self: &var Selector) param_word(word: i64) -> !i64 {
     let reg = self.func.new_vreg();
     let count = arg_regs(self.arch);
@@ -1143,9 +1037,6 @@ fn (self: &var Selector) param_word(word: i64) -> !i64 {
     return reg;
 }
 
-// ---- calls ----
-
-/// Calls a C symbol whose arguments are already in x0..x(count-1).
 fn (self: &var Selector) call_c(name: []u8, count: i64) -> !void {
     var symbol = try string::from_bytes(self.allocator, "_");
     defer symbol.deinit(self.allocator);
@@ -1164,9 +1055,6 @@ fn (self: &var Selector) call_sym(sym: ir::Name, count: i64, sret: i64) -> !void
     return self.inst(inst);
 }
 
-/// Places the words of call arguments: the first ones in the argument
-/// registers (x0..x7 on arm64, x0..x5 on amd64), the rest in the outgoing
-/// area. Returns the number of register words.
 fn (self: &var Selector) place_words(words: &array::Array<i64>) -> !i64 {
     let count = arg_regs(self.arch);
     var index = 0;
@@ -1194,13 +1082,10 @@ fn (self: &var Selector) place_words(words: &array::Array<i64>) -> !i64 {
     return words.len();
 }
 
-/// Appends the words a value travels as: one for a scalar or an address,
-/// two for a slice.
 fn (self: &var Selector) push_words(module: &ir::Module, value: ir::Value, words: &var array::Array<i64>) -> !bool {
     return self.push_val_words(module, self.val(value.name), value.type_name, words);
 }
 
-/// Appends the words a held value of a type travels as.
 fn (self: &var Selector) push_val_words(module: &ir::Module, held: Val, type_name: ir::Name, words: &var array::Array<i64>) -> !bool {
     let shape = self.shapes.of(module, type_name);
     match shape.class {
@@ -1247,8 +1132,6 @@ fn (self: &var Selector) push_val_words(module: &ir::Module, held: Val, type_nam
     return true;
 }
 
-/// Binds a call result from x0 (and x1 for a slice), or from the slot the
-/// call wrote it in.
 fn (self: &var Selector) bind_result(module: &ir::Module, result: ir::Value, sret: i64, c_call: bool) -> !void {
     let shape = self.shapes.of(module, result.type_name);
     if shape.class == Class::Void {
@@ -1274,15 +1157,11 @@ fn (self: &var Selector) bind_result(module: &ir::Module, result: ir::Value, sre
     }
     try self.mov(reg, 0);
     if c_call {
-        // C leaves the bits above a narrow result unspecified.
         reg = try self.normalize(reg, shape);
     }
     return self.set_val(result.name, reg_val(reg));
 }
 
-/// Selects a call of a function the module defines, through the backend's
-/// own convention: scalars and addresses one word, slices two, an aggregate
-/// result written where x8 points.
 fn (self: &var Selector) select_internal_call(module: &ir::Module, node: &ir::InstrNode, callee: ir::Function) -> !?diagnostic::Diagnostic {
     var words = array::new<i64>(self.allocator);
     defer words.deinit(self.allocator);
@@ -1330,7 +1209,6 @@ fn (self: &var Selector) select_internal_call(module: &ir::Module, node: &ir::In
     return null;
 }
 
-/// Returns the assembler symbol of a function the module defines.
 pub fn (self: &var Selector) function_symbol(module: &ir::Module, name: ir::Name) -> !ir::Name {
     var out = string::new(self.allocator);
     defer out.deinit(self.allocator);
@@ -1346,8 +1224,6 @@ pub fn (self: &var Selector) function_symbol(module: &ir::Module, name: ir::Name
     return self.syms.intern(out_bytes);
 }
 
-/// Returns the C symbol of an `export "c"` function, or the empty name
-/// for any other.
 pub fn (self: &var Selector) export_symbol(module: &ir::Module, node: &ir::FunctionNode) -> !ir::Name {
     if !module.names.is(node.export_abi, "c") {
         return ir::empty_name();
@@ -1359,8 +1235,6 @@ pub fn (self: &var Selector) export_symbol(module: &ir::Module, node: &ir::Funct
     return self.syms.intern(out_bytes);
 }
 
-/// Appends a name with every byte outside `[A-Za-z0-9_]` spelled `$xx`, so
-/// two names never meet in one symbol.
 fn append_mangled(allocator: Allocator, out: &var string::String, bytes: []u8) -> !void {
     let digits = "0123456789abcdef";
     var index = 0;
@@ -1379,8 +1253,6 @@ fn append_mangled(allocator: Allocator, out: &var string::String, bytes: []u8) -
     return;
 }
 
-/// Appends the C spelling LLVM gives a runtime symbol: every byte outside
-/// `[A-Za-z0-9_.]` becomes `_`.
 fn append_c_symbol(allocator: Allocator, out: &var string::String, bytes: []u8) -> !void {
     try out.append_byte(allocator, cast<u8>(95));
     var index = 0;
@@ -1397,12 +1269,6 @@ fn append_c_symbol(allocator: Allocator, out: &var string::String, bytes: []u8) 
     return;
 }
 
-/// Selects a call into the hosted runtime by the C signature hostabi
-/// declares for it: the result written through Out, the other parameters
-/// one word each in the order C takes them -- the argument registers, then
-/// 8-byte stack slots, which is where both AAPCS64 and System V put a word.
-/// A parameter this backend cannot make, or one C would not take as a
-/// whole word past the registers, refuses the call.
 fn (self: &var Selector) select_hosted_call(module: &ir::Module, node: &ir::InstrNode, signature: &hostabi::Signature) -> !?diagnostic::Diagnostic {
     let shape = self.shapes.of(module, node.result.type_name);
     if shape.class == Class::Unsupported {
@@ -1476,17 +1342,12 @@ fn (self: &var Selector) select_hosted_call(module: &ir::Module, node: &ir::Inst
                 }
             },
             Value => {
-                // A float goes in a float register, which this convention
-                // does not place.
                 if arg_shape.class != Class::Scalar {
                     return try self.fail_op(module, node);
                 }
                 if param.c_type != hostabi::CType::Operand and arg_shape.size != 8 {
                     return try self.fail_op(module, node);
                 }
-                // C packs a stack argument narrower than a word, so past
-                // the argument registers only whole words go where
-                // place_words puts them.
                 if words.len() >= arg_regs(self.arch) and arg_shape.size != 8 {
                     return try self.fail_op(module, node);
                 }
@@ -1515,9 +1376,6 @@ fn (self: &var Selector) select_hosted_call(module: &ir::Module, node: &ir::Inst
     return null;
 }
 
-/// Selects a call to a builtin by the C signature hostabi declares for it:
-/// through Out by select_hosted_call, and otherwise as the C call it is,
-/// by the target's C convention, when C takes exactly the call's operands.
 fn (self: &var Selector) select_builtin_call(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let signature = try hostabi::declare(self.allocator, module, node.operand, node);
     defer signature.deinit(self.allocator);
@@ -1561,9 +1419,6 @@ fn (self: &var Selector) select_call(module: &ir::Module, node: &ir::InstrNode) 
     return self.select_c_call(module, node, node.operand);
 }
 
-/// Checks that C can call an `export "c"` function: each parameter and the
-/// result a scalar or a float. A struct C passes or returns by value goes by
-/// the target's aggregate rules, which this backend does not lower.
 fn (self: &var Selector) check_c_export(module: &ir::Module, node: &ir::FunctionNode) -> !?diagnostic::Diagnostic {
     if self.ret.class != Class::Scalar and self.ret.class != Class::Float and self.ret.class != Class::Void {
         return try self.fail(module, "C export result type", node.return_type);
@@ -1579,12 +1434,6 @@ fn (self: &var Selector) check_c_export(module: &ir::Module, node: &ir::Function
     return null;
 }
 
-/// Reports whether C puts an argument of an `export "c"` function, or its
-/// result, where the backend's own convention does not: a float, which C
-/// passes in a float register and the backend in a general one, or, where C
-/// packs the stack (packs_stack_args), a scalar past the general registers.
-/// C calls such a function through a thunk (select_export_thunk) and the
-/// function itself keeps the backend's convention.
 pub fn (self: &Selector) export_has_thunk(module: &ir::Module, node: &ir::FunctionNode) -> bool {
     if !module.names.is(node.export_abi, "c") {
         return false;
@@ -1607,8 +1456,6 @@ pub fn (self: &Selector) export_has_thunk(module: &ir::Module, node: &ir::Functi
     return self.packs_stack_args() and words > arg_regs(self.arch);
 }
 
-/// Returns the symbol of the thunk C calls an `export "c"` function taking
-/// or returning a float through.
 pub fn (self: &var Selector) export_thunk_symbol(module: &ir::Module, name: ir::Name) -> !ir::Name {
     var out = try string::from_bytes(self.allocator, "_kz$c_");
     defer out.deinit(self.allocator);
@@ -1619,11 +1466,6 @@ pub fn (self: &var Selector) export_thunk_symbol(module: &ir::Module, name: ir::
     return self.syms.intern(out_bytes);
 }
 
-/// Selects the thunk C calls an `export "c"` function through
-/// (export_has_thunk): it moves each argument from where the target's C
-/// convention puts it, a register or the stack, to where the backend's own
-/// puts it, calls the function, and moves a float result to the float
-/// result register.
 pub fn (self: &var Selector) select_export_thunk(module: &ir::Module, node: &ir::FunctionNode) -> !void {
     self.gen = self.gen + 1;
     self.func.reset(self.allocator);
@@ -1639,12 +1481,9 @@ pub fn (self: &var Selector) select_export_thunk(module: &ir::Module, node: &ir:
     try self.start_block(entry);
     var words = array::new<i64>(self.allocator);
     defer words.deinit(self.allocator);
-    // Under Windows an argument's position names its register, a float's
-    // too; elsewhere each kind counts its own registers.
     let positional = self.arch == Arch::Amd64Windows;
     var ints = 0;
     var floats = 0;
-    // The stack bytes the arguments past the registers take so far.
     var stack = 0;
     var index = 0;
     while node.params.get(index) |param| {
@@ -1707,9 +1546,6 @@ pub fn (self: &var Selector) select_export_thunk(module: &ir::Module, node: &ir:
     return;
 }
 
-/// Selects the address of a function: one this module defines by its
-/// symbol, a C function through the global offset table, since another
-/// image may define it.
 fn (self: &var Selector) select_func_addr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     var inst = blank(MOp::SymAddr);
     if module.names.is(node.extern_abi, "c") {
@@ -1728,13 +1564,9 @@ fn (self: &var Selector) select_func_addr(module: &ir::Module, node: &ir::InstrN
         var thunk = false;
         if self.callee(module, node.operand) |callee| {
             defined = true;
-            // C calls through the address, so it is the thunk's when the
-            // function has one.
             thunk = self.export_has_thunk(module, module.function_nodes.at(callee.node));
         }
         if !defined or (mem::equal_bytes(bytes, "main") and !self.main_wraps) {
-            // The package main is the C entry point when it returns
-            // nothing, which no Kizu caller can call.
             return try self.fail_op(module, node);
         }
         if thunk {
@@ -1750,11 +1582,6 @@ fn (self: &var Selector) select_func_addr(module: &ir::Module, node: &ir::InstrN
     return null;
 }
 
-/// Selects a call through a function pointer, the first operand. A Kizu
-/// function pointer is called by the backend's own convention, as a call of
-/// the function by name is; the parameters of its type say which arguments
-/// go as the address of a copy. A C function pointer is called by the
-/// target's C convention, as a C function called by name is.
 fn (self: &var Selector) select_indirect_call(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let callee = node.args.get(0) orelse return try self.fail_op(module, node);
     let target = try self.reg_nz(module, callee) orelse return try self.fail_op(module, node);
@@ -1810,8 +1637,6 @@ fn (self: &var Selector) select_indirect_call(module: &ir::Module, node: &ir::In
     return null;
 }
 
-/// Returns the symbol of the thunk the pool calls a worker through, with a
-/// state first or not.
 pub fn (self: &var Selector) invoke_symbol(states: bool) -> !ir::Name {
     if states {
         return self.syms.intern("_kz$thread_invoke_state");
@@ -1819,10 +1644,6 @@ pub fn (self: &var Selector) invoke_symbol(states: bool) -> !ir::Name {
     return self.syms.intern("_kz$thread_invoke");
 }
 
-/// Appends the address of the thunk hostabi's PoolInvoke or PoolStateInvoke
-/// names, the one every worker of a round goes through (select_thread_invoke),
-/// and notes that it is used. Reports false when the round's result is not
-/// the code word the thunk answers.
 fn (self: &var Selector) pool_invoke_word(module: &ir::Module, node: &ir::InstrNode, states: bool, words: &var array::Array<i64>) -> !bool {
     if !self.shapes.is_coded(module, node.result.type_name) {
         return false;
@@ -1841,12 +1662,6 @@ fn (self: &var Selector) pool_invoke_word(module: &ir::Module, node: &ir::InstrN
     return true;
 }
 
-/// Selects the thunk a pool calls a worker through, the C function
-/// `invoke(worker, state, part, index)`: it reads the chunk out of the
-/// `[]T` part points at, calls the worker by the backend's own convention
-/// with the state first when states is set, and answers the failure code of
-/// the `E!void` the worker returned, zero for success. Every error set's
-/// union is that one code word, so one thunk serves every worker.
 pub fn (self: &var Selector) select_thread_invoke(states: bool) -> !void {
     self.gen = self.gen + 1;
     self.func.reset(self.allocator);
@@ -1892,8 +1707,6 @@ pub fn (self: &var Selector) select_thread_invoke(states: bool) -> !void {
     return;
 }
 
-/// Returns the symbol of the thunk a task set starts a worker taking a
-/// state of one type through.
 pub fn (self: &var Selector) task_invoke_symbol(module: &ir::Module, state_type: ir::Name) -> !ir::Name {
     var out = try string::from_bytes(self.allocator, "_kz$task_invoke_");
     defer out.deinit(self.allocator);
@@ -1904,8 +1717,6 @@ pub fn (self: &var Selector) task_invoke_symbol(module: &ir::Module, state_type:
     return self.syms.intern(out_bytes);
 }
 
-/// Notes that a task set starts workers with a state of one type, so its
-/// thunk is emitted once.
 fn (self: &var Selector) note_task_invoke(state_type: ir::Name) -> !void {
     var index = 0;
     while self.task_invokes.get(index) |seen| {
@@ -1917,11 +1728,6 @@ fn (self: &var Selector) note_task_invoke(state_type: ir::Name) -> !void {
     return self.task_invokes.append(self.allocator, state_type);
 }
 
-/// Selects the thunk a task set starts a worker through, hostabi's
-/// TaskInvoke: C calls `invoke(entry, io, allocator, state)`, and it calls
-/// `entry`, a `fn(Io, Allocator, S) -> void`, by the backend's own
-/// convention with a copy of the S at state. The state is the runtime's,
-/// and the worker owns what it is handed, so it is handed a copy of its own.
 pub fn (self: &var Selector) select_task_invoke(module: &ir::Module, state_type: ir::Name) -> !?diagnostic::Diagnostic {
     self.gen = self.gen + 1;
     self.func.reset(self.allocator);
@@ -1958,9 +1764,6 @@ pub fn (self: &var Selector) select_task_invoke(module: &ir::Module, state_type:
     return null;
 }
 
-/// Reports whether a parameter reads through an address it is handed the
-/// value of: it is passed as the address of a copy, and the argument is the
-/// value its reference type refers to.
 fn takes_address_of(module: &ir::Module, param: ir::Param, arg_type: ir::Name) -> bool {
     if param.passing != ir::Passing::CopyAddress or ir::same_name(param.type_name, arg_type) {
         return false;
@@ -1973,7 +1776,6 @@ fn takes_address_of(module: &ir::Module, param: ir::Param, arg_type: ir::Name) -
     return mem::equal_bytes(target, arg_bytes);
 }
 
-/// Returns T of `&T` or `&var T`, and the spelling itself otherwise.
 pub fn deref_bytes(bytes: []u8) -> []u8 {
     if mem::starts_with(bytes, "&var ") {
         return bytes[5..mem::len(bytes)];
@@ -1984,10 +1786,6 @@ pub fn deref_bytes(bytes: []u8) -> []u8 {
     return bytes;
 }
 
-/// Selects the C entry point for a package main that returns an error
-/// union: it hands argc and argv to the runtime, calls main, and maps what
-/// it returned to the exit status -- a failure's name reported and 1, a
-/// std::process::ExitStatus to its code, an i64 to itself, anything else 0.
 pub fn (self: &var Selector) select_main_wrapper(module: &ir::Module, ret_type: ir::Name) -> !?diagnostic::Diagnostic {
     self.gen = self.gen + 1;
     self.func.reset(self.allocator);
@@ -2089,8 +1887,6 @@ fn success_of(bytes: []u8) -> []u8 {
     return bytes[0..0];
 }
 
-/// Reports whether the code being selected runs only where reg & mask is
-/// zero.
 fn (self: &Selector) known_clear(reg: i64, mask: i64) -> bool {
     var index = 0;
     while self.fact_reg.get(index) |known| {
@@ -2102,7 +1898,6 @@ fn (self: &Selector) known_clear(reg: i64, mask: i64) -> bool {
     return false;
 }
 
-/// Copies the selector's cold marks onto the blocks they describe.
 pub fn (self: &var Selector) mark_cold_blocks() -> void {
     var index = 0;
     while self.func.blocks.at_mut(index) |block| {

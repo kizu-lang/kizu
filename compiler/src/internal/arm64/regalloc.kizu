@@ -1,49 +1,13 @@
 import std::array;
 
-// Register allocation, after a few machine-level clean-ups (constant
-// hoisting, tail duplication of small branch blocks, folding of frame
-// addresses into loads and stores, frame slots kept in registers, dead code).
-// Liveness over the machine blocks gives each virtual register a range of
-// segments in layout order, with holes where it is dead; a linear scan over
-// the ranges hands out registers. A range across a hot call takes a
-// callee-saved register; a call on a cold path is not counted, and the
-// caller-saved registers live across it are saved around it instead. x0..x7
-// are handed out too wherever the code does not name them inside the range.
-// A copy may share its source's register while the source is not written.
-// When no register is free, whatever is cheapest by loop-depth weight per
-// position held is spilled for its whole life: a constant or a frame
-// address is remade where it is read, anything else lives in a frame slot.
-// Afterwards the parallel copies of the phi edges become moves that respect
-// each other's reads.
-//
-// On arm64 the registers only float instructions compute with (see
-// float_registers) take float registers instead: d20..d31, or d8..d15
-// across a hot call or a vectorized loop, whose NEON instructions write
-// vector registers no range tracks. On amd64 under System V they take
-// xmm8..xmm12, or xmm0..xmm7 where nothing inside the range names those,
-// and none across a hot call, as the convention has a callee keep no xmm
-// register. Under Windows they take xmm6..xmm15, which a callee keeps, so
-// across a call too, or xmm0..xmm2 where nothing inside names those. A
-// spilled one is reloaded into a general scratch register like any other;
-// the printer moves it across.
-//
-// x16, x17 and x15 are scratch for the rewrite and the printer, x8 carries
-// an aggregate result's address and is scratch otherwise, x18 is the
-// platform's and x29/x30 the frame's: none of them is handed to a virtual
-// register.
-
-/// Returns the first scratch register.
 pub fn scratch0() -> i64 {
     return 16;
 }
 
-/// Returns the second scratch register.
 pub fn scratch1() -> i64 {
     return 17;
 }
 
-/// Returns the scratch register the printer forms out-of-range addresses
-/// in.
 pub fn scratch_addr() -> i64 {
     return 15;
 }
@@ -53,20 +17,12 @@ fn caller_saved_first() -> i64 {
 }
 
 fn caller_saved_last(arch: Arch) -> i64 {
-    // amd64 has no register left for this pool: its six argument
-    // registers, five callee-saved ones, the two scratch registers and rax
-    // (x8, and the printer's own scratch) are all of them; under Windows,
-    // four argument registers and seven callee-saved ones.
     if is_x86(arch) {
         return 8;
     }
     return 14;
 }
 
-/// Returns the end of the float registers a callee keeps, d8..d15 (their
-/// low 64 bits, all a float register holds here). System V has a callee
-/// keep no xmm register, so on amd64 there are none; Windows has it keep
-/// xmm6..xmm15 (whole, which the printer's prologue saves).
 fn float_callee_saved_end(arch: Arch) -> i64 {
     if arch == Arch::Amd64Windows {
         return first_float_reg() + 10;
@@ -77,11 +33,6 @@ fn float_callee_saved_end(arch: Arch) -> i64 {
     return first_float_reg() + 8;
 }
 
-/// Returns the first float register a call may clobber that allocation
-/// hands out: d20..d31 on arm64, where d16..d19 are the printer's float
-/// scratch; xmm8..xmm12 on amd64, where xmm0..xmm7 carry C's float
-/// arguments and xmm13..xmm15 are the printer's float scratch. Windows
-/// has none past xmm0..xmm2: xmm3..xmm5 are the scratch there.
 fn float_caller_saved_first(arch: Arch) -> i64 {
     if arch == Arch::Amd64Windows {
         return float_callee_saved_end(arch);
@@ -92,8 +43,6 @@ fn float_caller_saved_first(arch: Arch) -> i64 {
     return first_float_reg() + 12;
 }
 
-/// Returns the end of the float registers a call may clobber that
-/// allocation hands out.
 fn float_caller_saved_end(arch: Arch) -> i64 {
     if arch == Arch::Amd64Windows {
         return float_callee_saved_end(arch);
@@ -104,10 +53,6 @@ fn float_caller_saved_end(arch: Arch) -> i64 {
     return first_vreg();
 }
 
-/// Returns the end of the float registers a range may take only where no
-/// call, float argument or float result is inside it: on amd64 xmm0..xmm7,
-/// numbered after xmm8..xmm12, and under Windows xmm0..xmm2, after
-/// xmm6..xmm15; none on arm64.
 fn float_named_end(arch: Arch) -> i64 {
     if arch == Arch::Amd64Windows {
         return float_caller_saved_end(arch) + 3;
@@ -118,7 +63,6 @@ fn float_named_end(arch: Arch) -> i64 {
     return float_caller_saved_end(arch);
 }
 
-/// Reports whether reg is saved around a cold call it lives across.
 fn is_cold_saved(reg: i64, arch: Arch) -> bool {
     if reg >= caller_saved_first() and reg <= caller_saved_last(arch) {
         return true;
@@ -131,8 +75,6 @@ fn callee_saved_first() -> i64 {
 }
 
 fn callee_saved_last(arch: Arch) -> i64 {
-    // rbx and r12..r15 on amd64; under Windows also rdi and rsi, which
-    // its convention has a callee keep.
     if arch == Arch::Amd64 {
         return 23;
     }
@@ -142,14 +84,11 @@ fn callee_saved_last(arch: Arch) -> i64 {
     return 28;
 }
 
-/// Is what allocation leaves for the printer: the layout order and which
-/// callee-saved registers the function writes.
 pub struct Allocation {
     pub order: array::Array<i64>,
     pub saved: array::Array<i64>,
 }
 
-/// Removes instructions whose only effect is a register nobody reads.
 fn remove_dead(allocator: Allocator, func: &var MFunction) -> !void {
     var reads_buf = array::new<i64>(allocator);
     defer reads_buf.deinit(allocator);
@@ -203,9 +142,6 @@ fn remove_dead(allocator: Allocator, func: &var MFunction) -> !void {
     return;
 }
 
-/// Copies a small block that ends in a conditional branch into each block
-/// that jumps to it, so a loop whose header only tests tests at its bottom
-/// and takes one branch a turn instead of two.
 fn duplicate_tails(allocator: Allocator, func: &var MFunction) -> !void {
     var copied = array::new<MInst>(allocator);
     defer copied.deinit(allocator);
@@ -267,9 +203,6 @@ fn duplicate_tails(allocator: Allocator, func: &var MFunction) -> !void {
     return;
 }
 
-/// Folds `t = x + 1` into the select that is its one reader:
-/// `csel d, a, t, c` becomes `csinc d, a, x, c`, and `csel d, t, b, c`
-/// becomes `csinc d, b, x, !c`. The add is left for dead-code removal.
 fn fold_increments(allocator: Allocator, func: &var MFunction) -> !void {
     var reads_buf = array::new<i64>(allocator);
     defer reads_buf.deinit(allocator);
@@ -313,8 +246,6 @@ fn fold_increments(allocator: Allocator, func: &var MFunction) -> !void {
             if inst.op != MOp::CSel {
                 continue;
             }
-            // Find, earlier in this block, the one definition of an
-            // operand that adds one.
             var look = inst_index - 2;
             while look >= 0 {
                 let earlier = block.insts.get_or_panic(look);
@@ -338,8 +269,6 @@ fn fold_increments(allocator: Allocator, func: &var MFunction) -> !void {
                 } else {
                     continue;
                 }
-                // The add's operand must still hold the same value at the
-                // select: nothing between them writes it.
                 var clean = true;
                 var between = look + 2;
                 while between < inst_index - 1 {
@@ -360,10 +289,6 @@ fn fold_increments(allocator: Allocator, func: &var MFunction) -> !void {
     return;
 }
 
-/// Fuses `t = a * b` into the add or subtract that is its one reader in
-/// the same block: `d = c + t` becomes `madd d, a, b, c` and `d = c - t`
-/// becomes `msub d, a, b, c`, one instruction off the dependence chain. The
-/// multiply is left for dead-code removal.
 fn fuse_multiply_adds(allocator: Allocator, func: &var MFunction) -> !void {
     var reads_buf = array::new<i64>(allocator);
     defer reads_buf.deinit(allocator);
@@ -443,8 +368,6 @@ fn fuse_multiply_adds(allocator: Allocator, func: &var MFunction) -> !void {
                 }
                 fused.rn = earlier.rn;
                 fused.rm = earlier.rm;
-                // The factors must still hold their values at the add:
-                // nothing between them writes either.
                 var clean = fused.ra >= 0 and fused.ra != reg_zr();
                 var between = look + 2;
                 while between < inst_index - 1 {
@@ -468,8 +391,6 @@ fn fuse_multiply_adds(allocator: Allocator, func: &var MFunction) -> !void {
     return;
 }
 
-/// Folds the address of a frame slot into the loads and stores that use it
-/// as their base, so the address needs no register.
 fn fold_frame_addresses(allocator: Allocator, func: &var MFunction) -> !void {
     var def_count = array::new<i64>(allocator);
     defer def_count.deinit(allocator);
@@ -538,9 +459,6 @@ fn add_to(table: &var array::Array<i64>, at: i64, amount: i64) -> !void {
     return table.set(at, table.get_or_panic(at) + amount);
 }
 
-/// Counts for each block how many loops it is inside: a jump from a block
-/// to one at or before it in layout order closes a loop over the blocks
-/// between them.
 fn loop_depths(
     allocator: Allocator,
     func: &MFunction,
@@ -583,8 +501,6 @@ fn loop_depths(
     return;
 }
 
-/// Returns where a spilled register goes: -2 when it is remade at each use,
-/// otherwise a new frame slot.
 fn spill_place(allocator: Allocator, func: &var MFunction, remat: &array::Array<MInst>, v: i64) -> !i64 {
     if remat.get_or_panic(v).op != MOp::Trap {
         return 0 - 2;
@@ -592,10 +508,6 @@ fn spill_place(allocator: Allocator, func: &var MFunction, remat: &array::Array<
     return func.add_slot(allocator, 8, 8);
 }
 
-/// Moves each constant that takes more than one instruction to the entry
-/// block, once per value: inlining can leave a callee's entry constants
-/// inside a caller's loop. On amd64 under System V a constant a float
-/// operation reads is left to place_float_constants.
 fn hoist_constants(allocator: Allocator, func: &var MFunction, arch: Arch) -> !void {
     var def_count = array::new<i64>(allocator);
     defer def_count.deinit(allocator);
@@ -631,11 +543,9 @@ fn hoist_constants(allocator: Allocator, func: &var MFunction, arch: Arch) -> !v
             }
         }
     }
-    // A constant one move makes is hoisted only out of a loop.
     var looped = array::new<i64>(allocator);
     defer looped.deinit(allocator);
     try loop_blocks(allocator, func, &var looped);
-    // Which register each hoisted constant's readers read instead.
     var rename = array::new<i64>(allocator);
     defer rename.deinit(allocator);
     for 0..func.vregs |v| {
@@ -726,18 +636,10 @@ fn hoist_constants(allocator: Allocator, func: &var MFunction, arch: Arch) -> !v
     return;
 }
 
-/// Reports whether an instruction computes with floats: what reads a
-/// constant there wants it in a float register.
 fn computes_float(op: MOp) -> bool {
     return op == MOp::FBin or op == MOp::FUn or op == MOp::FMAdd or op == MOp::FCmp or op == MOp::FCvt;
 }
 
-/// On amd64 under System V, where no xmm register outlives a call, puts
-/// each constant a float operation reads where its readers need it and no
-/// sooner: in the nearest block outside every loop that dominates all of
-/// them, before the first of them there or else at the end, once per value
-/// and block. So it is made neither in a loop nor ahead of a call it need
-/// not live across.
 fn place_float_constants(allocator: Allocator, func: &var MFunction) -> !void {
     let nv = func.vregs;
     let nb = func.blocks.len();
@@ -807,7 +709,6 @@ fn place_float_constants(allocator: Allocator, func: &var MFunction) -> !void {
     var looped = array::new<bool>(allocator);
     defer looped.deinit(allocator);
     try dominators(allocator, func, &order, &var place, &var idom, &var looped);
-    // The block dominating every reader of each constant.
     var meet = array::new<i64>(allocator);
     defer meet.deinit(allocator);
     for 0..nv |_index| {
@@ -834,9 +735,6 @@ fn place_float_constants(allocator: Allocator, func: &var MFunction) -> !void {
         }
         try meet_at(&var meet, &wanted, &place, &idom, block.treg, b);
     }
-    // Where each goes: its block, out of loops, and the instruction it
-    // goes before there (the block's length for the end). Constants of one
-    // value going to one block share the first register.
     var target = array::new<i64>(allocator);
     defer target.deinit(allocator);
     var before = array::new<i64>(allocator);
@@ -896,8 +794,6 @@ fn place_float_constants(allocator: Allocator, func: &var MFunction) -> !void {
         try before.set(v, at);
         try holders.append(allocator, first_vreg() + v);
     }
-    // Take the constants out, read the shared registers, and put each
-    // holder in place.
     var fresh = array::new<MInst>(allocator);
     defer fresh.deinit(allocator);
     block_id = 0;
@@ -959,8 +855,6 @@ fn mark_read(table: &var array::Array<bool>, reg: i64) -> !void {
     return;
 }
 
-/// Widens the block dominating the readers of reg, when it is a constant
-/// being placed, to take in block b.
 fn meet_at(meet: &var array::Array<i64>, wanted: &array::Array<bool>, place: &array::Array<i64>, idom: &array::Array<i64>, reg: i64, b: i64) -> !void {
     if !is_vreg(reg) or !wanted.get_or_panic(reg - first_vreg()) {
         return;
@@ -973,9 +867,6 @@ fn meet_at(meet: &var array::Array<i64>, wanted: &array::Array<bool>, place: &ar
     return meet.set(v, common_dominator(place, idom, here, b));
 }
 
-/// Returns the index of the first instruction of block b that reads reg,
-/// or, when none does, where the end of the block starts: before the
-/// parallel copy and the comparison the terminator reads, if any.
 fn first_reader(allocator: Allocator, func: &MFunction, b: i64, reg: i64, buf: &var array::Array<i64>) -> !i64 {
     if func.blocks.at(b) |block| {
         var index = 0;
@@ -1007,10 +898,6 @@ fn is_comparison(op: MOp) -> bool {
     return op == MOp::Cmp or op == MOp::CmpImm or op == MOp::CmnImm or op == MOp::TstImm or op == MOp::FCmp;
 }
 
-/// Computes the immediate dominator of each block reachable from the entry
-/// (-1 for the others), each block's place in the reverse postorder, and
-/// which blocks a loop holds: those that reach the source of an edge to a
-/// block dominating it without passing that block, and that block.
 fn dominators(
     allocator: Allocator,
     func: &MFunction,
@@ -1102,7 +989,6 @@ fn dominators(
             if head < 0 or !dominates(idom, entry, head, b) {
                 continue;
             }
-            // The loop of the edge b -> head: back from b to head.
             let stamp = b * 2 + position;
             try seen.set(head, stamp);
             try looped.set(head, true);
@@ -1123,7 +1009,6 @@ fn dominators(
     return;
 }
 
-/// Reports whether block a dominates block b.
 fn dominates(idom: &array::Array<i64>, entry: i64, a: i64, b_in: i64) -> bool {
     var b = b_in;
     while b != a and b != entry and b >= 0 {
@@ -1132,7 +1017,6 @@ fn dominates(idom: &array::Array<i64>, entry: i64, a: i64, b_in: i64) -> bool {
     return b == a;
 }
 
-/// Returns the nearest block dominating both a and b.
 fn common_dominator(place: &array::Array<i64>, idom: &array::Array<i64>, a_in: i64, b_in: i64) -> i64 {
     var a = a_in;
     var b = b_in;
@@ -1147,8 +1031,6 @@ fn common_dominator(place: &array::Array<i64>, idom: &array::Array<i64>, a_in: i
     return a;
 }
 
-/// Marks the blocks inside a loop: those between a back edge's target and
-/// its source in a depth-first reverse postorder.
 fn loop_blocks(allocator: Allocator, func: &MFunction, depth: &var array::Array<i64>) -> !void {
     var order = array::new<i64>(allocator);
     defer order.deinit(allocator);
@@ -1156,7 +1038,6 @@ fn loop_blocks(allocator: Allocator, func: &MFunction, depth: &var array::Array<
     return loop_depths(allocator, func, &order, depth);
 }
 
-/// Lists the blocks reachable from the entry in reverse postorder.
 fn reverse_postorder(allocator: Allocator, func: &MFunction, order: &var array::Array<i64>) -> !void {
     let count = func.blocks.len();
     var state = array::new<i64>(allocator);
@@ -1206,8 +1087,6 @@ fn renamed(rename: &array::Array<i64>, reg: i64) -> i64 {
     return reg;
 }
 
-/// Sends a branch to an empty block that only jumps on straight to where
-/// it jumps.
 fn thread_empty_jumps(func: &var MFunction) -> void {
     let count = func.blocks.len();
     var block_id = 0;
@@ -1244,8 +1123,6 @@ fn thread_empty_jumps(func: &var MFunction) -> void {
     return;
 }
 
-/// Turns a block that ends comparing a register with zero for equality
-/// into a cbz / cbnz on the register.
 fn fuse_zero_tests(allocator: Allocator, func: &var MFunction) -> !void {
     var block_id = 0;
     while func.blocks.at_mut(block_id) |block| {
@@ -1272,8 +1149,6 @@ fn fuse_zero_tests(allocator: Allocator, func: &var MFunction) -> !void {
     return;
 }
 
-/// Resolves a test of a register the same block just set to a constant:
-/// the branch becomes a jump to the side the constant takes.
 fn fold_constant_branches(func: &var MFunction) -> void {
     var block_id = 0;
     while func.blocks.at_mut(block_id) |block| {
@@ -1310,10 +1185,6 @@ fn fold_constant_branches(func: &var MFunction) -> void {
     return;
 }
 
-/// Keeps in registers the frame slots whose address never leaves the
-/// function's own loads and stores: each word of such a slot becomes a
-/// virtual register, a store to it a move in and a load a move out. Only
-/// slots read and written a whole aligned word at a time qualify.
 fn promote_slots(allocator: Allocator, func: &var MFunction) -> !void {
     let slots = func.slots.len();
     if slots == 0 {
@@ -1344,7 +1215,6 @@ fn promote_slots(allocator: Allocator, func: &var MFunction) -> !void {
             }
         }
     }
-    // One register per word of each promoted slot.
     var slot_index = 0;
     while func.slots.get(slot_index) |slot| {
         let here = slot_index;
@@ -1384,9 +1254,6 @@ fn promote_slots(allocator: Allocator, func: &var MFunction) -> !void {
     return;
 }
 
-/// Orders the blocks the entry reaches: reverse postorder, visiting a
-/// block's fall-through successor last so it tends to follow it, with the
-/// cold blocks moved after all the others.
 fn layout(allocator: Allocator, func: &MFunction, cold: &array::Array<bool>, order: &var array::Array<i64>) -> !void {
     let count = func.blocks.len();
     var state = array::new<i64>(allocator);
@@ -1411,9 +1278,6 @@ fn layout(allocator: Allocator, func: &MFunction, cold: &array::Array<bool>, ord
         let position = next.get_or_panic(top);
         try next.set(top, position + 1);
         if position < 2 {
-            // Visit succ1 (the else side) first and succ0 second, so succ0
-            // lands right after the block in reverse postorder -- unless
-            // succ1 stays in a loop succ0 leaves, which then falls through.
             var side = 1 - position;
             let s0 = func.successor(top, 0);
             let s1 = func.successor(top, 1);
@@ -1461,19 +1325,13 @@ fn has_bit(bits: &array::Array<i64>, base: i64, bit: i64) -> bool {
     return (bits.get_or_panic(word) & mask) != 0;
 }
 
-/// Lists the ranges in active and inactive by the register each holds, one
-/// list per register threaded through next / prev, and records which of
-/// the two sets each range is in. The order of a list does not matter:
-/// what reads it asks whether any holder overlaps, or sums over them all.
 struct Holders {
-    // The first range holding each register, or -1.
     first: array::Array<i64>,
     next: array::Array<i64>,
     prev: array::Array<i64>,
     active: array::Array<bool>,
 }
 
-/// Adds v, which joins active, to the holders of reg.
 fn (self: &var Holders) link(reg: i64, v: i64) -> !void {
     let head = self.first.get_or_panic(reg);
     try self.next.set(v, head);
@@ -1485,7 +1343,6 @@ fn (self: &var Holders) link(reg: i64, v: i64) -> !void {
     return self.first.set(reg, v);
 }
 
-/// Removes v from the holders of reg as it leaves active and inactive.
 fn (self: &var Holders) unlink(reg: i64, v: i64) -> !void {
     let before = self.prev.get_or_panic(v);
     let after = self.next.get_or_panic(v);
@@ -1500,21 +1357,15 @@ fn (self: &var Holders) unlink(reg: i64, v: i64) -> !void {
     return;
 }
 
-/// Is the live range of one virtual register: segments [from, to] of
-/// positions, ascending, chained through the segment pool. An instruction
-/// at index k reads its operands at 2k and writes its result at 2k + 1.
 struct Ranges {
     seg_from: array::Array<i64>,
     seg_to: array::Array<i64>,
     seg_next: array::Array<i64>,
-    // The first segment of each register, or -1.
     first: array::Array<i64>,
 }
 
 fn (self: &var Ranges) add(allocator: Allocator, v: i64, from: i64, to: i64) -> !void {
     let head = self.first.get_or_panic(v);
-    // Segments arrive from the last block backwards, so a new one either
-    // joins the first or goes in front of it.
     if head >= 0 and self.seg_from.get_or_panic(head) <= to + 1 {
         if from < self.seg_from.get_or_panic(head) {
             try self.seg_from.set(head, from);
@@ -1531,8 +1382,6 @@ fn (self: &var Ranges) add(allocator: Allocator, v: i64, from: i64, to: i64) -> 
     return self.first.set(v, index);
 }
 
-/// Starts v's first segment at a definition: a value is not live before it
-/// is written.
 fn (self: &var Ranges) define(allocator: Allocator, v: i64, at: i64) -> !void {
     let head = self.first.get_or_panic(v);
     if head >= 0 and self.seg_from.get_or_panic(head) <= at and self.seg_to.get_or_panic(head) >= at {
@@ -1559,7 +1408,6 @@ fn (self: &Ranges) end(v: i64) -> i64 {
     return last;
 }
 
-/// Returns how many positions v's segments cover.
 fn (self: &Ranges) size(v: i64) -> i64 {
     var at = self.first.get_or_panic(v);
     var total = 0;
@@ -1584,9 +1432,6 @@ fn (self: &Ranges) covers(v: i64, pos: i64) -> bool {
     return false;
 }
 
-/// Returns the first segment of v from its cursor on that ends at pos or
-/// later, leaving the cursor there: what covers(v, pos) reads, for a pos
-/// that only grows from one call to the next. v must live at pos or later.
 fn (self: &Ranges) seek(cursor: &var array::Array<i64>, v: i64, pos: i64) -> !i64 {
     var at = cursor.get_or_panic(v);
     while self.seg_to.get_or_panic(at) < pos {
@@ -1615,17 +1460,11 @@ fn (self: &Ranges) intersect(a: i64, b: i64) -> bool {
     return false;
 }
 
-/// Holds, for each row of marks that marks anything, how many positions
-/// before each one are marked: the entry for index k is twice the count
-/// before 2k, plus one if 2k is marked, so the count before 2k + 1 is one
-/// read as well. A row that marks nothing has no entries.
 struct Marks {
-    // Where each row's entries start, or -1.
     rows: array::Array<i64>,
     entries: array::Array<i64>,
 }
 
-/// Builds the counts from the marks of each index, two bits a row.
 fn build_marks(allocator: Allocator, index_marks: &array::Array<i64>) -> !Marks {
     var marks = Marks { rows: array::new<i64>(allocator), entries: array::new<i64>(allocator) };
     errdefer marks.deinit(allocator);
@@ -1635,7 +1474,6 @@ fn build_marks(allocator: Allocator, index_marks: &array::Array<i64>) -> !Marks 
         index = index + 1;
         any = any | bits;
     }
-    // One entry past the last index, where a segment ending there asks.
     let span = index_marks.len() + 2;
     var used_rows = 0;
     for 0..10 |row| {
@@ -1661,13 +1499,11 @@ fn build_marks(allocator: Allocator, index_marks: &array::Array<i64>) -> !Marks 
     return move marks;
 }
 
-/// Returns how many positions before pos the row marks, from its base.
 fn (self: &Marks) before(base: i64, pos: i64) -> i64 {
     let entry = self.entries.get_or_panic(base + pos / 2);
     return (entry >> 1) + (entry & (pos % 2));
 }
 
-/// Reports whether some segment of v spans a position the row marks.
 fn (self: &Marks) spans(ranges: &Ranges, v: i64, row: i64) -> bool {
     let base = self.rows.get_or_panic(row);
     if base < 0 {
@@ -1685,7 +1521,6 @@ fn (self: &Marks) spans(ranges: &Ranges, v: i64, row: i64) -> bool {
     return false;
 }
 
-/// Allocates registers for a function and rewrites it to use them.
 pub fn allocate(allocator: Allocator, func: &var MFunction, arch: Arch) -> !Allocation {
     var cold_flags = array::new<bool>(allocator);
     defer cold_flags.deinit(allocator);
@@ -1705,7 +1540,6 @@ pub fn allocate(allocator: Allocator, func: &var MFunction, arch: Arch) -> !Allo
     return allocate_laid_out(allocator, func, cold, move order, &float, arch);
 }
 
-/// Runs the machine-level clean-ups allocation starts with.
 fn run_passes(allocator: Allocator, func: &var MFunction, arch: Arch) -> !void {
     try hoist_constants(allocator, func, arch);
     if arch == Arch::Amd64 {
@@ -1728,10 +1562,6 @@ fn run_passes(allocator: Allocator, func: &var MFunction, arch: Arch) -> !void {
     return;
 }
 
-/// Has an amd64 store of a register that is one constant write the
-/// constant itself, which `mov` takes as an immediate (sign-extended from
-/// 32 bits for a word), so the constant needs no register where it is
-/// stored. A constant only stored is then dead.
 fn store_immediates(allocator: Allocator, func: &var MFunction) -> !void {
     var def_count = array::new<i64>(allocator);
     defer def_count.deinit(allocator);
@@ -1809,7 +1639,6 @@ fn allocate_laid_out(
     let nv = func.vregs;
     let words = (nv + 63) / 64;
     let nb = func.blocks.len();
-    // Indices: each instruction one, and the end of each block one more.
     var block_first = array::new<i64>(allocator);
     defer block_first.deinit(allocator);
     var block_last = array::new<i64>(allocator);
@@ -1830,11 +1659,6 @@ fn allocate_laid_out(
         count = count + 1;
     }
     let positions = 2 * count + 2;
-    // Marks: hot calls (row 0), each argument register named (1 + r) and
-    // the NEON instructions, which write vector registers allocation does
-    // not track (9). amd64 has no NEON instructions; there 9 marks what
-    // names xmm0..xmm7: every call, float argument and float result. Each
-    // index k gets the marks at its two positions, two bits a row.
     var cold_calls = array::new<i64>(allocator);
     defer cold_calls.deinit(allocator);
     var index_marks = array::new<i64>(allocator);
@@ -1851,9 +1675,6 @@ fn allocate_laid_out(
                 let k = index_marks.len();
                 var bits = argument_marks(inst);
                 if inst.op == MOp::Call or inst.op == MOp::CallReg {
-                    // A call on a cold path does not decide where values
-                    // live: the registers it would clobber are saved around
-                    // it instead.
                     if !is_cold {
                         bits = bits | 3;
                     } else if block.term != Term::Stop {
@@ -1869,13 +1690,10 @@ fn allocate_laid_out(
                 try index_marks.append(allocator, bits);
             }
         }
-        // The end of a block marks nothing.
         try index_marks.append(allocator, 0);
     }
     var marks = try build_marks(allocator, &index_marks);
     defer marks.deinit(allocator);
-    // Liveness: use and def per block, then live-in / live-out to a fixed
-    // point.
     var use_bits = array::new<i64>(allocator);
     defer use_bits.deinit(allocator);
     var def_bits = array::new<i64>(allocator);
@@ -1949,7 +1767,6 @@ fn allocate_laid_out(
             }
         }
     }
-    // Ranges, built from the last block backwards.
     var ranges = Ranges {
         seg_from: array::new<i64>(allocator),
         seg_to: array::new<i64>(allocator),
@@ -1966,12 +1783,8 @@ fn allocate_laid_out(
     defer partner.deinit(allocator);
     var sink = array::new<i64>(allocator);
     defer sink.deinit(allocator);
-    // On amd64 a float operation's result is computed in place of its left
-    // operand, so it would rather have that operand's register.
     var tied = array::new<i64>(allocator);
     defer tied.deinit(allocator);
-    // Its right operand's register would make it a copy through a scratch
-    // register first.
     var shunned = array::new<i64>(allocator);
     defer shunned.deinit(allocator);
     for 0..nv |_index| {
@@ -1991,8 +1804,6 @@ fn allocate_laid_out(
         let base = b * words;
         let from = 2 * block_first.get_or_panic(b);
         let to = 2 * block_last.get_or_panic(b) + 1;
-        // Each v live out, ascending; a word with no bit set is skipped
-        // whole.
         for 0..words |w| {
             let bits = live_out.get_or_panic(base + w);
             if bits == 0 {
@@ -2033,10 +1844,6 @@ fn allocate_laid_out(
             }
         }
     }
-    // Spill weights: each def and use counts 8^depth of its block's loop
-    // nesting, so what a hot loop reads stays in a register. A register
-    // that is one constant or one frame address is remade where it is
-    // read rather than stored, and costs less to give up.
     var depth = array::new<i64>(allocator);
     defer depth.deinit(allocator);
     try loop_depths(allocator, func, &order, &var depth);
@@ -2091,8 +1898,6 @@ fn allocate_laid_out(
             }
         }
     }
-    // A register whose one definition copies another may share that
-    // register's location while the other is not written again.
     var copy_of = array::new<i64>(allocator);
     defer copy_of.deinit(allocator);
     for 0..nv |v| {
@@ -2102,9 +1907,6 @@ fn allocate_laid_out(
         }
         try copy_of.append(allocator, source);
     }
-    // Pairs (source, other destination) of each parallel copy: a source
-    // that takes the register of another destination of its copy makes
-    // the copy a cycle, resolved through a scratch register.
     var avoid_src = array::new<i64>(allocator);
     defer avoid_src.deinit(allocator);
     var avoid_dst = array::new<i64>(allocator);
@@ -2133,8 +1935,6 @@ fn allocate_laid_out(
             }
         }
     }
-    // Where each register is written, to tell whether a copy's source
-    // changes while the copy lives.
     var write_at = array::new<i64>(allocator);
     defer write_at.deinit(allocator);
     var write_next = array::new<i64>(allocator);
@@ -2173,15 +1973,9 @@ fn allocate_laid_out(
             try weight.set(v, weight.get_or_panic(v) / 4);
         }
     }
-    // A weight is per position held: giving up a long range frees its
-    // register over all of it, a short one over little, so of two ranges
-    // read as often the longer goes first. The 50 positions added keep a
-    // short range from weighing without bound.
     for 0..nv |v| {
         try weight.set(v, weight.get_or_panic(v) * 256 / (ranges.size(v) + 50));
     }
-    // Linear scan over the ranges by start, with active (live at the
-    // current position) and inactive (in a hole there) sets.
     var by_start = array::new<i64>(allocator);
     defer by_start.deinit(allocator);
     var bucket = array::new<i64>(allocator);
@@ -2216,11 +2010,8 @@ fn allocate_laid_out(
     defer phys.deinit(allocator);
     var spill = array::new<i64>(allocator);
     defer spill.deinit(allocator);
-    // Where each range ends: the ranges are final here, and the scan asks
-    // for the end of every active and inactive one at each step.
     var ends = array::new<i64>(allocator);
     defer ends.deinit(allocator);
-    // The segment of each range the scan last stopped at (Ranges.seek).
     var cursor = array::new<i64>(allocator);
     defer cursor.deinit(allocator);
     for 0..nv |v| {
@@ -2233,7 +2024,6 @@ fn allocate_laid_out(
     defer crosses_call.deinit(allocator);
     for 0..nv |v| {
         var crosses = ranges.first.get_or_panic(v) >= 0 and marks.spans(&ranges, v, 0);
-        // A float register is clobbered by a vectorized loop too.
         if arch == Arch::Arm64 and float.get_or_panic(v) and !crosses {
             crosses = ranges.first.get_or_panic(v) >= 0 and marks.spans(&ranges, v, 9);
         }
@@ -2243,8 +2033,6 @@ fn allocate_laid_out(
     defer active.deinit(allocator);
     var inactive = array::new<i64>(allocator);
     defer inactive.deinit(allocator);
-    // The ranges of active and inactive by the register each holds, so a
-    // question about one register reads only its holders.
     var holders = Holders {
         first: array::new<i64>(allocator),
         next: array::new<i64>(allocator),
@@ -2269,11 +2057,6 @@ fn allocate_laid_out(
     defer candidates.deinit(allocator);
     var to_inactive = array::new<i64>(allocator);
     defer to_inactive.deinit(allocator);
-    // The first position at which a range in active or inactive may change
-    // set: where an active one's segment ends, or an inactive one's next
-    // segment starts. Before it the sets stay as they are, in the same
-    // order, so the scan below has nothing to move. Ranges evicted since
-    // only leave it early, never late.
     var next_change = 0;
     var scan = 0;
     while by_start.get(scan) |v| {
@@ -2281,7 +2064,6 @@ fn allocate_laid_out(
         let start = ranges.start(v);
         if start >= next_change {
             next_change = positions + 1;
-            // Move what ended to handled and what is in a hole to inactive.
             var keep = 0;
             var look = 0;
             to_inactive.clear(allocator);
@@ -2329,13 +2111,9 @@ fn allocate_laid_out(
                 try inactive.append(allocator, other);
             }
         }
-        // v joins active below covering start in its first segment.
         let first_to = ranges.seg_to.get_or_panic(ranges.first.get_or_panic(v));
         let crosses = crosses_call.get_or_panic(v);
-        // Where no float register outlives a call, a range across one
-        // stays in a general register, as it would without float ones.
         let wants_float = float.get_or_panic(v) and !(crosses and float_callee_saved_end(arch) == first_float_reg());
-        // The registers this range may take, in the order it wants them.
         candidates.clear(allocator);
         let mate = partner.get_or_panic(v);
         if mate >= 0 {
@@ -2344,9 +2122,6 @@ fn allocate_laid_out(
                 try candidates.append(allocator, mate_reg);
             }
         }
-        // A chain of copies (a select into a join's phi into a loop
-        // header's phi) wants the register of the first one along it that
-        // has one.
         let tie = tied.get_or_panic(v);
         if wants_float and tie >= 0 {
             let tie_reg = phys.get_or_panic(tie - first_vreg());
@@ -2423,9 +2198,6 @@ fn allocate_laid_out(
             try used.set(chosen, true);
             continue;
         }
-        // No register is free for the whole range: give up whichever costs
-        // least -- this range, or the ranges holding one register it may
-        // take that overlap it.
         var best_reg = 0 - 1;
         var best_cost = weight.get_or_panic(v);
         candidate_index = 0;
@@ -2452,15 +2224,11 @@ fn allocate_laid_out(
         next_change = min(next_change, first_to + 1);
         try used.set(best_reg, true);
     }
-    // The caller-saved registers live across each cold call.
     var cold_saves = array::new<i64>(allocator);
     defer cold_saves.deinit(allocator);
     for 0..count + 1 |_index| {
         try cold_saves.append(allocator, 0);
     }
-    // A range in such a register adds it at each cold call k whose 2k and
-    // 2k + 1 it covers; the calls are in ascending k, so each segment
-    // finds the first one inside it by bisection.
     for 0..nv |v| {
         let reg = phys.get_or_panic(v);
         if !is_cold_saved(reg, arch) {
@@ -2497,9 +2265,6 @@ fn allocate_laid_out(
     for 0..first_vreg() |_index| {
         try save_slots.append(allocator, 0 - 1);
     }
-    // A pure instruction whose result is dead right after it -- one of the
-    // definitions of a register written on several paths, say, after a
-    // test of it was resolved -- is dropped.
     var dead = array::new<bool>(allocator);
     defer dead.deinit(allocator);
     for 0..count + 1 |_index| {
@@ -2537,11 +2302,6 @@ fn allocate_laid_out(
     return Allocation { order: move order, saved: move saved };
 }
 
-/// Reports whether a range may live in a register at all: a range across a
-/// hot call only in a callee-saved one, and none in an argument register
-/// the code names inside it.
-/// Reports whether v in reg would hold another destination's register in a
-/// parallel copy v is a source of.
 fn closes_cycle(avoid_src: &array::Array<i64>, avoid_dst: &array::Array<i64>, phys: &array::Array<i64>, v: i64, reg: i64) -> bool {
     var index = 0;
     while avoid_src.get(index) |source| {
@@ -2573,8 +2333,6 @@ fn may_take(ranges: &Ranges, marks: &Marks, v: i64, reg: i64, crosses: bool, flo
         (reg >= callee_saved_first() and reg <= callee_saved_last(arch));
 }
 
-/// Reports whether no range holding reg overlaps v, a copy and its source
-/// excepted while the source is not written again.
 fn register_free(
     ranges: &Ranges,
     holders: &Holders,
@@ -2596,9 +2354,6 @@ fn register_free(
     return true;
 }
 
-/// Reports whether two ranges hold the same value wherever both live: one
-/// is a copy of the other, directly or through a chain of copies, and no
-/// register along the chain is written while the copy lives.
 fn shares_value(
     ranges: &Ranges,
     copy_of: &array::Array<i64>,
@@ -2623,8 +2378,6 @@ fn copy_chain(
     copy: i64,
     target: i64
 ) -> bool {
-    // Each source along the chain must keep its value while every copy
-    // made from it, directly or not, lives.
     var chain0 = copy;
     var chain1 = 0 - 1;
     var chain2 = 0 - 1;
@@ -2654,7 +2407,6 @@ fn copy_chain(
     return false;
 }
 
-/// Sums the weights of the ranges holding reg that overlap v.
 fn holders_weight(
     ranges: &Ranges,
     holders: &Holders,
@@ -2673,7 +2425,6 @@ fn holders_weight(
     return total;
 }
 
-/// Spills the ranges of a set that hold reg and overlap v.
 fn evict(
     allocator: Allocator,
     func: &var MFunction,
@@ -2702,8 +2453,6 @@ fn evict(
     return set.truncate(allocator, keep);
 }
 
-/// Returns the marks of each argument register an instruction names, read
-/// at 2k (the row's low bit) and written at 2k + 1 (its high bit).
 fn argument_marks(inst: &MInst) -> i64 {
     let stores = inst.op == MOp::Store or inst.op == MOp::StoreIdx;
     var bits = 0;
@@ -2730,14 +2479,10 @@ fn bump(table: &var array::Array<i64>, at: i64) -> !void {
     return table.set(at, table.get_or_panic(at) + 1);
 }
 
-/// Reports whether an instruction names xmm0..xmm7 on amd64: a call, which
-/// clobbers them, or a float argument or result, which moves through one.
 fn names_float_args(op: MOp) -> bool {
     return op == MOp::Call or op == MOp::CallReg or op == MOp::FArg or op == MOp::FRet;
 }
 
-/// Notes, for each float operation amd64 computes two-address, the left
-/// operand its result would share a register with once that operand dies.
 fn note_tied(func: &MFunction, float: &array::Array<bool>, tied: &var array::Array<i64>, shunned: &var array::Array<i64>) -> !void {
     var block_id = 0;
     while func.blocks.at(block_id) |block| {
@@ -2762,9 +2507,6 @@ fn note_tied(func: &MFunction, float: &array::Array<bool>, tied: &var array::Arr
     return;
 }
 
-/// Notes which register a virtual register would like: the argument
-/// register it moves from or to, and the virtual registers it is copied
-/// from (partner) and into (sink).
 fn note_hints(hint: &var array::Array<i64>, partner: &var array::Array<i64>, sink: &var array::Array<i64>, inst: &MInst, copies: &array::Array<Copy>) -> !void {
     if inst.op == MOp::Mov {
         if is_vreg(inst.rd) and inst.rn >= 0 and inst.rn < 8 {
@@ -2793,7 +2535,6 @@ fn note_hints(hint: &var array::Array<i64>, partner: &var array::Array<i64>, sin
     return;
 }
 
-/// Lists the registers an instruction writes.
 fn defs(inst: &MInst, out: &var array::Array<i64>, allocator: Allocator, copies: &array::Array<Copy>) -> !void {
     out.clear(allocator);
     if inst.op == MOp::ParCopy {
@@ -2811,11 +2552,9 @@ fn defs(inst: &MInst, out: &var array::Array<i64>, allocator: Allocator, copies:
     return;
 }
 
-/// Is where a virtual register lives after allocation.
 struct Loc {
     reg: i64,
     slot: i64,
-    // Set when the register is remade from its one definition, def.
     remat: bool,
     def: MInst,
 }
@@ -2843,7 +2582,6 @@ fn loc_of(phys: &array::Array<i64>, spill: &array::Array<i64>, remat: &array::Ar
     return reg_loc(phys.get(id) orelse 0 - 1);
 }
 
-/// Returns the definition of a remade register writing into target.
 fn remade(place: Loc, target: i64) -> MInst {
     var inst = place.def;
     inst.rd = target;
@@ -2870,11 +2608,6 @@ fn spill_store(reg: i64, slot: i64) -> MInst {
     return inst;
 }
 
-/// Replaces every virtual register by its location, loading spilled reads
-/// into scratch registers, storing spilled writes back and remaking the
-/// remade ones; saves the caller-saved registers live across each cold
-/// call around it; and turns each parallel copy into moves. The blocks are
-/// walked in layout order, the order the positions were counted in.
 fn rewrite(
     allocator: Allocator,
     func: &var MFunction,
@@ -2966,8 +2699,6 @@ fn rewrite(
     return;
 }
 
-/// Maps one read operand: a spilled one is loaded into the next scratch
-/// register, once per instruction.
 fn map_read(
     allocator: Allocator,
     reg: i64,
@@ -3069,7 +2800,6 @@ fn rewrite_inst(
     return out.append(allocator, fixed);
 }
 
-/// Is one pending move of a parallel copy, by location.
 struct Move {
     dst: Loc,
     src: Loc,
@@ -3077,8 +2807,6 @@ struct Move {
     src_imm: bool,
 }
 
-/// Reports whether a move reads no location: an immediate or a remade
-/// register.
 fn reads_nothing(item: Move) -> bool {
     return item.src_imm or item.src.remat;
 }
@@ -3131,8 +2859,6 @@ fn emit_move(allocator: Allocator, item: Move, out: &var array::Array<MInst>) ->
     return out.append(allocator, inst);
 }
 
-/// Turns a parallel copy into moves: a move goes out once nothing pending
-/// still reads its destination, and a cycle is broken through x17.
 fn lower_copies(
     allocator: Allocator,
     copies: &array::Array<Copy>,
@@ -3185,8 +2911,6 @@ fn lower_copies(
         if emitted {
             continue;
         }
-        // Every destination is still read: the rest are cycles. Save one
-        // destination in x17 and read it from there.
         let first = pending.get_or_panic(0);
         let temp = reg_loc(scratch1());
         try emit_move(allocator, Move { dst: temp, src: first.dst, imm: 0, src_imm: false }, out);

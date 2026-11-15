@@ -5,14 +5,6 @@ import std::map;
 import std::mem;
 import std::string;
 
-// The passes over one function's body text that keep an optional or an error
-// union from reaching LLVM as a phi of the whole aggregate. The lines are
-// offsets into the body, the pieces of a line are offsets too, and the result
-// is written straight to the caller's String through a LineWriter, so no line
-// is copied.
-
-/// Writes lines joined by newlines: a newline before every line but the first.
-/// A text holding newlines of its own is several lines written at once.
 struct LineWriter {
     wrote: bool,
 }
@@ -25,8 +17,6 @@ fn (self: &var LineWriter) line(allocator: Allocator, out: &var string::String, 
     return out.append_bytes(allocator, text);
 }
 
-/// Is one `[ value, %block ]` arm of a phi, as offsets into the line it was
-/// read from.
 struct PhiArm {
     value_start: i64,
     value_end: i64,
@@ -34,7 +24,6 @@ struct PhiArm {
     block_end: i64,
 }
 
-/// Is a phi line taken apart, as offsets into the line.
 struct PhiParts {
     result_end: i64,
     type_start: i64,
@@ -42,15 +31,10 @@ struct PhiParts {
     arms_start: i64,
 }
 
-/// The longest body whose returns are gathered when more than one place names
-/// the function: LLVM copies a function one place calls into that caller
-/// whatever its size.
 fn inlinable_body_lines() -> i64 {
     return 100;
 }
 
-/// Counts the places in the module that name each function: a call, a call a
-/// cleanup makes, or taking its address.
 fn (self: &var Emitter) count_references(module: &ir::Module) -> !void {
     var index = 0;
     while module.functions.get(index) |function| {
@@ -80,7 +64,6 @@ fn (self: &var Emitter) count_references(module: &ir::Module) -> !void {
     return;
 }
 
-/// Counts the function one operation names, if it names one.
 fn (self: &var Emitter) count_reference(module: &ir::Module, op: ir::Op, operand: ir::Name) -> !void {
     if op != ir::Op::Call and op != ir::Op::FuncAddr {
         return;
@@ -94,15 +77,10 @@ fn (self: &var Emitter) count_reference(module: &ir::Module, op: ir::Op, operand
     return self.references.insert(self.allocator, bytes, 1);
 }
 
-/// The block every return of an aggregate goes through once the returns are
-/// gathered into one.
 fn return_join_label() -> []u8 {
     return "kizu.return.join";
 }
 
-/// Returns the offset of needle in text at or after from. A body is tens of
-/// kilobytes and is searched once per function, so the first byte is what
-/// rules a position out.
 fn find_bytes(text: []u8, needle: []u8, from: i64) -> ?i64 {
     let length = mem::len(needle);
     let size = mem::len(text);
@@ -122,8 +100,6 @@ fn find_bytes(text: []u8, needle: []u8, from: i64) -> ?i64 {
     return null;
 }
 
-/// Reports whether text holds more than limit newlines, stopping at the first
-/// one past it.
 fn more_lines_than(text: []u8, limit: i64) -> bool {
     var count = 0;
     var index = 0;
@@ -140,7 +116,6 @@ fn more_lines_than(text: []u8, limit: i64) -> bool {
     return false;
 }
 
-/// Reports whether a body line is a phi.
 fn is_phi_line(line: []u8) -> bool {
     if phi_parts(line) |_| {
         return true;
@@ -148,8 +123,6 @@ fn is_phi_line(line: []u8) -> bool {
     return false;
 }
 
-/// Counts the lines past the first that start with prefix: a line past the
-/// first is what follows a newline.
 fn count_lines_after_first_starting_with(text: []u8, prefix: []u8) -> i64 {
     var count = 0;
     var start = line_end(text, 0) + 1;
@@ -163,21 +136,17 @@ fn count_lines_after_first_starting_with(text: []u8, prefix: []u8) -> i64 {
     return count;
 }
 
-/// Reports whether a body line opens a block.
 fn is_label_line(line: []u8) -> bool {
     let length = mem::len(line);
     return length > 0 and line[length - 1] == cast<u8>(58) and !mem::starts_with(line, " ");
 }
 
-/// Reports whether a body line is the instruction a block ends with.
 fn is_terminator_line(line: []u8) -> bool {
     return mem::starts_with(line, "  br ") or mem::starts_with(line, "  ret ") or
         mem::starts_with(line, "  switch ") or mem::starts_with(line, "  indirectbr ") or
         mem::equal_bytes(line, "  unreachable");
 }
 
-/// Splits a phi line into its result, its type and the text of its arms; null
-/// for a line that is not a phi.
 fn phi_parts(line: []u8) -> ?PhiParts {
     if !mem::starts_with(line, "  %") {
         return null;
@@ -188,8 +157,6 @@ fn phi_parts(line: []u8) -> ?PhiParts {
     return PhiParts { result_end: marker, type_start: type_start, type_end: space, arms_start: space + 1 };
 }
 
-/// Reads the arms of a phi from the text after its type. The offsets are into
-/// line.
 fn parse_phi_arms(allocator: Allocator, line: []u8, start: i64, arms: &var array::Array<PhiArm>) -> !void {
     var at = start;
     while true {
@@ -211,7 +178,6 @@ fn parse_phi_arms(allocator: Allocator, line: []u8, start: i64, arms: &var array
     return;
 }
 
-/// Collects the lines of a body.
 fn body_lines(allocator: Allocator, body: []u8, lines: &var array::Array<LineSpan>) -> !void {
     var start = 0;
     while start <= mem::len(body) {
@@ -222,11 +188,7 @@ fn body_lines(allocator: Allocator, body: []u8, lines: &var array::Array<LineSpa
     return;
 }
 
-/// Reports whether some block goes on after it has trapped.
 fn has_unreachable_tail(body: []u8) -> bool {
-    // The trap is searched for between two newlines; the line after it is what
-    // says whether the block went on. No instruction but the trap starts with
-    // `u`, so a line is ruled out by its third byte.
     let size = mem::len(body);
     var index = 0;
     while index < size {
@@ -245,10 +207,6 @@ fn has_unreachable_tail(body: []u8) -> bool {
     return false;
 }
 
-/// Removes what a block says after it has trapped, and the phi arms that named
-/// it. A trap ends the block -- the instructions the source wrote after a
-/// panic cannot run, and a jump that cannot be taken is not an edge -- so a
-/// phi that still names the block claims a predecessor the block no longer is.
 fn drop_unreachable_tails(allocator: Allocator, body: []u8, out: &var string::String) -> !void {
     if !has_unreachable_tail(body) {
         return out.append_bytes(allocator, body);
@@ -272,7 +230,6 @@ fn drop_unreachable_tails(allocator: Allocator, body: []u8, out: &var string::St
             block_end = span.end - 1;
             dead = false;
         } else {
-            // The empty line is the body's last newline, not an instruction.
             if dead and mem::len(line) > 0 {
                 continue;
             }
@@ -308,8 +265,6 @@ fn drop_unreachable_tails(allocator: Allocator, body: []u8, out: &var string::St
                 live = live + 1;
             }
         }
-        // A phi with no arm left is in a block nothing reaches; it keeps what
-        // it said.
         if live == 0 or live == arms.len() {
             try writer.line(allocator, out, line);
             continue;
@@ -343,10 +298,6 @@ fn drop_unreachable_tails(allocator: Allocator, body: []u8, out: &var string::St
     return;
 }
 
-/// Reports whether a payload type has no bytes. A phi of a type with no bytes
-/// is one the code generator at -O0 does not lower, and a field that carries
-/// nothing is no reason to split the value it is in, so an aggregate holding
-/// one is left whole.
 fn (self: &Emitter) occupies_nothing(module: &ir::Module, typ_name: []u8) -> !bool {
     if try self.type_layout(module, typ_name) |layout| {
         return layout.size == 0;
@@ -354,10 +305,6 @@ fn (self: &Emitter) occupies_nothing(module: &ir::Module, typ_name: []u8) -> !bo
     return false;
 }
 
-/// Records the field types one declared aggregate holds: a tag, then a payload
-/// when middle is not empty, then last when it is not empty. They are kept as
-/// the text between the braces of the declaration, which is what splitting it
-/// along ", " gives back.
 fn (self: &var Emitter) remember_aggregate_name(name: ir::Name, first: []u8, middle: ir::Name, last: []u8) -> !void {
     var key = try self.names.copy(name);
     defer key.deinit(self.allocator);
@@ -383,8 +330,6 @@ fn (self: &var Emitter) remember_aggregate_name(name: ir::Name, first: []u8, mid
     return self.aggregates.insert(self.allocator, key_bytes, interned);
 }
 
-/// Appends the field types of a declared aggregate to fields; false when the
-/// type is not one.
 fn (self: &Emitter) aggregate_fields(name: []u8, fields: &var array::Array<LineSpan>, text: &var string::String) -> !bool {
     let interned = self.aggregates.get(name) orelse return false;
     let retained = ir::name_text(&self.names, interned);
@@ -402,8 +347,6 @@ fn (self: &Emitter) aggregate_fields(name: []u8, fields: &var array::Array<LineS
     return true;
 }
 
-/// Gathers the returns of a function that answers an optional or error union
-/// from more than one place into one return, built from one phi per field.
 fn (self: &var Emitter) unify_aggregate_returns(
     body: []u8,
     name: []u8,
@@ -415,9 +358,6 @@ fn (self: &var Emitter) unify_aggregate_returns(
     var field_text = string::new(self.allocator);
     defer field_text.deinit(self.allocator);
     let known = try self.aggregate_fields(return_type, &var fields, &var field_text);
-    // A split unit cannot count the places the program names a function
-    // without reading the other units, and is compiled for a debug build,
-    // which inlines nothing; it treats every function as named twice.
     let one_caller = !self.split and (self.references.get(name) orelse 0) == 1;
     if !known or (!one_caller and more_lines_than(body, inlinable_body_lines())) {
         return out.append_bytes(self.allocator, body);
@@ -436,8 +376,6 @@ fn (self: &var Emitter) unify_aggregate_returns(
     var lines = array::new<LineSpan>(allocator);
     defer lines.deinit(allocator);
     try body_lines(allocator, body, &var lines);
-    // A last empty line is not written; the lines are written as they come, so
-    // that one is held back.
     var last = lines.len();
     if lines.get(last - 1) |span| {
         if span.start == span.end {
@@ -570,29 +508,19 @@ fn (self: &var Emitter) unify_aggregate_returns(
     return writer.line(allocator, out, "");
 }
 
-/// Is what one phi of an aggregate becomes: the line it was on, the phis per
-/// field and the instructions that put the fields back together after the
-/// block's phis, both as spans of the pass's shared text.
 struct SplitPhi {
     line: i64,
     phis: LineSpan,
     builds: LineSpan,
 }
 
-/// Is one field read an arm of a split phi needs at the end of the block it
-/// arrives from: the block as a span of the body and the instruction as a span
-/// of the pass's shared text.
 struct FieldRead {
     block: LineSpan,
     text: LineSpan,
 }
 
-/// Rewrites every phi of an optional or error union in one function body into
-/// one phi per field and an assembly of the result.
 fn (self: &var Emitter) split_aggregate_phis(body: []u8, out: &var string::String) -> !void {
     let allocator = self.allocator;
-    // The emitter records writing a phi of either, which answers whether the
-    // body holds one without searching it.
     if !self.wrote_aggregate_phi {
         return out.append_bytes(allocator, body);
     }
@@ -691,8 +619,6 @@ fn (self: &var Emitter) split_aggregate_phis(body: []u8, out: &var string::Strin
             field = field + 1;
         }
         let builds_end = text.len();
-        // The reads are written in this order: every arm of the first field,
-        // then every arm of the next.
         field = 0;
         while fields.get(field) |_| {
             var arm = 0;
@@ -727,8 +653,6 @@ fn (self: &var Emitter) split_aggregate_phis(body: []u8, out: &var string::Strin
     let shared = text.as_bytes();
     var writer = LineWriter { wrote: false };
     var block = LineSpan { start: 0, end: 0 };
-    // The phis have to lead their block, so what assembles a split one waits
-    // until the block's last phi has been written.
     var pending = array::new<LineSpan>(allocator);
     defer pending.deinit(allocator);
     var next_split = 0;
@@ -771,7 +695,6 @@ fn (self: &var Emitter) split_aggregate_phis(body: []u8, out: &var string::Strin
     return;
 }
 
-/// Appends `.split<n><suffix><field>` to a split phi's result name.
 fn append_split_name(allocator: Allocator, text: &var string::String, split: i64, suffix: []u8, field: i64) -> !void {
     try text.append_bytes(allocator, ".split");
     try fmt::append_i64(allocator, text, split);
@@ -779,7 +702,6 @@ fn append_split_name(allocator: Allocator, text: &var string::String, split: i64
     return fmt::append_i64(allocator, text, field);
 }
 
-/// Appends `.split<n>.arm<arm>.f<field>` to a split phi's result name.
 fn append_arm_name(allocator: Allocator, text: &var string::String, split: i64, arm: i64, field: i64) -> !void {
     try text.append_bytes(allocator, ".split");
     try fmt::append_i64(allocator, text, split);
@@ -789,8 +711,6 @@ fn append_arm_name(allocator: Allocator, text: &var string::String, split: i64, 
     return fmt::append_i64(allocator, text, field);
 }
 
-/// Records that the phi about to be written is of an optional or error union,
-/// so split_aggregate_phis need not search the body for one.
 fn (self: &var Emitter) note_phi_type(phi_type: ir::Name) -> !void {
     var spelled = try self.names.copy(phi_type);
     defer spelled.deinit(self.allocator);

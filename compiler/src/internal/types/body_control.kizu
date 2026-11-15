@@ -8,15 +8,12 @@ import std::mem;
 import std::sort;
 import std::string;
 
-// Identifies the tagged type a match runs over: an enum (or the tag view of
-// an error set) or a union.
 union MatchTarget {
     Enum(EnumHandle),
     Union(UnionHandle),
     ErrorSet(ErrorSetHandle),
 }
 
-// Validates a branch and tracks whether both arms return.
 fn (self: &var Checker) check_if_stmt(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -72,11 +69,6 @@ fn (self: &var Checker) check_if_stmt(
     return null;
 }
 
-// Types an if condition and binds what it captures: a bool condition binds
-// nothing, an optional binds its payload into the consequence, an error union
-// binds its success payload there and its failure member into the alternative,
-// and a container accessor binds the payload borrow. Statement and expression
-// forms share it.
 fn (self: &var Checker) bind_if_captures(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -128,10 +120,6 @@ fn (self: &var Checker) bind_if_captures(
     return self.bind_condition_capture("if", capture, cond, consequence);
 }
 
-// Types an error union if condition: the success payload binds into the
-// consequence, and `else |err|` binds the error member into the alternative
-// (SPEC §11.1). `else |err|` is required because leaving it off would drop
-// the failure silently.
 fn (self: &var Checker) bind_error_union_captures(
     capture: []u8,
     err_capture: []u8,
@@ -189,9 +177,6 @@ fn (self: &var Checker) bind_error_union_captures(
     return self.require_scope_definition(err_capture, defined);
 }
 
-// Types an if/while condition: with a capture the condition must be an
-// optional and the payload binds into the branch scope; without one it must
-// be bool.
 fn (self: &var Checker) bind_condition_capture(
     kind: []u8,
     capture: []u8,
@@ -226,8 +211,6 @@ fn (self: &var Checker) bind_condition_capture(
     return self.require_scope_definition(capture, defined);
 }
 
-// Handles an array/map at/at_mut capture condition: the capture binds the
-// payload borrow directly, carrying the container's provenance.
 fn (self: &var Checker) bind_container_borrow_capture(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -264,9 +247,6 @@ fn (self: &var Checker) bind_container_borrow_capture(
     return self.require_scope_definition(capture, defined);
 }
 
-// Types a container borrow capture condition and reports whether the
-// condition was one; a call producing any other type is typed by the generic
-// condition path.
 fn (self: &var Checker) check_container_borrow_condition(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -309,7 +289,6 @@ fn (self: &var Checker) check_container_borrow_condition(
     return null;
 }
 
-// Validates loop condition and body types.
 fn (self: &var Checker) check_while_stmt(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -356,7 +335,6 @@ fn (self: &var Checker) check_while_stmt(
     return null;
 }
 
-// Validates a bounded integer range loop.
 fn (self: &var Checker) check_for_stmt(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -396,7 +374,6 @@ fn (self: &var Checker) check_for_stmt(
     return null;
 }
 
-// Validates the start and end expressions for a range loop.
 fn (self: &var Checker) check_for_bounds(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -424,8 +401,6 @@ fn (self: &var Checker) check_for_bounds(
     return null;
 }
 
-// Returns the named set of tags a match can run over. An enum is one, and so
-// is an error set: matching a failure asks which member of the set it is.
 fn (self: &Checker) tagged_type(name: []u8) -> ?EnumHandle {
     if self.metadata.enums_by_name.get(name) |handle| {
         return handle;
@@ -438,7 +413,6 @@ fn (self: &Checker) tagged_type(name: []u8) -> ?EnumHandle {
     return null;
 }
 
-// Resolves the tagged type or union a match value belongs to.
 fn (self: &Checker) match_target(value_type: Type) -> ?MatchTarget {
     if value_type.node |handle| {
         let entry = self.types.entries.at(handle);
@@ -456,8 +430,6 @@ fn (self: &Checker) match_target(value_type: Type) -> ?MatchTarget {
     return null;
 }
 
-// Returns the error set a match target runs over, or null for an enum or
-// union target.
 fn match_error_set(target: MatchTarget) -> ?ErrorSetHandle {
     match target {
         ErrorSet(handle) => return handle,
@@ -465,7 +437,6 @@ fn match_error_set(target: MatchTarget) -> ?ErrorSetHandle {
     }
 }
 
-// Validates exhaustive simple enum tag matches.
 fn (self: &var Checker) check_match_stmt(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -506,7 +477,6 @@ fn (self: &var Checker) check_match_stmt(
     }
 }
 
-// Validates tag patterns and return flow for match arms.
 fn (self: &var Checker) check_match_arms(
     allocator: Allocator,
     tree: &var ast::Ast,
@@ -550,9 +520,6 @@ fn (self: &var Checker) check_match_arms(
             wildcard = true;
         } else {
             if match_error_set(target) |error_handle| {
-                // An error arm is counted under the member value it resolves
-                // to, so two spellings of one member collide and two members
-                // that share a spelling do not (ADR-0127).
                 var key = string::new(self.allocator);
                 errdefer key.deinit(self.allocator);
                 if try self.error_match_arm_value(tree, error_handle, arm, &var key) |problem| {
@@ -614,8 +581,6 @@ fn (self: &var Checker) check_match_arms(
     return null;
 }
 
-// Indexes by tag the variants a `comptime match` arm body is written against.
-// A match written by hand carries no capture and binds nothing.
 fn (self: &var Checker) match_arm_variants(
     allocator: Allocator,
     tree: &ast::Ast,
@@ -647,8 +612,6 @@ fn (self: &var Checker) match_arm_variants(
     return null;
 }
 
-// Selects the variant an expanded arm is written against; an arm without one
-// binds an empty record, the way an absent map entry reads.
 fn (self: &var Checker) match_arm_meta_field(
     arm_variants: &map::Map<[]u8, MetaFieldHandle>,
     tag: []u8
@@ -659,7 +622,6 @@ fn (self: &var Checker) match_arm_meta_field(
     return self.retain_meta_field(empty_type(), "", empty_type(), false);
 }
 
-// Lists an enum's tags or a union's variants in declaration order.
 fn (self: &var Checker) meta_variants(
     tree: &ast::Ast,
     type_arg: []u8,
@@ -765,7 +727,6 @@ fn (self: &Checker) union_variant_names(
     return;
 }
 
-// Checks the restricted fallback pattern shape.
 fn (self: &Checker) validate_wildcard_match_arm(
     tree: &ast::Ast,
     arm: &ast::MatchArm,
@@ -788,7 +749,6 @@ fn (self: &Checker) validate_wildcard_match_arm(
     return null;
 }
 
-// Validates a match arm pattern and returns its payload type.
 fn (self: &Checker) match_payload_type(
     tree: &ast::Ast,
     target: MatchTarget,
@@ -836,8 +796,6 @@ fn (self: &Checker) match_payload_type(
             return null;
         },
         ErrorSet(_) => {
-            // Error arms resolve through error_match_arm_value; this path
-            // types only enum and union arms.
             out.* = empty_type();
             return null;
         },
@@ -858,7 +816,6 @@ fn (self: &Checker) union_variant_payload(handle: UnionHandle, tag: []u8) -> ?Ty
     return null;
 }
 
-// Appends the matched enum or union type name.
 fn (self: &Checker) append_match_type_name(
     out: &var string::String,
     tree: &ast::Ast,
@@ -889,7 +846,6 @@ fn (self: &Checker) append_match_type_name(
     return;
 }
 
-// Returns the number of variants in a match target.
 fn (self: &Checker) match_variant_count(target: MatchTarget) -> i64 {
     match target {
         Enum(handle) => {
@@ -913,7 +869,6 @@ fn (self: &Checker) match_variant_count(target: MatchTarget) -> i64 {
     }
 }
 
-// Lists the variants a match does not cover, sorted so the message is stable.
 fn (self: &Checker) missing_match_variants(
     target: MatchTarget,
     seen: &map::Map<[]u8, bool>,
@@ -954,10 +909,6 @@ fn (self: &Checker) missing_match_variants(
     return sort::strings(out);
 }
 
-// Lists the member values an error match does not cover. A member whose bare
-// name is unambiguous is listed bare; one that reaches the set from more
-// than one declaring set is listed qualified, the way its arm has to be
-// written.
 fn (self: &Checker) missing_error_match_values(
     handle: ErrorSetHandle,
     seen: &map::Map<[]u8, bool>,
@@ -999,9 +950,6 @@ fn (self: &Checker) missing_error_match_values(
     return;
 }
 
-// Returns the byte index where the member name of a value key starts: the
-// declaring set is everything before the last `::` separator, and a set name
-// may itself be module-qualified.
 fn error_value_member_start(key: []u8) -> i64 {
     var index = mem::len(key) - 2;
     while index >= 0 {
@@ -1013,10 +961,6 @@ fn error_value_member_start(key: []u8) -> i64 {
     return 0;
 }
 
-// Resolves one error match arm to the member value it covers. A bare arm must
-// name exactly one declaring set; a qualified arm names it explicitly, which a
-// combined set needs when two of its sets declare the same member name (SPEC
-// §11.2).
 fn (self: &var Checker) error_match_arm_value(
     tree: &ast::Ast,
     handle: ErrorSetHandle,
@@ -1095,7 +1039,6 @@ fn (self: &var Checker) error_match_arm_value(
     return null;
 }
 
-// Resolves a qualified error match arm against the set it names.
 fn (self: &var Checker) qualified_error_match_arm_value(
     handle: ErrorSetHandle,
     name: []u8,
@@ -1155,8 +1098,6 @@ fn (self: &var Checker) qualified_error_match_arm_value(
     return null;
 }
 
-// Appends the declaring sets that contribute a bare member name to a set, in
-// value order.
 fn (self: &Checker) error_member_origins(
     handle: ErrorSetHandle,
     tag: []u8,
@@ -1226,8 +1167,6 @@ fn (self: &Checker) match_not_exhaustive_error(
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-// Types `cond orelse return/break/continue`: on null the guard leaves the
-// enclosing function or loop, so the guard itself always yields the payload.
 fn (self: &var Checker) check_orelse_guard_expr(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1287,9 +1226,6 @@ fn (self: &var Checker) check_orelse_guard_expr(
     return null;
 }
 
-// Types `union catch return/break/continue`: on failure the guard leaves
-// the enclosing function or loop, so the guard itself always yields the
-// success payload.
 fn (self: &var Checker) check_catch_guard_expr(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1343,7 +1279,6 @@ fn (self: &var Checker) check_catch_guard_expr(
     return null;
 }
 
-// Validates an if expression and returns the common branch type.
 fn (self: &var Checker) check_if_expr(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1394,7 +1329,6 @@ fn (self: &var Checker) check_if_expr(
     return null;
 }
 
-// Validates a block used as an expression branch.
 fn (self: &var Checker) check_block_value(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1437,7 +1371,6 @@ fn block_statement_count(tree: &ast::Ast, block: ast::Block) -> i64 {
     }
 }
 
-// Computes the value type of a statement in expression-tail position.
 fn (self: &var Checker) check_stmt_value(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1450,7 +1383,6 @@ fn (self: &var Checker) check_stmt_value(
     return null;
 }
 
-// Computes a tail statement's value type by its form.
 fn (self: &var Checker) check_stmt_value_form(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1494,7 +1426,6 @@ fn (self: &var Checker) check_stmt_value_form(
     }
 }
 
-// Validates an exhaustive match expression and its arm result type.
 fn (self: &var Checker) check_match_expr(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -1514,12 +1445,6 @@ fn (self: &var Checker) check_match_expr(
     return self.check_match_expr_arms(self.allocator, tree, scope, &arms, target, value_expr, out);
 }
 
-// Binds one arm's payload. Matched through a mutable borrow place -- a `&var`
-// borrow binding by name, or a field path rooted at a `var` local or a `&var`
-// borrow -- a declared aggregate or owner payload binds as a `&var` borrow of
-// the payload where it lies, so the arm can call its `&var self` methods (SPEC
-// §6.8). Every other payload binds as before: a copy, or a move out of an
-// owned local (ADR-0090).
 fn (self: &var Checker) define_match_arm_binding(
     tree: &ast::Ast,
     scope: ScopeHandle,
@@ -1540,9 +1465,6 @@ fn (self: &var Checker) define_match_arm_binding(
     return self.scopes.define(arm_scope, binding, payload, false);
 }
 
-// Names the place a match borrows its payload from mutably, when it does. A
-// `var` local matched by name is not such a place: it owns what it holds, and
-// its payloads move out.
 fn (self: &var Checker) match_payload_reference_root(
     tree: &ast::Ast,
     scope: ScopeHandle,
@@ -1574,9 +1496,6 @@ fn (self: &var Checker) match_payload_reference_root(
     return root;
 }
 
-// Reports whether a payload has an inside a mutable borrow can reach: a
-// declared struct or union, or a type with a deinit contract. Scalars, enums
-// and views copy.
 fn (self: &var Checker) payload_binds_by_reference(payload: Type) -> !bool {
     let retained = try self.types.copy_text(self.allocator, payload);
     defer retained.deinit(self.allocator);
@@ -1585,7 +1504,6 @@ fn (self: &var Checker) payload_binds_by_reference(payload: Type) -> !bool {
         self.owner_type(payload);
 }
 
-// Validates match expression arms and returns their common type.
 fn (self: &var Checker) check_match_expr_arms(
     allocator: Allocator,
     tree: &var ast::Ast,
@@ -1676,7 +1594,6 @@ fn (self: &var Checker) check_match_expr_arms(
     return null;
 }
 
-// Validates one match expression arm and returns its value type.
 fn (self: &var Checker) check_match_expr_arm(
     tree: &var ast::Ast,
     scope: ScopeHandle,

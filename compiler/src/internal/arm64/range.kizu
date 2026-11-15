@@ -1,29 +1,6 @@
 import compiler::internal::ir;
 import std::array;
 
-// Value ranges: the interval each integer value of a function lies in, for
-// the selector to pick a cheaper sequence where the value cannot reach part
-// of its type -- a signed division of a dividend that is never negative is
-// the unsigned one. The interval holds the mathematical value: a signed
-// type's as it is, an unsigned one's below 2^63; a u64 that may reach 2^63
-// has no interval. `+ - *` and `<<` wrap (SPEC §6.9.2), so an operation
-// whose interval leaves its type gives the whole type.
-//
-// A value's interval is the one at its definition, which holds wherever the
-// value is read: an SSA value does not change. At the definition, what the
-// branches on the way in say narrows the operands: a block with one
-// predecessor that branches to it on c knows c, and so does every block it
-// dominates. A phi joins its incoming values, each narrowed by what holds at
-// the end of its predecessor and on the edge from there.
-//
-// The walk repeats over the blocks in reverse postorder until nothing
-// changes. A phi only grows, and from the second walk on a bound of one that
-// grows goes to the end of its type, so a loop counter settles in three.
-// A walk that does not settle in its budget leaves every value unknown.
-
-/// Is the interval of one value: none known yet (a phi's incoming value the
-/// walk has not reached), [lo, hi], or nothing known (a u64 that may reach
-/// 2^63).
 struct Range {
     gen: i64,
     kind: RangeKind,
@@ -37,34 +14,23 @@ enum RangeKind {
     Unknown,
 }
 
-/// Is the bit width and signedness of an integer type; bits is 0 for any
-/// other type.
 struct IntType {
     bits: i64,
     signed: bool,
 }
 
-/// Is what the range walk keeps for the function being selected.
 struct ValueRanges {
     gen: i64,
-    // By name id: the value's interval, and for `/` and `%` the dividend's
-    // where the instruction is.
     values: array::Array<Range>,
     dividends: array::Array<Range>,
-    // By name id: the comparison instruction a bool value is, as an index
-    // into compares, stamped with gen.
     compare_gen: array::Array<i64>,
     compare_at: array::Array<i64>,
     compares: array::Array<ir::Instr>,
-    // By block: its place in reverse postorder (-1 unreached), its
-    // immediate dominator, the first of the facts that hold in it (-1 none),
-    // and its predecessors, pred_list[pred_start[b] .. pred_start[b + 1]].
     place: array::Array<i64>,
     idom: array::Array<i64>,
     facts_at: array::Array<i64>,
     pred_start: array::Array<i64>,
     pred_list: array::Array<i64>,
-    // One fact: the comparison cond is sense, then the fact after it.
     fact_cond: array::Array<ir::Name>,
     fact_sense: array::Array<bool>,
     fact_next: array::Array<i64>,
@@ -89,7 +55,6 @@ fn new_ranges(allocator: Allocator) -> ValueRanges {
     };
 }
 
-// How many walks a function gets, and how many facts a lookup reads.
 fn range_walks() -> i64 {
     return 16;
 }
@@ -118,7 +83,6 @@ fn interval(lo: i64, hi: i64) -> Range {
     return Range { gen: 0, kind: RangeKind::Known, lo: lo, hi: hi };
 }
 
-/// Returns the integer type a type name spells, bits 0 for any other.
 fn int_type(module: &ir::Module, name: ir::Name) -> IntType {
     if module.names.is(name, "i64") or module.names.is(name, "isize") {
         return IntType { bits: 64, signed: true };
@@ -147,7 +111,6 @@ fn int_type(module: &ir::Module, name: ir::Name) -> IntType {
     return IntType { bits: 0, signed: false };
 }
 
-/// Returns the whole of a type: every value it holds.
 fn whole(ty: IntType) -> Range {
     if ty.bits == 64 {
         if ty.signed {
@@ -162,8 +125,6 @@ fn whole(ty: IntType) -> Range {
     return interval(0, top * 2 + 1);
 }
 
-/// Returns [lo, hi] when the type holds all of it, else the whole type: an
-/// operation that leaves the type wraps.
 fn fitted(ty: IntType, lo: i64, hi: i64) -> Range {
     let all = whole(ty);
     if all.kind == RangeKind::Unknown {
@@ -178,16 +139,12 @@ fn fitted(ty: IntType, lo: i64, hi: i64) -> Range {
     return all;
 }
 
-/// Returns the range of a constant of a type as a register holds it.
 fn constant_range(ty: IntType, imm: i64) -> Range {
     if ty.bits == 64 and !ty.signed and imm < 0 {
         return unknown();
     }
     return interval(imm, imm);
 }
-
-// Checked arithmetic on the mathematical values: null when the result
-// leaves i64.
 
 fn add_checked(a: i64, b: i64) -> ?i64 {
     let sum = a + b;
@@ -248,7 +205,6 @@ fn max(a: i64, b: i64) -> i64 {
     return b;
 }
 
-/// Returns 2^n - 1 for the least n it is at least value at, value >= 0.
 fn ones_through(value: i64) -> i64 {
     var mask = 0;
     while mask < value {
@@ -257,7 +213,6 @@ fn ones_through(value: i64) -> i64 {
     return mask;
 }
 
-/// Returns the smallest range holding both.
 fn join(a: Range, b: Range) -> Range {
     if a.kind == RangeKind::Bottom {
         return b;
@@ -281,8 +236,6 @@ fn same_range(a: Range, b: Range) -> bool {
     return a.lo == b.lo and a.hi == b.hi;
 }
 
-// ---- tables keyed by name id ----
-
 fn (self: &ValueRanges) stored(table: &array::Array<Range>, name: ir::Name) -> ?Range {
     let held = table.get(ir::name_id(name)) orelse return null;
     if held.gen != self.gen {
@@ -301,8 +254,6 @@ fn (self: &ValueRanges) store(allocator: Allocator, table: &var array::Array<Ran
     return table.set(id, stamped);
 }
 
-/// Returns the dividend's range where the `/` or `%` naming result is, or
-/// null when none is known.
 fn (self: &ValueRanges) dividend(result: ir::Name) -> ?Range {
     let held = self.stored(&self.dividends, result) orelse return null;
     if held.kind != RangeKind::Known {
@@ -311,14 +262,11 @@ fn (self: &ValueRanges) dividend(result: ir::Name) -> ?Range {
     return held;
 }
 
-/// Reports whether the dividend of the `/` or `%` naming result is never
-/// negative where the instruction is.
 fn (self: &ValueRanges) dividend_non_negative(result: ir::Name) -> bool {
     let held = self.dividend(result) orelse return false;
     return held.lo >= 0;
 }
 
-/// Returns the comparison instruction a bool value is, or null.
 fn (self: &ValueRanges) compare_of(name: ir::Name) -> ?ir::Instr {
     let id = ir::name_id(name);
     let stamp = self.compare_gen.get(id) orelse return null;
@@ -328,14 +276,8 @@ fn (self: &ValueRanges) compare_of(name: ir::Name) -> ?ir::Instr {
     return self.compares.get(self.compare_at.get_or_panic(id));
 }
 
-// ---- the walk ----
-
-/// Works out the ranges of the function being selected; order is its blocks
-/// in reverse postorder.
 fn (self: &var Selector) find_ranges(module: &ir::Module, node: &ir::FunctionNode, order: &array::Array<i64>) -> !void {
     try self.range_blocks(module, node, order);
-    // Mark every result the walk will reach, so a phi reads one it has not
-    // reached yet as nothing rather than as anything.
     var order_index = 0;
     while order.get(order_index) |mir| {
         order_index = order_index + 1;
@@ -360,7 +302,6 @@ fn (self: &var Selector) find_ranges(module: &ir::Module, node: &ir::FunctionNod
     var changed = true;
     while changed {
         if walks == range_walks() {
-            // Not settled: nothing is known.
             self.ranges.gen = self.ranges.gen + 1;
             return;
         }
@@ -398,8 +339,6 @@ fn (self: &var Selector) find_ranges(module: &ir::Module, node: &ir::FunctionNod
     return;
 }
 
-/// Returns next with each bound that moved past old's taken to the end of
-/// the type, so a phi stops growing.
 fn widened(ty: IntType, old: Range, next: Range) -> Range {
     if old.kind != RangeKind::Known or next.kind != RangeKind::Known {
         return next;
@@ -433,7 +372,6 @@ fn (self: &var ValueRanges) note_compare(allocator: Allocator, name: ir::Name, i
     return self.compares.append(allocator, instr);
 }
 
-/// Finds the predecessors, the dominator tree and the facts of each block.
 fn (self: &var Selector) range_blocks(module: &ir::Module, node: &ir::FunctionNode, order: &array::Array<i64>) -> !void {
     let count = node.blocks.len();
     let allocator = self.allocator;
@@ -458,7 +396,6 @@ fn (self: &var Selector) range_blocks(module: &ir::Module, node: &ir::FunctionNo
         try self.ranges.place.set(mir, position);
         position = position + 1;
     }
-    // Predecessors of the reached blocks, counted then filled.
     position = 0;
     while order.get(position) |mir| {
         position = position + 1;
@@ -497,8 +434,6 @@ fn (self: &var Selector) range_blocks(module: &ir::Module, node: &ir::FunctionNo
             }
         }
     }
-    // Immediate dominators by the Cooper-Harvey-Kennedy iteration over the
-    // reverse postorder; idom holds blocks.
     let entry = order.get(0) orelse return;
     try self.ranges.idom.set(entry, entry);
     var changed = true;
@@ -527,8 +462,6 @@ fn (self: &var Selector) range_blocks(module: &ir::Module, node: &ir::FunctionNo
             }
         }
     }
-    // A block entered only by one branch knows its condition; every block
-    // knows what its immediate dominator does.
     position = 1;
     while order.get(position) |mir| {
         position = position + 1;
@@ -546,9 +479,6 @@ fn (self: &var Selector) range_blocks(module: &ir::Module, node: &ir::FunctionNo
     return;
 }
 
-/// Returns what the branch term says on its edge to the block succ: its
-/// condition is true there, or false; null when it is not a branch or both
-/// of its edges go to succ.
 fn edge_sense(selector: &Selector, term: ir::Terminator, succ: i64) -> ?bool {
     if term.op != ir::TermOp::Branch {
         return null;
@@ -589,7 +519,6 @@ fn (self: &ValueRanges) meet(left: i64, right: i64) -> i64 {
     return a;
 }
 
-/// Returns a value's range as it is defined, with nothing narrowed.
 fn (self: &Selector) plain_range(value: ir::Value, ty: IntType) -> Range {
     if self.ranges.stored(&self.ranges.values, value.name) |held| {
         return held;
@@ -601,7 +530,6 @@ fn (self: &Selector) plain_range(value: ir::Value, ty: IntType) -> Range {
     return whole(ty);
 }
 
-/// Returns a value's range where the facts from head on hold.
 fn (self: &Selector) range_under(module: &ir::Module, value: ir::Value, head: i64) -> Range {
     let ty = int_type(module, value.type_name);
     if ty.bits == 0 {
@@ -623,8 +551,6 @@ fn (self: &Selector) range_under(module: &ir::Module, value: ir::Value, head: i6
     return range;
 }
 
-/// Returns range, the range of value, less what the comparison cond being
-/// sense rules out.
 fn (self: &Selector) narrowed_by(module: &ir::Module, value: ir::Value, ty: IntType, range: Range, cond: ir::Name, sense: bool) -> Range {
     if self.ranges.compare_of(cond) |instr| {
         let compare = module.instrs.at(instr.node);
@@ -650,7 +576,6 @@ fn (self: &Selector) narrowed_by(module: &ir::Module, value: ir::Value, ty: IntT
     return range;
 }
 
-/// Is a comparison `value <relation> other`.
 enum Relation {
     None,
     Less,
@@ -705,9 +630,6 @@ fn swapped(relation: Relation) -> Relation {
     }
 }
 
-/// Returns range less what `value <relation> bound` rules out. Both sides
-/// are one type, so an unsigned comparison orders the mathematical values
-/// the same as a signed one.
 fn narrowed(range: Range, relation: Relation, bound: Range) -> Range {
     if bound.kind != RangeKind::Known {
         return range;
@@ -715,8 +637,6 @@ fn narrowed(range: Range, relation: Relation, bound: Range) -> Range {
     var lo = range.lo;
     var hi = range.hi;
     if range.kind == RangeKind::Unknown {
-        // Only an unsigned value has no range: it is at least 0, and an
-        // upper bound makes it one.
         lo = 0;
         hi = i64_max();
     }
@@ -762,14 +682,11 @@ fn narrowed(range: Range, relation: Relation, bound: Range) -> Range {
         return range;
     }
     if lo > hi {
-        // The block cannot be reached; keep what was known.
         return range;
     }
     return interval(lo, hi);
 }
 
-/// Returns a phi's range: its incoming values joined, each where its edge
-/// leaves the predecessor.
 fn (self: &Selector) phi_range(module: &ir::Module, node: &ir::InstrNode, mir: i64, ty: IntType) -> Range {
     var range = bottom();
     var index = 0;
@@ -777,7 +694,6 @@ fn (self: &Selector) phi_range(module: &ir::Module, node: &ir::InstrNode, mir: i
         index = index + 1;
         let pred = self.block(incoming.block);
         if pred < 0 or self.ranges.place.get_or_panic(pred) < 0 {
-            // An edge from a block the entry does not reach brings nothing.
             continue;
         }
         let head = self.ranges.facts_at.get_or_panic(pred);
@@ -794,8 +710,6 @@ fn (self: &Selector) phi_range(module: &ir::Module, node: &ir::InstrNode, mir: i
     return range;
 }
 
-/// Returns a value's range on an edge whose branch says cond is sense, past
-/// the facts from head on.
 fn (self: &Selector) range_on_edge(module: &ir::Module, value: ir::Value, cond: ir::Name, sense: bool, head: i64) -> Range {
     let range = self.range_under(module, value, head);
     if range.kind == RangeKind::Bottom {
@@ -804,7 +718,6 @@ fn (self: &Selector) range_on_edge(module: &ir::Module, value: ir::Value, cond: 
     return self.narrowed_by(module, value, int_type(module, value.type_name), range, cond, sense);
 }
 
-/// Returns the range of an instruction's integer result in the block mir.
 fn (self: &var Selector) instr_range(module: &ir::Module, node: &ir::InstrNode, mir: i64, ty: IntType) -> !Range {
     let head = self.ranges.facts_at.get_or_panic(mir);
     match node.op {
@@ -865,7 +778,6 @@ fn (self: &var Selector) instr_range(module: &ir::Module, node: &ir::InstrNode, 
     }
 }
 
-/// Returns the range of `left op right` of the type ty.
 fn binary_range(module: &ir::Module, op: ir::Name, ty: IntType, left: Range, right: Range) -> Range {
     let known = left.kind == RangeKind::Known and right.kind == RangeKind::Known;
     let constant = right.kind == RangeKind::Known and right.lo == right.hi;
@@ -902,7 +814,6 @@ fn binary_range(module: &ir::Module, op: ir::Name, ty: IntType, left: Range, rig
         return remainder_range(ty, left, right);
     }
     if module.names.is(op, "&") {
-        // Anded with a value that is never negative, a value is at most it.
         var hi = 0 - 1;
         if left.kind == RangeKind::Known and left.lo >= 0 {
             hi = left.hi;
@@ -939,7 +850,6 @@ fn binary_range(module: &ir::Module, op: ir::Name, ty: IntType, left: Range, rig
     return whole(ty);
 }
 
-/// Returns the range of `left / right`, rounding toward zero.
 fn quotient_range(ty: IntType, left: Range, right: Range) -> Range {
     let constant = right.kind == RangeKind::Known and right.lo == right.hi;
     if !ty.signed {
@@ -974,7 +884,6 @@ fn quotient_range(ty: IntType, left: Range, right: Range) -> Range {
     return interval(left.hi / d, left.lo / d);
 }
 
-/// Returns the range of `left % right`, which keeps the sign of left.
 fn remainder_range(ty: IntType, left: Range, right: Range) -> Range {
     let constant = right.kind == RangeKind::Known and right.lo == right.hi;
     if !ty.signed {
@@ -1016,9 +925,6 @@ fn remainder_range(ty: IntType, left: Range, right: Range) -> Range {
     return interval(lo, hi);
 }
 
-/// Returns the range of `left >> right`: arithmetic for a signed type,
-/// logical for an unsigned one, an amount at or past the width leaving the
-/// sign or 0.
 fn shift_right_range(ty: IntType, left: Range, right: Range, constant: bool) -> Range {
     if constant and right.kind == RangeKind::Known {
         var amount = right.lo;
