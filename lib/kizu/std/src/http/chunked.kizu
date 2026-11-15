@@ -1,27 +1,3 @@
-// Chunked transfer decoding.
-//
-// A chunked body is a sequence of `SIZE CRLF DATA CRLF`, ending with a zero
-// size and whatever trailer fields follow it. The size is hex, and it may
-// carry extensions after a `;` that nothing here reads. The trailer section
-// is head-shaped, so the reader that owns the buffer reads it with the head's
-// parser (`Reader.read_trailers`); this decoder stops at the terminator and
-// says so.
-//
-// This is the part of HTTP/1 that request smuggling lives in, so the rules it
-// keeps are the ones that make two messages out of one:
-//
-//   - `Transfer-Encoding` and `Content-Length` together are refused. RFC 9112
-//     says the encoding wins, but a proxy in front that decided the other way
-//     is exactly how one request becomes two. A message that says two things
-//     about its own length does not get to be read.
-//   - `Transfer-Encoding` is refused unless it is exactly `chunked`. A list,
-//     an unknown coding, or `identity` is a message this cannot frame.
-//   - A size that is not hex, or a chunk not followed by CRLF, ends the read.
-//     Nothing is guessed.
-//
-// The decoder is a state machine over a buffer the caller refills, so the
-// same one serves a body read whole and a body handed out a piece at a time.
-
 // ChunkState is where a partly-read body is. `left` is what remains of the
 // chunk being handed out, and the two flags say whether a header has been read
 // and whether the terminator has.
@@ -31,9 +7,6 @@ pub struct ChunkState {
     closing: bool,
     done: bool,
     seen: i64,
-    // How much decoded body this decoder may produce. A body being read into
-    // memory is bounded by what the caller will hold; a body being handed out
-    // a piece at a time is not, because nothing is holding it.
     limit: std::mem::Limit,
 }
 
@@ -97,8 +70,6 @@ fn (self: &var std::http::ChunkState) take(
             return ChunkTake { taken: taken, consumed: at, need_more: false };
         }
         if self.closing {
-            // The terminator is read. What follows is the trailer section,
-            // which is the reader's to read; the data so far goes out now.
             return ChunkTake { taken: taken, consumed: at, need_more: false };
         }
         if !self.started {
@@ -130,7 +101,6 @@ fn (self: &var std::http::ChunkState) take(
             taken = taken + want;
             continue;
         }
-        // The chunk's data is out; the CRLF behind it says so.
         if length - at < 2 {
             return ChunkTake { taken: taken, consumed: at, need_more: true };
         }
@@ -174,9 +144,6 @@ fn (self: &var std::http::ChunkState) read_header(
     return ChunkTake { taken: 0, consumed: line_end + 2, need_more: false };
 }
 
-// chunk_size reads the hex size, stopping at the `;` that starts extensions.
-// Nothing reads the extensions: none of them change the framing, and a value
-// this does not understand is not a reason to refuse a message it can frame.
 fn chunk_size(line: []u8) -> std::http::Failure!i64 {
     var end = std::mem::len(line);
     if std::http::index_of(line, cast<u8>(59), 0) |semicolon| {
@@ -198,14 +165,10 @@ fn chunk_size(line: []u8) -> std::http::Failure!i64 {
     return value;
 }
 
-// chunked_framing reports how a message says its body is framed, and refuses
-// the shapes that let a message mean two things at once.
 fn chunked_framing(headers: &std::http::Headers) -> std::http::Failure!bool {
     if !headers.has("Transfer-Encoding") {
         return false;
     }
-    // Both at once is the classic smuggling pair: RFC 9112 says the encoding
-    // wins, and every proxy that decided otherwise turned one request into two.
     if headers.has("Content-Length") {
         return std::http::Error::ConflictingFraming;
     }

@@ -1,16 +1,3 @@
-// std::http is HTTP/1 over std::net, written in Kizu.
-//
-// The server is a loop you can see. There is no handler registry and no
-// callback: `accept` hands back one Exchange -- the request that arrived and
-// the response to fill in -- and the program decides what to do with it. That
-// is the shape Kizu can honestly offer today (a function value cannot take a
-// borrow, so a handler could not be given the request), and it is also the
-// shape that keeps the control flow in the caller's source.
-//
-// `accept` serves one connection at a time. An evented caller can instead move
-// each `accept_connection` result into a TaskSet worker, or let `first` / `next`
-// keep the connection table inside Server (SPEC §15, ADR-0146).
-
 pub error Error {
     // The request line or a header did not parse.
     MalformedRequest,
@@ -91,8 +78,6 @@ pub enum Version {
     Http11,
 }
 
-// version_text renders a version the way a request line and a status line
-// spell it.
 fn version_text(version: std::http::Version) -> []u8 {
     return match version {
         Http10 => "HTTP/1.0",
@@ -209,8 +194,6 @@ pub fn append_hex(
         try out.append_byte(allocator, cast<u8>(48));
         return;
     }
-    // The most significant digit first, so nothing has to be held and
-    // reversed: find its place value, then walk down.
     var place = 1;
     var probe = value;
     while probe >= 16 {
@@ -239,23 +222,13 @@ pub union Progress {
     Closed,
 }
 
-// Phase is where a connection is in reading the message it is on. It is not
-// public: a caller reads `Progress`, which says what to do, rather than a
-// state, which says what happened.
 union Phase {
-    // A TLS handshake still under way: the connection reads no message
-    // until it is done, and the head's deadline covers it.
     Handshaking,
     ReadingHead,
     Ready,
-    // Closing in stages: the writing side is shut, and what the peer still
-    // sends is read and dropped until it closes too or the time runs out.
     Lingering,
 }
 
-// arm_read / arm_write turn one phase's duration into the deadline that phase
-// runs under. Zero is the caller saying there is no deadline, which is why it
-// clears rather than asking for a moment that has already gone by.
 fn arm_read(stream: &var std::http::Stream, millis: i64) -> void {
     if millis <= 0 {
         stream.clear_read_deadline();
@@ -381,8 +354,6 @@ pub fn content_type_for(path: []u8) -> []u8 {
     return "application/octet-stream";
 }
 
-// extension_of is the run after the last `.` of the last path segment. A dot
-// in a directory name is not an extension, and a leading dot is a name.
 fn extension_of(path: []u8) -> []u8 {
     let length = std::mem::len(path);
     var start = 0;
@@ -409,8 +380,6 @@ fn extension_of(path: []u8) -> []u8 {
     return path[dot + 1..length];
 }
 
-// ascii_lower folds one byte the way HTTP compares header names: A-Z only,
-// never the locale's idea of case.
 fn ascii_lower(byte: u8) -> u8 {
     if byte >= cast<u8>(65) and byte <= cast<u8>(90) {
         return byte + cast<u8>(32);
@@ -439,8 +408,6 @@ fn is_digit(byte: u8) -> bool {
     return byte >= cast<u8>(48) and byte <= cast<u8>(57);
 }
 
-// is_token_byte reports whether a byte may appear in an HTTP token -- a method
-// name or a header name. The set is RFC 9110's tchar.
 fn is_token_byte(byte: u8) -> bool {
     if byte >= cast<u8>(48) and byte <= cast<u8>(57) {
         return true;
@@ -451,7 +418,6 @@ fn is_token_byte(byte: u8) -> bool {
     if byte >= cast<u8>(97) and byte <= cast<u8>(122) {
         return true;
     }
-    // ! # $ % & ' * + - . ^ _ ` | ~
     if byte == cast<u8>(33) or byte == cast<u8>(35) or byte == cast<u8>(36) {
         return true;
     }
@@ -470,9 +436,6 @@ fn is_token_byte(byte: u8) -> bool {
     return false;
 }
 
-// is_value_byte reports whether a byte may appear in a header value: visible
-// ASCII, space, and tab. A control byte in a value is how a response gets
-// split in two, so it is refused rather than passed on.
 fn is_value_byte(byte: u8) -> bool {
     if byte == cast<u8>(9) {
         return true;
@@ -480,9 +443,6 @@ fn is_value_byte(byte: u8) -> bool {
     return byte >= cast<u8>(32) and byte != cast<u8>(127);
 }
 
-// append_crlf writes the two bytes that end every line of an HTTP message.
-// Kizu string literals carry no escapes (SPEC §7), so CR and LF are written as
-// the numbers they are, in the one place that has to know them.
 fn append_crlf(
     allocator: Allocator,
     out: &var std::string::String
@@ -496,7 +456,6 @@ fn is_space_or_tab(byte: u8) -> bool {
     return byte == cast<u8>(32) or byte == cast<u8>(9);
 }
 
-// index_of finds the first `needle` at or after `from`.
 fn index_of(bytes: []u8, needle: u8, from: i64) -> ?i64 {
     let length = std::mem::len(bytes);
     var index = from;
@@ -512,8 +471,6 @@ fn index_of(bytes: []u8, needle: u8, from: i64) -> ?i64 {
     return null;
 }
 
-// parse_decimal reads a non-negative decimal number, refusing anything that is
-// not entirely digits and anything that would overflow.
 fn parse_decimal(text: []u8) -> ?i64 {
     let length = std::mem::len(text);
     if length == 0 or length > 18 {

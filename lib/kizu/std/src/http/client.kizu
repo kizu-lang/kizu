@@ -1,13 +1,3 @@
-// The client is two shapes over one connection. `get` / `post` / `fetch` are
-// one call: build the request, open the connection, read the answer whole.
-// `Connection` is the same thing taken apart, for an answer too big to hold or
-// a stream that is not a plain socket.
-//
-// There is no connection pool and no redirect following. Both are policy --
-// how long to keep a socket, whether a 301 to another host is the same
-// request -- and policy a library picks is policy the caller cannot see. What
-// this returns is what the server said.
-
 // A ClientResponse is the head that came back, owned. It is a different type
 // from std::http::Response, because they are different things: one is what a
 // server is still building, the other is what a client already has.
@@ -149,8 +139,6 @@ fn (self: &var std::http::Connection) send_with(
     return;
 }
 
-// content_type_headers is the head the content-type spellings send: one
-// field when a type is given, none when it is empty.
 fn content_type_headers(
     allocator: Allocator,
     content_type: []u8
@@ -175,15 +163,9 @@ fn (self: &var std::http::Connection) receive(
     method: []u8,
     limits: std::http::Limits
 ) -> std::http::Failure!std::http::ClientResponse {
-    // The answer before this one has to have been read to its end. What is
-    // left of its body would be read as this head, and the failure that made
-    // would blame the peer for what is the caller's bug -- the same rule the
-    // server's `next` keeps with `ExchangeUnfinished`.
     if !self.finished() {
         return std::http::Error::ExchangeUnfinished;
     }
-    // A new message. The last one's framing, decoder state and trailers are
-    // done with; what the peer sent behind it stays, and is read first.
     try self.reader.reopen(allocator);
     self.reader.arm_read(limits.read_head_millis);
     let head_length = try self.take_head(io, allocator, limits);
@@ -251,15 +233,10 @@ fn (self: &var std::http::Connection) bind_body(
     response: &std::http::ClientResponse,
     method: []u8
 ) -> std::http::Failure!void {
-    // A 101 hands the connection over: what follows the head is the protocol
-    // the peer switched to, not this message's body, and it is the caller's
-    // to read until the close and to write with `write_all`.
     if response.status == 101 {
         self.reader.bind_until_close();
         return;
     }
-    // A HEAD answer carries the length the body would have had and none of it,
-    // and 1xx / 204 / 304 carry no body at all.
     if std::mem::equal_bytes(method, "HEAD") {
         self.reader.bind_length(0);
         return;
@@ -268,9 +245,6 @@ fn (self: &var std::http::Connection) bind_body(
         self.reader.bind_length(0);
         return;
     }
-    // A message that says two things about its own length is what turns one
-    // answer into two, so this is where the refusal comes from rather than a
-    // guess about which framing wins.
     if try std::http::chunked_framing(&response.headers) {
         self.reader.bind_chunked(std::mem::Limit::Unlimited);
         return;
@@ -351,8 +325,6 @@ fn (self: &var std::http::Connection) read_body(
     response: &var std::http::ClientResponse,
     max: i64
 ) -> std::http::Failure!void {
-    // A declared length past the ceiling is refused before a byte is read. A
-    // chunked answer has no number to check, so it is refused as it grows.
     if self.reader.owes() > max {
         return std::http::Error::BodyTooLarge;
     }
@@ -456,8 +428,6 @@ pub fn fetch_with(
     limits: std::http::Limits,
     max: i64
 ) -> std::http::Failure!std::http::ClientResponse {
-    // Checked before the connect, so a request this will not send does not
-    // open a socket first.
     if !std::http::valid_field_name(method) {
         return std::http::Error::MalformedRequest;
     }
@@ -479,8 +449,6 @@ pub fn fetch_with(
     return move response;
 }
 
-// open_connection opens the connection a URL asks for: over TLS to the
-// URL's host when the scheme is `https`, in the clear otherwise.
 fn open_connection(
     io: Io,
     allocator: Allocator,
@@ -496,14 +464,6 @@ fn open_connection(
     return connect(io, allocator, address, limits);
 }
 
-// build_request writes the request line and the head. Host is required by
-// HTTP/1.1 and is the authority the URL named, so it is written here rather
-// than left to the caller to remember. The caller's fields follow it, all
-// but the ones that say what the message is -- Host, Content-Length,
-// Transfer-Encoding, Connection -- which are written from the message
-// itself, the rule `Response.encode` keeps: a field that disagreed with the
-// body would desynchronise the connection, and sending both is worse than
-// sending neither.
 fn build_request(
     allocator: Allocator,
     url: &std::http::Url,
@@ -539,8 +499,6 @@ fn build_request(
         try std::fmt::append_i64(allocator, out, std::mem::len(body));
         try std::http::append_crlf(allocator, out);
     }
-    // One request per connection, and saying so is what lets the server frame
-    // the answer by closing rather than by a length it may not know.
     try out.append_bytes(allocator, "Connection: close");
     try std::http::append_crlf(allocator, out);
     try std::http::append_crlf(allocator, out);
@@ -548,8 +506,6 @@ fn build_request(
     return;
 }
 
-// is_message_field reports whether a field is one the client writes from the
-// message itself rather than takes from the caller.
 fn is_message_field(name: []u8) -> bool {
     if std::http::equal_ascii_fold(name, "Host") {
         return true;
@@ -621,9 +577,6 @@ fn parse_status_line(
     return line_end + 2;
 }
 
-// A token that is not shaped like a version at all is a malformed line; one
-// that is, and names a version this does not speak, is the other failure. The
-// two are different answers to different questions (docs/principles.md §7).
 fn parse_response_version(text: []u8) -> std::http::Failure!std::http::Version {
     if std::mem::equal_bytes(text, "HTTP/1.1") {
         return std::http::Version::Http11;

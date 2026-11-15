@@ -1,16 +1,3 @@
-// multipart/form-data is how a browser posts a form that carries a file: the
-// body is parts separated by a boundary line, and each part is a small head
-// (`Content-Disposition`, maybe `Content-Type`) followed by its bytes
-// (RFC 7578; the framing is RFC 2046's).
-//
-// The parser reads a body that is already in hand -- `exchange.body` after
-// `accept`, or whatever a caller read into a String under a ceiling it named.
-// The parts it hands back are owned copies, the way a Request's fields are:
-// the buffer they were cut from is the caller's to reuse. Nothing is decoded
-// beyond the quoting the head grammar itself defines; a filename is the bytes
-// the client sent, and a part's body is the bytes between its head and the
-// next boundary.
-
 pub struct Part {
     // The `name` parameter of Content-Disposition. Every part has one: a part
     // without it is not form data (RFC 7578 §4.2), and the body is refused.
@@ -105,9 +92,6 @@ pub fn parse_multipart(
     let length = std::mem::len(body);
     let dash_length = 2 + std::mem::len(boundary);
 
-    // The CRLF in front of a boundary line belongs to the boundary, except
-    // that the very first one may stand at the start of the body with nothing
-    // in front of it.
     var cursor = 0;
     if delimiter_at(body, 0, boundary) {
         cursor = dash_length;
@@ -118,8 +102,6 @@ pub fn parse_multipart(
     }
 
     while true {
-        // Behind a boundary line: `--` closes the body; otherwise padding,
-        // then the CRLF that ends the line, then a part.
         if std::mem::starts_with(body[cursor..length], "--") {
             break;
         }
@@ -167,9 +149,6 @@ pub fn parse_multipart(
     return Multipart { parts: move parts };
 }
 
-// read_part_field reads one head line of a part. Content-Disposition gives
-// the name and filename, Content-Type is kept as the part's own; every other
-// field is ignored, as RFC 7578 §4.8 says to. Answers whether a name arrived.
 fn read_part_field(
     allocator: Allocator,
     part: &var std::http::Part,
@@ -193,9 +172,6 @@ fn read_part_field(
     return false;
 }
 
-// read_disposition takes `form-data; name="a"; filename="b"` apart. The
-// disposition type has to be form-data: a body whose parts say something else
-// is some other multipart, not a form.
 fn read_disposition(
     allocator: Allocator,
     part: &var std::http::Part,
@@ -222,11 +198,6 @@ fn read_disposition(
     return named;
 }
 
-// param_of finds `key=value` in a `; key=value; key="value"` parameter list
-// and answers the value with its quotes taken off. A quoted value may hold `;`
-// and `\"`, so the scan reads the quoting instead of splitting on `;`. Names
-// are case-insensitive, as RFC 9110 has them. Null is "not there", which
-// includes a quote that never closes.
 fn param_of(params: []u8, key: []u8) -> ?[]u8 {
     let length = std::mem::len(params);
     var cursor = 0;
@@ -283,10 +254,6 @@ fn is_param_gap(byte: u8) -> bool {
     return byte == cast<u8>(59) or std::http::is_space_or_tab(byte);
 }
 
-// unquote_into copies a parameter value, dropping the backslash of each
-// quoted-pair: `\"` is a quote in the value, which is the one thing the head
-// grammar itself encodes. Nothing else is decoded -- a percent sign is a
-// percent sign.
 fn unquote_into(
     allocator: Allocator,
     raw: []u8,
@@ -305,8 +272,6 @@ fn unquote_into(
     return;
 }
 
-// valid_boundary is RFC 2046's bchars: 1 to 70 of letters, digits,
-// `'()+_,-./:=?` and space, not ending in a space.
 fn valid_boundary(boundary: []u8) -> bool {
     let length = std::mem::len(boundary);
     if length == 0 or length > 70 {
@@ -342,7 +307,6 @@ fn is_boundary_byte(byte: u8) -> bool {
         byte == cast<u8>(32);
 }
 
-// delimiter_at reports whether `--boundary` stands at `at`.
 fn delimiter_at(body: []u8, at: i64, boundary: []u8) -> bool {
     let length = std::mem::len(body);
     if at + 2 > length {
@@ -354,9 +318,6 @@ fn delimiter_at(body: []u8, at: i64, boundary: []u8) -> bool {
     return std::mem::starts_with(body[at + 2..length], boundary);
 }
 
-// find_delimiter is the position of the next `CRLF --boundary` at or after
-// `from`. The CRLF is part of what is found: a body that happens to contain
-// `--boundary` in the middle of a line is data, not a boundary.
 fn find_delimiter(body: []u8, boundary: []u8, from: i64) -> ?i64 {
     let length = std::mem::len(body);
     var index = from;
