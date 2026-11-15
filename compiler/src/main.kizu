@@ -9,6 +9,7 @@ import compiler::internal::ir;
 import compiler::internal::lexer;
 import compiler::internal::llvm;
 import compiler::internal::manifest;
+import compiler::internal::msl;
 import compiler::internal::native;
 import compiler::internal::ownership;
 import compiler::internal::parser;
@@ -236,10 +237,14 @@ enum Output {
     WasmBrowser,
     WasmBrowserBinary,
     WasmBrowserEsm,
+    Metal,
     Check,
 }
 
 fn output_target(output: Output) -> stdtarget::Target {
+    if output == Output::Metal {
+        return stdtarget::Target::GpuMetal;
+    }
     if output == Output::WasmBrowser or output == Output::WasmBrowserBinary or
         output == Output::WasmBrowserEsm {
         return stdtarget::Target::WasmBrowser;
@@ -354,6 +359,9 @@ fn build_command(io: Io, allocator: Allocator, lib_dir: []u8, next: i64, count: 
     if mem::equal_bytes(target_kind, "native") {
         return build_native_command(io, allocator, lib_dir, next + 3, count);
     }
+    if mem::equal_bytes(target_kind, "metal") {
+        return metal_build_command(io, allocator, lib_dir, next + 3, count);
+    }
     try usage(io);
     var message = try string::from_bytes(allocator, "error: invalid build target `");
     defer message.deinit(allocator);
@@ -362,6 +370,39 @@ fn build_command(io: Io, allocator: Allocator, lib_dir: []u8, next: i64, count: 
     let message_bytes = message.as_bytes();
     try io::write_stderr_line(io, message_bytes);
     return 1;
+}
+
+fn metal_build_command(io: Io, allocator: Allocator, lib_dir: []u8, start: i64, count: i64) -> !i64 {
+    var opt = false;
+    var output_file = "";
+    var source = "";
+    var index = start;
+    while index < count {
+        let argument = try process::arg(index);
+        index = index + 1;
+        if mem::equal_bytes(argument, "--opt") and !opt {
+            opt = true;
+            continue;
+        }
+        if mem::equal_bytes(argument, "-o") and index < count and mem::len(output_file) == 0 {
+            output_file = try process::arg(index);
+            index = index + 1;
+            continue;
+        }
+        if mem::len(source) == 0 and index == count {
+            source = argument;
+            continue;
+        }
+        try usage(io);
+        try io::write_stderr_line(io, "error: invalid build command");
+        return 1;
+    }
+    if mem::len(source) == 0 {
+        try usage(io);
+        try io::write_stderr_line(io, "error: invalid build command");
+        return 1;
+    }
+    return lower_target(io, allocator, lib_dir, source, opt, Output::Metal, output_file);
 }
 
 struct WasmBuildOptions {
@@ -568,6 +609,7 @@ fn usage(io: Io) -> !void {
     try io::write_stderr_line(io, "usage: kizu build --target wasm32-browser [--emit wat] [--opt] [-o file] <file|package>");
     try io::write_stderr_line(io, "usage: kizu build --target wasm32-browser --emit wasm -o file [--opt] <file|package>");
     try io::write_stderr_line(io, "usage: kizu build --target wasm32-browser --emit esm -o directory [--opt] <file|package>");
+    try io::write_stderr_line(io, "usage: kizu build --target metal [--opt] [-o file] <file|package>");
     try io::write_stderr_line(io, "usage: kizu cache <status|prune>");
     try io::write_stderr_line(io, "usage: kizu import-c-header <file>");
     return io::write_stderr_line(io, "usage: kizu version");
@@ -1538,6 +1580,27 @@ fn lower_target(
                             }
                             return 1;
                         }
+                        if mem::len(output_file) > 0 {
+                            try fs::write_file(io, output_file, text_bytes);
+                            return 0;
+                        }
+                        try io::write_stdout_line(io, text_bytes);
+                        return 0;
+                    }
+                    if output == Output::Metal {
+                        var kernel_roots = array::new<string::String>(allocator);
+                        defer kernel_roots.deinit(allocator);
+                        try ir::keep_target_reachable_functions(
+                            allocator, &var lowerer.module, &kernel_roots, "gpu"
+                        );
+                        var text = string::new(allocator);
+                        defer text.deinit(allocator);
+                        if try msl::emit(allocator, &lowerer.module, &var text) |failed| {
+                            defer failed.deinit(allocator);
+                            try report(io, allocator, &loader.sources, &failed);
+                            return 1;
+                        }
+                        let text_bytes = text.as_bytes();
                         if mem::len(output_file) > 0 {
                             try fs::write_file(io, output_file, text_bytes);
                             return 0;
