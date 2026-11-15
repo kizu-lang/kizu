@@ -1,0 +1,317 @@
+import compiler::internal::ir;
+import std::array;
+
+struct Flow {
+    count: i64,
+    first: array::Array<i64>,
+    second: array::Array<i64>,
+    exits: array::Array<bool>,
+    idom: array::Array<i64>,
+    ipdom: array::Array<i64>,
+    header: array::Array<bool>,
+    loop_exit: array::Array<i64>,
+    loop_exits: array::Array<i64>,
+}
+
+fn (self: Flow) deinit(allocator: Allocator) -> void {
+    self.first.deinit(allocator);
+    self.second.deinit(allocator);
+    self.exits.deinit(allocator);
+    self.idom.deinit(allocator);
+    self.ipdom.deinit(allocator);
+    self.header.deinit(allocator);
+    self.loop_exit.deinit(allocator);
+    self.loop_exits.deinit(allocator);
+    return;
+}
+
+struct Context {
+    loop_header: i64,
+    loop_exit: i64,
+    follow: i64,
+}
+
+fn block_index(module: &ir::Module, node: &ir::FunctionNode, name: ir::Name) -> i64 {
+    var index = 0;
+    while node.blocks.get(index) |block| {
+        if ir::same_name(module.block_name(block), name) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+fn analyze_flow(allocator: Allocator, module: &ir::Module, node: &ir::FunctionNode) -> !Flow {
+    let count = node.blocks.len();
+    var flow = Flow {
+        count: count,
+        first: array::new<i64>(allocator),
+        second: array::new<i64>(allocator),
+        exits: array::new<bool>(allocator),
+        idom: array::new<i64>(allocator),
+        ipdom: array::new<i64>(allocator),
+        header: array::new<bool>(allocator),
+        loop_exit: array::new<i64>(allocator),
+        loop_exits: array::new<i64>(allocator)
+    };
+    errdefer flow.deinit(allocator);
+    var index = 0;
+    while node.blocks.get(index) |block| {
+        index = index + 1;
+        let terminator = module.block_terminator(block);
+        var first: i64 = -1;
+        var second: i64 = -1;
+        var exits = false;
+        if terminator.op == ir::TermOp::Jump {
+            first = block_index(module, node, terminator.target);
+        }
+        if terminator.op == ir::TermOp::Branch {
+            first = block_index(module, node, terminator.target);
+            second = block_index(module, node, terminator.else_target);
+        }
+        if terminator.op == ir::TermOp::Return or terminator.op == ir::TermOp::Unreachable {
+            exits = true;
+        }
+        try flow.first.append(allocator, first);
+        try flow.second.append(allocator, second);
+        try flow.exits.append(allocator, exits);
+        try flow.idom.append(allocator, -1);
+        try flow.ipdom.append(allocator, -1);
+        try flow.header.append(allocator, false);
+        try flow.loop_exit.append(allocator, -1);
+        try flow.loop_exits.append(allocator, 0);
+    }
+    try flow.compute_dominators(allocator, false);
+    try flow.compute_dominators(allocator, true);
+    try flow.find_loops(allocator);
+    return move flow;
+}
+
+fn (self: &Flow) successor(block: i64, which: i64) -> i64 {
+    if which == 0 {
+        return self.first.get(block) orelse -1;
+    }
+    if which == 1 {
+        return self.second.get(block) orelse -1;
+    }
+    return -1;
+}
+
+fn (self: &Flow) edge(from: i64, to: i64) -> bool {
+    return self.successor(from, 0) == to or self.successor(from, 1) == to;
+}
+
+fn (self: &Flow) next_in(reverse: bool, node: i64, which: i64) -> i64 {
+    if !reverse {
+        if node == self.count {
+            return -1;
+        }
+        let forward = self.successor(node, which);
+        if forward < 0 and which == 0 and self.exits.get_or_panic(node) {
+            return self.count;
+        }
+        return forward;
+    }
+    var seen = 0;
+    var candidate = 0;
+    if node == self.count {
+        while candidate < self.count {
+            if self.exits.get_or_panic(candidate) {
+                if seen == which {
+                    return candidate;
+                }
+                seen = seen + 1;
+            }
+            candidate = candidate + 1;
+        }
+        return -1;
+    }
+    while candidate < self.count {
+        if self.edge(candidate, node) {
+            if seen == which {
+                return candidate;
+            }
+            seen = seen + 1;
+        }
+        candidate = candidate + 1;
+    }
+    return -1;
+}
+
+fn (self: &Flow) previous_in(reverse: bool, node: i64, which: i64) -> i64 {
+    return self.next_in(!reverse, node, which);
+}
+
+fn (self: &var Flow) compute_dominators(allocator: Allocator, reverse: bool) -> !void {
+    let total = self.count + 1;
+    var root: i64 = 0;
+    if reverse {
+        root = self.count;
+    }
+    var order = array::new<i64>(allocator);
+    defer order.deinit(allocator);
+    var number = array::new<i64>(allocator);
+    defer number.deinit(allocator);
+    var dominator = array::new<i64>(allocator);
+    defer dominator.deinit(allocator);
+    var visited = array::new<bool>(allocator);
+    defer visited.deinit(allocator);
+    var stack = array::new<i64>(allocator);
+    defer stack.deinit(allocator);
+    var cursor = array::new<i64>(allocator);
+    defer cursor.deinit(allocator);
+    for 0..total |_| {
+        try number.append(allocator, -1);
+        try dominator.append(allocator, -1);
+        try visited.append(allocator, false);
+        try cursor.append(allocator, 0);
+    }
+    try stack.append(allocator, root);
+    try visited.set(root, true);
+    var postorder = array::new<i64>(allocator);
+    defer postorder.deinit(allocator);
+    while stack.len() > 0 {
+        let top = stack.get_or_panic(stack.len() - 1);
+        let which = cursor.get_or_panic(top);
+        let next = self.next_in(reverse, top, which);
+        if next < 0 {
+            try postorder.append(allocator, top);
+            if stack.pop() |_| {}
+            continue;
+        }
+        try cursor.set(top, which + 1);
+        if !visited.get_or_panic(next) {
+            try visited.set(next, true);
+            try stack.append(allocator, next);
+        }
+    }
+    var position = postorder.len();
+    while position > 0 {
+        position = position - 1;
+        let node = postorder.get_or_panic(position);
+        try number.set(node, order.len());
+        try order.append(allocator, node);
+    }
+    try dominator.set(root, root);
+    var changed = true;
+    while changed {
+        changed = false;
+        var walk = 1;
+        while order.get(walk) |node| {
+            walk = walk + 1;
+            var chosen: i64 = -1;
+            var which = 0;
+            while which <= self.count {
+                let previous = self.previous_in(reverse, node, which);
+                which = which + 1;
+                if previous < 0 {
+                    break;
+                }
+                if dominator.get_or_panic(previous) < 0 {
+                    continue;
+                }
+                if chosen < 0 {
+                    chosen = previous;
+                    continue;
+                }
+                var left = previous;
+                var right = chosen;
+                while left != right {
+                    while number.get_or_panic(left) > number.get_or_panic(right) {
+                        left = dominator.get_or_panic(left);
+                    }
+                    while number.get_or_panic(right) > number.get_or_panic(left) {
+                        right = dominator.get_or_panic(right);
+                    }
+                }
+                chosen = left;
+            }
+            if chosen >= 0 and dominator.get_or_panic(node) != chosen {
+                try dominator.set(node, chosen);
+                changed = true;
+            }
+        }
+    }
+    for 0..self.count |node| {
+        var value = dominator.get_or_panic(node);
+        if value == self.count {
+            value = -1;
+        }
+        if reverse {
+            try self.ipdom.set(node, value);
+        } else {
+            try self.idom.set(node, value);
+        }
+    }
+    return;
+}
+
+fn (self: &Flow) dominates(upper: i64, lower: i64) -> bool {
+    var node = lower;
+    var steps = 0;
+    while node >= 0 and steps <= self.count {
+        if node == upper {
+            return true;
+        }
+        if node == 0 {
+            return false;
+        }
+        node = self.idom.get_or_panic(node);
+        steps = steps + 1;
+    }
+    return false;
+}
+
+fn (self: &var Flow) find_loops(allocator: Allocator) -> !void {
+    for 0..self.count |header| {
+        var body = array::new<bool>(allocator);
+        defer body.deinit(allocator);
+        var work = array::new<i64>(allocator);
+        defer work.deinit(allocator);
+        for 0..self.count |_| {
+            try body.append(allocator, false);
+        }
+        for 0..self.count |source| {
+            if self.edge(source, header) and self.dominates(header, source) {
+                try self.header.set(header, true);
+                if !body.get_or_panic(source) {
+                    try body.set(source, true);
+                    try work.append(allocator, source);
+                }
+            }
+        }
+        if !self.header.get_or_panic(header) {
+            continue;
+        }
+        try body.set(header, true);
+        while work.pop() |node| {
+            if node == header {
+                continue;
+            }
+            for 0..self.count |previous| {
+                if self.edge(previous, node) and !body.get_or_panic(previous) {
+                    try body.set(previous, true);
+                    try work.append(allocator, previous);
+                }
+            }
+        }
+        var exit: i64 = -1;
+        var exits = 0;
+        for 0..self.count |node| {
+            if !body.get_or_panic(node) {
+                continue;
+            }
+            for 0..2 |which| {
+                let target = self.successor(node, which);
+                if target >= 0 and !body.get_or_panic(target) and target != exit {
+                    exit = target;
+                    exits = exits + 1;
+                }
+            }
+        }
+        try self.loop_exit.set(header, exit);
+        try self.loop_exits.set(header, exits);
+    }
+    return;
+}
