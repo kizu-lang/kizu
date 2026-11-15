@@ -1,5 +1,6 @@
 import compiler::internal::diagnostic;
 import compiler::internal::ir;
+import compiler::internal::typ;
 import std::array;
 import std::mem;
 import std::string;
@@ -379,15 +380,17 @@ fn (self: &var Emitter) c_return_type(passing: CPassing) -> !ir::Name {
 fn (self: &var Emitter) c_args(
     module: &ir::Module,
     node: &ir::InstrNode,
+    first: i64,
     operands: bool,
     args: &var array::Array<CArg>
 ) -> !void {
-    var index = 0;
+    var index = first;
     while node.args.get(index) |arg| {
         let at = index;
+        let param_at = index - first;
         index = index + 1;
         let ptr_name = try self.names.intern("ptr");
-        if call_param_takes_address_of(module, node, at, arg.type_name) {
+        if call_param_takes_address_of(module, node, param_at, arg.type_name) {
             var described = CArg {
                 type_name: arg.type_name,
                 float_scalar: false,
@@ -396,14 +399,14 @@ fn (self: &var Emitter) c_args(
                 operand: ir::empty_name()
             };
             if operands {
-                let copied = try self.copy_address_arg(module, node, at, at);
+                let copied = try self.copy_address_arg(module, node, at, param_at);
                 described.operand = try self.names.intern_owned(move copied);
             }
             try args.append(self.allocator, described);
             continue;
         }
         var by_value = is_c_struct_value(module, arg.type_name);
-        if node.call_params.get(at) |param| {
+        if node.call_params.get(param_at) |param| {
             by_value = by_value and param.passing == ir::Passing::Value;
         }
         let param = try self.llvm_type_of(module, arg.type_name);
@@ -426,6 +429,51 @@ fn (self: &var Emitter) c_args(
     return;
 }
 
+fn (self: &var Emitter) c_pointer_struct_decl(module: &ir::Module, symbol: ir::Name, pointer: ir::Name) -> !?string::String {
+    let text = ir::name_text(&module.names, pointer);
+    let bytes = text.as_bytes();
+    let parsed = try self.types.parse(bytes);
+    var args = array::new<CArg>(self.allocator);
+    defer args.deinit(self.allocator);
+    var result = ir::empty_name();
+    var result_type = ir::empty_name();
+    match typ::root_node(&self.types, parsed) {
+        Func(node) => {
+            var index = 0;
+            while node.params.get(index) |param| {
+                index = index + 1;
+                let part = typ::child_type(parsed, param);
+                let rendered = try typ::render(self.allocator, &self.types, part);
+                defer rendered.deinit(self.allocator);
+                let spelled = rendered.as_bytes();
+                let borrowed = match typ::root_node(&self.types, part) {
+                    Borrow(_) => true,
+                    _ => false,
+                };
+                let type_name = module.names.lookup(spelled) orelse ir::empty_name();
+                try args.append(self.allocator, CArg {
+                    type_name: type_name,
+                    float_scalar: mem::equal_bytes(spelled, "f32") or mem::equal_bytes(spelled, "f64"),
+                    by_value: !borrowed and is_c_struct_value(module, type_name),
+                    param: try self.rendered_llvm_type(module, part),
+                    operand: ir::empty_name()
+                });
+            }
+            let returned = typ::child_type(parsed, node.result);
+            let rendered_result = try typ::render(self.allocator, &self.types, returned);
+            defer rendered_result.deinit(self.allocator);
+            let spelled_result = rendered_result.as_bytes();
+            result = module.names.lookup(spelled_result) orelse ir::empty_name();
+            result_type = try self.rendered_llvm_type(module, returned);
+        },
+        _ => return null,
+    }
+    if !uses_c_struct_values(module, result, &args) {
+        return null;
+    }
+    return try self.c_struct_decl(module, symbol, result, result_type, &args);
+}
+
 fn uses_c_struct_values(module: &ir::Module, result: ir::Name, args: &array::Array<CArg>) -> bool {
     if is_c_struct_value(module, result) {
         return true;
@@ -440,21 +488,31 @@ fn uses_c_struct_values(module: &ir::Module, result: ir::Name, args: &array::Arr
     return false;
 }
 
-fn (self: &var Emitter) c_call_uses_struct_values(module: &ir::Module, node: &ir::InstrNode) -> !bool {
+fn (self: &var Emitter) c_call_uses_struct_values(module: &ir::Module, node: &ir::InstrNode, first: i64) -> !bool {
     var args = array::new<CArg>(self.allocator);
     defer args.deinit(self.allocator);
-    try self.c_args(module, node, false, &var args);
+    try self.c_args(module, node, first, false, &var args);
     return uses_c_struct_values(module, node.result.type_name, &args);
 }
 
 fn (self: &var Emitter) c_struct_call_decl(module: &ir::Module, symbol: ir::Name, node: &ir::InstrNode) -> !string::String {
     var args = array::new<CArg>(self.allocator);
     defer args.deinit(self.allocator);
-    try self.c_args(module, node, false, &var args);
+    try self.c_args(module, node, 0, false, &var args);
+    let result_type = try self.llvm_type_of(module, node.result.type_name);
+    return self.c_struct_decl(module, symbol, node.result.type_name, result_type, &args);
+}
+
+fn (self: &var Emitter) c_struct_decl(
+    module: &ir::Module,
+    symbol: ir::Name,
+    result: ir::Name,
+    returned: ir::Name,
+    args: &array::Array<CArg>
+) -> !string::String {
     var params = array::new<string::String>(self.allocator);
     defer params.deinit(self.allocator);
-    let result = node.result.type_name;
-    var result_type = try self.llvm_type_of(module, result);
+    var result_type = returned;
     var sret = false;
     if is_c_struct_value(module, result) {
         let passing = try self.c_return_passing(module, result);
@@ -533,18 +591,19 @@ fn (self: &var Emitter) append_c_struct_part(
 
 fn (self: &var Emitter) write_c_struct_call(
     module: &ir::Module,
-    symbol: ir::Name,
-    node: &ir::InstrNode
+    callee: ir::Name,
+    node: &ir::InstrNode,
+    first: i64
 ) -> !?diagnostic::Diagnostic {
-    var args = array::new<CArg>(self.allocator);
-    defer args.deinit(self.allocator);
-    try self.c_args(module, node, true, &var args);
     if self.arch == Arch::Other {
         return try self.fail1(
-            "llvm error: C function `%s` passes a struct by value, and this target has no C calling convention the compiler follows for one",
-            Arg::Str(symbol)
+            "llvm error: the call of `%s` passes a C struct by value, and this target has no C calling convention the compiler follows for one",
+            Arg::Str(callee)
         );
     }
+    var args = array::new<CArg>(self.allocator);
+    defer args.deinit(self.allocator);
+    try self.c_args(module, node, first, true, &var args);
     let result = node.result.type_name;
     let arg_count = args.len();
     var result_type = try self.llvm_type_of(module, result);
@@ -580,7 +639,7 @@ fn (self: &var Emitter) write_c_struct_call(
         try self.append_c_struct_args(module, arg, passing, at, &var operands);
     }
     let joined = try string::join(self.allocator, &operands, ", ");
-    let call = try self.text3("call %s @%s(%s)", Arg::Str(result_type), Arg::Str(symbol), Arg::Owned(move joined));
+    let call = try self.text3("call %s %s(%s)", Arg::Str(result_type), Arg::Str(callee), Arg::Owned(move joined));
     if module.names.is(result, "void") {
         try self.line1("  %s", Arg::Str(call));
         return null;

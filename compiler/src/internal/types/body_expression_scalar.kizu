@@ -107,20 +107,6 @@ fn (self: &var Checker) check_ident_expr(
         }
     }
     if try self.function_pointer_value(name) |value| {
-        if try self.c_pointer_refusal(value) |refused| {
-            var message = string::new(self.allocator);
-            errdefer message.deinit(self.allocator);
-            try message.append_bytes(self.allocator, "C function `");
-            try message.append_bytes(self.allocator, name);
-            try message.append_bytes(self.allocator, "` passes `");
-            try self.append_checker_type(&var message, refused);
-            try message.append_bytes(self.allocator,
-                "`, which a C function pointer cannot carry; call it by name"
-            );
-            return try self.checker_message_at(
-                "type error", expression.span, move message
-            );
-        }
         out.* = value;
         return null;
     }
@@ -130,34 +116,6 @@ fn (self: &var Checker) check_ident_expr(
     try message.append_bytes(self.allocator, name);
     try message.append_byte(self.allocator, cast<u8>(96));
     return try self.checker_message_at("type error", expression.span, move message);
-}
-
-fn (self: &var Checker) c_pointer_refusal(value: Type) -> !?Type {
-    let parsed = self.types.lookup(value) orelse return null;
-    match typ::root_node(&self.types.parsed, parsed) {
-        Func(node) => {
-            if !node.c_abi {
-                return null;
-            }
-            var index = 0;
-            while node.params.get(index) |param| {
-                index = index + 1;
-                let elem = try self.types.retain_parsed(typ::child_type(parsed, param));
-                if try self.types.explicit_borrow_type(elem) |_| {
-                    continue;
-                }
-                if !c_host_scalar(&self.types, elem) {
-                    return elem;
-                }
-            }
-            let result = try self.types.retain_parsed(typ::child_type(parsed, node.result));
-            if !self.types.is_text(result, "void") and !c_host_scalar(&self.types, result) {
-                return result;
-            }
-            return null;
-        },
-        _ => return null,
-    }
 }
 
 fn (self: &var Checker) function_by_value_name(name: []u8) -> !?FunctionHandle {
