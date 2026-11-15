@@ -1,0 +1,36 @@
+import std::gpu;
+
+fn simdgroup_sum(value: f32) -> f32 {
+    var total = value;
+    var offset: i64 = 16;
+    while offset >= 1 {
+        total = total + gpu::shuffle_xor(total, offset);
+        offset = offset / 2;
+    }
+    return total;
+}
+
+fn add_partials(partials: []f32, count: i64) -> f32 {
+    var total: f32 = 0.0;
+    for 0..count |index| {
+        total = total + partials[index];
+    }
+    return total;
+}
+
+export "gpu" fn group_sums(values: []f32, sums: &var []f32) -> void {
+    var storage = gpu::group_array<[8]f32>();
+    let partials = storage.as_mut_slice();
+    let total = simdgroup_sum(values[gpu::thread_index()]);
+    if gpu::lane_index() == 0 {
+        partials[gpu::simdgroup_index()] = total;
+    }
+    gpu::barrier();
+    if gpu::local_index() == 0 {
+        sums[gpu::group_index()] = add_partials(partials, 8);
+    }
+    return;
+}
+
+// check
+// features: gpu-export

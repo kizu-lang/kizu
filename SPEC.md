@@ -2892,8 +2892,12 @@ export "gpu" fn add(total: &var []f32, part: []f32, scale: f32) -> void {
 
 `export "gpu" fn` は method にも static parameter を持つ関数にもできず、`void` を
 返します。parameter に置けるのは整数型と `f32` の値、その view(`[]T`)、view の
-`&var` 借用だけです。`std::gpu::thread_index()` は dispatch の中での thread の通し番号を
-`i64` で返し、kernel の外では build が拒否します。
+`&var` 借用だけです。thread の番号、barrier、SIMD group の演算、threadgroup で共有する
+配列は `std::gpu`(`docs/std/gpu.md`)が持ち、CPU と wasm の build は到達すると拒否します。
+`std::gpu::group_array<[N]T>()` は compiler が知っている形で、呼び出しが書かれた
+`export "gpu" fn` の threadgroup memory を指します。利用者が同じ関数を書くことはできません。
+kernel から呼ぶ関数は view を受け取れ、受け取る view の置き場所(buffer、threadgroup、
+thread)ごとに別の関数として生成されます。
 
 host が渡す buffer の並びは次のとおりです。
 
@@ -2905,7 +2909,8 @@ host が渡す buffer の並びは次のとおりです。
 
 範囲外の添字など、CPU なら panic する失敗が起きると、その thread は status word を
 `1` にして終わります。host は pass の完了後に status word を読みます。kernel は
-`f64` の値を扱えず、扱う関数に到達すると build が止まります。
+`f64` の値を扱えず、扱う関数に到達すると build が止まります。例外は `f32` に cast するだけの
+`f64` の literal で、CPU と同じく f64 で読んでから f32 に丸めた値になります。
 
 ## 13. comptime
 

@@ -5,6 +5,7 @@ import compiler::internal::typ;
 import std::array;
 import std::float;
 import std::fmt;
+import std::map;
 import std::mem;
 import std::string;
 
@@ -70,16 +71,118 @@ fn spelling(kind: Scalar) -> []u8 {
     };
 }
 
-fn view_element(type_name: []u8) -> ?Scalar {
-    let length = mem::len(type_name);
-    if length < 3 or type_name[0] != cast<u8>(91) or type_name[1] != cast<u8>(93) {
+enum Space {
+    Device,
+    Thread,
+    Group,
+}
+
+fn space_spelling(space: Space) -> []u8 {
+    return match space {
+        Device => "device",
+        Thread => "thread",
+        Group => "threadgroup",
+    };
+}
+
+fn space_letter(space: Space) -> u8 {
+    return match space {
+        Device => cast<u8>(100),
+        Thread => cast<u8>(116),
+        Group => cast<u8>(103),
+    };
+}
+
+fn space_of_letter(letter: u8) -> Space {
+    if letter == cast<u8>(116) {
+        return Space::Thread;
+    }
+    if letter == cast<u8>(103) {
+        return Space::Group;
+    }
+    return Space::Device;
+}
+
+enum Form {
+    Value,
+    View,
+    Array,
+    Pointer,
+    ViewSlot,
+}
+
+struct Shape {
+    form: Form,
+    element: Scalar,
+    count: i64,
+}
+
+fn parse_count(text: []u8, start: i64) -> ?i64 {
+    var index = start;
+    var count: i64 = 0;
+    let length = mem::len(text);
+    while index < length and text[index] >= cast<u8>(48) and text[index] <= cast<u8>(57) {
+        count = count * 10 + cast<i64>(text[index] - cast<u8>(48));
+        index = index + 1;
+    }
+    if index == start or index >= length or text[index] != cast<u8>(93) {
         return null;
     }
-    let kind = scalar_kind(type_name[2..length]) orelse return null;
-    if kind == Scalar::Bool {
+    return count;
+}
+
+fn digits_end(text: []u8, start: i64) -> i64 {
+    var index = start;
+    while index < mem::len(text) and text[index] >= cast<u8>(48) and text[index] <= cast<u8>(57) {
+        index = index + 1;
+    }
+    return index;
+}
+
+fn array_shape(text: []u8, start: i64, form: Form) -> ?Shape {
+    let length = mem::len(text);
+    if start >= length or text[start] != cast<u8>(91) {
         return null;
     }
-    return kind;
+    if start + 1 < length and text[start + 1] == cast<u8>(93) {
+        let element = scalar_kind(text[start + 2..length]) orelse return null;
+        if element == Scalar::Bool {
+            return null;
+        }
+        return Shape { form: Form::View, element: element, count: 0 };
+    }
+    let count = parse_count(text, start + 1) orelse return null;
+    let close = digits_end(text, start + 1);
+    let element = scalar_kind(text[close + 1..length]) orelse return null;
+    return Shape { form: form, element: element, count: count };
+}
+
+fn shape_of(text: []u8) -> ?Shape {
+    if scalar_kind(text) |kind| {
+        return Shape { form: Form::Value, element: kind, count: 0 };
+    }
+    let length = mem::len(text);
+    if length > 0 and text[0] == cast<u8>(38) {
+        var start = 1;
+        if length > 5 and text[1] == cast<u8>(118) and text[2] == cast<u8>(97) and text[3] == cast<u8>(114) and text[4] == cast<u8>(32) {
+            start = 5;
+        }
+        if scalar_kind(text[start..length]) |kind| {
+            return Shape { form: Form::Pointer, element: kind, count: 0 };
+        }
+        let shape = array_shape(text, start, Form::Pointer) orelse return null;
+        if shape.form == Form::View {
+            return Shape { form: Form::ViewSlot, element: shape.element, count: 0 };
+        }
+        return shape;
+    }
+    return array_shape(text, 0, Form::Array);
+}
+
+fn shape_named(module: &ir::Module, type_name: ir::Name) -> ?Shape {
+    let retained = ir::name_text(&module.names, type_name);
+    let bytes = retained.as_bytes();
+    return shape_of(bytes);
 }
 
 enum Role {
@@ -87,22 +190,38 @@ enum Role {
     Helper,
 }
 
-struct ViewParam {
-    name: ir::Name,
-    position: i64,
+struct Instance {
+    function: ir::Function,
+    spaces: string::String,
 }
 
 struct Emitter {
     allocator: Allocator,
     out: string::String,
-    views: array::Array<ViewParam>,
+    prototypes: string::String,
+    helpers: string::String,
+    kernels: string::String,
+    instances: array::Array<Instance>,
+    emitted: i64,
+    spaces: map::Map<i64, Space>,
+    uses: map::Map<i64, i64>,
+    wide_constants: map::Map<i64, ir::Name>,
+    kernel_views: array::Array<i64>,
     role: Role,
     returns_value: bool,
+    generation: i64,
 }
 
 fn (self: Emitter) deinit(allocator: Allocator) -> void {
     self.out.deinit(allocator);
-    self.views.deinit(allocator);
+    self.prototypes.deinit(allocator);
+    self.helpers.deinit(allocator);
+    self.kernels.deinit(allocator);
+    self.instances.deinit(allocator);
+    self.spaces.deinit(allocator);
+    self.uses.deinit(allocator);
+    self.wide_constants.deinit(allocator);
+    self.kernel_views.deinit(allocator);
     return;
 }
 
@@ -111,47 +230,55 @@ pub fn emit(
     module: &ir::Module,
     out: &var string::String
 ) -> !?diagnostic::Diagnostic {
+    var emitter = Emitter {
+        allocator: allocator,
+        out: string::new(allocator),
+        prototypes: string::new(allocator),
+        helpers: string::new(allocator),
+        kernels: string::new(allocator),
+        instances: array::new<Instance>(allocator),
+        emitted: 0,
+        spaces: map::new<i64, Space>(allocator),
+        uses: map::new<i64, i64>(allocator),
+        wide_constants: map::new<i64, ir::Name>(allocator),
+        kernel_views: array::new<i64>(allocator),
+        role: Role::Kernel,
+        returns_value: false,
+        generation: 0
+    };
+    defer emitter.deinit(allocator);
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        if !module.names.is(node.export_abi, "gpu") {
+            continue;
+        }
+        if try emitter.emit_function(module, node, Role::Kernel, "") |failed| {
+            return move failed;
+        }
+        try emitter.kernels.append_string(allocator, &emitter.out);
+    }
+    while emitter.instances.at(emitter.emitted) |instance| {
+        let function = instance.function;
+        var spaces = string::new(allocator);
+        defer spaces.deinit(allocator);
+        try spaces.append_string(allocator, &instance.spaces);
+        emitter.emitted = emitter.emitted + 1;
+        let node = module.function_nodes.at(function.node);
+        let space_bytes = spaces.as_bytes();
+        if try emitter.emit_function(module, node, Role::Helper, space_bytes) |failed| {
+            return move failed;
+        }
+        try emitter.helpers.append_string(allocator, &emitter.out);
+    }
     try append_line(allocator, out, "#include <metal_stdlib>");
     try append_line(allocator, out, "using namespace metal;");
     try append_line(allocator, out, "#pragma METAL fp contract(off)");
-    var pass = 0;
-    while pass < 3 {
-        var index = 0;
-        while module.functions.get(index) |function| {
-            index = index + 1;
-            let node = module.function_nodes.at(function.node);
-            let kernel = module.names.is(node.export_abi, "gpu");
-            if (pass == 2) != kernel {
-                continue;
-            }
-            var role = Role::Helper;
-            if kernel {
-                role = Role::Kernel;
-            }
-            var emitter = Emitter {
-                allocator: allocator,
-                out: string::new(allocator),
-                views: array::new<ViewParam>(allocator),
-                role: role,
-                returns_value: !module.names.is(node.return_type, "void")
-            };
-            defer emitter.deinit(allocator);
-            if try emitter.emit_signature(module, node) |failed| {
-                return move failed;
-            }
-            if pass == 0 {
-                try append_line(allocator, &var emitter.out, ";");
-            } else {
-                try append_line(allocator, &var emitter.out, " {");
-                if try emitter.emit_body(module, node) |failed| {
-                    return move failed;
-                }
-                try append_line(allocator, &var emitter.out, "}");
-            }
-            try out.append_string(allocator, &emitter.out);
-        }
-        pass = pass + 1;
-    }
+    try append_line(allocator, out, "struct KzIds { uint thread_id; uint group_id; uint local_id; uint simdgroup_id; uint lane_id; };");
+    try out.append_string(allocator, &emitter.prototypes);
+    try out.append_string(allocator, &emitter.helpers);
+    try out.append_string(allocator, &emitter.kernels);
     return null;
 }
 
@@ -180,6 +307,10 @@ fn fail(
     return try diagnostic::from_text(allocator, diagnostic::Severity::Error, span, bytes);
 }
 
+fn unsupported(module: &ir::Module, allocator: Allocator, span: ast::Span, what: []u8, type_name: ir::Name) -> !diagnostic::Diagnostic {
+    return fail(allocator, module, span, what, type_name, "`, which a kernel cannot hold yet");
+}
+
 fn (self: &var Emitter) text(bytes: []u8) -> !void {
     try self.out.append_bytes(self.allocator, bytes);
     return;
@@ -194,6 +325,21 @@ fn (self: &var Emitter) value(name: ir::Name) -> !void {
     return self.number(ir::name_id(name));
 }
 
+fn (self: &var Emitter) view_pointer(name: ir::Name) -> !void {
+    try self.value(name);
+    return self.text("p");
+}
+
+fn (self: &var Emitter) view_length(name: ir::Name) -> !void {
+    try self.value(name);
+    return self.text("n");
+}
+
+fn (self: &var Emitter) storage(name: ir::Name) -> !void {
+    try self.value(name);
+    return self.text("s");
+}
+
 fn (self: &var Emitter) phi_input(name: ir::Name) -> !void {
     try self.text("p");
     return self.number(ir::name_id(name));
@@ -203,7 +349,13 @@ fn (self: &var Emitter) end_line() -> !void {
     return self.out.append_byte(self.allocator, cast<u8>(10));
 }
 
-fn (self: &var Emitter) function_name(module: &ir::Module, name: ir::Name) -> !void {
+fn (self: &var Emitter) line(indent: []u8, bytes: []u8) -> !void {
+    try self.text(indent);
+    try self.text(bytes);
+    return self.end_line();
+}
+
+fn (self: &var Emitter) leaf_name(module: &ir::Module, name: ir::Name) -> !void {
     let retained = ir::name_text(&module.names, name);
     let bytes = retained.as_bytes();
     var start = mem::len(bytes);
@@ -211,75 +363,255 @@ fn (self: &var Emitter) function_name(module: &ir::Module, name: ir::Name) -> !v
         start = start - 1;
     }
     try self.out.append_bytes(self.allocator, bytes[start..mem::len(bytes)]);
-    if self.role == Role::Helper {
+    return;
+}
+
+fn (self: &var Emitter) instance_name(module: &ir::Module, name: ir::Name, spaces: []u8) -> !void {
+    try self.leaf_name(module, name);
+    try self.text("_");
+    try self.number(ir::name_id(name));
+    if mem::len(spaces) > 0 {
         try self.text("_");
-        try self.number(ir::name_id(name));
+        try self.text(spaces);
     }
     return;
 }
 
-fn (self: &var Emitter) callee_name(module: &ir::Module, name: ir::Name) -> !void {
-    let retained = ir::name_text(&module.names, name);
-    let bytes = retained.as_bytes();
-    var start = mem::len(bytes);
-    while start > 0 and bytes[start - 1] != cast<u8>(58) {
-        start = start - 1;
+fn (self: &Emitter) key(name: ir::Name) -> i64 {
+    return self.generation * 4294967296 + ir::name_id(name);
+}
+
+fn (self: &Emitter) space_of(name: ir::Name) -> ?Space {
+    return self.spaces.get(self.key(name));
+}
+
+fn (self: &Emitter) use_count(name: ir::Name) -> i64 {
+    return self.uses.get(self.key(name)) orelse 0;
+}
+
+fn (self: &var Emitter) set_space(name: ir::Name, space: Space) -> !void {
+    let key = self.key(name);
+    if self.spaces.contains(key) {
+        return;
     }
-    try self.out.append_bytes(self.allocator, bytes[start..mem::len(bytes)]);
-    try self.text("_");
-    return self.number(ir::name_id(name));
+    try self.spaces.insert(self.allocator, key, space);
+    return;
 }
 
-fn scalar_named(module: &ir::Module, type_name: ir::Name) -> ?Scalar {
-    let retained = ir::name_text(&module.names, type_name);
-    let bytes = retained.as_bytes();
-    return scalar_kind(bytes);
+fn (self: &var Emitter) count_use(name: ir::Name) -> !void {
+    let key = self.key(name);
+    if self.uses.at_mut(key) |count| {
+        count.* = count.* + 1;
+        return;
+    }
+    try self.uses.insert(self.allocator, key, 1);
+    return;
 }
 
-fn unsupported(module: &ir::Module, allocator: Allocator, span: ast::Span, what: []u8, type_name: ir::Name) -> !diagnostic::Diagnostic {
-    return fail(allocator, module, span, what, type_name, "`, which a kernel cannot hold yet");
+fn (self: &var Emitter) reset() -> void {
+    self.out.clear();
+    self.kernel_views.clear(self.allocator);
+    self.generation = self.generation + 1;
+    return;
 }
 
-fn (self: &var Emitter) emit_signature(module: &ir::Module, node: &ir::FunctionNode) -> !?diagnostic::Diagnostic {
+fn (self: &var Emitter) emit_function(
+    module: &ir::Module,
+    node: &ir::FunctionNode,
+    role: Role,
+    param_spaces: []u8
+) -> !?diagnostic::Diagnostic {
+    self.reset();
+    self.role = role;
+    self.returns_value = !module.names.is(node.return_type, "void");
+    if try self.assign_param_spaces(module, node, param_spaces) |failed| {
+        return move failed;
+    }
+    try self.study_values(module, node);
+    if try self.emit_signature(module, node, param_spaces) |failed| {
+        return move failed;
+    }
+    if role == Role::Helper {
+        try self.prototypes.append_string(self.allocator, &self.out);
+        try self.prototypes.append_bytes(self.allocator, ";");
+        try self.prototypes.append_byte(self.allocator, cast<u8>(10));
+    }
+    try self.line("", " {");
+    if try self.emit_body(module, node) |failed| {
+        return move failed;
+    }
+    try self.line("", "}");
+    return null;
+}
+
+fn (self: &var Emitter) assign_param_spaces(module: &ir::Module, node: &ir::FunctionNode, param_spaces: []u8) -> !?diagnostic::Diagnostic {
+    var position = 0;
+    var view_position = 0;
+    while node.params.get(position) |param| {
+        position = position + 1;
+        let shape = shape_named(module, param.type_name) orelse return try unsupported(module, self.allocator, ast::zero_span(),
+            "a kernel parameter has type `", param.type_name);
+        if shape.form == Form::Value {
+            continue;
+        }
+        if shape.form != Form::View {
+            return try unsupported(module, self.allocator, ast::zero_span(), "a kernel parameter has type `", param.type_name);
+        }
+        var space = Space::Device;
+        if self.role == Role::Helper {
+            space = space_of_letter(param_spaces[view_position]);
+        } else {
+            try self.kernel_views.append(self.allocator, ir::name_id(param.name));
+        }
+        try self.set_space(param.name, space);
+        view_position = view_position + 1;
+    }
+    return null;
+}
+
+fn (self: &var Emitter) study_values(module: &ir::Module, node: &ir::FunctionNode) -> !void {
+    var round = 0;
+    while round < 3 {
+        round = round + 1;
+        var block_index = 0;
+        while node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let instr_node = module.instrs.at(instr.node);
+                if round == 1 {
+                    var arg_index = 0;
+                    while instr_node.args.get(arg_index) |arg| {
+                        arg_index = arg_index + 1;
+                        try self.count_use(arg.name);
+                    }
+                    var incoming_index = 0;
+                    while instr_node.incoming.get(incoming_index) |incoming| {
+                        incoming_index = incoming_index + 1;
+                        try self.count_use(incoming.value.name);
+                    }
+                }
+                try self.study_space(module, instr_node);
+            }
+            if round == 1 {
+                let terminator = block_node.terminator;
+                try self.count_use(terminator.value.name);
+                try self.count_use(terminator.cond.name);
+            }
+        }
+    }
+    return;
+}
+
+fn (self: &var Emitter) study_space(module: &ir::Module, node: &ir::InstrNode) -> !void {
+    let result = node.result.name;
+    if node.op == ir::Op::Const and module.names.is(node.result.type_name, "f64") {
+        let key = self.key(result);
+        if !self.wide_constants.contains(key) {
+            try self.wide_constants.insert(self.allocator, key, node.immediate);
+        }
+        return;
+    }
+    match node.op {
+        BufferNew => try self.set_space(result, Space::Thread),
+        GpuGroupArray => try self.set_space(result, Space::Group),
+        RefLoad => {
+            let shape = shape_named(module, node.result.type_name) orelse return;
+            if shape.form == Form::View {
+                try self.inherit_space(node);
+                return;
+            }
+            try self.set_space(result, Space::Thread);
+        },
+        LocalSlot => {
+            let source = node.args.get_or_panic(0);
+            let shape = shape_named(module, source.type_name) orelse return;
+            if shape.form == Form::View {
+                try self.inherit_space(node);
+                return;
+            }
+            if shape.form == Form::Array and self.use_count(source.name) == 1 {
+                if self.space_of(source.name) |space| {
+                    try self.set_space(result, space);
+                }
+                return;
+            }
+            try self.set_space(result, Space::Thread);
+        },
+        BufferAddr => try self.inherit_space(node),
+        BufferAsBytes => try self.inherit_space(node),
+        SliceSlice => try self.inherit_space(node),
+        Id => try self.inherit_space(node),
+        Phi => {
+            var incoming_index = 0;
+            while node.incoming.get(incoming_index) |incoming| {
+                incoming_index = incoming_index + 1;
+                if self.space_of(incoming.value.name) |space| {
+                    try self.set_space(result, space);
+                    return;
+                }
+            }
+        },
+        _ => {},
+    }
+    return;
+}
+
+fn (self: &var Emitter) inherit_space(node: &ir::InstrNode) -> !void {
+    if self.space_of(node.args.get_or_panic(0).name) |space| {
+        try self.set_space(node.result.name, space);
+    }
+    return;
+}
+
+fn (self: &var Emitter) emit_signature(module: &ir::Module, node: &ir::FunctionNode, param_spaces: []u8) -> !?diagnostic::Diagnostic {
     if self.role == Role::Kernel {
         try self.text("kernel void ");
+        try self.leaf_name(module, node.name);
     } else {
         try self.text("static ");
         if self.returns_value {
-            let kind = scalar_named(module, node.return_type) orelse return try unsupported(module, self.allocator, ast::zero_span(), "a kernel calls a function returning `", node.return_type);
-            try self.text(spelling(kind));
+            let shape = shape_named(module, node.return_type) orelse return try unsupported(module, self.allocator, ast::zero_span(),
+                "a kernel calls a function returning `", node.return_type);
+            if shape.form != Form::Value {
+                return try unsupported(module, self.allocator, ast::zero_span(), "a kernel calls a function returning `", node.return_type);
+            }
+            try self.text(spelling(shape.element));
         } else {
             try self.text("void");
         }
         try self.text(" ");
+        try self.instance_name(module, node.name, param_spaces);
     }
-    try self.function_name(module, node.name);
     try self.text("(");
     var position = 0;
     while node.params.get(position) |param| {
-        let retained_type = ir::name_text(&module.names, param.type_name);
-        let type_name = retained_type.as_bytes();
-        if view_element(type_name) |element| {
-            if self.role == Role::Helper {
-                return try fail(self.allocator, module, ast::zero_span(), "a kernel passes a view to `", node.name,
-                    "`; only gpu exports take views yet");
-            }
-            try self.views.append(self.allocator, ViewParam { name: param.name, position: position });
-            try self.text("device ");
-            try self.text(spelling(element));
+        let shape = shape_named(module, param.type_name) orelse return try unsupported(module, self.allocator, ast::zero_span(),
+            "a kernel parameter has type `", param.type_name);
+        if shape.form == Form::View {
+            let space = self.space_of(param.name) orelse Space::Device;
+            try self.text(space_spelling(space));
+            try self.text(" ");
+            try self.text(spelling(shape.element));
             try self.text(" *");
+            try self.view_pointer(param.name);
+            if self.role == Role::Helper {
+                try self.text(", long ");
+                try self.view_length(param.name);
+            }
         } else {
-            let kind = scalar_named(module, param.type_name) orelse return try unsupported(module, self.allocator, ast::zero_span(), "a kernel parameter has type `", param.type_name);
             if self.role == Role::Kernel {
                 try self.text("constant ");
-                try self.text(spelling(kind));
+                try self.text(spelling(shape.element));
                 try self.text(" &");
             } else {
-                try self.text(spelling(kind));
+                try self.text(spelling(shape.element));
                 try self.text(" ");
             }
+            try self.value(param.name);
         }
-        try self.value(param.name);
         if self.role == Role::Kernel {
             try self.text(" [[buffer(");
             try self.number(position);
@@ -293,48 +625,48 @@ fn (self: &var Emitter) emit_signature(module: &ir::Module, node: &ir::FunctionN
         try self.number(position);
         try self.text(")]], device atomic_uint *kz_status [[buffer(");
         try self.number(position + 1);
-        try self.text(")]], uint kz_thread [[thread_position_in_grid]])");
+        try self.text(")]], uint kz_thread [[thread_position_in_grid]], uint kz_group [[threadgroup_position_in_grid]], ");
+        try self.text("uint kz_local [[thread_index_in_threadgroup]], uint kz_simdgroup [[simdgroup_index_in_threadgroup]], ");
+        try self.text("uint kz_lane [[thread_index_in_simdgroup]])");
     } else {
-        try self.text("thread bool &kz_failed, uint kz_thread)");
+        try self.text("thread bool &kz_failed, KzIds kz_ids)");
     }
     return null;
 }
 
 fn (self: &var Emitter) emit_fail_action(indent: []u8) -> !void {
-    try self.text(indent);
     if self.role == Role::Kernel {
-        try self.text("atomic_store_explicit(kz_status, 1u, memory_order_relaxed);");
-        try self.end_line();
-        try self.text(indent);
-        try self.text("return;");
-        try self.end_line();
-        return;
+        try self.line(indent, "atomic_store_explicit(kz_status, 1u, memory_order_relaxed);");
+        return self.line(indent, "return;");
     }
-    try self.text("kz_failed = true;");
-    try self.end_line();
-    try self.text(indent);
+    try self.line(indent, "kz_failed = true;");
     if self.returns_value {
-        try self.text("return {};");
-    } else {
-        try self.text("return;");
+        return self.line(indent, "return {};");
     }
-    return self.end_line();
+    return self.line(indent, "return;");
 }
 
 fn (self: &var Emitter) emit_body(module: &ir::Module, node: &ir::FunctionNode) -> !?diagnostic::Diagnostic {
     if self.role == Role::Kernel {
-        try self.text("    bool kz_failed = false;");
-        try self.end_line();
+        try self.line("    ", "bool kz_failed = false;");
+        try self.line("    ", "KzIds kz_ids = { kz_thread, kz_group, kz_local, kz_simdgroup, kz_lane };");
+        var view_index = 0;
+        while self.kernel_views.get(view_index) |id| {
+            try self.text("    long v");
+            try self.number(id);
+            try self.text("n = kz_lengths[");
+            try self.number(view_index);
+            try self.text("];");
+            try self.end_line();
+            view_index = view_index + 1;
+        }
     }
     if try self.declare_values(module, node) |failed| {
         return move failed;
     }
-    try self.text("    uint kz_block = 0;");
-    try self.end_line();
-    try self.text("    for (;;) {");
-    try self.end_line();
-    try self.text("        switch (kz_block) {");
-    try self.end_line();
+    try self.line("    ", "uint kz_block = 0;");
+    try self.line("    ", "for (;;) {");
+    try self.line("        ", "switch (kz_block) {");
     var block_index = 0;
     while node.blocks.get(block_index) |block| {
         try self.text("        case ");
@@ -347,12 +679,9 @@ fn (self: &var Emitter) emit_body(module: &ir::Module, node: &ir::FunctionNode) 
             instr_index = instr_index + 1;
             let instr_node = module.instrs.at(instr.node);
             if instr_node.op == ir::Op::Phi {
-                try self.text("            ");
-                try self.value(instr_node.result.name);
-                try self.text(" = ");
-                try self.phi_input(instr_node.result.name);
-                try self.text(";");
-                try self.end_line();
+                if try self.emit_phi_entry(module, instr_node) |failed| {
+                    return move failed;
+                }
             }
         }
         instr_index = 0;
@@ -369,16 +698,35 @@ fn (self: &var Emitter) emit_body(module: &ir::Module, node: &ir::FunctionNode) 
         if try self.emit_terminator(module, node, block_node) |failed| {
             return move failed;
         }
-        try self.text("        }");
-        try self.end_line();
+        try self.line("        ", "}");
         block_index = block_index + 1;
     }
-    try self.text("        default:");
-    try self.end_line();
+    try self.line("        ", "default:");
     try self.emit_fail_action("            ");
-    try self.text("        }");
-    try self.end_line();
-    try self.text("    }");
+    try self.line("        ", "}");
+    try self.line("    ", "}");
+    return null;
+}
+
+fn (self: &var Emitter) emit_phi_entry(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let shape = shape_named(module, node.result.type_name) orelse return try unsupported(module, self.allocator, node.span,
+        "a kernel joins values of type `", node.result.type_name);
+    try self.text("            ");
+    if shape.form == Form::View {
+        try self.view_pointer(node.result.name);
+        try self.text(" = ");
+        try self.phi_input(node.result.name);
+        try self.text("p; ");
+        try self.view_length(node.result.name);
+        try self.text(" = ");
+        try self.phi_input(node.result.name);
+        try self.text("n;");
+    } else {
+        try self.value(node.result.name);
+        try self.text(" = ");
+        try self.phi_input(node.result.name);
+        try self.text(";");
+    }
     try self.end_line();
     return null;
 }
@@ -395,53 +743,340 @@ fn (self: &var Emitter) declare_values(module: &ir::Module, node: &ir::FunctionN
             if ir::is_empty(instr_node.result.name) or module.names.is(instr_node.result.type_name, "void") {
                 continue;
             }
-            let kind = scalar_named(module, instr_node.result.type_name) orelse return try unsupported(module, self.allocator, instr_node.span, "a kernel computes a value of type `", instr_node.result.type_name);
-            try self.text("    ");
-            try self.text(spelling(kind));
-            try self.text(" ");
-            try self.value(instr_node.result.name);
-            try self.text(";");
-            try self.end_line();
-            if instr_node.op == ir::Op::Phi {
-                try self.text("    ");
-                try self.text(spelling(kind));
-                try self.text(" ");
-                try self.phi_input(instr_node.result.name);
-                try self.text(";");
-                try self.end_line();
+            if self.wide_constants.contains(self.key(instr_node.result.name)) {
+                continue;
+            }
+            if try self.declare_value(module, instr_node) |failed| {
+                return move failed;
             }
         }
     }
     return null;
 }
 
-fn (self: &Emitter) view_position(name: ir::Name) -> ?i64 {
-    var index = 0;
-    while self.views.get(index) |view| {
-        if ir::same_name(view.name, name) {
-            return index;
-        }
-        index = index + 1;
+fn (self: &var Emitter) declare_value(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let result = node.result;
+    let shape = shape_named(module, result.type_name) orelse return try unsupported(module, self.allocator, node.span,
+        "a kernel computes a value of type `", result.type_name);
+    let space = self.space_of(result.name) orelse Space::Thread;
+    let element = spelling(shape.element);
+    var form = shape.form;
+    if form == Form::ViewSlot {
+        form = Form::View;
     }
+    match form {
+        Value => {
+            try self.text("    ");
+            try self.text(element);
+            try self.text(" ");
+            try self.value(result.name);
+            try self.text(";");
+            if node.op == ir::Op::Phi {
+                try self.text(" ");
+                try self.text(element);
+                try self.text(" ");
+                try self.phi_input(result.name);
+                try self.text(";");
+            }
+        },
+        View => {
+            if !self.spaces.contains(self.key(result.name)) {
+                return try unsupported(module, self.allocator, node.span, "a kernel cannot tell where a view of type `", result.type_name);
+            }
+            try self.text("    ");
+            try self.text(space_spelling(space));
+            try self.text(" ");
+            try self.text(element);
+            try self.text(" *");
+            try self.view_pointer(result.name);
+            try self.text("; long ");
+            try self.view_length(result.name);
+            try self.text(";");
+            if node.op == ir::Op::Phi {
+                try self.text(" ");
+                try self.text(space_spelling(space));
+                try self.text(" ");
+                try self.text(element);
+                try self.text(" *");
+                try self.phi_input(result.name);
+                try self.text("p; long ");
+                try self.phi_input(result.name);
+                try self.text("n;");
+            }
+        },
+        Array => {
+            if node.op == ir::Op::GpuGroupArray and self.role == Role::Helper {
+                return try fail(self.allocator, module, node.span, "`std::gpu::group_array` of type `", result.type_name,
+                    "` is allowed only in the body of a gpu export");
+            }
+            try self.text("    ");
+            try self.text(space_spelling(space));
+            try self.text(" ");
+            try self.text(element);
+            try self.text(" ");
+            try self.value(result.name);
+            try self.text("[");
+            try self.number(shape.count);
+            try self.text("];");
+        },
+        ViewSlot => {},
+        Pointer => {
+            if node.op == ir::Op::Phi {
+                return try unsupported(module, self.allocator, node.span, "a kernel joins values of type `", result.type_name);
+            }
+            try self.text("    ");
+            try self.text(space_spelling(space));
+            try self.text(" ");
+            try self.text(element);
+            try self.text(" *");
+            try self.value(result.name);
+            try self.text(";");
+            if node.op == ir::Op::LocalSlot and space == Space::Thread {
+                try self.text(" thread ");
+                try self.text(element);
+                try self.text(" ");
+                try self.storage(result.name);
+                if shape.count > 0 {
+                    try self.text("[");
+                    try self.number(shape.count);
+                    try self.text("]");
+                }
+                try self.text(";");
+            }
+        },
+    }
+    try self.end_line();
     return null;
 }
 
+fn (self: &var Emitter) emit_view_copy(target: ir::Name, source: ir::Name) -> !void {
+    try self.text("            ");
+    try self.view_pointer(target);
+    try self.text(" = ");
+    try self.view_pointer(source);
+    try self.text("; ");
+    try self.view_length(target);
+    try self.text(" = ");
+    try self.view_length(source);
+    try self.text(";");
+    return self.end_line();
+}
+
+fn (self: &var Emitter) emit_copy(target: ir::Name, target_suffix: []u8, source: ir::Name, count: i64) -> !void {
+    try self.text("            for (int k = 0; k < ");
+    try self.number(count);
+    try self.text("; k++) { ");
+    try self.value(target);
+    try self.text(target_suffix);
+    try self.text("[k] = ");
+    try self.value(source);
+    try self.text("[k]; }");
+    return self.end_line();
+}
+
 fn (self: &var Emitter) emit_instr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    if node.op == ir::Op::CondFail {
-        try self.text("            if (");
-        try self.value(node.args.get_or_panic(0).name);
-        try self.text(") {");
-        try self.end_line();
-        try self.emit_fail_action("                ");
-        try self.text("            }");
-        try self.end_line();
-        return null;
-    }
-    if node.op == ir::Op::SliceStore {
-        let view = node.args.get_or_panic(0);
-        if self.view_position(view.name) |_| {
+    let result = node.result.name;
+    match node.op {
+        CondFail => {
+            try self.text("            if (");
+            try self.value(node.args.get_or_panic(0).name);
+            try self.text(") {");
+            try self.end_line();
+            try self.emit_fail_action("                ");
+            try self.line("            ", "}");
+            return null;
+        },
+        GpuGroupArray => return null,
+        Const => {
+            if self.wide_constants.contains(self.key(result)) {
+                return null;
+            }
+        },
+        Cast => {
+            let source = node.args.get_or_panic(0);
+            if self.wide_constants.get(self.key(source.name)) |literal| {
+                let shape = shape_named(module, node.result.type_name) orelse return try unsupported(module, self.allocator, node.span,
+                    "a kernel casts an f64 constant to `", node.result.type_name);
+                if shape.element != Scalar::F32 or shape.form != Form::Value {
+                    return try unsupported(module, self.allocator, node.span, "a kernel casts an f64 constant to `", node.result.type_name);
+                }
+                let literal_text = ir::name_text(&module.names, literal);
+                let literal_bytes = literal_text.as_bytes();
+                let parsed = try typ::parse_float_literal(self.allocator, literal_bytes) orelse return try fail(self.allocator, module, node.span,
+                    "a kernel has the float literal `", literal, "`, which does not parse");
+                try self.text("            ");
+                try self.value(result);
+                try self.text(" = as_type<float>(");
+                try fmt::append_u64(self.allocator, &var self.out, binary32_bits(cast<f32>(parsed)));
+                try self.text("u);");
+                try self.end_line();
+                return null;
+            }
+        },
+        GpuBarrier => {
+            try self.line("            ", "threadgroup_barrier(mem_flags::mem_threadgroup);");
+            return null;
+        },
+        BufferNew => {
+            let shape = shape_named(module, node.result.type_name) orelse return null;
+            try self.text("            for (int k = 0; k < ");
+            try self.number(shape.count);
+            try self.text("; k++) { ");
+            try self.value(result);
+            try self.text("[k] = 0; }");
+            try self.end_line();
+            return null;
+        },
+        LocalSlot => {
+            let source = node.args.get_or_panic(0);
+            let shape = shape_named(module, source.type_name) orelse return try unsupported(module, self.allocator, node.span,
+                "a kernel takes the address of a value of type `", source.type_name);
+            if shape.form == Form::View {
+                try self.emit_view_copy(result, source.name);
+                return null;
+            }
+            let space = self.space_of(result) orelse Space::Thread;
+            if shape.form == Form::Array and space != Space::Thread {
+                try self.text("            ");
+                try self.value(result);
+                try self.text(" = ");
+                try self.value(source.name);
+                try self.text(";");
+                try self.end_line();
+                return null;
+            }
+            if shape.form == Form::Array {
+                if self.use_count(source.name) == 1 {
+                    try self.text("            ");
+                    try self.value(result);
+                    try self.text(" = ");
+                    try self.value(source.name);
+                    try self.text(";");
+                    try self.end_line();
+                    return null;
+                }
+                try self.emit_copy(result, "s", source.name, shape.count);
+            } else {
+                if shape.form != Form::Value {
+                    return try unsupported(module, self.allocator, node.span, "a kernel takes the address of a value of type `", source.type_name);
+                }
+                try self.text("            ");
+                try self.storage(result);
+                try self.text(" = ");
+                try self.value(source.name);
+                try self.text(";");
+                try self.end_line();
+                try self.text("            ");
+                try self.value(result);
+                try self.text(" = &");
+                try self.storage(result);
+                try self.text(";");
+                try self.end_line();
+                return null;
+            }
             try self.text("            ");
-            try self.value(view.name);
+            try self.value(result);
+            try self.text(" = ");
+            try self.storage(result);
+            try self.text(";");
+            try self.end_line();
+            return null;
+        },
+        RefLoad => {
+            let shape = shape_named(module, node.result.type_name) orelse return try unsupported(module, self.allocator, node.span,
+                "a kernel loads a value of type `", node.result.type_name);
+            if shape.form == Form::Array {
+                try self.emit_copy(result, "", node.args.get_or_panic(0).name, shape.count);
+                return null;
+            }
+            if shape.form == Form::View {
+                try self.emit_view_copy(result, node.args.get_or_panic(0).name);
+                return null;
+            }
+            if shape.form != Form::Value {
+                return try unsupported(module, self.allocator, node.span, "a kernel loads a value of type `", node.result.type_name);
+            }
+            try self.text("            ");
+            try self.value(result);
+            try self.text(" = *");
+            try self.value(node.args.get_or_panic(0).name);
+            try self.text(";");
+            try self.end_line();
+            return null;
+        },
+        RefStore => {
+            let stored = node.args.get_or_panic(1);
+            let shape = shape_named(module, stored.type_name) orelse return try unsupported(module, self.allocator, node.span,
+                "a kernel stores a value of type `", stored.type_name);
+            if shape.form == Form::Array {
+                try self.emit_copy(node.args.get_or_panic(0).name, "", stored.name, shape.count);
+                return null;
+            }
+            if shape.form == Form::View {
+                try self.emit_view_copy(node.args.get_or_panic(0).name, stored.name);
+                return null;
+            }
+            if shape.form != Form::Value {
+                return try unsupported(module, self.allocator, node.span, "a kernel stores a value of type `", stored.type_name);
+            }
+            try self.text("            *");
+            try self.value(node.args.get_or_panic(0).name);
+            try self.text(" = ");
+            try self.value(stored.name);
+            try self.text(";");
+            try self.end_line();
+            return null;
+        },
+        BufferAddr => {
+            try self.text("            ");
+            try self.value(result);
+            try self.text(" = ");
+            try self.value(node.args.get_or_panic(0).name);
+            try self.text(" + ");
+            try self.value(node.args.get_or_panic(1).name);
+            try self.text(";");
+            try self.end_line();
+            return null;
+        },
+        BufferAsBytes => {
+            let slot = node.args.get_or_panic(0);
+            let shape = shape_named(module, slot.type_name) orelse return try unsupported(module, self.allocator, node.span,
+                "a kernel views a value of type `", slot.type_name);
+            try self.text("            ");
+            try self.view_pointer(result);
+            try self.text(" = ");
+            try self.value(slot.name);
+            try self.text("; ");
+            try self.view_length(result);
+            try self.text(" = ");
+            try self.number(shape.count);
+            try self.text(";");
+            try self.end_line();
+            return null;
+        },
+        SliceSlice => {
+            let view = node.args.get_or_panic(0).name;
+            let low = node.args.get_or_panic(1).name;
+            let high = node.args.get_or_panic(2).name;
+            try self.text("            ");
+            try self.view_pointer(result);
+            try self.text(" = ");
+            try self.view_pointer(view);
+            try self.text(" + ");
+            try self.value(low);
+            try self.text("; ");
+            try self.view_length(result);
+            try self.text(" = ");
+            try self.value(high);
+            try self.text(" - ");
+            try self.value(low);
+            try self.text(";");
+            try self.end_line();
+            return null;
+        },
+        SliceStore => {
+            try self.text("            ");
+            try self.view_pointer(node.args.get_or_panic(0).name);
             try self.text("[");
             try self.value(node.args.get_or_panic(1).name);
             try self.text("] = ");
@@ -449,13 +1084,31 @@ fn (self: &var Emitter) emit_instr(module: &ir::Module, node: &ir::InstrNode) ->
             try self.text(";");
             try self.end_line();
             return null;
-        }
-        return try fail(self.allocator, module, node.span, "a kernel stores into `", view.name, "`, which is not a kernel parameter");
+        },
+        Id => {
+            let source = node.args.get_or_panic(0);
+            let shape = shape_named(module, source.type_name) orelse return try unsupported(module, self.allocator, node.span,
+                "a kernel copies a value of type `", source.type_name);
+            if shape.form == Form::View {
+                try self.text("            ");
+                try self.view_pointer(result);
+                try self.text(" = ");
+                try self.view_pointer(source.name);
+                try self.text("; ");
+                try self.view_length(result);
+                try self.text(" = ");
+                try self.view_length(source.name);
+                try self.text(";");
+                try self.end_line();
+                return null;
+            }
+        },
+        Call => return self.emit_call(module, node),
+        _ => {},
     }
     try self.text("            ");
-    let produces = !ir::is_empty(node.result.name) and !module.names.is(node.result.type_name, "void");
-    if produces {
-        try self.value(node.result.name);
+    if !ir::is_empty(result) and !module.names.is(node.result.type_name, "void") {
+        try self.value(result);
         try self.text(" = ");
     }
     if try self.emit_expression(module, node) |failed| {
@@ -463,24 +1116,108 @@ fn (self: &var Emitter) emit_instr(module: &ir::Module, node: &ir::InstrNode) ->
     }
     try self.text(";");
     try self.end_line();
-    if node.op == ir::Op::Call {
-        try self.text("            if (kz_failed) {");
-        try self.end_line();
-        try self.emit_fail_action("                ");
-        try self.text("            }");
-        try self.end_line();
-    }
     return null;
+}
+
+fn (self: &var Emitter) emit_call(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let callee_text = ir::name_text(&module.names, node.operand);
+    let callee_bytes = callee_text.as_bytes();
+    let callee = module.function_named(callee_bytes) orelse return try fail(self.allocator, module, node.span,
+        "a kernel calls `", node.operand, "`, which has no body the metal target can lower");
+    let callee_node = module.function_nodes.at(callee.node);
+    var spaces = string::new(self.allocator);
+    defer spaces.deinit(self.allocator);
+    var index = 0;
+    while node.args.get(index) |arg| {
+        index = index + 1;
+        let shape = shape_named(module, arg.type_name) orelse return try unsupported(module, self.allocator, node.span,
+            "a kernel passes a value of type `", arg.type_name);
+        if shape.form == Form::View {
+            let space = self.space_of(arg.name) orelse Space::Device;
+            try spaces.append_byte(self.allocator, space_letter(space));
+        } else {
+            if shape.form != Form::Value {
+                return try unsupported(module, self.allocator, node.span, "a kernel passes a value of type `", arg.type_name);
+            }
+        }
+    }
+    let space_bytes = spaces.as_bytes();
+    try self.request_instance(callee, space_bytes);
+    try self.text("            ");
+    if !ir::is_empty(node.result.name) and !module.names.is(node.result.type_name, "void") {
+        try self.value(node.result.name);
+        try self.text(" = ");
+    }
+    try self.instance_name(module, callee_node.name, space_bytes);
+    try self.text("(");
+    index = 0;
+    while node.args.get(index) |arg| {
+        index = index + 1;
+        let shape = shape_named(module, arg.type_name) orelse return null;
+        if shape.form == Form::View {
+            try self.view_pointer(arg.name);
+            try self.text(", ");
+            try self.view_length(arg.name);
+        } else {
+            try self.value(arg.name);
+        }
+        try self.text(", ");
+    }
+    try self.text("kz_failed, kz_ids);");
+    try self.end_line();
+    try self.line("            ", "if (kz_failed) {");
+    try self.emit_fail_action("                ");
+    try self.line("            ", "}");
+    return null;
+}
+
+fn (self: &var Emitter) request_instance(function: ir::Function, spaces: []u8) -> !void {
+    var index = 0;
+    while self.instances.at(index) |instance| {
+        index = index + 1;
+        let existing = instance.spaces.as_bytes();
+        if instance.function.node == function.node and mem::equal_bytes(existing, spaces) {
+            return;
+        }
+    }
+    let owned = try string::from_bytes(self.allocator, spaces);
+    try self.instances.append(self.allocator, Instance { function: function, spaces: move owned });
+    return;
 }
 
 fn (self: &var Emitter) emit_expression(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     match node.op {
         Const => {
-            let kind = scalar_named(module, node.result.type_name) orelse return try unsupported(module, self.allocator, node.span, "a kernel has a constant of type `", node.result.type_name);
-            return self.emit_const(module, node, kind);
+            let shape = shape_named(module, node.result.type_name) orelse return try unsupported(module, self.allocator, node.span,
+                "a kernel has a constant of type `", node.result.type_name);
+            return self.emit_const(module, node, shape.element);
         },
         Id => try self.value(node.args.get_or_panic(0).name),
-        GpuThreadIndex => try self.text("long(kz_thread)"),
+        GpuIndex => {
+            try self.text("long(kz_ids.");
+            let kind = ir::name_text(&module.names, node.immediate);
+            try self.out.append_string(self.allocator, kind);
+            try self.text("_id)");
+        },
+        GpuShuffleXor => {
+            try self.text("simd_shuffle_xor(");
+            try self.value(node.args.get_or_panic(0).name);
+            try self.text(", ushort(");
+            try self.value(node.args.get_or_panic(1).name);
+            try self.text("))");
+        },
+        GpuMath => {
+            let function = ir::name_text(&module.names, node.immediate);
+            try self.out.append_string(self.allocator, function);
+            try self.text("(");
+            try self.value(node.args.get_or_panic(0).name);
+            try self.text(")");
+        },
+        GpuSimdMax => {
+            try self.text("simd_max(");
+            try self.value(node.args.get_or_panic(0).name);
+            try self.text(")");
+        },
         FloatBits => {
             try self.text("as_type<uint>(");
             try self.value(node.args.get_or_panic(0).name);
@@ -492,8 +1229,9 @@ fn (self: &var Emitter) emit_expression(module: &ir::Module, node: &ir::InstrNod
             try self.text(")");
         },
         Cast => {
-            let kind = scalar_named(module, node.result.type_name) orelse return try unsupported(module, self.allocator, node.span, "a kernel casts to `", node.result.type_name);
-            try self.text(spelling(kind));
+            let shape = shape_named(module, node.result.type_name) orelse return try unsupported(module, self.allocator, node.span,
+                "a kernel casts to `", node.result.type_name);
+            try self.text(spelling(shape.element));
             try self.text("(");
             try self.value(node.args.get_or_panic(0).name);
             try self.text(")");
@@ -511,39 +1249,12 @@ fn (self: &var Emitter) emit_expression(module: &ir::Module, node: &ir::InstrNod
             try self.text(" ");
             try self.value(node.args.get_or_panic(1).name);
         },
-        Call => {
-            try self.callee_name(module, node.operand);
-            try self.text("(");
-            var index = 0;
-            while node.args.get(index) |arg| {
-                index = index + 1;
-                if self.view_position(arg.name) |_| {
-                    return try fail(self.allocator, module, node.span, "a kernel passes a view to `", node.operand,
-                        "`; only gpu exports take views yet");
-                }
-                try self.value(arg.name);
-                try self.text(", ");
-            }
-            try self.text("kz_failed, kz_thread)");
-        },
-        SliceLen => {
-            let view = node.args.get_or_panic(0);
-            let position = self.view_position(view.name) orelse return try fail(self.allocator, module, node.span,
-                "a kernel takes the length of `", view.name, "`, which is not a kernel parameter");
-            try self.text("kz_lengths[");
-            try self.number(position);
-            try self.text("]");
-        },
+        SliceLen => try self.view_length(node.args.get_or_panic(0).name),
         SliceIndex => {
-            let view = node.args.get_or_panic(0);
-            if self.view_position(view.name) |_| {
-                try self.value(view.name);
-                try self.text("[");
-                try self.value(node.args.get_or_panic(1).name);
-                try self.text("]");
-                return null;
-            }
-            return try fail(self.allocator, module, node.span, "a kernel reads `", view.name, "`, which is not a kernel parameter");
+            try self.view_pointer(node.args.get_or_panic(0).name);
+            try self.text("[");
+            try self.value(node.args.get_or_panic(1).name);
+            try self.text("]");
         },
         _ => {
             var message = string::new(self.allocator);
@@ -579,29 +1290,6 @@ fn (self: &var Emitter) emit_const(module: &ir::Module, node: &ir::InstrNode, ki
     return null;
 }
 
-fn binary32_bits(value: f32) -> u64 {
-    let wide = float::bits(cast<f64>(value));
-    let sign = (wide >> 32) & 0x80000000;
-    let exponent = cast<i64>((wide >> 52) & 0x7ff);
-    let fraction = wide & 0xfffffffffffff;
-    if exponent == 0x7ff {
-        var quiet: u64 = 0;
-        if fraction != 0 {
-            quiet = 0x400000 | (fraction >> 29);
-        }
-        return sign | 0x7f800000 | quiet;
-    }
-    if exponent == 0 {
-        return sign;
-    }
-    let unbiased = exponent - 1023;
-    if unbiased >= -126 {
-        return sign | (cast<u64>(unbiased + 127) << 23) | (fraction >> 29);
-    }
-    let significand = fraction | 0x10000000000000;
-    return sign | (significand >> cast<u64>(29 - 126 - unbiased));
-}
-
 fn (self: &var Emitter) emit_terminator(module: &ir::Module, function: &ir::FunctionNode, block: &ir::BlockNode) -> !?diagnostic::Diagnostic {
     let terminator = block.terminator;
     match terminator.op {
@@ -622,8 +1310,7 @@ fn (self: &var Emitter) emit_terminator(module: &ir::Module, function: &ir::Func
             try self.text(") {");
             try self.end_line();
             try self.emit_edge(module, function, block.name, terminator.target, "                ");
-            try self.text("            }");
-            try self.end_line();
+            try self.line("            ", "}");
             try self.emit_edge(module, function, block.name, terminator.else_target, "            ");
         },
         None => return try fail(self.allocator, module, ast::zero_span(), "block `", block.name, "` has no terminator"),
@@ -647,12 +1334,7 @@ fn (self: &var Emitter) emit_edge(module: &ir::Module, function: &ir::FunctionNo
                 while instr_node.incoming.get(incoming_index) |incoming| {
                     incoming_index = incoming_index + 1;
                     if ir::same_name(incoming.block, from) {
-                        try self.text(indent);
-                        try self.phi_input(instr_node.result.name);
-                        try self.text(" = ");
-                        try self.value(incoming.value.name);
-                        try self.text(";");
-                        try self.end_line();
+                        try self.emit_phi_assignment(module, instr_node, incoming.value, indent);
                     }
                 }
             }
@@ -661,11 +1343,53 @@ fn (self: &var Emitter) emit_edge(module: &ir::Module, function: &ir::FunctionNo
             try self.number(target_index);
             try self.text(";");
             try self.end_line();
-            try self.text(indent);
-            try self.text("continue;");
-            return self.end_line();
+            return self.line(indent, "continue;");
         }
         target_index = target_index + 1;
     }
     return;
+}
+
+fn (self: &var Emitter) emit_phi_assignment(module: &ir::Module, phi: &ir::InstrNode, incoming: ir::Value, indent: []u8) -> !void {
+    try self.text(indent);
+    let shape = shape_named(module, phi.result.type_name) orelse Shape { form: Form::Value, element: Scalar::I64, count: 0 };
+    if shape.form == Form::View {
+        try self.phi_input(phi.result.name);
+        try self.text("p = ");
+        try self.view_pointer(incoming.name);
+        try self.text("; ");
+        try self.phi_input(phi.result.name);
+        try self.text("n = ");
+        try self.view_length(incoming.name);
+        try self.text(";");
+    } else {
+        try self.phi_input(phi.result.name);
+        try self.text(" = ");
+        try self.value(incoming.name);
+        try self.text(";");
+    }
+    return self.end_line();
+}
+
+fn binary32_bits(value: f32) -> u64 {
+    let wide = float::bits(cast<f64>(value));
+    let sign = (wide >> 32) & 0x80000000;
+    let exponent = cast<i64>((wide >> 52) & 0x7ff);
+    let fraction = wide & 0xfffffffffffff;
+    if exponent == 0x7ff {
+        var quiet: u64 = 0;
+        if fraction != 0 {
+            quiet = 0x400000 | (fraction >> 29);
+        }
+        return sign | 0x7f800000 | quiet;
+    }
+    if exponent == 0 {
+        return sign;
+    }
+    let unbiased = exponent - 1023;
+    if unbiased >= -126 {
+        return sign | (cast<u64>(unbiased + 127) << 23) | (fraction >> 29);
+    }
+    let significand = fraction | 0x10000000000000;
+    return sign | (significand >> cast<u64>(29 - 126 - unbiased));
 }
