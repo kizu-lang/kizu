@@ -45,9 +45,10 @@ fn (self: &var Emitter) write_call(module: &ir::Module, node: &ir::InstrNode) ->
         },
         Foreign => {
             callee_name = node.extern_name;
-            if try self.c_call_uses_struct_values(module, node) {
+            if try self.c_call_uses_struct_values(module, node, 0) {
                 let symbol = try self.callee_symbol(module, callee_name);
-                return self.write_c_struct_call(module, symbol, node);
+                let callee = try self.text1("@%s", Arg::Str(symbol));
+                return self.write_c_struct_call(module, callee, node, 0);
             }
         },
         Plain => {},
@@ -118,6 +119,10 @@ fn (self: &var Emitter) write_indirect_call(module: &ir::Module, node: &ir::Inst
     let callee_value = node.args.get(0) orelse
         return try self.fail0("llvm error: call.indirect expects a callee");
     let callee = try self.operand(module, callee_value);
+    if module.names.starts_with(callee_value.type_name, typ::c_func_head()) and
+        try self.c_call_uses_struct_values(module, node, 1) {
+        return self.write_c_struct_call(module, callee.operand, node, 1);
+    }
     var args = array::new<string::String>(self.allocator);
     defer args.deinit(self.allocator);
     var index = 1;
@@ -422,6 +427,10 @@ fn (self: &var Emitter) external_decl(module: &ir::Module, node: &ir::InstrNode)
     if node.op != ir::Op::FuncAddr {
         return self.external_call_decl(module, node.extern_name, node);
     }
+    let pointer_symbol = try self.callee_symbol(module, node.extern_name);
+    if try self.c_pointer_struct_decl(module, pointer_symbol, node.result.type_name) |decl| {
+        return move decl;
+    }
     let pointer = ir::name_text(&module.names, node.result.type_name);
     let pointer_bytes = pointer.as_bytes();
     let parsed = try self.types.parse(pointer_bytes);
@@ -470,7 +479,7 @@ fn (self: &var Emitter) external_call_decl(module: &ir::Module, name: ir::Name, 
         let joined = try string::join(self.allocator, &params, ", ");
         return self.sprint2("declare void @%s(%s)", Arg::Str(symbol), Arg::Owned(move joined));
     }
-    if module.names.is(node.extern_abi, "c") and try self.c_call_uses_struct_values(module, node) {
+    if module.names.is(node.extern_abi, "c") and try self.c_call_uses_struct_values(module, node, 0) {
         return self.c_struct_call_decl(module, symbol, node);
     }
     try self.append_plain_call_params(module, node, &var params);
