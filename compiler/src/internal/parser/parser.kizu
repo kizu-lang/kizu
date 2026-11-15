@@ -307,8 +307,31 @@ fn (self: &var Parser) parse_ident_led_decl(
     if self.starts_error_set_decl() {
         return try self.parse_error_set_decl(tree);
     }
+    if token_literal_equal(self.current_token(), "const") and
+        self.peek_kind() == token::Kind::Ident {
+        return try self.parse_const_decl(tree);
+    }
     try self.error_expected_declaration();
     return null;
+}
+
+fn (self: &var Parser) parse_const_decl(
+    tree: &var ast::Ast
+) -> !ast::Declaration {
+    try self.next_token();
+    let span = token_span_at(self);
+    let name = try self.retain_current_literal(tree);
+    if !try self.expect_peek(token::Kind::Assign) {
+        return try tree.add_recovered_declaration(token_span_at(self));
+    }
+    try self.next_token();
+    let value = try self.parse_expression(tree, lowest_precedence());
+    let _ = try self.expect_statement_terminator("const declaration");
+    return try tree.add_declaration(ast::DeclarationNode::Const(ast::ConstDecl {
+        name: name,
+        value: value,
+        span: span
+    }));
 }
 
 fn (self: &var Parser) parse_test_decl(
@@ -3578,7 +3601,7 @@ fn (self: &var Parser) parse_static_expr_arg(tree: &var ast::Ast) -> !?string::S
     }
     var text = string::new(self.allocator);
     errdefer text.deinit(self.allocator);
-    if try append_static_expr_text(self.allocator, tree, expression, &var text) {
+    if try ast::append_static_expr_text(self.allocator, tree, expression, &var text) {
         return move text;
     }
     text.deinit(self.allocator);
@@ -3595,67 +3618,6 @@ fn (self: &var Parser) parse_static_expr_arg(tree: &var ast::Ast) -> !?string::S
     errdefer stand_in.deinit(self.allocator);
     try stand_in.append_bytes(self.allocator, "0");
     return move stand_in;
-}
-
-fn append_static_expr_text(
-    allocator: Allocator,
-    tree: &ast::Ast,
-    expression: ast::Expression,
-    out: &var string::String
-) -> !bool {
-    match tree.expressions.at(expression.node) {
-        Int(value) => {
-            try append_retained_string(allocator, out, tree.texts.at(value.value.node));
-            return true;
-        },
-        Ident(value) => {
-            try append_retained_string(allocator, out, tree.texts.at(value.name.node));
-            return true;
-        },
-        Prefix(value) => {
-            if !text_equal(tree, value.operator, "-") {
-                return false;
-            }
-            try out.append_bytes(allocator, "(0 - ");
-            if !try append_static_expr_text(allocator, tree, value.right, out) {
-                return false;
-            }
-            try out.append_bytes(allocator, ")");
-            return true;
-        },
-        Binary(value) => {
-            if !is_static_expr_operator(tree, value.operator) {
-                return false;
-            }
-            try out.append_bytes(allocator, "(");
-            if !try append_static_expr_text(allocator, tree, value.left, out) {
-                return false;
-            }
-            try out.append_bytes(allocator, " ");
-            try append_retained_string(allocator, out, tree.texts.at(value.operator.node));
-            try out.append_bytes(allocator, " ");
-            if !try append_static_expr_text(allocator, tree, value.right, out) {
-                return false;
-            }
-            try out.append_bytes(allocator, ")");
-            return true;
-        },
-        _ => return false,
-    }
-}
-
-fn text_equal(tree: &ast::Ast, value: ast::Text, expected: []u8) -> bool {
-    let retained = tree.texts.at(value.node);
-    let bytes = retained.as_bytes();
-    return mem::equal_bytes(bytes, expected);
-}
-
-fn is_static_expr_operator(tree: &ast::Ast, operator: ast::Text) -> bool {
-    return text_equal(tree, operator, "+") or
-        text_equal(tree, operator, "-") or
-        text_equal(tree, operator, "*") or
-        text_equal(tree, operator, "/") or
-        text_equal(tree, operator, "%");
 }
 
 fn (self: &var Parser) parse_type_argument(
@@ -3804,7 +3766,7 @@ fn positive_decimal(current: &token::Token) -> ?i64 {
 }
 
 fn (self: &var Parser) error_expected_declaration() -> !void {
-    let prefix = "expected declaration (fn, test, import, struct, enum, union, contract, impl, extern, export, pub, or unsafe), got ";
+    let prefix = "expected declaration (fn, test, import, const, struct, enum, union, contract, impl, extern, export, pub, or unsafe), got ";
     return self.error_token(prefix, self.current_token());
 }
 
@@ -4277,4 +4239,10 @@ fn append_next_token(
     let next = try scanner.next_token();
     let handle = try tokens.add(allocator, move next);
     return stream.append(allocator, handle);
+}
+
+fn text_equal(tree: &ast::Ast, value: ast::Text, expected: []u8) -> bool {
+    let retained = tree.texts.at(value.node);
+    let bytes = retained.as_bytes();
+    return mem::equal_bytes(bytes, expected);
 }
