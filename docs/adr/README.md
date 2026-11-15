@@ -148,3 +148,4 @@ ADR には積みません。残す価値が無くなったら消します。番�
 - [ADR-0152: raw pointer の指す値は local borrow として借りる](0152-a-raw-pointer-lends-its-pointee.md)
 - [ADR-0153: C の struct は値でも渡し、呼び出し規約は compiler が守る](0153-a-c-struct-passes-by-value.md)
 - [ADR-0154: Windows target は GNU 環境で、llvm-mingw が link する](0154-windows-links-with-llvm-mingw.md)
+- [ADR-0155: module 直下の const は compile 時の値に付けた名前](0155-module-const-names-a-compile-time-value.md)

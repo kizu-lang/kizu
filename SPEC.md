@@ -300,7 +300,41 @@ fn main() {
 
 関数の引数は対象外です。引数は署名の一部で、呼び出し側との約束のために受け取る
 ことがあります。top-level 宣言も対象外です。package の外から使われる可能性が
-あります。
+あります。ただし `const`(§6.2.1)は module の外へ出ないので、使わなければ
+compile error です。
+
+### 6.2.1 const
+
+module 直下の `const` は、compile 時に値の決まる式に名前を付けます。
+
+```kizu
+const max_bytes = 48;
+const limbs = (max_bytes / 4);
+const greeting = "hello";
+
+struct Number {
+    limbs: [limbs]u64,
+}
+
+fn main() {
+    var buffer = [max_bytes]u8{};
+    print(greeting);
+}
+```
+
+* 右辺に書けるのは literal、同じ module の他の `const`、それらへの演算子と
+  `cast`、struct / 固定長配列の literal、enum の値、`comptime` 式です。関数呼び出し
+  は書けません。
+* 名前を読むことは、そこに右辺を書いたのと同じです。runtime の変数ではありません。
+* 型は `let` に同じ式を書いたときの型です。裸の整数 literal は `i64`、浮動小数点
+  literal は `f64` で、使う場所の文脈で幅を変えません。別の幅が要るときは
+  `const port = cast<u16>(8080);` と右辺に書きます。
+* 整数の `const` は、`i64` の static な整数として配列の長さ(§7)と static 引数
+  (§13)にも書けます。
+* module の外へは出せません(`pub const` は書けません)。
+* 使わない `const`、自分自身に依存する `const`、同じ module の他の宣言と同じ名前の
+  `const` は compile error です。局所変数・引数・capture が `const` と同じ名前を
+  使うことも compile error です。
 
 ### 6.3 関数
 
@@ -676,7 +710,8 @@ name resolution order:
 5. error
 
 同じ last segment を持つ import は compile error です。
-local declaration が import した名前を shadow することも compile error です。
+local declaration が import した名前や、その module の `const` を shadow する
+ことも compile error です。
 使わない import も compile error です。import 一覧がその file の依存一覧である
 ことは、これが保証します。
 
@@ -1488,12 +1523,13 @@ let cell = [2][2]f64{
 ```
 
 N の型は `i64` です。N は整数 literal のほか、static な整数でも書けます。`i64` の
-static parameter と整数 range の `comptime for` の capture(§13)の名前か、
-それらと literal を括弧で囲んだ整数演算(`[(n * 2)]f64`)で、括弧の中は static 引数の式(§13)と同じ規則
-です。長さは instance ごと・capture の値ごとに評価し、1 未満になるとその
-instance を作った呼び出しが compile error です。literal だけの式はその値と同じ型
-です(`[(2 * 4)]u8` は `[8]u8`)。長さが読む名前は宣言中の関数の static parameter
-に限るので、static parameter を持たない struct の field には書けません。
+static parameter、整数 range の `comptime for` の capture(§13)、整数の `const`
+(§6.2.1)の名前か、それらと literal を括弧で囲んだ整数演算(`[(n * 2)]f64`)
+で、括弧の中は static 引数の式(§13)と同じ規則です。長さは instance ごと・
+capture の値ごとに評価し、1 未満になるとその instance を作った呼び出しが
+compile error です。literal だけの式はその値と同じ型です(`[(2 * 4)]u8` は
+`[8]u8`)。static parameter は宣言中の関数の中でしか読めないので、struct の field
+の長さには literal か `const` を書きます。
 
 ```kizu
 fn dot<n: i64>(a: &[n]f64, b: &[n]f64) -> f64 {
