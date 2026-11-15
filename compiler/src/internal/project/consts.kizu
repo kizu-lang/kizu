@@ -1,0 +1,529 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::staticexpr;
+import compiler::internal::typ;
+import std::arena;
+import std::array;
+import std::fmt;
+import std::mem;
+import std::string;
+
+enum ConstState {
+    Pending,
+    Resolving,
+    Resolved,
+}
+
+struct ConstEntry {
+    file: arena::Handle<ModuleFile>,
+    value: ast::Expression,
+    span: ast::Span,
+    state: ConstState,
+    resolved: ast::Expression,
+    used: bool,
+}
+
+fn (self: &var Loader) collect_consts(
+    tree: &ast::Ast,
+    files: &array::Array<arena::Handle<ModuleFile>>
+) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    while files.at(index) |file_handle| {
+        index = index + 1;
+        let file = file_handle.*;
+        let declarations = try self.declarations_of(file);
+        defer declarations.deinit(self.allocator);
+        var position = 0;
+        while declarations.get(position) |declaration| {
+            position = position + 1;
+            match tree.declarations.at(declaration.node) {
+                Const(value) => {
+                    if try self.add_const(tree, file, value.name, value.value, value.span) |failed| {
+                        return move failed;
+                    }
+                },
+                _ => {},
+            }
+        }
+    }
+    return null;
+}
+
+fn (self: &var Loader) add_const(
+    tree: &ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    name: ast::Text,
+    value: ast::Expression,
+    span: ast::Span
+) -> !?diagnostic::Diagnostic {
+    let key = try self.const_key(tree, file, name);
+    defer key.deinit(self.allocator);
+    let key_bytes = key.as_bytes();
+    if self.consts.contains(key_bytes) or index_holds(&self.functions, &key) or index_holds(&self.types, &key) {
+        return try const_error(self.allocator, span, tree, name, "` is already declared in this module");
+    }
+    try self.consts.insert(self.allocator, key_bytes, ConstEntry {
+        file: file,
+        value: value,
+        span: span,
+        state: ConstState::Pending,
+        resolved: value,
+        used: false
+    });
+    return null;
+}
+
+fn (self: &Loader) const_key(
+    tree: &ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    name: ast::Text
+) -> !string::String {
+    let retained = tree.texts.at(name.node);
+    let bytes = retained.as_bytes();
+    return self.qualify_in(file, bytes);
+}
+
+fn (self: &Loader) names_const(tree: &ast::Ast, file: arena::Handle<ModuleFile>, name: ast::Text) -> !bool {
+    if self.consts.len() == 0 {
+        return false;
+    }
+    let key = try self.const_key(tree, file, name);
+    defer key.deinit(self.allocator);
+    let key_bytes = key.as_bytes();
+    return self.consts.contains(key_bytes);
+}
+
+fn (self: &Loader) names_const_text(file: arena::Handle<ModuleFile>, name: []u8) -> !bool {
+    if self.consts.len() == 0 {
+        return false;
+    }
+    let key = try self.qualify_in(file, name);
+    defer key.deinit(self.allocator);
+    let key_bytes = key.as_bytes();
+    return self.consts.contains(key_bytes);
+}
+
+fn append_static_value(allocator: Allocator, out: &var string::String, value: i64) -> !void {
+    if value < 0 {
+        try out.append_bytes(allocator, "(0 - ");
+        try fmt::append_i64(allocator, out, 0 - value);
+        try out.append_bytes(allocator, ")");
+        return;
+    }
+    return fmt::append_i64(allocator, out, value);
+}
+
+fn (self: &Loader) reject_const_shadow(
+    tree: &ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    name: ast::Text,
+    span: ast::Span
+) -> !?diagnostic::Diagnostic {
+    if !try self.names_const(tree, file, name) {
+        return null;
+    }
+    return try const_error(self.allocator, span, tree, name, "` shadows a const of this module");
+}
+
+fn (self: &var Loader) qualify_const_ident(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    expr: ast::Expression,
+    node: ast::IdentExpr
+) -> !ExpressionResult {
+    if !try self.names_const(tree, file, node.name) {
+        return ExpressionResult::Expression(expr);
+    }
+    let key = try self.const_key(tree, file, node.name);
+    defer key.deinit(self.allocator);
+    let key_bytes = key.as_bytes();
+    return self.const_value(tree, key_bytes, node.name, node.span);
+}
+
+fn (self: &var Loader) const_value(
+    tree: &var ast::Ast,
+    key: []u8,
+    name: ast::Text,
+    span: ast::Span
+) -> !ExpressionResult {
+    var entry = self.consts.get(key) orelse return ExpressionResult::Failed(
+        try const_error(self.allocator, span, tree, name, "` is not a const")
+    );
+    entry.used = true;
+    match entry.state {
+        Resolved => {
+            try self.consts.insert(self.allocator, key, entry);
+            return ExpressionResult::Expression(entry.resolved);
+        },
+        Resolving => return ExpressionResult::Failed(
+            try const_error(self.allocator, span, tree, name, "` depends on itself")
+        ),
+        Pending => {},
+    }
+    if !try self.is_const_form(tree, entry.file, entry.value) {
+        return ExpressionResult::Failed(
+            try const_error(self.allocator, entry.span, tree, name, "` is not known at compile time; a const holds literals, other consts, and operators on them")
+        );
+    }
+    entry.state = ConstState::Resolving;
+    try self.consts.insert(self.allocator, key, entry);
+    let outcome = try self.qualify_expr(tree, entry.file, entry.value);
+    match outcome {
+        Expression(qualified) => {
+            entry.resolved = try default_typed(tree, qualified);
+            entry.state = ConstState::Resolved;
+            try self.consts.insert(self.allocator, key, entry);
+            return ExpressionResult::Expression(entry.resolved);
+        },
+        Failed(failed) => return ExpressionResult::Failed(move failed),
+    }
+}
+
+fn default_typed(tree: &var ast::Ast, value: ast::Expression) -> !ast::Expression {
+    let target = match tree.expressions.at(value.node) {
+        Int(_) => "i64",
+        Float(_) => "f64",
+        Prefix(node) => literal_type(tree, node.right),
+        _ => "",
+    };
+    if mem::len(target) == 0 {
+        return value;
+    }
+    let target_type = try tree.types.parse(target);
+    return tree.add_expression(ast::ExpressionNode::Cast(ast::CastExpr {
+        target_type: target_type,
+        value: value,
+        keyword_span: ast::zero_span()
+    }));
+}
+
+fn literal_type(tree: &ast::Ast, value: ast::Expression) -> []u8 {
+    return match tree.expressions.at(value.node) {
+        Int(_) => "i64",
+        Float(_) => "f64",
+        _ => "",
+    };
+}
+
+fn (self: &Loader) is_const_form(
+    tree: &ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    value: ast::Expression
+) -> !bool {
+    match tree.expressions.at(value.node) {
+        Int(_) => return true,
+        Float(_) => return true,
+        String(_) => return true,
+        Bool(_) => return true,
+        Comptime(_) => return true,
+        Ident(node) => return self.names_const(tree, file, node.name),
+        Prefix(node) => return self.is_const_form(tree, file, node.right),
+        Binary(node) => {
+            if !try self.is_const_form(tree, file, node.left) {
+                return false;
+            }
+            return self.is_const_form(tree, file, node.right);
+        },
+        Cast(node) => return self.is_const_form(tree, file, node.value),
+        Field(node) => return node.namespace,
+        StructLiteral(node) => {
+            var index = 0;
+            while node.fields.get(index) |field| {
+                index = index + 1;
+                if !try self.is_const_form(tree, file, field.value) {
+                    return false;
+                }
+            }
+            return true;
+        },
+        BufferLiteral(node) => {
+            var index = 0;
+            while node.elements.get(index) |element| {
+                index = index + 1;
+                if !try self.is_const_form(tree, file, element) {
+                    return false;
+                }
+            }
+            return true;
+        },
+        _ => return false,
+    }
+}
+
+fn (self: &var Loader) const_integer(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    name: []u8,
+    span: ast::Span
+) -> !ConstIntegerResult {
+    let key = try self.qualify_in(file, name);
+    defer key.deinit(self.allocator);
+    let key_bytes = key.as_bytes();
+    let entry = self.consts.get(key_bytes) orelse return ConstIntegerResult::Missing;
+    let text = try tree.add_text(try string::from_bytes(self.allocator, name));
+    let outcome = try self.const_value(tree, key_bytes, text, span);
+    match outcome {
+        Expression(_) => {},
+        Failed(failed) => return ConstIntegerResult::Failed(move failed),
+    }
+    var rendered = string::new(self.allocator);
+    defer rendered.deinit(self.allocator);
+    if !try ast::append_static_expr_text(self.allocator, tree, entry.value, &var rendered) {
+        return ConstIntegerResult::Missing;
+    }
+    let rendered_bytes = rendered.as_bytes();
+    let names = try staticexpr::names(self.allocator, rendered_bytes);
+    defer names.deinit(self.allocator);
+    var env = staticexpr::new_env(self.allocator);
+    defer env.deinit(self.allocator);
+    var index = 0;
+    while names.at(index) |inner| {
+        index = index + 1;
+        let inner_bytes = inner.as_bytes();
+        let inner_outcome = try self.const_integer(tree, entry.file, inner_bytes, entry.span);
+        match inner_outcome {
+            Value(value) => try env.bind(self.allocator, inner_bytes, value),
+            Missing => return ConstIntegerResult::Missing,
+            Failed(failed) => return ConstIntegerResult::Failed(move failed),
+        }
+    }
+    let evaluated = try staticexpr::eval(self.allocator, rendered_bytes, &env);
+    match evaluated {
+        Value(value) => return ConstIntegerResult::Value(value),
+        Problem(problem) => {
+            problem.deinit(self.allocator);
+            return ConstIntegerResult::Missing;
+        },
+    }
+}
+
+union ConstIntegerResult {
+    Value(i64),
+    Missing,
+    Failed(diagnostic::Diagnostic),
+}
+
+union LengthEnvResult {
+    Env(staticexpr::Env),
+    Failed(diagnostic::Diagnostic),
+}
+
+fn (self: &var Loader) const_length_env(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    lengths: &array::Array<string::String>
+) -> !LengthEnvResult {
+    var env = staticexpr::new_env(self.allocator);
+    errdefer env.deinit(self.allocator);
+    var index = 0;
+    while lengths.at(index) |length| {
+        index = index + 1;
+        let length_bytes = length.as_bytes();
+        let names = try staticexpr::names(self.allocator, length_bytes);
+        defer names.deinit(self.allocator);
+        var position = 0;
+        while names.at(position) |name| {
+            position = position + 1;
+            let name_bytes = name.as_bytes();
+            let outcome = try self.const_integer(tree, file, name_bytes, ast::zero_span());
+            match outcome {
+                Value(value) => try env.bind(self.allocator, name_bytes, value),
+                Missing => {},
+                Failed(failed) => {
+                    env.deinit(self.allocator);
+                    return LengthEnvResult::Failed(move failed);
+                },
+            }
+        }
+    }
+    return LengthEnvResult::Env(move env);
+}
+
+fn (self: &var Loader) bind_const_lengths(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    value: typ::Type
+) -> !TypeNodeResolution {
+    if self.consts.len() == 0 {
+        return TypeNodeResolution::Type(value);
+    }
+    var lengths = array::new<string::String>(self.allocator);
+    defer lengths.deinit(self.allocator);
+    try collect_lengths(self.allocator, &tree.types, value, &var lengths);
+    if lengths.len() == 0 {
+        return TypeNodeResolution::Type(value);
+    }
+    let outcome = try self.const_length_env(tree, file, &lengths);
+    match outcome {
+        Env(env) => {
+            defer env.deinit(self.allocator);
+            let bound = try typ::bind_lengths(&var tree.types, value, &env);
+            match bound {
+                Type(resolved) => return TypeNodeResolution::Type(resolved),
+                Problem(problem) => {
+                    defer problem.deinit(self.allocator);
+                    var text = string::new(self.allocator);
+                    errdefer text.deinit(self.allocator);
+                    try text.append_bytes(self.allocator, "type error: ");
+                    try text.append_string(self.allocator, &problem);
+                    return TypeNodeResolution::Failed(try module_error(self.allocator, move text));
+                },
+            }
+        },
+        Failed(failed) => return TypeNodeResolution::Failed(move failed),
+    }
+}
+
+fn (self: &var Loader) bind_const_length_text(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    length: ast::Text
+) -> !TextResult {
+    if self.consts.len() == 0 {
+        return TextResult::Text(length);
+    }
+    let source = try text_copy(self.allocator, tree, length);
+    defer source.deinit(self.allocator);
+    let source_bytes = source.as_bytes();
+    let outcome = try self.bind_const_static(tree, file, source_bytes);
+    match outcome {
+        Value(size) => {
+            var text = string::new(self.allocator);
+            errdefer text.deinit(self.allocator);
+            if size < 1 {
+                try text.append_bytes(self.allocator, "type error: length `");
+                try text.append_bytes(self.allocator, source_bytes);
+                try text.append_bytes(self.allocator, "` is ");
+                try fmt::append_i64(self.allocator, &var text, size);
+                try text.append_bytes(self.allocator, "; an array holds at least 1 element");
+                return TextResult::Failed(try module_error(self.allocator, move text));
+            }
+            try fmt::append_i64(self.allocator, &var text, size);
+            return TextResult::Text(try tree.add_text(move text));
+        },
+        Unbound => return TextResult::Text(length),
+        Failed(failed) => return TextResult::Failed(move failed),
+    }
+}
+
+fn (self: &var Loader) bind_const_static(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    source: []u8
+) -> !StaticBinding {
+    if self.consts.len() == 0 or mem::len(source) == 0 {
+        return StaticBinding::Unbound;
+    }
+    var lengths = array::new<string::String>(self.allocator);
+    defer lengths.deinit(self.allocator);
+    try lengths.append(self.allocator, try string::from_bytes(self.allocator, source));
+    let outcome = try self.const_length_env(tree, file, &lengths);
+    match outcome {
+        Env(env) => {
+            defer env.deinit(self.allocator);
+            if !try staticexpr::binds_all(self.allocator, source, &env) {
+                return StaticBinding::Unbound;
+            }
+            let evaluated = try staticexpr::eval(self.allocator, source, &env);
+            match evaluated {
+                Value(value) => return StaticBinding::Value(value),
+                Problem(problem) => {
+                    problem.deinit(self.allocator);
+                    return StaticBinding::Unbound;
+                },
+            }
+        },
+        Failed(failed) => return StaticBinding::Failed(move failed),
+    }
+}
+
+union StaticBinding {
+    Value(i64),
+    Unbound,
+    Failed(diagnostic::Diagnostic),
+}
+
+union TextResult {
+    Text(ast::Text),
+    Failed(diagnostic::Diagnostic),
+}
+
+fn collect_lengths(
+    allocator: Allocator,
+    table: &typ::Table,
+    value: typ::Type,
+    out: &var array::Array<string::String>
+) -> !void {
+    match typ::root_node(table, value) {
+        Name(node) => {
+            var index = 0;
+            while node.args.get(index) |arg| {
+                try collect_lengths(allocator, table, typ::child_type(value, arg), out);
+                index = index + 1;
+            }
+        },
+        Buffer(node) => {
+            let len_bytes = node.len.as_bytes();
+            if mem::len(len_bytes) > 0 {
+                try out.append(allocator, try string::from_bytes(allocator, len_bytes));
+            }
+            try collect_lengths(allocator, table, typ::child_type(value, node.elem), out);
+        },
+        Slice(node) => try collect_lengths(allocator, table, typ::child_type(value, node.elem), out),
+        Borrow(node) => try collect_lengths(allocator, table, typ::child_type(value, node.elem), out),
+        Optional(node) => try collect_lengths(allocator, table, typ::child_type(value, node.elem), out),
+        Const(node) => try collect_lengths(allocator, table, typ::child_type(value, node.elem), out),
+        ErrorUnion(node) => {
+            try collect_lengths(allocator, table, typ::child_type(value, node.ok), out);
+            if node.err |err| {
+                try collect_lengths(allocator, table, typ::child_type(value, err), out);
+            }
+        },
+        Func(node) => {
+            var index = 0;
+            while node.params.get(index) |param| {
+                try collect_lengths(allocator, table, typ::child_type(value, param), out);
+                index = index + 1;
+            }
+            try collect_lengths(allocator, table, typ::child_type(value, node.result), out);
+        },
+    }
+    return;
+}
+
+fn (self: &Loader) reject_unused_consts(tree: &ast::Ast) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    while self.consts.key_at(index) |key| {
+        index = index + 1;
+        let entry = self.consts.get(key) orelse continue;
+        if entry.used {
+            continue;
+        }
+        var text = try module_error_text(self.allocator);
+        errdefer text.deinit(self.allocator);
+        try text.append_bytes(self.allocator, "unused const `");
+        try text.append_bytes(self.allocator, key);
+        try text.append_bytes(self.allocator, "`");
+        let problem = try module_error(self.allocator, move text);
+        return diagnostic::locate(move problem, entry.span);
+    }
+    return null;
+}
+
+fn const_error(
+    allocator: Allocator,
+    span: ast::Span,
+    tree: &ast::Ast,
+    name: ast::Text,
+    after: []u8
+) -> !diagnostic::Diagnostic {
+    var text = try module_error_text(allocator);
+    errdefer text.deinit(allocator);
+    try text.append_bytes(allocator, "`");
+    let retained = tree.texts.at(name.node);
+    let bytes = retained.as_bytes();
+    try text.append_bytes(allocator, bytes);
+    try text.append_bytes(allocator, after);
+    let problem = try module_error(allocator, move text);
+    return diagnostic::locate(move problem, span);
+}

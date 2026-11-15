@@ -5,6 +5,11 @@
 // the key and the digest as RFC 6979 says, so no signature ever repeats
 // a nonce and none needs a source of randomness.
 
+const max_curve_bytes = 48;
+const max_point_bytes = (1 + max_curve_bytes * 2);
+const max_curve_limbs = (max_curve_bytes / 4);
+const max_curve_product_limbs = (max_curve_limbs * 2 + 1);
+
 // ecdsa_p256_verify reports whether `signature` is a valid signature of
 // `digest` under `public_key` (FIPS 186-4 §6.4.2). The key is the 65
 // bytes of an uncompressed SEC 1 point, `04` then x then y, as a
@@ -39,8 +44,8 @@ fn ecdsa_verify(curve: Curve, public_key: []u8, digest: []u8, signature: []u8) -
     if std::mem::len(signature) != bytes * 2 {
         return false;
     }
-    var field_buffer = [25]u64{};
-    var order_buffer = [25]u64{};
+    var field_buffer = [max_curve_product_limbs]u64{};
+    var order_buffer = [max_curve_product_limbs]u64{};
     let field = field_buffer.as_mut_slice();
     let order = order_buffer.as_mut_slice();
     fill_field(field, curve);
@@ -50,11 +55,11 @@ fn ecdsa_verify(curve: Curve, public_key: []u8, digest: []u8, signature: []u8) -
     let p = modulus_of(field_view);
     let n = modulus_of(order_view);
 
-    var x_buffer = [12]u64{};
-    var y_buffer = [12]u64{};
-    var r_buffer = [12]u64{};
-    var s_buffer = [12]u64{};
-    var e_buffer = [12]u64{};
+    var x_buffer = [max_curve_limbs]u64{};
+    var y_buffer = [max_curve_limbs]u64{};
+    var r_buffer = [max_curve_limbs]u64{};
+    var s_buffer = [max_curve_limbs]u64{};
+    var e_buffer = [max_curve_limbs]u64{};
     let x = x_buffer.as_mut_slice();
     let y = y_buffer.as_mut_slice();
     let r = r_buffer.as_mut_slice();
@@ -85,11 +90,11 @@ fn ecdsa_verify(curve: Curve, public_key: []u8, digest: []u8, signature: []u8) -
 
     // u1 = e / s and u2 = r / s mod n, computed in Montgomery form and
     // brought back out.
-    var sm_buffer = [12]u64{};
-    var w_buffer = [12]u64{};
-    var t_buffer = [12]u64{};
-    var u1_buffer = [12]u64{};
-    var u2_buffer = [12]u64{};
+    var sm_buffer = [max_curve_limbs]u64{};
+    var w_buffer = [max_curve_limbs]u64{};
+    var t_buffer = [max_curve_limbs]u64{};
+    var u1_buffer = [max_curve_limbs]u64{};
+    var u2_buffer = [max_curve_limbs]u64{};
     let sm = sm_buffer.as_mut_slice();
     let w = w_buffer.as_mut_slice();
     let t = t_buffer.as_mut_slice();
@@ -110,8 +115,8 @@ fn ecdsa_verify(curve: Curve, public_key: []u8, digest: []u8, signature: []u8) -
     let generator = generator_buffer.as_mut_slice();
     let key = key_buffer.as_mut_slice();
     let result = result_buffer.as_mut_slice();
-    var gx_buffer = [12]u64{};
-    var gy_buffer = [12]u64{};
+    var gx_buffer = [max_curve_limbs]u64{};
+    var gy_buffer = [max_curve_limbs]u64{};
     let gx = gx_buffer.as_mut_slice();
     let gy = gy_buffer.as_mut_slice();
     limbs_of_hex(gx, 0, generator_x(curve));
@@ -124,12 +129,12 @@ fn ecdsa_verify(curve: Curve, public_key: []u8, digest: []u8, signature: []u8) -
     }
     // The signature is valid when the x of the result, taken mod n, is
     // r. x is below p < 2n, so at most one subtraction of n is needed.
-    var rx_buffer = [12]u64{};
+    var rx_buffer = [max_curve_limbs]u64{};
     let rx = rx_buffer.as_mut_slice();
     affine_x(rx, result, field_view);
     let rx_view = rx[0..count];
     if !less_than(rx_view, n) {
-        var reduced_buffer = [12]u64{};
+        var reduced_buffer = [max_curve_limbs]u64{};
         let reduced = reduced_buffer.as_mut_slice();
         let _ = subtract_limbs(reduced, rx_view, n);
         let reduced_view = reduced[0..count];
@@ -184,8 +189,8 @@ fn ecdsa_sign(curve: Curve, hash: Hash, private_key: []u8, digest: []u8, signatu
     if std::mem::len(private_key) != bytes {
         return Error::InvalidKey;
     }
-    var field_buffer = [25]u64{};
-    var order_buffer = [25]u64{};
+    var field_buffer = [max_curve_product_limbs]u64{};
+    var order_buffer = [max_curve_product_limbs]u64{};
     let field = field_buffer.as_mut_slice();
     let order = order_buffer.as_mut_slice();
     fill_field(field, curve);
@@ -194,8 +199,8 @@ fn ecdsa_sign(curve: Curve, hash: Hash, private_key: []u8, digest: []u8, signatu
     let order_view = order[0..count * 2 + 1];
     let n = modulus_of(order_view);
 
-    var d_buffer = [12]u64{};
-    var e_buffer = [12]u64{};
+    var d_buffer = [max_curve_limbs]u64{};
+    var e_buffer = [max_curve_limbs]u64{};
     let d = d_buffer.as_mut_slice();
     let e = e_buffer.as_mut_slice();
     limbs_of_bytes(d, private_key);
@@ -209,10 +214,10 @@ fn ecdsa_sign(curve: Curve, hash: Hash, private_key: []u8, digest: []u8, signatu
 
     // The HMAC state: V of ones, K of zeros, then K and V stirred with
     // the key and the digest under separators 00 and 01.
-    var v_buffer = [48]u8{};
-    var k_buffer = [48]u8{};
-    var tail_buffer = [97]u8{};
-    var e_bytes_buffer = [48]u8{};
+    var v_buffer = [max_curve_bytes]u8{};
+    var k_buffer = [max_curve_bytes]u8{};
+    var tail_buffer = [max_point_bytes]u8{};
+    var e_bytes_buffer = [max_curve_bytes]u8{};
     let v = v_buffer.as_mut_bytes();
     let k = k_buffer.as_mut_bytes();
     let tail = tail_buffer.as_mut_bytes();
@@ -232,13 +237,13 @@ fn ecdsa_sign(curve: Curve, hash: Hash, private_key: []u8, digest: []u8, signatu
     tail[0] = 1;
     stir(hash, k, v, bytes, tail_view);
 
-    var nonce_buffer = [12]u64{};
-    var r_buffer = [12]u64{};
-    var s_buffer = [12]u64{};
+    var nonce_buffer = [max_curve_limbs]u64{};
+    var r_buffer = [max_curve_limbs]u64{};
+    var s_buffer = [max_curve_limbs]u64{};
     let nonce = nonce_buffer.as_mut_slice();
     let r = r_buffer.as_mut_slice();
     let s = s_buffer.as_mut_slice();
-    var next_buffer = [48]u8{};
+    var next_buffer = [max_curve_bytes]u8{};
     var zero_buffer = [1]u8{};
     let next = next_buffer.as_mut_bytes();
     let zero = zero_buffer.as_bytes();
@@ -265,8 +270,8 @@ fn ecdsa_sign(curve: Curve, hash: Hash, private_key: []u8, digest: []u8, signatu
             stir(hash, k, v, bytes, zero);
         }
     }
-    var r_bytes_buffer = [48]u8{};
-    var s_bytes_buffer = [48]u8{};
+    var r_bytes_buffer = [max_curve_bytes]u8{};
+    var s_bytes_buffer = [max_curve_bytes]u8{};
     let r_bytes = r_bytes_buffer.as_mut_bytes();
     let s_bytes = s_bytes_buffer.as_mut_bytes();
     let r_done = r[0..count];
@@ -286,7 +291,7 @@ fn ecdsa_sign(curve: Curve, hash: Hash, private_key: []u8, digest: []u8, signatu
 // is passed over), and V becomes the HMAC under the new K of V. K and V
 // are the first `length` bytes of their buffers.
 fn stir(hash: Hash, k: &var []u8, v: &var []u8, length: i64, tail: []u8) -> void {
-    var next_buffer = [48]u8{};
+    var next_buffer = [max_curve_bytes]u8{};
     let next = next_buffer.as_mut_bytes();
     hmac_kv(hash, k, v, length, tail, next);
     for 0..length |index| {
@@ -327,8 +332,8 @@ fn signature_parts(
     var result_buffer = [36]u64{};
     let generator = generator_buffer.as_mut_slice();
     let result = result_buffer.as_mut_slice();
-    var gx_buffer = [12]u64{};
-    var gy_buffer = [12]u64{};
+    var gx_buffer = [max_curve_limbs]u64{};
+    var gy_buffer = [max_curve_limbs]u64{};
     let gx = gx_buffer.as_mut_slice();
     let gy = gy_buffer.as_mut_slice();
     limbs_of_hex(gx, 0, generator_x(curve));
@@ -338,12 +343,12 @@ fn signature_parts(
     affine_x(r, result, field);
     reduce_below_order(r, n, count);
     // s = (e + r d) / k, in Montgomery form mod n.
-    var km_buffer = [12]u64{};
-    var inverse_buffer = [12]u64{};
-    var dm_buffer = [12]u64{};
-    var rm_buffer = [12]u64{};
-    var em_buffer = [12]u64{};
-    var t_buffer = [12]u64{};
+    var km_buffer = [max_curve_limbs]u64{};
+    var inverse_buffer = [max_curve_limbs]u64{};
+    var dm_buffer = [max_curve_limbs]u64{};
+    var rm_buffer = [max_curve_limbs]u64{};
+    var em_buffer = [max_curve_limbs]u64{};
+    var t_buffer = [max_curve_limbs]u64{};
     let km = km_buffer.as_mut_slice();
     let inverse = inverse_buffer.as_mut_slice();
     let dm = dm_buffer.as_mut_slice();
@@ -365,7 +370,7 @@ fn signature_parts(
 // reduce_below_order brings a number below 2n below n, choosing by mask
 // whether n comes off.
 fn reduce_below_order(o: &var []u64, n: []u64, count: i64) -> void {
-    var less_buffer = [12]u64{};
+    var less_buffer = [max_curve_limbs]u64{};
     let less = less_buffer.as_mut_slice();
     let o_view = o[0..count];
     let borrow = subtract_limbs(less, o_view, n);
