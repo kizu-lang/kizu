@@ -1,64 +1,18 @@
-// The server is a loop the caller writes.
-//
-// `accept` hands back one Exchange -- the request that arrived and the
-// response to fill in -- and returns. There is no handler registry and no
-// callback, so what happens to a request is in the source that asked for it,
-// at the place it asked. Go takes a handler because Go can pass one; Zig can
-// pass one and still does not, because a pull loop is what keeps the control
-// flow visible (docs/principles.md §2). Kizu has function pointers too, and
-// makes the same choice Zig does for the same reason (ADR-0136).
-//
-// `accept` serves one connection at a time. `first` and `next` serve many by
-// keeping their state in Server; `accept_connection` lets a TaskSet worker own
-// each one instead. Answering is the same either way -- what differs is who
-// owns the connections still being listened to.
-
 pub struct Server {
     listener: std::net::TcpListener,
     limits: std::http::Limits,
-    // The certificate chain and the private key's DER of a server that
-    // speaks TLS, empty for one that does not. Each connection takes a
-    // copy, since a handshake may be moved on by whoever holds the
-    // exchange.
     chain: std::array::Array<std::string::String>,
     key: std::string::String,
-    // What each TLS connection's handshake draws from: a `split` of this
-    // per connection, in the order they were accepted.
     entropy: std::tls::Entropy,
-    // Every connection this server holds. The one the caller is answering is
-    // not in here: it was handed out, and `next` is the only way to get
-    // another, so handing it back is the only way forward. A caller cannot
-    // forget to return a connection it cannot proceed without returning.
     open: std::array::Array<std::http::Exchange>,
-    // What the connections in `open` are waited on with. The listener is in
-    // here too, so a new caller wakes the same wait a talking one does.
     poller: std::net::Poller,
-    // Where the connection with a given token is in `open`, or -1 for one that
-    // is not in there: handed out to the caller, or gone. A token belongs to a
-    // connection for as long as the connection lasts, so rearranging `open`
-    // moves numbers in here rather than re-registering descriptors.
     slot_of: std::array::Array<i64>,
-    // Tokens no connection is using. Reusing one keeps `slot_of` as short as
-    // the most connections that were ever open at once.
     spare: std::array::Array<i64>,
-    // Tokens freed while a batch of events was being read. They become spare
-    // at the top of the next turn, so a token cannot be handed to a new
-    // connection while an event naming its old owner is still unread.
     retiring: std::array::Array<i64>,
-    // Tokens whose request finished. A head only completes where bytes were
-    // just moved into it, so those are the two places that write here, and
-    // finding the next one to hand out is a pop rather than a walk over
-    // everyone who is still mid-sentence.
     settled_tokens: std::array::Array<i64>,
-    // Whether the listener is under the poller. It comes out while this
-    // server holds `max_connections` -- a listener left in would wake every
-    // wait for a caller that is not going to be accepted -- and goes back in
-    // when a connection leaves.
     listening: bool,
 }
 
-// The listener's token. A connection's token comes from `claim_token`, which
-// only ever hands out a length, so nothing collides with this.
 fn listener_token() -> i64 {
     return -1;
 }
@@ -129,8 +83,6 @@ pub fn listen_secure_with(
     errdefer own_key.deinit(allocator);
     var listener = try std::net::tcp_listen(io, address);
     errdefer listener.deinit();
-    // 64 events per wait. More ready descriptors than that are not lost: they
-    // are still ready, so the next wait returns them (ADR-0141).
     var poller = try std::net::poller_new(io, 64);
     errdefer poller.deinit();
     try poller.watch_listener(io, &listener, listener_token());
@@ -150,7 +102,6 @@ pub fn listen_secure_with(
     };
 }
 
-// copy_chain appends a copy of each certificate of `chain` to `out`.
 fn copy_chain(
     allocator: Allocator,
     chain: &std::array::Array<std::string::String>,
@@ -465,8 +416,6 @@ fn (self: &var std::http::Server) rejoin(
     var held = move done;
     errdefer held.deinit(allocator);
     try held.reopen(allocator);
-    // An exchange `accept` handed out was never in the table and has no token
-    // yet. Joining for the first time is what `hold` is.
     if held.token < 0 {
         try self.hold(io, allocator, move held);
         return;
@@ -505,8 +454,6 @@ fn (self: &var std::http::Server) restore(
     let index = self.open.len();
     try self.open.append(allocator, move taken);
     try self.slot_of.set(token, index);
-    // A connection that pipelined its next request already has it in the
-    // buffer, and no wait will ever mention it.
     let done = try self.settle_at(io, allocator, index);
     if done {
         try self.settled_tokens.append(allocator, token);
@@ -560,7 +507,6 @@ fn (self: &var std::http::Server) wait_for_one(
 ) -> std::http::Failure!std::http::Exchange {
     while true {
         try self.settle_tokens(allocator);
-        // What is already in hand first, since no wait would mention it.
         if try self.settled(io, allocator) |index| {
             let held = try self.take_out(allocator, index);
             return move held;
@@ -682,9 +628,6 @@ fn (self: &var std::http::Server) hear(
             if ready.token == listener_token() {
                 try self.take_new(io, allocator);
             } else {
-                // A token whose connection left during this same batch has no
-                // slot any more. The event is about a connection that is gone,
-                // so there is nothing to move.
                 let slot = self.slot_of.get(ready.token) orelse -1;
                 if slot >= 0 {
                     try self.fill_at(io, allocator, slot);
@@ -743,10 +686,6 @@ fn (self: &var std::http::Server) advance_at(
             gone = is_closed(progress);
             finished = is_settled(progress);
         } else |failure| {
-            // A connection this server could not read has already been told
-            // why by `advance`. It has nothing further to say to the loop;
-            // it stays only for the refusal to reach it (`linger`). A peer
-            // that is gone was told nothing, and is closed at once.
             if worth_answering(failure) {
                 try held.begin_lingering(io, allocator);
             } else {
@@ -760,8 +699,6 @@ fn (self: &var std::http::Server) advance_at(
     return gone;
 }
 
-// is_settled answers whether this connection now has a whole request waiting
-// to be handed out.
 fn is_settled(progress: std::http::Progress) -> bool {
     return match progress {
         Request => true,
@@ -786,13 +723,10 @@ fn (self: &var std::http::Server) sweep(
     allocator: Allocator
 ) -> std::http::Failure!void {
     let now = std::process::monotonic_millis();
-    // Backwards, because closing one moves the last into its place.
     var index = self.open.len() - 1;
     while index >= 0 {
         let out_of_time = self.expired_at(index, now);
         if out_of_time {
-            // One that was already closing has waited long enough for the
-            // peer. Any other is told, and then waits the same way.
             if self.lingering_at(index) {
                 try self.drop_at(allocator, index);
             } else {
@@ -952,9 +886,6 @@ fn (self: &var std::http::Exchange) arm_read_phase(millis: i64) -> void {
     return;
 }
 
-// phase_deadline turns a duration into the moment it runs out. Zero is no
-// deadline, which is what `Limits` means by it -- not a deadline that has
-// already passed.
 fn phase_deadline(millis: i64) -> i64 {
     if millis <= 0 {
         return 0;
@@ -980,9 +911,6 @@ fn (self: &var std::http::Exchange) refuse_expired(
     io: Io,
     allocator: Allocator
 ) -> void {
-    // 408 is what RFC 9110 gives a request that was not wrong, it just never
-    // finished arriving -- the same status the blocking path maps a read
-    // timeout to.
     self.refuse_status(io, allocator, 408);
     return;
 }
@@ -1013,8 +941,6 @@ fn (self: &var std::http::Exchange) advance(
         return self.advance_lingering(io, allocator);
     }
     if self.is_handshaking() {
-        // The request may follow the client's Finished in the same read,
-        // so a handshake that just finished goes on to parse.
         if !try self.handshake_ready(io, allocator) {
             return std::http::Progress::NeedMore;
         }
@@ -1088,8 +1014,6 @@ fn (self: &var std::http::Exchange) step(
         Handshaking => false,
         ReadingHead => true,
         Ready => false,
-        // A connection being closed reads only to drop what arrives, and
-        // never has a request.
         Lingering => false,
     };
     if reading_head {
@@ -1165,8 +1089,6 @@ fn (self: &var std::http::Exchange) linger(
     io: Io,
     allocator: Allocator
 ) -> void {
-    // A close that cannot be said is a connection already gone: nothing
-    // more to wait for, and nothing to report about one being closed.
     self.begin_lingering(io, allocator) catch return;
     while true {
         if self.reader.discard_waiting(io, allocator) |got| {
@@ -1174,9 +1096,6 @@ fn (self: &var std::http::Exchange) linger(
                 return;
             }
         } else |_| {
-            // Out of time, or a peer that reset: nothing more to wait for
-            // either way, and nothing to report about a connection that is
-            // being closed.
             return;
         }
     }
@@ -1204,13 +1123,9 @@ fn (self: &var std::http::Exchange) step_head(
     let limits = self.limits;
     let found = self.reader.find_head();
     if found |head_length| {
-        // The ceiling is on the head, not on what one read happened to bring.
         if head_length > limits.max_head_bytes {
             return std::http::Error::HeadTooLarge;
         }
-        // Staged through a local because reading one field while writing
-        // another is two borrows of `self` (docs/language-gaps.md). The head
-        // is bounded by `max_head_bytes`, so the copy is bounded too.
         var head = std::string::new(allocator);
         defer head.deinit(allocator);
         try self.reader.copy_head(allocator, head_length, &var head);
@@ -1244,10 +1159,6 @@ fn (self: &var std::http::Exchange) begin_body(
         let declared = try self.request.content_length();
         self.reader.bind_length(declared orelse 0);
     }
-    // The body is its own phase, so it gets its own deadline. Sharing the
-    // head's would give a large body whatever the head happened to leave over.
-    // This is where both paths cross from one phase to the other, which is why
-    // it is the one place that says so.
     let body_millis = self.limits.read_body_millis;
     self.arm_read_phase(body_millis);
     self.phase = std::http::Phase::Ready;
@@ -1280,10 +1191,6 @@ fn parse_staged_head(
 // in `pending` and a read that went to the socket would skip them. Go hands a
 // hijacker its buffered reader beside the connection for the same reason.
 pub struct Exchange {
-    // The connection and the bytes read off it that nobody has taken yet.
-    // It is not handed out: reading a head reads whole packets, so the first
-    // bytes of the body are already in here and a caller given the socket
-    // would skip them.
     reader: std::http::Reader,
     pub request: std::http::Request,
     pub response: std::http::Response,
@@ -1292,41 +1199,17 @@ pub struct Exchange {
     // between the two calls.
     pub body: std::string::String,
     answered: bool,
-    // Where this connection is in reading the message it is on. A blocking
-    // read and a poller loop differ only in how the reader is filled -- what
-    // it means is decided in one place (`step`).
     phase: std::http::Phase,
-    // When the phase this connection is in has to be finished by, or 0 for no
-    // deadline. The socket carries the same moment for a caller that waits on
-    // it. This is here for one that does not: a poller reports connections
-    // that spoke, and a peer running out its clock in silence is exactly the
-    // one that never does -- so the only way a loop can notice is to look.
     deadline: i64,
-    // How the head this exchange sent framed its body, and whether that body
-    // is still open. `write_all` reads them to know whether to count bytes,
-    // wrap them in a chunk, or pass them straight through.
     framing: std::http::Framing,
     body_open: bool,
-    // What is left of the length the head declared. Only `Length(n)` gives a
-    // number to hold a caller to; the others have nothing to contradict.
     owed: i64,
     counting: bool,
-    // How many requests this connection has answered, and whether the last
-    // answer left it able to carry another.
     served: i64,
     persisted: bool,
-    // The server's policy, carried so `respond` can make the write deadline
-    // when the write starts. A deadline stamped at accept would already be
-    // spent by whatever the caller did in between.
     limits: std::http::Limits,
-    // The server's certificate chain and key, copied for a TLS handshake;
-    // empty on a plain server and once the handshake is done.
     chain: std::array::Array<std::string::String>,
     key: std::string::String,
-    // What the poller calls this connection. It is the connection's for as
-    // long as the connection lasts, so being handed out and taken back moves
-    // it in the server's table without touching the descriptor. -1 is an
-    // exchange no server is holding, which is what `accept` hands back.
     token: i64,
 }
 
@@ -1372,9 +1255,6 @@ fn (self: &var std::http::Exchange) respond_head(
 fn (self: &var std::http::Exchange) open_body(framing: std::http::Framing) -> void {
     self.framing = framing;
     self.body_open = true;
-    // A head this module did not frame is a caller taking the protocol over,
-    // so what it reads next is no longer this message's body and no bound of
-    // this module's applies to it.
     if is_raw_framing(framing) {
         self.reader.bind_until_close();
     }
@@ -1487,9 +1367,6 @@ fn (self: &std::http::Exchange) will_persist(framing: std::http::Framing) -> boo
     return std::http::allows_keep_alive(&self.request);
 }
 
-// delimited reports whether a peer can find the end of this body without the
-// connection closing. `UntilClose` is the close by definition, and `Raw` framed
-// nothing for a peer to read.
 fn delimited(framing: std::http::Framing) -> bool {
     return match framing {
         Buffered => true,
@@ -1535,9 +1412,6 @@ fn (self: &var std::http::Exchange) next_head(
     io: Io,
     allocator: Allocator
 ) -> std::http::Failure!bool {
-    // A connection a 101 handed over is no longer carrying HTTP, so it is
-    // finished as far as this module is concerned: there is no next request,
-    // and nothing here was left undone.
     if self.answered and is_raw_framing(self.framing) {
         return false;
     }
@@ -1551,17 +1425,11 @@ fn (self: &var std::http::Exchange) next_head(
         return std::http::Error::ExchangeUnfinished;
     }
     if !self.persisted {
-        // This side is ending the connection, and the peer may not know yet:
-        // it is closed in stages so the last answer arrives before the end
-        // does.
         self.linger(io, allocator);
         return false;
     }
     try self.reopen(allocator);
     if self.reader.held_len() == 0 {
-        // Nothing was read ahead, so whether there is another request is a
-        // question for the socket. A peer that closed here is done, which is
-        // the ordinary end of a persistent connection rather than a failure.
         let idle_millis = self.limits.idle_millis;
         self.arm_read_phase(idle_millis);
         let got = try self.fill_waiting(io, allocator);
@@ -1649,8 +1517,6 @@ fn (self: &var std::http::Exchange) append_body(
 fn (self: &var std::http::Exchange) reopen(
     allocator: Allocator
 ) -> std::http::Failure!void {
-    // The request that just ended counts against `max_requests`, which is what
-    // decides whether the one after it will be offered the connection again.
     self.served = self.served + 1;
     try self.reader.reopen(allocator);
     self.phase = std::http::Phase::ReadingHead;
@@ -1879,15 +1745,11 @@ fn (self: &var std::http::Exchange) refuse_status(
     return;
 }
 
-// worth_answering separates a request this server refused from a peer that
-// is no longer there to hear the refusal.
 fn worth_answering(failure: std::http::Failure) -> bool {
     return match failure {
         ConnectionReset => false,
         std::net::Error::Closed => false,
         std::net::Error::ReadFailed => false,
-        // A TLS failure has already been answered with its alert, or the
-        // peer's alert ended the connection; there is no one to tell.
         BadRecord => false,
         IllegalParameter => false,
         std::tls::Error::Unsupported => false,
@@ -1899,9 +1761,6 @@ fn worth_answering(failure: std::http::Failure) -> bool {
     };
 }
 
-// refusal_status maps a read failure to what the client should be told. A
-// ceiling this server chose is a 4xx about the request; anything else is this
-// server's own trouble.
 fn refusal_status(failure: std::http::Failure) -> i64 {
     return match failure {
         MalformedRequest => 400,
@@ -1913,8 +1772,6 @@ fn refusal_status(failure: std::http::Failure) -> i64 {
         BodyTooLarge => 413,
         UnsupportedVersion => 505,
         UnsupportedEncoding => 501,
-        // The deadline this server set ran out. RFC 9110 gives that its own
-        // status: the request was not wrong, it just never finished arriving.
         TimedOut => 408,
         _ => 500,
     };
