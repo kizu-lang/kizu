@@ -664,47 +664,20 @@ fn (self: &var Emitter) emit_body(module: &ir::Module, node: &ir::FunctionNode) 
     if try self.declare_values(module, node) |failed| {
         return move failed;
     }
-    try self.line("    ", "uint kz_block = 0;");
-    try self.line("    ", "for (;;) {");
-    try self.line("        ", "switch (kz_block) {");
-    var block_index = 0;
-    while node.blocks.get(block_index) |block| {
-        try self.text("        case ");
-        try self.number(block_index);
-        try self.text(": {");
-        try self.end_line();
-        let block_node = module.blocks.at(block.node);
-        var instr_index = 0;
-        while block_node.instrs.get(instr_index) |instr| {
-            instr_index = instr_index + 1;
-            let instr_node = module.instrs.at(instr.node);
-            if instr_node.op == ir::Op::Phi {
-                if try self.emit_phi_entry(module, instr_node) |failed| {
-                    return move failed;
-                }
-            }
+    var flow = try analyze_flow(self.allocator, module, node);
+    defer flow.deinit(self.allocator);
+    var header = 0;
+    while header < flow.count {
+        if flow.header.get_or_panic(header) and flow.loop_exits.get_or_panic(header) > 1 {
+            return try fail(self.allocator, module, ast::zero_span(), "`", node.name,
+                "` has a loop that leaves to more than one place, which the metal target cannot structure yet");
         }
-        instr_index = 0;
-        while block_node.instrs.get(instr_index) |instr| {
-            instr_index = instr_index + 1;
-            let instr_node = module.instrs.at(instr.node);
-            if instr_node.op == ir::Op::Phi {
-                continue;
-            }
-            if try self.emit_instr(module, instr_node) |failed| {
-                return move failed;
-            }
-        }
-        if try self.emit_terminator(module, node, block_node) |failed| {
-            return move failed;
-        }
-        try self.line("        ", "}");
-        block_index = block_index + 1;
+        header = header + 1;
     }
-    try self.line("        ", "default:");
-    try self.emit_fail_action("            ");
-    try self.line("        ", "}");
-    try self.line("    ", "}");
+    let outermost = Context { loop_header: -1, loop_exit: -1, follow: -1 };
+    if try self.emit_from(module, node, &flow, 0, outermost) |failed| {
+        return move failed;
+    }
     return null;
 }
 
@@ -1290,8 +1263,72 @@ fn (self: &var Emitter) emit_const(module: &ir::Module, node: &ir::InstrNode, ki
     return null;
 }
 
-fn (self: &var Emitter) emit_terminator(module: &ir::Module, function: &ir::FunctionNode, block: &ir::BlockNode) -> !?diagnostic::Diagnostic {
-    let terminator = block.terminator;
+fn (self: &var Emitter) emit_from(
+    module: &ir::Module,
+    function: &ir::FunctionNode,
+    flow: &Flow,
+    start: i64,
+    context: Context
+) -> !?diagnostic::Diagnostic {
+    var block = start;
+    while true {
+        if block < 0 or block == context.follow {
+            return null;
+        }
+        if block == context.loop_header {
+            try self.line("    ", "continue;");
+            return null;
+        }
+        if block == context.loop_exit {
+            try self.line("    ", "break;");
+            return null;
+        }
+        if !flow.header.get_or_panic(block) {
+            return self.emit_block(module, function, flow, block, context);
+        }
+        let exit = flow.loop_exit.get_or_panic(block);
+        try self.line("    ", "while (true) {");
+        let inner = Context { loop_header: block, loop_exit: exit, follow: -1 };
+        if try self.emit_block(module, function, flow, block, inner) |failed| {
+            return move failed;
+        }
+        try self.line("    ", "}");
+        block = exit;
+    }
+    return null;
+}
+
+fn (self: &var Emitter) emit_block(
+    module: &ir::Module,
+    function: &ir::FunctionNode,
+    flow: &Flow,
+    index: i64,
+    context: Context
+) -> !?diagnostic::Diagnostic {
+    let block = function.blocks.get_or_panic(index);
+    let block_node = module.blocks.at(block.node);
+    var instr_index = 0;
+    while block_node.instrs.get(instr_index) |instr| {
+        instr_index = instr_index + 1;
+        let instr_node = module.instrs.at(instr.node);
+        if instr_node.op == ir::Op::Phi {
+            if try self.emit_phi_entry(module, instr_node) |failed| {
+                return move failed;
+            }
+        }
+    }
+    instr_index = 0;
+    while block_node.instrs.get(instr_index) |instr| {
+        instr_index = instr_index + 1;
+        let instr_node = module.instrs.at(instr.node);
+        if instr_node.op == ir::Op::Phi {
+            continue;
+        }
+        if try self.emit_instr(module, instr_node) |failed| {
+            return move failed;
+        }
+    }
+    let terminator = block_node.terminator;
     match terminator.op {
         Return => {
             try self.text("            return");
@@ -1301,51 +1338,66 @@ fn (self: &var Emitter) emit_terminator(module: &ir::Module, function: &ir::Func
             }
             try self.text(";");
             try self.end_line();
+            return null;
         },
-        Unreachable => try self.emit_fail_action("            "),
-        Jump => try self.emit_edge(module, function, block.name, terminator.target, "            "),
+        Unreachable => {
+            try self.emit_fail_action("            ");
+            return null;
+        },
+        Jump => {
+            let target = flow.successor(index, 0);
+            try self.emit_phi_assignments(module, function, block_node.name, target, "            ");
+            return self.emit_from(module, function, flow, target, context);
+        },
         Branch => {
+            let then_target = flow.successor(index, 0);
+            let else_target = flow.successor(index, 1);
+            let merge = flow.ipdom.get_or_panic(index);
+            let arms = Context { loop_header: context.loop_header, loop_exit: context.loop_exit, follow: merge };
             try self.text("            if (");
             try self.value(terminator.cond.name);
             try self.text(") {");
             try self.end_line();
-            try self.emit_edge(module, function, block.name, terminator.target, "                ");
+            try self.emit_phi_assignments(module, function, block_node.name, then_target, "                ");
+            if try self.emit_from(module, function, flow, then_target, arms) |failed| {
+                return move failed;
+            }
+            try self.line("            ", "} else {");
+            try self.emit_phi_assignments(module, function, block_node.name, else_target, "                ");
+            if try self.emit_from(module, function, flow, else_target, arms) |failed| {
+                return move failed;
+            }
             try self.line("            ", "}");
-            try self.emit_edge(module, function, block.name, terminator.else_target, "            ");
+            if merge < 0 {
+                return null;
+            }
+            return self.emit_from(module, function, flow, merge, context);
         },
-        None => return try fail(self.allocator, module, ast::zero_span(), "block `", block.name, "` has no terminator"),
+        None => return try fail(self.allocator, module, ast::zero_span(), "block `", block_node.name, "` has no terminator"),
     }
     return null;
 }
 
-fn (self: &var Emitter) emit_edge(module: &ir::Module, function: &ir::FunctionNode, from: ir::Name, to: ir::Name, indent: []u8) -> !void {
-    var target_index = 0;
-    while function.blocks.get(target_index) |block| {
-        let block_node = module.blocks.at(block.node);
-        if ir::same_name(block_node.name, to) {
-            var instr_index = 0;
-            while block_node.instrs.get(instr_index) |instr| {
-                instr_index = instr_index + 1;
-                let instr_node = module.instrs.at(instr.node);
-                if instr_node.op != ir::Op::Phi {
-                    continue;
-                }
-                var incoming_index = 0;
-                while instr_node.incoming.get(incoming_index) |incoming| {
-                    incoming_index = incoming_index + 1;
-                    if ir::same_name(incoming.block, from) {
-                        try self.emit_phi_assignment(module, instr_node, incoming.value, indent);
-                    }
-                }
-            }
-            try self.text(indent);
-            try self.text("kz_block = ");
-            try self.number(target_index);
-            try self.text(";");
-            try self.end_line();
-            return self.line(indent, "continue;");
+fn (self: &var Emitter) emit_phi_assignments(module: &ir::Module, function: &ir::FunctionNode, from: ir::Name, to: i64, indent: []u8) -> !void {
+    if to < 0 {
+        return;
+    }
+    let block = function.blocks.get_or_panic(to);
+    let block_node = module.blocks.at(block.node);
+    var instr_index = 0;
+    while block_node.instrs.get(instr_index) |instr| {
+        instr_index = instr_index + 1;
+        let instr_node = module.instrs.at(instr.node);
+        if instr_node.op != ir::Op::Phi {
+            continue;
         }
-        target_index = target_index + 1;
+        var incoming_index = 0;
+        while instr_node.incoming.get(incoming_index) |incoming| {
+            incoming_index = incoming_index + 1;
+            if ir::same_name(incoming.block, from) {
+                try self.emit_phi_assignment(module, instr_node, incoming.value, indent);
+            }
+        }
     }
     return;
 }
