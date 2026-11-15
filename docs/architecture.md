@@ -24,6 +24,7 @@ compiler/            shipping する Kizu 製 compiler(pin した種が build �
     typ                           型の綴りを 1 度だけ parse した形(文字列手術の代わり)
     types, ownership              型検査・所有権/借用検査
     ir, arm64, llvm, wasm, native typed SSA IR と各 backend(arm64 は direct backend。x86-64 も持つ)
+    msl                           `export "gpu"` の kernel を Metal Shading Language の text にする
     hostabi                       runtime を呼ぶ C 署名(native backend 共通)
     project, manifest             パッケージ/モジュール解決(std も含む)、kizu.toml
     stdmethod, stdprim, stdmeta, stdtarget
@@ -62,6 +63,7 @@ source.kizu   (module は compiler/src/internal/ 以下)
                                              (wasm32-wasi / wasm32-browser)
                                            → browser ESM directory
                                              (`app.wasm` + `app.mjs`)
+                  → msl → Metal Shading Language の text(metal)
 ```
 
 `run` と `test` は生成した実行ファイルを走らせます。経路は 1 本で、interpreter は
@@ -134,7 +136,7 @@ browser は `main` と `export "browser"` から到達できる関数だけを b
 [`docs/wasm-browser.md`](wasm-browser.md) が持ちます。
 
 CLI のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
-`build`(`--emit-llvm` / `--target native|wasm32-wasi|wasm32-browser`、nativeの
+`build`(`--emit-llvm` / `--target native|wasm32-wasi|wasm32-browser|metal`、nativeの
 `--emit obj`、browserの`--emit esm`。native の `build` / `run` / `test` は `--backend direct|llvm`)`cache` `import-c-header`
 `version`。基本の実行経路は `kizu run examples/hello.kizu`。どのコマンドがどこへ
 流れるかは `compiler/src/main.kizu` が全てです。

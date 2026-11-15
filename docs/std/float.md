@@ -9,6 +9,8 @@ std::float::is_nan(value: f64) -> bool
 std::float::is_infinite(value: f64) -> bool
 std::float::bits(value: f64) -> u64
 std::float::from_bits(bits: u64) -> f64
+std::float::bits_f32(value: f32) -> u32
+std::float::from_bits_f32(bits: u32) -> f32
 ```
 
 `append` は、読み戻すと同じ値になる**最短**の 10 進を書きます。整数値は `.0` で終わり
@@ -26,6 +28,7 @@ null を返します。受ける形は `append` が書くものと、人が書�
 float literal もこの `parse` で値を決めます。
 
 `bits` は IEEE 754 binary64 の表現をそのまま返し、`from_bits` はその逆です。
+`bits_f32` と `from_bits_f32` は binary32 について同じことをします。
 `cast` は値を変換しますが表現には触れないので、bit を見る処理はこの 2 つの上に
 書きます。両方とも trusted primitive です。float の支援が backend に頼るのは、この 2 つと
 [std::math](math.md) の `sqrt` / `floor` / `ceil` / `trunc` だけです。

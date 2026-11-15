@@ -2874,6 +2874,39 @@ unsafe qsort(base, count, 8, ascending);
   `cast<extern "c" fn(...) -> T>(p)` で渡します(`ptr_cast`)。両辺の null 可能性は
   揃えます。
 
+### 12.5 GPU kernel export
+
+GPU が dispatch する kernel は `export "gpu" fn` で宣言します。本体は通常の Kizu
+関数で、`build --target metal` が `export "gpu"` の関数とそこから到達できる関数だけを
+Metal Shading Language の source にします。他の target の build では root になりません。
+
+```kizu
+import std::gpu;
+
+export "gpu" fn add(total: &var []f32, part: []f32, scale: f32) -> void {
+    let index = gpu::thread_index();
+    total[index] = total[index] + part[index] * scale;
+    return;
+}
+```
+
+`export "gpu" fn` は method にも static parameter を持つ関数にもできず、`void` を
+返します。parameter に置けるのは整数型と `f32` の値、その view(`[]T`)、view の
+`&var` 借用だけです。`std::gpu::thread_index()` は dispatch の中での thread の通し番号を
+`i64` で返し、kernel の外では build が拒否します。
+
+host が渡す buffer の並びは次のとおりです。
+
+| index | 中身 |
+| --- | --- |
+| 0 から parameter 順 | view は要素の配列、値は 1 つの値 |
+| parameter 数 | view の要素数を view parameter の順に並べた `i64` の配列 |
+| parameter 数 + 1 | `u32` の status word。host は 0 にしてから dispatch する |
+
+範囲外の添字など、CPU なら panic する失敗が起きると、その thread は status word を
+`1` にして終わります。host は pass の完了後に status word を読みます。kernel は
+`f64` の値を扱えず、扱う関数に到達すると build が止まります。
+
 ## 13. comptime
 
 `comptime` は、限定的なコンパイル時評価です。
@@ -3297,20 +3330,21 @@ comptime if std::target::is_native() {
 std::target::is_native()  -> bool    comptime-if-only
 std::target::is_wasi()    -> bool    comptime-if-only
 std::target::is_browser() -> bool    comptime-if-only
+std::target::is_gpu()     -> bool    comptime-if-only
 std::target::is_darwin()  -> bool    comptime-if-only
 std::target::is_linux()   -> bool    comptime-if-only
 std::target::is_windows() -> bool    comptime-if-only
 ```
 
-述語は引数も static 引数も取りません。build family を問う 3 つは、1 回の build で
+述語は引数も static 引数も取りません。build family を問う 4 つは、1 回の build で
 ちょうど 1 つだけが true です。
 `build --target native`、`run`、`check`、`test`、`ir`、`build --emit-llvm` は native、
-`build --target wasm32-wasi` は WASI、`build --target wasm32-browser` は browser を
-選びます。`fmt` の semantic validation も native を使い、`parse` は target を
+`build --target wasm32-wasi` は WASI、`build --target wasm32-browser` は browser、
+`build --target metal` は gpu を選びます。`fmt` の semantic validation も native を使い、`parse` は target を
 選びません。
 
 OS を問う 3 つは native build の operating system を答えます。native build では
-ちょうど 1 つが true で、wasm build ではすべて false です。`build --target native
+ちょうど 1 つが true で、wasm build と gpu build ではすべて false です。`build --target native
 --triple` は triple の OS を、それ以外の native command は compiler が動いている
 host の OS を選びます。native target の OS は darwin、linux、windows で、macOS と iOS の
 triple はどちらも darwin です。windows は GNU 環境の triple(`x86_64-w64-windows-gnu`、
@@ -3324,7 +3358,7 @@ type / ownership / IR の各 phase が検査・lowering します。
 
 backend へ渡す executable module は `main` と、その target が認める明示 export から
 到達できる関数だけで閉じます。browser の `export "browser"` は browser build だけの
-root です。したがって、選ばれなかった filesystem adapter や browser host adapter は
+root で、gpu の `export "gpu"` は gpu build だけの root です。したがって、選ばれなかった filesystem adapter や browser host adapter は
 反対 target の capability として誤って拒否されません。
 
 ## 14. std とのインターフェース
