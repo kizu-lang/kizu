@@ -974,12 +974,23 @@ fn (self: &Checker) comptime_env() -> !staticexpr::Env {
         let bound = binding.value;
         let name = binding.name.as_bytes();
         match bound {
-            Integer(value) => try env.bind(self.allocator, name, value),
+            Integer(value) => {
+                if self.is_length_value(name) {
+                    try env.bind(self.allocator, name, value);
+                } else {
+                    try env.hide(self.allocator, name);
+                }
+            },
             _ => try env.hide(self.allocator, name),
         }
         current = binding.parent;
     }
     return move env;
+}
+
+fn (self: &Checker) is_length_value(name: []u8) -> bool {
+    let declared = self.static_values.get(name) orelse return true;
+    return self.types.is_text(declared, "i64");
 }
 
 fn (self: &Checker) values_env(values: &map::Map<[]u8, ComptimeValue>) -> !staticexpr::Env {
@@ -2800,9 +2811,7 @@ fn (self: &var Checker) check_generic_instantiation_bound(
         if parameter.is_type {
             try type_params.insert(allocator, parameter_name, true);
         } else {
-            if !self.types.is_text(parameter.type_name, "bool") and
-                !self.types.is_text(parameter.type_name, "Function") and
-                !self.types.is_text(parameter.type_name, "Field") {
+            if self.types.is_text(parameter.type_name, "i64") {
                 try type_params.insert(allocator, parameter_name, false);
             }
             let defined = try self.define_scope_param(
