@@ -1,16 +1,3 @@
-// Where a connection draws its randomness. Every byte std::tls draws --
-// the hello's random, the session id, the x25519 private key, the RSA-PSS
-// salt -- comes from the connection's `Entropy`, and nothing here reaches
-// the host's source except `draw` on a system one. A source that is set
-// and still lets one byte come from elsewhere would make a replayed
-// connection differ without saying why, so a new draw in std::tls takes
-// it from here too.
-//
-// An Entropy is not copied: two connections drawing the same sequence
-// would reuse a key share and a nonce. All its fields are copy data, so
-// the `deinit` below is what keeps it moved rather than copied (SPEC §8);
-// it has nothing to free.
-
 enum EntropySource {
     System,
     Predictable,
@@ -20,11 +7,7 @@ enum EntropySource {
 // sequence fixed by a seed.
 pub struct Entropy {
     source: std::tls::EntropySource,
-    // A predictable source's key, SHA-256 of its seed; zeros for the
-    // host's.
     key: [32]u8,
-    // How many bytes this source has handed out, and how many children
-    // `split` has made of it.
     drawn: i64,
     children: i64,
 }
@@ -84,7 +67,6 @@ fn (self: std::tls::Entropy) deinit() -> void {
     return;
 }
 
-// draw returns the next `count` bytes of the source as an owned String.
 fn (self: &var std::tls::Entropy) draw(
     io: Io,
     allocator: Allocator,
@@ -115,9 +97,6 @@ fn (self: &var std::tls::Entropy) draw(
     return move out;
 }
 
-// block writes HMAC-SHA256 under the key of `domain` followed by `index`
-// as eight big-endian bytes to the front of `out`. The domain keeps the
-// sequence's blocks (0) apart from the children's seeds (1).
 fn (self: &std::tls::Entropy) block(domain: u8, index: i64, out: &var []u8) -> void {
     var message = [9]u8{};
     let view = message.as_mut_bytes();
