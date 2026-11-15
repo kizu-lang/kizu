@@ -1,0 +1,226 @@
+import std::array;
+import std::float;
+import std::mem;
+
+pub fn parse_f32_literal(allocator: Allocator, text: []u8) -> !?f64 {
+    let value = try parse_float_literal(allocator, text) orelse return null;
+    let raw = float::bits(value);
+    let field = cast<i64>((raw >> 52) & 2047);
+    if field == 2047 {
+        return value;
+    }
+    var significand = raw & ((cast<u64>(1) << 52) - 1);
+    var exponent = -1074;
+    if field > 0 {
+        significand = significand | (cast<u64>(1) << 52);
+        exponent = field - 1075;
+    }
+    if significand == 0 {
+        return value;
+    }
+    let leading = exponent + bit_length(significand) - 1;
+    if leading > 127 {
+        return null;
+    }
+    var quantum = leading - 23;
+    if quantum < -149 {
+        quantum = -149;
+    }
+    let drop = quantum - exponent;
+    if drop <= 0 {
+        return value;
+    }
+    var kept = cast<u64>(0);
+    if drop <= 54 {
+        let rest = significand & ((cast<u64>(1) << cast<u64>(drop)) - 1);
+        let half = cast<u64>(1) << cast<u64>(drop - 1);
+        kept = significand >> cast<u64>(drop);
+        var up = rest > half;
+        if rest == half {
+            let order = try compare_literal(allocator, text, kept * 2 + 1, quantum - 1);
+            up = order > 0 or (order == 0 and kept & 1 == 1);
+        }
+        if up {
+            kept = kept + 1;
+        }
+    }
+    if kept != 0 and quantum + bit_length(kept) - 1 > 127 {
+        return null;
+    }
+    let scale = float::from_bits(cast<u64>(quantum + 1023) << 52);
+    let magnitude = cast<f64>(kept) * scale;
+    return float::from_bits(float::bits(magnitude) | (raw & (cast<u64>(1) << 63)));
+}
+
+fn bit_length(value: u64) -> i64 {
+    var length = 0;
+    while length < 64 and value >> cast<u64>(length) != 0 {
+        length = length + 1;
+    }
+    return length;
+}
+
+struct Exact {
+    limbs: array::Array<u32>,
+}
+
+fn (self: Exact) deinit(allocator: Allocator) -> void {
+    self.limbs.deinit(allocator);
+    return;
+}
+
+fn (self: &var Exact) mul_add(allocator: Allocator, factor: u64, addend: u64) -> !void {
+    var carry = addend;
+    var index = 0;
+    while index < self.limbs.len() {
+        let product = cast<u64>(self.limbs.get_or_panic(index)) * factor + carry;
+        if self.limbs.at_mut(index) |slot| {
+            slot.* = cast<u32>(product & 4294967295);
+        }
+        carry = product >> 32;
+        index = index + 1;
+    }
+    while carry != 0 {
+        try self.limbs.append(allocator, cast<u32>(carry & 4294967295));
+        carry = carry >> 32;
+    }
+    return;
+}
+
+fn (self: &var Exact) mul_pow10(allocator: Allocator, count: i64) -> !void {
+    var remaining = count;
+    while remaining >= 9 {
+        try self.mul_add(allocator, 1000000000, 0);
+        remaining = remaining - 9;
+    }
+    while remaining > 0 {
+        try self.mul_add(allocator, 10, 0);
+        remaining = remaining - 1;
+    }
+    return;
+}
+
+fn (self: &var Exact) shl(allocator: Allocator, count: i64) -> !void {
+    var remaining = count;
+    while remaining >= 31 {
+        try self.mul_add(allocator, cast<u64>(1) << 31, 0);
+        remaining = remaining - 31;
+    }
+    if remaining > 0 {
+        try self.mul_add(allocator, cast<u64>(1) << cast<u64>(remaining), 0);
+    }
+    return;
+}
+
+fn compare_exact(left: &Exact, right: &Exact) -> i64 {
+    if left.limbs.len() != right.limbs.len() {
+        if left.limbs.len() < right.limbs.len() {
+            return -1;
+        }
+        return 1;
+    }
+    var index = left.limbs.len();
+    while index > 0 {
+        index = index - 1;
+        let a = left.limbs.get_or_panic(index);
+        let b = right.limbs.get_or_panic(index);
+        if a < b {
+            return -1;
+        }
+        if a > b {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+fn compare_literal(allocator: Allocator, text: []u8, odd: u64, power: i64) -> !i64 {
+    var digits = Exact { limbs: array::new<u32>(allocator) };
+    defer digits.deinit(allocator);
+    var target = Exact { limbs: array::new<u32>(allocator) };
+    defer target.deinit(allocator);
+    try target.mul_add(allocator, 1, odd);
+    var decimal_exponent = 0;
+    var binary_exponent = 0 - power;
+    var index = 0;
+    let length = mem::len(text);
+    if index < length and (text[index] == cast<u8>(45) or text[index] == cast<u8>(43)) {
+        index = index + 1;
+    }
+    var base = cast<u64>(10);
+    if index + 1 < length and text[index] == cast<u8>(48) and
+        (text[index + 1] == cast<u8>(120) or text[index + 1] == cast<u8>(88)) {
+        base = 16;
+        index = index + 2;
+    }
+    var seen_dot = false;
+    while index < length {
+        let ch = text[index];
+        if ch == cast<u8>(46) {
+            seen_dot = true;
+            index = index + 1;
+            continue;
+        }
+        let digit = digit_value(ch, base) orelse break;
+        try digits.mul_add(allocator, base, digit);
+        if seen_dot {
+            if base == 16 {
+                binary_exponent = binary_exponent - 4;
+            } else {
+                decimal_exponent = decimal_exponent - 1;
+            }
+        }
+        index = index + 1;
+    }
+    if index < length {
+        index = index + 1;
+        var negative = false;
+        if index < length and text[index] == cast<u8>(45) {
+            negative = true;
+            index = index + 1;
+        } else {
+            if index < length and text[index] == cast<u8>(43) {
+                index = index + 1;
+            }
+        }
+        var written = 0;
+        while index < length {
+            if written < 100000 {
+                written = written * 10 + cast<i64>(text[index] - cast<u8>(48));
+            }
+            index = index + 1;
+        }
+        if negative {
+            written = 0 - written;
+        }
+        if base == 16 {
+            binary_exponent = binary_exponent + written;
+        } else {
+            decimal_exponent = decimal_exponent + written;
+        }
+    }
+    if decimal_exponent >= 0 {
+        try digits.mul_pow10(allocator, decimal_exponent);
+    } else {
+        try target.mul_pow10(allocator, 0 - decimal_exponent);
+    }
+    if binary_exponent >= 0 {
+        try digits.shl(allocator, binary_exponent);
+    } else {
+        try target.shl(allocator, 0 - binary_exponent);
+    }
+    return compare_exact(&digits, &target);
+}
+
+fn digit_value(ch: u8, base: u64) -> ?u64 {
+    if ch >= cast<u8>(48) and ch <= cast<u8>(57) {
+        return cast<u64>(ch - cast<u8>(48));
+    }
+    if base == 16 and ch >= cast<u8>(97) and ch <= cast<u8>(102) {
+        return cast<u64>(ch - cast<u8>(87));
+    }
+    if base == 16 and ch >= cast<u8>(65) and ch <= cast<u8>(70) {
+        return cast<u64>(ch - cast<u8>(55));
+    }
+    return null;
+}
