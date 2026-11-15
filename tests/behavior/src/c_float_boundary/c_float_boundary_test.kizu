@@ -1,0 +1,53 @@
+import std::testing;
+
+// Floats crossing the C boundary where C picks the registers: a call
+// through a C function pointer, and an `export "c" fn` C calls. Integers
+// and floats are interleaved because C counts their registers apart on
+// some targets and by argument position on others.
+@link_library("m")
+extern "c" fn ldexp(value: f64, exponent: i32) -> f64
+@link_library("m")
+extern "c" fn fmaf(x: f32, y: f32, z: f32) -> f32
+@link_library("m")
+extern "c" fn atan2(y: f64, x: f64) -> f64
+export "c" fn behavior_c_float_weigh(count: i32, weight: f64, step: u8, bias: f32) -> f64 {
+    return cast<f64>(count) * weight + cast<f64>(step) * cast<f64>(bias);
+}
+export "c" fn behavior_c_float_halve(value: f32) -> f32 {
+    return value / 2.0;
+}
+
+export "c" fn behavior_c_float_truncate(value: f64) -> i64 {
+    return cast<i64>(value);
+}
+
+fn scale(f: extern "c" fn(f64, i32) -> f64, value: f64, exponent: i32) -> f64 {
+    // SAFETY: f is ldexp, defined for every argument.
+    return unsafe f(value, exponent);
+}
+
+test "a C function pointer takes float arguments" {
+    testing::expect(scale(ldexp, 1.5, 3) == 12.0);
+    let fused: extern "c" fn(f32, f32, f32) -> f32 = fmaf;
+    // SAFETY: fmaf is defined for every argument.
+    testing::expect(unsafe fused(2.0, 3.0, 1.5) == 7.5);
+    let angle: extern "c" fn(f64, f64) -> f64 = atan2;
+    // SAFETY: atan2 is defined for every argument.
+    // SAFETY: as above.
+    let direct = unsafe atan2(1.0, -1.0);
+    // SAFETY: as above.
+    testing::expect(unsafe angle(1.0, -1.0) == direct);
+}
+
+test "an export takes and returns floats, called by name and through its C pointer" {
+    testing::expect(behavior_c_float_weigh(-2, 1.5, 200, 0.25) == 47.0);
+    let weigh: extern "c" fn(i32, f64, u8, f32) -> f64 = behavior_c_float_weigh;
+    // SAFETY: weigh is the export above.
+    testing::expect(unsafe weigh(-2, 1.5, 200, 0.25) == 47.0);
+    let halve: extern "c" fn(f32) -> f32 = behavior_c_float_halve;
+    // SAFETY: as above.
+    testing::expect(unsafe halve(-2.5) == -1.25);
+    let truncate: extern "c" fn(f64) -> i64 = behavior_c_float_truncate;
+    // SAFETY: as above.
+    testing::expect_equal<i64>(-7, unsafe truncate(-7.9));
+}

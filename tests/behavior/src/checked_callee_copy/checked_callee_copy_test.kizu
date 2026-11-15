@@ -1,0 +1,101 @@
+import std::math;
+import std::testing;
+
+// A call computes the same result however the callee's body reaches the
+// caller: a callee that checks an index on the way, one whose arguments
+// spill past the argument registers, and one of those that itself calls
+// another such callee and reads its own spilled arguments afterwards.
+
+struct Table {
+    cells: [8]i64,
+    widths: [8]i32,
+    count: i64,
+}
+
+fn new_table() -> Table {
+    return Table { cells: [8]i64{ 3, 1, 4, 1, 5, 9, 2, 6 }, widths: [8]i32{}, count: 0 };
+}
+
+fn cell(t: &Table, i: i64) -> i64 {
+    if i < 0 {
+        return -1;
+    }
+    return t.cells[i];
+}
+
+fn set_width(t: &var Table, i: i64, width: f64) -> void {
+    if i < 0 {
+        return;
+    }
+    t.widths[i] = cast<i32>(math::round<f64>(width));
+}
+
+fn weigh(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64) -> i64 {
+    return a + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7 + h * 8 + i * 9 + j * 10;
+}
+
+fn weigh_back(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64) -> i64 {
+    let inner = weigh(j, i, h, g, f, e, d, c, b, a);
+    var x = inner + i * 100 + j * 1000;
+    x = x * 3 + i - j;
+    x = x ^ (i * 7);
+    return x + j * 11 - i;
+}
+
+fn push(t: &var Table, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, width: f64) -> i64 {
+    let k = t.count;
+    t.cells[k] = a + b + c + d + e + f + g;
+    t.widths[k] = cast<i32>(math::round<f64>(width));
+    t.count = k + 1;
+    return k;
+}
+
+test "a callee that checks an index returns what it read" {
+    let t = new_table();
+    var sum = 0;
+    for 0..8 |k| {
+        sum = sum + cell(&t, k) * (k + 1);
+    }
+    testing::expect_equal<i64>(3 + 2 + 12 + 4 + 25 + 54 + 14 + 48, sum);
+    testing::expect_equal<i64>(-1, cell(&t, -3));
+}
+
+test "a callee with a float argument and a check writes where it should" {
+    var t = new_table();
+    for 0..8 |k| {
+        set_width(&var t, k, cast<f64>(k) * 1.5);
+    }
+    set_width(&var t, -1, 99.0);
+    testing::expect_equal<i64>(0, cast<i64>(t.widths[0]));
+    testing::expect_equal<i64>(2, cast<i64>(t.widths[1]));
+    testing::expect_equal<i64>(3, cast<i64>(t.widths[2]));
+    testing::expect_equal<i64>(5, cast<i64>(t.widths[3]));
+    testing::expect_equal<i64>(11, cast<i64>(t.widths[7]));
+}
+
+test "arguments past the registers reach the callee" {
+    var total = 0;
+    for 0..5 |k| {
+        total = total + weigh(k, 1, 2, 3, 4, 5, 6, 7, k + 8, k + 9);
+    }
+    testing::expect_equal<i64>(1850, total);
+}
+
+test "a callee reads its own spilled arguments after calling another" {
+    var total = 0;
+    for 0..5 |k| {
+        total = total + weigh_back(k, 1, 2, 3, 4, 5, 6, 7, k + 8, k + 9);
+    }
+    testing::expect_equal<i64>(183297, total);
+}
+
+test "spilled arguments and a check together" {
+    var t = new_table();
+    for 0..8 |k| {
+        let at = push(&var t, k, 1, 2, 3, 4, 5, 6, cast<f64>(k) + 0.5);
+        testing::expect_equal<i64>(k, at);
+    }
+    testing::expect_equal<i64>(8, t.count);
+    testing::expect_equal<i64>(28, t.cells[7]);
+    testing::expect_equal<i64>(8, cast<i64>(t.widths[7]));
+}

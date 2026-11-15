@@ -78,7 +78,7 @@ fn (self: &var Selector) float_op(op: MOp, kind: i64, width: i64, rd: i64, rn: i
 fn (self: &var Selector) select_float_binary(module: &ir::Module, node: &ir::InstrNode, next: ir::Value, next_op: ir::Op) -> !?diagnostic::Diagnostic {
     let left = node.args.get_or_panic(0);
     let right = node.args.get_or_panic(1);
-    let shape = shape_of(module, left.type_name);
+    let shape = self.shapes.of(module, left.type_name);
     if module.names.is(node.result.type_name, "bool") {
         let cond = float_comparison(module, node.operand) orelse return try self.fail_op(module, node);
         var held = no_val();
@@ -99,16 +99,37 @@ fn (self: &var Selector) select_float_binary(module: &ir::Module, node: &ir::Ins
     } else if module.names.is(node.operand, "/") {
         kind = float_div();
     }
-    let result = shape_of(module, node.result.type_name);
+    let result = self.shapes.of(module, node.result.type_name);
     if kind < 0 or result.class != Class::Float or result.size != shape.size {
         return try self.fail_op(module, node);
     }
-    let lhs = try self.reg(module, left) orelse return try self.fail_op(module, node);
-    let rhs = try self.reg(module, right) orelse return try self.fail_op(module, node);
+    var operand = left;
+    var other = right;
+    if kind == float_mul() and self.is_float_two(left, shape) {
+        operand = right;
+        other = right;
+        kind = float_add();
+    } else if kind == float_mul() and self.is_float_two(right, shape) {
+        other = left;
+        kind = float_add();
+    }
+    let lhs = try self.reg(module, operand) orelse return try self.fail_op(module, node);
+    let rhs = try self.reg(module, other) orelse return try self.fail_op(module, node);
     let rd = self.func.new_vreg();
     try self.float_op(MOp::FBin, kind, shape.size, rd, lhs, rhs);
     try self.set_val(node.result.name, reg_val(rd));
     return null;
+}
+
+fn (self: &Selector) is_float_two(value: ir::Value, shape: Shape) -> bool {
+    let held = self.val(value.name);
+    if held.kind != ValKind::Const {
+        return false;
+    }
+    if shape.size == 4 {
+        return held.imm == 1073741824;
+    }
+    return held.imm == 4611686018427387904;
 }
 
 fn (self: &var Selector) float_compare(module: &ir::Module, held: Val) -> !?Cond {
@@ -120,7 +141,7 @@ fn (self: &var Selector) float_compare(module: &ir::Module, held: Val) -> !?Cond
 
 fn (self: &var Selector) select_float_unary(module: &ir::Module, node: &ir::InstrNode, kind: i64) -> !?diagnostic::Diagnostic {
     let source = node.args.get(0) orelse return try self.fail_op(module, node);
-    let shape = shape_of(module, node.result.type_name);
+    let shape = self.shapes.of(module, node.result.type_name);
     if shape.class != Class::Float or node.args.len() != 1 {
         return try self.fail_op(module, node);
     }
@@ -176,7 +197,7 @@ fn (self: &var Selector) call_float_c(name: []u8, width: i64, rd: i64, a: i64, b
 }
 
 fn (self: &var Selector) select_float_fma(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    let shape = shape_of(module, node.result.type_name);
+    let shape = self.shapes.of(module, node.result.type_name);
     if shape.class != Class::Float or node.args.len() != 3 {
         return try self.fail_op(module, node);
     }
@@ -202,8 +223,8 @@ fn (self: &var Selector) select_float_fma(module: &ir::Module, node: &ir::InstrN
 
 fn (self: &var Selector) select_float_bits(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let source = node.args.get(0) orelse return try self.fail_op(module, node);
-    let from = shape_of(module, source.type_name);
-    let to = shape_of(module, node.result.type_name);
+    let from = self.shapes.of(module, source.type_name);
+    let to = self.shapes.of(module, node.result.type_name);
     if node.args.len() != 1 or !is_word(from) or !is_word(to) or from.size != to.size {
         return try self.fail_op(module, node);
     }

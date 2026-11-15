@@ -1325,6 +1325,38 @@ fn has_bit(bits: &array::Array<i64>, base: i64, bit: i64) -> bool {
     return (bits.get_or_panic(word) & mask) != 0;
 }
 
+struct Holders {
+    first: array::Array<i64>,
+    next: array::Array<i64>,
+    prev: array::Array<i64>,
+    active: array::Array<bool>,
+}
+
+fn (self: &var Holders) link(reg: i64, v: i64) -> !void {
+    let head = self.first.get_or_panic(reg);
+    try self.next.set(v, head);
+    try self.prev.set(v, 0 - 1);
+    if head >= 0 {
+        try self.prev.set(head, v);
+    }
+    try self.active.set(v, true);
+    return self.first.set(reg, v);
+}
+
+fn (self: &var Holders) unlink(reg: i64, v: i64) -> !void {
+    let before = self.prev.get_or_panic(v);
+    let after = self.next.get_or_panic(v);
+    if before >= 0 {
+        try self.next.set(before, after);
+    } else {
+        try self.first.set(reg, after);
+    }
+    if after >= 0 {
+        try self.prev.set(after, before);
+    }
+    return;
+}
+
 struct Ranges {
     seg_from: array::Array<i64>,
     seg_to: array::Array<i64>,
@@ -1428,15 +1460,63 @@ fn (self: &Ranges) intersect(a: i64, b: i64) -> bool {
     return false;
 }
 
-fn (self: &Ranges) spans(v: i64, before: &array::Array<i64>, base: i64) -> bool {
-    var at = self.first.get_or_panic(v);
+struct Marks {
+    rows: array::Array<i64>,
+    entries: array::Array<i64>,
+}
+
+fn build_marks(allocator: Allocator, index_marks: &array::Array<i64>) -> !Marks {
+    var marks = Marks { rows: array::new<i64>(allocator), entries: array::new<i64>(allocator) };
+    errdefer marks.deinit(allocator);
+    var any = 0;
+    var index = 0;
+    while index_marks.get(index) |bits| {
+        index = index + 1;
+        any = any | bits;
+    }
+    let span = index_marks.len() + 2;
+    var used_rows = 0;
+    for 0..10 |row| {
+        if ((any >> (2 * row)) & 3) != 0 {
+            used_rows = used_rows + 1;
+        }
+    }
+    try marks.entries.reserve(allocator, used_rows * span);
+    for 0..10 |row| {
+        if ((any >> (2 * row)) & 3) == 0 {
+            try marks.rows.append(allocator, 0 - 1);
+            continue;
+        }
+        try marks.rows.append(allocator, marks.entries.len());
+        var running = 0;
+        for 0..span |k| {
+            let bits = (index_marks.get(k) orelse 0) >> (2 * row);
+            let even = bits & 1;
+            try marks.entries.append(allocator, 2 * running + even);
+            running = running + even + ((bits >> 1) & 1);
+        }
+    }
+    return move marks;
+}
+
+fn (self: &Marks) before(base: i64, pos: i64) -> i64 {
+    let entry = self.entries.get_or_panic(base + pos / 2);
+    return (entry >> 1) + (entry & (pos % 2));
+}
+
+fn (self: &Marks) spans(ranges: &Ranges, v: i64, row: i64) -> bool {
+    let base = self.rows.get_or_panic(row);
+    if base < 0 {
+        return false;
+    }
+    var at = ranges.first.get_or_panic(v);
     while at >= 0 {
-        let from = self.seg_from.get_or_panic(at);
-        let to = self.seg_to.get_or_panic(at);
-        if before.get_or_panic(base + to + 1) - before.get_or_panic(base + from) > 0 {
+        let from = ranges.seg_from.get_or_panic(at);
+        let to = ranges.seg_to.get_or_panic(at);
+        if self.before(base, to + 1) - self.before(base, from) > 0 {
             return true;
         }
-        at = self.seg_next.get_or_panic(at);
+        at = ranges.seg_next.get_or_panic(at);
     }
     return false;
 }
@@ -1475,7 +1555,74 @@ fn run_passes(allocator: Allocator, func: &var MFunction, arch: Arch) -> !void {
     try fold_frame_addresses(allocator, func);
     try remove_dead(allocator, func);
     try promote_slots(allocator, func);
+    if is_x86(arch) {
+        try store_immediates(allocator, func);
+    }
     try remove_dead(allocator, func);
+    return;
+}
+
+fn store_immediates(allocator: Allocator, func: &var MFunction) -> !void {
+    var def_count = array::new<i64>(allocator);
+    defer def_count.deinit(allocator);
+    var value = array::new<i64>(allocator);
+    defer value.deinit(allocator);
+    var constant = array::new<bool>(allocator);
+    defer constant.deinit(allocator);
+    for 0..func.vregs |_index| {
+        try def_count.append(allocator, 0);
+        try value.append(allocator, 0);
+        try constant.append(allocator, false);
+    }
+    var block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        block_id = block_id + 1;
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            if writes_rd(inst.op) and is_vreg(inst.rd) {
+                let id = inst.rd - first_vreg();
+                try add_to(&var def_count, id, 1);
+                if inst.op == MOp::MovImm {
+                    try value.set(id, inst.imm);
+                    try constant.set(id, true);
+                }
+            }
+            if inst.op == MOp::ParCopy {
+                var index = 0;
+                while index < inst.imm {
+                    let copy = func.copies.get_or_panic(inst.slot + index);
+                    index = index + 1;
+                    if is_vreg(copy.dst) {
+                        try add_to(&var def_count, copy.dst - first_vreg(), 1);
+                    }
+                }
+            }
+        }
+    }
+    block_id = 0;
+    while func.blocks.at_mut(block_id) |block| {
+        block_id = block_id + 1;
+        var inst_index = 0;
+        while inst_index < block.insts.len() {
+            var inst = block.insts.get_or_panic(inst_index);
+            inst_index = inst_index + 1;
+            if (inst.op != MOp::Store and inst.op != MOp::StoreIdx) or !is_vreg(inst.rd) {
+                continue;
+            }
+            let id = inst.rd - first_vreg();
+            if def_count.get_or_panic(id) != 1 or !constant.get_or_panic(id) {
+                continue;
+            }
+            let imm = value.get_or_panic(id);
+            if inst.width == 8 and !(imm >= 0 - 2147483648 and imm <= 2147483647) {
+                continue;
+            }
+            inst.rd = reg_imm();
+            inst.vec = imm;
+            try block.insts.set(inst_index - 1, inst);
+        }
+    }
     return;
 }
 
@@ -1512,15 +1659,11 @@ fn allocate_laid_out(
         count = count + 1;
     }
     let positions = 2 * count + 2;
-    let stride = positions + 1;
-    var marks = array::new<i64>(allocator);
-    defer marks.deinit(allocator);
-    for 0..10 * stride |_index| {
-        try marks.append(allocator, 0);
-    }
     var cold_calls = array::new<i64>(allocator);
     defer cold_calls.deinit(allocator);
-    var index_at = 0;
+    var index_marks = array::new<i64>(allocator);
+    defer index_marks.deinit(allocator);
+    try index_marks.reserve(allocator, count);
     order_index = 0;
     while order.get(order_index) |block_id| {
         order_index = order_index + 1;
@@ -1529,38 +1672,28 @@ fn allocate_laid_out(
             var inst_index = 0;
             while block.insts.at(inst_index) |inst| {
                 inst_index = inst_index + 1;
-                let k = index_at;
-                index_at = index_at + 1;
+                let k = index_marks.len();
+                var bits = argument_marks(inst);
                 if inst.op == MOp::Call or inst.op == MOp::CallReg {
                     if !is_cold {
-                        try bump(&var marks, 2 * k);
-                        try bump(&var marks, 2 * k + 1);
+                        bits = bits | 3;
                     } else if block.term != Term::Stop {
                         try cold_calls.append(allocator, k);
                     }
                     for 0..8 |r| {
-                        try bump(&var marks, (1 + r) * stride + 2 * k);
-                        try bump(&var marks, (1 + r) * stride + 2 * k + 1);
+                        bits = bits | (3 << (2 * (1 + r)));
                     }
                 }
                 if is_vector(inst.op) or (is_x86(arch) and names_float_args(inst.op)) {
-                    try bump(&var marks, 9 * stride + 2 * k);
-                    try bump(&var marks, 9 * stride + 2 * k + 1);
+                    bits = bits | (3 << 18);
                 }
-                try mark_arguments(&var marks, stride, inst, k);
+                try index_marks.append(allocator, bits);
             }
         }
-        index_at = index_at + 1;
+        try index_marks.append(allocator, 0);
     }
-    for 0..10 |row| {
-        var running = 0;
-        for 0..stride |p| {
-            let at = row * stride + p;
-            let here = marks.get_or_panic(at);
-            try marks.set(at, running);
-            running = running + here;
-        }
-    }
+    var marks = try build_marks(allocator, &index_marks);
+    defer marks.deinit(allocator);
     var use_bits = array::new<i64>(allocator);
     defer use_bits.deinit(allocator);
     var def_bits = array::new<i64>(allocator);
@@ -1890,9 +2023,9 @@ fn allocate_laid_out(
     var crosses_call = array::new<bool>(allocator);
     defer crosses_call.deinit(allocator);
     for 0..nv |v| {
-        var crosses = ranges.first.get_or_panic(v) >= 0 and ranges.spans(v, &marks, 0);
+        var crosses = ranges.first.get_or_panic(v) >= 0 and marks.spans(&ranges, v, 0);
         if arch == Arch::Arm64 and float.get_or_panic(v) and !crosses {
-            crosses = ranges.first.get_or_panic(v) >= 0 and ranges.spans(v, &marks, 9 * stride);
+            crosses = ranges.first.get_or_panic(v) >= 0 and marks.spans(&ranges, v, 9);
         }
         try crosses_call.append(allocator, crosses);
     }
@@ -1900,6 +2033,21 @@ fn allocate_laid_out(
     defer active.deinit(allocator);
     var inactive = array::new<i64>(allocator);
     defer inactive.deinit(allocator);
+    var holders = Holders {
+        first: array::new<i64>(allocator),
+        next: array::new<i64>(allocator),
+        prev: array::new<i64>(allocator),
+        active: array::new<bool>(allocator)
+    };
+    defer holders.deinit(allocator);
+    for 0..first_vreg() |_index| {
+        try holders.first.append(allocator, 0 - 1);
+    }
+    for 0..nv |_index| {
+        try holders.next.append(allocator, 0 - 1);
+        try holders.prev.append(allocator, 0 - 1);
+        try holders.active.append(allocator, false);
+    }
     var used = array::new<bool>(allocator);
     defer used.deinit(allocator);
     for 0..first_vreg() |_index| {
@@ -1922,12 +2070,14 @@ fn allocate_laid_out(
             while active.get(look) |other| {
                 look = look + 1;
                 if ends.get_or_panic(other) < start {
+                    try holders.unlink(phys.get_or_panic(other), other);
                     continue;
                 }
                 let at = try ranges.seek(&var cursor, other, start);
                 if ranges.seg_from.get_or_panic(at) > start {
                     next_change = min(next_change, ranges.seg_from.get_or_panic(at));
                     try to_inactive.append(allocator, other);
+                    try holders.active.set(other, false);
                     continue;
                 }
                 next_change = min(next_change, ranges.seg_to.get_or_panic(at) + 1);
@@ -1940,12 +2090,14 @@ fn allocate_laid_out(
             while inactive.get(look) |other| {
                 look = look + 1;
                 if ends.get_or_panic(other) < start {
+                    try holders.unlink(phys.get_or_panic(other), other);
                     continue;
                 }
                 let at = try ranges.seek(&var cursor, other, start);
                 if ranges.seg_from.get_or_panic(at) <= start {
                     next_change = min(next_change, ranges.seg_to.get_or_panic(at) + 1);
                     try active.append(allocator, other);
+                    try holders.active.set(other, true);
                     continue;
                 }
                 next_change = min(next_change, ranges.seg_from.get_or_panic(at));
@@ -2023,10 +2175,10 @@ fn allocate_laid_out(
         var candidate_index = 0;
         while candidates.get(candidate_index) |r| {
             candidate_index = candidate_index + 1;
-            if !may_take(&ranges, &marks, stride, v, r, crosses, wants_float, arch) {
+            if !may_take(&ranges, &marks, v, r, crosses, wants_float, arch) {
                 continue;
             }
-            if register_free(&ranges, &phys, &active, &inactive, &copy_of, &write_at, &write_next, &write_first, v, r) {
+            if register_free(&ranges, &holders, &copy_of, &write_at, &write_next, &write_first, v, r) {
                 if deferred < 0 and (r == shun or closes_cycle(&avoid_src, &avoid_dst, &phys, v, r)) {
                     deferred = r;
                     continue;
@@ -2041,6 +2193,7 @@ fn allocate_laid_out(
         if chosen >= 0 {
             try phys.set(v, chosen);
             try active.append(allocator, v);
+            try holders.link(chosen, v);
             next_change = min(next_change, first_to + 1);
             try used.set(chosen, true);
             continue;
@@ -2050,10 +2203,10 @@ fn allocate_laid_out(
         candidate_index = 0;
         while candidates.get(candidate_index) |r| {
             candidate_index = candidate_index + 1;
-            if !may_take(&ranges, &marks, stride, v, r, crosses, wants_float, arch) {
+            if !may_take(&ranges, &marks, v, r, crosses, wants_float, arch) {
                 continue;
             }
-            let cost = holders_weight(&ranges, &phys, &weight, &active, &inactive, v, r);
+            let cost = holders_weight(&ranges, &holders, &weight, v, r);
             if cost < best_cost {
                 best_cost = cost;
                 best_reg = r;
@@ -2063,10 +2216,11 @@ fn allocate_laid_out(
             try spill.set(v, try spill_place(allocator, func, &remat, v));
             continue;
         }
-        try evict(allocator, func, &ranges, &var phys, &var spill, &remat, &var active, v, best_reg);
-        try evict(allocator, func, &ranges, &var phys, &var spill, &remat, &var inactive, v, best_reg);
+        try evict(allocator, func, &ranges, &var phys, &var spill, &remat, &var holders, &var active, v, best_reg);
+        try evict(allocator, func, &ranges, &var phys, &var spill, &remat, &var holders, &var inactive, v, best_reg);
         try phys.set(v, best_reg);
         try active.append(allocator, v);
+        try holders.link(best_reg, v);
         next_change = min(next_change, first_to + 1);
         try used.set(best_reg, true);
     }
@@ -2159,13 +2313,13 @@ fn closes_cycle(avoid_src: &array::Array<i64>, avoid_dst: &array::Array<i64>, ph
     return false;
 }
 
-fn may_take(ranges: &Ranges, marks: &array::Array<i64>, stride: i64, v: i64, reg: i64, crosses: bool, float: bool, arch: Arch) -> bool {
+fn may_take(ranges: &Ranges, marks: &Marks, v: i64, reg: i64, crosses: bool, float: bool, arch: Arch) -> bool {
     if float or is_float_reg(reg) {
         if !float or !is_float_reg(reg) {
             return false;
         }
         if reg >= float_caller_saved_end(arch) {
-            return reg < float_named_end(arch) and !ranges.spans(v, marks, 9 * stride);
+            return reg < float_named_end(arch) and !marks.spans(ranges, v, 9);
         }
         return !crosses or reg < float_callee_saved_end(arch);
     }
@@ -2173,7 +2327,7 @@ fn may_take(ranges: &Ranges, marks: &array::Array<i64>, stride: i64, v: i64, reg
         return false;
     }
     if reg < arg_regs(arch) {
-        return !ranges.spans(v, marks, (1 + reg) * stride);
+        return !marks.spans(ranges, v, 1 + reg);
     }
     return (reg >= caller_saved_first() and reg <= caller_saved_last(arch)) or
         (reg >= callee_saved_first() and reg <= callee_saved_last(arch));
@@ -2181,9 +2335,7 @@ fn may_take(ranges: &Ranges, marks: &array::Array<i64>, stride: i64, v: i64, reg
 
 fn register_free(
     ranges: &Ranges,
-    phys: &array::Array<i64>,
-    active: &array::Array<i64>,
-    inactive: &array::Array<i64>,
+    holders: &Holders,
     copy_of: &array::Array<i64>,
     write_at: &array::Array<i64>,
     write_next: &array::Array<i64>,
@@ -2191,20 +2343,13 @@ fn register_free(
     v: i64,
     reg: i64
 ) -> bool {
-    var index = 0;
-    while active.get(index) |other| {
-        index = index + 1;
-        if phys.get_or_panic(other) == reg and !shares_value(ranges, copy_of, write_at, write_next, write_first, v, other) {
-            return false;
-        }
-    }
-    index = 0;
-    while inactive.get(index) |other| {
-        index = index + 1;
-        if phys.get_or_panic(other) == reg and ranges.intersect(v, other) and
+    var other = holders.first.get_or_panic(reg);
+    while other >= 0 {
+        if (holders.active.get_or_panic(other) or ranges.intersect(v, other)) and
             !shares_value(ranges, copy_of, write_at, write_next, write_first, v, other) {
             return false;
         }
+        other = holders.next.get_or_panic(other);
     }
     return true;
 }
@@ -2264,27 +2409,18 @@ fn copy_chain(
 
 fn holders_weight(
     ranges: &Ranges,
-    phys: &array::Array<i64>,
+    holders: &Holders,
     weight: &array::Array<i64>,
-    active: &array::Array<i64>,
-    inactive: &array::Array<i64>,
     v: i64,
     reg: i64
 ) -> i64 {
     var total = 0;
-    var index = 0;
-    while active.get(index) |other| {
-        index = index + 1;
-        if phys.get_or_panic(other) == reg {
+    var other = holders.first.get_or_panic(reg);
+    while other >= 0 {
+        if holders.active.get_or_panic(other) or ranges.intersect(v, other) {
             total = total + weight.get_or_panic(other);
         }
-    }
-    index = 0;
-    while inactive.get(index) |other| {
-        index = index + 1;
-        if phys.get_or_panic(other) == reg and ranges.intersect(v, other) {
-            total = total + weight.get_or_panic(other);
-        }
+        other = holders.next.get_or_panic(other);
     }
     return total;
 }
@@ -2296,6 +2432,7 @@ fn evict(
     phys: &var array::Array<i64>,
     spill: &var array::Array<i64>,
     remat: &array::Array<MInst>,
+    holders: &var Holders,
     set: &var array::Array<i64>,
     v: i64,
     reg: i64
@@ -2305,6 +2442,7 @@ fn evict(
     while set.get(look) |other| {
         look = look + 1;
         if phys.get_or_panic(other) == reg and ranges.intersect(v, other) {
+            try holders.unlink(reg, other);
             try phys.set(other, 0 - 1);
             try spill.set(other, try spill_place(allocator, func, remat, other));
             continue;
@@ -2315,25 +2453,26 @@ fn evict(
     return set.truncate(allocator, keep);
 }
 
-fn mark_arguments(marks: &var array::Array<i64>, stride: i64, inst: &MInst, k: i64) -> !void {
+fn argument_marks(inst: &MInst) -> i64 {
     let stores = inst.op == MOp::Store or inst.op == MOp::StoreIdx;
+    var bits = 0;
     if inst.rn >= 0 and inst.rn < 8 {
-        try bump(marks, (1 + inst.rn) * stride + 2 * k);
+        bits = bits | (1 << (2 * (1 + inst.rn)));
     }
     if inst.rm >= 0 and inst.rm < 8 {
-        try bump(marks, (1 + inst.rm) * stride + 2 * k);
+        bits = bits | (1 << (2 * (1 + inst.rm)));
     }
     if inst.ra >= 0 and inst.ra < 8 {
-        try bump(marks, (1 + inst.ra) * stride + 2 * k);
+        bits = bits | (1 << (2 * (1 + inst.ra)));
     }
     if inst.rd >= 0 and inst.rd < 8 {
         if stores {
-            try bump(marks, (1 + inst.rd) * stride + 2 * k);
+            bits = bits | (1 << (2 * (1 + inst.rd)));
         } else if writes_rd(inst.op) {
-            try bump(marks, (1 + inst.rd) * stride + 2 * k + 1);
+            bits = bits | (1 << (2 * (1 + inst.rd) + 1));
         }
     }
-    return;
+    return bits;
 }
 
 fn bump(table: &var array::Array<i64>, at: i64) -> !void {

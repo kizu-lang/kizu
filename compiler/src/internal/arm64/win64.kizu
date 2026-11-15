@@ -1,7 +1,6 @@
 import compiler::internal::diagnostic;
 import compiler::internal::ir;
 import std::array;
-import std::string;
 
 fn win64_in_register(size: i64) -> bool {
     return size == 1 or size == 2 or size == 4 or size == 8;
@@ -26,7 +25,7 @@ fn (self: &var Selector) win64_word(args: &var CCallArgs, reg: i64) -> !void {
     if args.words.len() < arg_regs(self.arch) {
         return args.words.append(self.allocator, reg);
     }
-    return args.stacked.append(self.allocator, reg);
+    return self.stack_word(args, reg);
 }
 
 fn (self: &var Selector) win64_float(args: &var CCallArgs, positions: &var array::Array<i64>, reg: i64, width: i64) -> !void {
@@ -53,13 +52,8 @@ fn (self: &var Selector) win64_struct_arg(module: &ir::Module, arg: ir::Value, a
     return true;
 }
 
-fn (self: &var Selector) select_win64_call(module: &ir::Module, node: &ir::InstrNode, symbol_name: ir::Name) -> !?diagnostic::Diagnostic {
-    var args = CCallArgs {
-        words: array::new<i64>(self.allocator),
-        floats: array::new<i64>(self.allocator),
-        float_widths: array::new<i64>(self.allocator),
-        stacked: array::new<i64>(self.allocator),
-    };
+fn (self: &var Selector) select_win64_call(module: &ir::Module, node: &ir::InstrNode, callee: CCallee) -> !?diagnostic::Diagnostic {
+    var args = new_c_call_args(self.allocator);
     defer args.deinit(self.allocator);
     var positions = array::new<i64>(self.allocator);
     defer positions.deinit(self.allocator);
@@ -81,9 +75,9 @@ fn (self: &var Selector) select_win64_call(module: &ir::Module, node: &ir::Instr
             return try self.fail(module, "C result type", result.type_name);
         }
     }
-    var index = 0;
+    var index = callee.first;
     while node.args.get(index) |arg| {
-        let at = index;
+        let at = index - callee.first;
         index = index + 1;
         let unnamed = node.variadic_fixed > 0 and at >= node.variadic_fixed;
         var takes_address = false;
@@ -115,14 +109,7 @@ fn (self: &var Selector) select_win64_call(module: &ir::Module, node: &ir::Instr
             try self.win64_word(&var args, reg);
         }
     }
-    index = 0;
-    while args.stacked.get(index) |reg| {
-        try self.store(reg, reg_sp(), index * 8, 8);
-        index = index + 1;
-    }
-    if args.stacked.len() > self.func.out_words {
-        self.func.out_words = args.stacked.len();
-    }
+    try self.store_stack_args(&args);
     let count = try self.place_words(&args.words);
     index = 0;
     while args.floats.get(index) |reg| {
@@ -133,14 +120,7 @@ fn (self: &var Selector) select_win64_call(module: &ir::Module, node: &ir::Instr
         try self.inst(inst);
         index = index + 1;
     }
-    var symbol = string::new(self.allocator);
-    defer symbol.deinit(self.allocator);
-    let name_text = ir::name_text(&module.names, symbol_name);
-    let name_bytes = name_text.as_bytes();
-    try append_c_symbol(self.allocator, &var symbol, name_bytes);
-    let symbol_bytes = symbol.as_bytes();
-    let sym = try self.syms.intern(symbol_bytes);
-    try self.call_sym(sym, count, reg_none());
+    try self.call_c_callee(module, callee, count, reg_none());
     if !struct_result {
         try self.bind_result(module, result, reg_none(), true);
         return null;

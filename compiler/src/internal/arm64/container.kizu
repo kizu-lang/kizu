@@ -56,7 +56,7 @@ fn (self: &var Selector) scaled_addr(data: i64, index: i64, size: i64) -> !i64 {
 }
 
 fn (self: &var Selector) load_element(module: &ir::Module, data: i64, index: i64, type_name: ir::Name) -> !?Val {
-    let shape = shape_of(module, type_name);
+    let shape = self.shapes.of(module, type_name);
     let shift = power_of_two(shape.size);
     if is_word(shape) and shift >= 0 {
         let rd = self.func.new_vreg();
@@ -242,7 +242,7 @@ fn (self: &var Selector) select_array_get(module: &ir::Module, node: &ir::InstrN
     let array_value = node.args.get(0) orelse return try self.fail_op(module, node);
     let index = node.args.get(1) orelse return try self.fail_op(module, node);
     let elem = element_shape(module, array_value);
-    let optional = optional_layout(module, node.result.type_name) orelse return try self.fail_op(module, node);
+    let optional = self.shapes.optional_layout(module, node.result.type_name) orelse return try self.fail_op(module, node);
     if elem.class == Class::Unsupported or elem.class == Class::Void {
         return try self.fail_op(module, node);
     }
@@ -281,7 +281,7 @@ struct OptionalLayout {
     word: i64,
 }
 
-fn optional_layout(module: &ir::Module, type_name: ir::Name) -> ?OptionalLayout {
+fn (self: &var Shapes) optional_layout(module: &ir::Module, type_name: ir::Name) -> ?OptionalLayout {
     let text = ir::name_text(&module.names, type_name);
     let bytes = text.as_bytes();
     if llvm::niche_optional_elem(module, bytes) |elem| {
@@ -292,7 +292,7 @@ fn optional_layout(module: &ir::Module, type_name: ir::Name) -> ?OptionalLayout 
         let word = niche_word_offset(module, elem) orelse return null;
         return OptionalLayout { niche: true, shape: inner, offset: 0, word: word };
     }
-    let shape = shape_of(module, type_name);
+    let shape = self.of(module, type_name);
     if shape.class != Class::Aggregate {
         return null;
     }
@@ -336,7 +336,7 @@ fn (self: &var Selector) select_optional(module: &ir::Module, node: &ir::InstrNo
         let source = node.args.get(0) orelse return try self.fail_op(module, node);
         optional_type = source.type_name;
     }
-    let layout = optional_layout(module, optional_type) orelse return try self.fail_op(module, node);
+    let layout = self.shapes.optional_layout(module, optional_type) orelse return try self.fail_op(module, node);
     match node.op {
         OptNull => {
             if layout.niche and layout.shape.class == Class::Scalar {
@@ -357,7 +357,7 @@ fn (self: &var Selector) select_optional(module: &ir::Module, node: &ir::InstrNo
             let address = try self.new_slot(layout.shape);
             let one = try self.imm_reg_nz(1);
             try self.store(one, address, 0, 1);
-            let payload = shape_of(module, value.type_name);
+            let payload = self.shapes.of(module, value.type_name);
             if !try self.store_value(module, value, payload, address, layout.offset) {
                 return try self.fail_op(module, node);
             }
@@ -403,7 +403,7 @@ fn (self: &var Selector) select_optional(module: &ir::Module, node: &ir::InstrNo
 fn (self: &var Selector) select_union(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     match node.op {
         UnionNew => {
-            let shape = shape_of(module, node.result.type_name);
+            let shape = self.shapes.of(module, node.result.type_name);
             if shape.class != Class::Aggregate {
                 return try self.fail_op(module, node);
             }
@@ -412,7 +412,7 @@ fn (self: &var Selector) select_union(module: &ir::Module, node: &ir::InstrNode)
             let tag = try self.imm_reg(variant.index);
             try self.store(tag, address, 0, 8);
             if node.args.get(0) |payload| {
-                let payload_shape = shape_of(module, payload.type_name);
+                let payload_shape = self.shapes.of(module, payload.type_name);
                 if !try self.store_value(module, payload, payload_shape, address, 8) {
                     return try self.fail_op(module, node);
                 }
@@ -581,7 +581,7 @@ fn (self: &var Selector) select_array_shrink(module: &ir::Module, node: &ir::Ins
             return null;
         },
         ArrayPop => {
-            let optional = optional_layout(module, node.result.type_name) orelse return try self.fail_op(module, node);
+            let optional = self.shapes.optional_layout(module, node.result.type_name) orelse return try self.fail_op(module, node);
             let elem = element_shape(module, array_value);
             if elem.class == Class::Unsupported or elem.class == Class::Void {
                 return try self.fail_op(module, node);

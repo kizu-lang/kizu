@@ -93,12 +93,18 @@ pub fn amd64_print_function(
     try machine_liveness(allocator, func, &var live_in, &var reads_buf);
     var after = array::new<i64>(allocator);
     defer after.deinit(allocator);
+    var heads = array::new<bool>(allocator);
+    defer heads.deinit(allocator);
+    try loop_heads(allocator, func, &allocation.order, &var heads);
     var order_index = 0;
     while allocation.order.get(order_index) |block_id| {
         order_index = order_index + 1;
         var following = 0 - 1;
         if allocation.order.get(order_index) |next| {
             following = next;
+        }
+        if heads.get_or_panic(block_id) {
+            try out.obj.x86_loop_head(allocator, block_id);
         }
         try amd.place_block(out, block_id);
         if func.blocks.at(block_id) |block| {
@@ -108,6 +114,41 @@ pub fn amd64_print_function(
         }
     }
     try out.obj.end_function(allocator);
+    return;
+}
+
+fn loop_heads(allocator: Allocator, func: &MFunction, layout: &array::Array<i64>, heads: &var array::Array<bool>) -> !void {
+    var order = array::new<i64>(allocator);
+    defer order.deinit(allocator);
+    try reverse_postorder(allocator, func, &var order);
+    var place = array::new<i64>(allocator);
+    defer place.deinit(allocator);
+    var idom = array::new<i64>(allocator);
+    defer idom.deinit(allocator);
+    var looped = array::new<bool>(allocator);
+    defer looped.deinit(allocator);
+    try dominators(allocator, func, &order, &var place, &var idom, &var looped);
+    for 0..func.blocks.len() |_index| {
+        try heads.append(allocator, false);
+    }
+    let entry = order.get(0) orelse return;
+    for 0..func.blocks.len() |block| {
+        for 0..2 |position| {
+            let head = func.successor(block, position);
+            if head >= 0 and place.get_or_panic(block) >= 0 and dominates(&idom, entry, head, block) {
+                try heads.set(head, true);
+            }
+        }
+    }
+    var before = 0 - 1;
+    var index = 0;
+    while layout.get(index) |block| {
+        index = index + 1;
+        if heads.get_or_panic(block) and before >= 0 and dominates(&idom, entry, block, before) {
+            try heads.set(block, false);
+        }
+        before = block;
+    }
     return;
 }
 
@@ -234,7 +275,9 @@ fn (self: &var Amd) plan_frame(func: &var MFunction) -> void {
             }
         }
     }
-    if !func.calls {
+    let bare = !func.returns_from_calls() and !uses_inarg and func.out_words == 0 and func.slots.len() == 0 and
+        self.saved == 0 and self.xmm_saved == 0;
+    if !func.calls or bare {
         self.shadow = 0;
     }
     var offset = self.shadow + func.out_words * 8;
@@ -255,7 +298,7 @@ fn (self: &var Amd) plan_frame(func: &var MFunction) -> void {
         size = size + 8;
     }
     self.frame_size = size;
-    self.needed = func.calls or uses_inarg or offset > 0 or self.saved > 0;
+    self.needed = !bare and (func.calls or uses_inarg or offset > 0 or self.saved > 0);
     return;
 }
 
@@ -851,6 +894,17 @@ fn (self: &Amd) got_address(out: &var Out, syms: &ir::NameTable, name: ir::Name,
     return out.obj.x86_rip(self.allocator, syms, name, self.number(dst), true);
 }
 
+fn (self: &Amd) realign_bare(out: &var Out) -> !void {
+    if self.needed {
+        return;
+    }
+    var below = 8;
+    if self.windows {
+        below = 40;
+    }
+    return self.ir(out, "subq", below, reg_sp(), 8);
+}
+
 fn (self: &Amd) call(out: &var Out, syms: &ir::NameTable, name: ir::Name) -> !void {
     return out.obj.x86_call(self.allocator, syms, name);
 }
@@ -1136,6 +1190,9 @@ fn (self: &var Amd) inst(out: &var Out, func: &MFunction, inst: &MInst, syms: &i
             if is_float_reg(inst.rd) {
                 return self.xmm_store(out, inst, at);
             }
+            if inst.rd == reg_imm() {
+                return self.im(out, store_mnemonic(inst.width), inst.vec, at);
+            }
             if is_zr(inst.rd) {
                 return self.im(out, store_mnemonic(inst.width), 0, at);
             }
@@ -1172,6 +1229,9 @@ fn (self: &var Amd) inst(out: &var Out, func: &MFunction, inst: &MInst, syms: &i
             if is_float_reg(inst.rd) {
                 return self.xmm_store(out, inst, at);
             }
+            if inst.rd == reg_imm() {
+                return self.im(out, store_mnemonic(inst.width), inst.vec, at);
+            }
             if is_zr(inst.rd) {
                 return self.im(out, store_mnemonic(inst.width), 0, at);
             }
@@ -1189,6 +1249,7 @@ fn (self: &var Amd) inst(out: &var Out, func: &MFunction, inst: &MInst, syms: &i
             return self.got_address(out, syms, inst.sym, inst.rd);
         },
         Call => {
+            try self.realign_bare(out);
             try self.call(out, syms, inst.sym);
             let text = ir::name_text(syms, inst.sym);
             let bytes = text.as_bytes();
@@ -1198,6 +1259,7 @@ fn (self: &var Amd) inst(out: &var Out, func: &MFunction, inst: &MInst, syms: &i
             return self.rr(out, "movq", 8, 0, 8);
         },
         CallReg => {
+            try self.realign_bare(out);
             try self.call_reg(out, inst.rn);
             try self.rr(out, "movq", 8, 0, 8);
             return self.mov(out, self.rdx, 1);
@@ -1311,6 +1373,8 @@ fn (self: &var Amd) store_scaled_aside(out: &var Out, inst: &MInst) -> !void {
     }
     if is_float_reg(inst.rd) {
         try self.xmm_store(out, inst, based(t, 0));
+    } else if inst.rd == reg_imm() {
+        try self.im(out, store_mnemonic(inst.width), inst.vec, based(t, 0));
     } else if is_zr(inst.rd) {
         try self.im(out, store_mnemonic(inst.width), 0, based(t, 0));
     } else {

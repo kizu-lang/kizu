@@ -1,0 +1,87 @@
+import std::testing;
+
+// A struct literal whose field is itself a new struct or a zeroed array
+// holds the values the literal spells, however deep the nesting, whatever
+// the other fields read, and however often the literal is made again.
+
+struct Inner {
+    count: i64,
+    data: [8]i64,
+}
+
+struct Middle {
+    inner: Inner,
+    tag: i64,
+}
+
+struct Outer {
+    middle: Middle,
+    id: i64,
+}
+
+fn make(count: i64, tag: i64) -> Outer {
+    return Outer { middle: Middle { inner: Inner { count: count, data: [8]i64{} }, tag: tag }, id: count + tag };
+}
+
+fn sum(outer: &Outer) -> i64 {
+    var total = outer.middle.inner.count + outer.middle.tag + outer.id;
+    for 0..8 |i| {
+        total = total + outer.middle.inner.data[i];
+    }
+    return total;
+}
+
+test "a nested literal holds every field it names and zeroes the array" {
+    let outer = make(3, 4);
+    testing::expect_equal<i64>(3, outer.middle.inner.count);
+    testing::expect_equal<i64>(4, outer.middle.tag);
+    testing::expect_equal<i64>(7, outer.id);
+    for 0..8 |i| {
+        testing::expect_equal<i64>(0, outer.middle.inner.data[i]);
+    }
+}
+
+test "a nested literal made again in a loop starts from its own values" {
+    var total = 0;
+    for 0..4 |k| {
+        var outer = Outer { middle: Middle { inner: Inner { count: k, data: [8]i64{} }, tag: 1 }, id: 2 };
+        outer.middle.inner.data[k] = 100;
+        outer.middle.inner.count = outer.middle.inner.count + 10;
+        total = total + sum(&outer);
+    }
+    // Each round: (k + 10) + 1 + 2 + 100.
+    testing::expect_equal<i64>(4 * 113 + 6, total);
+}
+
+test "a field after the nested one reads a struct of the same type" {
+    var first = make(1, 2);
+    first.middle.inner.data[5] = 9;
+    let second = Outer { middle: Middle { inner: Inner { count: 5, data: [8]i64{} }, tag: first.middle.inner.data[5] }, id: first.id };
+    testing::expect_equal<i64>(5, second.middle.inner.count);
+    testing::expect_equal<i64>(9, second.middle.tag);
+    testing::expect_equal<i64>(3, second.id);
+    testing::expect_equal<i64>(0, second.middle.inner.data[5]);
+    testing::expect_equal<i64>(9, first.middle.inner.data[5]);
+}
+
+test "an inner struct used twice gives each outer its own copy" {
+    let inner = Inner { count: 6, data: [8]i64{} };
+    var a = Middle { inner: inner, tag: 1 };
+    var b = Middle { inner: inner, tag: 2 };
+    a.inner.count = 7;
+    b.inner.data[0] = 8;
+    testing::expect_equal<i64>(7, a.inner.count);
+    testing::expect_equal<i64>(0, a.inner.data[0]);
+    testing::expect_equal<i64>(6, b.inner.count);
+    testing::expect_equal<i64>(8, b.inner.data[0]);
+}
+
+test "an inner struct made on one branch goes into the outer one" {
+    var total = 0;
+    for 0..2 |k| {
+        let inner = if k == 0 { Inner { count: 10, data: [8]i64{} } } else { Inner { count: 20, data: [8]i64{} } };
+        let outer = Middle { inner: inner, tag: k };
+        total = total + outer.inner.count + outer.tag;
+    }
+    testing::expect_equal<i64>(31, total);
+}

@@ -1,0 +1,349 @@
+import std::array;
+import std::map;
+
+fn empty_loop_block_limit() -> i64 {
+    return 64;
+}
+
+pub fn remove_empty_loops(allocator: Allocator, module: &var Module) -> !void {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        try remove_empty_loops_in(allocator, module, function);
+    }
+    return;
+}
+
+struct LoopDef {
+    instr: Instr,
+    block: i64,
+}
+
+fn remove_empty_loops_in(allocator: Allocator, module: &var Module, function: Function) -> !void {
+    if function_block_count(module, function) == 0 {
+        return;
+    }
+    var blocks = try block_index(allocator, module, function);
+    defer blocks.deinit(allocator);
+    var has_back_edge = false;
+    var position = 0;
+    while position < blocks.len() {
+        let term = module.block_terminator(blocks.block_at(position));
+        var successor = 0;
+        while term.successor(successor) |target| {
+            successor = successor + 1;
+            if blocks.position_of(module, target) |next| {
+                if next <= position {
+                    has_back_edge = true;
+                }
+            }
+        }
+        position = position + 1;
+    }
+    if !has_back_edge {
+        return;
+    }
+    var preds = try block_predecessors(allocator, module, function, &blocks);
+    defer preds.deinit(allocator);
+    var consts = map::new<i64, i64>(allocator);
+    defer consts.deinit(allocator);
+    var defs = map::new<i64, LoopDef>(allocator);
+    defer defs.deinit(allocator);
+    position = 0;
+    while position < blocks.len() {
+        var instr_index = 0;
+        while block_instr_at(module, blocks.block_at(position), instr_index) |instr| {
+            instr_index = instr_index + 1;
+            try record_constant(allocator, module, instr, &var consts);
+            let result = module.instr_result(instr);
+            if is_empty(result.name) {
+                continue;
+            }
+            try defs.insert(allocator, name_id(result.name), LoopDef { instr: instr, block: position });
+        }
+        position = position + 1;
+    }
+    var changed = false;
+    position = 0;
+    while position < blocks.len() {
+        if try empty_loop_exit(allocator, module, &blocks, &preds, &consts, &defs, position) |exit| {
+            module.set_terminator(blocks.block_at(position), jump_terminator(exit));
+            changed = true;
+        }
+        position = position + 1;
+    }
+    if !changed {
+        return;
+    }
+    try remove_unreachable_blocks(allocator, module, function);
+    return fold_trivial_phis(allocator, module, function);
+}
+
+fn empty_loop_exit(
+    allocator: Allocator,
+    module: &var Module,
+    blocks: &BlockIndex,
+    preds: &array::Array<array::Array<i64>>,
+    consts: &map::Map<i64, i64>,
+    defs: &map::Map<i64, LoopDef>,
+    header: i64
+) -> !?Name {
+    let term = module.block_terminator(blocks.block_at(header));
+    if term.op != TermOp::Branch {
+        return null;
+    }
+    let body = blocks.position_of(module, term.target) orelse return null;
+    let exit = blocks.position_of(module, term.else_target) orelse return null;
+    if body == header or exit == header {
+        return null;
+    }
+    var inside = map::new<i64, bool>(allocator);
+    defer inside.deinit(allocator);
+    try inside.insert(allocator, header, true);
+    var order = array::new<i64>(allocator);
+    defer order.deinit(allocator);
+    var stack = array::new<i64>(allocator);
+    defer stack.deinit(allocator);
+    try stack.append(allocator, body);
+    while stack.pop() |block| {
+        if inside.contains(block) {
+            continue;
+        }
+        if block == exit or order.len() >= empty_loop_block_limit() {
+            return null;
+        }
+        try inside.insert(allocator, block, true);
+        try order.append(allocator, block);
+        let block_term = module.block_terminator(blocks.block_at(block));
+        if block_term.op != TermOp::Jump and block_term.op != TermOp::Branch {
+            return null;
+        }
+        var successor = 0;
+        while block_term.successor(successor) |target| {
+            successor = successor + 1;
+            let next = blocks.position_of(module, target) orelse return null;
+            try stack.append(allocator, next);
+        }
+    }
+    var latch = -1;
+    var outside = -1;
+    var pred_count = 0;
+    if preds.at(header) |into| {
+        pred_count = into.len();
+        var pred_index = 0;
+        while into.get(pred_index) |pred| {
+            pred_index = pred_index + 1;
+            if inside.contains(pred) {
+                latch = pred;
+            } else {
+                outside = pred;
+            }
+        }
+    }
+    if pred_count != 2 or latch < 0 or outside < 0 {
+        return null;
+    }
+    var index = 0;
+    while order.get(index) |block| {
+        index = index + 1;
+        if preds.at(block) |from| {
+            var from_index = 0;
+            while from.get(from_index) |pred| {
+                from_index = from_index + 1;
+                if !inside.contains(pred) {
+                    return null;
+                }
+            }
+        }
+    }
+    if !try body_is_acyclic(allocator, module, blocks, &order, header) {
+        return null;
+    }
+    if !counter_runs_out(module, blocks, consts, defs, &inside, header, term.cond, latch) {
+        return null;
+    }
+    if !loop_only_computes(module, blocks, &order, header) {
+        return null;
+    }
+    if loop_value_read_outside(module, blocks, defs, &inside) {
+        return null;
+    }
+    return term.else_target;
+}
+
+fn body_is_acyclic(allocator: Allocator, module: &Module, blocks: &BlockIndex, order: &array::Array<i64>, header: i64) -> !bool {
+    var done = map::new<i64, bool>(allocator);
+    defer done.deinit(allocator);
+    var progress = true;
+    while progress {
+        progress = false;
+        var index = 0;
+        while order.get(index) |block| {
+            index = index + 1;
+            if done.contains(block) {
+                continue;
+            }
+            let term = module.block_terminator(blocks.block_at(block));
+            var ready = true;
+            var successor = 0;
+            while term.successor(successor) |target| {
+                successor = successor + 1;
+                let next = blocks.position_of(module, target) orelse return false;
+                if next != header and !done.contains(next) {
+                    ready = false;
+                }
+            }
+            if ready {
+                try done.insert(allocator, block, true);
+                progress = true;
+            }
+        }
+    }
+    return done.len() == order.len();
+}
+
+fn counter_runs_out(
+    module: &Module,
+    blocks: &BlockIndex,
+    consts: &map::Map<i64, i64>,
+    defs: &map::Map<i64, LoopDef>,
+    inside: &map::Map<i64, bool>,
+    header: i64,
+    cond: Value,
+    latch: i64
+) -> bool {
+    let compare_def = defs.get(name_id(cond.name)) orelse return false;
+    let compare = module.instrs.at(compare_def.instr.node);
+    if compare.op != Op::Binary or !module.names.is(compare.operand, "<") or compare.args.len() != 2 {
+        return false;
+    }
+    let counter = compare.args.get_or_panic(0);
+    let bound = compare.args.get_or_panic(1);
+    if !module.names.is(counter.type_name, "i64") or !module.names.is(bound.type_name, "i64") {
+        return false;
+    }
+    if defs.get(name_id(bound.name)) |bound_def| {
+        if inside.contains(bound_def.block) {
+            return false;
+        }
+    }
+    let phi_def = defs.get(name_id(counter.name)) orelse return false;
+    let phi = module.instrs.at(phi_def.instr.node);
+    if phi.op != Op::Phi or phi_def.block != header or phi.incoming.len() != 2 {
+        return false;
+    }
+    let latch_name = blocks.name_at(latch);
+    var next = empty_value();
+    var found = false;
+    var index = 0;
+    while phi.incoming.get(index) |incoming| {
+        index = index + 1;
+        if same_name(incoming.block, latch_name) {
+            next = incoming.value;
+            found = true;
+        }
+    }
+    if !found {
+        return false;
+    }
+    let step_def = defs.get(name_id(next.name)) orelse return false;
+    let step = module.instrs.at(step_def.instr.node);
+    if step.op != Op::Binary or !module.names.is(step.operand, "+") or step.args.len() != 2 {
+        return false;
+    }
+    let left = step.args.get_or_panic(0);
+    let right = step.args.get_or_panic(1);
+    var one = right;
+    if same_name(right.name, counter.name) {
+        one = left;
+    } else if !same_name(left.name, counter.name) {
+        return false;
+    }
+    let amount = integer_constant(module, one, consts) orelse return false;
+    return amount == 1;
+}
+
+fn loop_only_computes(module: &Module, blocks: &BlockIndex, order: &array::Array<i64>, header: i64) -> bool {
+    if !block_only_computes(module, blocks.block_at(header)) {
+        return false;
+    }
+    var index = 0;
+    while order.get(index) |block| {
+        index = index + 1;
+        if !block_only_computes(module, blocks.block_at(block)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn block_only_computes(module: &Module, block: Block) -> bool {
+    var instr_index = 0;
+    while block_instr_at(module, block, instr_index) |instr| {
+        instr_index = instr_index + 1;
+        let node = module.instrs.at(instr.node);
+        if !is_pure_op(node.op) or node.cleanups.len() > 0 {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn loop_value_read_outside(module: &Module, blocks: &BlockIndex, defs: &map::Map<i64, LoopDef>, inside: &map::Map<i64, bool>) -> bool {
+    var position = 0;
+    while position < blocks.len() {
+        if inside.contains(position) {
+            position = position + 1;
+            continue;
+        }
+        let block = blocks.block_at(position);
+        position = position + 1;
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let node = module.instrs.at(instr.node);
+            var index = 0;
+            while node.args.get(index) |arg| {
+                index = index + 1;
+                if defined_inside(defs, inside, arg) {
+                    return true;
+                }
+            }
+            index = 0;
+            while node.incoming.get(index) |incoming| {
+                index = index + 1;
+                if defined_inside(defs, inside, incoming.value) {
+                    return true;
+                }
+            }
+            index = 0;
+            while node.fields.get(index) |field| {
+                index = index + 1;
+                if defined_inside(defs, inside, field.value) {
+                    return true;
+                }
+            }
+            index = 0;
+            while node.cleanups.get(index) |cleanup| {
+                index = index + 1;
+                var arg_index = 0;
+                while module.cleanup_arg(cleanup, arg_index) |arg| {
+                    arg_index = arg_index + 1;
+                    if defined_inside(defs, inside, arg) {
+                        return true;
+                    }
+                }
+            }
+        }
+        let term = module.block_terminator(block);
+        if defined_inside(defs, inside, term.value) or defined_inside(defs, inside, term.cond) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn defined_inside(defs: &map::Map<i64, LoopDef>, inside: &map::Map<i64, bool>, value: Value) -> bool {
+    let def = defs.get(name_id(value.name)) orelse return false;
+    return inside.contains(def.block);
+}

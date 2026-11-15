@@ -261,6 +261,59 @@ test "relax jumps" {
     try expect_code(allocator, &var obj, want_hex);
 }
 
+test "pad a loop head into one line" {
+    let allocator = mem::page_allocator();
+    var syms = try ir::new_name_table(allocator);
+    defer syms.deinit(allocator);
+    var obj = try code_object(allocator, &var syms);
+    defer obj.deinit(allocator);
+    try obj.begin_function(allocator, 1);
+    try obj.x86_jump(allocator, 0 - 1, 2, true);
+    try fill(allocator, &var obj, 60);
+    try obj.x86_loop_head(allocator, 0);
+    try obj.place_block(0);
+    try fill(allocator, &var obj, 50);
+    try obj.x86_jump(allocator, 5, 0, false);
+    try obj.place_local(allocator, 2);
+    try obj.x86_bare(allocator, "ret");
+    try obj.end_function(allocator);
+    var want = string::new(allocator);
+    defer want.deinit(allocator);
+    try want.append_bytes(allocator, "eb72");
+    try fill_hex(allocator, &var want, 60);
+    try want.append_bytes(allocator, "6690");
+    try fill_hex(allocator, &var want, 50);
+    try want.append_bytes(allocator, "75ccc3");
+    let want_hex = want.as_bytes();
+    try expect_code(allocator, &var obj, want_hex);
+}
+
+test "drop a loop head's nops as a jump grows" {
+    let allocator = mem::page_allocator();
+    var syms = try ir::new_name_table(allocator);
+    defer syms.deinit(allocator);
+    var obj = try code_object(allocator, &var syms);
+    defer obj.deinit(allocator);
+    try obj.begin_function(allocator, 1);
+    try obj.x86_jump(allocator, 0 - 1, 2, true);
+    try fill(allocator, &var obj, 125);
+    try obj.x86_loop_head(allocator, 0);
+    try obj.place_block(0);
+    try fill(allocator, &var obj, 50);
+    try obj.x86_jump(allocator, 5, 0, false);
+    try obj.place_local(allocator, 2);
+    try obj.x86_bare(allocator, "ret");
+    try obj.end_function(allocator);
+    var want = string::new(allocator);
+    defer want.deinit(allocator);
+    try want.append_bytes(allocator, "e9b1000000");
+    try fill_hex(allocator, &var want, 125);
+    try fill_hex(allocator, &var want, 50);
+    try want.append_bytes(allocator, "75ccc3");
+    let want_hex = want.as_bytes();
+    try expect_code(allocator, &var obj, want_hex);
+}
+
 fn assembled_x86_calls(allocator: Allocator) -> !string::String {
     var hex = string::new(allocator);
     defer hex.deinit(allocator);

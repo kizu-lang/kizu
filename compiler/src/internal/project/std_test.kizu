@@ -1,0 +1,103 @@
+import compiler::internal::lexer;
+import compiler::internal::token;
+import std::fs;
+import std::io;
+import std::mem;
+import std::testing;
+
+fn lexes_error(text: []u8) -> !bool {
+    let allocator = mem::page_allocator();
+    var scanner = lexer::new(allocator, text);
+    defer scanner.deinit(allocator);
+    while true {
+        let current = try scanner.next_lexeme();
+        if current.kind == token::Kind::Eof {
+            return false;
+        }
+        if current.kind == token::Kind::Ident and
+            mem::equal_bytes(text[current.start..current.end], "error") {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn expect_may_spell(text: []u8, want: bool) -> !void {
+    testing::expect(may_spell_error(text) == want);
+    if try lexes_error(text) {
+        testing::expect(may_spell_error(text));
+    }
+    return;
+}
+
+test "may_spell_error rules out only occurrences that are not the token" {
+    try expect_may_spell("error Failure { A, B }", true);
+    try expect_may_spell("pub error Failure = A or B;", true);
+    try expect_may_spell(
+        \\fn f() {}
+        \\error Failure { A }
+    , true);
+    try expect_may_spell("let x = 1error;", true);
+    try expect_may_spell("// relative error of the result", false);
+    try expect_may_spell(
+        \\/// a doc comment naming an error
+        \\fn f() {}
+    , false);
+    try expect_may_spell("let x = 1; // error below", false);
+    try expect_may_spell("terror errors error_set set_error error9", false);
+    try expect_may_spell("let s = 0xerror;", false);
+    try expect_may_spell(
+        \\let s = "a // b"; error Failure { A }
+    , true);
+    try expect_may_spell(
+        \\let s = "a // b error";
+    , true);
+    try expect_may_spell(
+        \\let s = "a
+        \\// b error";
+    , false);
+    try expect_may_spell(
+        \\let s =
+        \\    \\ text // error
+        \\;
+    , false);
+    try expect_may_spell(
+        \\let s =
+        \\    \\ text error
+        \\;
+    , true);
+    return;
+}
+
+test "may_spell_error keeps every std file that declares an error set" {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    var loader = try new_loader(io, allocator, "lib/kizu");
+    defer loader.deinit(allocator);
+    let outcome = try loader.read_std_graph();
+    match outcome {
+        Error(failed) => {
+            defer failed.deinit(allocator);
+            testing::fail("std graph did not resolve");
+        },
+        Graph(graph) => {
+            defer graph.deinit(allocator);
+            var index = 0;
+            while graph.modules.at(index) |module| {
+                index = index + 1;
+                var file_index = 0;
+                while module.files.at(file_index) |file| {
+                    file_index = file_index + 1;
+                    let file_bytes = file.as_bytes();
+                    let text = try fs::read_file(io, allocator, file_bytes, mem::Limit::Unlimited);
+                    defer text.deinit(allocator);
+                    let bytes = text.as_bytes();
+                    if try lexes_error(bytes) {
+                        testing::expect(may_spell_error(bytes));
+                    }
+                }
+            }
+        },
+    }
+    return;
+}
