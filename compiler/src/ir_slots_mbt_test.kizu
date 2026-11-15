@@ -15,24 +15,6 @@ import std::sort;
 import std::string;
 import std::testing;
 
-// The programs here come from the Quint model of the slot decision in
-// spec/ir/slots.qnt (spec/ir/README.md says what it covers);
-// scripts/ir-mbt samples them into compiler/tests/mbt/ir_slots.json. Each
-// case is a set of struct types with same-named methods, three struct locals
-// and three integer locals, and statements that call the methods; the model
-// says which locals the lowerer gives storage. This runner renders the case
-// to Kizu, type- and ownership-checks it, lowers it, reads which locals of
-// main got a `local.slot`, and compares. A divergence is a lowerer bug or a
-// model bug, and which one is a question for SPEC.md: record it in
-// findings/ir-safety-quint-findings.md rather than adjusting either side to
-// agree. internal/ir/slots_mbt_test.go replays the same fixture against the
-// Go lowerer.
-//
-// The bounds and defer fixtures of the same generator are run as wasm32-wasi
-// under node by ir_runtime_mbt_test.kizu.
-
-/// One program of the fixture, as the document has it: the fixture leaves
-/// out types and decls when they are empty.
 pub struct SlotMbtEntry {
     pub bucket: string::String,
     pub types: ?array::Array<string::String>,
@@ -46,9 +28,6 @@ pub struct SlotMbtFixture {
     pub cases: array::Array<SlotMbtEntry>,
 }
 
-/// One program to lower: the type of each struct local, each declared method
-/// as `<Type>.<method> <recv> <arg>`, the statements, and the locals the
-/// model gives storage.
 struct SlotMbtCase {
     bucket: string::String,
     types: array::Array<string::String>,
@@ -57,9 +36,6 @@ struct SlotMbtCase {
     expect: array::Array<string::String>,
 }
 
-/// The initial values that name the locals in the dump: x<i> is built from
-/// 100+i, n<k> is 200+k. Nothing else in a rendered main is a constant this
-/// large.
 fn slot_mbt_struct_base() -> i64 {
     return 100;
 }
@@ -68,12 +44,6 @@ fn slot_mbt_int_base() -> i64 {
     return 200;
 }
 
-/// Shapes whose answer is known from #1914 and
-/// tests/behavior/src/method_lend_scope, one per line as
-/// `name|types|statements|storage`, the lists separated by `;`, all with the
-/// declarations of method_lend_scope. A is Slot, B is Tally and C is
-/// Counter. They mirror spec/ir/slots_test.qnt, so a harness that renders or
-/// reads wrongly fails here before it disagrees with the model anywhere else.
 fn slot_mbt_known_shapes() -> []u8 {
     return
         \\issue1914/shared-methods-lend-nothing|A;B;C|call 0 poke 0;call 1 note 1|
@@ -83,7 +53,6 @@ fn slot_mbt_known_shapes() -> []u8 {
     ;
 }
 
-/// The declarations of method_lend_scope in the model's terms.
 fn slot_mbt_lend_scope_decls() -> []u8 {
     return "A.poke RShared AVal;B.note RShared AVal;C.note RShared ALent;C.poke RLent AVal";
 }
@@ -98,7 +67,6 @@ fn slot_mbt_new_case(allocator: Allocator) -> SlotMbtCase {
     };
 }
 
-/// Appends each `;`-separated field of text to out; an empty text has none.
 fn slot_mbt_split(allocator: Allocator, out: &var array::Array<string::String>, text: []u8) -> !void {
     if mem::len(text) == 0 {
         return;
@@ -120,7 +88,6 @@ fn slot_mbt_split(allocator: Allocator, out: &var array::Array<string::String>, 
     return;
 }
 
-/// Reads one `name|types|statements|storage` line of the known shapes.
 fn slot_mbt_known_case(allocator: Allocator, line: []u8) -> !SlotMbtCase {
     var c = slot_mbt_new_case(allocator);
     errdefer c.deinit(allocator);
@@ -149,7 +116,6 @@ fn slot_mbt_known_case(allocator: Allocator, line: []u8) -> !SlotMbtCase {
     return move c;
 }
 
-/// Copies one fixture entry into a case.
 fn slot_mbt_from_entry(allocator: Allocator, entry: &SlotMbtEntry) -> !SlotMbtCase {
     var c = slot_mbt_new_case(allocator);
     errdefer c.deinit(allocator);
@@ -180,7 +146,6 @@ fn slot_mbt_append_all(
     return;
 }
 
-/// The index of the first byte in text, or its length.
 fn slot_mbt_byte_index(text: []u8, byte: u8) -> i64 {
     var index = 0;
     while mem::byte_at(text, index) |at| {
@@ -192,7 +157,6 @@ fn slot_mbt_byte_index(text: []u8, byte: u8) -> i64 {
     return index;
 }
 
-/// The value of a decimal text, or -1 for one that is not.
 fn slot_mbt_decimal(text: []u8) -> i64 {
     if mem::len(text) == 0 {
         return -1;
@@ -209,9 +173,6 @@ fn slot_mbt_decimal(text: []u8) -> i64 {
     return value;
 }
 
-/// Writes a case as Kizu into out: the types, their declared methods, the
-/// free function that takes `&var i64`, and main. Returns false for a case
-/// that is not well formed (an unknown statement, an unbalanced end).
 fn slot_mbt_render(allocator: Allocator, out: &var string::String, c: &SlotMbtCase) -> !bool {
     try out.append_bytes(allocator,
         \\struct A {
@@ -292,7 +253,6 @@ fn slot_mbt_render(allocator: Allocator, out: &var string::String, c: &SlotMbtCa
     return true;
 }
 
-/// How many space-separated words text has.
 fn slot_mbt_word_count(text: []u8) -> i64 {
     var count = 1;
     var index = 0;
@@ -305,7 +265,6 @@ fn slot_mbt_word_count(text: []u8) -> i64 {
     return count;
 }
 
-/// Where word n of a space-separated text starts.
 fn slot_mbt_word_start(text: []u8, n: i64) -> i64 {
     var word = 0;
     var index = 0;
@@ -316,14 +275,11 @@ fn slot_mbt_word_start(text: []u8, n: i64) -> i64 {
     return index;
 }
 
-/// Where word n of a space-separated text ends.
 fn slot_mbt_word_end(text: []u8, n: i64) -> i64 {
     let start = slot_mbt_word_start(text, n);
     return start + slot_mbt_byte_index(text[start..mem::len(text)], cast<u8>(32));
 }
 
-/// Writes one declared method: its receiver and argument shape, and a body
-/// that uses each the way its shape allows.
 fn slot_mbt_render_decl(allocator: Allocator, out: &var string::String, decl: []u8) -> !bool {
     if slot_mbt_word_count(decl) != 3 {
         return false;
@@ -372,7 +328,6 @@ fn slot_mbt_render_decl(allocator: Allocator, out: &var string::String, decl: []
     return true;
 }
 
-/// Appends text and a newline.
 fn slot_mbt_line(allocator: Allocator, out: &var string::String, text: []u8) -> !void {
     try out.append_bytes(allocator, text);
     return out.append_byte(allocator, cast<u8>(10));
@@ -387,9 +342,6 @@ fn slot_mbt_indent(allocator: Allocator, out: &var string::String, depth: i64) -
     return;
 }
 
-/// Writes one statement of main at depth, which a block opens and its end
-/// closes. Returns the depth after it, or 0 for a statement that is not well
-/// formed.
 fn slot_mbt_render_stmt(allocator: Allocator, out: &var string::String, depth: i64, stmt: []u8) -> !i64 {
     let words = slot_mbt_word_count(stmt);
     let head = stmt[0..slot_mbt_word_end(stmt, 0)];
@@ -450,9 +402,6 @@ fn slot_mbt_render_stmt(allocator: Allocator, out: &var string::String, depth: i
     return 0;
 }
 
-/// Type- and ownership-checks and lowers one program the way `kizu ir`
-/// does, and appends main as the IR dump writes it to out; or, when a stage
-/// rejects the program, appends its message to problem.
 fn slot_mbt_lower(
     io: Io,
     allocator: Allocator,
@@ -505,7 +454,6 @@ fn slot_mbt_lower(
     }
 }
 
-/// The value id at the start of text (`%12`), as its length, or 0.
 fn slot_mbt_value_len(text: []u8) -> i64 {
     if mem::byte_at(text, 0) |first| {
         if first != cast<u8>(37) {
@@ -527,7 +475,6 @@ fn slot_mbt_value_len(text: []u8) -> i64 {
     return index;
 }
 
-/// The name of local code (0..2 are x0..x2, 3..5 are n0..n2).
 fn slot_mbt_local_name(allocator: Allocator, code: i64) -> !string::String {
     var name = string::new(allocator);
     errdefer name.deinit(allocator);
@@ -541,18 +488,12 @@ fn slot_mbt_local_name(allocator: Allocator, code: i64) -> !string::String {
     return move name;
 }
 
-/// Reads which locals of main a lowered dump gives storage into slotted, once
-/// each: the value each local is declared with is a constant, or a
-/// struct built from one, that names it, and a `local.slot` of that value is
-/// its storage. Appends to problem a `local.slot` of a value that names no
-/// local.
 fn slot_mbt_slotted(
     allocator: Allocator,
     dump: []u8,
     slotted: &var array::Array<string::String>,
     problem: &var string::String
 ) -> !void {
-    // The local each value names, by the value's id.
     var names = map::new<[]u8, i64>(allocator);
     defer names.deinit(allocator);
     var start = 0;
@@ -586,7 +527,6 @@ fn slot_mbt_slotted(
         }
         let id = line[0..id_len];
         let rest = line[id_len..mem::len(line)];
-        // `%1: i64 = const 100`
         if mem::len(rest) > 14 and mem::equal_bytes(rest[0..14], ": i64 = const ") {
             let n = slot_mbt_decimal(rest[14..mem::len(rest)]);
             if n >= slot_mbt_struct_base() and n < slot_mbt_struct_base() + 3 {
@@ -596,7 +536,6 @@ fn slot_mbt_slotted(
             }
             continue;
         }
-        // `%2: A = struct.new {n: %1: i64}`
         if mem::len(rest) > 21 and mem::equal_bytes(rest[0..2], ": ") and
             mem::equal_bytes(rest[3..21], " = struct.new {n: ") and
             slot_mbt_byte_index("ABC", rest[2]) < 3 {
@@ -611,7 +550,6 @@ fn slot_mbt_slotted(
             }
             continue;
         }
-        // `%7: &var C = local.slot %6: C`
         if mem::len(rest) > 7 and mem::equal_bytes(rest[0..7], ": &var ") {
             let after = rest[7..mem::len(rest)];
             let type_end = slot_mbt_byte_index(after, cast<u8>(32));
@@ -639,8 +577,6 @@ fn slot_mbt_slotted(
     return;
 }
 
-/// Lowers one case and reports on stderr how the slots of main differ from
-/// the model's. Returns whether they differ.
 fn slot_mbt_diverges(
     io: Io,
     allocator: Allocator,
@@ -748,7 +684,6 @@ fn slot_mbt_write_list(io: Io, label: []u8, values: &array::Array<string::String
     return io::write_stderr_line(io, "]");
 }
 
-/// The std error codes the lowerer needs, or null when they cannot be read.
 fn slot_mbt_std_errors(io: Io, allocator: Allocator, loader: &var project::Loader) -> !?project::StdErrorCodes {
     let codes = try loader.std_error_codes();
     match codes {
@@ -801,8 +736,6 @@ test "slot model harness agrees on the known shapes" {
 test "lowerer gives storage where the sampled slot model programs say" {
     let allocator = mem::page_allocator();
     let io = io::blocking();
-    // KIZU_MBT_FIXTURE replays another fixture, such as a wider sample than
-    // the checked-in one.
     var path = "compiler/tests/mbt/ir_slots.json";
     if process::env("KIZU_MBT_FIXTURE") |other| {
         path = other;
