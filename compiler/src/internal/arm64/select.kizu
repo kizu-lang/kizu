@@ -100,6 +100,7 @@ pub struct Selector {
     use_gen: array::Array<i64>,
     use_count: array::Array<i64>,
     cleanup_count: array::Array<i64>,
+    builds: array::Array<Build>,
     block_gen: array::Array<i64>,
     block_of: array::Array<i64>,
     ir_blocks: array::Array<ir::Block>,
@@ -128,6 +129,7 @@ pub struct Selector {
     pub stacks_variadics: bool,
     fn_name: ir::Name,
     callees: array::Array<i64>,
+    shapes: Shapes,
     pub arch: Arch,
 }
 
@@ -146,6 +148,7 @@ pub fn new_selector(allocator: Allocator, arch: Arch) -> !Selector {
         use_gen: array::new<i64>(allocator),
         use_count: array::new<i64>(allocator),
         cleanup_count: array::new<i64>(allocator),
+        builds: array::new<Build>(allocator),
         block_gen: array::new<i64>(allocator),
         block_of: array::new<i64>(allocator),
         ir_blocks: array::new<ir::Block>(allocator),
@@ -174,6 +177,7 @@ pub fn new_selector(allocator: Allocator, arch: Arch) -> !Selector {
         stacks_variadics: true,
         fn_name: ir::empty_name(),
         callees: array::new<i64>(allocator),
+        shapes: new_shapes(allocator),
         arch: arch
     };
 }
@@ -282,7 +286,7 @@ fn (self: &var Selector) count_use(module: &ir::Module, value: ir::Value) -> !vo
         } else if mem::equal_bytes(bytes, "false") {
             try self.set_val(value.name, const_val(0));
         } else if !mem::starts_with(bytes, "%") {
-            let shape = shape_of(module, value.type_name);
+            let shape = self.shapes.of(module, value.type_name);
             if shape.class == Class::Float {
                 if try float_literal_bits(self.allocator, bytes, shape) |held| {
                     try self.set_val(value.name, const_val(held));
@@ -549,7 +553,7 @@ fn (self: &var Selector) addr(module: &ir::Module, value: ir::Value) -> !?i64 {
         return reg;
     }
     if held.kind == ValKind::Reg or held.kind == ValKind::Const {
-        let shape = shape_of(module, value.type_name);
+        let shape = self.shapes.of(module, value.type_name);
         if shape.class != Class::Aggregate {
             return null;
         }
@@ -569,8 +573,8 @@ fn (self: &var Selector) code_slot(held: Val) -> !i64 {
     return reg;
 }
 
-fn is_coded(module: &ir::Module, type_name: ir::Name) -> bool {
-    let shape = shape_of(module, type_name);
+fn (self: &var Shapes) is_coded(module: &ir::Module, type_name: ir::Name) -> bool {
+    let shape = self.of(module, type_name);
     if shape.class != Class::Aggregate or shape.size != 8 {
         return false;
     }
@@ -665,7 +669,7 @@ fn (self: &var Selector) store_value(module: &ir::Module, value: ir::Value, shap
 }
 
 fn (self: &var Selector) load_value(module: &ir::Module, type_name: ir::Name, base: i64, offset: i64, copy: bool) -> !?Val {
-    let shape = shape_of(module, type_name);
+    let shape = self.shapes.of(module, type_name);
     match shape.class {
         Void => return no_val(),
         Scalar => {
@@ -726,7 +730,7 @@ pub fn (self: &var Selector) select_function(module: &ir::Module, function: ir::
     let node = module.function_nodes.at(function.node);
     self.fn_name = node.name;
     self.ret_type = node.return_type;
-    self.ret = shape_of(module, node.return_type);
+    self.ret = self.shapes.of(module, node.return_type);
     self.is_main = module.names.is(node.name, "main") and !self.main_wraps;
     self.func.is_main = self.is_main;
     if self.is_main and self.ret.class != Class::Void {
@@ -765,6 +769,9 @@ pub fn (self: &var Selector) select_function(module: &ir::Module, function: ir::
         while block_node.instrs.get(instr_index) |instr| {
             instr_index = instr_index + 1;
             let instr_node = module.instrs.at(instr.node);
+            if instr_node.op == ir::Op::StructNew or instr_node.op == ir::Op::BufferNew {
+                try self.note_build(module, instr_node, mir);
+            }
             var arg_index = 0;
             while instr_node.args.get(arg_index) |arg| {
                 arg_index = arg_index + 1;
@@ -943,7 +950,7 @@ fn (self: &var Selector) reverse_postorder(module: &ir::Module, node: &ir::Funct
 }
 
 fn (self: &var Selector) bind_phi(module: &ir::Module, node: &ir::InstrNode, mir: i64) -> !?diagnostic::Diagnostic {
-    let shape = shape_of(module, node.result.type_name);
+    let shape = self.shapes.of(module, node.result.type_name);
     match shape.class {
         Void => {
             try self.set_val(node.result.name, no_val());
@@ -990,7 +997,7 @@ fn (self: &var Selector) select_params(module: &ir::Module, params: &array::Arra
     var index = 0;
     while params.get(index) |param| {
         index = index + 1;
-        let shape = shape_of(module, param.type_name);
+        let shape = self.shapes.of(module, param.type_name);
         match shape.class {
             Void => {
                 continue;
@@ -1080,7 +1087,7 @@ fn (self: &var Selector) push_words(module: &ir::Module, value: ir::Value, words
 }
 
 fn (self: &var Selector) push_val_words(module: &ir::Module, held: Val, type_name: ir::Name, words: &var array::Array<i64>) -> !bool {
-    let shape = shape_of(module, type_name);
+    let shape = self.shapes.of(module, type_name);
     match shape.class {
         Void => return true,
         Unsupported => return false,
@@ -1126,7 +1133,7 @@ fn (self: &var Selector) push_val_words(module: &ir::Module, held: Val, type_nam
 }
 
 fn (self: &var Selector) bind_result(module: &ir::Module, result: ir::Value, sret: i64, c_call: bool) -> !void {
-    let shape = shape_of(module, result.type_name);
+    let shape = self.shapes.of(module, result.type_name);
     if shape.class == Class::Void {
         return self.set_val(result.name, no_val());
     }
@@ -1167,7 +1174,7 @@ fn (self: &var Selector) select_internal_call(module: &ir::Module, node: &ir::In
         }
         index = index + 1;
         if takes_address {
-            let shape = shape_of(module, arg.type_name);
+            let shape = self.shapes.of(module, arg.type_name);
             if shape.class == Class::Aggregate and !is_slice(module, arg.type_name) {
                 let address = try self.addr(module, arg) orelse return try self.fail_op(module, node);
                 try words.append(self.allocator, address);
@@ -1184,7 +1191,7 @@ fn (self: &var Selector) select_internal_call(module: &ir::Module, node: &ir::In
             return try self.fail(module, "argument type", arg.type_name);
         }
     }
-    let shape = shape_of(module, node.result.type_name);
+    let shape = self.shapes.of(module, node.result.type_name);
     if shape.class == Class::Unsupported {
         return try self.fail(module, "result type", node.result.type_name);
     }
@@ -1263,7 +1270,7 @@ fn append_c_symbol(allocator: Allocator, out: &var string::String, bytes: []u8) 
 }
 
 fn (self: &var Selector) select_hosted_call(module: &ir::Module, node: &ir::InstrNode, signature: &hostabi::Signature) -> !?diagnostic::Diagnostic {
-    let shape = shape_of(module, node.result.type_name);
+    let shape = self.shapes.of(module, node.result.type_name);
     if shape.class == Class::Unsupported {
         return try self.fail(module, "result type", node.result.type_name);
     }
@@ -1287,7 +1294,7 @@ fn (self: &var Selector) select_hosted_call(module: &ir::Module, node: &ir::Inst
             continue;
         }
         let arg = node.args.get(param.arg) orelse return try self.fail_op(module, node);
-        let arg_shape = shape_of(module, arg.type_name);
+        let arg_shape = self.shapes.of(module, arg.type_name);
         match param.source {
             Address => {
                 if arg_shape.class != Class::Aggregate {
@@ -1396,7 +1403,7 @@ fn (self: &var Selector) select_call(module: &ir::Module, node: &ir::InstrNode) 
         return self.select_c_call(module, node, node.extern_name);
     }
     if module.names.is(node.operand, "std::internal::builtin::mem_size_of") {
-        let shape = shape_of(module, node.immediate);
+        let shape = self.shapes.of(module, node.immediate);
         if shape.class == Class::Unsupported {
             return try self.fail(module, "size of", node.immediate);
         }
@@ -1413,10 +1420,71 @@ fn (self: &var Selector) select_call(module: &ir::Module, node: &ir::InstrNode) 
 }
 
 fn (self: &var Selector) check_c_export(module: &ir::Module, node: &ir::FunctionNode) -> !?diagnostic::Diagnostic {
-    if self.ret.class != Class::Scalar and self.ret.class != Class::Void {
+    if self.ret.class != Class::Scalar and self.ret.class != Class::Float and self.ret.class != Class::Void {
         return try self.fail(module, "C export result type", node.return_type);
     }
+    var index = 0;
+    while node.params.get(index) |param| {
+        index = index + 1;
+        let shape = self.shapes.of(module, param.type_name);
+        if shape.class != Class::Void and shape.class != Class::Float and shape.class != Class::Scalar {
+            return try self.fail(module, "C export parameter type", param.type_name);
+        }
+    }
+    return null;
+}
+
+pub fn (self: &Selector) export_has_thunk(module: &ir::Module, node: &ir::FunctionNode) -> bool {
+    if !module.names.is(node.export_abi, "c") {
+        return false;
+    }
+    if shape_of(module, node.return_type).class == Class::Float {
+        return true;
+    }
     var words = 0;
+    var index = 0;
+    while node.params.get(index) |param| {
+        index = index + 1;
+        let kind = shape_of(module, param.type_name).class;
+        if kind == Class::Float {
+            return true;
+        }
+        if kind == Class::Scalar {
+            words = words + 1;
+        }
+    }
+    return self.packs_stack_args() and words > arg_regs(self.arch);
+}
+
+pub fn (self: &var Selector) export_thunk_symbol(module: &ir::Module, name: ir::Name) -> !ir::Name {
+    var out = try string::from_bytes(self.allocator, "_kz$c_");
+    defer out.deinit(self.allocator);
+    let text = ir::name_text(&module.names, name);
+    let bytes = text.as_bytes();
+    try append_mangled(self.allocator, &var out, bytes);
+    let out_bytes = out.as_bytes();
+    return self.syms.intern(out_bytes);
+}
+
+pub fn (self: &var Selector) select_export_thunk(module: &ir::Module, node: &ir::FunctionNode) -> !void {
+    self.gen = self.gen + 1;
+    self.func.reset(self.allocator);
+    self.cold.clear(self.allocator);
+    self.ir_blocks.clear(self.allocator);
+    self.entry_imm.clear(self.allocator);
+    self.entry_reg.clear(self.allocator);
+    self.is_main = false;
+    self.func.is_main = false;
+    self.fn_name = node.name;
+    let entry = try self.func.add_block(self.allocator);
+    try self.cold.append(self.allocator, false);
+    try self.start_block(entry);
+    var words = array::new<i64>(self.allocator);
+    defer words.deinit(self.allocator);
+    let positional = self.arch == Arch::Amd64Windows;
+    var ints = 0;
+    var floats = 0;
+    var stack = 0;
     var index = 0;
     while node.params.get(index) |param| {
         index = index + 1;
@@ -1424,15 +1492,58 @@ fn (self: &var Selector) check_c_export(module: &ir::Module, node: &ir::Function
         if shape.class == Class::Void {
             continue;
         }
-        if shape.class != Class::Scalar {
-            return try self.fail(module, "C export parameter type", param.type_name);
+        let position = ints + floats;
+        let is_float = shape.class == Class::Float;
+        var reg_index = ints;
+        var regs = arg_regs(self.arch);
+        if is_float {
+            reg_index = floats;
+            regs = 8;
+            floats = floats + 1;
+        } else {
+            ints = ints + 1;
         }
-        words = words + 1;
+        if positional {
+            reg_index = position;
+            regs = arg_regs(self.arch);
+        }
+        if reg_index >= regs {
+            let offset = self.stack_arg_at(stack, shape.size);
+            stack = offset + self.stack_arg_bytes(shape.size);
+            let reg = self.func.new_vreg();
+            try self.load(reg, reg_inarg(), offset, shape.size, false);
+            try words.append(self.allocator, reg);
+        } else if is_float {
+            let reg = self.func.new_vreg();
+            var inst = blank(MOp::FRet);
+            inst.rd = reg;
+            inst.imm = reg_index;
+            inst.width = shape.size;
+            try self.inst(inst);
+            try words.append(self.allocator, reg);
+        } else {
+            try words.append(self.allocator, try self.param_word(reg_index));
+        }
     }
-    if words > arg_regs(self.arch) {
-        return try self.fail(module, "C export parameter count", node.name);
+    let count = try self.place_words(&words);
+    let body = try self.function_symbol(module, node.name);
+    try self.call_sym(body, count, reg_none());
+    let ret = shape_of(module, node.return_type);
+    if ret.class != Class::Void {
+        let result = self.func.new_vreg();
+        try self.mov(result, 0);
+        if ret.class == Class::Float {
+            var inst = blank(MOp::FArg);
+            inst.rn = result;
+            inst.imm = 0;
+            inst.width = ret.size;
+            try self.inst(inst);
+        } else {
+            try self.mov(0, result);
+        }
     }
-    return null;
+    self.func.end(self.current, Term::Return, Cond::Eq, reg_none(), 0 - 1, 0 - 1);
+    return;
 }
 
 fn (self: &var Selector) select_func_addr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
@@ -1450,13 +1561,19 @@ fn (self: &var Selector) select_func_addr(module: &ir::Module, node: &ir::InstrN
         let text = ir::name_text(&module.names, node.operand);
         let bytes = text.as_bytes();
         var defined = false;
-        if self.callee(module, node.operand) |_| {
+        var thunk = false;
+        if self.callee(module, node.operand) |callee| {
             defined = true;
+            thunk = self.export_has_thunk(module, module.function_nodes.at(callee.node));
         }
         if !defined or (mem::equal_bytes(bytes, "main") and !self.main_wraps) {
             return try self.fail_op(module, node);
         }
-        inst.sym = try self.function_symbol(module, node.operand);
+        if thunk {
+            inst.sym = try self.export_thunk_symbol(module, node.operand);
+        } else {
+            inst.sym = try self.function_symbol(module, node.operand);
+        }
     }
     let reg = self.func.new_vreg();
     inst.rd = reg;
@@ -1467,11 +1584,10 @@ fn (self: &var Selector) select_func_addr(module: &ir::Module, node: &ir::InstrN
 
 fn (self: &var Selector) select_indirect_call(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let callee = node.args.get(0) orelse return try self.fail_op(module, node);
-    let foreign = module.names.starts_with(callee.type_name, typ::c_func_head());
-    if foreign and node.args.len() > arg_regs(self.arch) + 1 {
-        return try self.fail_op(module, node);
-    }
     let target = try self.reg_nz(module, callee) orelse return try self.fail_op(module, node);
+    if module.names.starts_with(callee.type_name, typ::c_func_head()) {
+        return self.select_c_call_to(module, node, CCallee { symbol: ir::empty_name(), reg: target, first: 1 });
+    }
     var words = array::new<i64>(self.allocator);
     defer words.deinit(self.allocator);
     var index = 1;
@@ -1481,11 +1597,8 @@ fn (self: &var Selector) select_indirect_call(module: &ir::Module, node: &ir::In
             takes_address = takes_address_of(module, param, arg.type_name);
         }
         index = index + 1;
-        if foreign and !takes_address and shape_of(module, arg.type_name).class != Class::Scalar {
-            return try self.fail(module, "C argument type", arg.type_name);
-        }
         if takes_address {
-            let shape = shape_of(module, arg.type_name);
+            let shape = self.shapes.of(module, arg.type_name);
             if shape.class == Class::Aggregate and !is_slice(module, arg.type_name) {
                 let address = try self.addr(module, arg) orelse return try self.fail_op(module, node);
                 try words.append(self.allocator, address);
@@ -1502,12 +1615,9 @@ fn (self: &var Selector) select_indirect_call(module: &ir::Module, node: &ir::In
             return try self.fail(module, "argument type", arg.type_name);
         }
     }
-    let shape = shape_of(module, node.result.type_name);
+    let shape = self.shapes.of(module, node.result.type_name);
     if shape.class == Class::Unsupported {
         return try self.fail(module, "result type", node.result.type_name);
-    }
-    if foreign and shape.class == Class::Aggregate {
-        return try self.fail(module, "C result type", node.result.type_name);
     }
     var sret = reg_none();
     if shape.class == Class::Aggregate and !is_slice(module, node.result.type_name) {
@@ -1523,7 +1633,7 @@ fn (self: &var Selector) select_indirect_call(module: &ir::Module, node: &ir::In
     inst.ra = sret;
     self.func.calls = true;
     try self.inst(inst);
-    try self.bind_result(module, node.result, sret, foreign);
+    try self.bind_result(module, node.result, sret, false);
     return null;
 }
 
@@ -1535,7 +1645,7 @@ pub fn (self: &var Selector) invoke_symbol(states: bool) -> !ir::Name {
 }
 
 fn (self: &var Selector) pool_invoke_word(module: &ir::Module, node: &ir::InstrNode, states: bool, words: &var array::Array<i64>) -> !bool {
-    if !is_coded(module, node.result.type_name) {
+    if !self.shapes.is_coded(module, node.result.type_name) {
         return false;
     }
     let thunk = self.func.new_vreg();
@@ -1688,7 +1798,7 @@ pub fn (self: &var Selector) select_main_wrapper(module: &ir::Module, ret_type: 
     try self.cold.append(self.allocator, false);
     try self.start_block(entry);
     try self.call_c("kizu_runtime_init_args", 2);
-    let shape = shape_of(module, ret_type);
+    let shape = self.shapes.of(module, ret_type);
     if shape.class != Class::Aggregate {
         return try self.fail(module, "main returning", ret_type);
     }
@@ -1737,7 +1847,7 @@ pub fn (self: &var Selector) select_main_wrapper(module: &ir::Module, ret_type: 
     } else if mem::equal_bytes(success, "std::process::ExitStatus") {
         let failure = module.union_variant_named("std::process::ExitStatus", "Failure") orelse return try self.fail(module, "main returning", ret_type);
         let specific = module.union_variant_named("std::process::ExitStatus", "Specific") orelse return try self.fail(module, "main returning", ret_type);
-        let payload_shape = shape_of(module, specific.payload);
+        let payload_shape = self.shapes.of(module, specific.payload);
         if payload_shape.class != Class::Scalar {
             return try self.fail(module, "main returning", ret_type);
         }

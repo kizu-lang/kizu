@@ -615,12 +615,23 @@ struct X86Jump {
     cc: i64,
     target: i64,
     local: bool,
+    pad: bool,
 }
 
 fn (self: &var Obj) x86_jump(allocator: Allocator, cc: i64, target: i64, local: bool) -> !void {
     let at = self.here();
-    try self.jumps.append(allocator, X86Jump { at: at, cc: cc, target: target, local: local });
+    try self.jumps.append(allocator, X86Jump { at: at, cc: cc, target: target, local: local, pad: false });
     return self.little(allocator, 0, 2);
+}
+
+pub fn (self: &var Obj) x86_loop_head(allocator: Allocator, block: i64) -> !void {
+    if self.sections.at_mut(self.current) |section| {
+        if section.align < 6 {
+            section.align = 6;
+        }
+    }
+    let at = self.here();
+    return self.jumps.append(allocator, X86Jump { at: at, cc: 0 - 1, target: block, local: false, pad: true });
 }
 
 fn (self: &var Obj) place_local(allocator: Allocator, label: i64) -> !void {
@@ -636,13 +647,47 @@ fn jumps_before(jumps: &array::Array<X86Jump>, at: i64) -> i64 {
     var high = jumps.len();
     while low < high {
         let middle = (low + high) / 2;
-        if jumps.get_or_panic(middle).at < at {
+        let jump = jumps.get_or_panic(middle);
+        if jump.at < at or (jump.pad and jump.at == at) {
             low = middle + 1;
         } else {
             high = middle;
         }
     }
     return low;
+}
+
+fn last_jump_to(jumps: &array::Array<X86Jump>, head: i64) -> i64 {
+    let mark = jumps.get_or_panic(head);
+    var last = 0 - 1;
+    var index = head + 1;
+    while jumps.get(index) |jump| {
+        if !jump.pad and !jump.local and jump.target == mark.target {
+            last = index;
+        }
+        index = index + 1;
+    }
+    return last;
+}
+
+fn fewest_lines_pad(start: i64, size: i64) -> i64 {
+    if size <= 0 {
+        return 0;
+    }
+    var best = 0;
+    var fewest = lines_over(start, size);
+    for 1..64 |pad| {
+        let lines = lines_over(start + pad, size);
+        if lines < fewest {
+            best = pad;
+            fewest = lines;
+        }
+    }
+    return best;
+}
+
+fn lines_over(at: i64, size: i64) -> i64 {
+    return (at + size - 1) / 64 - at / 64 + 1;
 }
 
 fn (self: &var Obj) relax_jumps(allocator: Allocator) -> !void {
@@ -654,11 +699,16 @@ fn (self: &var Obj) relax_jumps(allocator: Allocator) -> !void {
     defer targets.deinit(allocator);
     var before = array::new<i64>(allocator);
     defer before.deinit(allocator);
+    var latches = array::new<i64>(allocator);
+    defer latches.deinit(allocator);
     var index = 0;
     while self.jumps.get(index) |jump| {
         index = index + 1;
         var target = 0 - 1;
-        if jump.local {
+        if jump.pad {
+            target = jump.at;
+            try latches.append(allocator, last_jump_to(&self.jumps, index - 1));
+        } else if jump.local {
             target = self.local_at.get(jump.target) orelse 0 - 1;
         } else {
             target = self.block_at.get(jump.target) orelse 0 - 1;
@@ -669,6 +719,23 @@ fn (self: &var Obj) relax_jumps(allocator: Allocator) -> !void {
         }
         try targets.append(allocator, target);
         try before.append(allocator, jumps_before(&self.jumps, target));
+    }
+    var pad_index = 0;
+    index = 0;
+    while self.jumps.get(index) |jump| {
+        index = index + 1;
+        if !jump.pad {
+            continue;
+        }
+        let latch = latches.get_or_panic(pad_index);
+        if latch >= 0 {
+            for index..latch |inside| {
+                if self.jumps.get_or_panic(inside).pad {
+                    try latches.set(pad_index, 0 - 1);
+                }
+            }
+        }
+        pad_index = pad_index + 1;
     }
     var grown = array::new<i64>(allocator);
     defer grown.deinit(allocator);
@@ -682,13 +749,28 @@ fn (self: &var Obj) relax_jumps(allocator: Allocator) -> !void {
     while changed {
         changed = false;
         var sum = 0;
+        pad_index = 0;
         for 0..count |at| {
             try added.set(at, sum);
+            let jump = self.jumps.get_or_panic(at);
+            if jump.pad {
+                let latch = latches.get_or_panic(pad_index);
+                pad_index = pad_index + 1;
+                var pad = 0;
+                if latch >= 0 {
+                    var size = self.jumps.get_or_panic(latch).at + 2 - jump.at;
+                    for at + 1..latch + 1 |inside| {
+                        size = size + grown.get_or_panic(inside);
+                    }
+                    pad = fewest_lines_pad(jump.at + sum, size);
+                }
+                try grown.set(at, pad);
+            }
             sum = sum + grown.get_or_panic(at);
         }
         try added.set(count, sum);
         for 0..count |at| {
-            if grown.get_or_panic(at) != 0 {
+            if grown.get_or_panic(at) != 0 or self.jumps.get_or_panic(at).pad {
                 continue;
             }
             let jump = self.jumps.get_or_panic(at);
@@ -713,8 +795,13 @@ fn (self: &var Obj) relax_jumps(allocator: Allocator) -> !void {
         for 0..count |at| {
             let jump = self.jumps.get_or_panic(at);
             try tail.append_bytes(allocator, bytes[cursor..jump.at]);
-            cursor = jump.at + 2;
             let growth = grown.get_or_panic(at);
+            if jump.pad {
+                cursor = jump.at;
+                try x86_nop_bytes(allocator, &var tail, growth);
+                continue;
+            }
+            cursor = jump.at + 2;
             let start = jump.at + added.get_or_panic(at);
             let target = targets.get_or_panic(at) + added.get_or_panic(before.get_or_panic(at));
             let distance = target - (start + 2 + growth);
@@ -762,6 +849,13 @@ fn (self: &var Obj) relax_jumps(allocator: Allocator) -> !void {
 }
 
 fn (self: &var Obj) x86_nops(allocator: Allocator, count: i64) -> !void {
+    if self.sections.at_mut(self.current) |section| {
+        try x86_nop_bytes(allocator, &var section.bytes, count);
+    }
+    return;
+}
+
+fn x86_nop_bytes(allocator: Allocator, out: &var string::String, count: i64) -> !void {
     var left = count;
     while left > 0 {
         var size = left;
@@ -770,28 +864,35 @@ fn (self: &var Obj) x86_nops(allocator: Allocator, count: i64) -> !void {
         }
         left = left - size;
         if size == 1 {
-            try self.byte(allocator, 0x90);
+            try append_little(allocator, out, 0x90, 1);
         } else if size == 2 {
-            try self.little(allocator, 0x9066, 2);
+            try append_little(allocator, out, 0x9066, 2);
         } else if size == 3 {
-            try self.little(allocator, 0x001F0F, 3);
+            try append_little(allocator, out, 0x001F0F, 3);
         } else if size == 4 {
-            try self.little(allocator, 0x00401F0F, 4);
+            try append_little(allocator, out, 0x00401F0F, 4);
         } else if size == 5 {
-            try self.little(allocator, 0x0000441F0F, 5);
+            try append_little(allocator, out, 0x0000441F0F, 5);
         } else if size == 6 {
-            try self.little(allocator, 0x0000441F0F66, 6);
+            try append_little(allocator, out, 0x0000441F0F66, 6);
         } else if size == 7 {
-            try self.little(allocator, 0x00000000801F0F, 7);
+            try append_little(allocator, out, 0x00000000801F0F, 7);
         } else if size == 8 {
-            try self.little(allocator, 0x0000000000841F0F, 8);
+            try append_little(allocator, out, 0x0000000000841F0F, 8);
         } else if size == 9 {
-            try self.byte(allocator, 0x66);
-            try self.little(allocator, 0x0000000000841F0F, 8);
+            try append_little(allocator, out, 0x66, 1);
+            try append_little(allocator, out, 0x0000000000841F0F, 8);
         } else {
-            try self.little(allocator, 0x0F2E66, 3);
-            try self.little(allocator, 0x00000000841F, 7);
+            try append_little(allocator, out, 0x0F2E66, 3);
+            try append_little(allocator, out, 0x00000000841F, 7);
         }
+    }
+    return;
+}
+
+fn append_little(allocator: Allocator, out: &var string::String, value: i64, size: i64) -> !void {
+    for 0..size |at| {
+        try out.append_byte(allocator, cast<u8>((value >> (8 * at)) & 255));
     }
     return;
 }

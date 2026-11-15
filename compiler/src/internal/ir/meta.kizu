@@ -607,6 +607,24 @@ enum WrapperKind {
 }
 
 fn (self: &var Lowerer) resolve_meta_type_deep(text: Name) -> !Name {
+    let id = name_id(text);
+    if self.deep_types.get(id) |known| {
+        if !is_empty(known) {
+            return known;
+        }
+    }
+    let forms_before = self.form_texts;
+    let resolved = try self.rebuild_meta_type(text);
+    if self.form_texts == forms_before and !is_empty(resolved) {
+        while self.deep_types.len() <= id {
+            try self.deep_types.append(self.allocator, empty_name());
+        }
+        try self.deep_types.set(id, resolved);
+    }
+    return resolved;
+}
+
+fn (self: &var Lowerer) rebuild_meta_type(text: Name) -> !Name {
     let resolved = try self.resolve_meta_type_text(text);
     if !same_name(resolved, text) {
         return resolved;
@@ -818,6 +836,12 @@ fn (self: &Lowerer) predicate_form(name: Name) -> ?stdmeta::Form {
 }
 
 fn (self: &var Lowerer) resolve_meta_type_text(text: Name) -> !Name {
+    let written = name_text(&self.module.names, text);
+    let written_bytes = written.as_bytes();
+    if !stdmeta::mentions_form(written_bytes) {
+        return text;
+    }
+    self.form_texts = self.form_texts + 1;
     let copied = try self.module.names.copy(text);
     defer copied.deinit(self.allocator);
     let bytes = copied.as_bytes();

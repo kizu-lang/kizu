@@ -43,23 +43,54 @@ pub fn clone_function(allocator: Allocator, source: &MFunction) -> !MFunction {
 }
 
 fn inlinable(func: &MFunction) -> bool {
-    if func.is_main or func.calls {
+    if func.is_main {
         return false;
     }
     var size = 0;
+    var hot_blocks = 0;
+    var reads_stack_args = false;
+    var touches_out_words = false;
     var index = 0;
     while func.blocks.at(index) |block| {
         index = index + 1;
+        let fails = block.fails();
+        if !fails {
+            hot_blocks = hot_blocks + 1;
+        }
         var inst_index = 0;
         while block.insts.at(inst_index) |inst| {
             inst_index = inst_index + 1;
-            size = size + 1;
-            if inst.op == MOp::Call or inst.op == MOp::CallReg or inst.rn == reg_inarg() {
+            if inst.rn == reg_inarg() {
+                reads_stack_args = true;
+            }
+            if fails {
+                continue;
+            }
+            if inst.op == MOp::Call or inst.op == MOp::CallReg {
                 return false;
             }
+            if inst.rn == reg_sp() {
+                touches_out_words = true;
+            }
+            size = size + 1;
         }
     }
-    return size <= 48 and func.blocks.len() <= 16;
+    if reads_stack_args and touches_out_words {
+        return false;
+    }
+    return size <= inline_size() and hot_blocks <= inline_blocks() and func.blocks.len() <= 2 * inline_blocks();
+}
+
+fn inline_size() -> i64 {
+    return 400;
+}
+
+fn inline_blocks() -> i64 {
+    return 64;
+}
+
+fn inline_sites() -> i64 {
+    return 64;
 }
 
 pub fn inline_calls(allocator: Allocator, functions: &var array::Array<MFunction>, symbols: &array::Array<ir::Name>) -> !void {
@@ -68,48 +99,128 @@ pub fn inline_calls(allocator: Allocator, functions: &var array::Array<MFunction
     var eligible = array::new<bool>(allocator);
     defer eligible.deinit(allocator);
     var index = 0;
-    while functions.at(index) |func| {
+    while functions.at(index) |_func| {
         try by_symbol.insert(allocator, ir::name_id(symbols.get_or_panic(index)), index);
-        try eligible.append(allocator, inlinable(func));
+        try eligible.append(allocator, false);
         index = index + 1;
     }
-    var caller = 0;
-    while caller < functions.len() {
-        var budget = 16;
-        while budget > 0 {
-            var found_block = 0 - 1;
-            var found_inst = 0 - 1;
-            var callee = 0 - 1;
-            if functions.at(caller) |func| {
-                var block_id = 0;
-                while func.blocks.at(block_id) |block| {
-                    var inst_index = 0;
-                    while block.insts.at(inst_index) |inst| {
-                        if inst.op == MOp::Call and found_block < 0 {
-                            if by_symbol.get(ir::name_id(inst.sym)) |target| {
-                                if target != caller and eligible.get_or_panic(target) {
-                                    found_block = block_id;
-                                    found_inst = inst_index;
-                                    callee = target;
-                                }
-                            }
-                        }
-                        inst_index = inst_index + 1;
+    var order = try callee_first(allocator, functions, &by_symbol);
+    defer order.deinit(allocator);
+    var position = 0;
+    while order.get(position) |caller| {
+        position = position + 1;
+        try inline_into(allocator, functions, caller, &by_symbol, &eligible);
+        if functions.at(caller) |func| {
+            try eligible.set(caller, inlinable(func));
+        }
+    }
+    return;
+}
+
+fn callee_first(allocator: Allocator, functions: &array::Array<MFunction>, by_symbol: &map::Map<i64, i64>) -> !array::Array<i64> {
+    var starts = array::new<i64>(allocator);
+    defer starts.deinit(allocator);
+    var edges = array::new<i64>(allocator);
+    defer edges.deinit(allocator);
+    var index = 0;
+    while functions.at(index) |func| {
+        index = index + 1;
+        try starts.append(allocator, edges.len());
+        var block_id = 0;
+        while func.blocks.at(block_id) |block| {
+            block_id = block_id + 1;
+            var inst_index = 0;
+            while block.insts.at(inst_index) |inst| {
+                inst_index = inst_index + 1;
+                if inst.op == MOp::Call {
+                    if by_symbol.get(ir::name_id(inst.sym)) |target| {
+                        try edges.append(allocator, target);
                     }
-                    block_id = block_id + 1;
                 }
             }
-            if callee < 0 {
-                break;
+        }
+    }
+    try starts.append(allocator, edges.len());
+    var order = array::new<i64>(allocator);
+    errdefer order.deinit(allocator);
+    var seen = array::new<bool>(allocator);
+    defer seen.deinit(allocator);
+    for 0..functions.len() |_f| {
+        try seen.append(allocator, false);
+    }
+    var stack = array::new<i64>(allocator);
+    defer stack.deinit(allocator);
+    var next = array::new<i64>(allocator);
+    defer next.deinit(allocator);
+    for 0..functions.len() |root| {
+        if seen.get_or_panic(root) {
+            continue;
+        }
+        try seen.set(root, true);
+        try stack.append(allocator, root);
+        try next.append(allocator, starts.get_or_panic(root));
+        while stack.len() > 0 {
+            let top = stack.len() - 1;
+            let f = stack.get_or_panic(top);
+            let edge = next.get_or_panic(top);
+            if edge < starts.get_or_panic(f + 1) {
+                try next.set(top, edge + 1);
+                let target = edges.get_or_panic(edge);
+                if !seen.get_or_panic(target) {
+                    try seen.set(target, true);
+                    try stack.append(allocator, target);
+                    try next.append(allocator, starts.get_or_panic(target));
+                }
+                continue;
             }
-            budget = budget - 1;
-            let body = try clone_at(allocator, functions, callee);
-            defer body.deinit(allocator);
-            if functions.at_mut(caller) |func| {
-                try splice(allocator, func, found_block, found_inst, &body);
+            try order.append(allocator, f);
+            try stack.truncate(allocator, top);
+            try next.truncate(allocator, top);
+        }
+    }
+    return move order;
+}
+
+fn inline_into(
+    allocator: Allocator,
+    functions: &var array::Array<MFunction>,
+    caller: i64,
+    by_symbol: &map::Map<i64, i64>,
+    eligible: &array::Array<bool>
+) -> !void {
+    var budget = inline_sites();
+    while budget > 0 {
+        var found_block = 0 - 1;
+        var found_inst = 0 - 1;
+        var callee = 0 - 1;
+        if functions.at(caller) |func| {
+            var block_id = 0;
+            while func.blocks.at(block_id) |block| {
+                var inst_index = 0;
+                while block.insts.at(inst_index) |inst| {
+                    if inst.op == MOp::Call and found_block < 0 {
+                        if by_symbol.get(ir::name_id(inst.sym)) |target| {
+                            if target != caller and eligible.get_or_panic(target) {
+                                found_block = block_id;
+                                found_inst = inst_index;
+                                callee = target;
+                            }
+                        }
+                    }
+                    inst_index = inst_index + 1;
+                }
+                block_id = block_id + 1;
             }
         }
-        caller = caller + 1;
+        if callee < 0 {
+            break;
+        }
+        budget = budget - 1;
+        let body = try clone_at(allocator, functions, callee);
+        defer body.deinit(allocator);
+        if functions.at_mut(caller) |func| {
+            try splice(allocator, func, found_block, found_inst, &body);
+        }
     }
     return;
 }
@@ -246,6 +357,9 @@ fn renumber(inst: MInst, vreg_base: i64, slot_base: i64, copy_base: i64) -> MIns
     out.rn = shift_reg(inst.rn, vreg_base);
     out.rm = shift_reg(inst.rm, vreg_base);
     out.ra = shift_reg(inst.ra, vreg_base);
+    if inst.rn == reg_inarg() {
+        out.rn = reg_sp();
+    }
     if inst.slot >= 0 and (inst.op == MOp::FrameAddr or inst.rn == reg_frame()) {
         out.slot = inst.slot + slot_base;
     }
@@ -261,9 +375,23 @@ fn untie_seams(allocator: Allocator, func: &var MFunction, caller: i64, first: i
     var reads_mask = 0;
     var writes_mask = 0;
     var late_mask = 0;
+    var pinned_mask = 0;
     var block_id = first;
     while block_id < continuation {
         if func.blocks.at(block_id) |block| {
+            if block.fails() {
+                var inst_index = 0;
+                while block.insts.at(inst_index) |inst| {
+                    inst_index = inst_index + 1;
+                    try reads(inst, &var buf, allocator, &func.copies);
+                    pinned_mask = pinned_mask | seam_mask(&buf);
+                }
+                if block.treg >= 0 and block.treg < 9 {
+                    pinned_mask = pinned_mask | (1 << block.treg);
+                }
+                block_id = block_id + 1;
+                continue;
+            }
             var inst_index = 0;
             while block.insts.at(inst_index) |inst| {
                 inst_index = inst_index + 1;
@@ -352,18 +480,29 @@ fn untie_seams(allocator: Allocator, func: &var MFunction, caller: i64, first: i
             settled = settled | open;
         }
     }
+    var kept = 0;
+    for 0..9 |r| {
+        let bit = 1 << r;
+        var keeps = (reads_mask & bit) != 0 and def_at.get_or_panic(r) < 0;
+        keeps = keeps or ((writes_mask & bit) != 0 and (settled & bit) == 0);
+        keeps = keeps or ((late_mask & bit) != 0 and (writes_mask & bit) != 0);
+        keeps = keeps or (pinned_mask & bit) != 0;
+        if keeps {
+            kept = kept | bit;
+        }
+    }
+    if (kept & reads_mask) != 0 {
+        kept = kept | reads_mask;
+    }
+    if (kept & writes_mask) != 0 {
+        kept = kept | writes_mask;
+    }
     for 0..9 |r| {
         let bit = 1 << r;
         if (reads_mask & bit) == 0 and (writes_mask & bit) == 0 {
             continue;
         }
-        if (reads_mask & bit) != 0 and def_at.get_or_panic(r) < 0 {
-            continue;
-        }
-        if (writes_mask & bit) != 0 and (settled & bit) == 0 {
-            continue;
-        }
-        if (late_mask & bit) != 0 and (writes_mask & bit) != 0 {
+        if (kept & bit) != 0 {
             continue;
         }
         let fresh = func.new_vreg();
@@ -381,7 +520,13 @@ fn untie_seams(allocator: Allocator, func: &var MFunction, caller: i64, first: i
         }
         block_id = first;
         while block_id < continuation {
-            try rename_in_block(allocator, func, block_id, r, fresh, result);
+            var renames = true;
+            if func.blocks.at(block_id) |block| {
+                renames = !block.fails();
+            }
+            if renames {
+                try rename_in_block(allocator, func, block_id, r, fresh, result);
+            }
             block_id = block_id + 1;
         }
         if (writes_mask & bit) != 0 {

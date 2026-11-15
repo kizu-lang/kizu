@@ -1,0 +1,536 @@
+import std::array;
+import std::map;
+
+struct SlotLink {
+    parent: i64,
+    step: i64,
+    has_step: bool,
+}
+
+struct SlotRoot {
+    init: Value,
+    escaped: bool,
+    reads_kept: bool,
+}
+
+struct SlotAccess {
+    root: i64,
+    start: i64,
+    len: i64,
+    instr: ?Instr,
+    result: Value,
+}
+
+enum StartKind {
+    Unknown,
+    Zero,
+    Known,
+}
+
+struct StartValue {
+    kind: StartKind,
+    value: Value,
+}
+
+struct SlotScan {
+    links: map::Map<i64, SlotLink>,
+    roots: map::Map<i64, i64>,
+    slots: array::Array<SlotRoot>,
+    builds: map::Map<i64, Instr>,
+    uses: map::Map<i64, i64>,
+    consts: map::Map<i64, i64>,
+    paths: array::Array<i64>,
+    reads: array::Array<SlotAccess>,
+    writes: array::Array<SlotAccess>,
+}
+
+fn new_slot_scan(allocator: Allocator) -> SlotScan {
+    return SlotScan {
+        links: map::new<i64, SlotLink>(allocator),
+        roots: map::new<i64, i64>(allocator),
+        slots: array::new<SlotRoot>(allocator),
+        builds: map::new<i64, Instr>(allocator),
+        uses: map::new<i64, i64>(allocator),
+        consts: map::new<i64, i64>(allocator),
+        paths: array::new<i64>(allocator),
+        reads: array::new<SlotAccess>(allocator),
+        writes: array::new<SlotAccess>(allocator)
+    };
+}
+
+fn (self: SlotScan) deinit(allocator: Allocator) -> void {
+    self.links.deinit(allocator);
+    self.roots.deinit(allocator);
+    self.slots.deinit(allocator);
+    self.builds.deinit(allocator);
+    self.uses.deinit(allocator);
+    self.consts.deinit(allocator);
+    self.paths.deinit(allocator);
+    self.reads.deinit(allocator);
+    self.writes.deinit(allocator);
+    return;
+}
+
+fn slot_path_limit() -> i64 {
+    return 32;
+}
+
+pub fn forward_slot_reads(allocator: Allocator, module: &var Module) -> !void {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        try forward_slot_reads_in(allocator, module, function);
+    }
+    return;
+}
+
+fn forward_slot_reads_in(allocator: Allocator, module: &var Module, function: Function) -> !void {
+    var scan = new_slot_scan(allocator);
+    defer scan.deinit(allocator);
+    try scan_slot_defs(allocator, module, function, &var scan);
+    if scan.slots.len() == 0 {
+        return;
+    }
+    try scan_slot_uses(allocator, module, function, &var scan);
+    var forwarded = false;
+    var index = 0;
+    while scan.reads.get(index) |read| {
+        index = index + 1;
+        if try forward_slot_read(allocator, module, &var scan, read) {
+            forwarded = true;
+        } else {
+            if scan.slots.at_mut(read.root) |slot| {
+                slot.reads_kept = true;
+            }
+        }
+    }
+    var dead = map::new<i64, bool>(allocator);
+    defer dead.deinit(allocator);
+    try collect_dead_slots(allocator, module, &scan, &var dead);
+    if dead.len() == 0 {
+        return;
+    }
+    return remove_dead_slots(allocator, module, function, &scan, &dead);
+}
+
+fn scan_slot_defs(allocator: Allocator, module: &var Module, function: Function, scan: &var SlotScan) -> !void {
+    var block_index = 0;
+    while function_block_at(module, function, block_index) |block| {
+        block_index = block_index + 1;
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let node = module.instrs.at(instr.node);
+            let result = name_id(node.result.name);
+            if node.op == Op::StructNew or node.op == Op::BufferNew {
+                try scan.builds.insert(allocator, result, instr);
+            }
+            if node.op == Op::LocalSlot and node.args.len() == 1 {
+                try scan.roots.insert(allocator, result, scan.slots.len());
+                try scan.slots.append(allocator, SlotRoot { init: node.args.get_or_panic(0), escaped: false, reads_kept: false });
+            }
+        }
+    }
+    if scan.slots.len() == 0 {
+        return;
+    }
+    block_index = 0;
+    while function_block_at(module, function, block_index) |block| {
+        block_index = block_index + 1;
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            try record_constant(allocator, module, instr, &var scan.consts);
+        }
+    }
+    block_index = 0;
+    while function_block_at(module, function, block_index) |block| {
+        block_index = block_index + 1;
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            if try slot_link_of(module, &scan.consts, instr) |link| {
+                let result = module.instr_result(instr);
+                try scan.links.insert(allocator, name_id(result.name), link);
+            }
+        }
+    }
+    return;
+}
+
+fn slot_link_of(module: &var Module, consts: &map::Map<i64, i64>, instr: Instr) -> !?SlotLink {
+    let node = module.instrs.at(instr.node);
+    if node.args.len() == 0 {
+        return null;
+    }
+    let base = name_id(node.args.get_or_panic(0).name);
+    if node.op == Op::Id and node.args.len() == 1 {
+        return SlotLink { parent: base, step: 0, has_step: false };
+    }
+    if node.op == Op::FieldAddr and node.args.len() == 1 {
+        return SlotLink { parent: base, step: name_id(node.operand) * 2, has_step: true };
+    }
+    if node.op != Op::BufferAddr or node.args.len() != 2 {
+        return null;
+    }
+    let at = integer_constant(module, node.args.get_or_panic(1), consts) orelse return null;
+    let base_type = node.args.get_or_panic(0).type_name;
+    let array_type = try module.names.deref_type(base_type);
+    if !module.names.is_buffer_type(array_type) {
+        return null;
+    }
+    let length_name = try module.names.buffer_length_text(array_type);
+    let length_text = name_text(&module.names, length_name);
+    let length_bytes = length_text.as_bytes();
+    let length = parse_i64(length_bytes) orelse return null;
+    if at < 0 or at >= length {
+        return null;
+    }
+    return SlotLink { parent: base, step: at * 2 + 1, has_step: true };
+}
+
+fn slot_of(scan: &SlotScan, value: i64) -> ?i64 {
+    var current = value;
+    var depth = 0;
+    while depth <= slot_path_limit() {
+        depth = depth + 1;
+        if scan.roots.get(current) |root| {
+            return root;
+        }
+        let link = scan.links.get(current) orelse return null;
+        current = link.parent;
+    }
+    return null;
+}
+
+fn push_slot_path(allocator: Allocator, scan: &var SlotScan, value: i64) -> !i64 {
+    let start = scan.paths.len();
+    var current = value;
+    while scan.links.get(current) |link| {
+        if scan.roots.contains(current) {
+            break;
+        }
+        if link.has_step {
+            try scan.paths.append(allocator, link.step);
+        }
+        current = link.parent;
+    }
+    var low = start;
+    var high = scan.paths.len() - 1;
+    while low < high {
+        let first = scan.paths.get_or_panic(low);
+        try scan.paths.set(low, scan.paths.get_or_panic(high));
+        try scan.paths.set(high, first);
+        low = low + 1;
+        high = high - 1;
+    }
+    return start;
+}
+
+fn scan_slot_uses(allocator: Allocator, module: &var Module, function: Function, scan: &var SlotScan) -> !void {
+    var block_index = 0;
+    while function_block_at(module, function, block_index) |block| {
+        block_index = block_index + 1;
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            try scan_instr_uses(allocator, module, instr, scan);
+        }
+        let term = module.block_terminator(block);
+        try note_other_use(allocator, scan, term.value);
+        try note_other_use(allocator, scan, term.cond);
+    }
+    return;
+}
+
+fn note_other_use(allocator: Allocator, scan: &var SlotScan, value: Value) -> !void {
+    let id = name_id(value.name);
+    try count_slot_use(allocator, scan, id);
+    if slot_of(scan, id) |root| {
+        if scan.slots.at_mut(root) |slot| {
+            slot.escaped = true;
+        }
+    }
+    return;
+}
+
+fn count_slot_use(allocator: Allocator, scan: &var SlotScan, id: i64) -> !void {
+    var count = 1;
+    if scan.uses.get(id) |known| {
+        count = known + 1;
+    }
+    return scan.uses.insert(allocator, id, count);
+}
+
+fn scan_instr_uses(allocator: Allocator, module: &Module, instr: Instr, scan: &var SlotScan) -> !void {
+    let node = module.instrs.at(instr.node);
+    let op = node.op;
+    let count = node.args.len();
+    var index = 0;
+    while node.args.get(index) |arg| {
+        let id = name_id(arg.name);
+        if index > 0 or !try note_slot_access(allocator, module, instr, op, count, id, scan) {
+            try note_other_use(allocator, scan, arg);
+        } else {
+            try count_slot_use(allocator, scan, id);
+        }
+        index = index + 1;
+    }
+    index = 0;
+    while node.incoming.get(index) |incoming| {
+        index = index + 1;
+        try note_other_use(allocator, scan, incoming.value);
+    }
+    index = 0;
+    while node.fields.get(index) |field| {
+        index = index + 1;
+        try note_other_use(allocator, scan, field.value);
+    }
+    index = 0;
+    while node.cleanups.get(index) |cleanup| {
+        index = index + 1;
+        var arg_index = 0;
+        while module.cleanup_arg(cleanup, arg_index) |arg| {
+            arg_index = arg_index + 1;
+            try note_other_use(allocator, scan, arg);
+        }
+    }
+    return;
+}
+
+fn note_slot_access(
+    allocator: Allocator,
+    module: &Module,
+    instr: Instr,
+    op: Op,
+    count: i64,
+    id: i64,
+    scan: &var SlotScan
+) -> !bool {
+    let root = slot_of(scan, id) orelse return false;
+    let result = module.instr_result(instr);
+    if scan.links.get(name_id(result.name)) |link| {
+        return link.parent == id;
+    }
+    var is_read = false;
+    var step = 0;
+    var has_step = false;
+    if op == Op::RefLoad and count == 1 {
+        is_read = true;
+    } else if op == Op::FieldRef and count == 1 {
+        is_read = true;
+        step = name_id(module.instrs.at(instr.node).operand) * 2;
+        has_step = true;
+    } else if op == Op::RefStore and count == 2 {
+        is_read = false;
+    } else if op == Op::FieldRefSet and count == 2 {
+        step = name_id(module.instrs.at(instr.node).operand) * 2;
+        has_step = true;
+    } else {
+        return false;
+    }
+    let start = try push_slot_path(allocator, scan, id);
+    if has_step {
+        try scan.paths.append(allocator, step);
+    }
+    if scan.paths.len() - start > slot_path_limit() {
+        return false;
+    }
+    let access = SlotAccess {
+        root: root,
+        start: start,
+        len: scan.paths.len() - start,
+        instr: instr,
+        result: result
+    };
+    if is_read {
+        try scan.reads.append(allocator, access);
+    } else {
+        try scan.writes.append(allocator, access);
+    }
+    return true;
+}
+
+fn forward_slot_read(allocator: Allocator, module: &var Module, scan: &var SlotScan, read: SlotAccess) -> !bool {
+    let slot = scan.slots.get_or_panic(read.root);
+    if slot.escaped {
+        return false;
+    }
+    let names = &module.names;
+    let is_integer = is_wrapping_integer(module, read.result.type_name);
+    let is_bool = names.is(read.result.type_name, "bool");
+    if !is_integer and !is_bool {
+        return false;
+    }
+    var index = 0;
+    while scan.writes.get(index) |write| {
+        index = index + 1;
+        if write.root == read.root and paths_overlap(scan, write, read) {
+            return false;
+        }
+    }
+    let start = start_value_at(module, scan, slot.init, read);
+    let instr = read.instr orelse return false;
+    match start.kind {
+        Unknown => return false,
+        Zero => {
+            var zero = try module.names.intern("0");
+            if is_bool {
+                zero = try module.names.intern("false");
+            }
+            if module.instrs.at_mut(instr.node) |node| {
+                node.op = Op::Const;
+                node.operand = empty_name();
+                while node.args.pop() |_| {}
+                node.immediate = zero;
+            }
+        },
+        Known => {
+            if !same_name(start.value.type_name, read.result.type_name) {
+                return false;
+            }
+            if module.instrs.at_mut(instr.node) |node| {
+                node.op = Op::Id;
+                node.operand = empty_name();
+                while node.args.pop() |_| {}
+                try node.args.append(allocator, start.value);
+            }
+        },
+    }
+    return true;
+}
+
+fn paths_overlap(scan: &SlotScan, left: SlotAccess, right: SlotAccess) -> bool {
+    var index = 0;
+    while index < left.len and index < right.len {
+        if scan.paths.get_or_panic(left.start + index) != scan.paths.get_or_panic(right.start + index) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn start_value_at(module: &Module, scan: &SlotScan, init: Value, read: SlotAccess) -> StartValue {
+    var current = init;
+    var index = 0;
+    while true {
+        let build = scan.builds.get(name_id(current.name));
+        if build |instr| {
+            if module.instrs.at(instr.node).op == Op::BufferNew {
+                return StartValue { kind: StartKind::Zero, value: empty_value() };
+            }
+        }
+        if index == read.len {
+            return StartValue { kind: StartKind::Known, value: current };
+        }
+        let step = scan.paths.get_or_panic(read.start + index);
+        index = index + 1;
+        let instr = build orelse return StartValue { kind: StartKind::Unknown, value: empty_value() };
+        if step % 2 != 0 {
+            return StartValue { kind: StartKind::Unknown, value: empty_value() };
+        }
+        let node = module.instrs.at(instr.node);
+        var found = false;
+        var field_index = 0;
+        while node.fields.get(field_index) |field| {
+            field_index = field_index + 1;
+            if name_id(field.name) * 2 == step {
+                current = field.value;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return StartValue { kind: StartKind::Unknown, value: empty_value() };
+        }
+    }
+    return StartValue { kind: StartKind::Unknown, value: empty_value() };
+}
+
+fn collect_dead_slots(allocator: Allocator, module: &Module, scan: &SlotScan, dead: &var map::Map<i64, bool>) -> !void {
+    var index = 0;
+    while scan.slots.get(index) |slot| {
+        index = index + 1;
+        if slot.escaped or slot.reads_kept {
+            continue;
+        }
+        try dead.insert(allocator, -(index - 1) - 1, true);
+        try collect_dead_build(allocator, module, scan, slot.init, dead);
+    }
+    return;
+}
+
+fn collect_dead_build(allocator: Allocator, module: &Module, scan: &SlotScan, value: Value, dead: &var map::Map<i64, bool>) -> !void {
+    let id = name_id(value.name);
+    let instr = scan.builds.get(id) orelse return;
+    let uses = scan.uses.get(id) orelse 0;
+    if uses != 1 {
+        return;
+    }
+    try dead.insert(allocator, id, true);
+    let node = module.instrs.at(instr.node);
+    var index = 0;
+    while node.fields.get(index) |field| {
+        index = index + 1;
+        try collect_dead_build(allocator, module, scan, field.value, dead);
+    }
+    return;
+}
+
+fn remove_dead_slots(
+    allocator: Allocator,
+    module: &var Module,
+    function: Function,
+    scan: &SlotScan,
+    dead: &map::Map<i64, bool>
+) -> !void {
+    var kept = array::new<Instr>(allocator);
+    defer kept.deinit(allocator);
+    var block_index = 0;
+    while function_block_at(module, function, block_index) |block| {
+        block_index = block_index + 1;
+        while kept.pop() |_| {}
+        var removed = false;
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            if is_dead_slot_instr(module, scan, dead, instr) {
+                removed = true;
+            } else {
+                try kept.append(allocator, instr);
+            }
+        }
+        if !removed {
+            continue;
+        }
+        if module.blocks.at_mut(block.node) |node| {
+            while node.instrs.pop() |_| {}
+            var index = 0;
+            while kept.get(index) |instr| {
+                index = index + 1;
+                try node.instrs.append(allocator, instr);
+            }
+        }
+    }
+    return;
+}
+
+fn is_dead_slot_instr(module: &Module, scan: &SlotScan, dead: &map::Map<i64, bool>, instr: Instr) -> bool {
+    let node = module.instrs.at(instr.node);
+    let result = name_id(node.result.name);
+    if dead.contains(result) and scan.builds.contains(result) {
+        return true;
+    }
+    var reached = result;
+    if !scan.roots.contains(result) {
+        if node.op != Op::Id and node.op != Op::FieldAddr and node.op != Op::BufferAddr and node.op != Op::RefStore and
+            node.op != Op::FieldRefSet {
+            return false;
+        }
+        let first = node.args.get(0) orelse return false;
+        reached = name_id(first.name);
+    }
+    let root = slot_of(scan, reached) orelse return false;
+    return dead.contains(-root - 1);
+}

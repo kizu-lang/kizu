@@ -1,0 +1,83 @@
+import std::testing;
+
+// `a.b.c = v` writes `c` in the storage `a` names, whether `a` is a `&var`
+// parameter or a local, and leaves the sibling fields of `c` and `b` as they
+// were. The value is read before the write lands.
+
+struct Inner {
+    count: i64,
+    data: [4]i64,
+}
+
+struct Middle {
+    inner: Inner,
+    tag: i64,
+}
+
+struct Outer {
+    middle: Middle,
+    id: i64,
+}
+
+fn fresh() -> Outer {
+    return Outer {
+        middle: Middle { inner: Inner { count: 1, data: [4]i64{ 10, 20, 30, 40 } }, tag: 7 },
+        id: 9,
+    };
+}
+
+fn set_count(outer: &var Outer, value: i64) -> void {
+    outer.middle.inner.count = value;
+}
+
+fn bump_from_data(outer: &var Outer) -> void {
+    outer.middle.inner.count = outer.middle.inner.count + outer.middle.inner.data[2];
+}
+
+fn set_tag(middle: &var Middle, value: i64) -> void {
+    middle.inner.data[1] = value;
+    middle.tag = value + 1;
+}
+
+test "nested field write through a mutable borrow lands in the caller" {
+    var outer = fresh();
+    set_count(&var outer, 5);
+    testing::expect_equal<i64>(5, outer.middle.inner.count);
+    testing::expect_equal<i64>(30, outer.middle.inner.data[2]);
+    testing::expect_equal<i64>(7, outer.middle.tag);
+    testing::expect_equal<i64>(9, outer.id);
+}
+
+test "nested field write reads its value before storing" {
+    var outer = fresh();
+    bump_from_data(&var outer);
+    bump_from_data(&var outer);
+    testing::expect_equal<i64>(61, outer.middle.inner.count);
+    testing::expect_equal<i64>(40, outer.middle.inner.data[3]);
+}
+
+test "nested field write on a local keeps the other fields" {
+    var outer = fresh();
+    outer.middle.inner.count = 3;
+    outer.middle.inner.data[0] = 4;
+    testing::expect_equal<i64>(3, outer.middle.inner.count);
+    testing::expect_equal<i64>(4, outer.middle.inner.data[0]);
+    testing::expect_equal<i64>(20, outer.middle.inner.data[1]);
+    testing::expect_equal<i64>(7, outer.middle.tag);
+}
+
+test "nested field write through a borrow of a field" {
+    var outer = fresh();
+    set_tag(&var outer.middle, 12);
+    testing::expect_equal<i64>(12, outer.middle.inner.data[1]);
+    testing::expect_equal<i64>(13, outer.middle.tag);
+    testing::expect_equal<i64>(1, outer.middle.inner.count);
+}
+
+test "a copy taken before a nested write keeps the old value" {
+    var outer = fresh();
+    let before = outer.middle;
+    outer.middle.inner.count = 8;
+    testing::expect_equal<i64>(1, before.inner.count);
+    testing::expect_equal<i64>(8, outer.middle.inner.count);
+}

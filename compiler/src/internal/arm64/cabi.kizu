@@ -110,6 +110,25 @@ struct CCallArgs {
     floats: array::Array<i64>,
     float_widths: array::Array<i64>,
     stacked: array::Array<i64>,
+    stack_offsets: array::Array<i64>,
+    stack_widths: array::Array<i64>,
+    stack_bytes: i64,
+    words_closed: bool,
+    floats_closed: bool,
+}
+
+fn new_c_call_args(allocator: Allocator) -> CCallArgs {
+    return CCallArgs {
+        words: array::new<i64>(allocator),
+        floats: array::new<i64>(allocator),
+        float_widths: array::new<i64>(allocator),
+        stacked: array::new<i64>(allocator),
+        stack_offsets: array::new<i64>(allocator),
+        stack_widths: array::new<i64>(allocator),
+        stack_bytes: 0,
+        words_closed: false,
+        floats_closed: false,
+    };
 }
 
 fn (self: CCallArgs) deinit(allocator: Allocator) -> void {
@@ -117,7 +136,76 @@ fn (self: CCallArgs) deinit(allocator: Allocator) -> void {
     self.floats.deinit(allocator);
     self.float_widths.deinit(allocator);
     self.stacked.deinit(allocator);
+    self.stack_offsets.deinit(allocator);
+    self.stack_widths.deinit(allocator);
     return;
+}
+
+fn (self: &Selector) packs_stack_args() -> bool {
+    return self.arch == Arch::Arm64 and self.stacks_variadics;
+}
+
+fn (self: &Selector) stack_arg_at(used: i64, align: i64) -> i64 {
+    if self.packs_stack_args() {
+        return round_up(used, align);
+    }
+    return round_up(used, 8);
+}
+
+fn (self: &Selector) stack_arg_bytes(size: i64) -> i64 {
+    if self.packs_stack_args() {
+        return size;
+    }
+    return round_up(size, 8);
+}
+
+fn (self: &Selector) next_stack_arg(args: &var CCallArgs, size: i64, align: i64) -> i64 {
+    let offset = self.stack_arg_at(args.stack_bytes, align);
+    args.stack_bytes = offset + self.stack_arg_bytes(size);
+    return offset;
+}
+
+fn (self: &var Selector) stack_at(args: &var CCallArgs, reg: i64, offset: i64, width: i64) -> !void {
+    try args.stacked.append(self.allocator, reg);
+    try args.stack_offsets.append(self.allocator, offset);
+    return args.stack_widths.append(self.allocator, width);
+}
+
+fn (self: &var Selector) stack_scalar(args: &var CCallArgs, reg: i64, size: i64) -> !void {
+    let offset = self.next_stack_arg(args, size, size);
+    return self.stack_at(args, reg, offset, size);
+}
+
+fn (self: &var Selector) stack_word(args: &var CCallArgs, reg: i64) -> !void {
+    return self.stack_scalar(args, reg, 8);
+}
+
+fn (self: &var Selector) store_stack_args(args: &CCallArgs) -> !void {
+    var index = 0;
+    while args.stacked.get(index) |reg| {
+        try self.store(reg, reg_sp(), args.stack_offsets.get_or_panic(index), args.stack_widths.get_or_panic(index));
+        index = index + 1;
+    }
+    let words = (args.stack_bytes + 7) / 8;
+    if words > self.func.out_words {
+        self.func.out_words = words;
+    }
+    return;
+}
+
+fn (self: &var Selector) c_word(args: &var CCallArgs, reg: i64, size: i64) -> !void {
+    if !args.words_closed and args.words.len() < arg_regs(self.arch) {
+        return args.words.append(self.allocator, reg);
+    }
+    return self.stack_scalar(args, reg, size);
+}
+
+fn (self: &var Selector) c_float(args: &var CCallArgs, reg: i64, size: i64) -> !void {
+    if !args.floats_closed and args.floats.len() < 8 {
+        try args.floats.append(self.allocator, reg);
+        return args.float_widths.append(self.allocator, size);
+    }
+    return self.stack_scalar(args, reg, size);
 }
 
 fn (self: &var Selector) c_slot(size: i64, align: i64) -> !i64 {
@@ -134,22 +222,32 @@ fn (self: &var Selector) c_struct_arg(module: &ir::Module, arg: ir::Value, args:
     let src = try self.addr(module, arg) orelse return false;
     match passing.kind {
         Floats => {
-            if args.floats.len() + passing.count > 8 {
-                return false;
+            let on_stack = args.floats_closed or args.floats.len() + passing.count > 8;
+            var offset = 0;
+            if on_stack {
+                args.floats_closed = true;
+                offset = self.next_stack_arg(args, passing.count * passing.width, passing.width);
             }
             var index = 0;
             while index < passing.count {
                 let reg = self.func.new_vreg();
                 try self.load(reg, src, index * passing.width, passing.width, false);
-                try args.floats.append(self.allocator, reg);
-                try args.float_widths.append(self.allocator, passing.width);
+                if on_stack {
+                    try self.stack_at(args, reg, offset + index * passing.width, passing.width);
+                } else {
+                    try args.floats.append(self.allocator, reg);
+                    try args.float_widths.append(self.allocator, passing.width);
+                }
                 index = index + 1;
             }
             return true;
         },
         Words => {
-            if args.words.len() + passing.count > 8 {
-                return false;
+            let on_stack = args.words_closed or args.words.len() + passing.count > 8;
+            var offset = 0;
+            if on_stack {
+                args.words_closed = true;
+                offset = self.next_stack_arg(args, passing.count * 8, 8);
             }
             var base = src;
             if passing.size % 8 != 0 {
@@ -160,25 +258,26 @@ fn (self: &var Selector) c_struct_arg(module: &ir::Module, arg: ir::Value, args:
             while index < passing.count {
                 let reg = self.func.new_vreg();
                 try self.load(reg, base, index * 8, 8, false);
-                try args.words.append(self.allocator, reg);
+                if on_stack {
+                    try self.stack_at(args, reg, offset + index * 8, 8);
+                } else {
+                    try args.words.append(self.allocator, reg);
+                }
                 index = index + 1;
             }
             return true;
         },
         Memory => {
-            if args.words.len() >= 8 {
-                return false;
-            }
             let copy = try self.c_slot(passing.size, passing.align);
             try self.copy_bytes(copy, src, passing.size);
-            try args.words.append(self.allocator, copy);
+            try self.c_word(args, copy, 8);
             return true;
         },
     }
 }
 
 fn (self: &var Selector) c_copy_address(module: &ir::Module, arg: ir::Value) -> !?i64 {
-    let shape = shape_of(module, arg.type_name);
+    let shape = self.shapes.of(module, arg.type_name);
     if shape.class == Class::Unsupported or shape.class == Class::Void {
         return null;
     }
@@ -189,23 +288,51 @@ fn (self: &var Selector) c_copy_address(module: &ir::Module, arg: ir::Value) -> 
     return address;
 }
 
+struct CCallee {
+    symbol: ir::Name,
+    reg: i64,
+    first: i64,
+}
+
+fn named_callee(symbol_name: ir::Name) -> CCallee {
+    return CCallee { symbol: symbol_name, reg: reg_none(), first: 0 };
+}
+
+fn (self: &var Selector) call_c_callee(module: &ir::Module, callee: CCallee, count: i64, sret: i64) -> !void {
+    if callee.reg != reg_none() {
+        var inst = blank(MOp::CallReg);
+        inst.rn = callee.reg;
+        inst.imm = count;
+        inst.ra = sret;
+        self.func.calls = true;
+        return self.inst(inst);
+    }
+    var symbol = string::new(self.allocator);
+    defer symbol.deinit(self.allocator);
+    let name_text = ir::name_text(&module.names, callee.symbol);
+    let name_bytes = name_text.as_bytes();
+    try append_c_symbol(self.allocator, &var symbol, name_bytes);
+    let symbol_bytes = symbol.as_bytes();
+    let sym = try self.syms.intern(symbol_bytes);
+    return self.call_sym(sym, count, sret);
+}
+
 fn (self: &var Selector) select_c_call(module: &ir::Module, node: &ir::InstrNode, symbol_name: ir::Name) -> !?diagnostic::Diagnostic {
+    return self.select_c_call_to(module, node, named_callee(symbol_name));
+}
+
+fn (self: &var Selector) select_c_call_to(module: &ir::Module, node: &ir::InstrNode, callee: CCallee) -> !?diagnostic::Diagnostic {
     if self.arch == Arch::Amd64 {
-        return self.select_sysv_call(module, node, symbol_name);
+        return self.select_sysv_call(module, node, callee);
     }
     if self.arch == Arch::Amd64Windows {
-        return self.select_win64_call(module, node, symbol_name);
+        return self.select_win64_call(module, node, callee);
     }
-    var args = CCallArgs {
-        words: array::new<i64>(self.allocator),
-        floats: array::new<i64>(self.allocator),
-        float_widths: array::new<i64>(self.allocator),
-        stacked: array::new<i64>(self.allocator),
-    };
+    var args = new_c_call_args(self.allocator);
     defer args.deinit(self.allocator);
-    var index = 0;
+    var index = callee.first;
     while node.args.get(index) |arg| {
-        let at = index;
+        let at = index - callee.first;
         index = index + 1;
         let unnamed = node.variadic_fixed > 0 and at >= node.variadic_fixed;
         let stacks_unnamed = unnamed and self.stacks_variadics;
@@ -215,20 +342,20 @@ fn (self: &var Selector) select_c_call(module: &ir::Module, node: &ir::InstrNode
         }
         if takes_address {
             let address = try self.c_copy_address(module, arg) orelse return try self.fail_op(module, node);
-            if stacks_unnamed or (unnamed and args.words.len() >= 8) {
-                try args.stacked.append(self.allocator, address);
+            if stacks_unnamed {
+                try self.stack_word(&var args, address);
             } else {
-                try args.words.append(self.allocator, address);
+                try self.c_word(&var args, address, 8);
             }
             continue;
         }
-        let shape = shape_of(module, arg.type_name);
+        let shape = self.shapes.of(module, arg.type_name);
         if stacks_unnamed {
             if !is_word(shape) {
                 return try self.fail(module, "C variadic argument type", arg.type_name);
             }
             let reg = try self.reg(module, arg) orelse return try self.fail_op(module, node);
-            try args.stacked.append(self.allocator, reg);
+            try self.stack_word(&var args, reg);
             continue;
         }
         if is_c_struct(module, arg.type_name) {
@@ -241,25 +368,15 @@ fn (self: &var Selector) select_c_call(module: &ir::Module, node: &ir::InstrNode
             return try self.fail(module, "C argument type", arg.type_name);
         }
         let reg = try self.reg(module, arg) orelse return try self.fail_op(module, node);
+        var size = shape.size;
         if unnamed {
-            var bank = args.words.len();
-            if shape.class == Class::Float {
-                bank = args.floats.len();
-            }
-            if bank >= 8 {
-                try args.stacked.append(self.allocator, reg);
-                continue;
-            }
+            size = 8;
         }
         if shape.class == Class::Float {
-            try args.floats.append(self.allocator, reg);
-            try args.float_widths.append(self.allocator, shape.size);
+            try self.c_float(&var args, reg, size);
         } else {
-            try args.words.append(self.allocator, reg);
+            try self.c_word(&var args, reg, size);
         }
-    }
-    if args.words.len() > 8 or args.floats.len() > 8 {
-        return try self.fail_op(module, node);
     }
     let result = node.result;
     var result_passing = CStructPassing { kind: CStructKind::Words, count: 0, width: 0, size: 0, align: 1 };
@@ -272,19 +389,12 @@ fn (self: &var Selector) select_c_call(module: &ir::Module, node: &ir::InstrNode
             sret = try self.c_slot(result_passing.size, result_passing.align);
         }
     } else {
-        let shape = shape_of(module, result.type_name);
+        let shape = self.shapes.of(module, result.type_name);
         if !is_word(shape) and shape.class != Class::Void {
             return try self.fail(module, "C result type", result.type_name);
         }
     }
-    index = 0;
-    while args.stacked.get(index) |reg| {
-        try self.store(reg, reg_sp(), index * 8, 8);
-        index = index + 1;
-    }
-    if args.stacked.len() > self.func.out_words {
-        self.func.out_words = args.stacked.len();
-    }
+    try self.store_stack_args(&args);
     let count = try self.place_words(&args.words);
     index = 0;
     while args.floats.get(index) |reg| {
@@ -298,14 +408,7 @@ fn (self: &var Selector) select_c_call(module: &ir::Module, node: &ir::InstrNode
     if sret != reg_none() {
         try self.mov(8, sret);
     }
-    var symbol = string::new(self.allocator);
-    defer symbol.deinit(self.allocator);
-    let name_text = ir::name_text(&module.names, symbol_name);
-    let name_bytes = name_text.as_bytes();
-    try append_c_symbol(self.allocator, &var symbol, name_bytes);
-    let symbol_bytes = symbol.as_bytes();
-    let sym = try self.syms.intern(symbol_bytes);
-    try self.call_sym(sym, count, sret);
+    try self.call_c_callee(module, callee, count, sret);
     if !struct_result {
         try self.bind_result(module, result, reg_none(), true);
         return null;
