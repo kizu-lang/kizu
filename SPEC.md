@@ -2755,9 +2755,9 @@ extern "c" fn clock_gettime(clock: i32, out: &var Timespec) -> i32
   native target の C 呼び出し規約に従い、C compiler と同じく register か memory に
   載せます。compiler が従う規約は arm64(AAPCS64)、x86-64(System V)、Windows の
   x86-64(x64)で、それ以外では値渡しを含む call を build error にします。target を持たない LLVM
-  text は arm64 の規則で書きます。値渡しの struct を持つ C 関数は名前でだけ呼べ、
-  `extern "c" fn(...)` の値としては取り出せません。`export "c" fn` は struct を
-  値で受け取りません。
+  text は arm64 の規則で書きます。関数 pointer 型 `extern "c" fn(...)` も同じ綴りで
+  struct を値で受け取り・返し、pointer を通した call も同じ規約で渡ります(§12.4)。
+  `export "c" fn` は struct を値で受け取りません。
 * それ以外は通常の struct と同じです。literal で構築し、field を読み書きし、
   `ptr<S>` 経由なら `p.*.field` で触ります。
 
@@ -2862,9 +2862,9 @@ unsafe qsort(base, count, 8, ascending);
 
 * 値は `extern "c" fn` と `export "c" fn` の名前です。どちらの名前も `fn(...)` の値に
   はならず、Kizu の関数の名前は `extern "c" fn(...)` の値になりません。
-* 引数と結果は C が名指しできる型だけです。引数は `extern "c" fn` の宣言と同じく
-  `extern "c" struct` の borrow `&S` / `&var S` も取れ、C には struct への pointer
-  として渡ります(§12.2)。それ以外の borrow と値渡しの struct は取れません。
+* 引数と結果は C が名指しできる型だけです。`extern "c" fn` の宣言と同じく、
+  `extern "c" struct` を値で取り・返せ、引数には borrow `&S` / `&var S` も取れて
+  C には struct への pointer として渡ります(§12.2)。それ以外の borrow は取れません。
   型自身も C が名指しできる型なので、`extern "c" fn` / `export "c" fn` の
   引数・戻り値と `extern "c" struct` の field に置けます。
 * 呼び出しには `unsafe`(`extern_call`)が要ります。指す先が C かもしれないからです。

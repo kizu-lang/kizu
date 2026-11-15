@@ -27,9 +27,13 @@ source に出てくる。
   * それ以外の machine では値渡しを含む call を build error にする。
 * target を持たない LLVM text(`kizu check`、`--emit-llvm`、corpus)は arm64 Linux の
   規則で書く。
-* `extern "c" fn(...)` の関数 pointer 型は値渡しの struct を持てないままにする。
-  値渡しの struct を取る C 関数は名前でだけ呼べ、値としては取り出せない。
-* `export "c" fn` も struct を値で受け取らない。
+* `extern "c" fn(...)` の関数 pointer 型も struct を値で取り・返す。pointer を通した
+  call も同じ書き換えで渡すので、値渡しの struct を取る C 関数の名前も値になる。
+  address を実行時にしか得られない C 関数(`dlsym` で引く関数、method ごとに
+  signature へ cast して呼ぶ Objective-C runtime の `objc_msgSend`)は、これが
+  無いと呼べない。
+* `export "c" fn` は struct を値で受け取らない。だから値渡しの struct を持つ
+  関数 pointer の値は C 側の関数だけで、export 側の書き換えは要らない。
 
 ## 却下した案
 
@@ -38,4 +42,4 @@ source に出てくる。
 | 値渡しを拒否したままにする | 呼べない C API が残り、回避策が platform 依存を source に持ち込む |
 | C の shim を生成して clang に規約を任せる | build に C の compile が増え、生成物が見えない所で動く |
 | 整数に割って渡す標準 helper | 割り方が platform ごとに違い、利用者がそれを選ぶことになる |
-| 関数 pointer 経由の値渡しも同時に入れる | 間接 call と export 側の書き換えが要る。必要な例が出てから足す |
+| 関数 pointer 型では値渡しを拒否し、名前でだけ呼ばせる | address でしか得られない C 関数が呼べず、利用者が規約を手で再現することになる |
