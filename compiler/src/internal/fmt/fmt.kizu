@@ -48,6 +48,7 @@ struct Builder {
     source_line: i64,
     last_top_decl: token::Kind,
     has_last_top_decl: bool,
+    last_top_const: bool,
     comment_index: i64,
     block_stack: array::Array<BlockState>,
     after_comment: bool,
@@ -79,6 +80,7 @@ pub fn format(allocator: Allocator, source: []u8) -> !string::String {
         source_line: 0,
         last_top_decl: token::Kind::Illegal,
         has_last_top_decl: false,
+        last_top_const: false,
         comment_index: 0,
         block_stack: array::new<BlockState>(allocator),
         after_comment: false,
@@ -685,18 +687,27 @@ fn (self: &var Builder) maybe_blank_line_for_top_level(current: &token::Token) -
     if !self.is_top_level_decl_at_line_start(current) {
         return;
     }
+    let is_const = is_const_decl_start(current);
     if self.after_comment or !self.has_prev or self.out.len() == 0 {
         self.last_top_decl = current.kind;
         self.has_last_top_decl = true;
+        self.last_top_const = is_const;
         return;
     }
-    if !self.is_consecutive_import(current.kind) and !self.continues_attribute() and
-        !self.ends_with_blank_line() {
+    let consecutive_const = is_const and self.last_top_const;
+    if !self.is_consecutive_import(current.kind) and !consecutive_const and
+        !self.continues_attribute() and !self.ends_with_blank_line() {
         try self.out.append_byte(self.allocator, cast<u8>(10));
     }
     self.last_top_decl = current.kind;
     self.has_last_top_decl = true;
+    self.last_top_const = is_const;
     return;
+}
+
+fn is_const_decl_start(current: &token::Token) -> bool {
+    let literal = current.literal.as_bytes();
+    return current.kind == token::Kind::Ident and mem::equal_bytes(literal, "const");
 }
 
 fn (self: &Builder) continues_attribute() -> bool {
@@ -1522,7 +1533,8 @@ fn is_top_level_decl_start(current: &token::Token) -> bool {
     }
     if kind == token::Kind::Ident {
         let literal = current.literal.as_bytes();
-        return mem::equal_bytes(literal, "test") or mem::equal_bytes(literal, "error");
+        return mem::equal_bytes(literal, "test") or mem::equal_bytes(literal, "error") or
+            mem::equal_bytes(literal, "const");
     }
     return false;
 }

@@ -72,6 +72,7 @@ pub union DeclarationNode {
     Union(UnionDecl),
     Contract(ContractDecl),
     Impl(ImplDecl),
+    Const(ConstDecl),
     Recovered(RecoveredNode),
 }
 
@@ -81,6 +82,12 @@ pub struct RecoveredNode {
 
 pub struct ImportDecl {
     pub path: array::Array<Text>,
+}
+
+pub struct ConstDecl {
+    pub name: Text,
+    pub value: Expression,
+    pub span: Span,
 }
 
 pub struct FunctionSignature {
@@ -1425,6 +1432,12 @@ fn append_declaration(
         Union(value) => try append_union_decl(allocator, out, ast, value),
         Contract(value) => try append_contract_decl(allocator, out, ast, value),
         Impl(value) => try append_impl_decl(allocator, out, ast, value),
+        Const(value) => {
+            try out.append_bytes(allocator, "const ");
+            try append_text(allocator, out, ast, value.name);
+            try out.append_bytes(allocator, " = ");
+            try append_expression(allocator, out, ast, value.value);
+        },
         Recovered(_) => {},
     }
     return;
@@ -2938,4 +2951,65 @@ pub fn marker_value(ast: &Ast, value: Expression) -> ?Expression {
         Move(node) => return node.value,
         _ => return null,
     }
+}
+
+pub fn append_static_expr_text(
+    allocator: Allocator,
+    tree: &Ast,
+    expression: Expression,
+    out: &var string::String
+) -> !bool {
+    match tree.expressions.at(expression.node) {
+        Int(value) => {
+            try append_retained_text(allocator, out, tree.texts.at(value.value.node));
+            return true;
+        },
+        Ident(value) => {
+            try append_retained_text(allocator, out, tree.texts.at(value.name.node));
+            return true;
+        },
+        Prefix(value) => {
+            if !static_text_equal(tree, value.operator, "-") {
+                return false;
+            }
+            try out.append_bytes(allocator, "(0 - ");
+            if !try append_static_expr_text(allocator, tree, value.right, out) {
+                return false;
+            }
+            try out.append_bytes(allocator, ")");
+            return true;
+        },
+        Binary(value) => {
+            if !is_static_expr_operator(tree, value.operator) {
+                return false;
+            }
+            try out.append_bytes(allocator, "(");
+            if !try append_static_expr_text(allocator, tree, value.left, out) {
+                return false;
+            }
+            try out.append_bytes(allocator, " ");
+            try append_retained_text(allocator, out, tree.texts.at(value.operator.node));
+            try out.append_bytes(allocator, " ");
+            if !try append_static_expr_text(allocator, tree, value.right, out) {
+                return false;
+            }
+            try out.append_bytes(allocator, ")");
+            return true;
+        },
+        _ => return false,
+    }
+}
+
+fn static_text_equal(tree: &Ast, value: Text, expected: []u8) -> bool {
+    let retained = tree.texts.at(value.node);
+    let bytes = retained.as_bytes();
+    return mem::equal_bytes(bytes, expected);
+}
+
+fn is_static_expr_operator(tree: &Ast, operator: Text) -> bool {
+    return static_text_equal(tree, operator, "+") or
+        static_text_equal(tree, operator, "-") or
+        static_text_equal(tree, operator, "*") or
+        static_text_equal(tree, operator, "/") or
+        static_text_equal(tree, operator, "%");
 }

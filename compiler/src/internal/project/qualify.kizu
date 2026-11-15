@@ -131,6 +131,7 @@ fn (self: &var Loader) qualify_decl_form(
             }
         },
         Test(value) => return self.qualify_test_decl(tree, file, value),
+        Const(_) => return DeclarationResult::Skipped,
         Recovered(_) => return DeclarationResult::Declaration(declaration),
     }
 }
@@ -409,9 +410,21 @@ fn (self: &var Loader) qualify_function(
         span: decl.signature.span
     };
     errdefer signature.deinit(self.allocator);
+    var static_index = 0;
+    while decl.signature.static_params.at(static_index) |static_param| {
+        static_index = static_index + 1;
+        if try self.reject_const_shadow(tree, file, static_param.name, decl.signature.span) |failed| {
+            signature.deinit(self.allocator);
+            return FunctionResult::Failed(move failed);
+        }
+    }
     var index = 0;
     while decl.signature.params.at(index) |param| {
         index = index + 1;
+        if try self.reject_const_shadow(tree, file, param.name, param.span) |failed| {
+            signature.deinit(self.allocator);
+            return FunctionResult::Failed(move failed);
+        }
         var copied = param.*;
         let outcome = try self.resolve_type_node(self.allocator, tree, file, param.type_name);
         match outcome {
@@ -537,6 +550,9 @@ fn (self: &var Loader) qualify_stmt_form(
 ) -> !StatementResult {
     match tree.statements.at(stmt.node) {
         Let(value) => {
+            if try self.reject_const_shadow(tree, file, value.name, ast::zero_span()) |failed| {
+                return StatementResult::Failed(move failed);
+            }
             var node = value;
             if value.type_name |declared| {
                 let resolved = try self.resolve_type_node(self.allocator, tree, file, declared);
@@ -591,6 +607,9 @@ fn (self: &var Loader) qualify_stmt_form(
             };
         },
         While(value) => {
+            if try self.reject_const_shadow(tree, file, value.capture, ast::zero_span()) |failed| {
+                return StatementResult::Failed(move failed);
+            }
             var node = value;
             let outcome = try self.qualify_expr(tree, file, value.condition);
             match outcome {
@@ -670,6 +689,9 @@ fn (self: &var Loader) qualify_comptime_for_stmt(
     file: arena::Handle<ModuleFile>,
     stmt: ast::ComptimeForStmt
 ) -> !StatementResult {
+    if try self.reject_const_shadow(tree, file, stmt.name, ast::zero_span()) |failed| {
+        return StatementResult::Failed(move failed);
+    }
     var node = stmt;
     match stmt.iterable {
         List(list) => {
@@ -765,6 +787,12 @@ fn (self: &var Loader) qualify_if_stmt(
     file: arena::Handle<ModuleFile>,
     stmt: ast::IfStmt
 ) -> !IfResult {
+    if try self.reject_const_shadow(tree, file, stmt.capture, ast::zero_span()) |failed| {
+        return IfResult::Failed(move failed);
+    }
+    if try self.reject_const_shadow(tree, file, stmt.err_capture, ast::zero_span()) |failed| {
+        return IfResult::Failed(move failed);
+    }
     var node = stmt;
     let condition_outcome = try self.qualify_expr(tree, file, stmt.condition);
     match condition_outcome {
@@ -797,6 +825,9 @@ fn (self: &var Loader) qualify_for_stmt(
     file: arena::Handle<ModuleFile>,
     stmt: ast::ForStmt
 ) -> !StatementResult {
+    if try self.reject_const_shadow(tree, file, stmt.name, ast::zero_span()) |failed| {
+        return StatementResult::Failed(move failed);
+    }
     var node = stmt;
     let start_outcome = try self.qualify_expr(tree, file, stmt.start);
     match start_outcome {
@@ -876,6 +907,10 @@ fn (self: &var Loader) qualify_match_stmt(
             while source.at(index) |arm| {
                 index = index + 1;
                 var copied = arm.*;
+                if try self.reject_const_shadow(tree, file, arm.binding, ast::zero_span()) |failed| {
+                    node.deinit(self.allocator);
+                    return MatchResult::Failed(move failed);
+                }
                 if try self.resolve_match_arm_set(tree, file, arm.tag_set) |set_outcome| {
                     match set_outcome {
                         Name(resolved) => {
@@ -1023,6 +1058,7 @@ fn (self: &var Loader) qualify_type_or_control_expr(
 ) -> !ExpressionResult {
     match tree.expressions.at(expr.node) {
         TypeApply(value) => return self.qualify_type_apply_expr(tree, file, value),
+        Ident(value) => return self.qualify_const_ident(tree, file, expr, value),
         Type(value) => {
             let outcome = try self.resolve_text(tree, file, value.type_name);
             return match outcome {
@@ -1244,8 +1280,16 @@ fn (self: &var Loader) qualify_type_apply_expr(
                         let qualified = try self.qualify_function_name(file, arg);
                         defer qualified.deinit(self.allocator);
                         try out.append_string(self.allocator, &qualified);
-                    } else if staticexpr::is(arg_bytes) {
-                        try out.append_bytes(self.allocator, arg_bytes);
+                    } else if staticexpr::is(arg_bytes) or try self.names_const_text(file, arg_bytes) {
+                        let bound = try self.bind_const_static(tree, file, arg_bytes);
+                        match bound {
+                            Value(value) => try append_static_value(self.allocator, &var out, value),
+                            Unbound => try out.append_bytes(self.allocator, arg_bytes),
+                            Failed(failed) => {
+                                out.deinit(self.allocator);
+                                return ExpressionResult::Failed(move failed);
+                            },
+                        }
                     } else {
                         let outcome = try self.resolve_type(tree, file, arg_bytes);
                         match outcome {
@@ -1460,8 +1504,16 @@ fn (self: &var Loader) qualify_array_literal(
     file: arena::Handle<ModuleFile>,
     expr: &ast::BufferLiteralExpr
 ) -> !ExpressionResult {
+    let len_outcome = try self.bind_const_length_text(tree, file, expr.len);
+    var len = expr.len;
+    match len_outcome {
+        Text(bound) => {
+            len = bound;
+        },
+        Failed(failed) => return ExpressionResult::Failed(move failed),
+    }
     var node = ast::BufferLiteralExpr {
-        len: expr.len,
+        len: len,
         elem: expr.elem,
         elements: array::new<ast::Expression>(self.allocator),
         span: expr.span

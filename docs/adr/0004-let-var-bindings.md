@@ -26,4 +26,4 @@ var: 再代入できる束縛
 - move 済み `let` は再代入できないので使用不能のまま
 - move 済み `var` は新しい値を再代入すれば再び使用可能
 - 将来 `var` が一度も再代入されない場合は lint または check で警告してよい
-- `const` は将来の comptime constant 用に予約する余地を残す
+- `const` は module 直下の compile 時定数の綴りに使う(ADR-0155)
