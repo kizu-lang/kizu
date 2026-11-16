@@ -123,15 +123,11 @@ cache-prune: stage1
 # Regenerate the tables of the TLS specification from std::tls, then check them (spec/README.md).
 spec-table: stage1 && spec-verify
     {{kizu}} run spec/tls_machine.kizu | {{kizu}} run scripts/machine-lean/main.kizu -- spec/Tls.lean client server
-    {{kizu}} run spec/tls_machine.kizu | {{kizu}} run scripts/machine-quint/main.kizu -- spec/tls_client.qnt spec/tls_server.qnt
+    {{kizu}} run spec/tls_machine.kizu | {{kizu}} run scripts/machine-tla/main.kizu -- spec/tls_client.tla spec/tls_server.tla
 
-# Check every reachable state of the Quint machines with TLC (spec/README.md).
+# Check every reachable state of the TLA+ machines with TLC (spec/README.md).
 spec-verify:
     scripts/spec-verify.sh
-
-# Search random runs of the Quint machines for a broken property, without Java (spec/README.md).
-spec-quint:
-    scripts/spec-quint.sh
 
 # Test the internal/ir models, search them for a broken property, and resample the
 # programs compiler/ and internal/ir replay against the lowerer and the optimizer
