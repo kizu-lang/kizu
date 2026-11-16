@@ -43,7 +43,7 @@ tables="$(mktemp)"
 trap 'rm -f "$tables"' EXIT
 "$kizu" run spec/tls_machine.kizu > "$tables"
 "$kizu" run scripts/machine-lean/main.kizu -- -check spec/Tls.lean client server < "$tables"
-"$kizu" run scripts/machine-quint/main.kizu -- -check spec/tls_client.qnt spec/tls_server.qnt < "$tables"
+"$kizu" run scripts/machine-tla/main.kizu -- -check spec/tls_client.tla spec/tls_server.tla < "$tables"
 "$kizu" test scripts/machine-lean/main.kizu
-"$kizu" test scripts/machine-quint/main.kizu
+"$kizu" test scripts/machine-tla/main.kizu
 echo "spec tables: ok"

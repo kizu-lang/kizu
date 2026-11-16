@@ -15,22 +15,11 @@ pub struct Reader {
     stream: std::http::Stream,
     held: std::string::String,
     at: i64,
-    // How far the head scan has looked. A CRLF CRLF can straddle a read
-    // boundary, so this resumes three bytes back rather than at the end --
-    // which is what keeps the scan linear over the head instead of quadratic
-    // in the number of reads.
     scanned: i64,
-    // What is left of this message's body, so a read stops at the end of it
-    // rather than running on into whatever follows. Bounded at zero is a
-    // message with no body at all; unbounded is a caller that took the
-    // connection over.
     owed: i64,
     bounded: bool,
     chunked: bool,
     chunks: std::http::ChunkState,
-    // The fields behind a chunked body's terminator, read by the head's parser
-    // once the decoder reaches them. They wait here until the owner of this
-    // reader moves them to the message they belong to.
     trailers: std::http::Headers,
     limits: std::http::Limits,
 }
@@ -96,7 +85,6 @@ fn (self: &var std::http::Reader) compact(
     try self.copy_held(allocator, from, end, &var tail);
     self.held.clear();
     self.at = 0;
-    // The bytes moved, so a scan that resumes has to start over with them.
     self.scanned = 0;
     try self.take_tail(allocator, &tail);
     return;
@@ -451,10 +439,6 @@ fn (self: &var std::http::Reader) read_trailers(
 ) -> std::http::Failure!bool {
     let found = try self.find_trailers();
     if found |length| {
-        // Staged through a local: parsing reads the buffer and writes the
-        // trailers, which are two borrows of `self` in one expression
-        // (docs/language-gaps.md). The section is bounded by `max_head_bytes`,
-        // so the copy is bounded too.
         var block = std::string::new(allocator);
         defer block.deinit(allocator);
         let from = self.at;
@@ -479,8 +463,6 @@ fn (self: &var std::http::Reader) find_trailers() -> std::http::Failure!?i64 {
     if length - at >= 2 and bytes[at] == cast<u8>(13) and bytes[at + 1] == cast<u8>(10) {
         return 2;
     }
-    // The section is bounded the way the head is. Without a ceiling a peer
-    // could send fields forever after saying it was done.
     let ceiling = self.limits.max_head_bytes;
     let found = std::http::head_end(bytes, self.scanned);
     if found |end| {
@@ -551,8 +533,6 @@ fn (self: &var std::http::Reader) decode(
     return take;
 }
 
-// take_chunks is the decoder called with the buffer as its source. It is a
-// free function because the state and the bytes are two different borrows.
 fn take_chunks(
     allocator: Allocator,
     chunks: &var std::http::ChunkState,

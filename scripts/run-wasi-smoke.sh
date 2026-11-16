@@ -129,6 +129,9 @@ env-ok
 
 run_example "hello" "examples/hello.kizu" "hello, kizu"
 run_example "functions" "examples/functions.kizu" "3"
+run_example "float_bits_f32" "examples/float_bits_f32.kizu" "3217031168
+1.0
+true"
 run_example "slice_checked_access" "examples/slice_checked_access.kizu" "98
 98
 99"

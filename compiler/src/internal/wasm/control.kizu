@@ -1320,10 +1320,12 @@ fn wasm_bool(names: &ir::NameTable, value: ir::Name) -> []u8 {
 fn (self: &var Emitter) float_const_expr(module: &ir::Module, node: &ir::InstrNode) -> !?ir::Name {
     let literal_text = ir::name_text(&module.names, node.immediate);
     let literal = literal_text.as_bytes();
-    var value = try typ::parse_float_literal(self.allocator, literal) orelse return null;
     let narrow = module.names.is(node.result.type_name, "f32");
+    var value = 0.0;
     if narrow {
-        value = cast<f64>(cast<f32>(value));
+        value = try typ::parse_f32_literal(self.allocator, literal) orelse return null;
+    } else {
+        value = try typ::parse_float_literal(self.allocator, literal) orelse return null;
     }
     var out = string::new(self.allocator);
     errdefer out.deinit(self.allocator);
@@ -1533,13 +1535,25 @@ fn (self: &var Emitter) write_float_bits(
     let value = try self.arg_expr(module, node, 0);
     var expression = string::new(self.allocator);
     errdefer expression.deinit(self.allocator);
-    if node.op == ir::Op::FloatBits {
-        try expression.append_bytes(self.allocator, "(i64.reinterpret_f64 ");
+    let narrow = module.names.is(node.result.type_name, "u32") or module.names.is(node.result.type_name, "f32");
+    if node.op == ir::Op::FloatBits and narrow {
+        try expression.append_bytes(self.allocator, "(i64.extend_i32_u (i32.reinterpret_f32 ");
     } else {
-        try expression.append_bytes(self.allocator, "(f64.reinterpret_i64 ");
+        if node.op == ir::Op::FloatBits {
+            try expression.append_bytes(self.allocator, "(i64.reinterpret_f64 ");
+        } else {
+            if narrow {
+                try expression.append_bytes(self.allocator, "(f32.reinterpret_i32 (i32.wrap_i64 ");
+            } else {
+                try expression.append_bytes(self.allocator, "(f64.reinterpret_i64 ");
+            }
+        }
     }
     try self.names.append_to(&var expression, value);
     try expression.append_byte(self.allocator, cast<u8>(41));
+    if narrow {
+        try expression.append_byte(self.allocator, cast<u8>(41));
+    }
     let expr = try self.names.intern_owned(move expression);
     return self.write_scalar_result(module, node.result, expr);
 }

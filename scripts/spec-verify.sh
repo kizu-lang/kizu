@@ -1,31 +1,34 @@
 #!/usr/bin/env bash
-# Checks every reachable state of the generated Quint machines with TLC, through
-# `quint verify --backend=tlc`. Unlike spec-quint.sh this is exhaustive, and it needs
-# Java: the one on PATH, or else the JDK from nixpkgs. Without either it fails, since
-# skipping would read as a pass. A machine that can never connect would satisfy the
-# properties about connecting, so notConnected has to be broken.
+# Checks every reachable state of the generated TLA+ machines with TLC. It takes
+# tlc from PATH, or else from nixpkgs' tlaplus, which brings its own JDK; without
+# either it fails, since skipping would read as a pass. A machine that can never
+# connect would satisfy the properties about connecting, so notConnected has to
+# be broken.
 set -euo pipefail
 cd "$(dirname "$0")/../spec"
 
-if ! java -version > /dev/null 2>&1; then
-    if ! command -v nix > /dev/null || ! jdk=$(nix build --no-link --print-out-paths nixpkgs#jdk21_headless); then
-        echo "spec-verify: needs Java or nix" >&2
+if ! command -v tlc > /dev/null; then
+    if ! command -v nix > /dev/null || ! tlaplus=$(nix build --no-link --print-out-paths nixpkgs#tlaplus); then
+        echo "spec-verify: needs tlc or nix" >&2
         exit 1
     fi
-    export PATH="$jdk/bin:$PATH" JAVA_HOME="$jdk"
+    export PATH="$tlaplus/bin:$PATH"
 fi
 
-trap 'rm -rf _apalache-out' EXIT
-quint=(npx -y @informalsystems/quint@0.33.0)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
 
 verify() {
-    "${quint[@]}" verify --backend=tlc --main="$1" --invariant="$2" tls_properties.qnt 2>&1
+    printf 'SPECIFICATION Spec\nINVARIANT %s\n' "$2" > "$work/$1.cfg"
+    tlc -config "$work/$1.cfg" -metadir "$work/states" -workers 1 "$1.tla" 2>&1
 }
 
 for check in \
+    tls_client_properties:TypeOK \
     tls_client_properties:connectedOnlyByFinished \
     tls_client_properties:closedStaysClosed \
     tls_client_properties:dataNeedsConnection \
+    tls_server_properties:TypeOK \
     tls_server_properties:connectedOnlyByFinished \
     tls_server_properties:closedStaysClosed; do
     main=${check%%:*}
@@ -44,7 +47,7 @@ for main in tls_client_properties tls_server_properties; do
         echo "spec-verify: $main: the connected state is unreachable" >&2
         exit 1
     fi
-    if ! echo "$output" | grep -q '\[violation\]'; then
+    if ! echo "$output" | grep -q 'Invariant notConnected is violated'; then
         echo "$output"
         echo "spec-verify: $main: TLC did not finish" >&2
         exit 1

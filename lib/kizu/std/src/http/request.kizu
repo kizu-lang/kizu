@@ -125,9 +125,6 @@ pub fn parse_request_head(
     return move request;
 }
 
-// parse_request_head_into fills a request that already exists. A connection
-// serving more than one request parses into the same one rather than building
-// a new one per message.
 fn parse_request_head_into(
     allocator: Allocator,
     request: &var std::http::Request,
@@ -139,9 +136,6 @@ fn parse_request_head_into(
     return;
 }
 
-// allows_keep_alive reports whether this request lets the connection carry
-// another. HTTP/1.1 is persistent unless it says `close`; HTTP/1.0 is the
-// other way round and has to ask.
 fn allows_keep_alive(request: &std::http::Request) -> bool {
     let closing = std::http::header_has_token(&request.headers, "Connection", "close");
     if closing {
@@ -154,8 +148,6 @@ fn allows_keep_alive(request: &std::http::Request) -> bool {
     };
 }
 
-// parse_request_line reads `METHOD SP TARGET SP HTTP/1.x CRLF` and answers with
-// where the header fields start.
 fn parse_request_line(
     allocator: Allocator,
     request: &var std::http::Request,
@@ -189,10 +181,6 @@ fn parse_request_line(
     return line_end + 2;
 }
 
-// A token that is not shaped like a version at all is a malformed request
-// line; one that is, and names a version this does not speak, is the other
-// failure. The two are different answers to different questions
-// (docs/principles.md §7), and only the second is worth a 505.
 fn parse_version(text: []u8) -> std::http::Failure!std::http::Version {
     if std::mem::equal_bytes(text, "HTTP/1.1") {
         return std::http::Version::Http11;
@@ -206,9 +194,6 @@ fn parse_version(text: []u8) -> std::http::Failure!std::http::Version {
     return std::http::Error::MalformedRequest;
 }
 
-// valid_target refuses a target with a byte no URI may carry. A space would
-// have ended the target already; a control byte would let the request line be
-// forged into two.
 fn valid_target(target: []u8) -> bool {
     let length = std::mem::len(target);
     var index = 0;
@@ -222,12 +207,6 @@ fn valid_target(target: []u8) -> bool {
     return true;
 }
 
-// parse_header_fields reads `NAME ":" OWS VALUE OWS CRLF` lines until the
-// blank one. A request head and a response head differ only in their first
-// line, so both read their fields here.
-// A line that starts with space or tab is a folded continuation, which RFC
-// 9110 removed from the protocol: it is refused rather than joined, because
-// joining it is what lets one header be smuggled inside another.
 fn parse_header_fields(
     allocator: Allocator,
     headers: &var std::http::Headers,
@@ -281,9 +260,6 @@ fn parse_field(
     return;
 }
 
-// trim_ows drops the optional whitespace HTTP allows around a header value.
-// It is space and tab only: `std::mem::trim_ascii` would also eat CR and LF,
-// and those cannot be inside a value that has already been split on CRLF.
 fn trim_ows(value: []u8) -> []u8 {
     let length = std::mem::len(value);
     var start = 0;
@@ -321,9 +297,6 @@ pub fn read_head(
     while true {
         let found = scan_head(buffer, scanned);
         if found |end| {
-            // The ceiling is on the head, not on what one read happened to
-            // bring: a head that arrived whole in one packet is still too
-            // large if it is past the limit.
             if end > limits.max_head_bytes {
                 return std::http::Error::HeadTooLarge;
             }
@@ -332,9 +305,6 @@ pub fn read_head(
         if buffer.len() >= limits.max_head_bytes {
             return std::http::Error::HeadTooLarge;
         }
-        // A CRLF CRLF can straddle the boundary by at most three bytes, so
-        // resuming three back is what makes the scan linear over the head
-        // rather than quadratic in the number of reads.
         scanned = buffer.len() - 3;
         if scanned < 0 {
             scanned = 0;
@@ -347,8 +317,6 @@ pub fn read_head(
     return std::http::Error::Incomplete;
 }
 
-// scan_head keeps the borrow of the buffer inside one call, so the read that
-// grows it next is free to take the buffer mutably.
 fn scan_head(buffer: &std::string::String, from: i64) -> ?i64 {
     let bytes = buffer.as_bytes();
     return head_end(bytes, from);
