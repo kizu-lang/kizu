@@ -23,7 +23,7 @@ compiler/            shipping する Kizu 製 compiler(pin した種が build �
     source, token, lexer, parser, ast   入力 text・字句・構文・AST
     typ                           型の綴りを 1 度だけ parse した形(文字列手術の代わり)
     types, ownership              型検査・所有権/借用検査
-    ir, arm64, llvm, wasm, native typed SSA IR と各 backend(arm64 は direct backend。x86-64 も持つ)
+    ir, direct, llvm, wasm, native typed SSA IR と各 backend(direct は arm64 と x86-64 を持つ)
     msl                           `export "gpu"` の kernel を Metal Shading Language の text にする
     hostabi                       runtime を呼ぶ C 署名(native backend 共通)
     project, manifest             パッケージ/モジュール解決(std も含む)、kizu.toml
@@ -55,7 +55,7 @@ source.kizu   (module は compiler/src/internal/ 以下)
   → build target を types / ownership / IR の comptime evaluator へ渡す
   → types(型)→ ownership(所有権)
   → ir(typed SSA)→ target の entry / export から到達可能性を閉じる
-                  → arm64(direct)→ Mach-O / ELF / COFF の object → clang driver で link
+                  → direct → Mach-O / ELF / COFF の object → clang driver で link
                                     (darwin-arm64 / linux-amd64 / windows-amd64)
                   → llvm → clang(他の native target と `--backend llvm`)
                   → wasm → 共通 WebAssembly module
@@ -69,7 +69,7 @@ source.kizu   (module は compiler/src/internal/ 以下)
 `run` と `test` は生成した実行ファイルを走らせます。経路は 1 本で、interpreter は
 ありません(ADR-0083)。挙動の正は例そのものが末尾に書いた case が持ちます。
 
-native の backend は target ごとに 1 つです(SPEC §5)。direct backend(`arm64`)は
+native の backend は target ごとに 1 つです(SPEC §5)。direct backend(`internal/direct`)は
 IR から命令を選んで仮想レジスタの機械 IR にし(arm64 / amd64)、ループのベクトル化と
 線形スキャンのレジスタ割り当てをして、arch ごとに 1 つのエンコーダが byte 列を
 共有の object バッファに書きます。形式で変わるのは書き出し層(Mach-O / ELF / COFF)

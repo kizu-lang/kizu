@@ -1,10 +1,3 @@
-// ECDSA over P-256 with SHA-256 and over P-384 with SHA-384, as TLS
-// 1.3 meets them: the signature on a certificate, or on the handshake
-// transcript, checked against a public key by a client and made with a
-// private key by a server. The nonce a signature needs is derived from
-// the key and the digest as RFC 6979 says, so no signature ever repeats
-// a nonce and none needs a source of randomness.
-
 const max_curve_bytes = 48;
 const max_point_bytes = (1 + max_curve_bytes * 2);
 const max_curve_limbs = (max_curve_bytes / 4);
@@ -88,8 +81,6 @@ fn ecdsa_verify(curve: Curve, public_key: []u8, digest: []u8, signature: []u8) -
         return false;
     }
 
-    // u1 = e / s and u2 = r / s mod n, computed in Montgomery form and
-    // brought back out.
     var sm_buffer = [max_curve_limbs]u64{};
     var w_buffer = [max_curve_limbs]u64{};
     var t_buffer = [max_curve_limbs]u64{};
@@ -127,8 +118,6 @@ fn ecdsa_verify(curve: Curve, public_key: []u8, digest: []u8, signature: []u8) -
     if is_infinity(result, count) {
         return false;
     }
-    // The signature is valid when the x of the result, taken mod n, is
-    // r. x is below p < 2n, so at most one subtraction of n is needed.
     var rx_buffer = [max_curve_limbs]u64{};
     let rx = rx_buffer.as_mut_slice();
     affine_x(rx, result, field_view);
@@ -178,11 +167,6 @@ pub fn ecdsa_p384_sign(private_key: []u8, digest: []u8, signature: &var []u8) ->
     return;
 }
 
-// ecdsa_sign is FIPS 186-4 §6.4.1 with the nonce of RFC 6979 §3.2. The
-// digest is as long as the order, so bits2int of it is the number it
-// spells, and one HMAC output is one candidate nonce. A candidate
-// outside 1..n-1, or one that makes r or s zero, is passed over as the
-// RFC says, by stirring the HMAC state once more.
 fn ecdsa_sign(curve: Curve, hash: Hash, private_key: []u8, digest: []u8, signature: &var []u8) -> Error!void {
     let bytes = curve_bytes(curve);
     let count = bytes / 4;
@@ -212,8 +196,6 @@ fn ecdsa_sign(curve: Curve, hash: Hash, private_key: []u8, digest: []u8, signatu
     reduce_below_order(e, n, count);
     let e_view = e[0..count];
 
-    // The HMAC state: V of ones, K of zeros, then K and V stirred with
-    // the key and the digest under separators 00 and 01.
     var v_buffer = [max_curve_bytes]u8{};
     var k_buffer = [max_curve_bytes]u8{};
     var tail_buffer = [max_point_bytes]u8{};
@@ -249,8 +231,6 @@ fn ecdsa_sign(curve: Curve, hash: Hash, private_key: []u8, digest: []u8, signatu
     let zero = zero_buffer.as_bytes();
     var found = false;
     while !found {
-        // T = HMAC_K(V) is one candidate, since the digest is as long
-        // as the order.
         hmac_kv(hash, k, v, bytes, "", next);
         for 0..bytes |index| {
             v[index] = next[index];
@@ -285,11 +265,6 @@ fn ecdsa_sign(curve: Curve, hash: Hash, private_key: []u8, digest: []u8, signatu
     return;
 }
 
-// stir is one round of RFC 6979 §3.2 steps d through g, and of step h
-// when a candidate is passed over: K becomes the HMAC under K of V and
-// `tail` (a separator and key material, or one 00 byte when a candidate
-// is passed over), and V becomes the HMAC under the new K of V. K and V
-// are the first `length` bytes of their buffers.
 fn stir(hash: Hash, k: &var []u8, v: &var []u8, length: i64, tail: []u8) -> void {
     var next_buffer = [max_curve_bytes]u8{};
     let next = next_buffer.as_mut_bytes();
@@ -304,8 +279,6 @@ fn stir(hash: Hash, k: &var []u8, v: &var []u8, length: i64, tail: []u8) -> void
     return;
 }
 
-// hmac_kv writes HMAC_K(V || tail) to the front of `out`, with K and V
-// the first `length` bytes of their buffers.
 fn hmac_kv(hash: Hash, k: []u8, v: []u8, length: i64, tail: []u8, out: &var []u8) -> void {
     let k_key = k[0..length];
     let v_message = v[0..length];
@@ -313,9 +286,6 @@ fn hmac_kv(hash: Hash, k: []u8, v: []u8, length: i64, tail: []u8, out: &var []u8
     return;
 }
 
-// signature_parts writes r = x(k G) mod n and s = (e + r d) / k mod n
-// for the nonce k, the key d, and the digest e, all below n. Either
-// may be zero, which the caller passes over.
 fn signature_parts(
     curve: Curve,
     nonce: []u64,
@@ -342,7 +312,6 @@ fn signature_parts(
     scalar_mul_secret(result, nonce, generator, field, order);
     affine_x(r, result, field);
     reduce_below_order(r, n, count);
-    // s = (e + r d) / k, in Montgomery form mod n.
     var km_buffer = [max_curve_limbs]u64{};
     var inverse_buffer = [max_curve_limbs]u64{};
     var dm_buffer = [max_curve_limbs]u64{};
@@ -367,8 +336,6 @@ fn signature_parts(
     return;
 }
 
-// reduce_below_order brings a number below 2n below n, choosing by mask
-// whether n comes off.
 fn reduce_below_order(o: &var []u64, n: []u64, count: i64) -> void {
     var less_buffer = [max_curve_limbs]u64{};
     let less = less_buffer.as_mut_slice();
