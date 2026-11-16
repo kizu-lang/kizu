@@ -1,20 +1,9 @@
-// A private key as a key file carries it, read from DER. Three shapes
-// are in use, and all are read: PKCS #8 (RFC 5958's PrivateKeyInfo,
-// what `openssl genpkey` and most tools write), the bare SEC 1
-// ECPrivateKey (RFC 5915, "EC PRIVATE KEY"), and the bare PKCS #1
-// RSAPrivateKey (RFC 8017 §A.1.2, "RSA PRIVATE KEY"). What comes out is
-// the P-256 or P-384 scalar, or the parts of the RSA key, as spans into
-// the DER; the bytes stay the caller's, and where they came from and
-// how long they live is the caller's to decide.
-
 // A PrivateKey is what `parse_private_key` read: which kind of key, and
 // where its parts lie in the DER.
 pub struct PrivateKey {
     der: []u8,
     pub algorithm: std::crypto::x509::KeyAlgorithm,
-    // The EC private scalar's OCTET STRING content, 32 or 48 bytes.
     scalar: std::crypto::x509::Element,
-    // The RSAPrivateKey INTEGERs an RSA signature needs.
     modulus: std::crypto::x509::Element,
     public_exponent: std::crypto::x509::Element,
     prime1: std::crypto::x509::Element,
@@ -55,10 +44,6 @@ pub fn parse_private_key(der: []u8) -> std::crypto::x509::Error!std::crypto::x50
     return Error::Malformed;
 }
 
-// read_pkcs8 reads what follows the version of a PrivateKeyInfo: the
-// AlgorithmIdentifier `algorithm` (an OID and, for EC, the curve's OID
-// as parameters), then the OCTET STRING holding the algorithm's own key
-// structure. Attributes and a public key may follow and are skipped.
 fn read_pkcs8(der: []u8, algorithm: std::crypto::x509::Element, limit: i64) -> std::crypto::x509::Error!std::crypto::x509::PrivateKey {
     let oid = try std::crypto::x509::expect_element(der, algorithm.start, algorithm.end, std::crypto::x509::tag_oid());
     let key = try std::crypto::x509::expect_element(der, algorithm.end, limit, std::crypto::x509::tag_octet_string());
@@ -84,7 +69,6 @@ fn read_pkcs8(der: []u8, algorithm: std::crypto::x509::Element, limit: i64) -> s
     return Error::Unsupported;
 }
 
-// curve_of names the curve an OID is, or Unsupported.
 fn curve_of(der: []u8, oid: std::crypto::x509::Element) -> std::crypto::x509::KeyAlgorithm {
     if std::crypto::x509::content_is_hex(der, oid, oid_prime256v1()) {
         return KeyAlgorithm::EcdsaP256;
@@ -95,11 +79,6 @@ fn curve_of(der: []u8, oid: std::crypto::x509::Element) -> std::crypto::x509::Ke
     return KeyAlgorithm::Unsupported;
 }
 
-// read_ec_private_key reads `ECPrivateKey ::= SEQUENCE { version 1,
-// privateKey OCTET STRING, parameters [0] OID OPTIONAL, publicKey [1]
-// BIT STRING OPTIONAL }` filling `outer`. The curve is the parameters'
-// when present, else `known` from the PKCS #8 wrapper; both present must
-// agree. The scalar must be exactly as long as the curve's order.
 fn read_ec_private_key(
     der: []u8,
     outer: std::crypto::x509::Element,
@@ -151,10 +130,6 @@ fn read_ec_private_key(
     };
 }
 
-// read_rsa_private_key reads `RSAPrivateKey ::= SEQUENCE { version 0,
-// modulus, publicExponent, privateExponent, prime1, prime2, exponent1,
-// exponent2, coefficient INTEGER }` filling `outer`. A version of 1
-// means more primes follow, which is Unsupported.
 fn read_rsa_private_key(der: []u8, outer: std::crypto::x509::Element) -> std::crypto::x509::Error!std::crypto::x509::PrivateKey {
     let version = try std::crypto::x509::expect_element(der, outer.start, outer.end, std::crypto::x509::tag_integer());
     if version.end - version.start != 1 {
@@ -268,10 +243,6 @@ pub fn sign(
     return move out;
 }
 
-// append_ecdsa_signature appends `SEQUENCE { r INTEGER, s INTEGER }` for
-// r and s given as `width` bytes each: each INTEGER is its value in the
-// fewest bytes, with a leading zero when the top bit is set so it does
-// not read as negative. Both fit in one-byte lengths.
 fn append_ecdsa_signature(allocator: Allocator, out: &var std::string::String, raw: []u8, width: i64) -> std::mem::Error!void {
     let r = without_leading_zeros(raw[0..width]);
     let s = without_leading_zeros(raw[width..width * 2]);
@@ -284,8 +255,6 @@ fn append_ecdsa_signature(allocator: Allocator, out: &var std::string::String, r
     return;
 }
 
-// integer_length is how many content bytes a positive INTEGER takes:
-// one for zero, the value's bytes, and one more when the top bit is set.
 fn integer_length(value: []u8) -> i64 {
     let count = std::mem::len(value);
     if count == 0 {

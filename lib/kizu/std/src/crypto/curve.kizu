@@ -1,24 +1,8 @@
-// The NIST curves P-256 and P-384 (FIPS 186-4 §D.1.2, SEC 2 secp256r1
-// and secp384r1), as far as a signature needs them: each
-// curve's field prime p and group order n as moduli for the arithmetic
-// in limbs.kizu, its constant b and generator G, and point addition and
-// doubling in Jacobian coordinates, which take the modulus view of p
-// and read their width from it -- eight limbs for P-256, twelve for
-// P-384. Both curves have a = -3, so one set of formulas serves.
-//
-// Verifying works on public data -- a certificate's key, a signature,
-// a digest -- and `point_add` and `scalar_mul_add` branch on values
-// freely. Signing multiplies the generator by a secret nonce, and
-// `scalar_mul_secret` with `point_add_secret` take the same time and
-// touch the same addresses whatever the nonce is.
-
-// Curve names one of the two curves.
 enum Curve {
     P256,
     P384,
 }
 
-// curve_bytes is how many bytes a coordinate or a scalar takes.
 fn curve_bytes(curve: Curve) -> i64 {
     return match curve {
         P256 => 32,
@@ -26,7 +10,6 @@ fn curve_bytes(curve: Curve) -> i64 {
     };
 }
 
-// fill_field writes the modulus view for the field prime p.
 fn fill_field(o: &var []u64, curve: Curve) -> void {
     var p_buffer = [12]u64{};
     let p = p_buffer.as_mut_slice();
@@ -43,7 +26,6 @@ fn fill_field(o: &var []u64, curve: Curve) -> void {
     return;
 }
 
-// fill_order writes the modulus view for the group order n.
 fn fill_order(o: &var []u64, curve: Curve) -> void {
     var n_buffer = [12]u64{};
     let n = n_buffer.as_mut_slice();
@@ -60,7 +42,6 @@ fn fill_order(o: &var []u64, curve: Curve) -> void {
     return;
 }
 
-// curve_b is the constant b of y^2 = x^3 - 3x + b.
 fn curve_b(curve: Curve) -> []u8 {
     return match curve {
         P256 => "5ac635d8 aa3a93e7 b3ebbd55 769886bc 651d06b0 cc53b0f6 3bce3c3e 27d2604b",
@@ -71,7 +52,6 @@ fn curve_b(curve: Curve) -> []u8 {
     };
 }
 
-// generator_x and generator_y are the affine coordinates of G.
 fn generator_x(curve: Curve) -> []u8 {
     return match curve {
         P256 => "6b17d1f2 e12c4247 f8bce6e5 63a440f2 77037d81 2deb33a0 f4a13945 d898c296",
@@ -92,9 +72,6 @@ fn generator_y(curve: Curve) -> []u8 {
     };
 }
 
-// A point is 3 count limbs: Jacobian X, Y, Z in Montgomery form, where
-// the affine point is (X / Z^2, Y / Z^3) and Z = 0 is the point at
-// infinity. `count` is the width the modulus view gives.
 fn point_x(p: []u64, count: i64) -> []u64 {
     return p[0..count];
 }
@@ -119,11 +96,6 @@ fn copy_point(o: &var []u64, p: []u64, count: i64) -> void {
     return;
 }
 
-// point_double writes 2P. The formulas are for a = -3 (Bernstein and
-// Lange's dbl-2001-b): with delta = Z^2 and gamma = Y^2,
-// alpha = 3 (X - delta) (X + delta) and beta = X gamma, then
-// X' = alpha^2 - 8 beta, Z' = (Y + Z)^2 - gamma - delta, and
-// Y' = alpha (4 beta - X') - 8 gamma^2.
 fn point_double(o: &var []u64, p: []u64, m: []u64) -> void {
     let count = count_of(m);
     let x = point_x(p, count);
@@ -151,20 +123,17 @@ fn point_double(o: &var []u64, p: []u64, m: []u64) -> void {
     mont_mul(t3, t1, t2, m);
     mod_add(t1, t3, t3, m);
     mod_add(alpha, t1, t3, m);
-    // X' = alpha^2 - 8 beta
     mont_mul(t1, alpha, alpha, m);
     mod_add(t2, beta, beta, m);
     mod_add(t3, t2, t2, m);
     mod_add(t2, t3, t3, m);
     mod_sub(t3, t1, t2, m);
     copy_limbs(o, 0, t3, count);
-    // Z' = (Y + Z)^2 - gamma - delta
     mod_add(t1, y, z, m);
     mont_mul(t2, t1, t1, m);
     mod_sub(t1, t2, gamma, m);
     mod_sub(t2, t1, delta, m);
     copy_limbs(o, count * 2, t2, count);
-    // Y' = alpha (4 beta - X') - 8 gamma^2
     mod_add(t1, beta, beta, m);
     mod_add(t2, t1, t1, m);
     mod_sub(t1, t2, t3, m);
@@ -178,12 +147,6 @@ fn point_double(o: &var []u64, p: []u64, m: []u64) -> void {
     return;
 }
 
-// point_add writes P + Q (Bernstein and Lange's add-2007-bl): with
-// U1 = X1 Z2^2, U2 = X2 Z1^2, S1 = Y1 Z2^3, S2 = Y2 Z1^3, H = U2 - U1,
-// I = (2H)^2, J = H I, r = 2 (S2 - S1), V = U1 I, then
-// X3 = r^2 - J - 2V, Y3 = r (V - X3) - 2 S1 J, and
-// Z3 = ((Z1 + Z2)^2 - Z1^2 - Z2^2) H. Either point at infinity gives the
-// other; equal points double, and opposite points give infinity.
 fn point_add(o: &var []u64, p: []u64, q: []u64, m: []u64) -> void {
     let count = count_of(m);
     if is_infinity(p, count) {
@@ -207,9 +170,6 @@ fn point_add(o: &var []u64, p: []u64, q: []u64, m: []u64) -> void {
     return;
 }
 
-// point_add_secret is `point_add` for points that are secrets: the
-// general formula, the doubling, and infinity are all computed, and the
-// masks of the cases pick which is written.
 fn point_add_secret(o: &var []u64, p: []u64, q: []u64, m: []u64) -> void {
     let count = count_of(m);
     var general_buffer = [36]u64{};
@@ -226,8 +186,6 @@ fn point_add_secret(o: &var []u64, p: []u64, q: []u64, m: []u64) -> void {
     let q_z = point_z(q, count);
     let p_infinite = zero_mask(p_z);
     let q_infinite = zero_mask(q_z);
-    // Same x and y: double. Same x, other y: infinity. Either infinite:
-    // the other. The later choices override the earlier.
     select_limbs(o, doubled, general, same_x & same_y, count * 3);
     select_limbs(general, infinity, o, same_x & (same_y ^ all_ones()), count * 3);
     select_limbs(o, p, general, q_infinite, count * 3);
@@ -236,10 +194,6 @@ fn point_add_secret(o: &var []u64, p: []u64, q: []u64, m: []u64) -> void {
     return;
 }
 
-// point_add_general writes what the addition formula makes of P and Q,
-// which is P + Q unless they share an x or either is infinity, and
-// reports what it met: bit 0 is set when H = 0 (same x), bit 1 when
-// r = 0 (same y). It never branches on the coordinates.
 fn point_add_general(o: &var []u64, p: []u64, q: []u64, m: []u64) -> u64 {
     let count = count_of(m);
     let x1 = point_x(p, count);
@@ -294,20 +248,17 @@ fn point_add_general(o: &var []u64, p: []u64, q: []u64, m: []u64) -> u64 {
     mont_mul(i, t1, t1, m);
     mont_mul(j, h, i, m);
     mont_mul(v, u1, i, m);
-    // X3 = r^2 - J - 2V
     mont_mul(t1, r, r, m);
     mod_sub(t2, t1, j, m);
     mod_add(t1, v, v, m);
     mod_sub(t3, t2, t1, m);
     copy_limbs(o, 0, t3, count);
-    // Y3 = r (V - X3) - 2 S1 J
     mod_sub(t1, v, t3, m);
     mont_mul(t2, r, t1, m);
     mont_mul(t1, s1, j, m);
     mod_add(t3, t1, t1, m);
     mod_sub(t1, t2, t3, m);
     copy_limbs(o, count, t1, count);
-    // Z3 = ((Z1 + Z2)^2 - Z1Z1 - Z2Z2) H
     mod_add(t1, z1, z2, m);
     mont_mul(t2, t1, t1, m);
     mod_sub(t1, t2, z1z1, m);
@@ -317,8 +268,6 @@ fn point_add_general(o: &var []u64, p: []u64, q: []u64, m: []u64) -> u64 {
     return flags;
 }
 
-// point_from_affine writes the Jacobian point for affine (x, y) given as
-// plain numbers: Montgomery form with Z = 1.
 fn point_from_affine(o: &var []u64, x: []u64, y: []u64, m: []u64) -> void {
     let count = count_of(m);
     var t_buffer = [12]u64{};
@@ -335,8 +284,6 @@ fn point_from_affine(o: &var []u64, x: []u64, y: []u64, m: []u64) -> void {
     return;
 }
 
-// affine_x writes the plain affine x of a point that is not infinity:
-// X / Z^2, out of Montgomery form.
 fn affine_x(o: &var []u64, p: []u64, m: []u64) -> void {
     let count = count_of(m);
     let x = point_x(p, count);
@@ -352,10 +299,6 @@ fn affine_x(o: &var []u64, p: []u64, m: []u64) -> void {
     return;
 }
 
-// scalar_mul_add writes k1 P1 + k2 P2 for plain scalars k1 and k2 below
-// n, by doubling and adding from the top bit down with P1 + P2 held
-// ready for the bits where both are set (Straus and Shamir). The
-// scalars are public here, so the branches on their bits are too.
 fn scalar_mul_add(o: &var []u64, k1: []u64, p1: []u64, k2: []u64, p2: []u64, m: []u64) -> void {
     let count = count_of(m);
     var both_buffer = [36]u64{};
@@ -391,13 +334,6 @@ fn scalar_mul_add(o: &var []u64, k1: []u64, p1: []u64, k2: []u64, p2: []u64, m: 
     return;
 }
 
-// scalar_mul_secret writes k P for a secret scalar k below the order n,
-// taking the same time and touching the same addresses whatever k is.
-// The scalar is first made k + n or k + 2n, whichever has one bit more
-// than n, so the ladder runs a fixed number of steps from a top bit that
-// is set. The ladder (Montgomery's) keeps R0 and R1 = R0 + P, and each
-// bit adds them and doubles one; which one is chosen by swapping under
-// the bit's mask before and after. `order` is the modulus view of n.
 fn scalar_mul_secret(o: &var []u64, k: []u64, p: []u64, m: []u64, order: []u64) -> void {
     let count = count_of(m);
     let n = modulus_of(order);
@@ -441,8 +377,6 @@ fn scalar_mul_secret(o: &var []u64, k: []u64, p: []u64, m: []u64, order: []u64) 
     return;
 }
 
-// on_curve reports whether plain affine (x, y), both below p, satisfy
-// y^2 = x^3 - 3x + b.
 fn on_curve(curve: Curve, x: []u64, y: []u64, m: []u64) -> bool {
     var xm_buffer = [12]u64{};
     var ym_buffer = [12]u64{};
@@ -462,9 +396,7 @@ fn on_curve(curve: Curve, x: []u64, y: []u64, m: []u64) -> bool {
     to_mont(ym, y, m);
     limbs_of_hex(b, 0, curve_b(curve));
     to_mont(bm, b, m);
-    // left = y^2
     mont_mul(t1, ym, ym, m);
-    // right = x^3 - 3x + b
     mont_mul(t2, xm, xm, m);
     mont_mul(t3, t2, xm, m);
     mod_sub(t2, t3, xm, m);

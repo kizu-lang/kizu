@@ -1,28 +1,7 @@
-// Arithmetic on numbers too wide for a word, modulo an odd modulus: what
-// a curve's field and group order need, and what an RSA modulus needs.
-// A number is a run of limbs of 32 bits held in `u64`, low limb first;
-// a product of two limbs fits in 64 bits exactly, which is what
-// Montgomery multiplication a limb at a time needs and the only reason
-// for the width. A number is as wide as its modulus, up to `max_limbs`;
-// a function that takes a modulus view reads that many limbs of its
-// inputs and writes that many of its output, and one that takes none
-// reads as many as its first input holds.
-//
-// Verifying works on public data -- a certificate's key, a signature,
-// a digest -- and branches on values freely. Signing works on a private
-// key and a nonce, and the functions it uses (`mont_mul` through
-// `reduce_once`, `mont_pow_secret`, `select_limbs`, `swap_limbs`) take
-// the same time and touch the same addresses whatever the values are:
-// a choice is made with a mask, never with a branch.
-
-// max_limbs is the widest modulus, 4096 bits.
 fn max_limbs() -> i64 {
     return 128;
 }
 
-// A modulus travels as one view of 2 count + 1 limbs: the modulus
-// itself, then R^2 mod m for entering Montgomery form, then
-// -m^-1 mod 2^32, where R = 2^(32 count).
 fn count_of(m: []u64) -> i64 {
     return (std::mem::count<u64>(m) - 1) / 2;
 }
@@ -36,13 +15,6 @@ fn r_squared_of(m: []u64) -> []u64 {
     return m[count..count * 2];
 }
 
-// fill_modulus writes the modulus view for the odd modulus `n` to the
-// first 2 count + 1 limbs of `o`. The inverse of the low limb is
-// Newton's, doubling its correct bits five times from the one bit an
-// odd number has. R mod n, the Montgomery form of 1, is reached by
-// doubling the power of two just below n; R^2 mod n, the form of
-// 2^(32 count), by squaring and doubling the form of 1 along the bits
-// of 32 count.
 fn fill_modulus(o: &var []u64, n: []u64) -> void {
     let count = std::mem::count<u64>(n);
     if count > max_limbs() or count == 0 or n[0] & 1 == 0 {
@@ -70,8 +42,6 @@ fn fill_modulus(o: &var []u64, n: []u64) -> void {
         copy_limbs(r, 0, next, count);
         doublings = doublings - 1;
     }
-    // r is R mod n. Each bit of the exponent 32 count, from the top,
-    // squares and, when set, doubles.
     let exponent = count * 32;
     var bit = bit_length_of(exponent) - 1;
     while bit >= 0 {
@@ -87,7 +57,6 @@ fn fill_modulus(o: &var []u64, n: []u64) -> void {
     return;
 }
 
-// bit_length is the number of bits a number takes, 0 for zero.
 fn bit_length(a: []u64) -> i64 {
     var limb = std::mem::count<u64>(a) - 1;
     while limb >= 0 {
@@ -109,9 +78,6 @@ fn bit_length_of(value: i64) -> i64 {
     return bits;
 }
 
-// limbs_of_hex writes the number a big-endian hex text spells to the
-// limbs starting at `at`, eight digits a limb, skipping spaces and line
-// breaks.
 fn limbs_of_hex(o: &var []u64, at: i64, hex: []u8) -> void {
     var digits = 0;
     for 0..std::mem::len(hex) |index| {
@@ -139,7 +105,6 @@ fn limbs_of_hex(o: &var []u64, at: i64, hex: []u8) -> void {
     return;
 }
 
-// limbs_of_bytes reads big-endian bytes, four a limb, into limbs.
 fn limbs_of_bytes(o: &var []u64, bytes: []u8) -> void {
     let count = std::mem::len(bytes) / 4;
     for 0..count |limb| {
@@ -152,7 +117,6 @@ fn limbs_of_bytes(o: &var []u64, bytes: []u8) -> void {
     return;
 }
 
-// bytes_of_limbs writes limbs as big-endian bytes, four a limb.
 fn bytes_of_limbs(o: &var []u8, limbs: []u64) -> void {
     let count = std::mem::count<u64>(limbs);
     for 0..count |limb| {
@@ -189,7 +153,6 @@ fn equal_limbs(a: []u64, b: []u64) -> bool {
     return differ == 0;
 }
 
-// less_than reports a < b as numbers of a's width.
 fn less_than(a: []u64, b: []u64) -> bool {
     var limb = std::mem::count<u64>(a) - 1;
     while limb >= 0 {
@@ -201,7 +164,6 @@ fn less_than(a: []u64, b: []u64) -> bool {
     return false;
 }
 
-// subtract_limbs writes a - b and returns the borrow out of the top.
 fn subtract_limbs(o: &var []u64, a: []u64, b: []u64) -> u64 {
     var borrow = cast<u64>(0);
     for 0..std::mem::count<u64>(a) |index| {
@@ -212,7 +174,6 @@ fn subtract_limbs(o: &var []u64, a: []u64, b: []u64) -> u64 {
     return borrow;
 }
 
-// add_limbs writes a + b and returns the carry out of the top.
 fn add_limbs(o: &var []u64, a: []u64, b: []u64) -> u64 {
     var carry = cast<u64>(0);
     for 0..std::mem::count<u64>(a) |index| {
@@ -223,8 +184,6 @@ fn add_limbs(o: &var []u64, a: []u64, b: []u64) -> u64 {
     return carry;
 }
 
-// subtract_in_place writes o - b over o and returns the borrow out of
-// the top.
 fn subtract_in_place(o: &var []u64, b: []u64) -> u64 {
     var borrow = cast<u64>(0);
     for 0..std::mem::count<u64>(b) |index| {
@@ -235,7 +194,6 @@ fn subtract_in_place(o: &var []u64, b: []u64) -> u64 {
     return borrow;
 }
 
-// add_in_place writes o + b over o, dropping the carry out of the top.
 fn add_in_place(o: &var []u64, b: []u64) -> void {
     var carry = cast<u64>(0);
     for 0..std::mem::count<u64>(b) |index| {
@@ -246,10 +204,6 @@ fn add_in_place(o: &var []u64, b: []u64) -> void {
     return;
 }
 
-// reduce_once brings a sum that is below 2m, with `carry` its bit above
-// the top limb, below m: m is taken off, and put back when that
-// borrowed with nothing to borrow from. The putting back is masked, not
-// branched, so the time does not say whether the sum was below m.
 fn reduce_once(o: &var []u64, carry: u64, m: []u64) -> void {
     let modulus = modulus_of(m);
     let borrow = subtract_in_place(o, modulus);
@@ -258,17 +212,14 @@ fn reduce_once(o: &var []u64, carry: u64, m: []u64) -> void {
     return;
 }
 
-// mask_of is all ones for a flag of 1 and all zeros for 0.
 fn mask_of(flag: u64) -> u64 {
     return 0 - flag;
 }
 
-// nonzero_flag is 1 when `value` is not zero, without a branch.
 fn nonzero_flag(value: u64) -> u64 {
     return (value | (0 - value)) >> 63;
 }
 
-// zero_mask is all ones when every limb of `a` is zero.
 fn zero_mask(a: []u64) -> u64 {
     var all = cast<u64>(0);
     for 0..std::mem::count<u64>(a) |index| {
@@ -277,8 +228,6 @@ fn zero_mask(a: []u64) -> u64 {
     return mask_of(1 - nonzero_flag(all));
 }
 
-// add_masked_in_place writes o + (b & mask) over o, dropping the carry
-// out of the top: o + b when the mask is all ones, o when it is zero.
 fn add_masked_in_place(o: &var []u64, b: []u64, mask: u64) -> void {
     var carry = cast<u64>(0);
     for 0..std::mem::count<u64>(b) |index| {
@@ -289,8 +238,6 @@ fn add_masked_in_place(o: &var []u64, b: []u64, mask: u64) -> void {
     return;
 }
 
-// select_limbs writes `count` limbs of a when the mask is all ones and
-// of b when it is zero.
 fn select_limbs(o: &var []u64, a: []u64, b: []u64, mask: u64, count: i64) -> void {
     for 0..count |index| {
         o[index] = (a[index] & mask) | (b[index] & (mask ^ all_ones()));
@@ -298,8 +245,6 @@ fn select_limbs(o: &var []u64, a: []u64, b: []u64, mask: u64, count: i64) -> voi
     return;
 }
 
-// swap_limbs exchanges `count` limbs of a and b when the mask is all
-// ones and leaves them when it is zero.
 fn swap_limbs(a: &var []u64, b: &var []u64, mask: u64, count: i64) -> void {
     for 0..count |index| {
         let t = (a[index] ^ b[index]) & mask;
@@ -313,7 +258,6 @@ fn all_ones() -> u64 {
     return 0 - cast<u64>(1);
 }
 
-// mod_add writes a + b mod m for a and b below m.
 fn mod_add(o: &var []u64, a: []u64, b: []u64, m: []u64) -> void {
     let count = count_of(m);
     let carry = add_limbs(o, a[0..count], b[0..count]);
@@ -321,7 +265,6 @@ fn mod_add(o: &var []u64, a: []u64, b: []u64, m: []u64) -> void {
     return;
 }
 
-// mod_sub writes a - b mod m for a and b below m.
 fn mod_sub(o: &var []u64, a: []u64, b: []u64, m: []u64) -> void {
     let count = count_of(m);
     let borrow = subtract_limbs(o, a[0..count], b[0..count]);
@@ -329,9 +272,6 @@ fn mod_sub(o: &var []u64, a: []u64, b: []u64, m: []u64) -> void {
     return;
 }
 
-// reduce_wide writes a mod m for `a` of 2 count limbs, through Montgomery
-// form: with a = hi R + lo, the form of a is the product of hi and R^2
-// taken twice, plus the form of lo.
 fn reduce_wide(o: &var []u64, a: []u64, m: []u64) -> void {
     let count = count_of(m);
     let r_squared = r_squared_of(m);
@@ -351,8 +291,6 @@ fn reduce_wide(o: &var []u64, a: []u64, m: []u64) -> void {
     return;
 }
 
-// mul_limbs_wide writes the 2 count limbs of a * b for a and b of
-// `count` limbs each.
 fn mul_limbs_wide(o: &var []u64, a: []u64, b: []u64, count: i64) -> void {
     for 0..count * 2 |index| {
         o[index] = 0;
@@ -369,10 +307,6 @@ fn mul_limbs_wide(o: &var []u64, a: []u64, b: []u64, count: i64) -> void {
     return;
 }
 
-// mont_mul writes a * b / R mod m, the Montgomery product, a limb at a
-// time (Koç, Acar, Kaliski's CIOS): after each limb of b is multiplied
-// in, a multiple of m that clears the low limb is added and the sum is
-// shifted down one limb.
 fn mont_mul(o: &var []u64, a: []u64, b: []u64, m: []u64) -> void {
     let count = count_of(m);
     let modulus = modulus_of(m);
@@ -406,14 +340,12 @@ fn mont_mul(o: &var []u64, a: []u64, b: []u64, m: []u64) -> void {
     return;
 }
 
-// to_mont writes a * R mod m, the Montgomery form of a < m.
 fn to_mont(o: &var []u64, a: []u64, m: []u64) -> void {
     let r_squared = r_squared_of(m);
     mont_mul(o, a, r_squared, m);
     return;
 }
 
-// from_mont writes the number a Montgomery form stands for.
 fn from_mont(o: &var []u64, a: []u64, m: []u64) -> void {
     var one_buffer = [128]u64{};
     let one = one_buffer.as_mut_slice();
@@ -422,12 +354,6 @@ fn from_mont(o: &var []u64, a: []u64, m: []u64) -> void {
     return;
 }
 
-// mont_pow writes the Montgomery form of a^e, for `a` in Montgomery
-// form and `e` as big-endian bytes, squaring and multiplying from the
-// top bit down. Squaring and multiplying alternate between two buffers,
-// since no product writes where it reads. The bits of e choose with a
-// branch, so e must be public: a verifying exponent, or a modulus less
-// two for an inverse.
 fn mont_pow(o: &var []u64, a: []u64, e: []u8, m: []u64) -> void {
     let count = count_of(m);
     var acc_buffer = [128]u64{};
@@ -454,9 +380,6 @@ fn mont_pow(o: &var []u64, a: []u64, e: []u8, m: []u64) -> void {
     return;
 }
 
-// mont_pow_secret is `mont_pow` for an exponent that is a secret: every
-// bit squares and multiplies, and the mask of the bit picks which of the
-// two results is kept.
 fn mont_pow_secret(o: &var []u64, a: []u64, e: []u8, m: []u64) -> void {
     let count = count_of(m);
     var acc_buffer = [128]u64{};
@@ -483,9 +406,6 @@ fn mont_pow_secret(o: &var []u64, a: []u64, e: []u8, m: []u64) -> void {
     return;
 }
 
-// mont_inverse writes the Montgomery form of the inverse of the number
-// `a` is the Montgomery form of, by raising to m - 2: m is prime, so
-// that is Fermat's inverse.
 fn mont_inverse(o: &var []u64, a: []u64, m: []u64) -> void {
     let count = count_of(m);
     var exponent_buffer = [128]u64{};
