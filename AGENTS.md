@@ -61,6 +61,8 @@ CLI は `run` / `check` / `test` / `parse` が中核で、`build` / `ir` / `fmt`
   receiver method の直前に空行なしで付いた `//` ブロックだけを契約として残します。
   内部宣言への説明、本体の中の理由、行末のコメントは書きません。何が公開型の
   method に当たるかは `scripts/comment-lint/check.py` が定義します。
+  `std::internal` は外向けの API ではないので、その下の `pub` 宣言は契約に
+  含めません。
 - `examples/` や `tests/` の末尾ブロック、corpus の期待値のように機械が読む
   コメント形の行はコメントではなくテストデータなので、この規則の外です。
 - これは自前のコードの運用ルールで、言語仕様ではありません。`SPEC.md` には

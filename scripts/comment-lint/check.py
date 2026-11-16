@@ -18,7 +18,8 @@ Every file:
   - `// SAFETY:` passes, at the start of a line or after code.
   - every other `//` fails, at the start of a line or after code.
 
-A file under lib/kizu/std/src/ additionally lets a contract comment pass:
+A file under lib/kizu/std/src/, outside lib/kizu/std/src/internal/,
+additionally lets a contract comment pass:
 a block of consecutive line-start `//` lines (`//` alone and `///` lines
 included) whose next line, with no blank line between, is a contract
 declaration:
@@ -33,7 +34,9 @@ declaration:
     does not declare, makes the method internal.
 Any other comment in std fails like in compiler/src: one on an internal
 declaration, one inside a body, one after code, and one followed by a
-blank line or the end of the file.
+blank line or the end of the file. std::internal is not an outward API,
+so a file under lib/kizu/std/src/internal/ takes the compiler/src rule
+whole: a `//` block above a `pub` declaration fails there too.
 """
 
 import argparse
@@ -42,6 +45,7 @@ import re
 import sys
 
 STD_PREFIX = "lib/kizu/std/src/"
+STD_INTERNAL_PREFIX = STD_PREFIX + "internal/"
 
 TYPE_DECL = re.compile(r"^(pub\s+)?(?:unsafe\s+)?(?:struct|enum|union|error)\s+([A-Za-z_][A-Za-z0-9_]*)")
 RECEIVER = re.compile(r"^(?:unsafe\s+)?fn\s*\(\s*self\s*:\s*(?:&\s*(?:var\s+)?)?([A-Za-z_][A-Za-z0-9_:]*)")
@@ -159,7 +163,7 @@ def check_file(root, path, types):
     comments = scan_comments(source)
     normalized = path.replace(os.sep, "/")
     allowed = set()
-    if normalized.startswith(STD_PREFIX):
+    if normalized.startswith(STD_PREFIX) and not normalized.startswith(STD_INTERNAL_PREFIX):
         own_module = os.path.dirname(normalized[len(STD_PREFIX):])
         allowed = contract_lines(source.split("\n"), comments, types, own_module)
     violations = []

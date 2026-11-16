@@ -5,7 +5,8 @@
 
 fixtures/ is laid out like the repository, so a file's path decides its
 rule the same way it does for the real tree: compiler/src/ takes the strict
-rule, lib/kizu/std/src/ also lets a contract comment pass. The docstring of
+rule, lib/kizu/std/src/ also lets a contract comment pass, and
+lib/kizu/std/src/internal/ takes the strict rule again. The docstring of
 check.py defines the rule; every case it names has a line here.
 """
 
@@ -62,6 +63,14 @@ class Failing(unittest.TestCase):
             (40, "comment"),
         ])
 
+    def test_std_internal_refuses_contracts(self):
+        self.assertEqual(lint(FIXTURES, "lib/kizu/std/src/internal/inner/inner.kizu"), [
+            (1, "comment"),
+            (3, "comment"),
+            (7, "comment"),
+            (12, "comment"),
+        ])
+
 
 class Mutations(unittest.TestCase):
     def setUp(self):
@@ -103,6 +112,14 @@ class Mutations(unittest.TestCase):
         shutil.copy(os.path.join(self.root, self.path), target)
         lines = [line for line, _ in lint(self.root, "compiler/src/good/good.kizu")]
         self.assertEqual(lines, [1, 3, 7, 8, 9, 14, 19, 24, 29, 34, 39])
+
+
+    def test_same_file_out_of_internal_passes(self):
+        source = "lib/kizu/std/src/internal/inner/inner.kizu"
+        target = os.path.join(self.root, "lib/kizu/std/src/inner")
+        os.makedirs(target)
+        shutil.copy(os.path.join(self.root, source), target)
+        self.assertEqual(lint(self.root, "lib/kizu/std/src/inner/inner.kizu"), [])
 
 
 class Main(unittest.TestCase):
