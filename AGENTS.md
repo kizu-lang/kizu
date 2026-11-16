@@ -55,13 +55,20 @@ CLI は `run` / `check` / `test` / `parse` が中核で、`build` / `ir` / `fmt`
 コードが何をするかは名前で、何を約束するかはテストと lint で分かるようにします。
 なぜそう書いたかの理由・背景は commit message に書きます。
 
-- 例外は unsafe の正当化だけです。`// SAFETY:` と、言語が unsafe 宣言に要求する
-  `///` は書きます。短く、前提だけを書きます。
+- 例外の 1 つ目は unsafe の正当化です。`// SAFETY:` と、言語が unsafe 宣言に
+  要求する `///` は書きます。短く、前提だけを書きます。
+- 例外の 2 つ目は `lib/kizu/std` の公開 API の契約です。`pub` 宣言と、公開型の
+  receiver method の直前に空行なしで付いた `//` ブロックだけを契約として残します。
+  内部宣言への説明、本体の中の理由、行末のコメントは書きません。何が公開型の
+  method に当たるかは `scripts/comment-lint/check.py` が定義します。
+  `std::internal` は外向けの API ではないので、その下の `pub` 宣言は契約に
+  含めません。
 - `examples/` や `tests/` の末尾ブロック、corpus の期待値のように機械が読む
   コメント形の行はコメントではなくテストデータなので、この規則の外です。
 - これは自前のコードの運用ルールで、言語仕様ではありません。`SPEC.md` には
   持ち込みません。
-- pre-commit hook `no-code-comments` が新しいコメントを止めます。まだコメントを
+- pre-commit hook `no-code-comments`(`scripts/comment-lint/check.py`、検査は
+  同じ場所の `test.py`)が新しいコメントを止めます。まだコメントを
   消していないディレクトリは hook の `exclude` に並んでいて、消した PR が
   その行を外します。
 
