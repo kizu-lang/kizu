@@ -1,11 +1,3 @@
-// RSA signatures, as TLS 1.3 meets them: PKCS #1 v1.5 on a certificate,
-// and PSS on a certificate or on the handshake transcript (RFC 8017 §8),
-// checked by a client and made by a server. A public key is its modulus
-// and exponent as big-endian bytes, as a certificate's
-// SubjectPublicKeyInfo carries them; a private key is `RsaPrivateKey`,
-// the parts of an RSAPrivateKey (RFC 8017 §A.1.2) the Chinese remainder
-// form of signing needs. A modulus is at most 4096 bits.
-
 // RsaPrivateKey is an RSA private key as its parts, each big-endian
 // bytes: the modulus n and public exponent e, the primes p and q,
 // the exponents dP = d mod (p - 1) and dQ = d mod (q - 1), and the
@@ -123,14 +115,6 @@ pub fn rsa_pss_sign(hash: Hash, key: &RsaPrivateKey, digest: []u8, salt: []u8, s
     return;
 }
 
-// sign_encoded writes encoded^d mod n, by the Chinese remainder theorem
-// (RFC 8017 §5.2.1 b): m^dP mod p and m^dQ mod q, joined with the
-// coefficient. Each part is `half` limbs, half the modulus rounded up.
-// The private exponents are raised with `mont_pow_secret`, so the time
-// does not depend on them. The result is checked against the public
-// exponent before it is written: a key whose parts disagree, or a fault
-// in the arithmetic, would otherwise hand out a signature that leaks
-// the primes.
 fn sign_encoded(key: &RsaPrivateKey, n_bytes: []u8, encoded: []u8, signature: &var []u8) -> Error!void {
     let length = std::mem::len(n_bytes);
     if n_bytes[length - 1] & 1 == 0 {
@@ -186,7 +170,6 @@ fn sign_encoded(key: &RsaPrivateKey, n_bytes: []u8, encoded: []u8, signature: &v
     power_of_wide(xp, m_wide, dp_bytes, mp_view);
     power_of_wide(xq, m_wide, dq_bytes, mq_view);
 
-    // h = qInv (xp - xq) mod p, with xq brought below p first.
     var t_buffer = [130]u64{};
     var u_buffer = [130]u64{};
     var h_buffer = [130]u64{};
@@ -210,14 +193,12 @@ fn sign_encoded(key: &RsaPrivateKey, n_bytes: []u8, encoded: []u8, signature: &v
     mont_mul(u, h, t, mp_view);
     from_mont(h, u, mp_view);
 
-    // s = xq + h q, which is below n.
     var s_buffer = [130]u64{};
     let s = s_buffer.as_mut_slice();
     let h_view = h[0..half];
     mul_limbs_wide(s, h_view, q_view, half);
     add_in_place(s, xq_wide);
 
-    // The check: s^e mod n must be the encoded message.
     var n_buffer = [130]u64{};
     let n = n_buffer.as_mut_slice();
     limbs_of_padded_bytes(n, n_bytes, count);
@@ -253,8 +234,6 @@ fn fits_half(bytes: []u8, half: i64) -> bool {
     return length > 0 and length <= half * 4;
 }
 
-// power_of_wide writes (a mod m)^e mod m for `a` of twice the modulus
-// width and a secret exponent `e`.
 fn power_of_wide(o: &var []u64, a: []u64, e: []u8, m: []u64) -> void {
     var t_buffer = [130]u64{};
     var u_buffer = [130]u64{};
@@ -267,10 +246,6 @@ fn power_of_wide(o: &var []u64, a: []u64, e: []u8, m: []u64) -> void {
     return;
 }
 
-// pkcs1_encode writes the EMSA-PKCS1-v1_5 encoding of `digest` (RFC
-// 8017 §9.2) as `length` bytes: 00 01, ff to fill, 00, the DER
-// DigestInfo naming the hash, and the digest. It reports false when
-// the length leaves fewer than eight ff.
 fn pkcs1_encode(out: &var []u8, length: i64, hash: Hash, digest: []u8) -> bool {
     let prefix = digest_info(hash);
     let prefix_length = std::mem::len(prefix) / 2;
@@ -295,12 +270,6 @@ fn pkcs1_encode(out: &var []u8, length: i64, hash: Hash, digest: []u8) -> bool {
     return true;
 }
 
-// pss_encode writes the EMSA-PSS encoding of `digest` with `salt` (RFC
-// 8017 §9.1.1) as `length` bytes: the encoded message is one bit
-// narrower than the modulus and sits at the low end, zeros before it.
-// H is the hash of eight zeros, the digest, and the salt; the data
-// block is zeros, 01, and the salt, masked with MGF1 over H; then H and
-// bc. It reports false when the modulus is too narrow.
 fn pss_encode(out: &var []u8, length: i64, modulus_bits: i64, hash: Hash, digest: []u8, salt: []u8) -> bool {
     let hash_length = std::mem::len(digest);
     let salt_length = std::mem::len(salt);
@@ -347,10 +316,6 @@ fn pss_encode(out: &var []u8, length: i64, modulus_bits: i64, hash: Hash, digest
     return true;
 }
 
-// recover_encoded writes the encoded message a signature stands for,
-// signature^exponent mod modulus, as as many bytes as the modulus has
-// once its leading zeros are dropped, and returns that length; 0 when
-// the key or the signature is not one this can check.
 fn recover_encoded(modulus: []u8, exponent: []u8, signature: []u8, out: &var []u8) -> i64 {
     let n_bytes = without_leading_zeros(modulus);
     let e_bytes = without_leading_zeros(exponent);
@@ -401,8 +366,6 @@ fn recover_encoded(modulus: []u8, exponent: []u8, signature: []u8, out: &var []u
     return length;
 }
 
-// limbs_of_padded_bytes reads big-endian bytes into `count` limbs,
-// taking the bytes as the low end of 4 count.
 fn limbs_of_padded_bytes(o: &var []u64, bytes: []u8, count: i64) -> void {
     var padded_buffer = [520]u8{};
     let padded = padded_buffer.as_mut_bytes();
@@ -423,7 +386,6 @@ fn without_leading_zeros(bytes: []u8) -> []u8 {
     return bytes[at..std::mem::len(bytes)];
 }
 
-// bit_length_of_bytes is the number of bits a big-endian number takes.
 fn bit_length_of_bytes(bytes: []u8) -> i64 {
     let digits = without_leading_zeros(bytes);
     let length = std::mem::len(digits);
@@ -433,9 +395,6 @@ fn bit_length_of_bytes(bytes: []u8) -> i64 {
     return (length - 1) * 8 + bit_length_of(cast<i64>(digits[0]));
 }
 
-// pkcs1_encoded reports whether an encoded message is what EMSA-PKCS1-v1_5
-// makes of `digest` (RFC 8017 §9.2): 00 01, at least eight ff, 00, the
-// DER DigestInfo naming the hash, and the digest.
 fn pkcs1_encoded(message: []u8, hash: Hash, digest: []u8) -> bool {
     let prefix = digest_info(hash);
     let prefix_length = std::mem::len(prefix) / 2;
@@ -461,8 +420,6 @@ fn pkcs1_encoded(message: []u8, hash: Hash, digest: []u8) -> bool {
     return std::mem::equal_bytes(message[length - std::mem::len(digest)..length], digest);
 }
 
-// digest_info is the DER DigestInfo prefix of RFC 8017 §9.2 note 1 for
-// a hash, as hex.
 fn digest_info(hash: Hash) -> []u8 {
     return match hash {
         Sha256 => "3031300d060960864801650304020105000420",
@@ -471,7 +428,6 @@ fn digest_info(hash: Hash) -> []u8 {
     };
 }
 
-// matches_hex reports whether bytes are what a hex text spells.
 fn matches_hex(bytes: []u8, hex: []u8) -> bool {
     if std::mem::len(bytes) * 2 != std::mem::len(hex) {
         return false;
@@ -486,11 +442,6 @@ fn matches_hex(bytes: []u8, hex: []u8) -> bool {
     return true;
 }
 
-// pss_encoded reports whether an encoded message is one EMSA-PSS could
-// have made of `digest` (RFC 8017 §9.1.2): the encoded message is one
-// bit narrower than the modulus, ends in bc, and holds the masked data
-// block and H; the block unmasked with MGF1 over H is zeros, 01, and
-// the salt, and H is the hash of eight zeros, the digest, and the salt.
 fn pss_encoded(message: []u8, modulus_bits: i64, hash: Hash, digest: []u8) -> bool {
     let hash_length = std::mem::len(digest);
     let salt_length = hash_length;
@@ -530,7 +481,6 @@ fn pss_encoded(message: []u8, modulus_bits: i64, hash: Hash, digest: []u8) -> bo
     if block[salt_at - 1] != 1 {
         return false;
     }
-    // M' = eight zeros, the digest, the salt; its hash must be H.
     var prime_buffer = [136]u8{};
     let prime = prime_buffer.as_mut_bytes();
     for 0..hash_length |index| {
@@ -547,9 +497,6 @@ fn pss_encoded(message: []u8, modulus_bits: i64, hash: Hash, digest: []u8) -> bo
     return std::mem::equal_bytes(got, h);
 }
 
-// mgf1 writes `length` bytes of the mask generation function of RFC 8017
-// §B.2.1 over `seed`: the hashes of the seed followed by a big-endian
-// counter, from 0, concatenated and cut.
 fn mgf1(hash: Hash, seed: []u8, out: &var []u8, length: i64) -> void {
     let hash_length = digest_length(hash);
     var input_buffer = [68]u8{};

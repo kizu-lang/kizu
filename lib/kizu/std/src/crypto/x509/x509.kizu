@@ -1,14 +1,3 @@
-// std::crypto::x509 reads the certificates a TLS server presents and
-// decides whether they vouch for the host it claims to be: each is
-// signed by the next, the last by a root the program trusts, the first
-// names the host, and all are in date. What a certificate says is read
-// from its DER (RFC 5280) and left there: a Certificate is spans into the
-// bytes it was parsed from, and holds no copy.
-//
-// The keys and signatures understood are the ones std::crypto has --
-// P-256 keys and ECDSA with SHA-256 -- and a certificate with another
-// kind is `Error::Unsupported`, said and not guessed.
-
 // Error is what parsing and verifying can fail with. `Malformed` is DER
 // that is not a certificate; `Unsupported` is a certificate this reader
 // cannot judge -- another key or signature kind, or a critical extension
@@ -52,9 +41,6 @@ pub enum SignatureAlgorithm {
     Unsupported,
 }
 
-// An RsaKey is where an RSA public key's modulus and exponent lie in
-// the DER of `RSAPublicKey ::= SEQUENCE { modulus INTEGER,
-// publicExponent INTEGER }`.
 struct RsaKey {
     modulus: std::crypto::x509::Element,
     exponent: std::crypto::x509::Element,
@@ -80,7 +66,6 @@ pub struct Certificate {
     signature_end: i64,
     // Whether basicConstraints says this certificate may sign others.
     pub is_ca: bool,
-    // The subjectAltName extension's SEQUENCE, or an empty span.
     alt_names: std::crypto::x509::Element,
 }
 
@@ -98,8 +83,6 @@ pub fn parse(der: []u8) -> std::crypto::x509::Error!std::crypto::x509::Certifica
         return Error::Malformed;
     }
 
-    // TBSCertificate: an optional explicit version, then the fields in
-    // order (RFC 5280 §4.1).
     var at = tbs.start;
     var version = 1;
     var first = try std::crypto::x509::read_element(der, at, tbs.end);
@@ -131,7 +114,6 @@ pub fn parse(der: []u8) -> std::crypto::x509::Error!std::crypto::x509::Certifica
     let not_after = try std::crypto::x509::time_value(der, not_after_element);
     let subject = try std::crypto::x509::expect_element(der, validity.end, tbs.end, std::crypto::x509::tag_sequence());
 
-    // SubjectPublicKeyInfo: an AlgorithmIdentifier and the key bits.
     let spki = try std::crypto::x509::expect_element(der, subject.end, tbs.end, std::crypto::x509::tag_sequence());
     let key_algorithm_element = try std::crypto::x509::expect_element(der, spki.start, spki.end, std::crypto::x509::tag_sequence());
     let key_oid = try std::crypto::x509::expect_element(der, key_algorithm_element.start, key_algorithm_element.end, std::crypto::x509::tag_oid());
@@ -158,8 +140,6 @@ pub fn parse(der: []u8) -> std::crypto::x509::Error!std::crypto::x509::Certifica
         key_algorithm = KeyAlgorithm::Rsa;
     }
 
-    // What follows the key: issuer and subject unique IDs, which are
-    // skipped, and the extensions of a version 3 certificate.
     at = spki.end;
     var is_ca = false;
     var alt_names = Element { tag: 0, head: 0, start: 0, end: 0 };
@@ -251,8 +231,6 @@ pub fn parse(der: []u8) -> std::crypto::x509::Error!std::crypto::x509::Certifica
     };
 }
 
-// read_basic_constraints reads `SEQUENCE { cA BOOLEAN DEFAULT FALSE,
-// pathLenConstraint INTEGER OPTIONAL }` and returns cA.
 fn read_basic_constraints(der: []u8, value: std::crypto::x509::Element) -> std::crypto::x509::Error!bool {
     let list = try std::crypto::x509::expect_element(der, value.start, value.end, std::crypto::x509::tag_sequence());
     if list.end != value.end {
@@ -271,15 +249,11 @@ fn read_basic_constraints(der: []u8, value: std::crypto::x509::Element) -> std::
     return der[first.start] != 0;
 }
 
-// known_extension reports the extensions a critical flag on which does
-// not make the certificate unreadable: they constrain uses this reader
-// does not make, or name keys it looks up by other means.
 fn known_extension(der: []u8, oid: std::crypto::x509::Element) -> bool {
     return std::crypto::x509::content_is_hex(der, oid, oid_key_usage())
         or std::crypto::x509::content_is_hex(der, oid, oid_extended_key_usage());
 }
 
-// Object identifiers, as the bytes of their DER content.
 fn oid_ec_public_key() -> []u8 {
     return "2a8648ce3d0201";
 }
@@ -383,7 +357,6 @@ pub fn (self: &std::crypto::x509::Certificate) matches_host(host: []u8) -> bool 
     return false;
 }
 
-// host_matches_pattern compares a host with one dNSName.
 fn host_matches_pattern(host: []u8, pattern: []u8) -> bool {
     let pattern_length = std::mem::len(pattern);
     let host_length = std::mem::len(host);
@@ -408,8 +381,6 @@ fn index_of_dot(text: []u8) -> ?i64 {
     return null;
 }
 
-// equal_ascii_fold compares two names with ASCII letters folded to one
-// case.
 fn equal_ascii_fold(a: []u8, b: []u8) -> bool {
     let count = std::mem::len(a);
     if count != std::mem::len(b) {
@@ -475,9 +446,6 @@ pub fn (self: &std::crypto::x509::Certificate) issued_by(issuer: &std::crypto::x
     }
 }
 
-// rsa_pkcs1_signature_verifies reports whether a certificate's RSA
-// PKCS #1 v1.5 signature over `signed` is valid under the issuer's
-// `RSAPublicKey` DER; a key of another shape gives false.
 fn rsa_pkcs1_signature_verifies(hash: std::crypto::Hash, public_key: []u8, signed: []u8, signature: []u8) -> bool {
     let key = read_rsa_key(public_key, 0, std::mem::len(public_key)) catch return false;
     var digest_buffer = [64]u8{};
@@ -502,8 +470,6 @@ pub fn rsa_pss_signature_verifies(hash: std::crypto::Hash, public_key: []u8, dig
     return std::crypto::rsa_pss_verify(hash, modulus, exponent, digest, signature);
 }
 
-// read_rsa_key reads `SEQUENCE { modulus INTEGER, publicExponent
-// INTEGER }` filling `start..end` of `der`.
 fn read_rsa_key(der: []u8, start: i64, end: i64) -> std::crypto::x509::Error!std::crypto::x509::RsaKey {
     let list = try std::crypto::x509::expect_element(der, start, end, std::crypto::x509::tag_sequence());
     if list.end != end {
@@ -545,11 +511,6 @@ pub fn ecdsa_signature_verifies(public_key: []u8, digest: []u8, signature: []u8)
     return std::crypto::ecdsa_p384_verify(public_key, digest, raw_bytes);
 }
 
-// read_ecdsa_signature reads `SEQUENCE { r INTEGER, s INTEGER }` into r
-// and s as `width` bytes each, right-aligned. An integer's leading zero
-// byte, there to keep a high bit from reading as a sign, is dropped; a
-// value that does not fit in `width` bytes is not a signature on the
-// curve.
 fn read_ecdsa_signature(der: []u8, start: i64, end: i64, out: &var []u8, width: i64) -> bool {
     let list = std::crypto::x509::expect_element(der, start, end, std::crypto::x509::tag_sequence()) catch return false;
     if list.end != end {
@@ -604,9 +565,6 @@ pub fn verify_chain(
     return Error::UnknownIssuer;
 }
 
-// verify_link checks certificate `index` of the chain: in date, naming
-// the host when it is the first, and, when there is a next one, signed
-// by it.
 fn verify_link(
     chain: &std::array::Array<std::string::String>,
     index: i64,
@@ -636,8 +594,6 @@ fn verify_link(
     return Error::Malformed;
 }
 
-// trusted reports whether certificate `index` of the chain is one of
-// the roots or is signed by one.
 fn trusted(
     chain: &std::array::Array<std::string::String>,
     roots: &std::array::Array<std::string::String>,

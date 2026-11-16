@@ -1,15 +1,3 @@
-// Poly1305, as RFC 8439 §2.5 defines it: the message is read as 16-byte
-// blocks, each with a 1 bit set above its top byte, and the accumulator
-// is (acc + block) * r mod 2^130 - 5 for each; the tag is the accumulator
-// plus s, mod 2^128. The arithmetic is on five 26-bit limbs held in i64,
-// so a limb times a limb stays under 2^52 and a row of five products
-// under 2^55 (the shape of poly1305-donna-32), and no branch depends on
-// the message or the key: the final reduction chooses with a mask.
-//
-// Only the AEAD reaches this, and the AEAD pads what it authenticates to
-// whole blocks, so every block here is a full one.
-
-// Poly1305 is the accumulator and the clamped key, mid-message.
 struct Poly1305 {
     h0: i64,
     h1: i64,
@@ -23,7 +11,6 @@ struct Poly1305 {
     r4: i64,
 }
 
-// poly1305_new clamps the first half of the 32-byte one-time key into r.
 fn poly1305_new(key: []u8) -> std::crypto::Poly1305 {
     let t0 = cast<i64>(std::crypto::le32(key, 0));
     let t1 = cast<i64>(std::crypto::le32(key, 4));
@@ -43,7 +30,6 @@ fn poly1305_new(key: []u8) -> std::crypto::Poly1305 {
     };
 }
 
-// block folds one full 16-byte block into the accumulator.
 fn (self: &var std::crypto::Poly1305) block(m: []u8) -> void {
     let t0 = cast<i64>(std::crypto::le32(m, 0));
     let t1 = cast<i64>(std::crypto::le32(m, 4));
@@ -87,8 +73,6 @@ fn (self: &var std::crypto::Poly1305) block(m: []u8) -> void {
     return;
 }
 
-// absorb_padded folds `bytes` as whole blocks, the last one filled out
-// with zeros, which is how the AEAD lays out each of its inputs.
 fn (self: &var std::crypto::Poly1305) absorb_padded(bytes: []u8) -> void {
     let end = std::mem::len(bytes);
     var at = 0;
@@ -109,9 +93,6 @@ fn (self: &var std::crypto::Poly1305) absorb_padded(bytes: []u8) -> void {
     return;
 }
 
-// finish reduces the accumulator fully, adds s (the second half of the
-// key), and writes the 16-byte tag to the front of `tag`. Whether the
-// accumulator is above the modulus is decided with a mask, not a branch.
 fn (self: &std::crypto::Poly1305) finish(key: []u8, tag: &var []u8) -> void {
     var carry = self.h1 >> 26;
     var h1 = self.h1 & 0x3ffffff;
@@ -143,7 +124,6 @@ fn (self: &std::crypto::Poly1305) finish(key: []u8, tag: &var []u8) -> void {
     g3 = g3 & 0x3ffffff;
     let g4 = h4 + carry - (1 << 26);
 
-    // g is h - (2^130 - 5); it is the answer when it did not go negative.
     let select = ((g4 >> 63) & 1) - 1;
     let keep = ~select;
     h0 = (h0 & keep) | (g0 & select);

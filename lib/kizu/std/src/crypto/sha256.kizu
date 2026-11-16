@@ -1,14 +1,3 @@
-// SHA-256, as FIPS 180-4 defines it: the message is padded to whole
-// 64-byte blocks, and each block is folded into eight 32-bit words of
-// state by 64 rounds. The words are `u32`, whose `+` wraps at 32 bits
-// (SPEC §6.9.2), so the rounds are written as the standard writes them.
-//
-// The whole message is hashed in one call. There is no hasher that takes
-// the message a piece at a time, because a partial block would have to
-// wait in a struct, and a stack buffer cannot (SPEC §7). What HMAC and
-// HKDF need instead -- the hash of a few views laid end to end -- is
-// `sha256_parts`, which keeps the partial block in its own frame.
-
 // sha256 writes the 32-byte digest of `bytes` to the front of `digest`.
 // The digest is a view of the caller's buffer -- `var out = [32]u8{}` and
 // its `as_mut_bytes()` -- so hashing allocates nothing and cannot fail. A
@@ -19,13 +8,6 @@ pub fn sha256(bytes: []u8, digest: &var []u8) -> void {
     return;
 }
 
-// sha256_parts hashes `prefix`, `a`, `b`, and `c` laid end to end, without
-// laying them end to end. The prefix is empty or exactly one block: it is
-// the padded key HMAC puts first. The three parts are what the callers
-// here put after it -- a message; or a previous output, an info, and a
-// counter -- and a caller with fewer passes "" for the rest. The block
-// being filled lives in this frame, which is what a piecewise hasher
-// would need a struct for.
 fn sha256_parts(prefix: []u8, a: []u8, b: []u8, c: []u8, digest: &var []u8) -> void {
     var state_buffer = [8]u32{};
     var schedule_buffer = [64]u32{};
@@ -44,9 +26,6 @@ fn sha256_parts(prefix: []u8, a: []u8, b: []u8, c: []u8, digest: &var []u8) -> v
     filled = absorb(state, block, filled, a, schedule, constants);
     filled = absorb(state, block, filled, b, schedule, constants);
     filled = absorb(state, block, filled, c, schedule, constants);
-    // The last block carries what is held, a 1 bit, zeros, and the length
-    // in bits as 64 bits big-endian; when the length does not fit after
-    // the 1 bit, there are two.
     let total_bits = (std::mem::len(prefix) + std::mem::len(a) + std::mem::len(b) + std::mem::len(c)) * 8;
     block[filled] = cast<u8>(128);
     var index = filled + 1;
@@ -72,9 +51,6 @@ fn sha256_parts(prefix: []u8, a: []u8, b: []u8, c: []u8, digest: &var []u8) -> v
     return;
 }
 
-// absorb feeds one part to the hash: it completes the block being filled,
-// folds whole blocks straight from the part, and keeps what is left in the
-// block for the next part. It returns how much of the block is filled.
 fn absorb(
     state: &var []u32,
     block: &var []u8,
@@ -112,9 +88,6 @@ fn absorb(
     return held;
 }
 
-// compress_block folds one 64-byte block into the eight state words
-// (FIPS 180-4 §6.2.2). `schedule` holds the 64 message words and `k` the
-// 64 round constants.
 fn compress_block(state: &var []u32, block: []u8, schedule: &var []u32, k: []u32) -> void {
     for 0..16 |t| {
         schedule[t] = word_at(block, t);
@@ -163,12 +136,10 @@ fn compress_block(state: &var []u32, block: []u8, schedule: &var []u32, k: []u32
     return;
 }
 
-// rotr rotates a word right by `n` bits, 0 < n < 32.
 fn rotr(x: u32, n: u32) -> u32 {
     return (x >> n) | (x << (32 - n));
 }
 
-// word_at reads word `index` of a big-endian word table.
 fn word_at(view: []u8, index: i64) -> u32 {
     let at = index * 4;
     return (cast<u32>(view[at]) << 24)
@@ -177,7 +148,6 @@ fn word_at(view: []u8, index: i64) -> u32 {
         | cast<u32>(view[at + 3]);
 }
 
-// set_word writes word `index` of a big-endian word table.
 fn set_word(view: &var []u8, index: i64, value: u32) -> void {
     let at = index * 4;
     view[at] = cast<u8>((value >> 24) & 255);
@@ -187,7 +157,6 @@ fn set_word(view: &var []u8, index: i64, value: u32) -> void {
     return;
 }
 
-// put_length writes `value` as 64 bits big-endian at `at`.
 fn put_length(view: &var []u8, at: i64, value: i64) -> void {
     for 0..8 |index| {
         let shift = (7 - index) * 8;
@@ -196,10 +165,6 @@ fn put_length(view: &var []u8, at: i64, value: i64) -> void {
     return;
 }
 
-// fill_hex_words writes the 32-bit words a hex text spells, eight digits
-// each, in order, skipping the spaces and line breaks that keep the text
-// readable. It is how the tables below are read, since a literal holds
-// text and not words.
 fn fill_hex_words(view: &var []u32, hex: []u8) -> void {
     var at = 0;
     var word = cast<u32>(0);
@@ -221,7 +186,6 @@ fn fill_hex_words(view: &var []u32, hex: []u8) -> void {
     return;
 }
 
-// hex_digit is the value of one hex digit, or -1 for any other byte.
 fn hex_digit(byte: u8) -> i64 {
     let value = cast<i64>(byte);
     if value >= 48 and value <= 57 {
@@ -233,14 +197,10 @@ fn hex_digit(byte: u8) -> i64 {
     return -1;
 }
 
-// initial_state is H(0) of FIPS 180-4 §5.3.3: the first 32 bits of the
-// fractional parts of the square roots of the first eight primes.
 fn initial_state() -> []u8 {
     return "6a09e667 bb67ae85 3c6ef372 a54ff53a 510e527f 9b05688c 1f83d9ab 5be0cd19";
 }
 
-// round_constants is K of FIPS 180-4 §4.2.2: the first 32 bits of the
-// fractional parts of the cube roots of the first 64 primes.
 fn round_constants() -> []u8 {
     return
         \\428a2f98 71374491 b5c0fbcf e9b5dba5 3956c25b 59f111f1 923f82a4 ab1c5ed5
