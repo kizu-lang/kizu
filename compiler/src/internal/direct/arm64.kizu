@@ -141,18 +141,12 @@ fn emit_into(allocator: Allocator, module: &ir::Module, arch: Arch, format: Form
         let symbol = symbols.get_or_panic(ordinal);
         let allocation = try allocate(allocator, func, arch);
         defer allocation.deinit(allocator);
-        let exported = exports.get_or_panic(ordinal);
+        try begin_symbol(allocator, out, func, symbol, exports.get_or_panic(ordinal), &selector.syms);
         if is_x86(arch) {
-            try amd64_print_function(allocator, out, func, &allocation, symbol, exported, &selector.syms, arch, format);
-            ordinal = ordinal + 1;
-            continue;
+            try amd64_print_function(allocator, out, func, &allocation, &selector.syms, arch, format);
+        } else {
+            try print_function(allocator, out, func, &allocation, &selector.syms);
         }
-        if !ir::is_empty(exported) {
-            try out.obj.global(allocator, &selector.syms, exported);
-            try out.obj.align(allocator, 4);
-            try out.obj.define(allocator, &selector.syms, exported);
-        }
-        try print_function(allocator, out, func, &allocation, symbol, &selector.syms);
         ordinal = ordinal + 1;
     }
     if selector.main_wraps {
@@ -173,6 +167,20 @@ fn emit_into(allocator: Allocator, module: &ir::Module, arch: Arch, format: Form
         try out.obj.write_macho(allocator, &selector.syms, 0, &var out.file);
     }
     return null;
+}
+
+fn begin_symbol(allocator: Allocator, out: &var Out, func: &MFunction, name: ir::Name, exported: ir::Name, syms: &ir::NameTable) -> !void {
+    if !ir::is_empty(exported) {
+        try out.obj.global(allocator, syms, exported);
+        try out.obj.align(allocator, 4);
+        try out.obj.define(allocator, syms, exported);
+    }
+    if func.is_main {
+        try out.obj.global(allocator, syms, name);
+    }
+    try out.obj.align(allocator, 4);
+    try out.obj.define(allocator, syms, name);
+    return out.obj.begin_function(allocator, func.blocks.len());
 }
 
 fn write_literal_bytes(allocator: Allocator, selector: &var Selector, obj: &var Obj) -> !void {
@@ -224,27 +232,8 @@ struct Frame {
 }
 
 fn plan_frame(func: &var MFunction, allocation: &Allocation) -> Frame {
-    var uses_inarg = false;
-    var block_index = 0;
-    while func.blocks.at(block_index) |block| {
-        block_index = block_index + 1;
-        var inst_index = 0;
-        while block.insts.at(inst_index) |inst| {
-            inst_index = inst_index + 1;
-            if inst.rn == reg_inarg() {
-                uses_inarg = true;
-            }
-        }
-    }
-    var offset = func.out_words * 8;
-    var slot_index = 0;
-    while func.slots.at_mut(slot_index) |slot| {
-        slot_index = slot_index + 1;
-        offset = round_up(offset, slot.align);
-        slot.offset = offset;
-        offset = offset + slot.size;
-    }
-    offset = round_up(offset, 8);
+    let uses_inarg = func.reads_inarg();
+    var offset = round_up(func.place_slots(func.out_words * 8), 8);
     let saved_at = offset;
     offset = offset + allocation.saved.len() * 8;
     let total = round_up(offset + 16, 16);
@@ -493,16 +482,9 @@ fn print_function(
     out: &var Out,
     func: &var MFunction,
     allocation: &Allocation,
-    name: ir::Name,
     syms: &ir::NameTable
 ) -> !void {
     let frame = plan_frame(func, allocation);
-    if func.is_main {
-        try out.obj.global(allocator, syms, name);
-    }
-    try out.obj.align(allocator, 4);
-    try out.obj.define(allocator, syms, name);
-    try out.obj.begin_function(allocator, func.blocks.len());
     if frame.needed {
         try print_prologue(allocator, out, frame, &allocation.saved);
     }
