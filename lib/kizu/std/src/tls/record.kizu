@@ -1,10 +1,3 @@
-// The TLS 1.3 record layer (RFC 8446 §5): once the handshake has keys,
-// every record is one AEAD sealing of the content with its real type
-// appended, under a nonce the record's sequence number makes from the
-// IV, with the five-byte record header as the associated data. The
-// header says `application_data` whatever is inside; the type is the
-// last byte of the plaintext, behind any zero padding.
-
 // CipherSuite is the AEAD a connection agreed on. Both are 16-byte
 // tags under a 12-byte nonce; the key is 16 bytes for AES-128-GCM and
 // 32 for ChaCha20-Poly1305.
@@ -67,8 +60,6 @@ pub fn seal_record(
     let nonce = nonce_buffer.as_mut_bytes();
     record_nonce(iv, sequence, nonce);
     let nonce_bytes = nonce_buffer.as_bytes();
-    // The plaintext is the content with its type behind it; it is laid
-    // out once in an owned buffer, since the AEAD takes one view.
     var plain = std::string::new(allocator);
     defer plain.deinit(allocator);
     try plain.append_bytes(allocator, content);
@@ -113,7 +104,6 @@ pub fn open_record(
     var plain = std::string::new(allocator);
     defer plain.deinit(allocator);
     try open_sealed(allocator, suite, key, nonce_bytes, aad, sealed, &var plain);
-    // The type is the last byte that is not padding.
     let plain_bytes = plain.as_bytes();
     var end = std::mem::len(plain_bytes);
     while end > 0 and plain_bytes[end - 1] == 0 {
@@ -127,9 +117,6 @@ pub fn open_record(
     return content_type;
 }
 
-// open_sealed opens the sealed content under the suite's AEAD. A tag
-// that does not verify is a bad record; what else the AEAD can fail
-// with is memory.
 fn open_sealed(
     allocator: Allocator,
     suite: std::tls::CipherSuite,
@@ -153,7 +140,6 @@ fn open_sealed(
     }
 }
 
-// refusal is the record layer's reading of the AEAD's failure.
 fn refusal(err: std::crypto::Failure) -> std::tls::Failure!void {
     if err == std::crypto::Error::AuthenticationFailed {
         return std::tls::Error::BadRecord;
@@ -161,9 +147,6 @@ fn refusal(err: std::crypto::Failure) -> std::tls::Failure!void {
     return err;
 }
 
-// record_nonce writes the per-record nonce (RFC 8446 §5.3): the
-// sequence number as 64 bits big-endian, left-padded to the IV's 12
-// bytes, XORed with the IV.
 fn record_nonce(iv: []u8, sequence: i64, out: &var []u8) -> void {
     for 0..12 |index| {
         out[index] = iv[index];

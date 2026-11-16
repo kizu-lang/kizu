@@ -1,16 +1,3 @@
-// The server side of the handshake (RFC 8446 §2): `accept` takes the
-// client's ClientHello off a socket, answers with everything through
-// its Finished in one flight -- ServerHello, EncryptedExtensions, the
-// certificate chain, a CertificateVerify signed with the chain's key,
-// Finished -- waits for the client's Finished, and returns a connected
-// `Connection`. A failure anywhere sends the alert the RFC names for it
-// and closes.
-//
-// The server asks for no client certificate, resumes no session, and
-// sends no HelloRetryRequest: a client that offers no x25519 share is
-// answered with `handshake_failure`, as one that offers no suite or no
-// signature scheme this server's key can sign with.
-
 // accept completes a TLS 1.3 handshake as the server over `stream`, a
 // connection a listener accepted, presenting `chain` -- the server's
 // certificate first, then its issuers, each as DER -- and signing with
@@ -98,8 +85,6 @@ pub fn (self: &var std::tls::Connection) accept_ready(
     return self.connected();
 }
 
-// take_client_hello takes the ClientHello and sends the server's flight
-// through its Finished.
 fn (self: &var std::tls::Connection) take_client_hello(
     io: Io,
     allocator: Allocator,
@@ -118,7 +103,6 @@ fn (self: &var std::tls::Connection) take_client_hello(
     try self.server_name.append_bytes(allocator, hello_bytes[offered.server_name_start..offered.server_name_end]);
     try self.transcript.append_bytes(allocator, hello_bytes);
 
-    // 64 random bytes: the hello's random and the x25519 private key.
     let random = try self.entropy.draw(io, allocator, 64);
     defer random.deinit(allocator);
     let drawn = random.as_bytes();
@@ -161,10 +145,6 @@ fn (self: &var std::tls::Connection) read_client_hello_or_alert(
     }
 }
 
-// choose_or_alert settles the suite and the signature scheme from what
-// the client offered and what the key can sign, or answers
-// handshake_failure: no suite in common, no x25519 share (this server
-// sends no HelloRetryRequest), or no scheme for the key.
 fn (self: &var std::tls::Connection) choose_or_alert(
     io: Io,
     allocator: Allocator,
@@ -184,9 +164,6 @@ fn (self: &var std::tls::Connection) choose_or_alert(
     return scheme;
 }
 
-// choose_scheme is the signature scheme a key of `algorithm` signs
-// with among those the client accepts (`schemes` as `scheme_bit` bits):
-// the curve's own for ECDSA, RSA-PSS over the shortest hash offered.
 fn choose_scheme(algorithm: std::crypto::x509::KeyAlgorithm, schemes: i64) -> ?i64 {
     if algorithm == std::crypto::x509::KeyAlgorithm::EcdsaP256 {
         if schemes & std::tls::scheme_bit(std::tls::signature_ecdsa_secp256r1_sha256()) != 0 {
@@ -215,9 +192,6 @@ fn choose_scheme(algorithm: std::crypto::x509::KeyAlgorithm, schemes: i64) -> ?i
     return null;
 }
 
-// send_server_hello writes and sends the ServerHello for what was
-// chosen, with `drawn`'s first 32 bytes as the random and the x25519
-// share of its last 32, then the change_cipher_spec of §D.4.
 fn (self: &var std::tls::Connection) send_server_hello(
     io: Io,
     allocator: Allocator,
@@ -244,9 +218,6 @@ fn (self: &var std::tls::Connection) send_server_hello(
     return;
 }
 
-// install_handshake_keys computes the shared secret and turns on the
-// handshake keys: the server writes under "s hs traffic" and reads
-// under "c hs traffic".
 fn (self: &var std::tls::Connection) install_handshake_keys(
     allocator: Allocator,
     private_key: []u8,
@@ -254,9 +225,6 @@ fn (self: &var std::tls::Connection) install_handshake_keys(
 ) -> std::tls::Failure!void {
     var shared_buffer = [32]u8{};
     let shared = shared_buffer.as_mut_bytes();
-    // A share of low order would be the client's doing; the handshake
-    // is already past the point of answering it with an alert in the
-    // clear, so the failure is reported as it is.
     try std::crypto::x25519(private_key, peer_share, shared);
     let shared_bytes = shared_buffer.as_bytes();
     var early_buffer = [32]u8{};
@@ -278,8 +246,6 @@ fn (self: &var std::tls::Connection) install_handshake_keys(
     return;
 }
 
-// send_certificate_verify signs the transcript so far with the key
-// under `scheme` and sends the CertificateVerify.
 fn (self: &var std::tls::Connection) send_certificate_verify(
     io: Io,
     allocator: Allocator,
@@ -291,7 +257,6 @@ fn (self: &var std::tls::Connection) send_certificate_verify(
     let digest = digest_buffer.as_mut_bytes();
     try self.certificate_verify_digest(allocator, kind, digest);
     let digest_bytes = digest[0..std::crypto::digest_length(kind)];
-    // Drawn whatever the key: x509::sign reads it for RSA-PSS only.
     let salt = try self.entropy.draw(io, allocator, std::crypto::digest_length(kind));
     defer salt.deinit(allocator);
     let salt_bytes = salt.as_bytes();
@@ -307,8 +272,6 @@ fn (self: &var std::tls::Connection) send_certificate_verify(
     return;
 }
 
-// send_finished sends the server's Finished and turns on its
-// application write keys; the client's read keys wait for its Finished.
 fn (self: &var std::tls::Connection) send_finished(io: Io, allocator: Allocator) -> std::tls::Failure!void {
     var own_buffer = [32]u8{};
     let own = own_buffer.as_mut_bytes();
@@ -323,9 +286,6 @@ fn (self: &var std::tls::Connection) send_finished(io: Io, allocator: Allocator)
     return;
 }
 
-// take_client_finished takes the client's Finished, checks it against
-// the transcript through the server's own, and turns on the
-// application keys in both directions.
 fn (self: &var std::tls::Connection) take_client_finished(
     io: Io,
     allocator: Allocator,

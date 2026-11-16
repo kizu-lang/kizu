@@ -1,41 +1,22 @@
 import std::float;
 
-// Elementary functions and constants on f64.
-//
-// Four of them are one IEEE 754 operation each -- `sqrt`, `floor`, `ceil`
-// and `trunc` -- and rest on the backend, which has each as one instruction
-// or intrinsic and answers the correctly rounded value. Everything else is
-// written over those and over the bits of a float, so the answer is the same
-// on every target. The kernels round a product and a sum in turn (fma_on<false>)
-// unless a caller asks for the fused ones (`exp_with<true>` and the like).
-
-// sqrt returns the square root of value, correctly rounded. A negative value
-// gives NaN; -0.0 gives -0.0.
 fn sqrt_f64(value: f64) -> f64 {
     return std::internal::builtin::f64_sqrt(value);
 }
 
-// floor returns the largest integral value not greater than value.
 fn floor_f64(value: f64) -> f64 {
     return std::internal::builtin::f64_floor(value);
 }
 
-// ceil returns the smallest integral value not less than value.
 fn ceil_f64(value: f64) -> f64 {
     return std::internal::builtin::f64_ceil(value);
 }
 
-// trunc returns the integral part of value, rounding toward zero.
 fn trunc_f64(value: f64) -> f64 {
     return std::internal::builtin::f64_trunc(value);
 }
 
-// round returns the integral value nearest to value, with halves rounded
-// away from zero: round(0.5) is 1.0 and round(-0.5) is -1.0.
 fn round_f64(value: f64) -> f64 {
-    // value - whole is exact below 2^52; above it every value is integral
-    // and the difference is zero. NaN and the infinities fall through both
-    // comparisons and come back as trunc left them.
     let whole = trunc_f64(value);
     let rest = value - whole;
     if rest >= 0.5 {
@@ -47,25 +28,19 @@ fn round_f64(value: f64) -> f64 {
     return whole;
 }
 
-// abs returns value with its sign bit cleared: |NaN| is NaN, |-0.0| is 0.0.
 fn abs_f64(value: f64) -> f64 {
     return float::from_bits(float::bits(value) & ~sign_bit());
 }
 
-// copysign returns magnitude with the sign bit of sign.
 fn copysign_f64(magnitude: f64, sign: f64) -> f64 {
     let bits = (float::bits(magnitude) & ~sign_bit()) | (float::bits(sign) & sign_bit());
     return float::from_bits(bits);
 }
 
-// is_negative reports whether the sign bit of value is set, so -0.0 is
-// negative and NaN follows its sign bit.
 fn is_negative_f64(value: f64) -> bool {
     return float::bits(value) & sign_bit() != 0;
 }
 
-// min returns the smaller of two values. One NaN yields the other value,
-// and -0.0 is smaller than 0.0.
 fn min_f64(a: f64, b: f64) -> f64 {
     if float::is_nan(a) {
         return b;
@@ -85,8 +60,6 @@ fn min_f64(a: f64, b: f64) -> f64 {
     return b;
 }
 
-// max returns the larger of two values. One NaN yields the other value,
-// and 0.0 is larger than -0.0.
 fn max_f64(a: f64, b: f64) -> f64 {
     if float::is_nan(a) {
         return b;
@@ -106,7 +79,6 @@ fn max_f64(a: f64, b: f64) -> f64 {
     return b;
 }
 
-// clamp returns value held within [low, high]. A NaN value stays NaN.
 fn clamp_f64(value: f64, low: f64, high: f64) -> f64 {
     if value < low {
         return low;
@@ -117,9 +89,6 @@ fn clamp_f64(value: f64, low: f64, high: f64) -> f64 {
     return value;
 }
 
-// hypot returns sqrt(x*x + y*y) without the overflow or underflow the
-// squares alone would have: the larger magnitude is factored out first.
-// An infinite argument gives infinity even when the other is NaN.
 fn hypot_f64(x: f64, y: f64) -> f64 {
     var p = abs_f64(x);
     var q = abs_f64(y);
@@ -141,27 +110,22 @@ fn hypot_f64(x: f64, y: f64) -> f64 {
     return p * sqrt_f64(1.0 + ratio * ratio);
 }
 
-// pi is the ratio of a circle's circumference to its diameter.
 fn pi_f64() -> f64 {
     return 3.141592653589793;
 }
 
-// tau is 2 * pi, the circumference of the unit circle.
 fn tau_f64() -> f64 {
     return 6.283185307179586;
 }
 
-// e is the base of the natural logarithm.
 fn e_f64() -> f64 {
     return 2.718281828459045;
 }
 
-// infinity returns positive infinity.
 fn infinity_f64() -> f64 {
     return float::from_bits(exponent_mask());
 }
 
-// nan returns a quiet NaN with the sign bit clear.
 fn nan_f64() -> f64 {
     return float::from_bits(exponent_mask() | (cast<u64>(1) << 51));
 }
@@ -170,25 +134,11 @@ fn sign_bit() -> u64 { return cast<u64>(1) << 63; }
 
 fn exponent_mask() -> u64 { return cast<u64>(2047) << 52; }
 
-// ---------------------------------------------------------------------------
-// Exponentials and logarithms.
-//
-// exp, exp2, log and pow are table driven, in the shape of the ARM
-// optimized-routines: the argument is reduced against 128 (pow: 256) points
-// whose values live in tables.kizu, and a short polynomial covers what is
-// left. expm1, log1p, log2 and log10 follow the FreeBSD msun algorithms as
-// Go's math package spells them. Each answers within one unit in the last
-// place of the true value, and the same bits on every target.
-
-// exp returns e raised to value. Above about 709.78 the answer is infinity;
-// below about -745.13 it is 0.
 fn exp_f64(value: f64) -> f64 {
     return exp_on<false>(value);
 }
 
-// exp_on is exp with the kernels' products and sums fused or not.
 fn exp_on<fused: bool>(value: f64) -> f64 {
-    // The exponent of value above 2^-54; below that it wraps past 2^31.
     let top = ((float::bits(value) >> 52) & 0x7ff) - 0x3c9;
     if top >= 0x3f {
         return exp_edges<fused>(value);
@@ -196,7 +146,6 @@ fn exp_on<fused: bool>(value: f64) -> f64 {
     return exp_kernel<fused>(value, 0.0, 0, false);
 }
 
-// exp_edges is exp of a value below 2^-54 or at least 512 in magnitude.
 fn exp_edges<fused: bool>(value: f64) -> f64 {
     let top = ((float::bits(value) >> 52) & 0x7ff) - 0x3c9;
     if top >= 0x80000000 {
@@ -214,17 +163,7 @@ fn exp_edges<fused: bool>(value: f64) -> f64 {
     return exp_kernel<fused>(value, 0.0, 0, true);
 }
 
-// exp_kernel returns exp(value + tail) times 2^(bias / 128): pow sets the
-// sign bit with bias, and sinh and cosh halve the answer with -128, so that
-// it is rounded once and stays finite where exp alone would overflow.
-// value = k ln2/128 + r with |r| at most ln2/256, so exp(value) =
-// 2^(k/128) exp(r), with 2^(k/128) from the table and exp(r) from a
-// polynomial. The tail carries the low half of a double-double argument
-// (pow); edge says the scale by 2^(k/128) alone could overflow or come out
-// subnormal.
 fn exp_kernel<fused: bool>(value: f64, tail: f64, bias: u64, edge: bool) -> f64 {
-    // Adding 1.5 * 2^52 rounds value * 128/ln2 to an integer whose low bits
-    // sit in the low bits of the sum.
     let shift = 6755399441055744.0;
     let kd = fma_on<fused>(value, 184.6649652337873, shift);
     let ki = float::bits(kd);
@@ -244,17 +183,11 @@ fn exp_kernel<fused: bool>(value: f64, tail: f64, bias: u64, edge: bool) -> f64 
     return fma_on<fused>(scale, tmp, scale);
 }
 
-// exp_edge_scale finishes exp_kernel where 2^(k/128) alone would overflow
-// or be subnormal: the scale is taken 2^1009 too small or 2^1022 too large
-// and the answer moved back after the multiply, so that a subnormal answer
-// is rounded once rather than twice.
 fn exp_edge_scale(tmp: f64, sbits: u64, ki: u64) -> f64 {
     if ki & 0x80000000 == 0 {
-        // k > 0: the exponent of the scale may have overflowed by up to 460.
         let scale = float::from_bits(sbits - (cast<u64>(1009) << 52));
         return 5.486124068793689e303 * (scale + scale * tmp);
     }
-    // k < 0: the answer may be subnormal.
     let scale = float::from_bits(sbits + (cast<u64>(1022) << 52));
     var y = scale + scale * tmp;
     if abs_f64(y) < 1.0 {
@@ -273,7 +206,6 @@ fn exp_edge_scale(tmp: f64, sbits: u64, ki: u64) -> f64 {
     return 2.2250738585072014e-308 * y;
 }
 
-// exp2 returns 2 raised to value.
 fn exp2_f64(value: f64) -> f64 {
     let top = ((float::bits(value) >> 52) & 0x7ff) - 0x3c9;
     if top >= 0x3f {
@@ -282,7 +214,6 @@ fn exp2_f64(value: f64) -> f64 {
     return exp2_kernel(value, false);
 }
 
-// exp2_edges is exp2 of a value below 2^-54 or at least 512 in magnitude.
 fn exp2_edges(value: f64) -> f64 {
     let top = ((float::bits(value) >> 52) & 0x7ff) - 0x3c9;
     if top >= 0x80000000 {
@@ -300,9 +231,6 @@ fn exp2_edges(value: f64) -> f64 {
     return exp2_kernel(value, true);
 }
 
-// exp2_kernel is exp_kernel for 2^value: value = k/128 + r with |r| at
-// most 1/256, found by rounding to the 1/128 grid, and 2^r from a
-// polynomial.
 fn exp2_kernel(value: f64, edge: bool) -> f64 {
     let shift = 52776558133248.0;
     let kd = value + shift;
@@ -320,8 +248,6 @@ fn exp2_kernel(value: f64, edge: bool) -> f64 {
     return fma_on<false>(scale, tmp, scale);
 }
 
-// expm1 returns exp(value) - 1, accurate where the subtraction itself would
-// lose every digit: expm1(1e-10) is 1.00000000005e-10.
 fn expm1_f64(value: f64) -> f64 {
     let overflow = 709.782712893383973096;
     let ln2_x56 = 3.88162421113569373274e+01;
@@ -342,7 +268,6 @@ fn expm1_f64(value: f64) -> f64 {
     }
     let negative = value < 0.0;
     let magnitude = abs_f64(value);
-    // A huge argument is -1 or overflows before any reduction.
     if magnitude >= ln2_x56 {
         if negative {
             return -1.0;
@@ -351,7 +276,6 @@ fn expm1_f64(value: f64) -> f64 {
             return infinity_f64();
         }
     }
-    // Reduce to |x| <= ln 2 / 2, keeping c, what the reduction dropped.
     var x = value;
     var c = 0.0;
     var k = 0;
@@ -409,7 +333,6 @@ fn expm1_f64(value: f64) -> f64 {
         return scale_exponent(y, k) - 1.0;
     }
     if k < 20 {
-        // t = 1 - 2^-k, built from its bits.
         let t2 = float::from_bits(0x3ff0000000000000 - (0x20000000000000 >> cast<u64>(k)));
         let y = t2 - (e - x);
         return scale_exponent(y, k);
@@ -420,8 +343,6 @@ fn expm1_f64(value: f64) -> f64 {
     return scale_exponent(y, k);
 }
 
-// scale_exponent adds k to the exponent field of a normal value, which is
-// value * 2^k as long as the result stays normal; the callers keep it so.
 fn scale_exponent(value: f64, k: i64) -> f64 {
     if k >= 0 {
         return float::from_bits(float::bits(value) + (cast<u64>(k) << 52));
@@ -429,17 +350,12 @@ fn scale_exponent(value: f64, k: i64) -> f64 {
     return float::from_bits(float::bits(value) - (cast<u64>(-k) << 52));
 }
 
-// log returns the natural logarithm of value. A negative value gives NaN and
-// zero gives negative infinity.
 fn log_f64(value: f64) -> f64 {
     return log_on<false>(value);
 }
 
-// log_on is log with the kernel's products and sums fused or not.
 fn log_on<fused: bool>(value: f64) -> f64 {
     let ix = float::bits(value);
-    // In [1 - 1/16, 1 + 1/16) log(1 + f) is taken straight from f = value - 1,
-    // which is exact there.
     if ix - 0x3fee000000000000 < 0x3000000000000 {
         return log_near_one(value - 1.0);
     }
@@ -449,7 +365,6 @@ fn log_on<fused: bool>(value: f64) -> f64 {
     return log_kernel<fused>(ix);
 }
 
-// log_edges is log of zero, a subnormal, a negative value, infinity or NaN.
 fn log_edges<fused: bool>(value: f64) -> f64 {
     if float::is_nan(value) {
         return value;
@@ -464,36 +379,24 @@ fn log_edges<fused: bool>(value: f64) -> f64 {
     if value == infinity_f64() {
         return value;
     }
-    // A subnormal: value * 2^52 is normal.
     return log_kernel<fused>(float::bits(value * 4503599627370496.0) - (cast<u64>(52) << 52));
 }
 
-// log_kernel is log of the normal positive value with bits ix, at least
-// 1/16 away from 1. value = 2^k z with z in [0.6875, 1.375), z = c (1 + r)
-// for the table centre c of z's sub-interval, and
-// log(value) = k ln2 + log(c) + log(1 + r) with |r| below 1/256. k ln2 and
-// log(c) are each split in two so that the sum of the high parts is exact.
 fn log_kernel<fused: bool>(ix: u64) -> f64 {
     let tmp = ix - 0x3fe6000000000000;
     let index = cast<i64>((tmp >> 45) & 127);
     let k = cast<f64>(cast<i64>(tmp) >> 52);
     let z = float::from_bits(ix - (tmp & (cast<u64>(0xfff) << 52)));
     let r = (z - float::from_bits(log_centre_bits(index))) * float::from_bits(log_inverse_bits(index));
-    // k ln2 + log(c) + r as hi + lo, with ln2 in two parts so that k times
-    // the first is exact.
     let w = fma_on<fused>(k, 0.6931471805598903, float::from_bits(log_c_bits(index)));
     let hi = w + r;
     let lo = fma_on<fused>(k, 5.497923018708371e-14, w - hi + r) + float::from_bits(log_c_tail_bits(index));
     let r2 = r * r;
-    // -r^2/2 + r^3/3 - ... + r^7/7
     let high = fma_on<fused>(r2, 0.14285714285714285, fma_on<fused>(r, -0.16666666666666666, 0.2));
     let mid = fma_on<fused>(r2, high, fma_on<fused>(r, -0.25, 0.3333333333333333));
     return fma_on<fused>(r * r2, mid, fma_on<fused>(r2, -0.5, lo)) + hi;
 }
 
-// log_near_one is log(1 + f) for |f| below 1/16, the msun kernel on
-// s = f / (2 + f): log(1 + f) = 2s + 2s^3/3 + 2s^5/5 + ..., with f^2/2 kept
-// apart so that the cancellation against f is exact.
 fn log_near_one(f: f64) -> f64 {
     let l1 = 6.666666666666735130e-01;
     let l2 = 3.999999999940941908e-01;
@@ -512,8 +415,6 @@ fn log_near_one(f: f64) -> f64 {
     return f - (hfsq - s * (hfsq + r));
 }
 
-// log1p returns log(1 + value), accurate where the addition itself would
-// lose every digit: log1p(1e-10) is 9.9999999995e-11.
 fn log1p_f64(value: f64) -> f64 {
     let sqrt2_m1 = 4.142135623730950488017e-01;
     let sqrt2_half_m1 = -2.928932188134524755992e-01;
@@ -560,7 +461,6 @@ fn log1p_f64(value: f64) -> f64 {
             u = 1.0 + value;
             iu = float::bits(u);
             k = cast<i64>(iu >> 52) - 1023;
-            // The correction term: what 1 + value rounded away.
             if k > 0 {
                 c = 1.0 - (u - value);
             } else {
@@ -608,8 +508,6 @@ fn log1p_f64(value: f64) -> f64 {
     return kf * ln2_hi() - ((hfsq - (s * (hfsq + r) + (kf * ln2_lo() + c))) - f);
 }
 
-// log2 returns the base-2 logarithm of value. An exact power of two gives an
-// exact integer.
 fn log2_f64(value: f64) -> f64 {
     let split = frexp_f64(value);
     if split.fraction == 0.5 {
@@ -618,27 +516,19 @@ fn log2_f64(value: f64) -> f64 {
     return log_f64(split.fraction) * inv_ln2() + cast<f64>(split.exponent);
 }
 
-// log10 returns the base-10 logarithm of value.
 fn log10_f64(value: f64) -> f64 {
     return log_f64(value) * inv_ln10();
 }
 
-// pow returns base raised to exponent, with the special cases of C's pow:
-// pow(x, 0) and pow(1, y) are 1 for any x and y, a negative base with a
-// non-integral exponent is NaN, and 0 and the infinities follow the sign
-// and parity of the exponent.
 fn pow_f64(base: f64, exponent: f64) -> f64 {
     return pow_on<false>(base, exponent);
 }
 
-// pow_on is pow with the kernels' products and sums fused or not.
 fn pow_on<fused: bool>(base: f64, exponent: f64) -> f64 {
     var ix = float::bits(base);
     let iy = float::bits(exponent);
     var sign_bias = cast<u64>(0);
     if (ix >> 52) - 0x001 >= 0x7fe or ((iy >> 52) & 0x7ff) - 0x3be >= 0x80 {
-        // base is zero, subnormal, negative, infinite or NaN, or exponent is
-        // below 2^-65 or at least 2^63 in magnitude, infinite or NaN.
         let edge = pow_edges(base, exponent);
         if edge.done {
             return edge.value;
@@ -647,9 +537,6 @@ fn pow_on<fused: bool>(base: f64, exponent: f64) -> f64 {
         sign_bias = edge.sign_bias;
     }
     let lg = pow_log<fused>(ix);
-    // exponent * log(base) as a double-double: the product's rounding is
-    // recovered by a fused multiply-add when fused, and otherwise the halves
-    // are cut to 26 bits so that their product is exact.
     let ehi = exponent * lg.hi;
     var elo = 0.0;
     comptime if fused {
@@ -664,7 +551,6 @@ fn pow_on<fused: bool>(base: f64, exponent: f64) -> f64 {
     let top = ((float::bits(ehi) >> 52) & 0x7ff) - 0x3c9;
     if top >= 0x3f {
         if top >= 0x80000000 {
-            // |exponent * log(base)| below 2^-54: the answer is 1 to the last bit.
             let one = 1.0 + ehi;
             if sign_bias != 0 {
                 return -one;
@@ -685,8 +571,6 @@ fn pow_on<fused: bool>(base: f64, exponent: f64) -> f64 {
     return exp_kernel<fused>(ehi, elo, sign_bias, false);
 }
 
-// PowEdge is what pow_edges settled: either the answer (done), or the bits
-// of |base| made normal and the sign to give the answer.
 struct PowEdge {
     done: bool,
     value: f64,
@@ -694,9 +578,6 @@ struct PowEdge {
     sign_bias: u64,
 }
 
-// pow_edges handles the special cases of pow: a zero, subnormal, negative,
-// infinite or NaN base, and an exponent that is zero, infinite, NaN, tiny
-// (below 2^-65) or huge (at least 2^63).
 fn pow_edges(base: f64, exponent: f64) -> PowEdge {
     var ix = float::bits(base);
     let iy = float::bits(exponent);
@@ -704,7 +585,6 @@ fn pow_edges(base: f64, exponent: f64) -> PowEdge {
     let inf = float::bits(infinity_f64());
     var sign_bias = cast<u64>(0);
     if (iy << 1) - 1 >= (inf << 1) - 1 {
-        // exponent is zero, infinite or NaN.
         if iy << 1 == 0 or ix == one {
             return settled(1.0);
         }
@@ -712,17 +592,14 @@ fn pow_edges(base: f64, exponent: f64) -> PowEdge {
             return settled(nan_f64());
         }
         if ix << 1 == one << 1 {
-            // (-1)^(+-infinity) is 1.
             return settled(1.0);
         }
         if (ix << 1 < one << 1) == (iy >> 63 == 0) {
-            // |base| < 1 with exponent +infinity, or |base| > 1 with -infinity.
             return settled(0.0);
         }
         return settled(infinity_f64());
     }
     if (ix << 1) - 1 >= (inf << 1) - 1 {
-        // base is zero, infinite or NaN.
         var x2 = base * base;
         if ix >> 63 == 1 and pow_integer_kind(iy) == 1 {
             x2 = -x2;
@@ -747,21 +624,17 @@ fn pow_edges(base: f64, exponent: f64) -> PowEdge {
             return settled(1.0);
         }
         if ((iy >> 52) & 0x7ff) < 0x3be {
-            // |exponent| below 2^-65: the answer is 1 to the last bit.
             if ix > one {
                 return settled(1.0 + exponent);
             }
             return settled(1.0 - exponent);
         }
-        // |exponent| at least 2^63, an even integer: |base| is not 1, so
-        // |exponent log(base)| is past 1000.
         if (ix > one) == (iy >> 63 == 0) {
             return settled(infinity_f64());
         }
         return settled(0.0);
     }
     if ix >> 52 == 0 {
-        // A subnormal base: base * 2^52 is normal.
         ix = float::bits(float::from_bits(ix) * 4503599627370496.0) - (cast<u64>(52) << 52);
     }
     return PowEdge { done: false, value: 0.0, bits: ix, sign_bias: sign_bias };
@@ -771,8 +644,6 @@ fn settled(value: f64) -> PowEdge {
     return PowEdge { done: true, value: value, bits: 0, sign_bias: 0 };
 }
 
-// pow_integer_kind is 0 when the float with bits iy is not an integer, 1
-// when it is an odd integer and 2 when even.
 fn pow_integer_kind(iy: u64) -> i64 {
     let e = (iy >> 52) & 0x7ff;
     if e < 0x3ff {
@@ -791,30 +662,18 @@ fn pow_integer_kind(iy: u64) -> i64 {
     return 2;
 }
 
-// LogParts is a logarithm as a double-double, hi + lo.
 struct LogParts {
     hi: f64,
     lo: f64,
 }
 
-// pow_log is log of the normal positive value with bits ix to about 2^-68
-// relative, which pow needs since the exponent multiplies the error. As in
-// log_kernel, value = 2^k z with z = c (1 + r) and z in [0.70508, 1.41016),
-// but 1/c = j/256 for an integer j, which has so few bits that r = z/c - 1
-// is exact, and every rounding of the sum is carried into lo.
 fn pow_log<fused: bool>(ix: u64) -> LogParts {
     let tmp = ix - 0x3fe6900000000000;
     let k = cast<f64>(cast<i64>(tmp) >> 52);
     let iz = ix - (tmp & (cast<u64>(0xfff) << 52));
     let z = float::from_bits(iz);
-    // 1/c = j/256 for the j of z's sub-interval, so that |z/c - 1| is below
-    // 2^-7.9 and, with so few bits in 1/c, exact.
     let index = cast<i64>((tmp >> 44) & 255);
     let invc = cast<f64>(pow_j_bits(index)) * 0.00390625;
-    // r = z/c - 1 exactly, and lo3, what the rounding of ar2 = -r^2/2
-    // dropped: fused, each is one fused multiply-add; otherwise r comes from
-    // the halves of z, whose products with so short a 1/c are exact, as is
-    // the square of r's top half.
     var r = 0.0;
     var ar = 0.0;
     var ar2 = 0.0;
@@ -836,14 +695,12 @@ fn pow_log<fused: bool>(ix: u64) -> LogParts {
         lo3 = rlo * (ar + arhi) + (rhi * arhi - ar2);
     }
     let ar3 = r * ar2;
-    // k ln2 + log(c) + r, with the rounding of each step kept.
     let t1 = fma_on<fused>(k, 0.6931471805598903, float::from_bits(pow_log_c_bits(index)));
     let t2 = t1 + r;
     let lo1 = fma_on<fused>(k, 5.497923018708371e-14, float::from_bits(pow_log_c_tail_bits(index)));
     let lo2 = t1 - t2 + r;
     let hi = t2 + ar2;
     let lo4 = t2 - hi + ar2;
-    // r^3/3 - r^4/4 + ... + r^9/9, written on ar2 and ar3.
     let inner = fma_on<fused>(ar2, 1.7777777777777777, fma_on<fused>(r, 1.0, -1.1428571428571428));
     let middle = fma_on<fused>(ar2, inner, fma_on<fused>(r, -0.6666666666666666, 0.8));
     let p = ar3 * fma_on<fused>(ar2, middle, fma_on<fused>(r, 0.5, -0.6666666666666666));
@@ -852,10 +709,6 @@ fn pow_log<fused: bool>(ix: u64) -> LogParts {
     return LogParts { hi: y, lo: hi - y + lo };
 }
 
-// fmod returns the remainder of value / divisor, with the sign of value and a
-// magnitude below |divisor|, the way C's fmod does: fmod(5.5, 2.0) is 1.5 and
-// fmod(-5.5, 2.0) is -1.5. A zero divisor, an infinite value, or a NaN gives
-// NaN.
 fn fmod_f64(value: f64, divisor: f64) -> f64 {
     if divisor == 0.0 or float::is_infinite(value) or float::is_nan(value) or float::is_nan(divisor) {
         return nan_f64();
@@ -880,9 +733,6 @@ fn fmod_f64(value: f64, divisor: f64) -> f64 {
     return r;
 }
 
-// ldexp returns fraction * 2^exponent, with a result past the format
-// becoming infinity or 0 and one below the normal range rounded once into a
-// subnormal.
 fn ldexp_f64(fraction: f64, exponent: i64) -> f64 {
     if fraction == 0.0 or float::is_infinite(fraction) or float::is_nan(fraction) {
         return fraction;
@@ -901,7 +751,6 @@ fn ldexp_f64(fraction: f64, exponent: i64) -> f64 {
     }
     var m = 1.0;
     if e < -1022 {
-        // A subnormal result: build it 2^53 too large, then scale once.
         e = e + 53;
         m = 1.1102230246251565404236316680908203125e-16;
     }
@@ -917,9 +766,6 @@ pub struct Scaled {
     pub exponent: i64,
 }
 
-// frexp splits value into fraction * 2^exponent with the fraction in
-// [1/2, 1). Zero, the infinities and NaN come back as they are with a zero
-// exponent.
 fn frexp_f64(value: f64) -> Scaled {
     if value == 0.0 or float::is_infinite(value) or float::is_nan(value) {
         return Scaled { fraction: value, exponent: 0 };
@@ -932,9 +778,6 @@ fn frexp_f64(value: f64) -> Scaled {
     return Scaled { fraction: float::from_bits(bits), exponent: exponent };
 }
 
-// normalize scales a subnormal value up by 2^52 so that its exponent field
-// is meaningful, reporting the -52 that undoes it; a normal value is
-// returned as it is with 0.
 fn normalize(value: f64) -> Scaled {
     let smallest_normal = 2.2250738585072014e-308;
     if abs_f64(value) < smallest_normal {
@@ -949,9 +792,6 @@ pub struct Parts {
     pub fraction: f64,
 }
 
-// modf splits value into its integral and fractional parts, both with the
-// sign of value: modf(-2.5) is -2.0 and -0.5. An infinity is all whole:
-// its fraction is a zero of its sign (C99 Annex F.9.3.12).
 fn modf_f64(value: f64) -> Parts {
     if float::is_infinite(value) {
         return Parts { whole: value, fraction: copysign_f64(0.0, value) };
@@ -968,7 +808,6 @@ fn modf_f64(value: f64) -> Parts {
     }
     var bits = float::bits(value);
     let e = cast<i64>((bits >> 52) & 2047) - 1023;
-    // Keep the top 12 + e bits, the integral part, and clear the rest.
     if e < 52 {
         bits = bits & ~((cast<u64>(1) << cast<u64>(52 - e)) - 1);
     }
@@ -984,30 +823,6 @@ fn inv_ln2() -> f64 { return 1.44269504088896340736; }
 
 fn inv_ln10() -> f64 { return 0.43429448190325182765; }
 
-// ---------------------------------------------------------------------------
-// Trigonometry.
-//
-// sin and cos are table driven: value = k pi/64 + r with |r| at most pi/128,
-// sin and cos of the 128 points k pi/64 around the circle live in
-// tables.kizu as double-doubles, and sin(value) = sin(k pi/64) cos(r) +
-// cos(k pi/64) sin(r) needs only a short polynomial for each of cos(r) - 1
-// and sin(r) - r. Within three points of a zero of the answer the point's
-// value would cancel against the polynomial's, so there sin is taken
-// straight from the distance to the zero. Below 2^17 the reduction
-// subtracts pi/64 in 30-bit pieces the msun way, more of them when the
-// subtraction cancels; above it Payne-Hanek reduction leads. tan reduces
-// by pi/2 the same two ways and follows msun's kernel. Each answers
-// within one unit in the last place.
-
-// fma_on is x * y + z rounded once when fused, and the product and the sum
-// rounded in turn when not. The kernels use it only where either is within
-// their error budget, so both answer within one unit in the last place, and
-// each answers the same bits on every target: unfused is two IEEE 754
-// operations, and fused rounds once, with the native instruction or, where
-// there is none (wasm), the software fma of `math::fma`, which costs a
-// hundred instructions a call. The public functions are unfused; the
-// `_with<true>` ones are the fused kernels for a caller who wants native's
-// instruction and accepts the other bits.
 fn fma_on<fused: bool>(x: f64, y: f64, z: f64) -> f64 {
     comptime if fused {
         return fma_f64(x, y, z);
@@ -1016,7 +831,6 @@ fn fma_on<fused: bool>(x: f64, y: f64, z: f64) -> f64 {
     }
 }
 
-// sin_f64, cos_f64 and sin_cos_f64 are unfused on every target.
 fn sin_f64(value: f64) -> f64 {
     return sin_on<false>(value);
 }
@@ -1029,15 +843,12 @@ fn sin_cos_f64(value: f64) -> SinCos {
     return sin_cos_on<false>(value);
 }
 
-// Arc is an angle taken apart as k pi/64 + (r + tail), k in [0, 128).
 struct Arc {
     k: u64,
     r: f64,
     tail: f64,
 }
 
-// Point is sin and cos of a point k pi/64 of the circle, each as a
-// double-double.
 struct Point {
     sin_hi: f64,
     sin_lo: f64,
@@ -1045,7 +856,6 @@ struct Point {
     cos_lo: f64,
 }
 
-// point_of reads sin and cos of the point k pi/64 off the tables.
 fn point_of(k: u64) -> Point {
     let index = cast<i64>(k & 127);
     return Point {
@@ -1056,20 +866,17 @@ fn point_of(k: u64) -> Point {
     };
 }
 
-// sin returns the sine of value in radians. An infinity gives NaN.
 fn sin_on<fused: bool>(value: f64) -> f64 {
     if (float::bits(value) >> 52) & 0x7ff >= 0x410 {
         return sin_huge<fused>(value);
     }
     if value == 0.0 {
-        // Keeps the sign of -0, which the sum in sin_near_zero would lose.
         return value;
     }
     let a = reduce_arc<fused>(value);
     return sin_at<fused>(a.k, a.r, a.tail);
 }
 
-// cos returns the cosine of value in radians. An infinity gives NaN.
 fn cos_on<fused: bool>(value: f64) -> f64 {
     if (float::bits(value) >> 52) & 0x7ff >= 0x410 {
         return cos_huge<fused>(value);
@@ -1078,7 +885,6 @@ fn cos_on<fused: bool>(value: f64) -> f64 {
     return cos_at<fused>(a.k, a.r, a.tail);
 }
 
-// sin_at is the sine of the angle a.
 fn sin_at<fused: bool>(k: u64, r: f64, tail: f64) -> f64 {
     comptime if !fused {
         if (k + 3) & 63 < 7 {
@@ -1087,19 +893,14 @@ fn sin_at<fused: bool>(k: u64, r: f64, tail: f64) -> f64 {
     }
     let z = r * r;
     let z2 = z * z;
-    // sin(r) - r and cos(r) - 1, each polynomial split in two so that the
-    // dependency chain is short.
     let p = r * z * fma_on<fused>(z2, -0.0001984126984126984, fma_on<fused>(z, 0.008333333333333333, -0.16666666666666666));
     let q = z * fma_on<fused>(z2, fma_on<fused>(z, 2.48015873015873e-05, -0.001388888888888889), fma_on<fused>(z, 0.041666666666666664, -0.5));
     let point = point_of(k);
     let pt = p + tail;
-    // sin(c) cos(r) + cos(c) sin(r), largest terms last; q arrives last, so
-    // its term is added last of the small ones.
     let small = fma_on<fused>(point.sin_hi, q, fma_on<fused>(point.cos_hi, pt, fma_on<fused>(point.cos_lo, r, point.sin_lo)));
     return sum_of<fused>(point.sin_hi, point.cos_hi, r, small);
 }
 
-// cos_at is the cosine of the angle a.
 fn cos_at<fused: bool>(k: u64, r: f64, tail: f64) -> f64 {
     comptime if !fused {
         if (k + 3 - 32) & 63 < 7 {
@@ -1108,13 +909,10 @@ fn cos_at<fused: bool>(k: u64, r: f64, tail: f64) -> f64 {
     }
     let z = r * r;
     let z2 = z * z;
-    // sin(r) - r and cos(r) - 1, each polynomial split in two so that the
-    // dependency chain is short.
     let p = r * z * fma_on<fused>(z2, -0.0001984126984126984, fma_on<fused>(z, 0.008333333333333333, -0.16666666666666666));
     let q = z * fma_on<fused>(z2, fma_on<fused>(z, 2.48015873015873e-05, -0.001388888888888889), fma_on<fused>(z, 0.041666666666666664, -0.5));
     let point = point_of(k);
     let pt = p + tail;
-    // cos(c) cos(r) - sin(c) sin(r), largest terms last.
     let small = fma_on<fused>(point.cos_hi, q, fma_on<fused>(-point.sin_hi, pt, fma_on<fused>(-point.sin_lo, r, point.cos_lo)));
     return sum_of<fused>(point.cos_hi, -point.sin_hi, r, small);
 }
@@ -1125,9 +923,6 @@ pub struct SinCos {
     pub cos: f64,
 }
 
-// sin_cos returns the sine and cosine of value in radians together. The
-// reduction and the table point are shared, so it costs little more than
-// one of them.
 fn sin_cos_on<fused: bool>(value: f64) -> SinCos {
     if (float::bits(value) >> 52) & 0x7ff >= 0x410 {
         if float::is_nan(value) or float::is_infinite(value) {
@@ -1148,12 +943,9 @@ fn sin_cos_on<fused: bool>(value: f64) -> SinCos {
     return both;
 }
 
-// both_at is sin_at and cos_at of the angle a in one pass.
 fn both_at<fused: bool>(k: u64, r: f64, tail: f64) -> SinCos {
     let z = r * r;
     let z2 = z * z;
-    // sin(r) - r and cos(r) - 1, each polynomial split in two so that the
-    // dependency chain is short.
     let p = r * z * fma_on<fused>(z2, -0.0001984126984126984, fma_on<fused>(z, 0.008333333333333333, -0.16666666666666666));
     let q = z * fma_on<fused>(z2, fma_on<fused>(z, 2.48015873015873e-05, -0.001388888888888889), fma_on<fused>(z, 0.041666666666666664, -0.5));
     let point = point_of(k);
@@ -1171,13 +963,6 @@ fn both_at<fused: bool>(k: u64, r: f64, tail: f64) -> SinCos {
     return SinCos { sin: s, cos: c };
 }
 
-// sum_of is big + m r + small, the last step of sin_at and cos_at. Within
-// three points of a zero of the answer, big and m r cancel, so a rounding
-// of either would be a large part of what is left. With a fused
-// multiply-add the product's rounding is recovered exactly, and the sum's
-// by Fast2Sum (|big| is at least |m r| wherever big is not zero), so the
-// answer is rounded once; unfused takes the sine of the distance to the
-// zero instead (sin_near_zero).
 fn sum_of<fused: bool>(big: f64, m: f64, r: f64, small: f64) -> f64 {
     comptime if fused {
         let product = m * r;
@@ -1190,11 +975,6 @@ fn sum_of<fused: bool>(big: f64, m: f64, r: f64, small: f64) -> f64 {
     }
 }
 
-// sin_near_zero is the sine of the angle a when it is within three points
-// of a zero of sin: the point at zero_k (0) or the one half a turn on. For
-// cos, zero_k is 32, and cos(a) = -sin(a - pi/2) is the sine measured from
-// its zeros at 32 and 96. The distance t = r + d pi/64 to the zero is kept
-// as a double-double, and sin(t) comes from an odd polynomial in t.
 fn sin_near_zero<fused: bool>(k: u64, r: f64, tail: f64, zero_k: u64) -> f64 {
     let shifted = (k + 3 - zero_k) & 127;
     var d = cast<i64>(shifted) - 3;
@@ -1203,7 +983,6 @@ fn sin_near_zero<fused: bool>(k: u64, r: f64, tail: f64, zero_k: u64) -> f64 {
         d = d - 64;
         negative = !negative;
     }
-    // pi/64 in 51 bits, so that d times it is exact, and the rest.
     let steps = cast<f64>(d);
     let big = steps * 0.04908738521234052;
     let t = big + r;
@@ -1218,11 +997,6 @@ fn sin_near_zero<fused: bool>(k: u64, r: f64, tail: f64, zero_k: u64) -> f64 {
     return y;
 }
 
-// reduce_arc takes a value below 2^17 in magnitude apart as
-// k pi/64 + (r + tail): k is value / (pi/64) rounded to nearest and pi/64
-// is subtracted in 30-bit pieces, more of them when the subtraction
-// cancels (a value close to a multiple of pi/64), so that the remainder
-// keeps its full precision.
 fn reduce_arc<fused: bool>(value: f64) -> Arc {
     let shift = 6755399441055744.0;
     let kd = fma_on<fused>(value, 20.371832715762604, shift);
@@ -1234,7 +1008,6 @@ fn reduce_arc<fused: bool>(value: f64) -> Arc {
     let exponent = cast<i64>((float::bits(value) >> 52) & 0x7ff);
     var lost = exponent - cast<i64>((float::bits(lo) >> 52) & 0x7ff);
     if lost > 16 {
-        // The second piece brings pi/64 to 60 bits, the third to 90.
         var t = r;
         w = steps * -2.7204736537502286e-11;
         r = t - w;
@@ -1252,7 +1025,6 @@ fn reduce_arc<fused: bool>(value: f64) -> Arc {
     return Arc { k: k, r: lo, tail: (r - lo) - w };
 }
 
-// sin_huge is sin of a value at least 2^17 in magnitude, or not finite.
 fn sin_huge<fused: bool>(value: f64) -> f64 {
     if float::is_nan(value) or float::is_infinite(value) {
         return nan_f64();
@@ -1265,7 +1037,6 @@ fn sin_huge<fused: bool>(value: f64) -> f64 {
     return y;
 }
 
-// cos_huge is cos of a value at least 2^17 in magnitude, or not finite.
 fn cos_huge<fused: bool>(value: f64) -> f64 {
     if float::is_nan(value) or float::is_infinite(value) {
         return nan_f64();
@@ -1274,8 +1045,6 @@ fn cos_huge<fused: bool>(value: f64) -> f64 {
     return cos_at<fused>(a.k, a.r, a.tail);
 }
 
-// arc_of moves an angle from octants of pi/4 to points of pi/64: the
-// remainder z is at most pi/4, so it is at most 16 points from the octant.
 fn arc_of(octant: Octant) -> Arc {
     let shift = 6755399441055744.0;
     let kd = octant.z * 20.371832715762604 + shift;
@@ -1287,16 +1056,11 @@ fn arc_of(octant: Octant) -> Arc {
     return Arc { k: k, r: lo, tail: ((r - lo) - w) + octant.lo };
 }
 
-// tan returns the tangent of value in radians. An infinity gives NaN. The
-// angle is taken apart as j pi/4 + (z + lo), j even and |z| at most about
-// pi/4, and tan_kernel answers tan(z + lo), or -1 / tan(z + lo) when j is
-// an odd multiple of 2.
 fn tan_f64(value: f64) -> f64 {
     if float::is_nan(value) or float::is_infinite(value) {
         return nan_f64();
     }
     if value == 0.0 {
-        // Keeps the sign of -0, which the sum in tan_kernel would lose.
         return value;
     }
     let x = abs_f64(value);
@@ -1315,10 +1079,6 @@ fn tan_f64(value: f64) -> f64 {
     return tan_kernel(octant.z, octant.lo, octant.j & 2 == 2);
 }
 
-// reduce_octant takes a value below 2^17 in magnitude apart as
-// j pi/4 + (z + lo), j = 2n with n value / (pi/2) rounded to nearest: pi/2
-// is subtracted in 33-bit pieces, more of them when the subtraction
-// cancels, as reduce_arc does for pi/64. The msun __ieee754_rem_pio2.
 fn reduce_octant(value: f64) -> Octant {
     let shift = 6755399441055744.0;
     let kd = value * 6.36619772367581382433e-01 + shift;
@@ -1330,8 +1090,6 @@ fn reduce_octant(value: f64) -> Octant {
     let exponent = cast<i64>((float::bits(value) >> 52) & 0x7ff);
     var lost = exponent - cast<i64>((float::bits(z) >> 52) & 0x7ff);
     if lost > 16 {
-        // The second piece brings pi/2 to 66 bits and good to 118, the third
-        // to 99 bits and good to 151.
         var t = r;
         w = steps * 6.07710050630396597660e-11;
         r = t - w;
@@ -1349,11 +1107,6 @@ fn reduce_octant(value: f64) -> Octant {
     return Octant { j: j, z: z, lo: (r - z) - w };
 }
 
-// tan_kernel is tan(x + y) for |x + y| at most about pi/4, or
-// -1 / tan(x + y) when reciprocal is set: the msun __kernel_tan. tan(x) is
-// x + x^3 / 3 + x^5 P(x^2); above 0.6744 the angle is moved to pi/4 - x,
-// where the polynomial is more accurate, and tan(x) recovered from
-// tan(pi/4 - x) by tan(pi/4 - a) = (1 - tan a) / (1 + tan a).
 fn tan_kernel(value: f64, tail: f64, reciprocal: bool) -> f64 {
     var x = value;
     var y = tail;
@@ -1369,8 +1122,6 @@ fn tan_kernel(value: f64, tail: f64, reciprocal: bool) -> f64 {
     }
     let z = x * x;
     var w = z * z;
-    // x^5 P(x^2) split into its even and odd powers of x^4, so that the
-    // dependency chain is short.
     var r = 1.33333333333201242699e-01 + w * (2.18694882948595424599e-02 + w * (3.59207910759131235356e-03 + w * (5.88041240820264096874e-04 + w * (7.81794442939557092300e-05 + w * -1.85586374855275456654e-05))));
     var v = z * (5.39682539762260521377e-02 + w * (8.86323982359930005737e-03 + w * (1.45620945432529025516e-03 + w * (2.46463134818469906812e-04 + w * (7.14072491382608190305e-05 + w * 2.59073051863633712884e-05)))));
     var s = z * x;
@@ -1391,9 +1142,6 @@ fn tan_kernel(value: f64, tail: f64, reciprocal: bool) -> f64 {
     if !reciprocal {
         return w;
     }
-    // -1 / (x + r) to a unit in the last place: w and the reciprocal are
-    // split into high halves with zeroed low words, whose products are
-    // exact, and the error of each carried on.
     let low_word = cast<u64>(0xffffffff);
     let high = float::from_bits(float::bits(w) & ~low_word);
     v = r - (high - x);
@@ -1403,35 +1151,24 @@ fn tan_kernel(value: f64, tail: f64, reciprocal: bool) -> f64 {
     return t + a * (s + t * v);
 }
 
-// Octant is an angle taken apart as j pi/4 + (z + lo), with j even; lo is
-// the tail of z.
 struct Octant {
     j: u64,
     z: f64,
     lo: f64,
 }
 
-// reduce_octant_huge is Payne-Hanek reduction of x >= pi/4 by pi/4: the
-// mantissa of x is multiplied by the digits of 4/pi that matter at x's
-// exponent, in 64-bit pieces, and the integer and fractional parts are read
-// off the product. From "Argument Reduction for Huge Arguments: Good to the
-// Last Bit", K. C. Ng et al, 1992.
 fn reduce_octant_huge(x: f64) -> Octant {
     if x < pi_over_4() {
         return Octant { j: 0, z: x, lo: 0.0 };
     }
-    // x = ix * 2^exp with the hidden bit made explicit.
     var ix = float::bits(x);
     let exp = cast<i64>((ix >> 52) & 2047) - 1023 - 52;
     ix = (ix & 0x000fffffffffffff) | 0x0010000000000000;
-    // The three digits of 4/pi at which the product's leading digit has
-    // exponent -61; exp is at least -53 and below 971.
     let digit = cast<u64>((exp + 61) / 64);
     let bitshift = cast<u64>((exp + 61) % 64);
     let z0 = (four_over_pi_digit(digit) << bitshift) | (four_over_pi_digit(digit + 1) >> (64 - bitshift));
     let z1 = (four_over_pi_digit(digit + 1) << bitshift) | (four_over_pi_digit(digit + 2) >> (64 - bitshift));
     let z2 = (four_over_pi_digit(digit + 2) << bitshift) | (four_over_pi_digit(digit + 3) >> (64 - bitshift));
-    // Multiply the mantissa by the digits and keep the upper two words.
     let z2hi = mul64_high(z2, ix);
     let z1hi = mul64_high(z1, ix);
     let z1lo = z1 * ix;
@@ -1442,16 +1179,11 @@ fn reduce_octant_huge(x: f64) -> Octant {
         carry = 1;
     }
     var hi = z0lo + z1hi + carry;
-    // The top 3 bits are the octant; the rest is the fraction, as a 128-bit
-    // number in fhi and flo.
     var j = hi >> 61;
     var fhi = (hi << 3) | (lo >> 61);
     var flo = lo << 3;
     var negative = false;
     if j & 1 == 1 {
-        // An odd octant: measure from the next even one, so that the
-        // remainder is centred on zero. Negating the whole fraction here
-        // keeps every bit; subtracting 1 from a float would not.
         j = (j + 1) & 7;
         flo = 0 - flo;
         fhi = 0 - fhi;
@@ -1463,14 +1195,10 @@ fn reduce_octant_huge(x: f64) -> Octant {
     if fhi == 0 {
         return Octant { j: j, z: 0.0, lo: 0.0 };
     }
-    // Normalise the fraction into a float: the 52 bits after the leading
-    // one, rounded on the bit below them.
     let lz = leading_zeros(fhi);
     var e = cast<u64>(1023) - (lz + 1);
     let rest = (fhi << (lz + 1)) | (flo >> (64 - (lz + 1)));
     var mantissa = rest >> 12;
-    // The 12 bits the float drops, minus 1 when the rounding went up, as a
-    // float of their own scaled 2^-64 below the leading one.
     var dropped = cast<i64>(rest & 0xfff);
     if rest & 0x800 != 0 {
         mantissa = mantissa + 1;
@@ -1486,8 +1214,6 @@ fn reduce_octant_huge(x: f64) -> Octant {
         z = -z;
         z_lo = -z_lo;
     }
-    // (z + z_lo) times pi/4 as a double-double: the product of the halves of
-    // z and of pi/4 is exact, and pi/4's own tail beyond a float is added.
     let zh = float::from_bits(float::bits(z) & ~((cast<u64>(1) << 27) - 1));
     let zl = z - zh;
     let ph = 0.7853981554508209;
@@ -1497,7 +1223,6 @@ fn reduce_octant_huge(x: f64) -> Octant {
     return Octant { j: j, z: angle, lo: tail };
 }
 
-// mul64_high returns the upper 64 bits of the 128-bit product of a and b.
 fn mul64_high(a: u64, b: u64) -> u64 {
     let mask32 = cast<u64>(0xffffffff);
     let a0 = a & mask32;
@@ -1512,7 +1237,6 @@ fn mul64_high(a: u64, b: u64) -> u64 {
     return a1 * b1 + w2 + (w1 >> 32);
 }
 
-// leading_zeros returns the number of leading zero bits in value, 64 for 0.
 fn leading_zeros(value: u64) -> u64 {
     var count = cast<u64>(0);
     var rest = value;
@@ -1530,9 +1254,6 @@ fn leading_zeros(value: u64) -> u64 {
     return count;
 }
 
-// four_over_pi_digit returns the index-th 64-bit digit of 4/pi, so that
-// 4/pi is the sum of digit(i) * 2^(-64 i): 19 digits and the leading one
-// give 1217 bits, enough for the largest float exponent.
 fn four_over_pi_digit(index: u64) -> u64 {
     if index == 0 { return 0x0000000000000001; }
     if index == 1 { return word64(0x45f306dc, 0x9c882a53); }
@@ -1557,14 +1278,10 @@ fn four_over_pi_digit(index: u64) -> u64 {
     return 0;
 }
 
-// word64 joins two 32-bit halves, since a literal cannot exceed the i64
-// range.
 fn word64(high: u64, low: u64) -> u64 {
     return (high << 32) | low;
 }
 
-// asin returns the arc sine of value, in [-pi/2, pi/2]. A value outside
-// [-1, 1] gives NaN.
 fn asin_f64(value: f64) -> f64 {
     if value == 0.0 {
         return value;
@@ -1590,13 +1307,10 @@ fn asin_f64(value: f64) -> f64 {
     return temp;
 }
 
-// acos returns the arc cosine of value, in [0, pi]. A value outside [-1, 1]
-// gives NaN.
 fn acos_f64(value: f64) -> f64 {
     return pi_over_2() - asin_f64(value);
 }
 
-// atan returns the arc tangent of value, in [-pi/2, pi/2].
 fn atan_f64(value: f64) -> f64 {
     if value == 0.0 {
         return value;
@@ -1607,9 +1321,6 @@ fn atan_f64(value: f64) -> f64 {
     return -atan_positive(-value);
 }
 
-// atan2 returns the angle of the point (x, y) from the positive x axis, in
-// (-pi, pi], with the quadrant chosen from the signs of both arguments:
-// atan2(1, -1) is 3pi/4 where atan(1 / -1) is -pi/4.
 fn atan2_f64(y: f64, x: f64) -> f64 {
     if float::is_nan(y) or float::is_nan(x) {
         return nan_f64();
@@ -1640,8 +1351,6 @@ fn atan2_f64(y: f64, x: f64) -> f64 {
     }
     let q = atan_f64(y / x);
     if x < 0.0 {
-        // The half turn goes the way of y: y / x may have underflowed to a
-        // zero whose sign no longer says which.
         if y > 0.0 {
             return q + pi_f64();
         }
@@ -1650,16 +1359,9 @@ fn atan2_f64(y: f64, x: f64) -> f64 {
     return q;
 }
 
-// atan_positive is the arc tangent of a positive value, the Cephes `satan`:
-// the argument is folded into [0, 0.66] where the rational approximation
-// holds.
 fn atan_positive(x: f64) -> f64 {
     let more_bits = 6.123233995736765886130e-17;
     let tan_3pi_over_8 = 2.41421356237309504880;
-    // Three ranges, each a different argument to atan_reduced and a
-    // different base angle; the arguments are all computed and one is
-    // selected, since a branch on the range is unpredictable on random
-    // input. atan_reduced is odd, so pi/2 - atan(1/x) is pi/2 + atan(-1/x).
     var argument = x;
     var base = 0.0;
     var extra = 0.0;
@@ -1676,7 +1378,6 @@ fn atan_positive(x: f64) -> f64 {
     return base + atan_reduced(argument) + extra;
 }
 
-// atan_reduced is the arc tangent of x in [0, 0.66], the Cephes `xatan`.
 fn atan_reduced(x: f64) -> f64 {
     let p0 = -8.750608600031904122785e-01;
     let p1 = -1.615753718733365076637e+01;
@@ -1700,10 +1401,6 @@ fn pi_over_2() -> f64 { return 1.57079632679489661923132169163975144209858469968
 
 fn three_pi_over_4() -> f64 { return 2.35619449019234492884698253745962716314787704953133; }
 
-// ---------------------------------------------------------------------------
-// Hyperbolics, the cube root, round-to-even and the fused multiply-add.
-
-// sinh returns the hyperbolic sine of value.
 fn sinh_f64(value: f64) -> f64 {
     let p0 = -0.6307673640497716991184787251e+6;
     let p1 = -0.8991272022039509355398013511e+5;
@@ -1737,7 +1434,6 @@ fn sinh_f64(value: f64) -> f64 {
     return temp;
 }
 
-// cosh returns the hyperbolic cosine of value.
 fn cosh_f64(value: f64) -> f64 {
     let x = abs_f64(value);
     if x > 21.0 {
@@ -1747,10 +1443,6 @@ fn cosh_f64(value: f64) -> f64 {
     return (ex + 1.0 / ex) * 0.5;
 }
 
-// half_exp is exp(x) / 2 for x above 21, which is sinh(x) and cosh(x) there:
-// exp(-x) is below a unit in the last place of either. The halving is part
-// of the one rounding, so the answer is finite up to ln(2 * max), about
-// 710.4759, though exp(x) overflows from 709.7827.
 fn half_exp(x: f64) -> f64 {
     if x > 710.4758600739439 {
         return infinity_f64();
@@ -1758,7 +1450,6 @@ fn half_exp(x: f64) -> f64 {
     return exp_kernel<false>(x, 0.0, cast<u64>(0) - 128, x >= 512.0);
 }
 
-// tanh returns the hyperbolic tangent of value, in [-1, 1].
 fn tanh_f64(value: f64) -> f64 {
     let max_log = 8.8029691931113054295988e+01;
     let p0 = -9.64399179425052238628e-1;
@@ -1777,9 +1468,6 @@ fn tanh_f64(value: f64) -> f64 {
     if value == 0.0 {
         return value;
     }
-    // Both the rational form (below 0.625) and the exp form are evaluated
-    // and one is selected, since a branch on the magnitude is unpredictable
-    // on random input and costs more than the spare evaluation.
     let s = value * value;
     let rational = value + value * s * ((p0 * s + p1) * s + p2) / (((s + q0) * s + q1) * s + q2);
     let e = exp_f64(2.0 * z);
@@ -1793,7 +1481,6 @@ fn tanh_f64(value: f64) -> f64 {
     return rational;
 }
 
-// asinh returns the inverse hyperbolic sine of value.
 fn asinh_f64(value: f64) -> f64 {
     let ln2 = 6.93147180559945286227e-01;
     let near_zero = 3.7252902984619140625e-9;
@@ -1827,8 +1514,6 @@ fn asinh_f64(value: f64) -> f64 {
     return temp;
 }
 
-// acosh returns the inverse hyperbolic cosine of value. A value below 1
-// gives NaN.
 fn acosh_f64(value: f64) -> f64 {
     let ln2 = 6.93147180559945286227e-01;
     let large = 268435456.0;
@@ -1848,8 +1533,6 @@ fn acosh_f64(value: f64) -> f64 {
     return log1p_f64(t + sqrt_f64(2.0 * t + t * t));
 }
 
-// atanh returns the inverse hyperbolic tangent of value. A value outside
-// [-1, 1] gives NaN and the ends give the infinities.
 fn atanh_f64(value: f64) -> f64 {
     let near_zero = 3.7252902984619140625e-9;
     if value < -1.0 or value > 1.0 or float::is_nan(value) {
@@ -1884,9 +1567,6 @@ fn atanh_f64(value: f64) -> f64 {
     return temp;
 }
 
-// cbrt returns the cube root of value, with the sign of value: cbrt(-8.0)
-// is -2.0. The FreeBSD msun algorithm: a rough root from the bits, a
-// rational refinement, and one Newton step.
 fn cbrt_f64(value: f64) -> f64 {
     let b1 = cast<u64>(715094163);
     let b2 = cast<u64>(696219795);
@@ -1905,19 +1585,15 @@ fn cbrt_f64(value: f64) -> f64 {
         x = -x;
         sign = true;
     }
-    // A root good to 5 bits, straight from the exponent.
     var t = float::from_bits(float::bits(x) / 3 + (b1 << 32));
     if x < smallest_normal {
         t = 18014398509481984.0 * x;
         t = float::from_bits(float::bits(t) / 3 + (b2 << 32));
     }
-    // To 23 bits.
     var r = t * t / x;
     var s = c + r * t;
     t = t * (g + f / (s + e + d / s));
-    // Chop to 22 bits, made larger than the root.
     t = float::from_bits((float::bits(t) & (cast<u64>(0xFFFFFFFFC) << 28)) + (cast<u64>(1) << 30));
-    // One Newton step to 53 bits, within 0.667 ulp.
     s = t * t;
     r = x / s;
     let w = t + t;
@@ -1929,16 +1605,10 @@ fn cbrt_f64(value: f64) -> f64 {
     return t;
 }
 
-// round_even returns the integral value nearest to value, with halves
-// rounded to the even neighbour: round_even(0.5) is 0.0 and
-// round_even(1.5) is 2.0.
 fn round_even_f64(value: f64) -> f64 {
     var bits = float::bits(value);
     let e = (bits >> 52) & 2047;
     if e >= 1023 {
-        // |value| >= 1: add just under a half, or a half when the integral
-        // part is odd, then drop the fraction. Past 2^52, infinity and NaN
-        // have no fraction bits and pass through.
         let half_minus_ulp = (cast<u64>(1) << 51) - 1;
         let shift = e - 1023;
         bits = bits + ((half_minus_ulp + ((bits >> (52 - shift)) & 1)) >> shift);
@@ -1946,23 +1616,14 @@ fn round_even_f64(value: f64) -> f64 {
         return float::from_bits(bits);
     }
     if e == 1022 and bits & fraction_mask() != 0 {
-        // 0.5 < |value| < 1 rounds to +-1.
         return float::from_bits((bits & sign_bit()) | (cast<u64>(1023) << 52));
     }
-    // |value| <= 0.5, subnormals included, rounds to +-0.
     return float::from_bits(bits & sign_bit());
 }
 
 fn fraction_mask() -> u64 { return (cast<u64>(1) << 52) - 1; }
 
-// fma returns x * y + z with one rounding, where x * y + z written out
-// rounds twice: fma(0.1, 10.0, -1.0) is the error of 0.1 * 10.0, which the
-// plain expression loses. The product is formed exactly as 128 bits, z is
-// aligned to it with the bits shifted out compressed into a sticky bit, and
-// the sum is rounded once to the nearest even. From Go's math.FMA.
 fn fma_f64(x: f64, y: f64, z: f64) -> f64 {
-    // Rounded once, the answer is the same bits whoever computes it, so
-    // native takes its instruction and other targets compute it below.
     comptime if std::target::is_native() {
         return std::internal::builtin::f64_fma(x, y, z);
     } else {
@@ -1975,19 +1636,15 @@ fn fma_software(x: f64, y: f64, z: f64) -> f64 {
     let by = float::bits(y);
     let bz = float::bits(z);
     let inf = exponent_mask();
-    // A zero, an infinity or a NaN among x and y: x * y + z rounds once.
     if x == 0.0 or y == 0.0 or z == 0.0 or bx & inf == inf or by & inf == inf {
         return x * y + z;
     }
-    // A finite product plus an infinite or NaN z is z.
     if bz & inf == inf {
         return z;
     }
     let xp = fma_split(bx);
     let yp = fma_split(by);
     let zp = fma_split(bz);
-    // The product: sign, exponent and a two-word mantissa, the 106-bit
-    // product shifted left by 21 so that its top bit is bit 62 or 63.
     var ps = xp.sign ^ yp.sign;
     var pe = xp.exponent + yp.exponent - 1023 + 1;
     let xm = xp.mantissa << 10;
@@ -1998,13 +1655,11 @@ fn fma_software(x: f64, y: f64, z: f64) -> f64 {
     var ze = zp.exponent;
     var zm1 = zp.mantissa << 10;
     var zm2 = cast<u64>(0);
-    // Normalize the product to bit 62.
     let is62zero = (~pm1 >> 62) & 1;
     let shifted = shl128(pm1, pm2, is62zero);
     pm1 = shifted.high;
     pm2 = shifted.low;
     pe = pe - cast<i64>(is62zero);
-    // Add the smaller magnitude to the larger.
     if pe < ze or (pe == ze and pm1 < zm1) {
         let ts = ps;
         let te = pe;
@@ -2019,17 +1674,14 @@ fn fma_software(x: f64, y: f64, z: f64) -> f64 {
         zm1 = t1;
         zm2 = t2;
     }
-    // p == -z is +0, since neither operand is zero.
     if ps != zs and pe == ze and pm1 == zm1 and pm2 == zm2 {
         return 0.0;
     }
-    // Align z to the product.
     let aligned = shr128_sticky(zm1, zm2, cast<u64>(pe - ze));
     zm1 = aligned.high;
     zm2 = aligned.low;
     var m = cast<u64>(0);
     if ps == zs {
-        // (pm1:pm2) + (zm1:zm2)
         let low = pm2 + zm2;
         var carry = cast<u64>(0);
         if low < pm2 {
@@ -2042,7 +1694,6 @@ fn fma_software(x: f64, y: f64, z: f64) -> f64 {
         pm1 = compressed.high;
         m = compressed.low;
     } else {
-        // (pm1:pm2) - (zm1:zm2)
         let low = pm2 - zm2;
         var borrow = cast<u64>(0);
         if pm2 < zm2 {
@@ -2062,7 +1713,6 @@ fn fma_software(x: f64, y: f64, z: f64) -> f64 {
             m = m | 1;
         }
     }
-    // Round to nearest even; a result past the exponent range is infinity.
     if pe > 1022 + 1023 or (pe == 1022 + 1023 and ((m + (cast<u64>(1) << 9)) >> 63) == 1) {
         return float::from_bits((ps << 63) | inf);
     }
@@ -2076,7 +1726,6 @@ fn fma_software(x: f64, y: f64, z: f64) -> f64 {
         pe = 0;
     }
     let rounded = (m + (cast<u64>(1) << 9)) >> 10;
-    // A tie, with the rounding bit set and nothing below it, goes to even.
     if (m & ((cast<u64>(1) << 10) - 1)) == (cast<u64>(1) << 9) {
         m = rounded & ~cast<u64>(1);
     } else {
@@ -2088,9 +1737,6 @@ fn fma_software(x: f64, y: f64, z: f64) -> f64 {
     return float::from_bits((ps << 63) + (cast<u64>(pe) << 52) + m);
 }
 
-// FmaPart is one operand of fma taken apart: its sign bit, its biased
-// exponent, and its mantissa with the hidden bit made explicit and a
-// subnormal shifted up to normal.
 struct FmaPart {
     sign: u64,
     exponent: i64,
@@ -2111,13 +1757,11 @@ fn fma_split(bits: u64) -> FmaPart {
     return FmaPart { sign: sign, exponent: exponent, mantissa: mantissa };
 }
 
-// Words is a 128-bit value as two 64-bit words.
 struct Words {
     high: u64,
     low: u64,
 }
 
-// shl128 shifts a two-word value left by n, for any n below 128.
 fn shl128(high: u64, low: u64, n: u64) -> Words {
     return Words {
         high: (high << n) | (low >> (64 - n)) | (low << (n - 64)),
@@ -2125,7 +1769,6 @@ fn shl128(high: u64, low: u64, n: u64) -> Words {
     };
 }
 
-// shr128 shifts a two-word value right by n, for any n below 128.
 fn shr128(high: u64, low: u64, n: u64) -> Words {
     return Words {
         high: high >> n,
@@ -2133,9 +1776,6 @@ fn shr128(high: u64, low: u64, n: u64) -> Words {
     };
 }
 
-// shr128_sticky shifts a two-word value right by n and folds every bit
-// shifted out into the lowest bit of the result, so that rounding still
-// sees whether anything was below it.
 fn shr128_sticky(high: u64, low: u64, n: u64) -> Words {
     if n == 0 {
         return Words { high: high, low: low };

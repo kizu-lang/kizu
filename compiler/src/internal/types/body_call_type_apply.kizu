@@ -1596,6 +1596,21 @@ fn (self: &var Checker) check_builtin_type_apply(
         handled.* = true;
         return self.check_allocator_from(tree, scope, type_arg, args, out);
     }
+    if mem::equal_bytes(name, "std::gpu::group_array") {
+        handled.* = true;
+        if args.len(tree) != 0 or !gpu_group_array_type(type_arg) {
+            return try self.checker_error_at(
+                "type error", ast::zero_span(), "`std::gpu::group_array` takes no arguments and a fixed array type `[N]T` whose T is an integer or f32"
+            );
+        }
+        match try self.resolve_type(tree, type_arg) {
+            Value(value) => {
+                out.* = value;
+            },
+            Issue(issue) => return try self.type_resolution_diagnostic(issue),
+        }
+        return null;
+    }
     if mem::equal_bytes(name, "std::internal::builtin::mem_size_of") {
         handled.* = true;
         if args.len(tree) != 0 {
@@ -2458,7 +2473,7 @@ fn (self: &var Checker) check_box_constructor(
         return move problem;
     }
     var coerced = empty_type();
-    if try self.coerce_contextual_integer_literal(
+    if try self.coerce_contextual_literal(
         tree,
         value_expression,
         element,
@@ -3323,4 +3338,21 @@ fn (self: &Checker) array_union_storage_reason(
     try message.append_bytes(self.allocator, "` cannot be Array element: ");
     try message.append_string(self.allocator, &reason);
     return move message;
+}
+
+fn gpu_group_array_type(type_arg: []u8) -> bool {
+    let length = mem::len(type_arg);
+    var close = 1;
+    while close < length and type_arg[close] >= cast<u8>(48) and type_arg[close] <= cast<u8>(57) {
+        close = close + 1;
+    }
+    if length < 4 or type_arg[0] != cast<u8>(91) or close == 1 or close >= length or type_arg[close] != cast<u8>(93) {
+        return false;
+    }
+    let element = type_arg[close + 1..length];
+    return mem::equal_bytes(element, "i8") or mem::equal_bytes(element, "i16") or
+        mem::equal_bytes(element, "i32") or mem::equal_bytes(element, "i64") or
+        mem::equal_bytes(element, "u8") or mem::equal_bytes(element, "u16") or
+        mem::equal_bytes(element, "u32") or mem::equal_bytes(element, "u64") or
+        mem::equal_bytes(element, "f32");
 }
