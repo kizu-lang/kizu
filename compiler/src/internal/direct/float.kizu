@@ -391,6 +391,11 @@ fn float_registers(allocator: Allocator, func: &MFunction, arch: Arch, out: &var
                         changed = true;
                     }
                 }
+                if inst.op == MOp::CSel and !is_x86(arch) and in_float(out, inst.rn) and in_float(out, inst.rm) {
+                    if try enter_float(out, &forced, inst.rd) {
+                        changed = true;
+                    }
+                }
                 if inst.op == MOp::ParCopy {
                     for 0..inst.imm |index| {
                         let copy = func.copies.get_or_panic(inst.slot + index);
@@ -414,7 +419,10 @@ fn float_registers(allocator: Allocator, func: &MFunction, arch: Arch, out: &var
                 if inst.op != MOp::CSel {
                     continue;
                 }
-                if !is_x86(arch) and in_float(out, inst.rd) and in_float(out, inst.rn) and in_float(out, inst.rm) {
+                if !is_x86(arch) {
+                    if !in_float(out, inst.rn) and !in_float(out, inst.rm) and try leave_float(out, inst.rd) {
+                        changed = true;
+                    }
                     continue;
                 }
                 if try leave_float(out, inst.rd) {
@@ -481,6 +489,14 @@ fn join_float(chosen: &var array::Array<bool>, forced: &array::Array<bool>, a: i
         return true;
     }
     return false;
+}
+
+fn enter_float(chosen: &var array::Array<bool>, forced: &array::Array<bool>, reg: i64) -> !bool {
+    if !is_vreg(reg) or in_float(chosen, reg) or forced.get_or_panic(reg - first_vreg()) {
+        return false;
+    }
+    try chosen.set(reg - first_vreg(), true);
+    return true;
 }
 
 fn leave_float(chosen: &var array::Array<bool>, reg: i64) -> !bool {
