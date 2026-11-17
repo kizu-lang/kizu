@@ -1,5 +1,6 @@
 import compiler::internal::ir;
 import std::array;
+import std::map;
 
 enum Role {
     Outside,
@@ -67,9 +68,9 @@ struct Load {
 }
 
 struct Tables {
-    roles: array::Array<Role>,
-    inner: array::Array<i64>,
-    vreg: array::Array<i64>,
+    roles: map::Map<i64, Role>,
+    inner: map::Map<i64, i64>,
+    vreg: map::Map<i64, i64>,
     body: array::Array<i64>,
     accs: array::Array<Acc>,
     invs: array::Array<ir::Name>,
@@ -80,7 +81,7 @@ struct Tables {
     fvals: array::Array<FVal>,
     fops: array::Array<FOp>,
     faccs: array::Array<FAcc>,
-    fnames: array::Array<i64>,
+    fnames: map::Map<i64, i64>,
 }
 
 fn (self: Tables) deinit(allocator: Allocator) -> void {
@@ -106,11 +107,7 @@ fn role_of(tables: &Tables, name: ir::Name) -> Role {
 }
 
 fn set_role(allocator: Allocator, tables: &var Tables, name: ir::Name, role: Role) -> !void {
-    let id = ir::name_id(name);
-    while tables.roles.len() <= id {
-        try tables.roles.append(allocator, Role::Outside);
-    }
-    return tables.roles.set(id, role);
+    return tables.roles.insert(allocator, ir::name_id(name), role);
 }
 
 fn inner_uses(tables: &Tables, name: ir::Name) -> i64 {
@@ -122,10 +119,7 @@ fn note_use(allocator: Allocator, tables: &var Tables, name: ir::Name) -> !void 
         return;
     }
     let id = ir::name_id(name);
-    while tables.inner.len() <= id {
-        try tables.inner.append(allocator, 0);
-    }
-    return tables.inner.set(id, tables.inner.get_or_panic(id) + 1);
+    return tables.inner.insert(allocator, id, (tables.inner.get(id) orelse 0) + 1);
 }
 
 fn vreg_slot(tables: &Tables, name: ir::Name) -> i64 {
@@ -133,11 +127,7 @@ fn vreg_slot(tables: &Tables, name: ir::Name) -> i64 {
 }
 
 fn set_vreg_slot(allocator: Allocator, tables: &var Tables, name: ir::Name, index: i64) -> !void {
-    let id = ir::name_id(name);
-    while tables.vreg.len() <= id {
-        try tables.vreg.append(allocator, 0 - 1);
-    }
-    return tables.vreg.set(id, index);
+    return tables.vreg.insert(allocator, ir::name_id(name), index);
 }
 
 fn resolve(tables: &Tables, name: ir::Name) -> ir::Name {
@@ -191,9 +181,9 @@ fn (self: &var Selector) vectorize_entry(module: &ir::Module, from: ir::Name, ta
         return false;
     }
     var tables = Tables {
-        roles: array::new<Role>(self.allocator),
-        inner: array::new<i64>(self.allocator),
-        vreg: array::new<i64>(self.allocator),
+        roles: map::new<i64, Role>(self.allocator),
+        inner: map::new<i64, i64>(self.allocator),
+        vreg: map::new<i64, i64>(self.allocator),
         body: array::new<i64>(self.allocator),
         accs: array::new<Acc>(self.allocator),
         invs: array::new<ir::Name>(self.allocator),
@@ -204,7 +194,7 @@ fn (self: &var Selector) vectorize_entry(module: &ir::Module, from: ir::Name, ta
         fvals: array::new<FVal>(self.allocator),
         fops: array::new<FOp>(self.allocator),
         faccs: array::new<FAcc>(self.allocator),
-        fnames: array::new<i64>(self.allocator)
+        fnames: map::new<i64, i64>(self.allocator)
     };
     defer tables.deinit(self.allocator);
     var plan = Plan {
@@ -589,29 +579,23 @@ fn (self: &var Selector) plan_const(module: &ir::Module, node: &ir::InstrNode, t
 
 fn (self: &var Selector) collect_body(module: &ir::Module, plan: &Plan, entry: i64, exit: i64, tables: &var Tables) -> !bool {
     let allocator = self.allocator;
-    let count = self.ir_blocks.len();
-    var state = array::new<i64>(allocator);
+    var state = map::new<i64, i64>(allocator);
     defer state.deinit(allocator);
-    var next = array::new<i64>(allocator);
+    var next = map::new<i64, i64>(allocator);
     defer next.deinit(allocator);
     var stack = array::new<i64>(allocator);
     defer stack.deinit(allocator);
     var post = array::new<i64>(allocator);
     defer post.deinit(allocator);
-    var into = array::new<i64>(allocator);
+    var into = map::new<i64, i64>(allocator);
     defer into.deinit(allocator);
-    for 0..count |_index| {
-        try state.append(allocator, 0);
-        try next.append(allocator, 0);
-        try into.append(allocator, 0);
-    }
-    try into.set(entry, 1);
+    try into.insert(allocator, entry, 1);
     try stack.append(allocator, entry);
-    try state.set(entry, 1);
+    try state.insert(allocator, entry, 1);
     while stack.len() > 0 {
         let top = stack.get_or_panic(stack.len() - 1);
-        let position = next.get_or_panic(top);
-        try next.set(top, position + 1);
+        let position = next.get(top) orelse 0;
+        try next.insert(allocator, top, position + 1);
         let block = self.ir_blocks.get(top) orelse return false;
         let term = module.blocks.at(block.node).terminator;
         if position == 0 and term.op != ir::TermOp::Jump and term.op != ir::TermOp::Branch {
@@ -625,36 +609,36 @@ fn (self: &var Selector) collect_body(module: &ir::Module, plan: &Plan, entry: i
             if succ == plan.header {
                 continue;
             }
-            try into.set(succ, into.get_or_panic(succ) + 1);
-            let seen = state.get_or_panic(succ);
+            try into.insert(allocator, succ, (into.get(succ) orelse 0) + 1);
+            let seen = state.get(succ) orelse 0;
             if seen == 1 {
                 return false;
             }
             if seen == 0 {
-                try state.set(succ, 1);
+                try state.insert(allocator, succ, 1);
                 try stack.append(allocator, succ);
             }
             continue;
         }
         let _ = stack.pop();
-        try state.set(top, 2);
+        try state.insert(allocator, top, 2);
         try post.append(allocator, top);
         if post.len() > 16 {
             return false;
         }
     }
-    if state.get_or_panic(exit) != 0 {
+    if (state.get(exit) orelse 0) != 0 {
         return false;
     }
     let latch = self.block(plan.latch);
-    if latch < 0 or state.get_or_panic(latch) != 2 {
+    if latch < 0 or (state.get(latch) orelse 0) != 2 {
         return false;
     }
     var index = post.len() - 1;
     while index >= 0 {
         let mir = post.get_or_panic(index);
         index = index - 1;
-        if into.get_or_panic(mir) != (self.preds.get(mir) orelse 0 - 1) {
+        if (into.get(mir) orelse 0) != (self.preds.get(mir) orelse 0 - 1) {
             return false;
         }
         try tables.body.append(allocator, mir);
