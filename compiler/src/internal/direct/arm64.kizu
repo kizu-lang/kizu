@@ -72,56 +72,46 @@ fn emit_into(allocator: Allocator, module: &ir::Module, arch: Arch, format: Form
         }
     }
     try out.obj.enter(allocator, &var selector.syms, SectionKind::Text);
-    var functions = array::new<MFunction>(allocator);
-    defer functions.deinit(allocator);
-    var symbols = array::new<ir::Name>(allocator);
-    defer symbols.deinit(allocator);
-    var exports = array::new<ir::Name>(allocator);
-    defer exports.deinit(allocator);
-    var index = 0;
-    while module.functions.get(index) |function| {
-        index = index + 1;
+    var order = try callee_first(allocator, module, &selector);
+    defer order.deinit(allocator);
+    var inliner = new_inliner(allocator);
+    defer inliner.deinit(allocator);
+    var position = 0;
+    while order.get(position) |index| {
+        position = position + 1;
+        let function = module.functions.get_or_panic(index);
         let function_node = module.function_nodes.at(function.node);
         let name = function_node.name;
         let symbol = try selector.function_symbol(module, name);
         let c_symbol = try selector.export_symbol(module, function_node);
         let thunk = selector.export_has_thunk(module, function_node);
+        var exported = c_symbol;
         if thunk {
-            try exports.append(allocator, ir::empty_name());
-        } else {
-            try exports.append(allocator, c_symbol);
+            exported = ir::empty_name();
         }
         if try selector.select_function(module, function) |failed| {
             return move failed;
         }
-        selector.mark_cold_blocks();
-        try functions.append(allocator, try clone_function(allocator, &selector.func));
-        try symbols.append(allocator, symbol);
+        try emit_selected(allocator, out, &var selector, &var inliner, symbol, exported, arch, format);
         if thunk {
             try selector.select_export_thunk(module, function_node);
-            selector.mark_cold_blocks();
-            try functions.append(allocator, try clone_function(allocator, &selector.func));
-            try symbols.append(allocator, try selector.export_thunk_symbol(module, name));
-            try exports.append(allocator, c_symbol);
+            let thunk_symbol = try selector.export_thunk_symbol(module, name);
+            try emit_selected(allocator, out, &var selector, &var inliner, thunk_symbol, c_symbol, arch, format);
         }
     }
     if selector.main_wraps {
         if try selector.select_main_wrapper(module, main_ret) |failed| {
             return move failed;
         }
-        selector.mark_cold_blocks();
-        try functions.append(allocator, try clone_function(allocator, &selector.func));
-        try symbols.append(allocator, try selector.syms.intern("_main"));
-        try exports.append(allocator, ir::empty_name());
+        let main_symbol = try selector.syms.intern("_main");
+        try emit_selected(allocator, out, &var selector, &var inliner, main_symbol, ir::empty_name(), arch, format);
     }
     for 0..2 |kind| {
         let states = kind == 1;
         if (states and selector.state_invokes) or (!states and selector.invokes) {
             try selector.select_thread_invoke(states);
-            selector.mark_cold_blocks();
-            try functions.append(allocator, try clone_function(allocator, &selector.func));
-            try symbols.append(allocator, try selector.invoke_symbol(states));
-            try exports.append(allocator, ir::empty_name());
+            let invoke_symbol = try selector.invoke_symbol(states);
+            try emit_selected(allocator, out, &var selector, &var inliner, invoke_symbol, ir::empty_name(), arch, format);
         }
     }
     var task_index = 0;
@@ -130,30 +120,8 @@ fn emit_into(allocator: Allocator, module: &ir::Module, arch: Arch, format: Form
         if try selector.select_task_invoke(module, state_type) |failed| {
             return move failed;
         }
-        selector.mark_cold_blocks();
-        try functions.append(allocator, try clone_function(allocator, &selector.func));
-        try symbols.append(allocator, try selector.task_invoke_symbol(module, state_type));
-        try exports.append(allocator, ir::empty_name());
-    }
-    try inline_calls(allocator, &var functions, &symbols);
-    let count = functions.len();
-    for 0..count / 2 |low| {
-        try functions.swap(low, count - 1 - low);
-    }
-    var ordinal = 0;
-    while functions.pop() |popped| {
-        var func = move popped;
-        defer func.deinit(allocator);
-        let symbol = symbols.get_or_panic(ordinal);
-        let allocation = try allocate(allocator, &var func, arch);
-        defer allocation.deinit(allocator);
-        try begin_symbol(allocator, out, &func, symbol, exports.get_or_panic(ordinal), &selector.syms);
-        if is_x86(arch) {
-            try amd64_print_function(allocator, out, &var func, &allocation, &selector.syms, arch, format);
-        } else {
-            try print_function(allocator, out, &var func, &allocation, &selector.syms);
-        }
-        ordinal = ordinal + 1;
+        let task_symbol = try selector.task_invoke_symbol(module, state_type);
+        try emit_selected(allocator, out, &var selector, &var inliner, task_symbol, ir::empty_name(), arch, format);
     }
     if selector.main_wraps {
         try write_error_names(allocator, module, &var selector, out);
@@ -173,6 +141,32 @@ fn emit_into(allocator: Allocator, module: &ir::Module, arch: Arch, format: Form
         try out.obj.write_macho(allocator, &selector.syms, 0, &var out.file);
     }
     return null;
+}
+
+fn emit_selected(
+    allocator: Allocator,
+    out: &var Out,
+    selector: &var Selector,
+    inliner: &var Inliner,
+    symbol: ir::Name,
+    exported: ir::Name,
+    arch: Arch,
+    format: Format
+) -> !void {
+    selector.mark_cold_blocks();
+    var func = try clone_function(allocator, &selector.func);
+    defer func.deinit(allocator);
+    try inliner.inline_into(allocator, &var func, symbol);
+    try inliner.remember(allocator, &func, symbol);
+    let allocation = try allocate(allocator, &var func, arch);
+    defer allocation.deinit(allocator);
+    try begin_symbol(allocator, out, &func, symbol, exported, &selector.syms);
+    if is_x86(arch) {
+        try amd64_print_function(allocator, out, &var func, &allocation, &selector.syms, arch, format);
+    } else {
+        try print_function(allocator, out, &var func, &allocation, &selector.syms);
+    }
+    return;
 }
 
 fn begin_symbol(allocator: Allocator, out: &var Out, func: &MFunction, name: ir::Name, exported: ir::Name, syms: &ir::NameTable) -> !void {
