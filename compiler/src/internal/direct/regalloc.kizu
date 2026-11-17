@@ -1626,6 +1626,28 @@ fn store_immediates(allocator: Allocator, func: &var MFunction) -> !void {
     return;
 }
 
+fn note_exposed_use(
+    allocator: Allocator,
+    vreg: i64,
+    block: i64,
+    def_block: &array::Array<i64>,
+    global_of: &var array::Array<i64>,
+    vreg_of: &var array::Array<i64>,
+    use_block: &var array::Array<i64>,
+    use_vreg: &var array::Array<i64>
+) -> !void {
+    if def_block.get_or_panic(vreg) == block {
+        return;
+    }
+    if global_of.get_or_panic(vreg) < 0 {
+        try global_of.set(vreg, vreg_of.len());
+        try vreg_of.append(allocator, vreg);
+    }
+    try use_block.append(allocator, block);
+    try use_vreg.append(allocator, vreg);
+    return;
+}
+
 fn allocate_laid_out(
     allocator: Allocator,
     func: &var MFunction,
@@ -1637,7 +1659,6 @@ fn allocate_laid_out(
     var order = move order_in;
     errdefer order.deinit(allocator);
     let nv = func.vregs;
-    let words = (nv + 63) / 64;
     let nb = func.blocks.len();
     var block_first = array::new<i64>(allocator);
     defer block_first.deinit(allocator);
@@ -1694,6 +1715,59 @@ fn allocate_laid_out(
     }
     var marks = try build_marks(allocator, &index_marks);
     defer marks.deinit(allocator);
+    var def_block = array::new<i64>(allocator);
+    defer def_block.deinit(allocator);
+    var global_of = array::new<i64>(allocator);
+    defer global_of.deinit(allocator);
+    for 0..nv |_index| {
+        try def_block.append(allocator, 0 - 1);
+        try global_of.append(allocator, 0 - 1);
+    }
+    var vreg_of = array::new<i64>(allocator);
+    defer vreg_of.deinit(allocator);
+    var use_block = array::new<i64>(allocator);
+    defer use_block.deinit(allocator);
+    var use_vreg = array::new<i64>(allocator);
+    defer use_vreg.deinit(allocator);
+    var def_at_block = array::new<i64>(allocator);
+    defer def_at_block.deinit(allocator);
+    var def_vreg = array::new<i64>(allocator);
+    defer def_vreg.deinit(allocator);
+    var reads_buf = array::new<i64>(allocator);
+    defer reads_buf.deinit(allocator);
+    var defs_buf = array::new<i64>(allocator);
+    defer defs_buf.deinit(allocator);
+    var block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        let current = block_id;
+        block_id = block_id + 1;
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            try reads(inst, &var reads_buf, allocator, &func.copies);
+            var read_index = 0;
+            while reads_buf.get(read_index) |reg| {
+                read_index = read_index + 1;
+                if is_vreg(reg) {
+                    try note_exposed_use(allocator, reg - first_vreg(), current, &def_block, &var global_of, &var vreg_of, &var use_block, &var use_vreg);
+                }
+            }
+            try defs(inst, &var defs_buf, allocator, &func.copies);
+            var def_index = 0;
+            while defs_buf.get(def_index) |reg| {
+                def_index = def_index + 1;
+                if is_vreg(reg) {
+                    try def_block.set(reg - first_vreg(), current);
+                    try def_at_block.append(allocator, current);
+                    try def_vreg.append(allocator, reg - first_vreg());
+                }
+            }
+        }
+        if is_vreg(block.treg) {
+            try note_exposed_use(allocator, block.treg - first_vreg(), current, &def_block, &var global_of, &var vreg_of, &var use_block, &var use_vreg);
+        }
+    }
+    let words = (vreg_of.len() + 63) / 64;
     var use_bits = array::new<i64>(allocator);
     defer use_bits.deinit(allocator);
     var def_bits = array::new<i64>(allocator);
@@ -1708,36 +1782,18 @@ fn allocate_laid_out(
         try live_in.append(allocator, 0);
         try live_out.append(allocator, 0);
     }
-    var reads_buf = array::new<i64>(allocator);
-    defer reads_buf.deinit(allocator);
-    var defs_buf = array::new<i64>(allocator);
-    defer defs_buf.deinit(allocator);
-    var block_id = 0;
-    while func.blocks.at(block_id) |block| {
-        let base = block_id * words;
-        block_id = block_id + 1;
-        var inst_index = 0;
-        while block.insts.at(inst_index) |inst| {
-            inst_index = inst_index + 1;
-            try reads(inst, &var reads_buf, allocator, &func.copies);
-            var read_index = 0;
-            while reads_buf.get(read_index) |reg| {
-                read_index = read_index + 1;
-                if is_vreg(reg) and !has_bit(&def_bits, base, reg - first_vreg()) {
-                    try set_bit(&var use_bits, base, reg - first_vreg());
-                }
-            }
-            try defs(inst, &var defs_buf, allocator, &func.copies);
-            var def_index = 0;
-            while defs_buf.get(def_index) |reg| {
-                def_index = def_index + 1;
-                if is_vreg(reg) {
-                    try set_bit(&var def_bits, base, reg - first_vreg());
-                }
-            }
-        }
-        if is_vreg(block.treg) and !has_bit(&def_bits, base, block.treg - first_vreg()) {
-            try set_bit(&var use_bits, base, block.treg - first_vreg());
+    var use_index = 0;
+    while use_block.get(use_index) |b| {
+        let global = global_of.get_or_panic(use_vreg.get_or_panic(use_index));
+        use_index = use_index + 1;
+        try set_bit(&var use_bits, b * words, global);
+    }
+    var def_entry = 0;
+    while def_at_block.get(def_entry) |b| {
+        let global = global_of.get_or_panic(def_vreg.get_or_panic(def_entry));
+        def_entry = def_entry + 1;
+        if global >= 0 {
+            try set_bit(&var def_bits, b * words, global);
         }
     }
     var changed = true;
@@ -1811,7 +1867,7 @@ fn allocate_laid_out(
             }
             for 0..64 |bit| {
                 if (bits & (1 << bit)) != 0 {
-                    try ranges.add(allocator, 64 * w + bit, from, to);
+                    try ranges.add(allocator, vreg_of.get_or_panic(64 * w + bit), from, to);
                 }
             }
         }
