@@ -4,24 +4,28 @@ import std::mem;
 import std::string;
 
 fn stamp_object(io: Io, allocator: Allocator, runtime_path: []u8, unit: &string::String, out: &var string::String) -> !void {
+    try out.append_string(allocator, unit);
     let unit_bytes = unit.as_bytes();
-    let at = build_version_at(unit_bytes);
-    if at < 0 {
-        return out.append_string(allocator, unit);
+    if build_version_at(unit_bytes) < 0 {
+        return;
     }
     var runtime = string::new(allocator);
     defer runtime.deinit(allocator);
     try fs::read_file_into(io, allocator, runtime_path, &var runtime);
     let runtime_bytes = runtime.as_bytes();
-    let minos = build_version_at(runtime_bytes);
-    try out.append_string(allocator, unit);
-    if minos < 0 {
+    let writable = out.as_mut_bytes();
+    stamp_build_version(runtime_bytes, writable);
+    return;
+}
+
+fn stamp_build_version(runtime: []u8, object: &var []u8) -> void {
+    let at = build_version_at(object);
+    let source = build_version_at(runtime);
+    if at < 0 or source < 0 {
         return;
     }
-    let version = read32(runtime_bytes, minos);
-    let writable = out.as_mut_bytes();
-    for 0..4 |byte| {
-        writable[at + byte] = cast<u8>((version >> (8 * byte)) & 255);
+    for 0..8 |byte| {
+        object[at + byte] = runtime[source + byte];
     }
     return;
 }
@@ -38,7 +42,7 @@ fn build_version_at(bytes: []u8) -> i64 {
         }
         let command = read32(bytes, at);
         if command == 0x32 {
-            return at + 12;
+            return at + 8;
         }
         at = at + read32(bytes, at + 4);
     }

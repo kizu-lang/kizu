@@ -1,0 +1,41 @@
+import std::mem;
+import std::string;
+import std::testing;
+
+fn macho_with_build_version(allocator: Allocator, platform: i64, minos: i64) -> !string::String {
+    var bytes = string::new(allocator);
+    errdefer bytes.deinit(allocator);
+    for 0..56 |_byte| {
+        try bytes.append_byte(allocator, cast<u8>(0));
+    }
+    let view = bytes.as_mut_bytes();
+    put32(view, 0, 0xFEEDFACF);
+    put32(view, 16, 1);
+    put32(view, 20, 24);
+    put32(view, 32, 0x32);
+    put32(view, 36, 24);
+    put32(view, 40, platform);
+    put32(view, 44, minos);
+    return move bytes;
+}
+
+fn put32(bytes: &var []u8, at: i64, value: i64) -> void {
+    for 0..4 |byte| {
+        bytes[at + byte] = cast<u8>((value >> (8 * byte)) & 255);
+    }
+    return;
+}
+
+test "stamp_build_version takes the platform and minos from the runtime object" {
+    let allocator = mem::page_allocator();
+    let runtime = try macho_with_build_version(allocator, 7, 0x110000);
+    defer runtime.deinit(allocator);
+    var unit = try macho_with_build_version(allocator, 1, 0);
+    defer unit.deinit(allocator);
+    let runtime_bytes = runtime.as_bytes();
+    let unit_view = unit.as_mut_bytes();
+    stamp_build_version(runtime_bytes, unit_view);
+    let stamped = unit.as_bytes();
+    testing::expect_equal<i64>(7, read32(stamped, 40));
+    testing::expect_equal<i64>(0x110000, read32(stamped, 44));
+}
