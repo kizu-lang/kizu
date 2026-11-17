@@ -1714,6 +1714,9 @@ fn (self: &var Selector) select_terminator(module: &ir::Module, block_name: ir::
             if try self.if_convert(module, block_name, term) {
                 return null;
             }
+            if try self.return_select(module, block_name, term) {
+                return null;
+            }
             let taken = try self.edge_block(module, block_name, term.target) orelse return try self.fail(module, "branch target", term.target);
             let other = try self.edge_block(module, block_name, term.else_target) orelse return try self.fail(module, "branch target", term.else_target);
             return self.branch_on(module, term.cond, taken, other);
@@ -2004,6 +2007,10 @@ fn (self: &Selector) speculation_cost(module: &ir::Module, mir: i64) -> i64 {
     if node.terminator.op != ir::TermOp::Jump {
         return 0 - 1;
     }
+    return self.instrs_cost(module, node);
+}
+
+fn (self: &Selector) instrs_cost(module: &ir::Module, node: &ir::BlockNode) -> i64 {
     var cost = 0;
     var index = 0;
     while node.instrs.get(index) |instr| {
@@ -2027,6 +2034,20 @@ fn (self: &Selector) speculation_cost(module: &ir::Module, mir: i64) -> i64 {
             },
             Binary => {
                 let shape = shape_of(module, instr_node.result.type_name);
+                if shape.class == Class::Float {
+                    if is_x86(self.arch) {
+                        return 0 - 1;
+                    }
+                    if module.names.is(instr_node.operand, "/") {
+                        cost = cost + 2;
+                    } else if module.names.is(instr_node.operand, "+") or module.names.is(instr_node.operand, "-") or
+                        module.names.is(instr_node.operand, "*") {
+                        cost = cost + 1;
+                    } else {
+                        return 0 - 1;
+                    }
+                    continue;
+                }
                 if shape.class != Class::Scalar {
                     return 0 - 1;
                 }
@@ -2170,12 +2191,7 @@ fn (self: &var Selector) if_convert(module: &ir::Module, block_name: ir::Name, t
         try picks_a.append(self.allocator, ra);
         try picks_b.append(self.allocator, rb);
     }
-    var cond = Cond::Ne;
-    if cond_held.kind == ValKind::Flags {
-        cond = try self.flags_compare(module, cond_held) orelse return false;
-    } else {
-        try self.op_imm(MOp::CmpImm, reg_none(), cond_held.reg, 0);
-    }
+    let cond = try self.branch_cond(module, cond_held) orelse return false;
     var updates = array::new<MInst>(self.allocator);
     defer updates.deinit(self.allocator);
     let start = self.func.copies.len();
@@ -2219,6 +2235,126 @@ fn (self: &var Selector) if_convert(module: &ir::Module, block_name: ir::Name, t
         try self.absorbed.set(side_other, true);
     }
     return true;
+}
+
+fn (self: &var Selector) return_select(module: &ir::Module, block_name: ir::Name, term: ir::Terminator) -> !bool {
+    if is_x86(self.arch) or self.is_main or is_slice(module, self.ret_type) {
+        return false;
+    }
+    if self.ret.class != Class::Scalar and self.ret.class != Class::Float {
+        return false;
+    }
+    let root = self.block(block_name);
+    let taken = self.block(term.target);
+    let other = self.block(term.else_target);
+    if root < 0 or taken < 0 or other < 0 or taken == other {
+        return false;
+    }
+    let taken_cost = self.return_tree_cost(module, root, taken, 0);
+    let other_cost = self.return_tree_cost(module, root, other, 0);
+    if taken_cost < 0 or other_cost < 0 or taken_cost + other_cost + 1 > 8 {
+        return false;
+    }
+    var blocks = array::new<i64>(self.allocator);
+    defer blocks.deinit(self.allocator);
+    let a = try self.return_tree_value(module, taken, &var blocks) orelse return false;
+    let b = try self.return_tree_value(module, other, &var blocks) orelse return false;
+    let picked = try self.pick_on(module, term.cond, a, b) orelse return false;
+    try self.mov(0, picked);
+    self.func.end(self.current, Term::Return, Cond::Eq, reg_none(), 0 - 1, 0 - 1);
+    var index = 0;
+    while blocks.get(index) |mir| {
+        index = index + 1;
+        try self.absorbed.set(mir, true);
+    }
+    return true;
+}
+
+fn (self: &Selector) return_tree_cost(module: &ir::Module, root: i64, mir: i64, depth: i64) -> i64 {
+    var at = mir;
+    var cost = 0;
+    while at >= 0 {
+        if at == root or self.preds.get_or_panic(at) != 1 {
+            return 0 - 1;
+        }
+        let ir_block = self.ir_blocks.get(at) orelse return 0 - 1;
+        let node = module.blocks.at(ir_block.node);
+        let own = self.instrs_cost(module, node);
+        if own < 0 {
+            return 0 - 1;
+        }
+        cost = cost + own;
+        let term = node.terminator;
+        match term.op {
+            Jump => {
+                at = self.block(term.target);
+            },
+            Return => return cost,
+            Branch => {
+                let taken = self.block(term.target);
+                let other = self.block(term.else_target);
+                if depth >= 2 or taken < 0 or other < 0 or taken == other {
+                    return 0 - 1;
+                }
+                let taken_cost = self.return_tree_cost(module, root, taken, depth + 1);
+                let other_cost = self.return_tree_cost(module, root, other, depth + 1);
+                if taken_cost < 0 or other_cost < 0 {
+                    return 0 - 1;
+                }
+                return cost + taken_cost + other_cost + 1;
+            },
+            _ => return 0 - 1,
+        }
+    }
+    return 0 - 1;
+}
+
+fn (self: &var Selector) return_tree_value(module: &ir::Module, mir: i64, blocks: &var array::Array<i64>) -> !?i64 {
+    var at = mir;
+    while at >= 0 {
+        if !try self.select_side(module, at) {
+            return null;
+        }
+        try blocks.append(self.allocator, at);
+        let ir_block = self.ir_blocks.get(at) orelse return null;
+        let term = module.blocks.at(ir_block.node).terminator;
+        match term.op {
+            Jump => {
+                at = self.block(term.target);
+            },
+            Return => return self.reg(module, term.value),
+            Branch => {
+                let a = try self.return_tree_value(module, self.block(term.target), blocks) orelse return null;
+                let b = try self.return_tree_value(module, self.block(term.else_target), blocks) orelse return null;
+                return self.pick_on(module, term.cond, a, b);
+            },
+            _ => return null,
+        }
+    }
+    return null;
+}
+
+fn (self: &var Selector) branch_cond(module: &ir::Module, held: Val) -> !?Cond {
+    if held.kind == ValKind::Flags {
+        return self.flags_compare(module, held);
+    }
+    if held.kind != ValKind::Reg {
+        return null;
+    }
+    try self.op_imm(MOp::CmpImm, reg_none(), held.reg, 0);
+    return Cond::Ne;
+}
+
+fn (self: &var Selector) pick_on(module: &ir::Module, cond_value: ir::Value, a: i64, b: i64) -> !?i64 {
+    let cond = try self.branch_cond(module, self.val(cond_value.name)) orelse return null;
+    let picked = self.func.new_vreg();
+    var pick = blank(MOp::CSel);
+    pick.rd = picked;
+    pick.rn = a;
+    pick.rm = b;
+    pick.cond = cond;
+    try self.inst(pick);
+    return picked;
 }
 
 fn (self: &Selector) selected_count() -> i64 {
@@ -2316,7 +2452,13 @@ fn (self: &var Selector) select_side(module: &ir::Module, mir: i64) -> !bool {
     while node.instrs.get(index) |instr| {
         index = index + 1;
         let instr_node = module.instrs.at(instr.node);
-        if try self.select_instr(module, instr_node, ir::empty_value(), ir::Op::Id) |failed| {
+        var next = node.terminator.cond;
+        var next_op = ir::Op::CondFail;
+        if node.instrs.get(index) |_following| {
+            next = ir::empty_value();
+            next_op = ir::Op::Id;
+        }
+        if try self.select_instr(module, instr_node, next, next_op) |failed| {
             failed.deinit(self.allocator);
             return false;
         }

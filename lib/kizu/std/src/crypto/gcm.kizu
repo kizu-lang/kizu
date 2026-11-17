@@ -1,19 +1,9 @@
-// AES-GCM, as NIST SP 800-38D defines it: the text is encrypted with AES
-// in counter mode from counter 2, and the tag is GHASH over the
-// associated data and the ciphertext, each padded to 16 bytes, and their
-// lengths in bits, XORed with the encryption of counter 1. GHASH is a
-// polynomial over GF(2^128) evaluated at H, the encryption of zero.
-//
 // The GF(2^128) multiplication is BearSSL's ghash_ctmul64 (src/hash/
 // ghash_ctmul64.c, Copyright (c) 2016 Thomas Pornin, MIT; the notice is
 // in aes.kizu): a carry-less multiply written as integer multiplies of
 // bits spread four apart, so nothing about the key or the data chooses
 // an address or a branch. The high half comes from multiplying the
 // bit-reversed operands.
-//
-// A key is 16 or 32 bytes and a nonce 12, and a nonce is used once under
-// a key: GCM with a repeated nonce gives away the authentication key.
-// TLS counts records into the nonce; nothing here draws one.
 
 // aes_gcm_seal appends the ciphertext of `plain` and its 16-byte tag to
 // `out`. `aad` is authenticated but not encrypted. A key that is not 16
@@ -81,7 +71,6 @@ pub fn aes_gcm_open(
     return;
 }
 
-// gcm_tag writes the tag over `aad` and `text` to the front of `tag`.
 fn gcm_tag(rounds: i64, skey: []u64, nonce: []u8, aad: []u8, text: []u8, tag: &var []u8) -> void {
     var h_buffer = [64]u8{};
     let h_blocks = h_buffer.as_mut_bytes();
@@ -107,8 +96,6 @@ fn gcm_tag(rounds: i64, skey: []u64, nonce: []u8, aad: []u8, text: []u8, tag: &v
     return;
 }
 
-// aes_ctr_xor appends `text` XORed with the counter-mode stream from
-// `counter` on, four blocks at a time.
 fn aes_ctr_xor(
     allocator: Allocator,
     rounds: i64,
@@ -127,8 +114,6 @@ fn aes_ctr_xor(
         if take > 64 {
             take = 64;
         }
-        // The four blocks are XORed with the text in place and appended
-        // whole, rather than a byte at a time.
         let stream = stream_buffer.as_mut_bytes();
         fill_counter_blocks(stream, nonce, block);
         std::crypto::aes_encrypt4(rounds, skey, stream);
@@ -143,8 +128,6 @@ fn aes_ctr_xor(
     return;
 }
 
-// fill_counter_blocks writes the four counter blocks `first` through
-// `first + 3`: the nonce, then the counter as 32 bits big-endian.
 fn fill_counter_blocks(blocks: &var []u8, nonce: []u8, first: i64) -> void {
     for 0..4 |index| {
         let at = index * 16;
@@ -160,8 +143,6 @@ fn fill_counter_blocks(blocks: &var []u8, nonce: []u8, first: i64) -> void {
     return;
 }
 
-// ghash folds `data`, its last block padded with zeros, into `y` under
-// the key `h`; both are 16 bytes, big-endian.
 fn ghash(y: &var []u8, h: []u8, data: []u8) -> void {
     var y1 = be64(y, 0);
     var y0 = be64(y, 8);
@@ -230,9 +211,6 @@ fn ghash(y: &var []u8, h: []u8, data: []u8) -> void {
     return;
 }
 
-// bmul64 is the low 64 bits of the carry-less product of x and y: each
-// operand is split into four words with its bits four apart, so the
-// integer products have no carries between the bits that matter.
 fn bmul64(x: u64, y: u64) -> u64 {
     let x0 = x & std::crypto::mask1();
     let x1 = x & std::crypto::mask2();
@@ -252,7 +230,6 @@ fn bmul64(x: u64, y: u64) -> u64 {
         | (z3 & std::crypto::mask8());
 }
 
-// rev64 reverses the order of the 64 bits.
 fn rev64(value: u64) -> u64 {
     var x = value;
     x = ((x & 0x5555555555555555) << 1) | ((x >> 1) & 0x5555555555555555);
@@ -263,7 +240,6 @@ fn rev64(value: u64) -> u64 {
     return (x << 32) | (x >> 32);
 }
 
-// be64 reads the big-endian word at byte `at`.
 fn be64(view: []u8, at: i64) -> u64 {
     var value = cast<u64>(0);
     for 0..8 |index| {
@@ -272,7 +248,6 @@ fn be64(view: []u8, at: i64) -> u64 {
     return value;
 }
 
-// set_be64 writes `value` big-endian at byte `at`.
 fn set_be64(view: &var []u8, at: i64, value: u64) -> void {
     for 0..8 |index| {
         let shift = cast<u64>((7 - index) * 8);
@@ -281,8 +256,6 @@ fn set_be64(view: &var []u8, at: i64, value: u64) -> void {
     return;
 }
 
-// require_aes_key_and_nonce traps on a key or nonce that is not a length
-// the cipher defines, since a wrong length is a bug and not an input.
 fn require_aes_key_and_nonce(key: []u8, nonce: []u8) -> void {
     let key_len = std::mem::len(key);
     if key_len != 16 and key_len != 32 {
