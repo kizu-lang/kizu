@@ -8,6 +8,24 @@ fn inline_limit() -> i64 {
     return 8;
 }
 
+fn leaf_inline_limit() -> i64 {
+    return 32;
+}
+
+fn constant_leaf_inline_limit() -> i64 {
+    return 400;
+}
+
+fn constant_leaf_sites() -> i64 {
+    return 64;
+}
+
+struct CalleeShape {
+    size: i64,
+    calls: bool,
+    eligible: bool,
+}
+
 pub fn inline_calls(allocator: Allocator, module: &var Module) -> !void {
     var functions = map::new<i64, Function>(allocator);
     defer functions.deinit(allocator);
@@ -19,10 +37,13 @@ pub fn inline_calls(allocator: Allocator, module: &var Module) -> !void {
     }
     var order = try callee_first_order(allocator, module, &functions);
     defer order.deinit(allocator);
+    var shapes = map::new<i64, CalleeShape>(allocator);
+    defer shapes.deinit(allocator);
     index = 0;
     while order.get(index) |function| {
         index = index + 1;
-        try inline_into(allocator, module, function, &functions);
+        try inline_into(allocator, module, function, &functions, &shapes);
+        try shapes.insert(allocator, name_id(module.function_name(function)), callee_shape(module, function));
     }
     return;
 }
@@ -138,18 +159,25 @@ fn inline_into(
     allocator: Allocator,
     module: &var Module,
     function: Function,
-    functions: &map::Map<i64, Function>
+    functions: &map::Map<i64, Function>,
+    shapes: &map::Map<i64, CalleeShape>
 ) -> !void {
     var site = 0;
     var results = map::new<i64, Value>(allocator);
     defer results.deinit(allocator);
+    var constants = try scalar_constants(allocator, module, function);
+    defer constants.deinit(allocator);
+    var constant_sites = constant_leaf_sites();
     var block_index = 0;
     while inline_block_at(module, function, block_index) |block| {
         var advance = 1;
         var instr_index = 0;
         var split = false;
         while inline_instr_at(module, block, instr_index) |call| {
-            if try inline_callee(module, function, call, functions) |callee| {
+            if inline_callee(module, function, call, functions, shapes, &constants, &results, constant_sites) |callee| {
+                if known_shape(module, shapes, callee).size > leaf_inline_limit() {
+                    constant_sites = constant_sites - 1;
+                }
                 site = site + 1;
                 var spelled = try string::from_bytes(allocator, "in");
                 errdefer spelled.deinit(allocator);
@@ -160,10 +188,10 @@ fn inline_into(
                 defer copier.deinit(allocator);
                 let callee_blocks = inline_block_count(module, callee);
                 if callee_blocks == 1 {
-                    let spliced = try splice_inlined_call(allocator, module, block, instr_index, callee, call, &copier, &var results);
+                    let spliced = try splice_inlined_call(allocator, module, block, instr_index, callee, call, &copier, &var results, &var constants);
                     instr_index = instr_index + spliced;
                 } else {
-                    advance = try split_at_inlined_call(allocator, module, function, block_index, instr_index, callee, &copier, &var results);
+                    advance = try split_at_inlined_call(allocator, module, function, block_index, instr_index, callee, &copier, &var results, &var constants);
                     split = true;
                 }
             } else {
@@ -204,12 +232,14 @@ fn splice_inlined_call(
     callee: Function,
     call: Instr,
     copier: &BodyCopier,
-    results: &var map::Map<i64, Value>
+    results: &var map::Map<i64, Value>,
+    constants: &var map::Map<i64, bool>
 ) -> !i64 {
     let callee_block = inline_block_at(module, callee, 0) orelse return 0;
     var body = array::new<Instr>(allocator);
     defer body.deinit(allocator);
     try copier.copy_instrs(allocator, module, callee_block, &var body);
+    try note_constants(allocator, module, &body, constants);
     var spliced = array::new<Instr>(allocator);
     defer spliced.deinit(allocator);
     var index = 0;
@@ -243,7 +273,8 @@ fn split_at_inlined_call(
     instr_index: i64,
     callee: Function,
     copier: &BodyCopier,
-    results: &var map::Map<i64, Value>
+    results: &var map::Map<i64, Value>,
+    constants: &var map::Map<i64, bool>
 ) -> !i64 {
     let block = inline_block_at(module, function, block_index) orelse return 0;
     let call = inline_instr_at(module, block, instr_index) orelse return 0;
@@ -284,6 +315,7 @@ fn split_at_inlined_call(
         var instrs = array::new<Instr>(allocator);
         defer instrs.deinit(allocator);
         try copier.copy_instrs(allocator, module, source, &var instrs);
+        try note_constants(allocator, module, &instrs, constants);
         try set_block_instrs(allocator, module, copied, &instrs);
         let source_terminator = module.block_terminator(source);
         let terminator = try copier.terminator(module, source_terminator);
@@ -406,8 +438,12 @@ fn inline_callee(
     module: &Module,
     function: Function,
     call: Instr,
-    functions: &map::Map<i64, Function>
-) -> !?Function {
+    functions: &map::Map<i64, Function>,
+    shapes: &map::Map<i64, CalleeShape>,
+    constants: &map::Map<i64, bool>,
+    results: &map::Map<i64, Value>,
+    constant_sites: i64
+) -> ?Function {
     let node = module.instrs.at(call.node);
     if !is_empty(node.extern_abi) or node.op != Op::Call {
         return null;
@@ -422,6 +458,7 @@ fn inline_callee(
         callee_node.params.len() != node.args.len() {
         return null;
     }
+    var constant_args = false;
     var index = 0;
     while callee_node.params.get(index) |param| {
         let arg = node.args.get_or_panic(index);
@@ -429,8 +466,18 @@ fn inline_callee(
         if !inline_argument_fits(module, param.type_name, arg.type_name) {
             return null;
         }
+        if constants.contains(name_id(resolve_replacement(results, arg).name)) {
+            constant_args = true;
+        }
     }
-    if !inlinable_body(module, callee) {
+    let shape = known_shape(module, shapes, callee);
+    var limit = inline_limit();
+    if !shape.calls and constant_args and constant_sites > 0 {
+        limit = constant_leaf_inline_limit();
+    } else if !shape.calls {
+        limit = leaf_inline_limit();
+    }
+    if !shape.eligible or shape.size > limit {
         return null;
     }
     return callee;
@@ -455,15 +502,51 @@ fn inline_argument_fits(module: &Module, want: Name, got: Name) -> bool {
     return mem::equal_bytes(want_elem, got_elem);
 }
 
-fn inlinable_body(module: &Module, callee: Function) -> bool {
+fn scalar_constants(allocator: Allocator, module: &Module, function: Function) -> !map::Map<i64, bool> {
+    var constants = map::new<i64, bool>(allocator);
+    errdefer constants.deinit(allocator);
+    var block_index = 0;
+    while inline_block_at(module, function, block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        try note_constants(allocator, module, &block_node.instrs, &var constants);
+    }
+    return move constants;
+}
+
+fn note_constants(allocator: Allocator, module: &Module, instrs: &array::Array<Instr>, constants: &var map::Map<i64, bool>) -> !void {
+    var index = 0;
+    while instrs.get(index) |instr| {
+        index = index + 1;
+        let node = module.instrs.at(instr.node);
+        if node.op == Op::Const and scalar_type(module, node.result.type_name) {
+            try constants.insert(allocator, name_id(node.result.name), true);
+        }
+    }
+    return;
+}
+
+fn scalar_type(module: &Module, type_name: Name) -> bool {
+    let names = &module.names;
+    return names.is(type_name, "i64") or names.is(type_name, "i32") or names.is(type_name, "i16") or
+        names.is(type_name, "i8") or names.is(type_name, "u64") or names.is(type_name, "u32") or
+        names.is(type_name, "u16") or names.is(type_name, "u8") or names.is(type_name, "f64") or
+        names.is(type_name, "bool");
+}
+
+fn known_shape(module: &Module, shapes: &map::Map<i64, CalleeShape>, callee: Function) -> CalleeShape {
+    return shapes.get(name_id(module.function_name(callee))) orelse callee_shape(module, callee);
+}
+
+fn callee_shape(module: &Module, callee: Function) -> CalleeShape {
+    var shape = CalleeShape { size: 0, calls: false, eligible: false };
     let callee_node = module.function_nodes.at(callee.node);
-    let entry = callee_node.blocks.get_or_panic(0);
+    let entry = callee_node.blocks.get(0) orelse return shape;
     let entry_name = module.block_name(entry);
     if callee_node.blocks.len() == 1 and module.block_terminator(entry).op != TermOp::Return {
-        return false;
+        return shape;
     }
     var returns = 0;
-    var count = 0;
     var block_index = 0;
     while callee_node.blocks.get(block_index) |block| {
         block_index = block_index + 1;
@@ -471,13 +554,16 @@ fn inlinable_body(module: &Module, callee: Function) -> bool {
         var instr_index = 0;
         while block_node.instrs.get(instr_index) |instr| {
             instr_index = instr_index + 1;
-            count = count + 1;
+            shape.size = shape.size + 1;
             let instr_node = module.instrs.at(instr.node);
-            if count > inline_limit() or instr_node.op == Op::ErrorTry {
-                return false;
+            if instr_node.op == Op::ErrorTry {
+                return shape;
             }
-            if instr_node.op == Op::Call and same_name(instr_node.operand, callee_node.name) {
-                return false;
+            if instr_node.op == Op::Call or instr_node.op == Op::CallIndirect {
+                shape.calls = true;
+                if same_name(instr_node.operand, callee_node.name) {
+                    return shape;
+                }
             }
         }
         let terminator = block_node.terminator;
@@ -485,18 +571,19 @@ fn inlinable_body(module: &Module, callee: Function) -> bool {
         while terminator.successor(position) |target| {
             position = position + 1;
             if same_name(target, entry_name) {
-                return false;
+                return shape;
             }
         }
         if terminator.op == TermOp::Return {
             returns = returns + 1;
             if !module.names.is(callee_node.return_type, "void") and
                 !same_name(terminator.value.type_name, callee_node.return_type) {
-                return false;
+                return shape;
             }
         }
     }
-    return returns > 0;
+    shape.eligible = returns > 0;
+    return shape;
 }
 
 struct BodyCopier {

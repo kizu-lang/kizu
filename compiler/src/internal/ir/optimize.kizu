@@ -1,13 +1,17 @@
 import compiler::internal::diagnostic;
+import compiler::internal::stdmath;
 import compiler::internal::stdtarget;
+import compiler::internal::typ;
 import std::array;
+import std::float;
 import std::map;
+import std::math;
 import std::mem;
 
 pub fn optimize(allocator: Allocator, module: &var Module, target: stdtarget::Target) -> !?diagnostic::Diagnostic {
     try inline_calls(allocator, module);
     try eliminate_tail_recursion(allocator, module);
-    try constant_fold(allocator, module);
+    try propagate_constants(allocator, module);
     try fold_constant_tables(allocator, module);
     try forward_slot_reads(allocator, module);
     try copy_propagate(allocator, module);
@@ -38,32 +42,100 @@ fn constant_fold(allocator: Allocator, module: &var Module) -> !void {
     var index = 0;
     while module.functions.get(index) |function| {
         index = index + 1;
-        var consts = map::new<i64, i64>(allocator);
-        defer consts.deinit(allocator);
-        var block_index = 0;
+        let _ = try fold_constants_in(allocator, module, function);
+    }
+    return;
+}
+
+fn propagate_constants(allocator: Allocator, module: &var Module) -> !void {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        var round = 0;
+        while round < propagation_rounds() {
+            round = round + 1;
+            let _ = try fold_constants_in(allocator, module, function);
+            if !(try simplify_branches_in(allocator, module, function)) {
+                break;
+            }
+        }
+    }
+    return;
+}
+
+fn propagation_rounds() -> i64 {
+    return 8;
+}
+
+fn fold_constants_in(allocator: Allocator, module: &var Module, function: Function) -> !bool {
+    var consts = map::new<i64, i64>(allocator);
+    defer consts.deinit(allocator);
+    var floats = map::new<i64, f64>(allocator);
+    defer floats.deinit(allocator);
+    var block_index = 0;
+    while function_block_at(module, function, block_index) |block| {
+        block_index = block_index + 1;
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            try record_constant(allocator, module, instr, &var consts);
+            try record_float_constant(allocator, module, instr, &var floats);
+        }
+    }
+    var folded = false;
+    var phis_folded = false;
+    var changed = true;
+    while changed {
+        changed = false;
+        block_index = 0;
         while function_block_at(module, function, block_index) |block| {
             block_index = block_index + 1;
             var instr_index = 0;
             while block_instr_at(module, block, instr_index) |instr| {
                 instr_index = instr_index + 1;
-                try record_constant(allocator, module, instr, &var consts);
-            }
-        }
-        var changed = true;
-        while changed {
-            changed = false;
-            block_index = 0;
-            while function_block_at(module, function, block_index) |block| {
-                block_index = block_index + 1;
-                var instr_index = 0;
-                while block_instr_at(module, block, instr_index) |instr| {
-                    instr_index = instr_index + 1;
-                    if try fold_instr(allocator, module, instr, &var consts) {
-                        changed = true;
-                    }
+                if try fold_instr(allocator, module, instr, &var consts) {
+                    changed = true;
+                } else if try fold_float_instr(allocator, module, instr, &var consts, &var floats) {
+                    changed = true;
+                } else if try fold_phi(allocator, module, instr, &var consts, &var floats) {
+                    changed = true;
+                    phis_folded = true;
                 }
             }
         }
+        if changed {
+            folded = true;
+        }
+    }
+    if phis_folded {
+        try group_phis(allocator, module, function);
+    }
+    return folded;
+}
+
+fn group_phis(allocator: Allocator, module: &var Module, function: Function) -> !void {
+    var block_index = 0;
+    while function_block_at(module, function, block_index) |block| {
+        block_index = block_index + 1;
+        var phis = array::new<Instr>(allocator);
+        defer phis.deinit(allocator);
+        var rest = array::new<Instr>(allocator);
+        defer rest.deinit(allocator);
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            if module.instrs.at(instr.node).op == Op::Phi {
+                try phis.append(allocator, instr);
+            } else {
+                try rest.append(allocator, instr);
+            }
+        }
+        var index = 0;
+        while rest.get(index) |instr| {
+            index = index + 1;
+            try phis.append(allocator, instr);
+        }
+        try set_block_instrs(allocator, module, block, &phis);
     }
     return;
 }
@@ -134,6 +206,245 @@ fn record_constant(allocator: Allocator, module: &Module, instr: Instr, consts: 
     let immediate_bytes = immediate_text.as_bytes();
     if parse_i64(immediate_bytes) |value| {
         try consts.insert(allocator, name_id(node.result.name), value);
+    }
+    return;
+}
+
+fn record_float_constant(allocator: Allocator, module: &Module, instr: Instr, floats: &var map::Map<i64, f64>) -> !void {
+    let node = module.instrs.at(instr.node);
+    if node.op != Op::Const or !module.names.is(node.result.type_name, "f64") {
+        return;
+    }
+    let immediate_text = name_text(&module.names, node.immediate);
+    let immediate_bytes = immediate_text.as_bytes();
+    if try typ::parse_float_literal(allocator, immediate_bytes) |value| {
+        try floats.insert(allocator, name_id(node.result.name), value);
+    }
+    return;
+}
+
+fn fold_float_instr(
+    allocator: Allocator,
+    module: &var Module,
+    instr: Instr,
+    consts: &var map::Map<i64, i64>,
+    floats: &var map::Map<i64, f64>
+) -> !bool {
+    let node = module.instrs.at(instr.node);
+    let op = node.op;
+    let operand = node.operand;
+    let result = node.result;
+    let count = node.args.len();
+    if count == 0 or count > 2 or op == Op::Const {
+        return false;
+    }
+    let first_name = node.args.get_or_panic(0).name;
+    let first_type = node.args.get_or_panic(0).type_name;
+    var second_name = empty_name();
+    if count == 2 {
+        second_name = node.args.get_or_panic(1).name;
+    }
+    if count == 2 {
+        if op != Op::Binary {
+            return false;
+        }
+        let left = floats.get(name_id(first_name)) orelse return false;
+        let right = floats.get(name_id(second_name)) orelse return false;
+        if module.names.is(result.type_name, "f64") {
+            let value = float_binary(module, operand, left, right) orelse return false;
+            return set_float_constant(allocator, module, instr, value, floats);
+        }
+        if module.names.is(result.type_name, "bool") {
+            let holds = float_compare(module, operand, left, right) orelse return false;
+            return set_bool_constant(module, instr, holds);
+        }
+        return false;
+    }
+    if op == Op::Cast {
+        if module.names.is(result.type_name, "f64") and module.names.is(first_type, "i64") {
+            let integer = consts.get(name_id(first_name)) orelse return false;
+            return set_float_constant(allocator, module, instr, cast<f64>(integer), floats);
+        }
+        if !module.names.is(first_type, "f64") {
+            return false;
+        }
+        let value = floats.get(name_id(first_name)) orelse return false;
+        let integer = truncated_integer(module, result.type_name, value) orelse return false;
+        return set_integer_constant(allocator, module, instr, integer, consts);
+    }
+    if !module.names.is(result.type_name, "f64") or !module.names.is(first_type, "f64") {
+        return false;
+    }
+    let value = floats.get(name_id(first_name)) orelse return false;
+    let computed = float_unary(module, op, operand, value) orelse return false;
+    return set_float_constant(allocator, module, instr, computed, floats);
+}
+
+fn float_binary(module: &Module, operand: Name, left: f64, right: f64) -> ?f64 {
+    let operator_text = name_text(&module.names, operand);
+    let operator = operator_text.as_bytes();
+    return stdmath::binary(operator, left, right);
+}
+
+fn float_compare(module: &Module, operand: Name, left: f64, right: f64) -> ?bool {
+    let operator_text = name_text(&module.names, operand);
+    let operator = operator_text.as_bytes();
+    return stdmath::compare(operator, left, right);
+}
+
+fn float_unary(module: &Module, op: Op, operand: Name, value: f64) -> ?f64 {
+    if op == Op::Unary {
+        if module.names.is(operand, "-") {
+            return -value;
+        }
+        return null;
+    }
+    if op == Op::FloatTrunc {
+        return math::trunc<f64>(value);
+    }
+    if op == Op::FloatFloor {
+        return math::floor<f64>(value);
+    }
+    if op == Op::FloatCeil {
+        return math::ceil<f64>(value);
+    }
+    if op == Op::FloatSqrt {
+        return math::sqrt<f64>(value);
+    }
+    return null;
+}
+
+fn truncated_integer(module: &Module, type_name: Name, value: f64) -> ?i64 {
+    if !stdmath::finite(value) {
+        return null;
+    }
+    let whole = math::trunc<f64>(value);
+    var low = 0.0;
+    var high = 0.0;
+    if module.names.is(type_name, "i64") {
+        low = -9223372036854775808.0;
+        high = 9223372036854775808.0;
+    } else if module.names.is(type_name, "i32") {
+        low = -2147483648.0;
+        high = 2147483648.0;
+    } else if module.names.is(type_name, "i16") {
+        low = -32768.0;
+        high = 32768.0;
+    } else if module.names.is(type_name, "i8") {
+        low = -128.0;
+        high = 128.0;
+    } else if module.names.is(type_name, "u64") {
+        high = 9223372036854775808.0;
+    } else if module.names.is(type_name, "u32") {
+        high = 4294967296.0;
+    } else if module.names.is(type_name, "u16") {
+        high = 65536.0;
+    } else if module.names.is(type_name, "u8") {
+        high = 256.0;
+    } else {
+        return null;
+    }
+    if whole < low or whole >= high {
+        return null;
+    }
+    return cast<i64>(whole);
+}
+
+fn fold_phi(
+    allocator: Allocator,
+    module: &var Module,
+    instr: Instr,
+    consts: &var map::Map<i64, i64>,
+    floats: &var map::Map<i64, f64>
+) -> !bool {
+    if module.instrs.at(instr.node).op != Op::Phi {
+        return false;
+    }
+    if phi_float(module, instr, floats) |known| {
+        return set_float_constant(allocator, module, instr, known, floats);
+    }
+    if phi_integer(module, instr, consts) |known| {
+        return set_integer_constant(allocator, module, instr, known, consts);
+    }
+    return false;
+}
+
+fn phi_float(module: &Module, instr: Instr, floats: &map::Map<i64, f64>) -> ?f64 {
+    let node = module.instrs.at(instr.node);
+    if node.incoming.len() == 0 or !module.names.is(node.result.type_name, "f64") {
+        return null;
+    }
+    var known = 0.0;
+    var index = 0;
+    while node.incoming.get(index) |incoming| {
+        let value = floats.get(name_id(incoming.value.name)) orelse return null;
+        if index > 0 and float::bits(value) != float::bits(known) {
+            return null;
+        }
+        known = value;
+        index = index + 1;
+    }
+    return known;
+}
+
+fn phi_integer(module: &Module, instr: Instr, consts: &map::Map<i64, i64>) -> ?i64 {
+    let node = module.instrs.at(instr.node);
+    if node.incoming.len() == 0 or !module.names.is(node.result.type_name, "i64") {
+        return null;
+    }
+    var known = 0;
+    var index = 0;
+    while node.incoming.get(index) |incoming| {
+        let value = consts.get(name_id(incoming.value.name)) orelse return null;
+        if index > 0 and value != known {
+            return null;
+        }
+        known = value;
+        index = index + 1;
+    }
+    return known;
+}
+
+fn set_float_constant(allocator: Allocator, module: &var Module, instr: Instr, value: f64, floats: &var map::Map<i64, f64>) -> !bool {
+    if !stdmath::finite(value) {
+        return false;
+    }
+    let spelled = try stdmath::literal(allocator, value);
+    let immediate = try module.names.intern_owned(move spelled);
+    let result = module.instr_result(instr);
+    try floats.insert(allocator, name_id(result.name), value);
+    become_constant(module, instr, immediate);
+    return true;
+}
+
+fn set_integer_constant(allocator: Allocator, module: &var Module, instr: Instr, value: i64, consts: &var map::Map<i64, i64>) -> !bool {
+    let immediate = try module.names.intern_i64(value);
+    let result = module.instr_result(instr);
+    if module.names.is(result.type_name, "i64") {
+        try consts.insert(allocator, name_id(result.name), value);
+    }
+    become_constant(module, instr, immediate);
+    return true;
+}
+
+fn set_bool_constant(module: &var Module, instr: Instr, holds: bool) -> !bool {
+    var immediate = empty_name();
+    if holds {
+        immediate = try module.names.intern("true");
+    } else {
+        immediate = try module.names.intern("false");
+    }
+    become_constant(module, instr, immediate);
+    return true;
+}
+
+fn become_constant(module: &var Module, instr: Instr, immediate: Name) -> void {
+    if module.instrs.at_mut(instr.node) |folded| {
+        folded.op = Op::Const;
+        folded.operand = empty_name();
+        while folded.args.pop() |_| {}
+        while folded.incoming.pop() |_| {}
+        folded.immediate = immediate;
     }
     return;
 }
