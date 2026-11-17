@@ -1,0 +1,73 @@
+// A union variant may carry a struct whose fields are raw pointers, nullable
+// raw pointers, or function values. Each of these is one machine word, so
+// both backends give the payload a fixed size.
+
+/// text points to at least len readable bytes for as long as the Slot lives.
+unsafe struct Bytes {
+    text: ptr<const u8>,
+    len: i64,
+}
+
+/// first is null or points to a readable byte.
+unsafe struct Maybe {
+    first: ?ptr<const u8>,
+}
+
+struct Step {
+    run: fn(i64) -> i64,
+}
+
+union Slot {
+    Empty,
+    Text(Bytes),
+    Optional(Maybe),
+    Action(Step),
+}
+
+fn double(value: i64) -> i64 {
+    return value * 2;
+}
+
+fn describe(slot: Slot) -> i64 {
+    match slot {
+        Empty => return 0,
+        Text(bytes) => {
+            // SAFETY: Bytes guarantees text points to len readable bytes, and len is 1 here
+            let head = unsafe bytes.text.*;
+            return cast<i64>(head) + bytes.len;
+        },
+        Optional(maybe) => {
+            if maybe.first |_| {
+                return 1;
+            }
+            return -1;
+        },
+        Action(step) => {
+            let run = step.run;
+            return run(21);
+        },
+    }
+}
+
+fn main() -> void {
+    print(describe(Slot::Empty));
+    // SAFETY: the literal "A" is one readable byte that lives for the whole program
+    let letter = unsafe Bytes { text: c"A", len: 1 };
+    print(describe(Slot::Text(move letter)));
+    // SAFETY: null satisfies the Maybe invariant
+    let none = unsafe Maybe { first: null };
+    print(describe(Slot::Optional(move none)));
+    // SAFETY: the literal "x" is a readable byte
+    let some = unsafe Maybe { first: c"x" };
+    print(describe(Slot::Optional(move some)));
+    print(describe(Slot::Action(Step { run: double })));
+}
+
+// run
+// features: union unsafe raw-pointer nullable-pointer fn-value
+// output:
+// 0
+// 66
+// -1
+// 1
+// 42
