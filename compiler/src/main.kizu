@@ -2285,6 +2285,137 @@ fn checked_lowerer(allocator: Allocator, tree: &var ast::Ast, program: &ast::Pro
     return Lowering::Ready(move boxed);
 }
 
+fn prepare_native_module(
+    io: Io,
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    program: &ast::Program,
+    loader: &project::Loader,
+    lowerer: &var ir::Lowerer,
+    std_errors: &project::StdErrorCodes,
+    command: NativeCommand,
+    options: &native::Options,
+    seed: ?i64,
+    build_target: stdtarget::Target,
+    package_name: &string::String
+) -> !bool {
+    if try lowerer.lower(tree, program, &std_errors, &loader.sources) |failed| {
+        defer failed.deinit(allocator);
+        try report(io, allocator, &loader.sources, &failed);
+        return false;
+    }
+    if command == NativeCommand::Build and options.opt {
+        if try ir::optimize(allocator, &var lowerer.module, build_target) |failed| {
+            defer failed.deinit(allocator);
+            try report(io, allocator, &loader.sources, &failed);
+            return false;
+        }
+    }
+    if command != NativeCommand::Test and package_name.len() > 0 {
+        var entry = string::new(allocator);
+        defer entry.deinit(allocator);
+        try entry.append_string(allocator, package_name);
+        try entry.append_bytes(allocator, "::main");
+        let entry_bytes = entry.as_bytes();
+        if try add_package_main(allocator, &var lowerer.module, entry_bytes) |failed| {
+            defer failed.deinit(allocator);
+            try report(io, allocator, &loader.sources, &failed);
+            return false;
+        }
+    }
+    if command == NativeCommand::Test {
+        if try add_test_main(allocator, &var lowerer.module, seed) |failed| {
+            defer failed.deinit(allocator);
+            try report(io, allocator, &loader.sources, &failed);
+            return false;
+        }
+    }
+    let emit = options.emit.as_bytes();
+    if try keep_native_roots(allocator, &var lowerer.module, emit) |failed| {
+        defer failed.deinit(allocator);
+        try report(io, allocator, &loader.sources, &failed);
+        return false;
+    }
+    return true;
+}
+
+struct NativeLowered {
+    lowerer: ir::Lowerer,
+    std_errors: project::StdErrorCodes,
+}
+
+union NativeLowering {
+    Ready(mem::Box<NativeLowered>),
+    Failed(i64),
+}
+
+fn lower_native(
+    io: Io,
+    allocator: Allocator,
+    loader: &var project::Loader,
+    target: []u8,
+    command: NativeCommand,
+    options: &native::Options,
+    seed: ?i64,
+    build_target: stdtarget::Target
+) -> !NativeLowering {
+    var tree = ast::new(allocator);
+    defer tree.deinit(allocator);
+    var package_name = string::new(allocator);
+    defer package_name.deinit(allocator);
+    let include_tests = command == NativeCommand::Test;
+    let loaded = try load_target(io, allocator, loader, &var tree, target, &var package_name, include_tests);
+    match loaded {
+        Error(failed) => {
+            defer failed.deinit(allocator);
+            try report(io, allocator, &loader.sources, &failed);
+            return NativeLowering::Failed(1);
+        },
+        Program(program) => {
+            defer program.deinit(allocator);
+            if try types::check_for_target(allocator, &var tree, &program, build_target) |failed| {
+                defer failed.deinit(allocator);
+                try report(io, allocator, &loader.sources, &failed);
+                return NativeLowering::Failed(1);
+            }
+            let lowering = try checked_lowerer(allocator, &var tree, &program, build_target);
+            match lowering {
+                Failed(failed) => {
+                    defer failed.deinit(allocator);
+                    try report(io, allocator, &loader.sources, &failed);
+                    return NativeLowering::Failed(1);
+                },
+                Ready(ready) => {
+                    var lowerer = ready.take(allocator);
+                    errdefer lowerer.deinit(allocator);
+                    let codes = try loader.std_error_codes();
+                    match codes {
+                        Error(failed) => {
+                            defer failed.deinit(allocator);
+                            try report(io, allocator, &loader.sources, &failed);
+                            lowerer.deinit(allocator);
+                            return NativeLowering::Failed(1);
+                        },
+                        Codes(std_errors) => {
+                            errdefer std_errors.deinit(allocator);
+                            if !try prepare_native_module(io, allocator, &var tree, &program, loader, &var lowerer, &std_errors, command, options, seed, build_target, &package_name) {
+                                lowerer.deinit(allocator);
+                                std_errors.deinit(allocator);
+                                return NativeLowering::Failed(1);
+                            }
+                            let boxed = try mem::box<NativeLowered>(allocator, NativeLowered {
+                                lowerer: move lowerer,
+                                std_errors: move std_errors
+                            });
+                            return NativeLowering::Ready(move boxed);
+                        },
+                    }
+                },
+            }
+        },
+    }
+}
+
 fn native_target(
     io: Io,
     allocator: Allocator,
@@ -2296,12 +2427,8 @@ fn native_target(
     child_start: i64,
     child_count: i64
 ) -> !i64 {
-    var tree = ast::new(allocator);
-    defer tree.deinit(allocator);
     var loader = try project::new_loader(io, allocator, lib_dir);
     defer loader.deinit(allocator);
-    var package_name = string::new(allocator);
-    defer package_name.deinit(allocator);
     let triple = options.triple.as_bytes();
     var build_target = stdtarget::host();
     if try native::target_for(allocator, triple, &var build_target) |failed| {
@@ -2315,186 +2442,117 @@ fn native_target(
         try report(io, allocator, &loader.sources, &failed);
         return 1;
     }
-    let include_tests = command == NativeCommand::Test;
-    let loaded = try load_target(io, allocator, &var loader, &var tree, target, &var package_name, include_tests);
-    match loaded {
-        Error(failed) => {
-            defer failed.deinit(allocator);
-            try report(io, allocator, &loader.sources, &failed);
-            return 1;
-        },
-        Program(program) => {
-            defer program.deinit(allocator);
-            if try types::check_for_target(allocator, &var tree, &program, build_target) |failed| {
+    let lowering = try lower_native(io, allocator, &var loader, target, command, options, seed, build_target);
+    match lowering {
+        Failed(code) => return code,
+        Ready(boxed) => {
+            var lowered = boxed.take(allocator);
+            defer lowered.deinit(allocator);
+            if try set_link_inputs(io, allocator, &lowered.lowerer.module, target, options) |failed| {
                 defer failed.deinit(allocator);
                 try report(io, allocator, &loader.sources, &failed);
                 return 1;
             }
-            let lowering = try checked_lowerer(allocator, &var tree, &program, build_target);
-            match lowering {
-                Failed(failed) => {
+            var temps = try native::new_temp_dirs(allocator);
+            defer temps.deinit(allocator);
+            var host = string::new(allocator);
+            defer host.deinit(allocator);
+            if try native::host_key(allocator, &var host) |failed| {
+                defer failed.deinit(allocator);
+                try report(io, allocator, &loader.sources, &failed);
+                return 1;
+            }
+            let darwin = build_target == stdtarget::Target::NativeDarwin;
+            var arch = llvm::Arch::Other;
+            if build_target == stdtarget::Target::NativeWindows {
+                if native::target_is_x86_64(options, &host) {
+                    arch = llvm::Arch::X86_64Windows;
+                }
+            } else if native::target_is_arm64(options, &host) {
+                arch = llvm::Arch::Arm64;
+            } else if native::target_is_x86_64(options, &host) {
+                arch = llvm::Arch::X86_64;
+            }
+            var split = llvm::Split::PerModule;
+            if options.thinlto {
+                split = llvm::Split::PerModuleLTO;
+            } else if options.opt {
+                split = llvm::Split::Whole;
+            }
+            var units = array::new<string::String>(allocator);
+            defer units.deinit(allocator);
+            let linux = build_target == stdtarget::Target::NativeLinux;
+            let windows = build_target == stdtarget::Target::NativeWindows;
+            let arm = (darwin or linux) and arch == llvm::Arch::Arm64;
+            let amd = linux and arch == llvm::Arch::X86_64;
+            let amd_windows = windows and arch == llvm::Arch::X86_64Windows;
+            if options.own_backend and ((darwin and arm) or amd or amd_windows) {
+                options.direct = true;
+            }
+            if options.direct and options.thinlto {
+                try io::write_stderr_line(io, "error: --thinlto optimizes LLVM bitcode in the link; build with --backend llvm");
+                return 1;
+            }
+            if options.direct {
+                if !arm and !amd and !amd_windows {
+                    try io::write_stderr_line(io, "error: --backend direct needs a Darwin or Linux arm64, or a Linux or Windows x86_64 target");
+                    return 1;
+                }
+                var direct_arch = direct::Arch::Arm64;
+                if amd {
+                    direct_arch = direct::Arch::Amd64;
+                } else if amd_windows {
+                    direct_arch = direct::Arch::Amd64Windows;
+                }
+                var format = direct::Format::MachO;
+                if linux {
+                    format = direct::Format::Elf;
+                } else if windows {
+                    format = direct::Format::Coff;
+                }
+                try units.append(allocator, string::new(allocator));
+                var failure = false;
+                if units.at_mut(0) |object| {
+                    if try direct::emit_object(allocator, &lowered.lowerer.module, direct_arch, format, object) |failed| {
+                        defer failed.deinit(allocator);
+                        try report(io, allocator, &loader.sources, &failed);
+                        failure = true;
+                    }
+                }
+                if failure {
+                    return 1;
+                }
+            } else if try emit_unit_texts(allocator, &var lowered.lowerer.module, darwin, arch, split, &var units) |failed| {
+                defer failed.deinit(allocator);
+                try report(io, allocator, &loader.sources, &failed);
+                return 1;
+            }
+            if options.output.len() > 0 {
+                if try native::build(io, allocator, &var temps, options, &host, &units, &lowered.std_errors.sets) |failed| {
                     defer failed.deinit(allocator);
                     try report(io, allocator, &loader.sources, &failed);
                     return 1;
-                },
-                Ready(ready) => {
-                    var lowerer = ready.take(allocator);
-                    defer lowerer.deinit(allocator);
-                    let codes = try loader.std_error_codes();
-                    match codes {
-                        Error(failed) => {
-                            defer failed.deinit(allocator);
-                            try report(io, allocator, &loader.sources, &failed);
-                            return 1;
-                        },
-                        Codes(std_errors) => {
-                            defer std_errors.deinit(allocator);
-                            if try lowerer.lower(&var tree, &program, &std_errors, &loader.sources) |failed| {
-                                defer failed.deinit(allocator);
-                                try report(io, allocator, &loader.sources, &failed);
-                                return 1;
-                            }
-                            if command == NativeCommand::Build and options.opt {
-                                if try ir::optimize(allocator, &var lowerer.module, build_target) |failed| {
-                                    defer failed.deinit(allocator);
-                                    try report(io, allocator, &loader.sources, &failed);
-                                    return 1;
-                                }
-                            }
-                            if command != NativeCommand::Test and package_name.len() > 0 {
-                                var entry = string::new(allocator);
-                                defer entry.deinit(allocator);
-                                try entry.append_string(allocator, &package_name);
-                                try entry.append_bytes(allocator, "::main");
-                                let entry_bytes = entry.as_bytes();
-                                if try add_package_main(allocator, &var lowerer.module, entry_bytes) |failed| {
-                                    defer failed.deinit(allocator);
-                                    try report(io, allocator, &loader.sources, &failed);
-                                    return 1;
-                                }
-                            }
-                            if command == NativeCommand::Test {
-                                if try add_test_main(allocator, &var lowerer.module, seed) |failed| {
-                                    defer failed.deinit(allocator);
-                                    try report(io, allocator, &loader.sources, &failed);
-                                    return 1;
-                                }
-                            }
-                            let emit = options.emit.as_bytes();
-                            if try keep_native_roots(allocator, &var lowerer.module, emit) |failed| {
-                                defer failed.deinit(allocator);
-                                try report(io, allocator, &loader.sources, &failed);
-                                return 1;
-                            }
-                            if try set_link_inputs(io, allocator, &lowerer.module, target, options) |failed| {
-                                defer failed.deinit(allocator);
-                                try report(io, allocator, &loader.sources, &failed);
-                                return 1;
-                            }
-                            var temps = try native::new_temp_dirs(allocator);
-                            defer temps.deinit(allocator);
-                            var host = string::new(allocator);
-                            defer host.deinit(allocator);
-                            if try native::host_key(allocator, &var host) |failed| {
-                                defer failed.deinit(allocator);
-                                try report(io, allocator, &loader.sources, &failed);
-                                return 1;
-                            }
-                            let darwin = build_target == stdtarget::Target::NativeDarwin;
-                            var arch = llvm::Arch::Other;
-                            if build_target == stdtarget::Target::NativeWindows {
-                                if native::target_is_x86_64(options, &host) {
-                                    arch = llvm::Arch::X86_64Windows;
-                                }
-                            } else if native::target_is_arm64(options, &host) {
-                                arch = llvm::Arch::Arm64;
-                            } else if native::target_is_x86_64(options, &host) {
-                                arch = llvm::Arch::X86_64;
-                            }
-                            var split = llvm::Split::PerModule;
-                            if options.thinlto {
-                                split = llvm::Split::PerModuleLTO;
-                            } else if options.opt {
-                                split = llvm::Split::Whole;
-                            }
-                            var units = array::new<string::String>(allocator);
-                            defer units.deinit(allocator);
-                            let linux = build_target == stdtarget::Target::NativeLinux;
-                            let windows = build_target == stdtarget::Target::NativeWindows;
-                            let arm = (darwin or linux) and arch == llvm::Arch::Arm64;
-                            let amd = linux and arch == llvm::Arch::X86_64;
-                            let amd_windows = windows and arch == llvm::Arch::X86_64Windows;
-                            if options.own_backend and ((darwin and arm) or amd or amd_windows) {
-                                options.direct = true;
-                            }
-                            if options.direct and options.thinlto {
-                                try io::write_stderr_line(io, "error: --thinlto optimizes LLVM bitcode in the link; build with --backend llvm");
-                                return 1;
-                            }
-                            if options.direct {
-                                if !arm and !amd and !amd_windows {
-                                    try io::write_stderr_line(io, "error: --backend direct needs a Darwin or Linux arm64, or a Linux or Windows x86_64 target");
-                                    return 1;
-                                }
-                                var direct_arch = direct::Arch::Arm64;
-                                if amd {
-                                    direct_arch = direct::Arch::Amd64;
-                                } else if amd_windows {
-                                    direct_arch = direct::Arch::Amd64Windows;
-                                }
-                                var format = direct::Format::MachO;
-                                if linux {
-                                    format = direct::Format::Elf;
-                                } else if windows {
-                                    format = direct::Format::Coff;
-                                }
-                                try units.append(allocator, string::new(allocator));
-                                var failure = false;
-                                if units.at_mut(0) |object| {
-                                    if try direct::emit_object(allocator, &lowerer.module, direct_arch, format, object) |failed| {
-                                        defer failed.deinit(allocator);
-                                        try report(io, allocator, &loader.sources, &failed);
-                                        failure = true;
-                                    }
-                                }
-                                if failure {
-                                    return 1;
-                                }
-                            } else if try emit_unit_texts(allocator, &var lowerer.module, darwin, arch, split, &var units) |failed| {
-                                defer failed.deinit(allocator);
-                                try report(io, allocator, &loader.sources, &failed);
-                                return 1;
-                            }
-                            if options.output.len() > 0 {
-                                if try native::build(io, allocator, &var temps, options, &host, &units, &std_errors.sets) |failed| {
-                                    defer failed.deinit(allocator);
-                                    try report(io, allocator, &loader.sources, &failed);
-                                    return 1;
-                                }
-                                let output = options.output.as_bytes();
-                                try io::write_stdout_line(io, output);
-                                return 0;
-                            }
-                            var exe = string::new(allocator);
-                            defer exe.deinit(allocator);
-                            if try native::executable(io, allocator, &var temps, options, &host, &units, &std_errors.sets, &var exe) |failed| {
-                                defer failed.deinit(allocator);
-                                try report(io, allocator, &loader.sources, &failed);
-                                return 1;
-                            }
-                            let exe_bytes = exe.as_bytes();
-                            let code = try execute_built(allocator, exe_bytes, child_start, child_count);
-                            if code != 0 {
-                                return code;
-                            }
-                            if command == NativeCommand::Test {
-                                try io::write_stdout_line(io, "test: ok");
-                            }
-                            return 0;
-                        },
-                    }
-                },
+                }
+                let output = options.output.as_bytes();
+                try io::write_stdout_line(io, output);
+                return 0;
             }
+            var exe = string::new(allocator);
+            defer exe.deinit(allocator);
+            if try native::executable(io, allocator, &var temps, options, &host, &units, &lowered.std_errors.sets, &var exe) |failed| {
+                defer failed.deinit(allocator);
+                try report(io, allocator, &loader.sources, &failed);
+                return 1;
+            }
+            let exe_bytes = exe.as_bytes();
+            let code = try execute_built(allocator, exe_bytes, child_start, child_count);
+            if code != 0 {
+                return code;
+            }
+            if command == NativeCommand::Test {
+                try io::write_stdout_line(io, "test: ok");
+            }
+            return 0;
         },
     }
 }
