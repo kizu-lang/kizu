@@ -2880,7 +2880,8 @@ unsafe qsort(base, count, 8, ascending);
 
 GPU が dispatch する kernel は `export "gpu" fn` で宣言します。本体は通常の Kizu
 関数で、`build --target metal` が `export "gpu"` の関数とそこから到達できる関数だけを
-Metal Shading Language の source にします。他の target の build では root になりません。
+Metal Shading Language の source にします。`build --target spirv -o file` は同じ関数を
+Vulkan 向けの SPIR-V module(binary)にします。他の target の build では root になりません。
 
 ```kizu
 import std::gpu;
@@ -2901,13 +2902,28 @@ export "gpu" fn add(total: &var []f32, part: []f32, scale: f32) -> void {
 kernel から呼ぶ関数は view を受け取れ、受け取る view の置き場所(buffer、threadgroup、
 thread)ごとに別の関数として生成されます。
 
-host が渡す buffer の並びは次のとおりです。
+Metal で host が渡す buffer の並びは次のとおりです。
 
 | index | 中身 |
 | --- | --- |
 | 0 から parameter 順 | view は要素の配列、値は 1 つの値 |
 | parameter 数 | view の要素数を view parameter の順に並べた `i64` の配列 |
 | parameter 数 + 1 | `u32` の status word。host は 0 にしてから dispatch する |
+
+SPIR-V の module は SPIR-V 1.5 で、すべての kernel を `export` の名前の entry point として
+持ちます。buffer は binding ではなく device address で渡します。threadgroup の大きさは
+specialization constant 0 で、host が pipeline を作るときに決めます。host は次の push
+constant を渡します。各 member は 8 byte です。
+
+| member | 中身 |
+| --- | --- |
+| 0 から parameter 順 | view は要素の先頭の device address、値は 1 つの値(下位 byte に置く) |
+| parameter 数 から | view の要素数を view parameter の順に並べた `i64` |
+| 最後 | `u32` の status word の device address |
+
+device には bufferDeviceAddress、shaderInt64、f32 の denormal と符号付き 0・Inf・NaN を
+保つ float controls が要ります。使う型と演算によっては、8 bit と 16 bit の整数と storage
+access、subgroup の shuffle と arithmetic も要ります。
 
 範囲外の添字など、CPU なら panic する失敗が起きると、その thread は status word を
 `1` にして終わります。host は pass の完了後に status word を読みます。kernel は
@@ -3347,7 +3363,7 @@ std::target::is_windows() -> bool    comptime-if-only
 ちょうど 1 つだけが true です。
 `build --target native`、`run`、`check`、`test`、`ir`、`build --emit-llvm` は native、
 `build --target wasm32-wasi` は WASI、`build --target wasm32-browser` は browser、
-`build --target metal` は gpu を選びます。`fmt` の semantic validation も native を使い、`parse` は target を
+`build --target metal` と `build --target spirv` は gpu を選びます。`fmt` の semantic validation も native を使い、`parse` は target を
 選びません。
 
 OS を問う 3 つは native build の operating system を答えます。native build では

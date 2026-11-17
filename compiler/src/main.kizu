@@ -16,6 +16,7 @@ import compiler::internal::parser;
 import compiler::internal::pool;
 import compiler::internal::project;
 import compiler::internal::source;
+import compiler::internal::spirv;
 import compiler::internal::stdfmt;
 import compiler::internal::stdtarget;
 import compiler::internal::types;
@@ -238,11 +239,12 @@ enum Output {
     WasmBrowserBinary,
     WasmBrowserEsm,
     Metal,
+    Spirv,
     Check,
 }
 
 fn output_target(output: Output) -> stdtarget::Target {
-    if output == Output::Metal {
+    if output == Output::Metal or output == Output::Spirv {
         return stdtarget::Target::GpuMetal;
     }
     if output == Output::WasmBrowser or output == Output::WasmBrowserBinary or
@@ -360,7 +362,10 @@ fn build_command(io: Io, allocator: Allocator, lib_dir: []u8, next: i64, count: 
         return build_native_command(io, allocator, lib_dir, next + 3, count);
     }
     if mem::equal_bytes(target_kind, "metal") {
-        return metal_build_command(io, allocator, lib_dir, next + 3, count);
+        return gpu_build_command(io, allocator, lib_dir, next + 3, count, Output::Metal);
+    }
+    if mem::equal_bytes(target_kind, "spirv") {
+        return gpu_build_command(io, allocator, lib_dir, next + 3, count, Output::Spirv);
     }
     try usage(io);
     var message = try string::from_bytes(allocator, "error: invalid build target `");
@@ -372,7 +377,7 @@ fn build_command(io: Io, allocator: Allocator, lib_dir: []u8, next: i64, count: 
     return 1;
 }
 
-fn metal_build_command(io: Io, allocator: Allocator, lib_dir: []u8, start: i64, count: i64) -> !i64 {
+fn gpu_build_command(io: Io, allocator: Allocator, lib_dir: []u8, start: i64, count: i64, output: Output) -> !i64 {
     var opt = false;
     var output_file = "";
     var source = "";
@@ -402,7 +407,12 @@ fn metal_build_command(io: Io, allocator: Allocator, lib_dir: []u8, start: i64, 
         try io::write_stderr_line(io, "error: invalid build command");
         return 1;
     }
-    return lower_target(io, allocator, lib_dir, source, opt, Output::Metal, output_file);
+    if output == Output::Spirv and mem::len(output_file) == 0 {
+        try usage(io);
+        try io::write_stderr_line(io, "error: --target spirv writes a binary module; name it with -o");
+        return 1;
+    }
+    return lower_target(io, allocator, lib_dir, source, opt, output, output_file);
 }
 
 struct WasmBuildOptions {
@@ -609,7 +619,7 @@ fn usage(io: Io) -> !void {
     try io::write_stderr_line(io, "usage: kizu build --target wasm32-browser [--emit wat] [--opt] [-o file] <file|package>");
     try io::write_stderr_line(io, "usage: kizu build --target wasm32-browser --emit wasm -o file [--opt] <file|package>");
     try io::write_stderr_line(io, "usage: kizu build --target wasm32-browser --emit esm -o directory [--opt] <file|package>");
-    try io::write_stderr_line(io, "usage: kizu build --target metal [--opt] [-o file] <file|package>");
+    try io::write_stderr_line(io, "usage: kizu build --target metal|spirv [--opt] [-o file] <file|package>");
     try io::write_stderr_line(io, "usage: kizu cache <status|prune>");
     try io::write_stderr_line(io, "usage: kizu import-c-header <file>");
     return io::write_stderr_line(io, "usage: kizu version");
@@ -1487,6 +1497,13 @@ fn lower_target(
                         try report(io, allocator, &loader.sources, &failed);
                         return 1;
                     }
+                    if output == Output::Metal or output == Output::Spirv {
+                        var gpu_roots = array::new<string::String>(allocator);
+                        defer gpu_roots.deinit(allocator);
+                        try ir::keep_target_reachable_functions(
+                            allocator, &var lowerer.module, &gpu_roots, "gpu"
+                        );
+                    }
                     if opt {
                         if try ir::optimize(allocator, &var lowerer.module, build_target) |failed| {
                             defer failed.deinit(allocator);
@@ -1606,6 +1623,23 @@ fn lower_target(
                             return 0;
                         }
                         try io::write_stdout_line(io, text_bytes);
+                        return 0;
+                    }
+                    if output == Output::Spirv {
+                        var kernel_roots = array::new<string::String>(allocator);
+                        defer kernel_roots.deinit(allocator);
+                        try ir::keep_target_reachable_functions(
+                            allocator, &var lowerer.module, &kernel_roots, "gpu"
+                        );
+                        var words = string::new(allocator);
+                        defer words.deinit(allocator);
+                        if try spirv::emit(allocator, &lowerer.module, &var words) |failed| {
+                            defer failed.deinit(allocator);
+                            try report(io, allocator, &loader.sources, &failed);
+                            return 1;
+                        }
+                        let word_bytes = words.as_bytes();
+                        try fs::write_file(io, output_file, word_bytes);
                         return 0;
                     }
                     if output == Output::Llvm {
