@@ -781,6 +781,13 @@ fn (self: &BoundsWalker) visit_unsigned_check(
     length: Value,
     key: i64
 ) -> !void {
+    if upper_bound(module, &self.defs, index, 0) |most| {
+        if constant_length(module, self.function, &self.defs, length) |count| {
+            if most < count {
+                return plan.drops.insert(allocator, key, true);
+            }
+        }
+    }
     let index_name = self.fact_name(plan, index.name);
     let length_name = self.fact_name(plan, length.name);
     let pair = pair_key(index_name, length_name);
@@ -1025,4 +1032,276 @@ fn append_new_instr(
     }
     let handle = Instr { node: try module.instrs.add(allocator, move node) };
     return out.append(allocator, handle);
+}
+
+fn integer_max(module: &Module, type_name: Name) -> ?i64 {
+    let names = &module.names;
+    if names.is(type_name, "u8") {
+        return 255;
+    }
+    if names.is(type_name, "u16") {
+        return 65535;
+    }
+    if names.is(type_name, "u32") {
+        return 4294967295;
+    }
+    if names.is(type_name, "i8") {
+        return 127;
+    }
+    if names.is(type_name, "i16") {
+        return 32767;
+    }
+    if names.is(type_name, "i32") {
+        return 2147483647;
+    }
+    if names.is(type_name, "i64") {
+        return 9223372036854775807;
+    }
+    return null;
+}
+
+fn unsigned_max(module: &Module, type_name: Name) -> ?i64 {
+    let names = &module.names;
+    if names.is(type_name, "u8") or names.is(type_name, "u16") or names.is(type_name, "u32") {
+        return integer_max(module, type_name);
+    }
+    return null;
+}
+
+fn integer_immediate(module: &Module, value: Value, defs: &map::Map<i64, Instr>) -> ?i64 {
+    if !module.names.is(value.type_name, "u64") {
+        let _ = integer_max(module, value.type_name) orelse return null;
+    }
+    if defs.get(name_id(value.name)) |instr| {
+        let node = module.instrs.at(instr.node);
+        if node.op != Op::Const {
+            return null;
+        }
+        let immediate = name_text(&module.names, node.immediate);
+        let immediate_bytes = immediate.as_bytes();
+        return parse_i64(immediate_bytes);
+    }
+    let text = name_text(&module.names, value.name);
+    let bytes = text.as_bytes();
+    return parse_i64(bytes);
+}
+
+fn upper_bound_depth() -> i64 {
+    return 16;
+}
+
+fn upper_bound(module: &Module, defs: &map::Map<i64, Instr>, value: Value, depth: i64) -> ?i64 {
+    let limit = unsigned_max(module, value.type_name);
+    if integer_immediate(module, value, defs) |number| {
+        if number >= 0 {
+            return number;
+        }
+        return limit;
+    }
+    if depth >= upper_bound_depth() {
+        return limit;
+    }
+    let instr = defs.get(name_id(value.name)) orelse return limit;
+    let node = module.instrs.at(instr.node);
+    if node.op == Op::Id and node.args.len() == 1 {
+        if upper_bound(module, defs, node.args.get_or_panic(0), depth + 1) |most| {
+            return most;
+        }
+        return limit;
+    }
+    if node.op == Op::Cast and node.args.len() == 1 {
+        let most = upper_bound(module, defs, node.args.get_or_panic(0), depth + 1) orelse return limit;
+        if integer_max(module, node.result.type_name) |widest| {
+            if most <= widest {
+                return most;
+            }
+        } else if module.names.is(node.result.type_name, "u64") {
+            return most;
+        }
+        return limit;
+    }
+    if node.op != Op::Binary or node.args.len() != 2 {
+        return limit;
+    }
+    let widest = integer_max(module, node.result.type_name) orelse return limit;
+    let left = node.args.get_or_panic(0);
+    let right = node.args.get_or_panic(1);
+    let names = &module.names;
+    if names.is(node.operand, "&") {
+        let left_most = upper_bound(module, defs, left, depth + 1);
+        let right_most = upper_bound(module, defs, right, depth + 1);
+        if left_most |l| {
+            if right_most |r| {
+                if l < r {
+                    return l;
+                }
+                return r;
+            }
+            return l;
+        }
+        if right_most |r| {
+            return r;
+        }
+        return limit;
+    }
+    let left_most = upper_bound(module, defs, left, depth + 1) orelse return limit;
+    if names.is(node.operand, "|") {
+        let right_most = upper_bound(module, defs, right, depth + 1) orelse return limit;
+        var larger = left_most;
+        if right_most > larger {
+            larger = right_most;
+        }
+        var filled: i64 = 0;
+        while filled < larger {
+            filled = filled * 2 + 1;
+        }
+        return filled;
+    }
+    if names.is(node.operand, "+") {
+        let right_most = upper_bound(module, defs, right, depth + 1) orelse return limit;
+        if right_most <= widest - left_most {
+            return left_most + right_most;
+        }
+        return limit;
+    }
+    if names.is(node.operand, "*") {
+        let right_most = upper_bound(module, defs, right, depth + 1) orelse return limit;
+        if left_most == 0 or right_most <= widest / left_most {
+            return left_most * right_most;
+        }
+        return limit;
+    }
+    let amount = integer_immediate(module, right, defs) orelse return limit;
+    if names.is(node.operand, ">>") {
+        if amount >= 0 and amount < 63 {
+            return left_most >> amount;
+        }
+        return limit;
+    }
+    if names.is(node.operand, "<<") {
+        if amount >= 0 and amount < 63 and left_most <= widest >> amount {
+            return left_most << amount;
+        }
+        return limit;
+    }
+    if names.is(node.operand, "/") {
+        if amount > 0 {
+            return left_most / amount;
+        }
+        return limit;
+    }
+    if names.is(node.operand, "%") {
+        if amount > 0 and amount - 1 < left_most {
+            return amount - 1;
+        }
+        if amount > 0 {
+            return left_most;
+        }
+    }
+    return limit;
+}
+
+fn constant_length(module: &Module, function: Function, defs: &map::Map<i64, Instr>, length: Value) -> ?i64 {
+    if constant_value(module, length, defs) |count| {
+        return count;
+    }
+    let instr = defs.get(name_id(length.name)) orelse return null;
+    let node = module.instrs.at(instr.node);
+    if node.op != Op::SliceLen or node.args.len() != 1 {
+        return null;
+    }
+    return fixed_view_length(module, function, defs, node.args.get_or_panic(0), 0);
+}
+
+fn fixed_view_length(module: &Module, function: Function, defs: &map::Map<i64, Instr>, view: Value, depth: i64) -> ?i64 {
+    if depth >= upper_bound_depth() {
+        return null;
+    }
+    let instr = defs.get(name_id(view.name)) orelse return null;
+    let node = module.instrs.at(instr.node);
+    if node.op == Op::Id and node.args.len() == 1 {
+        return fixed_view_length(module, function, defs, node.args.get_or_panic(0), depth + 1);
+    }
+    if node.op == Op::RefLoad and node.args.len() == 1 {
+        let slot = node.args.get_or_panic(0);
+        let slot_instr = defs.get(name_id(slot.name)) orelse return null;
+        let slot_node = module.instrs.at(slot_instr.node);
+        if slot_node.op != Op::LocalSlot or slot_node.args.len() != 1 or !only_loaded(module, function, slot.name) {
+            return null;
+        }
+        return fixed_view_length(module, function, defs, slot_node.args.get_or_panic(0), depth + 1);
+    }
+    if node.op == Op::SliceSlice and node.args.len() == 3 {
+        let start = node.args.get_or_panic(1);
+        let end_instr = defs.get(name_id(node.args.get_or_panic(2).name)) orelse return null;
+        let end_node = module.instrs.at(end_instr.node);
+        if end_node.op != Op::Binary or end_node.args.len() != 2 or !module.names.is(end_node.operand, "+") {
+            return null;
+        }
+        let left = end_node.args.get_or_panic(0);
+        let right = end_node.args.get_or_panic(1);
+        if same_name(left.name, start.name) {
+            return constant_value(module, right, defs);
+        }
+        if same_name(right.name, start.name) {
+            return constant_value(module, left, defs);
+        }
+        return null;
+    }
+    if node.op != Op::BufferAsBytes or node.args.len() != 1 {
+        return null;
+    }
+    let storage_text = name_text(&module.names, node.args.get_or_panic(0).type_name);
+    let storage = storage_text.as_bytes();
+    let view_text = name_text(&module.names, node.result.type_name);
+    let view_bytes = view_text.as_bytes();
+    let view_length = mem::len(view_bytes);
+    if view_length < 3 or view_bytes[0] != cast<u8>(91) or view_bytes[1] != cast<u8>(93) {
+        return null;
+    }
+    let element = view_bytes[2..view_length];
+    let storage_length = mem::len(storage);
+    var start = 0;
+    while start < storage_length and storage[start] != cast<u8>(91) {
+        start = start + 1;
+    }
+    var close = start + 1;
+    while close < storage_length and storage[close] != cast<u8>(93) {
+        close = close + 1;
+    }
+    if close >= storage_length or !mem::equal_bytes(storage[close + 1..storage_length], element) {
+        return null;
+    }
+    return parse_i64(storage[start + 1..close]);
+}
+
+fn only_loaded(module: &Module, function: Function, slot: Name) -> bool {
+    var block_index_at = 0;
+    while function_block_at(module, function, block_index_at) |block| {
+        block_index_at = block_index_at + 1;
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let node = module.instrs.at(instr.node);
+            var arg_index = 0;
+            while node.args.get(arg_index) |arg| {
+                arg_index = arg_index + 1;
+                if same_name(arg.name, slot) and node.op != Op::RefLoad {
+                    return false;
+                }
+            }
+            var incoming_index = 0;
+            while node.incoming.get(incoming_index) |incoming| {
+                incoming_index = incoming_index + 1;
+                if same_name(incoming.value.name, slot) {
+                    return false;
+                }
+            }
+        }
+        let terminator = module.block_terminator(block);
+        if same_name(terminator.value.name, slot) or same_name(terminator.cond.name, slot) {
+            return false;
+        }
+    }
+    return true;
 }
