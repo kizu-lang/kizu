@@ -11,7 +11,11 @@
 # - the generated blocks of spec/Tls.lean and the generated Quint modules are
 #   what std::tls does now, and the generators pass their own tests. Neither
 #   Lean nor Quint is needed: a change the proofs would have to answer for
-#   shows as a stale block, and `just spec-table` brings it up to date.
+#   shows as a stale block, and `just spec-table` brings it up to date;
+# - the std structs the C runtime reads field by field (std::fs::DirEntry,
+#   std::fs::Metadata, std::string::String) have the fields of their C twins
+#   in compiler/src/internal/native/runtime_source.kizu, so a change to one
+#   side alone fails here (scripts/layout-twins).
 #
 # scripts/bootstrap.sh runs it with stage1, from the repository root.
 set -eu
@@ -47,3 +51,7 @@ trap 'rm -f "$tables"' EXIT
 "$kizu" test scripts/machine-lean/main.kizu
 "$kizu" test scripts/machine-tla/main.kizu
 echo "spec tables: ok"
+
+"$kizu" run scripts/layout-twins/main.kizu
+"$kizu" test scripts/layout-twins/main.kizu
+echo "layout twins: ok"

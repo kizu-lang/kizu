@@ -1,0 +1,409 @@
+// Checks that the std structs the C runtime reads and writes field by field
+// have the fields their C twins have, in the same order and of the matching
+// types:
+//
+//     kizu run scripts/layout-twins/main.kizu
+//
+// Run it from the repository root; scripts/check-sources.sh does. The pairs
+// are in main and the type correspondence in c_type. A C twin spelled
+// `typedef A B;` is a struct of one A, so its std side has to be one field of
+// the type that maps to A, under any name.
+
+import std::fs;
+import std::io;
+import std::mem;
+import std::process;
+import std::string;
+import std::testing;
+
+error Failure = mem::Error or fs::Error or io::Error;
+
+const runtime_path = "compiler/src/internal/native/runtime_source.kizu";
+
+fn main() -> Failure!process::ExitStatus {
+    let allocator = mem::page_allocator();
+    let handle = io::blocking();
+    let runtime = try fs::read_file(handle, allocator, runtime_path, mem::Limit::Unlimited);
+    defer runtime.deinit(allocator);
+    let runtime_bytes = runtime.as_bytes();
+    var ok = true;
+    if !try check_twin(allocator, handle, runtime_bytes, "lib/kizu/std/src/fs/fs.kizu", "DirEntry", "KizuFsDirEntry") {
+        ok = false;
+    }
+    if !try check_twin(allocator, handle, runtime_bytes, "lib/kizu/std/src/fs/fs.kizu", "Metadata", "KizuFsMetadata") {
+        ok = false;
+    }
+    if !try check_twin(allocator, handle, runtime_bytes, "lib/kizu/std/src/string/string.kizu", "String", "KizuString") {
+        ok = false;
+    }
+    if !ok {
+        return process::ExitStatus::Failure;
+    }
+    return process::ExitStatus::Success;
+}
+
+fn check_twin(
+    allocator: Allocator,
+    handle: Io,
+    runtime: []u8,
+    std_path: []u8,
+    std_name: []u8,
+    c_name: []u8
+) -> Failure!bool {
+    let source = try fs::read_file(handle, allocator, std_path, mem::Limit::Unlimited);
+    defer source.deinit(allocator);
+    let source_bytes = source.as_bytes();
+    var problem = string::new(allocator);
+    defer problem.deinit(allocator);
+    if try compare(allocator, source_bytes, std_name, runtime, c_name, &var problem) {
+        return true;
+    }
+    try io::write_stderr(handle, "layout-twins: ");
+    try io::write_stderr(handle, std_path);
+    try io::write_stderr(handle, " ");
+    try io::write_stderr(handle, std_name);
+    try io::write_stderr(handle, " and ");
+    try io::write_stderr(handle, runtime_path);
+    try io::write_stderr(handle, " ");
+    try io::write_stderr(handle, c_name);
+    try io::write_stderr(handle, ": ");
+    let text = problem.as_bytes();
+    try io::write_stderr_line(handle, text);
+    return false;
+}
+
+fn compare(
+    allocator: Allocator,
+    std_source: []u8,
+    std_name: []u8,
+    c_source: []u8,
+    c_name: []u8,
+    problem: &var string::String
+) -> mem::Error!bool {
+    var c_fields = string::new(allocator);
+    defer c_fields.deinit(allocator);
+    if !try c_twin_fields(allocator, c_source, c_name, &var c_fields) {
+        try problem.append_bytes(allocator, "no C typedef of that name");
+        return false;
+    }
+    let c_bytes = c_fields.as_bytes();
+    let any_name = mem::starts_with(c_bytes, "* ");
+    var std_fields = string::new(allocator);
+    defer std_fields.deinit(allocator);
+    if !try std_struct_fields(allocator, std_source, std_name, any_name, &var std_fields, problem) {
+        return false;
+    }
+    let std_bytes = std_fields.as_bytes();
+    if mem::equal_bytes(std_bytes, c_bytes) {
+        return true;
+    }
+    try problem.append_bytes(allocator, "fields differ");
+    try problem.append_byte(allocator, cast<u8>(10));
+    try problem.append_bytes(allocator, "  std: ");
+    try append_fields(allocator, problem, std_bytes);
+    try problem.append_byte(allocator, cast<u8>(10));
+    try problem.append_bytes(allocator, "  C:   ");
+    try append_fields(allocator, problem, c_bytes);
+    return false;
+}
+
+fn append_fields(allocator: Allocator, out: &var string::String, fields: []u8) -> mem::Error!void {
+    var start = 0;
+    var first = true;
+    while start < mem::len(fields) {
+        let end = line_end(fields, start);
+        if !first {
+            try out.append_bytes(allocator, ", ");
+        }
+        first = false;
+        try out.append_bytes(allocator, mem::trim_ascii(fields[start..end]));
+        start = end;
+    }
+    return;
+}
+
+fn c_type(kizu_type: []u8) -> ?[]u8 {
+    if mem::equal_bytes(kizu_type, "i64") {
+        return "int64_t";
+    }
+    if mem::equal_bytes(kizu_type, "bool") {
+        return "_Bool";
+    }
+    if mem::equal_bytes(kizu_type, "std::string::String") {
+        return "KizuString";
+    }
+    if mem::equal_bytes(kizu_type, "std::array::Array<u8>") {
+        return "KizuArray";
+    }
+    return null;
+}
+
+fn std_struct_fields(
+    allocator: Allocator,
+    source: []u8,
+    name: []u8,
+    any_name: bool,
+    out: &var string::String,
+    problem: &var string::String
+) -> mem::Error!bool {
+    var open = string::new(allocator);
+    defer open.deinit(allocator);
+    try open.append_bytes(allocator, "struct ");
+    try open.append_bytes(allocator, name);
+    try open.append_bytes(allocator, " {");
+    let open_bytes = open.as_bytes();
+    var start = 0;
+    var inside = false;
+    while start < mem::len(source) {
+        let end = line_end(source, start);
+        var line = mem::trim_ascii(source[start..end]);
+        start = end;
+        if !inside {
+            if mem::starts_with(line, "pub ") {
+                line = line[4..mem::len(line)];
+            }
+            inside = mem::equal_bytes(line, open_bytes);
+        } else {
+            if mem::equal_bytes(line, "}") {
+                return true;
+            }
+            if mem::starts_with(line, "pub ") {
+                line = line[4..mem::len(line)];
+            }
+            let colon = find(line, ": ");
+            let length = mem::len(line);
+            if colon < 0 or length == 0 or line[length - 1] != cast<u8>(44) {
+                try problem.append_bytes(allocator, "cannot read std field `");
+                try problem.append_bytes(allocator, line);
+                try problem.append_bytes(allocator, "`");
+                return false;
+            }
+            let kizu_type = line[colon + 2..length - 1];
+            if c_type(kizu_type) |mapped| {
+                if any_name {
+                    try out.append_bytes(allocator, "*");
+                } else {
+                    try out.append_bytes(allocator, line[0..colon]);
+                }
+                try out.append_bytes(allocator, " ");
+                try out.append_bytes(allocator, mapped);
+                try out.append_byte(allocator, cast<u8>(10));
+            } else {
+                try problem.append_bytes(allocator, "no C type is known for std type `");
+                try problem.append_bytes(allocator, kizu_type);
+                try problem.append_bytes(allocator, "`");
+                return false;
+            }
+        }
+    }
+    try problem.append_bytes(allocator, "no std struct of that name");
+    return false;
+}
+
+fn c_twin_fields(allocator: Allocator, source: []u8, name: []u8, out: &var string::String) -> mem::Error!bool {
+    var close = string::new(allocator);
+    defer close.deinit(allocator);
+    try close.append_bytes(allocator, "} ");
+    try close.append_bytes(allocator, name);
+    try close.append_bytes(allocator, ";");
+    let close_bytes = close.as_bytes();
+    var alias_end = string::new(allocator);
+    defer alias_end.deinit(allocator);
+    try alias_end.append_bytes(allocator, " ");
+    try alias_end.append_bytes(allocator, name);
+    try alias_end.append_bytes(allocator, ";");
+    let alias_end_bytes = alias_end.as_bytes();
+    var fields = string::new(allocator);
+    defer fields.deinit(allocator);
+    var start = 0;
+    var inside = false;
+    while start < mem::len(source) {
+        let end = line_end(source, start);
+        let raw = mem::trim_ascii(source[start..end]);
+        start = end;
+        if !mem::starts_with(raw, "\\") {
+            continue;
+        }
+        let line = mem::trim_ascii(raw[2..mem::len(raw)]);
+        if mem::equal_bytes(line, "typedef struct {") {
+            inside = true;
+            fields.clear();
+        } else if inside and mem::starts_with(line, "}") {
+            inside = false;
+            if mem::equal_bytes(line, close_bytes) {
+                let fields_bytes = fields.as_bytes();
+                try out.append_bytes(allocator, fields_bytes);
+                return true;
+            }
+        } else if inside {
+            let length = mem::len(line);
+            let space = find_last(line, " ");
+            if space > 0 and length > 0 and line[length - 1] == cast<u8>(59) {
+                try fields.append_bytes(allocator, line[space + 1..length - 1]);
+                try fields.append_bytes(allocator, " ");
+                try fields.append_bytes(allocator, mem::trim_ascii(line[0..space]));
+                try fields.append_byte(allocator, cast<u8>(10));
+            } else {
+                try fields.append_bytes(allocator, "? ");
+                try fields.append_bytes(allocator, line);
+                try fields.append_byte(allocator, cast<u8>(10));
+            }
+        } else if mem::starts_with(line, "typedef ") and ends_with(line, alias_end_bytes) {
+            let length = mem::len(line);
+            try out.append_bytes(allocator, "* ");
+            try out.append_bytes(allocator, mem::trim_ascii(line[8..length - mem::len(alias_end_bytes)]));
+            try out.append_byte(allocator, cast<u8>(10));
+            return true;
+        }
+    }
+    return false;
+}
+
+fn line_end(text: []u8, start: i64) -> i64 {
+    var index = start;
+    while mem::byte_at(text, index) |byte| {
+        index = index + 1;
+        if byte == cast<u8>(10) {
+            return index;
+        }
+    }
+    return index;
+}
+
+fn find(text: []u8, needle: []u8) -> i64 {
+    var index = 0;
+    while index + mem::len(needle) <= mem::len(text) {
+        if mem::equal_bytes(text[index..index + mem::len(needle)], needle) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+fn find_last(text: []u8, needle: []u8) -> i64 {
+    var index = mem::len(text) - mem::len(needle);
+    while index >= 0 {
+        if mem::equal_bytes(text[index..index + mem::len(needle)], needle) {
+            return index;
+        }
+        index = index - 1;
+    }
+    return -1;
+}
+
+fn ends_with(text: []u8, suffix: []u8) -> bool {
+    let length = mem::len(text);
+    let suffix_length = mem::len(suffix);
+    if suffix_length > length {
+        return false;
+    }
+    return mem::equal_bytes(text[length - suffix_length..length], suffix);
+}
+
+fn agrees(std_source: []u8, std_name: []u8, c_source: []u8, c_name: []u8) -> mem::Error!bool {
+    let allocator = mem::page_allocator();
+    var problem = string::new(allocator);
+    defer problem.deinit(allocator);
+    return try compare(allocator, std_source, std_name, c_source, c_name, &var problem);
+}
+
+fn sample_std() -> []u8 {
+    return
+        \\pub struct Entry {
+        \\    pub name: std::string::String,
+        \\    pub size: i64,
+        \\    pub is_dir: bool,
+        \\}
+        \\
+        \\pub struct Text {
+        \\    bytes: std::array::Array<u8>,
+        \\}
+    ;
+}
+
+fn sample_c() -> []u8 {
+    return
+        \\    return
+        \\        \\typedef KizuArray KizuText;
+        \\        \\
+        \\        \\typedef struct {
+        \\        \\    KizuString name;
+        \\        \\    int64_t size;
+        \\        \\    _Bool is_dir;
+        \\        \\} KizuEntry;
+    ;
+}
+
+test "twins with the same fields agree" {
+    testing::expect(try agrees(sample_std(), "Entry", sample_c(), "KizuEntry"));
+    testing::expect(try agrees(sample_std(), "Text", sample_c(), "KizuText"));
+}
+
+test "a field only one side has is refused" {
+    let std_more =
+        \\pub struct Entry {
+        \\    pub name: std::string::String,
+        \\    pub size: i64,
+        \\    pub is_dir: bool,
+        \\    pub mode: i64,
+        \\}
+    ;
+    testing::expect(!try agrees(std_more, "Entry", sample_c(), "KizuEntry"));
+    let c_more =
+        \\        \\typedef struct {
+        \\        \\    KizuString name;
+        \\        \\    int64_t size;
+        \\        \\    _Bool is_dir;
+        \\        \\    int64_t mode;
+        \\        \\} KizuEntry;
+    ;
+    testing::expect(!try agrees(sample_std(), "Entry", c_more, "KizuEntry"));
+    let text_more =
+        \\pub struct Text {
+        \\    bytes: std::array::Array<u8>,
+        \\    hash: i64,
+        \\}
+    ;
+    testing::expect(!try agrees(text_more, "Text", sample_c(), "KizuText"));
+}
+
+test "order, type and name are each refused" {
+    let reordered =
+        \\pub struct Entry {
+        \\    pub size: i64,
+        \\    pub name: std::string::String,
+        \\    pub is_dir: bool,
+        \\}
+    ;
+    testing::expect(!try agrees(reordered, "Entry", sample_c(), "KizuEntry"));
+    let retyped =
+        \\        \\typedef struct {
+        \\        \\    KizuString name;
+        \\        \\    int32_t size;
+        \\        \\    _Bool is_dir;
+        \\        \\} KizuEntry;
+    ;
+    testing::expect(!try agrees(sample_std(), "Entry", retyped, "KizuEntry"));
+    let renamed =
+        \\pub struct Entry {
+        \\    pub name: std::string::String,
+        \\    pub length: i64,
+        \\    pub is_dir: bool,
+        \\}
+    ;
+    testing::expect(!try agrees(renamed, "Entry", sample_c(), "KizuEntry"));
+}
+
+test "a missing twin or an unknown type is refused" {
+    testing::expect(!try agrees(sample_std(), "Entry", sample_c(), "KizuMissing"));
+    testing::expect(!try agrees(sample_std(), "Missing", sample_c(), "KizuEntry"));
+    let unknown =
+        \\pub struct Entry {
+        \\    pub name: std::string::String,
+        \\    pub size: u32,
+        \\    pub is_dir: bool,
+        \\}
+    ;
+    testing::expect(!try agrees(unknown, "Entry", sample_c(), "KizuEntry"));
+}
