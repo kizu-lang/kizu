@@ -93,48 +93,57 @@ fn inline_sites() -> i64 {
     return 64;
 }
 
-pub fn inline_calls(allocator: Allocator, functions: &var array::Array<MFunction>, symbols: &array::Array<ir::Name>) -> !void {
-    var by_symbol = map::new<i64, i64>(allocator);
-    defer by_symbol.deinit(allocator);
-    var eligible = array::new<bool>(allocator);
-    defer eligible.deinit(allocator);
-    var index = 0;
-    while functions.at(index) |_func| {
-        try by_symbol.insert(allocator, ir::name_id(symbols.get_or_panic(index)), index);
-        try eligible.append(allocator, false);
-        index = index + 1;
+pub struct Inliner {
+    by_symbol: map::Map<i64, i64>,
+    bodies: array::Array<MFunction>,
+}
+
+pub fn new_inliner(allocator: Allocator) -> Inliner {
+    return Inliner { by_symbol: map::new<i64, i64>(allocator), bodies: array::new<MFunction>(allocator) };
+}
+
+pub fn (self: Inliner) deinit(allocator: Allocator) -> void {
+    self.by_symbol.deinit(allocator);
+    self.bodies.deinit(allocator);
+}
+
+pub fn (self: &var Inliner) remember(allocator: Allocator, func: &MFunction, symbol: ir::Name) -> !void {
+    if !inlinable(func) {
+        return;
     }
-    var order = try callee_first(allocator, functions, &by_symbol);
-    defer order.deinit(allocator);
-    var position = 0;
-    while order.get(position) |caller| {
-        position = position + 1;
-        try inline_into(allocator, functions, caller, &by_symbol, &eligible);
-        if functions.at(caller) |func| {
-            try eligible.set(caller, inlinable(func));
-        }
-    }
+    var body = try clone_function(allocator, func);
+    errdefer body.deinit(allocator);
+    try self.by_symbol.insert(allocator, ir::name_id(symbol), self.bodies.len());
+    try self.bodies.append(allocator, move body);
     return;
 }
 
-fn callee_first(allocator: Allocator, functions: &array::Array<MFunction>, by_symbol: &map::Map<i64, i64>) -> !array::Array<i64> {
+pub fn callee_first(allocator: Allocator, module: &ir::Module, selector: &Selector) -> !array::Array<i64> {
     var starts = array::new<i64>(allocator);
     defer starts.deinit(allocator);
     var edges = array::new<i64>(allocator);
     defer edges.deinit(allocator);
     var index = 0;
-    while functions.at(index) |func| {
+    while module.functions.get(index) |function| {
         index = index + 1;
         try starts.append(allocator, edges.len());
-        var block_id = 0;
-        while func.blocks.at(block_id) |block| {
-            block_id = block_id + 1;
-            var inst_index = 0;
-            while block.insts.at(inst_index) |inst| {
-                inst_index = inst_index + 1;
-                if inst.op == MOp::Call {
-                    if by_symbol.get(ir::name_id(inst.sym)) |target| {
-                        try edges.append(allocator, target);
+        let node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let instr_node = module.instrs.at(instr.node);
+                if instr_node.op == ir::Op::Call {
+                    try add_edge(allocator, &var edges, selector.callee_index(instr_node.operand));
+                }
+                var cleanup_index = 0;
+                while instr_node.cleanups.at(cleanup_index) |cleanup| {
+                    cleanup_index = cleanup_index + 1;
+                    if cleanup.op == ir::Op::Call {
+                        try add_edge(allocator, &var edges, selector.callee_index(cleanup.operand));
                     }
                 }
             }
@@ -145,14 +154,14 @@ fn callee_first(allocator: Allocator, functions: &array::Array<MFunction>, by_sy
     errdefer order.deinit(allocator);
     var seen = array::new<bool>(allocator);
     defer seen.deinit(allocator);
-    for 0..functions.len() |_f| {
+    for 0..module.functions.len() |_f| {
         try seen.append(allocator, false);
     }
     var stack = array::new<i64>(allocator);
     defer stack.deinit(allocator);
     var next = array::new<i64>(allocator);
     defer next.deinit(allocator);
-    for 0..functions.len() |root| {
+    for 0..module.functions.len() |root| {
         if seen.get_or_panic(root) {
             continue;
         }
@@ -181,55 +190,46 @@ fn callee_first(allocator: Allocator, functions: &array::Array<MFunction>, by_sy
     return move order;
 }
 
-fn inline_into(
-    allocator: Allocator,
-    functions: &var array::Array<MFunction>,
-    caller: i64,
-    by_symbol: &map::Map<i64, i64>,
-    eligible: &array::Array<bool>
-) -> !void {
+fn add_edge(allocator: Allocator, edges: &var array::Array<i64>, target: i64) -> !void {
+    if target >= 0 {
+        try edges.append(allocator, target);
+    }
+    return;
+}
+
+pub fn (self: &Inliner) inline_into(allocator: Allocator, func: &var MFunction, symbol: ir::Name) -> !void {
+    let own = ir::name_id(symbol);
     var budget = inline_sites();
     while budget > 0 {
         var found_block = 0 - 1;
         var found_inst = 0 - 1;
         var callee = 0 - 1;
-        if functions.at(caller) |func| {
-            var block_id = 0;
-            while func.blocks.at(block_id) |block| {
-                var inst_index = 0;
-                while block.insts.at(inst_index) |inst| {
-                    if inst.op == MOp::Call and found_block < 0 {
-                        if by_symbol.get(ir::name_id(inst.sym)) |target| {
-                            if target != caller and eligible.get_or_panic(target) {
-                                found_block = block_id;
-                                found_inst = inst_index;
-                                callee = target;
-                            }
-                        }
+        var block_id = 0;
+        while func.blocks.at(block_id) |block| {
+            var inst_index = 0;
+            while block.insts.at(inst_index) |inst| {
+                if inst.op == MOp::Call and found_block < 0 and ir::name_id(inst.sym) != own {
+                    if self.by_symbol.get(ir::name_id(inst.sym)) |target| {
+                        found_block = block_id;
+                        found_inst = inst_index;
+                        callee = target;
                     }
-                    inst_index = inst_index + 1;
                 }
-                block_id = block_id + 1;
+                inst_index = inst_index + 1;
             }
+            block_id = block_id + 1;
         }
         if callee < 0 {
             break;
         }
         budget = budget - 1;
-        let body = try clone_at(allocator, functions, callee);
-        defer body.deinit(allocator);
-        if functions.at_mut(caller) |func| {
+        if self.bodies.at(callee) |source| {
+            let body = try clone_function(allocator, source);
+            defer body.deinit(allocator);
             try splice(allocator, func, found_block, found_inst, &body);
         }
     }
     return;
-}
-
-fn clone_at(allocator: Allocator, functions: &array::Array<MFunction>, index: i64) -> !MFunction {
-    if functions.at(index) |source| {
-        return clone_function(allocator, source);
-    }
-    return new_function(allocator);
 }
 
 fn splice(allocator: Allocator, func: &var MFunction, block: i64, at: i64, callee: &MFunction) -> !void {
