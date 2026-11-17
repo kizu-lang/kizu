@@ -693,6 +693,15 @@ fn (self: &Lowerer) gpu_math_kind(name: Name) -> ?[]u8 {
     if self.name_is(name, "std::internal::builtin::gpu_log_f32") {
         return "log";
     }
+    if self.name_is(name, "std::internal::builtin::gpu_fma_f32") {
+        return "fma";
+    }
+    if self.name_is(name, "std::internal::builtin::gpu_f32_from_half") {
+        return "f32_from_half";
+    }
+    if self.name_is(name, "std::internal::builtin::gpu_half_from_f32") {
+        return "half_from_f32";
+    }
     return null;
 }
 
@@ -763,12 +772,19 @@ fn (self: &var Lowerer) lower_named_call_expr(
         return null;
     }
     if self.gpu_math_kind(name) |kind| {
-        if args.len() != 1 {
-            return try self.fail0("ir error: a gpu math builtin expects 1 arg");
+        var arity = 1;
+        if mem::equal_bytes(kind, "fma") {
+            arity = 3;
         }
-        let f32_type = try self.module.names.intern("f32");
+        if args.len() != arity {
+            return try self.fail0("ir error: a gpu math builtin got the wrong number of args");
+        }
+        var result_type = try self.module.names.intern("f32");
+        if mem::equal_bytes(kind, "half_from_f32") {
+            result_type = try self.module.names.intern("u16");
+        }
         let immediate = try self.module.names.intern(kind);
-        out.* = try self.emit_with(Op::GpuMath, empty_name(), f32_type, immediate, &args);
+        out.* = try self.emit_with(Op::GpuMath, empty_name(), result_type, immediate, &args);
         return null;
     }
     if self.name_is(name, "std::internal::builtin::gpu_barrier") {

@@ -450,6 +450,11 @@ fn (self: &var Emitter) vector3_type() -> !i64 {
     return self.simple_type(1300, 23, element, 3, 2);
 }
 
+fn (self: &var Emitter) vector2_type() -> !i64 {
+    let element = try self.float_type();
+    return self.simple_type(1301, 23, element, 2, 2);
+}
+
 fn (self: &var Emitter) pointer_type(class: i64, pointee: i64) -> !i64 {
     return self.simple_type(class * 4294967296 + pointee, 32, class, pointee, 2);
 }
@@ -2092,6 +2097,48 @@ fn (self: &var Emitter) emit_expression(module: &ir::Module, node: &ir::InstrNod
             self.arithmetic = true;
         },
         GpuMath => {
+            if module.names.is(node.immediate, "fma") {
+                let float_id = try self.float_type();
+                let left = try self.read(node.args.get_or_panic(0).name);
+                let right = try self.read(node.args.get_or_panic(1).name);
+                let addend = try self.read(node.args.get_or_panic(2).name);
+                let glsl = self.glsl;
+                let id = self.fresh();
+                try self.start();
+                try self.put(float_id);
+                try self.put(id);
+                try self.put(glsl);
+                try self.put(50);
+                try self.put(left);
+                try self.put(right);
+                try self.put(addend);
+                try self.end(12);
+                self.produced = id;
+                return null;
+            }
+            if module.names.is(node.immediate, "f32_from_half") {
+                let float_id = try self.float_type();
+                let pair_type = try self.vector2_type();
+                let word = try self.int_type(32);
+                let bits = try self.read(node.args.get_or_panic(0).name);
+                let widened = try self.op1(113, word, bits);
+                let glsl = self.glsl;
+                let pair = try self.op3(12, pair_type, glsl, 62, widened);
+                self.produced = try self.op2(81, float_id, pair, 0);
+                return null;
+            }
+            if module.names.is(node.immediate, "half_from_f32") {
+                let pair_type = try self.vector2_type();
+                let word = try self.int_type(32);
+                let half_word = try self.int_type(16);
+                let value = try self.read(node.args.get_or_panic(0).name);
+                let zero = try self.float_constant(0);
+                let pair = try self.op2(80, pair_type, value, zero);
+                let glsl = self.glsl;
+                let packed = try self.op3(12, word, glsl, 58, pair);
+                self.produced = try self.op1(113, half_word, packed);
+                return null;
+            }
             var instruction: i64 = 0;
             if module.names.is(node.immediate, "exp") {
                 instruction = 27;
