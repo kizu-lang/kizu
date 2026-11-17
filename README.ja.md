@@ -122,7 +122,7 @@ Windows では `kizu` 自身がそのまま動き、既定で Windows 向けに 
 | 機能 | 状態 |
 | --- | --- |
 | 並列処理のための thread | **進行中。** `std::thread::Pool` は slice を重ならない塊に切って 1 つの関数を複数の thread で同時に走らせ、全部の塊が終わってから返ります(native のみ)。`each_lane` は行列の列のように一定間隔で並ぶ要素の列に対して同じことをします。worker は呼び出しが名指した set で失敗でき、最初の失敗が呼び出しの戻り値になります(ADR-0025)。coroutine(`std::coro`)と evented な `Io` は 1 thread 上の並行性であって並列性ではありません(ADR-0145、ADR-0146) |
-| GPU kernel | **進行中。** `export "gpu" fn` の本体を `build --target metal` で Metal Shading Language にします。conformance の実行環境に GPU が無いので、`gpu_export.kizu` は check だけで実行しません |
+| GPU kernel | **進行中。** `export "gpu" fn` の本体を `build --target metal` で Metal Shading Language に、`build --target spirv -o out.spv` で Vulkan 向けの SPIR-V module にします。conformance の実行環境に GPU が無いので、`gpu_export.kizu` は check だけで実行しません |
 | 現在の subset を超える wasm backend | **進行中。** Wasm の経路で動かない example は、すべて target が持たない capability として拒否されます |
 | raw pointer の実行時操作 | **check のみ。** `pointer_policy.kizu` と `raw_pointer_deref.kizu` は検査だけで実行しません |
 | type alias | **未着手** |

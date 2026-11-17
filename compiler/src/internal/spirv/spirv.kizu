@@ -1,0 +1,2493 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import compiler::internal::msl;
+import compiler::internal::typ;
+import std::array;
+import std::map;
+import std::mem;
+import std::string;
+
+enum Role {
+    Kernel,
+    Helper,
+}
+
+struct Root {
+    variable: i64,
+    element: msl::Scalar,
+    count: i64,
+    class: i64,
+}
+
+struct Home {
+    first: i64,
+    first_type: i64,
+    second: i64,
+}
+
+struct Access {
+    pointer: i64,
+    element_type: i64,
+    aligned: i64,
+}
+
+struct Pair {
+    from: i64,
+    to: i64,
+}
+
+struct Context {
+    loop_header: i64,
+    loop_exit: i64,
+    follow: i64,
+    continue_label: i64,
+    merge_label: i64,
+}
+
+struct Emitter {
+    allocator: Allocator,
+    next: i64,
+    annotations: array::Array<u32>,
+    globals: array::Array<u32>,
+    functions: array::Array<u32>,
+    variables: array::Array<u32>,
+    body: array::Array<u32>,
+    types: map::Map<i64, i64>,
+    integers8: map::Map<i64, i64>,
+    integers16: map::Map<i64, i64>,
+    integers32: map::Map<i64, i64>,
+    integers64: map::Map<i64, i64>,
+    floats: map::Map<i64, i64>,
+    nulls: map::Map<i64, i64>,
+    bools: map::Map<i64, i64>,
+    signature_starts: array::Array<i64>,
+    signature_pool: array::Array<i64>,
+    signature_ids: array::Array<i64>,
+    roots: map::Map<i64, Root>,
+    root_info: map::Map<i64, Root>,
+    homes: map::Map<i64, Home>,
+    phi_homes: map::Map<i64, Home>,
+    direct: map::Map<i64, i64>,
+    uses: map::Map<i64, i64>,
+    wide_constants: map::Map<i64, ir::Name>,
+    builtins: map::Map<i64, i64>,
+    instance_functions: array::Array<ir::Function>,
+    instance_ids: array::Array<i64>,
+    instance_starts: array::Array<i64>,
+    code_pool: array::Array<i64>,
+    emitted: i64,
+    kernel_functions: array::Array<i64>,
+    kernel_starts: array::Array<i64>,
+    kernel_names: string::String,
+    globals_used: array::Array<Pair>,
+    calls: array::Array<Pair>,
+    glsl: i64,
+    failed: i64,
+    function: i64,
+    role: Role,
+    returns_value: bool,
+    return_type: i64,
+    open: bool,
+    push: i64,
+    push_struct: i64,
+    status_member: i64,
+    mark: i64,
+    global_mark: i64,
+    produced: i64,
+    generation: i64,
+    int8: bool,
+    int16: bool,
+    device8: bool,
+    device16: bool,
+    subgroup: bool,
+    arithmetic: bool,
+    shuffle: bool,
+}
+
+fn (self: Emitter) deinit(allocator: Allocator) -> void {
+    self.annotations.deinit(allocator);
+    self.globals.deinit(allocator);
+    self.functions.deinit(allocator);
+    self.variables.deinit(allocator);
+    self.body.deinit(allocator);
+    self.types.deinit(allocator);
+    self.integers8.deinit(allocator);
+    self.integers16.deinit(allocator);
+    self.integers32.deinit(allocator);
+    self.integers64.deinit(allocator);
+    self.floats.deinit(allocator);
+    self.nulls.deinit(allocator);
+    self.bools.deinit(allocator);
+    self.signature_starts.deinit(allocator);
+    self.signature_pool.deinit(allocator);
+    self.signature_ids.deinit(allocator);
+    self.roots.deinit(allocator);
+    self.root_info.deinit(allocator);
+    self.homes.deinit(allocator);
+    self.phi_homes.deinit(allocator);
+    self.direct.deinit(allocator);
+    self.uses.deinit(allocator);
+    self.wide_constants.deinit(allocator);
+    self.builtins.deinit(allocator);
+    self.instance_functions.deinit(allocator);
+    self.instance_ids.deinit(allocator);
+    self.instance_starts.deinit(allocator);
+    self.code_pool.deinit(allocator);
+    self.kernel_functions.deinit(allocator);
+    self.kernel_starts.deinit(allocator);
+    self.kernel_names.deinit(allocator);
+    self.globals_used.deinit(allocator);
+    self.calls.deinit(allocator);
+    return;
+}
+
+pub fn emit(
+    allocator: Allocator,
+    module: &ir::Module,
+    out: &var string::String
+) -> !?diagnostic::Diagnostic {
+    var emitter = Emitter {
+        allocator: allocator,
+        next: 1,
+        annotations: array::new<u32>(allocator),
+        globals: array::new<u32>(allocator),
+        functions: array::new<u32>(allocator),
+        variables: array::new<u32>(allocator),
+        body: array::new<u32>(allocator),
+        types: map::new<i64, i64>(allocator),
+        integers8: map::new<i64, i64>(allocator),
+        integers16: map::new<i64, i64>(allocator),
+        integers32: map::new<i64, i64>(allocator),
+        integers64: map::new<i64, i64>(allocator),
+        floats: map::new<i64, i64>(allocator),
+        nulls: map::new<i64, i64>(allocator),
+        bools: map::new<i64, i64>(allocator),
+        signature_starts: array::new<i64>(allocator),
+        signature_pool: array::new<i64>(allocator),
+        signature_ids: array::new<i64>(allocator),
+        roots: map::new<i64, Root>(allocator),
+        root_info: map::new<i64, Root>(allocator),
+        homes: map::new<i64, Home>(allocator),
+        phi_homes: map::new<i64, Home>(allocator),
+        direct: map::new<i64, i64>(allocator),
+        uses: map::new<i64, i64>(allocator),
+        wide_constants: map::new<i64, ir::Name>(allocator),
+        builtins: map::new<i64, i64>(allocator),
+        instance_functions: array::new<ir::Function>(allocator),
+        instance_ids: array::new<i64>(allocator),
+        instance_starts: array::new<i64>(allocator),
+        code_pool: array::new<i64>(allocator),
+        emitted: 0,
+        kernel_functions: array::new<i64>(allocator),
+        kernel_starts: array::new<i64>(allocator),
+        kernel_names: string::new(allocator),
+        globals_used: array::new<Pair>(allocator),
+        calls: array::new<Pair>(allocator),
+        glsl: 0,
+        failed: 0,
+        function: 0,
+        role: Role::Kernel,
+        returns_value: false,
+        return_type: 0,
+        open: false,
+        push: 0,
+        push_struct: 0,
+        status_member: 0,
+        mark: 0,
+        global_mark: 0,
+        produced: 0,
+        generation: 0,
+        int8: false,
+        int16: false,
+        device8: false,
+        device16: false,
+        subgroup: false,
+        arithmetic: false,
+        shuffle: false
+    };
+    defer emitter.deinit(allocator);
+    emitter.glsl = emitter.fresh();
+    try emitter.declare_workgroup_size();
+    var no_codes = array::new<i64>(allocator);
+    defer no_codes.deinit(allocator);
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        if !module.names.is(node.export_abi, "gpu") {
+            continue;
+        }
+        let id = emitter.fresh();
+        if try emitter.emit_function(module, node, Role::Kernel, &no_codes, id) |failed| {
+            return move failed;
+        }
+        try emitter.kernel_functions.append(allocator, id);
+        let name_start = emitter.kernel_names.len();
+        try emitter.kernel_starts.append(allocator, name_start);
+        try append_leaf_name(allocator, &var emitter.kernel_names, module, node.name);
+    }
+    while emitter.instance_functions.get(emitter.emitted) |function| {
+        let position = emitter.emitted;
+        emitter.emitted = position + 1;
+        var codes = array::new<i64>(allocator);
+        defer codes.deinit(allocator);
+        try emitter.instance_codes(position, &var codes);
+        let id = emitter.instance_ids.get_or_panic(position);
+        let node = module.function_nodes.at(function.node);
+        if try emitter.emit_function(module, node, Role::Helper, &codes, id) |failed| {
+            return move failed;
+        }
+    }
+    var words = array::new<u32>(allocator);
+    defer words.deinit(allocator);
+    try emitter.assemble(&var words);
+    var word_index = 0;
+    while words.get(word_index) |value| {
+        word_index = word_index + 1;
+        var shift: u32 = 0;
+        while shift < 32 {
+            try out.append_byte(allocator, cast<u8>((value >> shift) & 255));
+            shift = shift + 8;
+        }
+    }
+    return null;
+}
+
+fn append_leaf_name(allocator: Allocator, out: &var string::String, module: &ir::Module, name: ir::Name) -> !void {
+    let retained = ir::name_text(&module.names, name);
+    let bytes = retained.as_bytes();
+    var start = mem::len(bytes);
+    while start > 0 and bytes[start - 1] != cast<u8>(58) {
+        start = start - 1;
+    }
+    while start < mem::len(bytes) {
+        try out.append_byte(allocator, bytes[start]);
+        start = start + 1;
+    }
+    return;
+}
+
+fn fail(
+    allocator: Allocator,
+    module: &ir::Module,
+    span: ast::Span,
+    before: []u8,
+    name: ir::Name,
+    after: []u8
+) -> !diagnostic::Diagnostic {
+    var text = string::new(allocator);
+    defer text.deinit(allocator);
+    try text.append_bytes(allocator, "spirv error: ");
+    try text.append_bytes(allocator, before);
+    let retained = ir::name_text(&module.names, name);
+    try text.append_string(allocator, retained);
+    try text.append_bytes(allocator, after);
+    let bytes = text.as_bytes();
+    return try diagnostic::from_text(allocator, diagnostic::Severity::Error, span, bytes);
+}
+
+fn unsupported(module: &ir::Module, allocator: Allocator, span: ast::Span, what: []u8, type_name: ir::Name) -> !diagnostic::Diagnostic {
+    return fail(allocator, module, span, what, type_name, "`, which the spirv target cannot hold yet");
+}
+
+fn begin(allocator: Allocator, out: &var array::Array<u32>) -> !i64 {
+    let at = out.len();
+    try out.append(allocator, cast<u32>(0));
+    return at;
+}
+
+fn word(allocator: Allocator, out: &var array::Array<u32>, value: i64) -> !void {
+    try out.append(allocator, cast<u32>(value));
+    return;
+}
+
+fn finish(out: &var array::Array<u32>, at: i64, opcode: i64) -> !void {
+    try out.set(at, cast<u32>((out.len() - at) * 65536 + opcode));
+    return;
+}
+
+fn text_words(allocator: Allocator, out: &var array::Array<u32>, bytes: []u8) -> !void {
+    let length = mem::len(bytes);
+    var index = 0;
+    while index <= length {
+        var packed: i64 = 0;
+        var lane = 0;
+        while lane < 4 {
+            let position = index + lane;
+            if position < length {
+                packed = packed + (cast<i64>(bytes[position]) << (lane * 8));
+            }
+            lane = lane + 1;
+        }
+        try word(allocator, out, packed);
+        index = index + 4;
+    }
+    return;
+}
+
+fn width_of(kind: msl::Scalar) -> i64 {
+    return match kind {
+        Bool => 8,
+        I8 => 8,
+        I16 => 16,
+        I32 => 32,
+        I64 => 64,
+        U8 => 8,
+        U16 => 16,
+        U32 => 32,
+        U64 => 64,
+        F32 => 32,
+    };
+}
+
+fn is_signed(kind: msl::Scalar) -> bool {
+    return kind == msl::Scalar::I8 or kind == msl::Scalar::I16 or kind == msl::Scalar::I32 or kind == msl::Scalar::I64;
+}
+
+fn (self: &var Emitter) fresh() -> i64 {
+    let id = self.next;
+    self.next = self.next + 1;
+    return id;
+}
+
+fn (self: &Emitter) key(name: ir::Name) -> i64 {
+    return self.generation * 4294967296 + ir::name_id(name);
+}
+
+fn (self: &var Emitter) start() -> !void {
+    self.mark = try begin(self.allocator, &var self.body);
+    return;
+}
+
+fn (self: &var Emitter) put(value: i64) -> !void {
+    return word(self.allocator, &var self.body, value);
+}
+
+fn (self: &var Emitter) end(opcode: i64) -> !void {
+    return finish(&var self.body, self.mark, opcode);
+}
+
+fn (self: &var Emitter) global_start() -> !void {
+    self.global_mark = try begin(self.allocator, &var self.globals);
+    return;
+}
+
+fn (self: &var Emitter) global_put(value: i64) -> !void {
+    return word(self.allocator, &var self.globals, value);
+}
+
+fn (self: &var Emitter) global_end(opcode: i64) -> !void {
+    return finish(&var self.globals, self.global_mark, opcode);
+}
+
+fn (self: &var Emitter) decorate(target: i64, decoration: i64) -> !void {
+    let at = try begin(self.allocator, &var self.annotations);
+    try word(self.allocator, &var self.annotations, target);
+    try word(self.allocator, &var self.annotations, decoration);
+    return finish(&var self.annotations, at, 71);
+}
+
+fn (self: &var Emitter) decorate_value(target: i64, decoration: i64, value: i64) -> !void {
+    let at = try begin(self.allocator, &var self.annotations);
+    try word(self.allocator, &var self.annotations, target);
+    try word(self.allocator, &var self.annotations, decoration);
+    try word(self.allocator, &var self.annotations, value);
+    return finish(&var self.annotations, at, 71);
+}
+
+fn (self: &var Emitter) member_offset(structure: i64, member: i64, offset: i64) -> !void {
+    let at = try begin(self.allocator, &var self.annotations);
+    try word(self.allocator, &var self.annotations, structure);
+    try word(self.allocator, &var self.annotations, member);
+    try word(self.allocator, &var self.annotations, 35);
+    try word(self.allocator, &var self.annotations, offset);
+    return finish(&var self.annotations, at, 72);
+}
+
+fn (self: &var Emitter) simple_type(key: i64, opcode: i64, first: i64, second: i64, count: i64) -> !i64 {
+    if self.types.get(key) |id| {
+        return id;
+    }
+    let id = self.fresh();
+    try self.global_start();
+    try self.global_put(id);
+    if count > 0 {
+        try self.global_put(first);
+    }
+    if count > 1 {
+        try self.global_put(second);
+    }
+    try self.global_end(opcode);
+    try self.types.insert(self.allocator, key, id);
+    return id;
+}
+
+fn (self: &var Emitter) void_type() -> !i64 {
+    return self.simple_type(1000, 19, 0, 0, 0);
+}
+
+fn (self: &var Emitter) bool_type() -> !i64 {
+    return self.simple_type(1001, 20, 0, 0, 0);
+}
+
+fn (self: &var Emitter) int_type(width: i64) -> !i64 {
+    if width == 8 {
+        self.int8 = true;
+    }
+    if width == 16 {
+        self.int16 = true;
+    }
+    return self.simple_type(1000 + width, 21, width, 0, 2);
+}
+
+fn (self: &var Emitter) float_type() -> !i64 {
+    return self.simple_type(1200, 22, 32, 0, 1);
+}
+
+fn (self: &var Emitter) vector3_type() -> !i64 {
+    let element = try self.int_type(32);
+    return self.simple_type(1300, 23, element, 3, 2);
+}
+
+fn (self: &var Emitter) pointer_type(class: i64, pointee: i64) -> !i64 {
+    return self.simple_type(class * 4294967296 + pointee, 32, class, pointee, 2);
+}
+
+fn (self: &var Emitter) array_type(element: i64, count: i64) -> !i64 {
+    let length = try self.int_constant(32, count);
+    return self.simple_type(4503599627370496 + count * 16777216 + element, 28, element, length, 2);
+}
+
+fn (self: &var Emitter) scalar_type(kind: msl::Scalar) -> !i64 {
+    if kind == msl::Scalar::Bool {
+        return self.bool_type();
+    }
+    if kind == msl::Scalar::F32 {
+        return self.float_type();
+    }
+    return self.int_type(width_of(kind));
+}
+
+fn (self: &var Emitter) root_type(root: Root) -> !i64 {
+    let element = try self.scalar_type(root.element);
+    return self.array_type(element, root.count);
+}
+
+fn (self: &Emitter) signature_matches(index: i64, result: i64, params: &array::Array<i64>) -> bool {
+    let first = self.signature_starts.get_or_panic(index);
+    var last = self.signature_pool.len();
+    if self.signature_starts.get(index + 1) |next| {
+        last = next;
+    }
+    if last - first != params.len() + 1 or self.signature_pool.get_or_panic(first) != result {
+        return false;
+    }
+    var position = 0;
+    while params.get(position) |param| {
+        if self.signature_pool.get_or_panic(first + 1 + position) != param {
+            return false;
+        }
+        position = position + 1;
+    }
+    return true;
+}
+
+fn (self: &var Emitter) function_type(result: i64, params: &array::Array<i64>) -> !i64 {
+    var index = 0;
+    while self.signature_ids.get(index) |existing| {
+        if self.signature_matches(index, result, params) {
+            return existing;
+        }
+        index = index + 1;
+    }
+    let id = self.fresh();
+    try self.global_start();
+    try self.global_put(id);
+    try self.global_put(result);
+    let pool_start = self.signature_pool.len();
+    try self.signature_starts.append(self.allocator, pool_start);
+    try self.signature_pool.append(self.allocator, result);
+    var put_index = 0;
+    while params.get(put_index) |param| {
+        put_index = put_index + 1;
+        try self.global_put(param);
+        try self.signature_pool.append(self.allocator, param);
+    }
+    try self.global_end(33);
+    try self.signature_ids.append(self.allocator, id);
+    return id;
+}
+
+fn (self: &Emitter) known_constant(family: i64, value: i64) -> ?i64 {
+    if family == 8 {
+        return self.integers8.get(value);
+    }
+    if family == 16 {
+        return self.integers16.get(value);
+    }
+    if family == 32 {
+        return self.integers32.get(value);
+    }
+    if family == 64 {
+        return self.integers64.get(value);
+    }
+    return self.floats.get(value);
+}
+
+fn (self: &var Emitter) remember_constant(family: i64, value: i64, id: i64) -> !void {
+    if family == 8 {
+        return self.integers8.insert(self.allocator, value, id);
+    }
+    if family == 16 {
+        return self.integers16.insert(self.allocator, value, id);
+    }
+    if family == 32 {
+        return self.integers32.insert(self.allocator, value, id);
+    }
+    if family == 64 {
+        return self.integers64.insert(self.allocator, value, id);
+    }
+    return self.floats.insert(self.allocator, value, id);
+}
+
+fn (self: &var Emitter) numeric_constant(family: i64, raw: i64) -> !i64 {
+    var value = raw;
+    if family != 64 {
+        value = cast<i64>(cast<u64>(raw) & 0xffffffff);
+    }
+    if family == 8 {
+        value = value & 0xff;
+    }
+    if family == 16 {
+        value = value & 0xffff;
+    }
+    if self.known_constant(family, value) |id| {
+        return id;
+    }
+    var type_id: i64 = 0;
+    if family == 1 {
+        type_id = try self.float_type();
+    } else {
+        type_id = try self.int_type(family);
+    }
+    let id = self.fresh();
+    let bits = cast<u64>(value);
+    try self.global_start();
+    try self.global_put(type_id);
+    try self.global_put(id);
+    try self.global_put(cast<i64>(bits & 0xffffffff));
+    if family == 64 {
+        try self.global_put(cast<i64>(bits >> 32));
+    }
+    try self.global_end(43);
+    try self.remember_constant(family, value, id);
+    return id;
+}
+
+fn (self: &var Emitter) int_constant(width: i64, value: i64) -> !i64 {
+    return self.numeric_constant(width, value);
+}
+
+fn (self: &var Emitter) float_constant(bits: u64) -> !i64 {
+    return self.numeric_constant(1, cast<i64>(bits));
+}
+
+fn (self: &var Emitter) bool_constant(value: bool) -> !i64 {
+    var code: i64 = 0;
+    var opcode: i64 = 42;
+    if value {
+        code = 1;
+        opcode = 41;
+    }
+    if self.bools.get(code) |id| {
+        return id;
+    }
+    let type_id = try self.bool_type();
+    let id = self.fresh();
+    try self.global_start();
+    try self.global_put(type_id);
+    try self.global_put(id);
+    try self.global_end(opcode);
+    try self.bools.insert(self.allocator, code, id);
+    return id;
+}
+
+fn (self: &var Emitter) null_constant(type_id: i64) -> !i64 {
+    if self.nulls.get(type_id) |id| {
+        return id;
+    }
+    let id = self.fresh();
+    try self.global_start();
+    try self.global_put(type_id);
+    try self.global_put(id);
+    try self.global_end(46);
+    try self.nulls.insert(self.allocator, type_id, id);
+    return id;
+}
+
+fn (self: &var Emitter) declare_workgroup_size() -> !void {
+    let element = try self.int_type(32);
+    let one = try self.int_constant(32, 1);
+    let vector = try self.vector3_type();
+    let width = self.fresh();
+    try self.global_start();
+    try self.global_put(element);
+    try self.global_put(width);
+    try self.global_put(64);
+    try self.global_end(50);
+    try self.decorate_value(width, 1, 0);
+    let size = self.fresh();
+    try self.global_start();
+    try self.global_put(vector);
+    try self.global_put(size);
+    try self.global_put(width);
+    try self.global_put(one);
+    try self.global_put(one);
+    try self.global_end(51);
+    try self.decorate_value(size, 11, 25);
+    return;
+}
+
+fn (self: &var Emitter) global_variable(class: i64, pointee: i64, initializer: i64) -> !i64 {
+    let pointer = try self.pointer_type(class, pointee);
+    let id = self.fresh();
+    try self.global_start();
+    try self.global_put(pointer);
+    try self.global_put(id);
+    try self.global_put(class);
+    if initializer > 0 {
+        try self.global_put(initializer);
+    }
+    try self.global_end(59);
+    return id;
+}
+
+fn (self: &var Emitter) use_global(global: i64) -> !void {
+    let function = self.function;
+    try self.globals_used.append(self.allocator, Pair { from: function, to: global });
+    return;
+}
+
+fn (self: &var Emitter) failed_flag() -> !i64 {
+    if self.failed == 0 {
+        let type_id = try self.bool_type();
+        let initial = try self.bool_constant(false);
+        self.failed = try self.global_variable(6, type_id, initial);
+    }
+    let failed = self.failed;
+    try self.use_global(failed);
+    return failed;
+}
+
+fn (self: &var Emitter) function_variable(type_id: i64) -> !i64 {
+    let pointer = try self.pointer_type(7, type_id);
+    let id = self.fresh();
+    let at = try begin(self.allocator, &var self.variables);
+    try word(self.allocator, &var self.variables, pointer);
+    try word(self.allocator, &var self.variables, id);
+    try word(self.allocator, &var self.variables, 7);
+    try finish(&var self.variables, at, 59);
+    return id;
+}
+
+fn (self: &var Emitter) op1(opcode: i64, type_id: i64, first: i64) -> !i64 {
+    let id = self.fresh();
+    try self.start();
+    try self.put(type_id);
+    try self.put(id);
+    try self.put(first);
+    try self.end(opcode);
+    return id;
+}
+
+fn (self: &var Emitter) op2(opcode: i64, type_id: i64, first: i64, second: i64) -> !i64 {
+    let id = self.fresh();
+    try self.start();
+    try self.put(type_id);
+    try self.put(id);
+    try self.put(first);
+    try self.put(second);
+    try self.end(opcode);
+    return id;
+}
+
+fn (self: &var Emitter) op3(opcode: i64, type_id: i64, first: i64, second: i64, third: i64) -> !i64 {
+    let id = self.fresh();
+    try self.start();
+    try self.put(type_id);
+    try self.put(id);
+    try self.put(first);
+    try self.put(second);
+    try self.put(third);
+    try self.end(opcode);
+    return id;
+}
+
+fn (self: &var Emitter) load(type_id: i64, pointer: i64) -> !i64 {
+    return self.op1(61, type_id, pointer);
+}
+
+fn (self: &var Emitter) store(pointer: i64, value: i64) -> !void {
+    try self.start();
+    try self.put(pointer);
+    try self.put(value);
+    return self.end(62);
+}
+
+fn (self: &var Emitter) load_access(access: Access) -> !i64 {
+    if access.aligned == 0 {
+        return self.load(access.element_type, access.pointer);
+    }
+    let id = self.fresh();
+    try self.start();
+    try self.put(access.element_type);
+    try self.put(id);
+    try self.put(access.pointer);
+    try self.put(2);
+    try self.put(access.aligned);
+    try self.end(61);
+    return id;
+}
+
+fn (self: &var Emitter) store_access(access: Access, value: i64) -> !void {
+    try self.start();
+    try self.put(access.pointer);
+    try self.put(value);
+    if access.aligned > 0 {
+        try self.put(2);
+        try self.put(access.aligned);
+    }
+    return self.end(62);
+}
+
+fn (self: &var Emitter) i64_type() -> !i64 {
+    return self.int_type(64);
+}
+
+fn (self: &var Emitter) label(id: i64) -> !void {
+    try self.start();
+    try self.put(id);
+    try self.end(248);
+    self.open = true;
+    return;
+}
+
+fn (self: &var Emitter) branch(target: i64) -> !void {
+    if !self.open {
+        return;
+    }
+    try self.start();
+    try self.put(target);
+    try self.end(249);
+    self.open = false;
+    return;
+}
+
+fn (self: &var Emitter) unreachable() -> !void {
+    if !self.open {
+        return;
+    }
+    try self.start();
+    try self.end(255);
+    self.open = false;
+    return;
+}
+
+fn (self: &var Emitter) selection(condition: i64, then_label: i64, else_label: i64, merge_label: i64) -> !void {
+    try self.start();
+    try self.put(merge_label);
+    try self.put(0);
+    try self.end(247);
+    try self.start();
+    try self.put(condition);
+    try self.put(then_label);
+    try self.put(else_label);
+    try self.end(250);
+    self.open = false;
+    return;
+}
+
+fn (self: &Emitter) root_of(name: ir::Name) -> ?Root {
+    return self.roots.get(self.key(name));
+}
+
+fn (self: &var Emitter) set_root(name: ir::Name, root: Root) -> !void {
+    let key = self.key(name);
+    if self.roots.contains(key) {
+        return;
+    }
+    try self.roots.insert(self.allocator, key, root);
+    return;
+}
+
+fn (self: &var Emitter) new_root(name: ir::Name, element: msl::Scalar, count: i64, class: i64) -> !void {
+    if self.roots.contains(self.key(name)) {
+        return;
+    }
+    let element_type = try self.scalar_type(element);
+    let storage = try self.array_type(element_type, count);
+    let variable = try self.global_variable(class, storage, 0);
+    let root = Root { variable: variable, element: element, count: count, class: class };
+    try self.root_info.insert(self.allocator, variable, root);
+    try self.use_global(variable);
+    return self.set_root(name, root);
+}
+
+fn (self: &var Emitter) inherit_root(node: &ir::InstrNode) -> !void {
+    if self.root_of(node.args.get_or_panic(0).name) |root| {
+        try self.set_root(node.result.name, root);
+    }
+    return;
+}
+
+fn (self: &Emitter) use_count(name: ir::Name) -> i64 {
+    return self.uses.get(self.key(name)) orelse 0;
+}
+
+fn (self: &var Emitter) count_use(name: ir::Name) -> !void {
+    let key = self.key(name);
+    if self.uses.at_mut(key) |count| {
+        count.* = count.* + 1;
+        return;
+    }
+    try self.uses.insert(self.allocator, key, 1);
+    return;
+}
+
+fn (self: &var Emitter) reset() -> void {
+    self.body.clear(self.allocator);
+    self.variables.clear(self.allocator);
+    self.generation = self.generation + 1;
+    self.open = false;
+    self.push = 0;
+    return;
+}
+
+fn (self: &var Emitter) emit_function(
+    module: &ir::Module,
+    node: &ir::FunctionNode,
+    role: Role,
+    codes: &array::Array<i64>,
+    id: i64
+) -> !?diagnostic::Diagnostic {
+    self.reset();
+    self.function = id;
+    self.role = role;
+    self.returns_value = !module.names.is(node.return_type, "void");
+    if self.returns_value {
+        let shape = msl::shape_named(module, node.return_type) orelse return try unsupported(module, self.allocator, ast::zero_span(),
+            "a kernel calls a function returning `", node.return_type);
+        if shape.form != msl::Form::Value {
+            return try unsupported(module, self.allocator, ast::zero_span(), "a kernel calls a function returning `", node.return_type);
+        }
+        self.return_type = try self.scalar_type(shape.element);
+    } else {
+        self.return_type = try self.void_type();
+    }
+    if try self.assign_param_roots(module, node, codes) |failed| {
+        return move failed;
+    }
+    try self.study_values(module, node);
+    var param_types = array::new<i64>(self.allocator);
+    defer param_types.deinit(self.allocator);
+    var param_ids = array::new<i64>(self.allocator);
+    defer param_ids.deinit(self.allocator);
+    let wide = try self.i64_type();
+    var position = 0;
+    while node.params.get(position) |param| {
+        position = position + 1;
+        let shape = msl::shape_named(module, param.type_name) orelse return try unsupported(module, self.allocator, ast::zero_span(),
+            "a kernel parameter has type `", param.type_name);
+        if shape.form == msl::Form::View {
+            let first = try self.function_variable(wide);
+            let second = try self.function_variable(wide);
+            let param_key = self.key(param.name);
+            try self.homes.insert(self.allocator, param_key, Home { first: first, first_type: wide, second: second });
+            if role == Role::Helper {
+                try param_types.append(self.allocator, wide);
+                try param_types.append(self.allocator, wide);
+                let first_param = self.fresh();
+                let second_param = self.fresh();
+                try param_ids.append(self.allocator, first_param);
+                try param_ids.append(self.allocator, second_param);
+            }
+        } else {
+            let type_id = try self.scalar_type(shape.element);
+            let variable = try self.function_variable(type_id);
+            let param_key = self.key(param.name);
+            try self.homes.insert(self.allocator, param_key, Home { first: variable, first_type: type_id, second: 0 });
+            if role == Role::Helper {
+                try param_types.append(self.allocator, type_id);
+                let param_id = self.fresh();
+                try param_ids.append(self.allocator, param_id);
+            }
+        }
+    }
+    if try self.declare_values(module, node) |failed| {
+        return move failed;
+    }
+    let return_type_id = self.return_type;
+    let signature = try self.function_type(return_type_id, &param_types);
+    let header = try begin(self.allocator, &var self.functions);
+    let return_type = self.return_type;
+    try word(self.allocator, &var self.functions, return_type);
+    try word(self.allocator, &var self.functions, id);
+    try word(self.allocator, &var self.functions, 0);
+    try word(self.allocator, &var self.functions, signature);
+    try finish(&var self.functions, header, 54);
+    var param_index = 0;
+    while param_ids.get(param_index) |param_id| {
+        let at = try begin(self.allocator, &var self.functions);
+        try word(self.allocator, &var self.functions, param_types.get_or_panic(param_index));
+        try word(self.allocator, &var self.functions, param_id);
+        try finish(&var self.functions, at, 55);
+        param_index = param_index + 1;
+    }
+    let entry = self.fresh();
+    let entry_at = try begin(self.allocator, &var self.functions);
+    try word(self.allocator, &var self.functions, entry);
+    try finish(&var self.functions, entry_at, 248);
+    self.open = true;
+    if role == Role::Kernel {
+        if try self.load_push_params(module, node) |failed| {
+            return move failed;
+        }
+    } else {
+        try self.store_helper_params(module, node, &param_ids);
+    }
+    if try self.emit_body(module, node) |failed| {
+        return move failed;
+    }
+    try self.unreachable();
+    var variable_index = 0;
+    while self.variables.get(variable_index) |value| {
+        variable_index = variable_index + 1;
+        try self.functions.append(self.allocator, value);
+    }
+    var body_index = 0;
+    while self.body.get(body_index) |value| {
+        body_index = body_index + 1;
+        try self.functions.append(self.allocator, value);
+    }
+    let end_at = try begin(self.allocator, &var self.functions);
+    try finish(&var self.functions, end_at, 56);
+    return null;
+}
+
+fn (self: &var Emitter) assign_param_roots(module: &ir::Module, node: &ir::FunctionNode, codes: &array::Array<i64>) -> !?diagnostic::Diagnostic {
+    var position = 0;
+    var view_position = 0;
+    while node.params.get(position) |param| {
+        position = position + 1;
+        let shape = msl::shape_named(module, param.type_name) orelse return try unsupported(module, self.allocator, ast::zero_span(),
+            "a kernel parameter has type `", param.type_name);
+        if shape.form == msl::Form::Value {
+            if shape.element == msl::Scalar::Bool and self.role == Role::Kernel {
+                return try unsupported(module, self.allocator, ast::zero_span(), "a kernel parameter has type `", param.type_name);
+            }
+            continue;
+        }
+        if shape.form != msl::Form::View {
+            return try unsupported(module, self.allocator, ast::zero_span(), "a kernel parameter has type `", param.type_name);
+        }
+        if self.role == Role::Helper {
+            let code = codes.get_or_panic(view_position);
+            if code > 0 {
+                let root = self.root_info.get(code) orelse return try unsupported(module, self.allocator, ast::zero_span(),
+                    "a kernel passes a view of type `", param.type_name);
+                try self.set_root(param.name, root);
+                try self.use_global(root.variable);
+            }
+        }
+        view_position = view_position + 1;
+    }
+    return null;
+}
+
+fn (self: &var Emitter) study_values(module: &ir::Module, node: &ir::FunctionNode) -> !void {
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            var arg_index = 0;
+            while instr_node.args.get(arg_index) |arg| {
+                arg_index = arg_index + 1;
+                try self.count_use(arg.name);
+            }
+            var incoming_index = 0;
+            while instr_node.incoming.get(incoming_index) |incoming| {
+                incoming_index = incoming_index + 1;
+                try self.count_use(incoming.value.name);
+            }
+        }
+        let terminator = block_node.terminator;
+        try self.count_use(terminator.value.name);
+        try self.count_use(terminator.cond.name);
+    }
+    var round = 0;
+    while round < 3 {
+        round = round + 1;
+        block_index = 0;
+        while node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let instr_node = module.instrs.at(instr.node);
+                try self.study_root(module, instr_node);
+            }
+        }
+    }
+    return;
+}
+
+fn (self: &var Emitter) study_root(module: &ir::Module, node: &ir::InstrNode) -> !void {
+    let result = node.result.name;
+    if node.op == ir::Op::Const and module.names.is(node.result.type_name, "f64") {
+        let key = self.key(result);
+        if !self.wide_constants.contains(key) {
+            try self.wide_constants.insert(self.allocator, key, node.immediate);
+        }
+        return;
+    }
+    match node.op {
+        GpuGroupArray => {
+            let shape = msl::shape_named(module, node.result.type_name) orelse return;
+            try self.new_root(result, shape.element, shape.count, 4);
+        },
+        BufferNew => {
+            let shape = msl::shape_named(module, node.result.type_name) orelse return;
+            if shape.form == msl::Form::Array {
+                try self.new_root(result, shape.element, shape.count, 6);
+            }
+        },
+        RefLoad => {
+            let shape = msl::shape_named(module, node.result.type_name) orelse return;
+            if shape.form == msl::Form::View {
+                try self.inherit_root(node);
+                return;
+            }
+            if shape.form == msl::Form::Array {
+                try self.new_root(result, shape.element, shape.count, 6);
+            }
+        },
+        LocalSlot => {
+            let source = node.args.get_or_panic(0);
+            let shape = msl::shape_named(module, source.type_name) orelse return;
+            if shape.form == msl::Form::View {
+                try self.inherit_root(node);
+                return;
+            }
+            if shape.form == msl::Form::Array {
+                if self.use_count(source.name) == 1 {
+                    if self.root_of(source.name) |root| {
+                        try self.set_root(result, root);
+                        return;
+                    }
+                    return;
+                }
+                if self.root_of(source.name) |_| {
+                    try self.new_root(result, shape.element, shape.count, 6);
+                }
+                return;
+            }
+            if shape.form == msl::Form::Value {
+                try self.new_root(result, shape.element, 1, 6);
+            }
+        },
+        BufferAddr => try self.inherit_root(node),
+        BufferAsBytes => try self.inherit_root(node),
+        SliceSlice => try self.inherit_root(node),
+        Id => try self.inherit_root(node),
+        Phi => {
+            var incoming_index = 0;
+            while node.incoming.get(incoming_index) |incoming| {
+                incoming_index = incoming_index + 1;
+                if self.root_of(incoming.value.name) |root| {
+                    try self.set_root(result, root);
+                    return;
+                }
+            }
+        },
+        _ => {},
+    }
+    return;
+}
+
+fn (self: &var Emitter) declare_values(module: &ir::Module, node: &ir::FunctionNode) -> !?diagnostic::Diagnostic {
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if ir::is_empty(instr_node.result.name) or module.names.is(instr_node.result.type_name, "void") {
+                continue;
+            }
+            if self.wide_constants.contains(self.key(instr_node.result.name)) {
+                continue;
+            }
+            if try self.declare_value(module, instr_node) |failed| {
+                return move failed;
+            }
+        }
+    }
+    return null;
+}
+
+fn (self: &var Emitter) declare_value(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let result = node.result;
+    let shape = msl::shape_named(module, result.type_name) orelse return try unsupported(module, self.allocator, node.span,
+        "a kernel computes a value of type `", result.type_name);
+    let key = self.key(result.name);
+    let wide = try self.i64_type();
+    match shape.form {
+        Value => {
+            if node.op == ir::Op::Const {
+                if try self.constant_value(module, node, shape.element) |failed| {
+                    return move failed;
+                }
+                let produced = self.produced;
+                try self.direct.insert(self.allocator, key, produced);
+                return null;
+            }
+            if node.op == ir::Op::Cast {
+                let source = node.args.get_or_panic(0);
+                if self.wide_constants.get(self.key(source.name)) |literal| {
+                    if shape.element != msl::Scalar::F32 {
+                        return try unsupported(module, self.allocator, node.span, "a kernel casts an f64 constant to `", result.type_name);
+                    }
+                    let literal_text = ir::name_text(&module.names, literal);
+                    let literal_bytes = literal_text.as_bytes();
+                    let parsed = try typ::parse_float_literal(self.allocator, literal_bytes) orelse return try fail(self.allocator, module, node.span,
+                        "a kernel has the float literal `", literal, "`, which does not parse");
+                    let constant = try self.float_constant(msl::binary32_bits(cast<f32>(parsed)));
+                    try self.direct.insert(self.allocator, key, constant);
+                    return null;
+                }
+            }
+            let type_id = try self.scalar_type(shape.element);
+            let variable = try self.function_variable(type_id);
+            try self.homes.insert(self.allocator, key, Home { first: variable, first_type: type_id, second: 0 });
+            if node.op == ir::Op::Phi {
+                let input = try self.function_variable(type_id);
+                try self.phi_homes.insert(self.allocator, key, Home { first: input, first_type: type_id, second: 0 });
+            }
+        },
+        View => try self.declare_view(node, wide),
+        ViewSlot => try self.declare_view(node, wide),
+        Array => {
+            if node.op == ir::Op::GpuGroupArray and self.role == Role::Helper {
+                return try fail(self.allocator, module, node.span, "`std::gpu::group_array` of type `", result.type_name,
+                    "` is allowed only in the body of a gpu export");
+            }
+            if node.op == ir::Op::Phi {
+                return try unsupported(module, self.allocator, node.span, "a kernel joins values of type `", result.type_name);
+            }
+            try self.new_root(result.name, shape.element, shape.count, 6);
+        },
+        Pointer => {
+            if node.op == ir::Op::Phi {
+                return try unsupported(module, self.allocator, node.span, "a kernel joins values of type `", result.type_name);
+            }
+            if !self.roots.contains(key) {
+                return try unsupported(module, self.allocator, node.span, "a kernel cannot tell where a pointer of type `", result.type_name);
+            }
+            let variable = try self.function_variable(wide);
+            try self.homes.insert(self.allocator, key, Home { first: variable, first_type: wide, second: 0 });
+        },
+    }
+    return null;
+}
+
+fn (self: &var Emitter) declare_view(node: &ir::InstrNode, wide: i64) -> !void {
+    let key = self.key(node.result.name);
+    let first = try self.function_variable(wide);
+    let second = try self.function_variable(wide);
+    try self.homes.insert(self.allocator, key, Home { first: first, first_type: wide, second: second });
+    if node.op == ir::Op::Phi {
+        let input_first = try self.function_variable(wide);
+        let input_second = try self.function_variable(wide);
+        try self.phi_homes.insert(self.allocator, key, Home { first: input_first, first_type: wide, second: input_second });
+    }
+    return;
+}
+
+fn parse_integer(text: []u8) -> ?i64 {
+    let length = mem::len(text);
+    var index = 0;
+    var negative = false;
+    if length > 0 and text[0] == cast<u8>(45) {
+        negative = true;
+        index = 1;
+    }
+    var radix: u64 = 10;
+    if index + 1 < length and text[index] == cast<u8>(48) and (text[index + 1] == cast<u8>(120) or text[index + 1] == cast<u8>(88)) {
+        radix = 16;
+        index = index + 2;
+    }
+    if index >= length {
+        return null;
+    }
+    var value: u64 = 0;
+    while index < length {
+        let byte = text[index];
+        index = index + 1;
+        if byte == cast<u8>(95) {
+            continue;
+        }
+        var digit: u64 = 99;
+        if byte >= cast<u8>(48) and byte <= cast<u8>(57) {
+            digit = cast<u64>(byte - cast<u8>(48));
+        }
+        if byte >= cast<u8>(97) and byte <= cast<u8>(102) {
+            digit = cast<u64>(byte - cast<u8>(87));
+        }
+        if byte >= cast<u8>(65) and byte <= cast<u8>(70) {
+            digit = cast<u64>(byte - cast<u8>(55));
+        }
+        if digit >= radix {
+            return null;
+        }
+        value = value * radix + digit;
+    }
+    if negative {
+        return 0 - cast<i64>(value);
+    }
+    return cast<i64>(value);
+}
+
+fn (self: &var Emitter) constant_value(module: &ir::Module, node: &ir::InstrNode, kind: msl::Scalar) -> !?diagnostic::Diagnostic {
+    let literal_text = ir::name_text(&module.names, node.immediate);
+    let literal = literal_text.as_bytes();
+    if kind == msl::Scalar::F32 {
+        let parsed = try typ::parse_f32_literal(self.allocator, literal) orelse return try fail(self.allocator, module, node.span,
+            "a kernel has the float literal `", node.immediate, "`, which does not parse");
+        self.produced = try self.float_constant(msl::binary32_bits(cast<f32>(parsed)));
+        return null;
+    }
+    if kind == msl::Scalar::Bool {
+        self.produced = try self.bool_constant(mem::equal_bytes(literal, "true"));
+        return null;
+    }
+    let value = parse_integer(literal) orelse return try fail(self.allocator, module, node.span,
+        "a kernel has the integer literal `", node.immediate, "`, which does not parse");
+    self.produced = try self.int_constant(width_of(kind), value);
+    return null;
+}
+
+fn (self: &var Emitter) home_of(name: ir::Name) -> Home {
+    return self.homes.get(self.key(name)) orelse Home { first: 0, first_type: 0, second: 0 };
+}
+
+fn (self: &var Emitter) read(name: ir::Name) -> !i64 {
+    if self.direct.get(self.key(name)) |id| {
+        return id;
+    }
+    let home = self.home_of(name);
+    return self.load(home.first_type, home.first);
+}
+
+fn (self: &var Emitter) write(name: ir::Name, value: i64) -> !void {
+    if self.homes.get(self.key(name)) |home| {
+        try self.store(home.first, value);
+    }
+    return;
+}
+
+fn (self: &var Emitter) read_first(name: ir::Name) -> !i64 {
+    let home = self.home_of(name);
+    let wide = try self.i64_type();
+    return self.load(wide, home.first);
+}
+
+fn (self: &var Emitter) read_second(name: ir::Name) -> !i64 {
+    let home = self.home_of(name);
+    let wide = try self.i64_type();
+    return self.load(wide, home.second);
+}
+
+fn (self: &var Emitter) offset_of(name: ir::Name) -> !i64 {
+    if self.homes.contains(self.key(name)) {
+        return self.read_first(name);
+    }
+    return self.int_constant(64, 0);
+}
+
+fn (self: &var Emitter) write_view(name: ir::Name, first: i64, second: i64) -> !void {
+    if self.homes.get(self.key(name)) |home| {
+        try self.store(home.first, first);
+        try self.store(home.second, second);
+    }
+    return;
+}
+
+fn (self: &var Emitter) copy_view(target: ir::Name, source: ir::Name) -> !void {
+    let first = try self.read_first(source);
+    let second = try self.read_second(source);
+    return self.write_view(target, first, second);
+}
+
+fn (self: &var Emitter) root_element(root: Root, offset: i64) -> !Access {
+    let narrow_type = try self.int_type(32);
+    let narrow = try self.op1(113, narrow_type, offset);
+    let element_type = try self.scalar_type(root.element);
+    let pointer_type = try self.pointer_type(root.class, element_type);
+    let pointer = try self.op2(65, pointer_type, root.variable, narrow);
+    try self.use_global(root.variable);
+    return Access { pointer: pointer, element_type: element_type, aligned: 0 };
+}
+
+fn (self: &var Emitter) element_access(view: ir::Name, element: msl::Scalar, index: i64) -> !Access {
+    let wide = try self.i64_type();
+    if self.root_of(view) |root| {
+        let offset = try self.read_first(view);
+        let sum = try self.op2(128, wide, offset, index);
+        return self.root_element(root, sum);
+    }
+    let size = width_of(element) / 8;
+    if size == 1 {
+        self.device8 = true;
+    }
+    if size == 2 {
+        self.device16 = true;
+    }
+    let address = try self.read_first(view);
+    let scale = try self.int_constant(64, size);
+    let scaled = try self.op2(132, wide, index, scale);
+    let sum = try self.op2(128, wide, address, scaled);
+    let element_type = try self.scalar_type(element);
+    let pointer_type = try self.pointer_type(5349, element_type);
+    let pointer = try self.op1(120, pointer_type, sum);
+    return Access { pointer: pointer, element_type: element_type, aligned: size };
+}
+
+fn (self: &var Emitter) pointer_access(pointer: ir::Name) -> !Access {
+    let root = self.root_of(pointer) orelse Root { variable: 0, element: msl::Scalar::I64, count: 0, class: 6 };
+    let offset = try self.offset_of(pointer);
+    return self.root_element(root, offset);
+}
+
+fn (self: &var Emitter) push_member(index: i64, type_id: i64) -> !i64 {
+    let pointer_type = try self.pointer_type(9, type_id);
+    let member = try self.int_constant(32, index);
+    let push = self.push;
+    let pointer = try self.op2(65, pointer_type, push, member);
+    return self.load(type_id, pointer);
+}
+
+fn (self: &var Emitter) load_push_params(module: &ir::Module, node: &ir::FunctionNode) -> !?diagnostic::Diagnostic {
+    let wide = try self.i64_type();
+    var members = array::new<i64>(self.allocator);
+    defer members.deinit(self.allocator);
+    var position = 0;
+    while node.params.get(position) |param| {
+        position = position + 1;
+        let shape = msl::shape_named(module, param.type_name) orelse return null;
+        if shape.form == msl::Form::View {
+            try members.append(self.allocator, wide);
+        } else {
+            try members.append(self.allocator, try self.scalar_type(shape.element));
+        }
+    }
+    let first_length = members.len();
+    position = 0;
+    while node.params.get(position) |param| {
+        position = position + 1;
+        let shape = msl::shape_named(module, param.type_name) orelse return null;
+        if shape.form == msl::Form::View {
+            try members.append(self.allocator, wide);
+        }
+    }
+    self.status_member = members.len();
+    try members.append(self.allocator, wide);
+    let structure = self.fresh();
+    try self.global_start();
+    try self.global_put(structure);
+    var member_index = 0;
+    while members.get(member_index) |member| {
+        member_index = member_index + 1;
+        try self.global_put(member);
+    }
+    try self.global_end(30);
+    try self.decorate(structure, 2);
+    member_index = 0;
+    while member_index < members.len() {
+        try self.member_offset(structure, member_index, member_index * 8);
+        member_index = member_index + 1;
+    }
+    let push = try self.global_variable(9, structure, 0);
+    self.push = push;
+    try self.use_global(push);
+    var next_length = first_length;
+    position = 0;
+    while node.params.get(position) |param| {
+        let index = position;
+        position = position + 1;
+        let shape = msl::shape_named(module, param.type_name) orelse return null;
+        let home = self.home_of(param.name);
+        if shape.form == msl::Form::View {
+            let address = try self.push_member(index, wide);
+            try self.store(home.first, address);
+            let length = try self.push_member(next_length, wide);
+            try self.store(home.second, length);
+            next_length = next_length + 1;
+        } else {
+            let value = try self.push_member(index, members.get_or_panic(index));
+            try self.store(home.first, value);
+        }
+    }
+    return null;
+}
+
+fn (self: &var Emitter) store_helper_params(module: &ir::Module, node: &ir::FunctionNode, ids: &array::Array<i64>) -> !void {
+    var position = 0;
+    var id_index = 0;
+    while node.params.get(position) |param| {
+        position = position + 1;
+        let shape = msl::shape_named(module, param.type_name) orelse return;
+        let home = self.home_of(param.name);
+        try self.store(home.first, ids.get_or_panic(id_index));
+        id_index = id_index + 1;
+        if shape.form == msl::Form::View {
+            try self.store(home.second, ids.get_or_panic(id_index));
+            id_index = id_index + 1;
+        }
+    }
+    return;
+}
+
+fn (self: &var Emitter) fail_action() -> !void {
+    if self.role == Role::Kernel {
+        let wide = try self.i64_type();
+        let word_type = try self.int_type(32);
+        let status_member = self.status_member;
+        let address = try self.push_member(status_member, wide);
+        let pointer_type = try self.pointer_type(5349, word_type);
+        let pointer = try self.op1(120, pointer_type, address);
+        let one = try self.int_constant(32, 1);
+        try self.store_access(Access { pointer: pointer, element_type: word_type, aligned: 4 }, one);
+        try self.start();
+        try self.end(253);
+        self.open = false;
+        return;
+    }
+    let flag = try self.failed_flag();
+    let truth = try self.bool_constant(true);
+    try self.store(flag, truth);
+    if self.returns_value {
+        let return_type = self.return_type;
+        let empty = try self.null_constant(return_type);
+        try self.start();
+        try self.put(empty);
+        try self.end(254);
+    } else {
+        try self.start();
+        try self.end(253);
+    }
+    self.open = false;
+    return;
+}
+
+fn (self: &var Emitter) fail_when(condition: i64) -> !void {
+    let fail_label = self.fresh();
+    let merge_label = self.fresh();
+    try self.selection(condition, fail_label, merge_label, merge_label);
+    try self.label(fail_label);
+    try self.fail_action();
+    try self.label(merge_label);
+    return;
+}
+
+fn (self: &var Emitter) emit_body(module: &ir::Module, node: &ir::FunctionNode) -> !?diagnostic::Diagnostic {
+    var flow = try msl::analyze_flow(self.allocator, module, node);
+    defer flow.deinit(self.allocator);
+    var header = 0;
+    while header < flow.count {
+        if flow.header.get_or_panic(header) and flow.loop_exits.get_or_panic(header) > 1 {
+            return try fail(self.allocator, module, ast::zero_span(), "`", node.name,
+                "` has a loop that leaves to more than one place, which the spirv target cannot structure yet");
+        }
+        header = header + 1;
+    }
+    let outermost = Context { loop_header: -1, loop_exit: -1, follow: -1, continue_label: 0, merge_label: 0 };
+    return self.emit_from(module, node, &flow, 0, outermost);
+}
+
+fn (self: &var Emitter) emit_from(
+    module: &ir::Module,
+    function: &ir::FunctionNode,
+    flow: &msl::Flow,
+    start: i64,
+    context: Context
+) -> !?diagnostic::Diagnostic {
+    var block = start;
+    while true {
+        if block < 0 or block == context.follow {
+            return null;
+        }
+        if block == context.loop_header {
+            try self.branch(context.continue_label);
+            return null;
+        }
+        if block == context.loop_exit {
+            try self.branch(context.merge_label);
+            return null;
+        }
+        if !flow.header.get_or_panic(block) {
+            return self.emit_block(module, function, flow, block, context);
+        }
+        let exit = flow.loop_exit.get_or_panic(block);
+        let header_label = self.fresh();
+        let body_label = self.fresh();
+        let continue_label = self.fresh();
+        let merge_label = self.fresh();
+        try self.branch(header_label);
+        try self.label(header_label);
+        try self.start();
+        try self.put(merge_label);
+        try self.put(continue_label);
+        try self.put(0);
+        try self.end(246);
+        try self.branch(body_label);
+        try self.label(body_label);
+        let inner = Context { loop_header: block, loop_exit: exit, follow: -1, continue_label: continue_label, merge_label: merge_label };
+        if try self.emit_block(module, function, flow, block, inner) |failed| {
+            return move failed;
+        }
+        try self.branch(continue_label);
+        try self.label(continue_label);
+        try self.branch(header_label);
+        try self.label(merge_label);
+        if exit < 0 {
+            try self.unreachable();
+            return null;
+        }
+        block = exit;
+    }
+    return null;
+}
+
+fn (self: &var Emitter) emit_block(
+    module: &ir::Module,
+    function: &ir::FunctionNode,
+    flow: &msl::Flow,
+    index: i64,
+    context: Context
+) -> !?diagnostic::Diagnostic {
+    let block = function.blocks.get_or_panic(index);
+    let block_node = module.blocks.at(block.node);
+    var instr_index = 0;
+    while block_node.instrs.get(instr_index) |instr| {
+        instr_index = instr_index + 1;
+        let instr_node = module.instrs.at(instr.node);
+        if instr_node.op == ir::Op::Phi {
+            try self.emit_phi_entry(instr_node);
+        }
+    }
+    instr_index = 0;
+    while block_node.instrs.get(instr_index) |instr| {
+        instr_index = instr_index + 1;
+        let instr_node = module.instrs.at(instr.node);
+        if instr_node.op == ir::Op::Phi {
+            continue;
+        }
+        if try self.emit_instr(module, instr_node) |failed| {
+            return move failed;
+        }
+    }
+    let terminator = block_node.terminator;
+    match terminator.op {
+        Return => {
+            if self.role == Role::Helper and self.returns_value {
+                let value = try self.read(terminator.value.name);
+                try self.start();
+                try self.put(value);
+                try self.end(254);
+            } else {
+                try self.start();
+                try self.end(253);
+            }
+            self.open = false;
+            return null;
+        },
+        Unreachable => {
+            try self.fail_action();
+            return null;
+        },
+        Jump => {
+            let target = flow.successor(index, 0);
+            try self.emit_phi_assignments(module, function, block_node.name, target);
+            return self.emit_from(module, function, flow, target, context);
+        },
+        Branch => {
+            let then_target = flow.successor(index, 0);
+            let else_target = flow.successor(index, 1);
+            let merge = flow.ipdom.get_or_panic(index);
+            let arms = Context {
+                loop_header: context.loop_header,
+                loop_exit: context.loop_exit,
+                follow: merge,
+                continue_label: context.continue_label,
+                merge_label: context.merge_label
+            };
+            let condition = try self.read(terminator.cond.name);
+            let then_label = self.fresh();
+            let else_label = self.fresh();
+            let merge_label = self.fresh();
+            try self.selection(condition, then_label, else_label, merge_label);
+            try self.label(then_label);
+            try self.emit_phi_assignments(module, function, block_node.name, then_target);
+            if try self.emit_from(module, function, flow, then_target, arms) |failed| {
+                return move failed;
+            }
+            let then_reaches = self.open;
+            try self.branch(merge_label);
+            try self.label(else_label);
+            try self.emit_phi_assignments(module, function, block_node.name, else_target);
+            if try self.emit_from(module, function, flow, else_target, arms) |failed| {
+                return move failed;
+            }
+            let else_reaches = self.open;
+            try self.branch(merge_label);
+            try self.label(merge_label);
+            if merge < 0 or (!then_reaches and !else_reaches) {
+                try self.unreachable();
+                return null;
+            }
+            return self.emit_from(module, function, flow, merge, context);
+        },
+        None => return try fail(self.allocator, module, ast::zero_span(), "block `", block_node.name, "` has no terminator"),
+    }
+    return null;
+}
+
+fn (self: &var Emitter) emit_phi_entry(node: &ir::InstrNode) -> !void {
+    let key = self.key(node.result.name);
+    let input = self.phi_homes.get(key) orelse return;
+    let home = self.home_of(node.result.name);
+    let first = try self.load(input.first_type, input.first);
+    try self.store(home.first, first);
+    if input.second > 0 {
+        let wide = try self.i64_type();
+        let second = try self.load(wide, input.second);
+        try self.store(home.second, second);
+    }
+    return;
+}
+
+fn (self: &var Emitter) emit_phi_assignments(module: &ir::Module, function: &ir::FunctionNode, from: ir::Name, to: i64) -> !void {
+    if to < 0 {
+        return;
+    }
+    let block = function.blocks.get_or_panic(to);
+    let block_node = module.blocks.at(block.node);
+    var instr_index = 0;
+    while block_node.instrs.get(instr_index) |instr| {
+        instr_index = instr_index + 1;
+        let instr_node = module.instrs.at(instr.node);
+        if instr_node.op != ir::Op::Phi {
+            continue;
+        }
+        let input = self.phi_homes.get(self.key(instr_node.result.name)) orelse continue;
+        var incoming_index = 0;
+        while instr_node.incoming.get(incoming_index) |incoming| {
+            incoming_index = incoming_index + 1;
+            if !ir::same_name(incoming.block, from) {
+                continue;
+            }
+            if input.second > 0 {
+                let first = try self.read_first(incoming.value.name);
+                let second = try self.read_second(incoming.value.name);
+                try self.store(input.first, first);
+                try self.store(input.second, second);
+            } else {
+                let value = try self.read(incoming.value.name);
+                try self.store(input.first, value);
+            }
+        }
+    }
+    return;
+}
+
+fn (self: &var Emitter) emit_instr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let result = node.result.name;
+    if !ir::is_empty(result) and self.direct.contains(self.key(result)) {
+        return null;
+    }
+    match node.op {
+        CondFail => {
+            let condition = try self.read(node.args.get_or_panic(0).name);
+            try self.fail_when(condition);
+            return null;
+        },
+        GpuGroupArray => return null,
+        Const => return null,
+        GpuBarrier => {
+            let scope = try self.int_constant(32, 2);
+            let semantics = try self.int_constant(32, 264);
+            try self.start();
+            try self.put(scope);
+            try self.put(scope);
+            try self.put(semantics);
+            try self.end(224);
+            return null;
+        },
+        BufferNew => {
+            let root = self.root_of(result) orelse return null;
+            let storage = try self.root_type(root);
+            let empty = try self.null_constant(storage);
+            try self.store(root.variable, empty);
+            return null;
+        },
+        LocalSlot => return self.emit_local_slot(module, node),
+        RefLoad => {
+            let pointer = node.args.get_or_panic(0).name;
+            let shape = msl::shape_named(module, node.result.type_name) orelse return try unsupported(module, self.allocator, node.span,
+                "a kernel loads a value of type `", node.result.type_name);
+            if shape.form == msl::Form::Array {
+                return self.copy_array(module, node, result, pointer);
+            }
+            if shape.form == msl::Form::View {
+                try self.copy_view(result, pointer);
+                return null;
+            }
+            let access = try self.pointer_access(pointer);
+            let value = try self.load_access(access);
+            try self.write(result, value);
+            return null;
+        },
+        RefStore => {
+            let pointer = node.args.get_or_panic(0).name;
+            let stored = node.args.get_or_panic(1);
+            let shape = msl::shape_named(module, stored.type_name) orelse return try unsupported(module, self.allocator, node.span,
+                "a kernel stores a value of type `", stored.type_name);
+            if shape.form == msl::Form::Array {
+                return self.copy_array(module, node, pointer, stored.name);
+            }
+            if shape.form == msl::Form::View {
+                try self.copy_view(pointer, stored.name);
+                return null;
+            }
+            let value = try self.read(stored.name);
+            let access = try self.pointer_access(pointer);
+            try self.store_access(access, value);
+            return null;
+        },
+        BufferAddr => {
+            let wide = try self.i64_type();
+            let base = try self.offset_of(node.args.get_or_panic(0).name);
+            let index = try self.read(node.args.get_or_panic(1).name);
+            let sum = try self.op2(128, wide, base, index);
+            try self.write(result, sum);
+            return null;
+        },
+        BufferAsBytes => {
+            let slot = node.args.get_or_panic(0);
+            let shape = msl::shape_named(module, slot.type_name) orelse return try unsupported(module, self.allocator, node.span,
+                "a kernel views a value of type `", slot.type_name);
+            let base = try self.offset_of(slot.name);
+            let length = try self.int_constant(64, shape.count);
+            try self.write_view(result, base, length);
+            return null;
+        },
+        SliceSlice => {
+            let view = node.args.get_or_panic(0);
+            let wide = try self.i64_type();
+            let low = try self.read(node.args.get_or_panic(1).name);
+            let high = try self.read(node.args.get_or_panic(2).name);
+            let base = try self.read_first(view.name);
+            var first: i64 = 0;
+            if self.root_of(view.name) |_| {
+                first = try self.op2(128, wide, base, low);
+            } else {
+                let shape = msl::shape_named(module, view.type_name) orelse return try unsupported(module, self.allocator, node.span,
+                    "a kernel slices a value of type `", view.type_name);
+                let scale = try self.int_constant(64, width_of(shape.element) / 8);
+                let scaled = try self.op2(132, wide, low, scale);
+                first = try self.op2(128, wide, base, scaled);
+            }
+            let length = try self.op2(130, wide, high, low);
+            try self.write_view(result, first, length);
+            return null;
+        },
+        SliceStore => {
+            let view = node.args.get_or_panic(0);
+            let shape = msl::shape_named(module, view.type_name) orelse return try unsupported(module, self.allocator, node.span,
+                "a kernel stores into a value of type `", view.type_name);
+            let index = try self.read(node.args.get_or_panic(1).name);
+            let value = try self.read(node.args.get_or_panic(2).name);
+            let access = try self.element_access(view.name, shape.element, index);
+            try self.store_access(access, value);
+            return null;
+        },
+        Id => {
+            let source = node.args.get_or_panic(0);
+            let shape = msl::shape_named(module, source.type_name) orelse return try unsupported(module, self.allocator, node.span,
+                "a kernel copies a value of type `", source.type_name);
+            if shape.form == msl::Form::View or shape.form == msl::Form::ViewSlot {
+                try self.copy_view(result, source.name);
+                return null;
+            }
+            if shape.form == msl::Form::Array {
+                return self.copy_array(module, node, result, source.name);
+            }
+        },
+        Call => return self.emit_call(module, node),
+        _ => {},
+    }
+    if try self.emit_expression(module, node) |failed| {
+        return move failed;
+    }
+    if !ir::is_empty(result) and !module.names.is(node.result.type_name, "void") {
+        let produced = self.produced;
+        try self.write(result, produced);
+    }
+    return null;
+}
+
+fn (self: &var Emitter) copy_array(module: &ir::Module, node: &ir::InstrNode, target: ir::Name, source: ir::Name) -> !?diagnostic::Diagnostic {
+    let target_root = self.root_of(target) orelse return try unsupported(module, self.allocator, node.span,
+        "a kernel copies into an array of type `", node.result.type_name);
+    let source_root = self.root_of(source) orelse return try unsupported(module, self.allocator, node.span,
+        "a kernel copies from an array of type `", node.result.type_name);
+    if target_root.variable == source_root.variable {
+        return null;
+    }
+    if target_root.count != source_root.count or target_root.element != source_root.element {
+        return try unsupported(module, self.allocator, node.span, "a kernel copies arrays of different shapes into `", node.result.type_name);
+    }
+    let storage = try self.root_type(source_root);
+    let value = try self.load(storage, source_root.variable);
+    try self.store(target_root.variable, value);
+    try self.use_global(target_root.variable);
+    try self.use_global(source_root.variable);
+    return null;
+}
+
+fn (self: &var Emitter) emit_local_slot(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let result = node.result.name;
+    let source = node.args.get_or_panic(0);
+    let shape = msl::shape_named(module, source.type_name) orelse return try unsupported(module, self.allocator, node.span,
+        "a kernel takes the address of a value of type `", source.type_name);
+    if shape.form == msl::Form::View {
+        try self.copy_view(result, source.name);
+        return null;
+    }
+    let zero = try self.int_constant(64, 0);
+    if shape.form == msl::Form::Array {
+        if try self.copy_array(module, node, result, source.name) |failed| {
+            return move failed;
+        }
+        try self.write(result, zero);
+        return null;
+    }
+    if shape.form != msl::Form::Value {
+        return try unsupported(module, self.allocator, node.span, "a kernel takes the address of a value of type `", source.type_name);
+    }
+    let root = self.root_of(result) orelse return try unsupported(module, self.allocator, node.span,
+        "a kernel takes the address of a value of type `", source.type_name);
+    let value = try self.read(source.name);
+    let access = try self.root_element(root, zero);
+    try self.store_access(access, value);
+    try self.write(result, zero);
+    return null;
+}
+
+fn (self: &var Emitter) emit_call(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let callee_text = ir::name_text(&module.names, node.operand);
+    let callee_bytes = callee_text.as_bytes();
+    let callee = module.function_named(callee_bytes) orelse return try fail(self.allocator, module, node.span,
+        "a kernel calls `", node.operand, "`, which has no body the spirv target can lower");
+    let callee_node = module.function_nodes.at(callee.node);
+    var codes = array::new<i64>(self.allocator);
+    defer codes.deinit(self.allocator);
+    var arguments = array::new<i64>(self.allocator);
+    defer arguments.deinit(self.allocator);
+    var index = 0;
+    while node.args.get(index) |arg| {
+        index = index + 1;
+        let shape = msl::shape_named(module, arg.type_name) orelse return try unsupported(module, self.allocator, node.span,
+            "a kernel passes a value of type `", arg.type_name);
+        if shape.form == msl::Form::View {
+            var code: i64 = 0;
+            if self.root_of(arg.name) |root| {
+                code = root.variable;
+            }
+            try codes.append(self.allocator, code);
+            try arguments.append(self.allocator, try self.read_first(arg.name));
+            try arguments.append(self.allocator, try self.read_second(arg.name));
+            continue;
+        }
+        if shape.form != msl::Form::Value {
+            return try unsupported(module, self.allocator, node.span, "a kernel passes a value of type `", arg.type_name);
+        }
+        try arguments.append(self.allocator, try self.read(arg.name));
+    }
+    let callee_id = try self.request_instance(callee, &codes);
+    var result_type: i64 = 0;
+    if module.names.is(callee_node.return_type, "void") {
+        result_type = try self.void_type();
+    } else {
+        let shape = msl::shape_named(module, callee_node.return_type) orelse return try unsupported(module, self.allocator, node.span,
+            "a kernel calls a function returning `", callee_node.return_type);
+        result_type = try self.scalar_type(shape.element);
+    }
+    let id = self.fresh();
+    try self.start();
+    try self.put(result_type);
+    try self.put(id);
+    try self.put(callee_id);
+    var argument_index = 0;
+    while arguments.get(argument_index) |argument| {
+        argument_index = argument_index + 1;
+        try self.put(argument);
+    }
+    try self.end(57);
+    let caller = self.function;
+    try self.calls.append(self.allocator, Pair { from: caller, to: callee_id });
+    if !ir::is_empty(node.result.name) and !module.names.is(node.result.type_name, "void") {
+        try self.write(node.result.name, id);
+    }
+    let flag = try self.failed_flag();
+    let bool_id = try self.bool_type();
+    let failed = try self.load(bool_id, flag);
+    try self.fail_when(failed);
+    return null;
+}
+
+fn (self: &Emitter) instance_end(position: i64) -> i64 {
+    if self.instance_starts.get(position + 1) |next| {
+        return next;
+    }
+    return self.code_pool.len();
+}
+
+fn (self: &Emitter) instance_codes(position: i64, out: &var array::Array<i64>) -> !void {
+    var index = self.instance_starts.get_or_panic(position);
+    let last = self.instance_end(position);
+    while index < last {
+        try out.append(self.allocator, self.code_pool.get_or_panic(index));
+        index = index + 1;
+    }
+    return;
+}
+
+fn (self: &Emitter) instance_matches(position: i64, function: ir::Function, codes: &array::Array<i64>) -> bool {
+    if self.instance_functions.get_or_panic(position).node != function.node {
+        return false;
+    }
+    let first = self.instance_starts.get_or_panic(position);
+    if self.instance_end(position) - first != codes.len() {
+        return false;
+    }
+    var index = 0;
+    while codes.get(index) |code| {
+        if self.code_pool.get_or_panic(first + index) != code {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn (self: &var Emitter) request_instance(function: ir::Function, codes: &array::Array<i64>) -> !i64 {
+    var position = 0;
+    while position < self.instance_ids.len() {
+        if self.instance_matches(position, function, codes) {
+            return self.instance_ids.get_or_panic(position);
+        }
+        position = position + 1;
+    }
+    let id = self.fresh();
+    let pool_start = self.code_pool.len();
+    try self.instance_functions.append(self.allocator, function);
+    try self.instance_ids.append(self.allocator, id);
+    try self.instance_starts.append(self.allocator, pool_start);
+    var index = 0;
+    while codes.get(index) |code| {
+        index = index + 1;
+        try self.code_pool.append(self.allocator, code);
+    }
+    return id;
+}
+
+fn (self: &var Emitter) builtin_value(code: i64, vector: bool) -> !i64 {
+    let word_type = try self.int_type(32);
+    var variable: i64 = 0;
+    if self.builtins.get(code) |existing| {
+        variable = existing;
+    } else {
+        var pointee = word_type;
+        if vector {
+            pointee = try self.vector3_type();
+        }
+        variable = try self.global_variable(1, pointee, 0);
+        try self.decorate_value(variable, 11, code);
+        try self.builtins.insert(self.allocator, code, variable);
+    }
+    try self.use_global(variable);
+    if !vector {
+        return self.load(word_type, variable);
+    }
+    let vector_type = try self.vector3_type();
+    let loaded = try self.load(vector_type, variable);
+    return self.op2(81, word_type, loaded, 0);
+}
+
+fn (self: &var Emitter) emit_expression(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let wide = try self.i64_type();
+    let word_type = try self.int_type(32);
+    match node.op {
+        Id => {
+            self.produced = try self.read(node.args.get_or_panic(0).name);
+        },
+        GpuIndex => {
+            var code: i64 = 28;
+            var vector = true;
+            if module.names.is(node.immediate, "group") {
+                code = 26;
+            }
+            if module.names.is(node.immediate, "local") {
+                code = 29;
+                vector = false;
+            }
+            if module.names.is(node.immediate, "simdgroup") {
+                code = 40;
+                vector = false;
+                self.subgroup = true;
+            }
+            if module.names.is(node.immediate, "lane") {
+                code = 41;
+                vector = false;
+                self.subgroup = true;
+            }
+            let value = try self.builtin_value(code, vector);
+            self.produced = try self.op1(113, wide, value);
+        },
+        GpuShuffleXor => {
+            let float_id = try self.float_type();
+            let value = try self.read(node.args.get_or_panic(0).name);
+            let mask_wide = try self.read(node.args.get_or_panic(1).name);
+            let mask = try self.op1(113, word_type, mask_wide);
+            let scope = try self.int_constant(32, 3);
+            self.produced = try self.op3(346, float_id, scope, value, mask);
+            self.subgroup = true;
+            self.shuffle = true;
+        },
+        GpuSimdMax => {
+            let float_id = try self.float_type();
+            let value = try self.read(node.args.get_or_panic(0).name);
+            let scope = try self.int_constant(32, 3);
+            self.produced = try self.op3(358, float_id, scope, 0, value);
+            self.subgroup = true;
+            self.arithmetic = true;
+        },
+        GpuMath => {
+            var instruction: i64 = 0;
+            if module.names.is(node.immediate, "exp") {
+                instruction = 27;
+            }
+            if module.names.is(node.immediate, "log") {
+                instruction = 28;
+            }
+            if module.names.is(node.immediate, "sqrt") {
+                instruction = 31;
+            }
+            if instruction == 0 {
+                return try fail(self.allocator, module, node.span, "a kernel uses the gpu math function `", node.immediate,
+                    "`, which the spirv target does not support yet");
+            }
+            let float_id = try self.float_type();
+            let value = try self.read(node.args.get_or_panic(0).name);
+            let glsl = self.glsl;
+            self.produced = try self.op3(12, float_id, glsl, instruction, value);
+        },
+        FloatBits => {
+            let value = try self.read(node.args.get_or_panic(0).name);
+            let bits = try self.op1(124, word_type, value);
+            self.produced = bits;
+            let shape = msl::shape_named(module, node.result.type_name) orelse return null;
+            if width_of(shape.element) == 64 {
+                self.produced = try self.op1(113, wide, bits);
+            }
+        },
+        FloatFromBits => {
+            let float_id = try self.float_type();
+            var value = try self.read(node.args.get_or_panic(0).name);
+            let source = node.args.get_or_panic(0);
+            let shape = msl::shape_named(module, source.type_name) orelse return null;
+            if width_of(shape.element) == 64 {
+                value = try self.op1(113, word_type, value);
+            }
+            self.produced = try self.op1(124, float_id, value);
+        },
+        Cast => return self.emit_cast(module, node),
+        Unary => return self.emit_unary(module, node),
+        Binary => return self.emit_binary(module, node),
+        SliceLen => {
+            self.produced = try self.read_second(node.args.get_or_panic(0).name);
+        },
+        SliceIndex => {
+            let view = node.args.get_or_panic(0);
+            let shape = msl::shape_named(module, view.type_name) orelse return try unsupported(module, self.allocator, node.span,
+                "a kernel indexes a value of type `", view.type_name);
+            let index = try self.read(node.args.get_or_panic(1).name);
+            let access = try self.element_access(view.name, shape.element, index);
+            self.produced = try self.load_access(access);
+        },
+        _ => {
+            var message = string::new(self.allocator);
+            defer message.deinit(self.allocator);
+            try message.append_bytes(self.allocator, "spirv error: a kernel uses `");
+            try message.append_bytes(self.allocator, ir::op_spelling(node.op));
+            try message.append_bytes(self.allocator, "`, which the spirv target does not support yet");
+            let bytes = message.as_bytes();
+            return try diagnostic::from_text(self.allocator, diagnostic::Severity::Error, node.span, bytes);
+        },
+    }
+    return null;
+}
+
+fn (self: &var Emitter) emit_cast(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let source_value = node.args.get_or_panic(0);
+    let source = msl::shape_named(module, source_value.type_name) orelse return try unsupported(module, self.allocator, node.span,
+        "a kernel casts from `", source_value.type_name);
+    let target = msl::shape_named(module, node.result.type_name) orelse return try unsupported(module, self.allocator, node.span,
+        "a kernel casts to `", node.result.type_name);
+    if source.form != msl::Form::Value or target.form != msl::Form::Value {
+        return try unsupported(module, self.allocator, node.span, "a kernel casts to `", node.result.type_name);
+    }
+    let value = try self.read(source_value.name);
+    let target_type = try self.scalar_type(target.element);
+    if source.element == target.element {
+        self.produced = value;
+        return null;
+    }
+    if target.element == msl::Scalar::Bool {
+        let zero = try self.int_constant(width_of(source.element), 0);
+        self.produced = try self.op2(171, target_type, value, zero);
+        return null;
+    }
+    if source.element == msl::Scalar::Bool {
+        if target.element == msl::Scalar::F32 {
+            let one = try self.float_constant(msl::binary32_bits(cast<f32>(1.0)));
+            let zero = try self.float_constant(0);
+            self.produced = try self.op3(169, target_type, value, one, zero);
+            return null;
+        }
+        let one = try self.int_constant(width_of(target.element), 1);
+        let zero = try self.int_constant(width_of(target.element), 0);
+        self.produced = try self.op3(169, target_type, value, one, zero);
+        return null;
+    }
+    if source.element == msl::Scalar::F32 {
+        var opcode: i64 = 109;
+        if is_signed(target.element) {
+            opcode = 110;
+        }
+        self.produced = try self.op1(opcode, target_type, value);
+        return null;
+    }
+    if target.element == msl::Scalar::F32 {
+        var opcode: i64 = 112;
+        if is_signed(source.element) {
+            opcode = 111;
+        }
+        self.produced = try self.op1(opcode, target_type, value);
+        return null;
+    }
+    let source_width = width_of(source.element);
+    let target_width = width_of(target.element);
+    if source_width == target_width {
+        self.produced = value;
+        return null;
+    }
+    var opcode: i64 = 113;
+    if target_width > source_width and is_signed(source.element) {
+        opcode = 114;
+    }
+    self.produced = try self.op1(opcode, target_type, value);
+    return null;
+}
+
+fn (self: &var Emitter) emit_unary(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let operand = node.args.get_or_panic(0);
+    let shape = msl::shape_named(module, operand.type_name) orelse return try unsupported(module, self.allocator, node.span,
+        "a kernel negates a value of type `", operand.type_name);
+    let type_id = try self.scalar_type(shape.element);
+    let value = try self.read(operand.name);
+    var opcode: i64 = 0;
+    if module.names.is(node.operand, "-") {
+        opcode = 126;
+        if shape.element == msl::Scalar::F32 {
+            opcode = 127;
+        }
+    }
+    if module.names.is(node.operand, "!") {
+        opcode = 200;
+        if shape.element == msl::Scalar::Bool {
+            opcode = 168;
+        }
+    }
+    if module.names.is(node.operand, "~") {
+        opcode = 200;
+    }
+    if opcode == 0 {
+        return try fail(self.allocator, module, node.span, "a kernel uses the operator `", node.operand,
+            "`, which the spirv target does not support yet");
+    }
+    self.produced = try self.op1(opcode, type_id, value);
+    return null;
+}
+
+fn binary_opcode(operator: []u8, kind: msl::Scalar) -> i64 {
+    let float = kind == msl::Scalar::F32;
+    let boolean = kind == msl::Scalar::Bool;
+    let signed = is_signed(kind);
+    if mem::equal_bytes(operator, "+") {
+        if float { return 129; }
+        return 128;
+    }
+    if mem::equal_bytes(operator, "-") {
+        if float { return 131; }
+        return 130;
+    }
+    if mem::equal_bytes(operator, "*") {
+        if float { return 133; }
+        return 132;
+    }
+    if mem::equal_bytes(operator, "/") {
+        if float { return 136; }
+        if signed { return 135; }
+        return 134;
+    }
+    if mem::equal_bytes(operator, "%") {
+        if float { return 140; }
+        if signed { return 138; }
+        return 137;
+    }
+    if mem::equal_bytes(operator, "&") or mem::equal_bytes(operator, "&&") or mem::equal_bytes(operator, "and") {
+        if boolean { return 167; }
+        return 199;
+    }
+    if mem::equal_bytes(operator, "|") or mem::equal_bytes(operator, "||") or mem::equal_bytes(operator, "or") {
+        if boolean { return 166; }
+        return 197;
+    }
+    if mem::equal_bytes(operator, "^") {
+        if boolean { return 165; }
+        return 198;
+    }
+    if mem::equal_bytes(operator, "<<") {
+        return 196;
+    }
+    if mem::equal_bytes(operator, ">>") {
+        if signed { return 195; }
+        return 194;
+    }
+    if mem::equal_bytes(operator, "==") {
+        if float { return 180; }
+        if boolean { return 164; }
+        return 170;
+    }
+    if mem::equal_bytes(operator, "!=") {
+        if float { return 183; }
+        if boolean { return 165; }
+        return 171;
+    }
+    if mem::equal_bytes(operator, "<") {
+        if float { return 184; }
+        if signed { return 177; }
+        return 176;
+    }
+    if mem::equal_bytes(operator, "<=") {
+        if float { return 188; }
+        if signed { return 179; }
+        return 178;
+    }
+    if mem::equal_bytes(operator, ">") {
+        if float { return 186; }
+        if signed { return 173; }
+        return 172;
+    }
+    if mem::equal_bytes(operator, ">=") {
+        if float { return 190; }
+        if signed { return 175; }
+        return 174;
+    }
+    return 0;
+}
+
+fn (self: &var Emitter) emit_binary(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let left = node.args.get_or_panic(0);
+    let shape = msl::shape_named(module, left.type_name) orelse return try unsupported(module, self.allocator, node.span,
+        "a kernel computes with a value of type `", left.type_name);
+    let result_shape = msl::shape_named(module, node.result.type_name) orelse return try unsupported(module, self.allocator, node.span,
+        "a kernel computes a value of type `", node.result.type_name);
+    let operator_text = ir::name_text(&module.names, node.operand);
+    let operator = operator_text.as_bytes();
+    let opcode = binary_opcode(operator, shape.element);
+    if opcode == 0 {
+        return try fail(self.allocator, module, node.span, "a kernel uses the operator `", node.operand,
+            "`, which the spirv target does not support yet");
+    }
+    let first = try self.read(left.name);
+    let second = try self.read(node.args.get_or_panic(1).name);
+    let type_id = try self.scalar_type(result_shape.element);
+    self.produced = try self.op2(opcode, type_id, first, second);
+    if opcode == 129 or opcode == 131 or opcode == 133 or opcode == 136 or opcode == 140 {
+        let produced = self.produced;
+        try self.decorate(produced, 42);
+    }
+    return null;
+}
+
+fn (self: &var Emitter) capability(out: &var array::Array<u32>, value: i64) -> !void {
+    let at = try begin(self.allocator, out);
+    try word(self.allocator, out, value);
+    return finish(out, at, 17);
+}
+
+fn contains(values: &array::Array<i64>, value: i64) -> bool {
+    var index = 0;
+    while values.get(index) |existing| {
+        if existing == value {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn (self: &var Emitter) interface_of(function: i64, out: &var array::Array<i64>) -> !void {
+    var reached = array::new<i64>(self.allocator);
+    defer reached.deinit(self.allocator);
+    try reached.append(self.allocator, function);
+    var changed = true;
+    while changed {
+        changed = false;
+        var call_index = 0;
+        while self.calls.get(call_index) |call| {
+            call_index = call_index + 1;
+            if contains(&reached, call.from) and !contains(&reached, call.to) {
+                try reached.append(self.allocator, call.to);
+                changed = true;
+            }
+        }
+    }
+    var use_index = 0;
+    while self.globals_used.get(use_index) |used| {
+        use_index = use_index + 1;
+        if contains(&reached, used.from) and !contains(out, used.to) {
+            try out.append(self.allocator, used.to);
+        }
+    }
+    return;
+}
+
+fn execution_mode(allocator: Allocator, out: &var array::Array<u32>, function: i64, mode: i64) -> !void {
+    let at = try begin(allocator, out);
+    try word(allocator, out, function);
+    try word(allocator, out, mode);
+    try word(allocator, out, 32);
+    return finish(out, at, 16);
+}
+
+fn append_words(allocator: Allocator, out: &var array::Array<u32>, words: &array::Array<u32>) -> !void {
+    var index = 0;
+    while words.get(index) |value| {
+        index = index + 1;
+        try out.append(allocator, value);
+    }
+    return;
+}
+
+fn (self: &var Emitter) assemble(out: &var array::Array<u32>) -> !void {
+    var entries = array::new<u32>(self.allocator);
+    defer entries.deinit(self.allocator);
+    var modes = array::new<u32>(self.allocator);
+    defer modes.deinit(self.allocator);
+    var kernel_index = 0;
+    while self.kernel_functions.get(kernel_index) |function| {
+        var interface = array::new<i64>(self.allocator);
+        defer interface.deinit(self.allocator);
+        try self.interface_of(function, &var interface);
+        let name_start = self.kernel_starts.get_or_panic(kernel_index);
+        let names = self.kernel_names.as_bytes();
+        var name_end = mem::len(names);
+        if self.kernel_starts.get(kernel_index + 1) |next| {
+            name_end = next;
+        }
+        kernel_index = kernel_index + 1;
+        let name_bytes = names[name_start..name_end];
+        let at = try begin(self.allocator, &var entries);
+        try word(self.allocator, &var entries, 5);
+        try word(self.allocator, &var entries, function);
+        try text_words(self.allocator, &var entries, name_bytes);
+        var interface_index = 0;
+        while interface.get(interface_index) |global| {
+            interface_index = interface_index + 1;
+            try word(self.allocator, &var entries, global);
+        }
+        try finish(&var entries, at, 15);
+        try execution_mode(self.allocator, &var modes, function, 4459);
+        try execution_mode(self.allocator, &var modes, function, 4461);
+    }
+    try word(self.allocator, out, 0x07230203);
+    try word(self.allocator, out, 0x00010500);
+    try word(self.allocator, out, 0);
+    let bound = self.next;
+    try word(self.allocator, out, bound);
+    try word(self.allocator, out, 0);
+    try self.capability(out, 1);
+    try self.capability(out, 11);
+    try self.capability(out, 5347);
+    try self.capability(out, 4464);
+    try self.capability(out, 4466);
+    if self.int8 {
+        try self.capability(out, 39);
+    }
+    if self.int16 {
+        try self.capability(out, 22);
+    }
+    if self.device8 {
+        try self.capability(out, 4448);
+    }
+    if self.device16 {
+        try self.capability(out, 4433);
+    }
+    if self.subgroup {
+        try self.capability(out, 61);
+    }
+    if self.arithmetic {
+        try self.capability(out, 63);
+    }
+    if self.shuffle {
+        try self.capability(out, 65);
+    }
+    let import_at = try begin(self.allocator, out);
+    let glsl = self.glsl;
+    try word(self.allocator, out, glsl);
+    try text_words(self.allocator, out, "GLSL.std.450");
+    try finish(out, import_at, 11);
+    let memory_at = try begin(self.allocator, out);
+    try word(self.allocator, out, 5348);
+    try word(self.allocator, out, 1);
+    try finish(out, memory_at, 14);
+    try append_words(self.allocator, out, &entries);
+    try append_words(self.allocator, out, &modes);
+    let allocator = self.allocator;
+    try append_words(allocator, out, &self.annotations);
+    try append_words(allocator, out, &self.globals);
+    try append_words(allocator, out, &self.functions);
+    return;
+}

@@ -26,7 +26,7 @@ struct CalleeShape {
     eligible: bool,
 }
 
-pub fn inline_calls(allocator: Allocator, module: &var Module) -> !void {
+pub fn inline_calls(allocator: Allocator, module: &var Module, unlimited: bool) -> !void {
     var functions = map::new<i64, Function>(allocator);
     defer functions.deinit(allocator);
     var index = 0;
@@ -42,7 +42,7 @@ pub fn inline_calls(allocator: Allocator, module: &var Module) -> !void {
     index = 0;
     while order.get(index) |function| {
         index = index + 1;
-        try inline_into(allocator, module, function, &functions, &shapes);
+        try inline_into(allocator, module, function, &functions, &shapes, unlimited);
         try shapes.insert(allocator, name_id(module.function_name(function)), callee_shape(module, function));
     }
     return;
@@ -160,7 +160,8 @@ fn inline_into(
     module: &var Module,
     function: Function,
     functions: &map::Map<i64, Function>,
-    shapes: &map::Map<i64, CalleeShape>
+    shapes: &map::Map<i64, CalleeShape>,
+    unlimited: bool
 ) -> !void {
     var site = 0;
     var results = map::new<i64, Value>(allocator);
@@ -174,7 +175,7 @@ fn inline_into(
         var instr_index = 0;
         var split = false;
         while inline_instr_at(module, block, instr_index) |call| {
-            if inline_callee(module, function, call, functions, shapes, &constants, &results, constant_sites) |callee| {
+            if inline_callee(module, function, call, functions, shapes, &constants, &results, constant_sites, unlimited) |callee| {
                 if known_shape(module, shapes, callee).size > leaf_inline_limit() {
                     constant_sites = constant_sites - 1;
                 }
@@ -442,7 +443,8 @@ fn inline_callee(
     shapes: &map::Map<i64, CalleeShape>,
     constants: &map::Map<i64, bool>,
     results: &map::Map<i64, Value>,
-    constant_sites: i64
+    constant_sites: i64,
+    unlimited: bool
 ) -> ?Function {
     let node = module.instrs.at(call.node);
     if !is_empty(node.extern_abi) or node.op != Op::Call {
@@ -476,6 +478,9 @@ fn inline_callee(
         limit = constant_leaf_inline_limit();
     } else if !shape.calls {
         limit = leaf_inline_limit();
+    }
+    if unlimited {
+        limit = 1048576;
     }
     if !shape.eligible or shape.size > limit {
         return null;

@@ -20,7 +20,8 @@ std::gpu::group_array<[N]T>() -> [N]T
 
 番号は 0 から数えます。`thread_index` は dispatch 全体での通し番号、`group_index` は
 threadgroup の番号、`local_index` は threadgroup の中での番号、`simdgroup_index` と
-`lane_index` は threadgroup の中の SIMD group の番号と、その中での番号です。
+`lane_index` は threadgroup の中の SIMD group の番号と、その中での番号です。SPIR-V では SIMD group は
+subgroup で、その大きさは device が決めます。
 
 `barrier` は threadgroup の全 thread がそこに着くまで待ち、それまでの threadgroup memory
 への書き込みを見えるようにします。threadgroup の全 thread が同じ回数だけ呼ぶ必要があります。
