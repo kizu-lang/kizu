@@ -11,7 +11,8 @@
 #      checks the sources the tree derives from it (scripts/check-sources.sh);
 #   3. stage1 runs the test harness (compiler/tests/harness): its own tests,
 #      and the behavior suite, the conformance cases that cross the CLI
-#      boundary (examples/, tests/behavior);
+#      boundary (examples/, tests/behavior), and the Unicode conformance
+#      files on native and wasm32-browser (scripts/check-unicode.sh);
 #   4. stage1 builds stage2, and the harness requires stage2 to rebuild
 #      itself byte for byte. Stage2 is the one asked: stage1 was compiled by
 #      the seed, and only a compiler the current source compiled is expected
@@ -74,6 +75,7 @@ stage1_lane() {
 
   "$stage1" test compiler/tests/harness
   "$stage1" run compiler/tests/harness -- behavior "$stage1"
+  scripts/check-unicode.sh "$stage1"
 
   rm -rf "$root/target/seed/stage2"
   mkdir -p "$(dirname "$stage2")"

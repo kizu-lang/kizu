@@ -30,7 +30,7 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
 unformatted="$(
-  find lib/kizu/std/src examples tests/behavior/src compiler/src compiler/tests/harness/src \
+  find lib/kizu/std/src examples tests/behavior/src tests/unicode/src compiler/src compiler/tests/harness/src \
     -path examples/negative -prune -o -name '*.kizu' -print | sort |
     while IFS= read -r file; do
       if ! "$kizu" fmt "$file" | cmp -s - "$file"; then echo "$file"; fi

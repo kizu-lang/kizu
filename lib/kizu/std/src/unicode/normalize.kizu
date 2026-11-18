@@ -1,0 +1,260 @@
+const hangul_s = 0xAC00;
+const hangul_l = 0x1100;
+const hangul_v = 0x1161;
+const hangul_t = 0x11A7;
+const hangul_l_count = 19;
+const hangul_v_count = 21;
+const hangul_t_count = 28;
+const hangul_n_count = 588;
+const hangul_s_count = 11172;
+const class_shift = 24;
+const scalar_mask = 0xFFFFFF;
+const insertion_limit = 16;
+
+// Form is a normalization form of UAX #15.
+pub enum Form {
+    Nfc,
+    Nfd,
+}
+
+// normalize returns bytes in form as a new String. Input that is not
+// well-formed UTF-8 is Error::InvalidUtf8.
+pub fn normalize(
+    allocator: Allocator,
+    bytes: []u8,
+    form: std::unicode::Form
+) -> std::unicode::GrowError!std::string::String {
+    if is_ascii(bytes) {
+        return try std::string::from_bytes(allocator, bytes);
+    }
+    var scalars = std::array::new<u32>(allocator);
+    defer scalars.deinit(allocator);
+    try decompose(allocator, &var scalars, bytes);
+    try reorder(allocator, &var scalars);
+    var count = scalars.len();
+    if form == Form::Nfc {
+        count = compose(&var scalars);
+    }
+    var out = std::string::new(allocator);
+    errdefer out.deinit(allocator);
+    let view = scalars.as_slice();
+    var index = 0;
+    while index < count {
+        try append_scalar(allocator, &var out, scalar_of(view[index]));
+        index = index + 1;
+    }
+    return move out;
+}
+
+// is_normalized reports whether bytes is already in form. Input that is not
+// well-formed UTF-8 is Error::InvalidUtf8. Text outside ASCII is normalized
+// into a temporary String to compare, which is why it takes an allocator.
+pub fn is_normalized(
+    allocator: Allocator,
+    bytes: []u8,
+    form: std::unicode::Form
+) -> std::unicode::GrowError!bool {
+    if is_ascii(bytes) {
+        return true;
+    }
+    let normalized = try normalize(allocator, bytes, form);
+    defer normalized.deinit(allocator);
+    let view = normalized.as_bytes();
+    return std::mem::equal_bytes(view, bytes);
+}
+
+fn is_ascii(bytes: []u8) -> bool {
+    var index = 0;
+    while index < std::mem::len(bytes) {
+        if bytes[index] >= cast<u8>(0x80) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn scalar_of(packed: u32) -> i64 {
+    return cast<i64>(packed) & scalar_mask;
+}
+
+fn class_of(packed: u32) -> i64 {
+    return cast<i64>(packed) >> class_shift;
+}
+
+fn pack(scalar: i64) -> u32 {
+    if scalar < 0x300 {
+        return cast<u32>(scalar);
+    }
+    return cast<u32>(run_value(class_table(), scalar) << class_shift | scalar);
+}
+
+fn decompose(
+    allocator: Allocator,
+    scalars: &var std::array::Array<u32>,
+    bytes: []u8
+) -> std::unicode::GrowError!void {
+    var position = 0;
+    while position < std::mem::len(bytes) {
+        if decode(bytes, position) |decoded| {
+            try append_decomposed(allocator, scalars, cast<i64>(decoded.scalar));
+            position = position + decoded.width;
+        } else {
+            return Error::InvalidUtf8;
+        }
+    }
+    return;
+}
+
+fn append_decomposed(
+    allocator: Allocator,
+    scalars: &var std::array::Array<u32>,
+    scalar: i64
+) -> std::mem::Error!void {
+    if scalar < 0xC0 {
+        try scalars.append(allocator, cast<u32>(scalar));
+        return;
+    }
+    if scalar >= hangul_s and scalar < hangul_s + hangul_s_count {
+        let index = scalar - hangul_s;
+        try scalars.append(allocator, pack(hangul_l + index / hangul_n_count));
+        try scalars.append(
+            allocator,
+            pack(hangul_v + index % hangul_n_count / hangul_t_count)
+        );
+        if index % hangul_t_count != 0 {
+            try scalars.append(allocator, pack(hangul_t + index % hangul_t_count));
+        }
+        return;
+    }
+    let offset = decomposition_offset(scalar);
+    if offset < 0 {
+        try scalars.append(allocator, pack(scalar));
+        return;
+    }
+    let table = decompose_table();
+    try append_decomposed(allocator, scalars, scalar_at(table, offset + scalar_bytes));
+    let second = scalar_at(table, offset + 2 * scalar_bytes);
+    if second != 0 {
+        try append_decomposed(allocator, scalars, second);
+    }
+    return;
+}
+
+fn reorder(
+    allocator: Allocator,
+    scalars: &var std::array::Array<u32>
+) -> std::mem::Error!void {
+    let length = scalars.len();
+    var start = 0;
+    while start < length {
+        if class_of(scalars.get_or_panic(start)) == 0 {
+            start = start + 1;
+            continue;
+        }
+        var end = start + 1;
+        while end < length and class_of(scalars.get_or_panic(end)) != 0 {
+            end = end + 1;
+        }
+        if end - start <= insertion_limit {
+            insertion_sort(scalars, start, end);
+        } else {
+            try counting_sort(allocator, scalars, start, end);
+        }
+        start = end;
+    }
+    return;
+}
+
+fn insertion_sort(scalars: &var std::array::Array<u32>, start: i64, end: i64) -> void {
+    let view = scalars.as_mut_slice();
+    var index = start + 1;
+    while index < end {
+        let value = view[index];
+        var slot = index;
+        while slot > start and class_of(view[slot - 1]) > class_of(value) {
+            view[slot] = view[slot - 1];
+            slot = slot - 1;
+        }
+        view[slot] = value;
+        index = index + 1;
+    }
+}
+
+fn counting_sort(
+    allocator: Allocator,
+    scalars: &var std::array::Array<u32>,
+    start: i64,
+    end: i64
+) -> std::mem::Error!void {
+    var run = std::array::new<u32>(allocator);
+    defer run.deinit(allocator);
+    try run.reserve(allocator, end - start);
+    var counts = [256]i64{};
+    let view = scalars.as_mut_slice();
+    var index = start;
+    while index < end {
+        try run.append(allocator, view[index]);
+        counts[class_of(view[index])] = counts[class_of(view[index])] + 1;
+        index = index + 1;
+    }
+    var slot = start;
+    var class = 0;
+    while class < 256 {
+        let next = slot + counts[class];
+        counts[class] = slot;
+        slot = next;
+        class = class + 1;
+    }
+    let source = run.as_slice();
+    index = 0;
+    while index < end - start {
+        let value = source[index];
+        view[counts[class_of(value)]] = value;
+        counts[class_of(value)] = counts[class_of(value)] + 1;
+        index = index + 1;
+    }
+    return;
+}
+
+fn compose(scalars: &var std::array::Array<u32>) -> i64 {
+    let length = scalars.len();
+    let view = scalars.as_mut_slice();
+    var kept = 0;
+    var starter = -1;
+    var last_class = 0;
+    var index = 0;
+    while index < length {
+        let current = view[index];
+        index = index + 1;
+        let class = class_of(current);
+        if starter >= 0 and (kept - 1 == starter or last_class != 0 and last_class < class) {
+            let composite = composite_pair(scalar_of(view[starter]), scalar_of(current));
+            if composite != 0 {
+                view[starter] = pack(composite);
+                continue;
+            }
+        }
+        view[kept] = current;
+        if class == 0 {
+            starter = kept;
+        }
+        last_class = class;
+        kept = kept + 1;
+    }
+    return kept;
+}
+
+fn composite_pair(first: i64, second: i64) -> i64 {
+    if first >= hangul_l and first < hangul_l + hangul_l_count and second >= hangul_v and
+        second < hangul_v + hangul_v_count {
+        return hangul_s +
+            ((first - hangul_l) * hangul_v_count + second - hangul_v) * hangul_t_count;
+    }
+    if first >= hangul_s and first < hangul_s + hangul_s_count and
+        (first - hangul_s) % hangul_t_count == 0 and second > hangul_t and
+        second < hangul_t + hangul_t_count {
+        return first + second - hangul_t;
+    }
+    return composite_of(first, second);
+}

@@ -1,0 +1,214 @@
+import std::mem;
+import std::string;
+import std::testing;
+import std::unicode;
+
+fn text_of(allocator: Allocator, scalars: []u32) -> unicode::GrowError!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    var index = 0;
+    while index < mem::count<u32>(scalars) {
+        try unicode::append_utf8(allocator, &var out, scalars[index]);
+        index = index + 1;
+    }
+    return move out;
+}
+
+fn normalizes_to(
+    allocator: Allocator,
+    source: []u32,
+    expected: []u32,
+    form: unicode::Form
+) -> unicode::GrowError!bool {
+    let input = try text_of(allocator, source);
+    defer input.deinit(allocator);
+    let wanted = try text_of(allocator, expected);
+    defer wanted.deinit(allocator);
+    let input_bytes = input.as_bytes();
+    let actual = try unicode::normalize(allocator, input_bytes, form);
+    defer actual.deinit(allocator);
+    let actual_bytes = actual.as_bytes();
+    let wanted_bytes = wanted.as_bytes();
+    return mem::equal_bytes(actual_bytes, wanted_bytes);
+}
+
+fn break_after(allocator: Allocator, scalars: []u32) -> unicode::GrowError!i64 {
+    let input = try text_of(allocator, scalars);
+    defer input.deinit(allocator);
+    let bytes = input.as_bytes();
+    return try unicode::next_grapheme_break(bytes, 0);
+}
+
+fn decodes(bytes: []u8, position: i64) -> bool {
+    if unicode::decode(bytes, position) |decoded| {
+        return decoded.width > 0;
+    }
+    return false;
+}
+
+fn appends(allocator: Allocator, out: &var string::String, scalar: u32) -> bool {
+    unicode::append_utf8(allocator, out, scalar) catch return false;
+    return true;
+}
+
+fn normalizes(allocator: Allocator, bytes: []u8) -> bool {
+    let out = unicode::normalize(allocator, bytes, unicode::Form::Nfc) catch return false;
+    out.deinit(allocator);
+    return true;
+}
+
+test "well-formed UTF-8 is accepted" {
+    testing::expect(unicode::is_valid_utf8(""));
+    testing::expect(unicode::is_valid_utf8("kizu"));
+    testing::expect(unicode::is_valid_utf8("傷 🦀 é"));
+}
+
+test "ill-formed UTF-8 is rejected" {
+    var bytes = [4]u8{};
+    let view = bytes.as_mut_bytes();
+    view[0] = cast<u8>(0xC0);
+    view[1] = cast<u8>(0x80);
+    testing::expect(!unicode::is_valid_utf8(view[0..2]));
+    view[0] = cast<u8>(0xED);
+    view[1] = cast<u8>(0xA0);
+    view[2] = cast<u8>(0x80);
+    testing::expect(!unicode::is_valid_utf8(view[0..3]));
+    view[0] = cast<u8>(0xF4);
+    view[1] = cast<u8>(0x90);
+    view[2] = cast<u8>(0x80);
+    view[3] = cast<u8>(0x80);
+    testing::expect(!unicode::is_valid_utf8(view[0..4]));
+    view[0] = cast<u8>(0xE3);
+    view[1] = cast<u8>(0x81);
+    testing::expect(!unicode::is_valid_utf8(view[0..2]));
+    view[0] = cast<u8>(0x80);
+    testing::expect(!unicode::is_valid_utf8(view[0..1]));
+}
+
+test "decode reads one scalar and its width" {
+    let text = "aé傷🦀";
+    if unicode::decode(text, 1) |decoded| {
+        testing::expect_equal<u32>(cast<u32>(0xE9), decoded.scalar);
+        testing::expect_equal<i64>(2, decoded.width);
+    } else {
+        testing::expect(false);
+    }
+    if unicode::decode(text, 6) |decoded| {
+        testing::expect_equal<u32>(cast<u32>(0x1F980), decoded.scalar);
+        testing::expect_equal<i64>(4, decoded.width);
+    } else {
+        testing::expect(false);
+    }
+}
+
+test "decode answers null outside the bytes and inside an encoding" {
+    let text = "é";
+    testing::expect(!decodes(text, -1));
+    testing::expect(!decodes(text, 2));
+    testing::expect(!decodes(text, 1));
+}
+
+test "append_utf8 refuses what is not a scalar and keeps the output" {
+    let allocator = mem::page_allocator();
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    testing::expect(!appends(allocator, &var out, cast<u32>(0xD800)));
+    testing::expect(!appends(allocator, &var out, cast<u32>(0xDFFF)));
+    testing::expect(!appends(allocator, &var out, cast<u32>(0x110000)));
+    testing::expect_equal<i64>(0, out.len());
+}
+
+test "both spellings of a kana normalize to one another" {
+    let allocator = mem::page_allocator();
+    var composed = [1]u32{ cast<u32>(0x304C) };
+    var decomposed = [2]u32{ cast<u32>(0x304B), cast<u32>(0x3099) };
+    let one = composed.as_slice();
+    let two = decomposed.as_slice();
+    testing::expect(normalizes_to(allocator, two, one, unicode::Form::Nfc) catch false);
+    testing::expect(normalizes_to(allocator, one, two, unicode::Form::Nfd) catch false);
+}
+
+test "a Hangul syllable is computed in both directions" {
+    let allocator = mem::page_allocator();
+    var syllable = [1]u32{ cast<u32>(0xD55C) };
+    var jamo = [3]u32{ cast<u32>(0x1112), cast<u32>(0x1161), cast<u32>(0x11AB) };
+    let one = syllable.as_slice();
+    let three = jamo.as_slice();
+    testing::expect(normalizes_to(allocator, three, one, unicode::Form::Nfc) catch false);
+    testing::expect(normalizes_to(allocator, one, three, unicode::Form::Nfd) catch false);
+}
+
+test "a long run of marks is ordered by class and stays stable" {
+    let allocator = mem::page_allocator();
+    var source = [41]u32{};
+    var expected = [41]u32{};
+    source[0] = cast<u32>(0x61);
+    expected[0] = cast<u32>(0x61);
+    var index = 0;
+    while index < 20 {
+        source[1 + index * 2] = cast<u32>(0x0301);
+        source[2 + index * 2] = cast<u32>(0x0323);
+        expected[1 + index] = cast<u32>(0x0323);
+        expected[21 + index] = cast<u32>(0x0301);
+        index = index + 1;
+    }
+    let from = source.as_slice();
+    let to = expected.as_slice();
+    testing::expect(normalizes_to(allocator, from, to, unicode::Form::Nfd) catch false);
+}
+
+test "normalize refuses ill-formed UTF-8" {
+    let allocator = mem::page_allocator();
+    var bytes = [2]u8{};
+    let view = bytes.as_mut_bytes();
+    view[0] = cast<u8>(0xE3);
+    view[1] = cast<u8>(0x41);
+    testing::expect(!normalizes(allocator, view[0..2]));
+}
+
+test "is_normalized answers for each form" {
+    let allocator = mem::page_allocator();
+    var decomposed = [2]u32{ cast<u32>(0x304B), cast<u32>(0x3099) };
+    let scalars = decomposed.as_slice();
+    let input = text_of(allocator, scalars) catch return;
+    defer input.deinit(allocator);
+    let bytes = input.as_bytes();
+    testing::expect(unicode::is_normalized(allocator, bytes, unicode::Form::Nfd) catch false);
+    testing::expect(!(unicode::is_normalized(allocator, bytes, unicode::Form::Nfc) catch true));
+    testing::expect(unicode::is_normalized(allocator, "ascii", unicode::Form::Nfc) catch false);
+}
+
+test "a base and its combining mark are one cluster" {
+    let allocator = mem::page_allocator();
+    var kana = [3]u32{ cast<u32>(0x304B), cast<u32>(0x3099), cast<u32>(0x41) };
+    let scalars = kana.as_slice();
+    testing::expect_equal<i64>(6, break_after(allocator, scalars) catch -1);
+}
+
+test "a family joined by ZWJ is one cluster" {
+    let allocator = mem::page_allocator();
+    var family = [3]u32{ cast<u32>(0x1F468), cast<u32>(0x200D), cast<u32>(0x1F469) };
+    let scalars = family.as_slice();
+    testing::expect_equal<i64>(11, break_after(allocator, scalars) catch -1);
+}
+
+test "regional indicators pair up" {
+    let allocator = mem::page_allocator();
+    var flags = [3]u32{ cast<u32>(0x1F1EF), cast<u32>(0x1F1F5), cast<u32>(0x1F1FA) };
+    let scalars = flags.as_slice();
+    testing::expect_equal<i64>(8, break_after(allocator, scalars) catch -1);
+}
+
+test "the end of the bytes is a break and past it is refused" {
+    testing::expect_equal<i64>(2, unicode::next_grapheme_break("ab", 2) catch -1);
+    testing::expect_equal<i64>(-1, unicode::next_grapheme_break("ab", 3) catch -1);
+    testing::expect_equal<i64>(-1, unicode::next_grapheme_break("ab", -1) catch -1);
+}
+
+test "a cluster read across ill-formed bytes is refused" {
+    var bytes = [2]u8{};
+    let view = bytes.as_mut_bytes();
+    view[0] = cast<u8>(0x41);
+    view[1] = cast<u8>(0xFF);
+    testing::expect_equal<i64>(-1, unicode::next_grapheme_break(view[0..2], 0) catch -1);
+}

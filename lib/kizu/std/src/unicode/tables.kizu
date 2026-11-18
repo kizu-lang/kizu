@@ -1,0 +1,78 @@
+const scalar_bytes = 3;
+const run_bytes = 4;
+const mapping_bytes = 9;
+
+fn class_table() -> []u8 {
+    return @embed_file("src/unicode/ccc.bin");
+}
+
+fn decompose_table() -> []u8 {
+    return @embed_file("src/unicode/decompose.bin");
+}
+
+fn compose_table() -> []u8 {
+    return @embed_file("src/unicode/compose.bin");
+}
+
+fn grapheme_table() -> []u8 {
+    return @embed_file("src/unicode/grapheme.bin");
+}
+
+fn scalar_at(table: []u8, offset: i64) -> i64 {
+    return cast<i64>(table[offset]) << 16 | cast<i64>(table[offset + 1]) << 8 |
+        cast<i64>(table[offset + 2]);
+}
+
+fn run_value(table: []u8, scalar: i64) -> i64 {
+    var low = 0;
+    var high = std::mem::len(table) / run_bytes;
+    while high - low > 1 {
+        let middle = low + (high - low) / 2;
+        if scalar_at(table, middle * run_bytes) <= scalar {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    return cast<i64>(table[low * run_bytes + scalar_bytes]);
+}
+
+fn decomposition_offset(scalar: i64) -> i64 {
+    let table = decompose_table();
+    var low = 0;
+    var high = std::mem::len(table) / mapping_bytes;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let found = scalar_at(table, middle * mapping_bytes);
+        if found == scalar {
+            return middle * mapping_bytes;
+        }
+        if found < scalar {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    return -1;
+}
+
+fn composite_of(first: i64, second: i64) -> i64 {
+    let table = compose_table();
+    let key = first << 21 | second;
+    var low = 0;
+    var high = std::mem::len(table) / mapping_bytes;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let offset = middle * mapping_bytes;
+        let found = scalar_at(table, offset) << 21 | scalar_at(table, offset + scalar_bytes);
+        if found == key {
+            return scalar_at(table, offset + 2 * scalar_bytes);
+        }
+        if found < key {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    return 0;
+}
