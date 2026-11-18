@@ -1,0 +1,134 @@
+// Error is what a call rejects in its input.
+pub error Error {
+    InvalidUtf8,
+    InvalidScalar,
+    InvalidPosition,
+}
+
+// GrowError is Error or a failed allocation.
+pub error GrowError = std::unicode::Error or std::mem::Error;
+
+// Decoded is one scalar value and the bytes its encoding takes.
+pub struct Decoded {
+    pub scalar: u32,
+    pub width: i64,
+}
+
+// is_valid_utf8 reports whether bytes is well-formed UTF-8: no overlong form,
+// surrogate, or scalar above U+10FFFF.
+pub fn is_valid_utf8(bytes: []u8) -> bool {
+    var position = 0;
+    while position < std::mem::len(bytes) {
+        if decode(bytes, position) |decoded| {
+            position = position + decoded.width;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+// decode reads the scalar that starts at position. It returns null when
+// position is outside bytes or no well-formed encoding starts there.
+pub fn decode(bytes: []u8, position: i64) -> ?std::unicode::Decoded {
+    if position < 0 or position >= std::mem::len(bytes) {
+        return null;
+    }
+    let first = cast<i64>(bytes[position]);
+    if first < 0x80 {
+        return Decoded { scalar: cast<u32>(first), width: 1 };
+    }
+    if first >= 0xC2 and first <= 0xDF {
+        return decode_tail(bytes, position, first & 0x1F, 2, 0x80, 0xBF);
+    }
+    if first >= 0xE0 and first <= 0xEF {
+        var low = 0x80;
+        var high = 0xBF;
+        if first == 0xE0 {
+            low = 0xA0;
+        }
+        if first == 0xED {
+            high = 0x9F;
+        }
+        return decode_tail(bytes, position, first & 0x0F, 3, low, high);
+    }
+    if first >= 0xF0 and first <= 0xF4 {
+        var low = 0x80;
+        var high = 0xBF;
+        if first == 0xF0 {
+            low = 0x90;
+        }
+        if first == 0xF4 {
+            high = 0x8F;
+        }
+        return decode_tail(bytes, position, first & 0x07, 4, low, high);
+    }
+    return null;
+}
+
+fn decode_tail(
+    bytes: []u8,
+    position: i64,
+    lead: i64,
+    width: i64,
+    low: i64,
+    high: i64
+) -> ?std::unicode::Decoded {
+    if position + width > std::mem::len(bytes) {
+        return null;
+    }
+    let second = cast<i64>(bytes[position + 1]);
+    if second < low or second > high {
+        return null;
+    }
+    var scalar = lead << 6 | second & 0x3F;
+    var index = 2;
+    while index < width {
+        let next = cast<i64>(bytes[position + index]);
+        if next < 0x80 or next > 0xBF {
+            return null;
+        }
+        scalar = scalar << 6 | next & 0x3F;
+        index = index + 1;
+    }
+    return Decoded { scalar: cast<u32>(scalar), width: width };
+}
+
+// append_utf8 appends the encoding of scalar to out. A surrogate or a value
+// above U+10FFFF is Error::InvalidScalar and leaves out unchanged.
+pub fn append_utf8(
+    allocator: Allocator,
+    out: &var std::string::String,
+    scalar: u32
+) -> std::unicode::GrowError!void {
+    let value = cast<i64>(scalar);
+    if value > 0x10FFFF or value >= 0xD800 and value <= 0xDFFF {
+        return Error::InvalidScalar;
+    }
+    try append_scalar(allocator, out, value);
+    return;
+}
+
+fn append_scalar(
+    allocator: Allocator,
+    out: &var std::string::String,
+    value: i64
+) -> std::mem::Error!void {
+    if value < 0x80 {
+        try out.append_byte(allocator, cast<u8>(value));
+        return;
+    }
+    if value < 0x800 {
+        try out.append_byte(allocator, cast<u8>(0xC0 | value >> 6));
+    } else {
+        if value < 0x10000 {
+            try out.append_byte(allocator, cast<u8>(0xE0 | value >> 12));
+        } else {
+            try out.append_byte(allocator, cast<u8>(0xF0 | value >> 18));
+            try out.append_byte(allocator, cast<u8>(0x80 | value >> 12 & 0x3F));
+        }
+        try out.append_byte(allocator, cast<u8>(0x80 | value >> 6 & 0x3F));
+    }
+    try out.append_byte(allocator, cast<u8>(0x80 | value & 0x3F));
+    return;
+}

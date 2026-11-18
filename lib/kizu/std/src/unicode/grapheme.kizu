@@ -1,0 +1,134 @@
+const break_cr = 1;
+const break_lf = 2;
+const break_control = 3;
+const break_extend = 4;
+const break_zwj = 5;
+const break_regional = 6;
+const break_prepend = 7;
+const break_spacing = 8;
+const break_l = 9;
+const break_v = 10;
+const break_t = 11;
+const break_lv = 12;
+const break_lvt = 13;
+const conjunct_linker = 1;
+const conjunct_consonant = 2;
+const conjunct_extend = 3;
+const pictographic_flag = 0x40;
+
+struct Cluster {
+    previous: i64,
+    conjunct: i64,
+    pictographic: i64,
+    regional: i64,
+}
+
+// next_grapheme_break returns the end of the extended grapheme cluster that
+// starts at position, reading position as the start of a cluster. The end of
+// bytes is its own break. A position outside bytes is Error::InvalidPosition,
+// and bytes that are not well-formed UTF-8 where the cluster is read are
+// Error::InvalidUtf8.
+pub fn next_grapheme_break(bytes: []u8, position: i64) -> std::unicode::Error!i64 {
+    let length = std::mem::len(bytes);
+    if position < 0 or position > length {
+        return Error::InvalidPosition;
+    }
+    if position == length {
+        return length;
+    }
+    var cluster = Cluster { previous: 0, conjunct: 0, pictographic: 0, regional: 0 };
+    var cursor = position;
+    while cursor < length {
+        if decode(bytes, cursor) |decoded| {
+            let flags = grapheme_flags(cast<i64>(decoded.scalar));
+            if cursor != position and breaks_before(&cluster, flags) {
+                return cursor;
+            }
+            cluster = advance(&cluster, flags);
+            cursor = cursor + decoded.width;
+        } else {
+            return Error::InvalidUtf8;
+        }
+    }
+    return length;
+}
+
+fn grapheme_flags(scalar: i64) -> i64 {
+    return run_value(grapheme_table(), scalar);
+}
+
+fn break_class(flags: i64) -> i64 {
+    return flags & 0x0F;
+}
+
+fn conjunct_class(flags: i64) -> i64 {
+    return flags >> 4 & 0x03;
+}
+
+fn is_line_control(class: i64) -> bool {
+    return class == break_cr or class == break_lf or class == break_control;
+}
+
+fn breaks_before(cluster: &Cluster, flags: i64) -> bool {
+    let previous = cluster.previous;
+    let next = break_class(flags);
+    if previous == break_cr and next == break_lf {
+        return false;
+    }
+    if is_line_control(previous) or is_line_control(next) {
+        return true;
+    }
+    if previous == break_l and
+        (next == break_l or next == break_v or next == break_lv or next == break_lvt) {
+        return false;
+    }
+    if (previous == break_lv or previous == break_v) and (next == break_v or next == break_t) {
+        return false;
+    }
+    if (previous == break_lvt or previous == break_t) and next == break_t {
+        return false;
+    }
+    if next == break_extend or next == break_zwj or next == break_spacing {
+        return false;
+    }
+    if previous == break_prepend {
+        return false;
+    }
+    if cluster.conjunct != 0 and conjunct_class(flags) == conjunct_consonant {
+        return false;
+    }
+    if cluster.pictographic == 2 and flags & pictographic_flag != 0 {
+        return false;
+    }
+    if previous == break_regional and next == break_regional and cluster.regional % 2 == 1 {
+        return false;
+    }
+    return true;
+}
+
+fn advance(cluster: &Cluster, flags: i64) -> Cluster {
+    let class = break_class(flags);
+    let joiner = conjunct_class(flags);
+    var conjunct = 0;
+    if joiner == conjunct_linker or cluster.conjunct != 0 and joiner == conjunct_extend {
+        conjunct = 1;
+    }
+    var pictographic = 0;
+    if flags & pictographic_flag != 0 {
+        pictographic = 1;
+    } else if cluster.pictographic == 1 and class == break_extend {
+        pictographic = 1;
+    } else if cluster.pictographic == 1 and class == break_zwj {
+        pictographic = 2;
+    }
+    var regional = 0;
+    if class == break_regional {
+        regional = cluster.regional + 1;
+    }
+    return Cluster {
+        previous: class,
+        conjunct: conjunct,
+        pictographic: pictographic,
+        regional: regional
+    };
+}

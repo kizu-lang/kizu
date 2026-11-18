@@ -184,11 +184,32 @@ fn begin_symbol(allocator: Allocator, out: &var Out, func: &MFunction, name: ir:
 }
 
 fn write_literal_bytes(allocator: Allocator, selector: &var Selector, obj: &var Obj) -> !void {
-    try obj.enter(allocator, &var selector.syms, SectionKind::Cstring);
+    try write_literals_in(allocator, selector, obj, SectionKind::Cstring, false);
+    return write_literals_in(allocator, selector, obj, SectionKind::TextConst, true);
+}
+
+fn write_literals_in(
+    allocator: Allocator,
+    selector: &var Selector,
+    obj: &var Obj,
+    section: SectionKind,
+    holding_nul: bool
+) -> !void {
+    var entered = false;
     var literal_index = 0;
     while selector.literals.get(literal_index) |literal| {
-        let label = try local_label(allocator, &var selector.syms, "Lkz_str.", literal_index);
+        let index = literal_index;
         literal_index = literal_index + 1;
+        let held = ir::name_text(&selector.syms, literal);
+        let held_bytes = held.as_bytes();
+        if has_nul(held_bytes) != holding_nul {
+            continue;
+        }
+        if !entered {
+            try obj.enter(allocator, &var selector.syms, section);
+            entered = true;
+        }
+        let label = try local_label(allocator, &var selector.syms, "Lkz_str.", index);
         try obj.define(allocator, &selector.syms, label);
         let text = ir::name_text(&selector.syms, literal);
         let bytes = text.as_bytes();
@@ -196,6 +217,15 @@ fn write_literal_bytes(allocator: Allocator, selector: &var Selector, obj: &var 
         try obj.datum(allocator, 0, 1);
     }
     return;
+}
+
+fn has_nul(bytes: []u8) -> bool {
+    for 0..mem::len(bytes) |index| {
+        if bytes[index] == cast<u8>(0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 fn local_label(allocator: Allocator, syms: &var ir::NameTable, prefix: []u8, index: i64) -> !ir::Name {

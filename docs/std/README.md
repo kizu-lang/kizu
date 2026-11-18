@@ -26,6 +26,7 @@
 | [mem](mem.md) | allocator capability、byte helper、`Box<T>`、`leak`、`Limit` |
 | [arena](arena.md) | handle で参照する owned arena |
 | [string](string.md) | owned byte buffer |
+| [unicode](unicode.md) | UTF-8 の検証と変換、正規化(NFC / NFD)、書記素クラスタ分割 |
 | [array](array.md) | owned contiguous collection |
 | [sort](sort.md) | owner-safe in-place string sorting |
 | [map](map.md) | owned symbol table |

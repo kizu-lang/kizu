@@ -120,6 +120,16 @@ cache-status: stage1
 cache-prune: stage1
     {{kizu}} cache prune
 
+# Regenerate the tables of std::unicode and its conformance files from the
+# Unicode version named here. Changing the version is how std::unicode moves.
+unicode-tables: stage1
+    mkdir -p target/ucd
+    for file in UnicodeData.txt DerivedNormalizationProps.txt DerivedCoreProperties.txt NormalizationTest.txt auxiliary/GraphemeBreakProperty.txt auxiliary/GraphemeBreakTest.txt emoji/emoji-data.txt; do \
+        curl -fsS -o "target/ucd/$(basename "$file")" "https://www.unicode.org/Public/18.0.0/ucd/$file"; \
+    done
+    {{kizu}} run scripts/unicode-tables/main.kizu -- target/ucd lib/kizu/std/src/unicode
+    cp target/ucd/NormalizationTest.txt target/ucd/GraphemeBreakTest.txt tests/unicode/src/
+
 # Regenerate the tables of the TLS specification from std::tls, then check them (spec/README.md).
 spec-table: stage1 && spec-verify
     {{kizu}} run spec/tls_machine.kizu | {{kizu}} run scripts/machine-lean/main.kizu -- spec/Tls.lean client server

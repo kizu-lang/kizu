@@ -1,0 +1,226 @@
+import std::array;
+import std::mem;
+import std::process;
+import std::string;
+import std::unicode;
+
+// Runs every line of the Unicode 18.0.0 conformance files against std::unicode:
+//
+//     NormalizationTest.txt          c1;c2;c3;c4;c5 with the invariants the
+//                                    file's header states for NFC and NFD
+//     GraphemeBreakTest.txt          ÷ and × between hex scalars
+//
+// A program and not `test` blocks, so that the same build runs natively and on
+// wasm32-browser (scripts/check-unicode.sh).
+
+error Failure = unicode::GrowError or array::Error;
+
+fn main() -> Failure!process::ExitStatus {
+    let allocator = mem::page_allocator();
+    let normalization = try check_normalization(allocator);
+    let grapheme = try check_grapheme(allocator);
+    if normalization < 0 or grapheme < 0 {
+        return process::ExitStatus::Failure;
+    }
+    print("normalization lines:");
+    print_count(allocator, normalization);
+    print("grapheme lines:");
+    print_count(allocator, grapheme);
+    return process::ExitStatus::Success;
+}
+
+fn print_count(allocator: Allocator, count: i64) -> void {
+    var digits = string::new(allocator);
+    defer digits.deinit(allocator);
+    var rest = count;
+    var divisor = 1;
+    while rest / divisor >= 10 {
+        divisor = divisor * 10;
+    }
+    while divisor > 0 {
+        digits.append_byte(allocator, cast<u8>(48 + rest / divisor % 10)) catch return;
+        divisor = divisor / 10;
+    }
+    let view = digits.as_bytes();
+    print(view);
+}
+
+fn find(bytes: []u8, byte: u8, from: i64) -> i64 {
+    var index = from;
+    while index < mem::len(bytes) {
+        if bytes[index] == byte {
+            return index;
+        }
+        index = index + 1;
+    }
+    return mem::len(bytes);
+}
+
+fn digit_value(byte: u8) -> i64 {
+    let code = cast<i64>(byte);
+    if code >= 48 and code <= 57 {
+        return code - 48;
+    }
+    if code >= 65 and code <= 70 {
+        return code - 55;
+    }
+    return -1;
+}
+
+fn append_hex_scalars(allocator: Allocator, out: &var string::String, text: []u8) -> Failure!void {
+    var value = -1;
+    var index = 0;
+    while index <= mem::len(text) {
+        var digit = -1;
+        if index < mem::len(text) {
+            digit = digit_value(text[index]);
+        }
+        if digit >= 0 {
+            if value < 0 {
+                value = 0;
+            }
+            value = value * 16 + digit;
+        } else if value >= 0 {
+            try unicode::append_utf8(allocator, out, cast<u32>(value));
+            value = -1;
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn expect_form(
+    allocator: Allocator,
+    expected: &string::String,
+    source: &string::String,
+    form: unicode::Form
+) -> Failure!bool {
+    let source_bytes = source.as_bytes();
+    let actual = try unicode::normalize(allocator, source_bytes, form);
+    defer actual.deinit(allocator);
+    let actual_bytes = actual.as_bytes();
+    let expected_bytes = expected.as_bytes();
+    return mem::equal_bytes(actual_bytes, expected_bytes);
+}
+
+fn check_normalization(allocator: Allocator) -> Failure!i64 {
+    let text = @embed_file("src/NormalizationTest.txt");
+    var lines = 0;
+    var position = 0;
+    while position < mem::len(text) {
+        let end = find(text, cast<u8>(10), position);
+        let line = text[position..end];
+        position = end + 1;
+        if mem::len(line) == 0 or line[0] == cast<u8>(35) or line[0] == cast<u8>(64) {
+            continue;
+        }
+        var columns = array::new<string::String>(allocator);
+        defer columns.deinit(allocator);
+        var start = 0;
+        var column = 0;
+        while column < 5 {
+            let stop = find(line, cast<u8>(59), start);
+            var scalars = string::new(allocator);
+            errdefer scalars.deinit(allocator);
+            try append_hex_scalars(allocator, &var scalars, line[start..stop]);
+            try columns.append(allocator, move scalars);
+            start = stop + 1;
+            column = column + 1;
+        }
+        var ok = true;
+        var index = 0;
+        while index < 5 {
+            if columns.at(index) |source| {
+                var nfc_column = 1;
+                var nfd_column = 2;
+                if index >= 3 {
+                    nfc_column = 3;
+                    nfd_column = 4;
+                }
+                if columns.at(nfc_column) |nfc| {
+                    ok = ok and try expect_form(allocator, nfc, source, unicode::Form::Nfc);
+                }
+                if columns.at(nfd_column) |nfd| {
+                    ok = ok and try expect_form(allocator, nfd, source, unicode::Form::Nfd);
+                }
+            }
+            index = index + 1;
+        }
+        if !ok {
+            print("normalization failed:");
+            print(line);
+            return -1;
+        }
+        lines = lines + 1;
+    }
+    return lines;
+}
+
+fn check_grapheme(allocator: Allocator) -> Failure!i64 {
+    let text = @embed_file("src/GraphemeBreakTest.txt");
+    var lines = 0;
+    var position = 0;
+    while position < mem::len(text) {
+        let end = find(text, cast<u8>(10), position);
+        let raw = text[position..end];
+        position = end + 1;
+        if mem::len(raw) == 0 or raw[0] == cast<u8>(35) {
+            continue;
+        }
+        let line = raw[0..find(raw, cast<u8>(35), 0)];
+        if !try check_grapheme_line(allocator, line) {
+            print("grapheme failed:");
+            print(raw);
+            return -1;
+        }
+        lines = lines + 1;
+    }
+    return lines;
+}
+
+fn check_grapheme_line(allocator: Allocator, line: []u8) -> Failure!bool {
+    var bytes = string::new(allocator);
+    defer bytes.deinit(allocator);
+    var breaks = array::new<i64>(allocator);
+    defer breaks.deinit(allocator);
+    var value = -1;
+    var index = 0;
+    while index <= mem::len(line) {
+        var digit = -1;
+        if index < mem::len(line) {
+            digit = digit_value(line[index]);
+        }
+        if digit >= 0 {
+            if value < 0 {
+                value = 0;
+            }
+            value = value * 16 + digit;
+            index = index + 1;
+            continue;
+        }
+        if value >= 0 {
+            try unicode::append_utf8(allocator, &var bytes, cast<u32>(value));
+            value = -1;
+        }
+        if index + 1 < mem::len(line) and line[index] == cast<u8>(0xC3) and
+            line[index + 1] == cast<u8>(0xB7) {
+            try breaks.append(allocator, bytes.len());
+        }
+        index = index + 1;
+    }
+    let view = bytes.as_bytes();
+    var cursor = 0;
+    var expected = 1;
+    while cursor < mem::len(view) {
+        cursor = try unicode::next_grapheme_break(view, cursor);
+        if breaks.get(expected) |wanted| {
+            if wanted != cursor {
+                return false;
+            }
+        } else {
+            return false;
+        }
+        expected = expected + 1;
+    }
+    return expected == breaks.len();
+}

@@ -1,0 +1,334 @@
+// Generates the tables std::unicode embeds from the Unicode Character
+// Database:
+//
+//     kizu run scripts/unicode-tables/main.kizu -- <ucd-dir> <out-dir>
+//
+// `just unicode-tables` downloads the version the recipe names and runs this.
+//
+// Every number in a table is big-endian, and a scalar takes 3 bytes.
+//
+//   ccc.bin        runs of (start, Canonical_Combining_Class)
+//   decompose.bin  (scalar, first, second) by scalar, one step of the canonical
+//                  mapping; second is 0 for a singleton
+//   compose.bin    (first, second, composite) by first and second, leaving out
+//                  Full_Composition_Exclusion
+//   grapheme.bin   runs of (start, flags): Grapheme_Cluster_Break in bits 0-3,
+//                  InCB in bits 4-5, Extended_Pictographic in bit 6
+//
+// A run lasts until the next one starts. The Hangul syllables are computed, so
+// they are in neither mapping.
+
+import std::array;
+import std::fs;
+import std::io;
+import std::mem;
+import std::process;
+import std::string;
+
+error Invalid {
+    BadLine,
+}
+
+error Failure = mem::Error or fs::Error or io::Error or process::Error or array::Error or
+string::Error or Invalid;
+
+const scalar_count = 0x110000;
+const semicolon = cast<u8>(59);
+const newline = cast<u8>(10);
+const hash = cast<u8>(35);
+const space = cast<u8>(32);
+const less_than = cast<u8>(60);
+const dot = cast<u8>(46);
+
+fn main() -> Failure!process::ExitStatus {
+    if process::arg_count() != 2 {
+        print("usage: kizu run scripts/unicode-tables/main.kizu -- <ucd-dir> <out-dir>");
+        return process::ExitStatus::Failure;
+    }
+    let allocator = mem::page_allocator();
+    let handle = io::blocking();
+    let ucd = try process::arg(0);
+    let out = try process::arg(1);
+
+    let unicode_data = try read(handle, allocator, ucd, "UnicodeData.txt");
+    defer unicode_data.deinit(allocator);
+    let normalization = try read(handle, allocator, ucd, "DerivedNormalizationProps.txt");
+    defer normalization.deinit(allocator);
+    let grapheme_break = try read(handle, allocator, ucd, "GraphemeBreakProperty.txt");
+    defer grapheme_break.deinit(allocator);
+    let emoji = try read(handle, allocator, ucd, "emoji-data.txt");
+    defer emoji.deinit(allocator);
+    let core = try read(handle, allocator, ucd, "DerivedCoreProperties.txt");
+    defer core.deinit(allocator);
+
+    var excluded = try blank_table(allocator);
+    defer excluded.deinit(allocator);
+    let normalization_bytes = normalization.as_bytes();
+    try mark(&var excluded, normalization_bytes, "Full_Composition_Exclusion", "", cast<u8>(1));
+
+    var classes = try blank_table(allocator);
+    defer classes.deinit(allocator);
+    var decompose = string::new(allocator);
+    defer decompose.deinit(allocator);
+    var pairs = array::new<i64>(allocator);
+    defer pairs.deinit(allocator);
+    let unicode_data_bytes = unicode_data.as_bytes();
+    try read_unicode_data(
+        allocator,
+        unicode_data_bytes,
+        &excluded,
+        &var classes,
+        &var decompose,
+        &var pairs
+    );
+    sort_ascending(&var pairs);
+
+    var compose = string::new(allocator);
+    defer compose.deinit(allocator);
+    var index = 0;
+    while pairs.get(index) |pair| {
+        index = index + 1;
+        try append_scalar(allocator, &var compose, pair >> 42);
+        try append_scalar(allocator, &var compose, pair >> 21 & 0x1FFFFF);
+        try append_scalar(allocator, &var compose, pair & 0x1FFFFF);
+    }
+
+    var grapheme = try blank_table(allocator);
+    defer grapheme.deinit(allocator);
+    let breaks = grapheme_break.as_bytes();
+    try mark(&var grapheme, breaks, "CR", "", cast<u8>(1));
+    try mark(&var grapheme, breaks, "LF", "", cast<u8>(2));
+    try mark(&var grapheme, breaks, "Control", "", cast<u8>(3));
+    try mark(&var grapheme, breaks, "Extend", "", cast<u8>(4));
+    try mark(&var grapheme, breaks, "ZWJ", "", cast<u8>(5));
+    try mark(&var grapheme, breaks, "Regional_Indicator", "", cast<u8>(6));
+    try mark(&var grapheme, breaks, "Prepend", "", cast<u8>(7));
+    try mark(&var grapheme, breaks, "SpacingMark", "", cast<u8>(8));
+    try mark(&var grapheme, breaks, "L", "", cast<u8>(9));
+    try mark(&var grapheme, breaks, "V", "", cast<u8>(10));
+    try mark(&var grapheme, breaks, "T", "", cast<u8>(11));
+    try mark(&var grapheme, breaks, "LV", "", cast<u8>(12));
+    try mark(&var grapheme, breaks, "LVT", "", cast<u8>(13));
+    let core_bytes = core.as_bytes();
+    try mark(&var grapheme, core_bytes, "InCB", "Linker", cast<u8>(0x10));
+    try mark(&var grapheme, core_bytes, "InCB", "Consonant", cast<u8>(0x20));
+    try mark(&var grapheme, core_bytes, "InCB", "Extend", cast<u8>(0x30));
+    let emoji_bytes = emoji.as_bytes();
+    try mark(&var grapheme, emoji_bytes, "Extended_Pictographic", "", cast<u8>(0x40));
+
+    var class_runs = try runs_of(allocator, &classes);
+    defer class_runs.deinit(allocator);
+    var grapheme_runs = try runs_of(allocator, &grapheme);
+    defer grapheme_runs.deinit(allocator);
+
+    let class_bytes = class_runs.as_bytes();
+    let decompose_bytes = decompose.as_bytes();
+    let compose_bytes = compose.as_bytes();
+    let grapheme_bytes = grapheme_runs.as_bytes();
+    try write(handle, allocator, out, "ccc.bin", class_bytes);
+    try write(handle, allocator, out, "decompose.bin", decompose_bytes);
+    try write(handle, allocator, out, "compose.bin", compose_bytes);
+    try write(handle, allocator, out, "grapheme.bin", grapheme_bytes);
+    return process::ExitStatus::Success;
+}
+
+fn read(handle: Io, allocator: Allocator, dir: []u8, name: []u8) -> Failure!string::String {
+    var path = string::new(allocator);
+    defer path.deinit(allocator);
+    try path.append_bytes(allocator, dir);
+    try path.append_byte(allocator, cast<u8>(47));
+    try path.append_bytes(allocator, name);
+    let bytes = path.as_bytes();
+    return try fs::read_file(handle, allocator, bytes, mem::Limit::Unlimited);
+}
+
+fn write(handle: Io, allocator: Allocator, dir: []u8, name: []u8, content: []u8) -> Failure!void {
+    var path = string::new(allocator);
+    defer path.deinit(allocator);
+    try path.append_bytes(allocator, dir);
+    try path.append_byte(allocator, cast<u8>(47));
+    try path.append_bytes(allocator, name);
+    let bytes = path.as_bytes();
+    try fs::write_file(handle, bytes, content);
+    return;
+}
+
+fn blank_table(allocator: Allocator) -> Failure!string::String {
+    var table = string::new(allocator);
+    errdefer table.deinit(allocator);
+    try table.reserve(allocator, scalar_count);
+    var index = 0;
+    while index < scalar_count {
+        try table.append_byte(allocator, cast<u8>(0));
+        index = index + 1;
+    }
+    return move table;
+}
+
+fn read_unicode_data(
+    allocator: Allocator,
+    text: []u8,
+    excluded: &string::String,
+    classes: &var string::String,
+    decompose: &var string::String,
+    pairs: &var array::Array<i64>
+) -> Failure!void {
+    let excluded_bytes = excluded.as_bytes();
+    var position = 0;
+    while position < mem::len(text) {
+        let end = find(text, newline, position);
+        let line = text[position..end];
+        position = end + 1;
+        if mem::len(line) == 0 {
+            continue;
+        }
+        let scalar = try parse_number(field(line, 0), 16);
+        let class = try parse_number(field(line, 3), 10);
+        let class_bytes = classes.as_mut_bytes();
+        class_bytes[scalar] = cast<u8>(class);
+
+        let mapping = field(line, 5);
+        if mem::len(mapping) == 0 or mapping[0] == less_than {
+            continue;
+        }
+        let gap = find(mapping, space, 0);
+        let first = try parse_number(mapping[0..gap], 16);
+        var second = 0;
+        if gap < mem::len(mapping) {
+            second = try parse_number(mapping[gap + 1..mem::len(mapping)], 16);
+        }
+        try append_scalar(allocator, decompose, scalar);
+        try append_scalar(allocator, decompose, first);
+        try append_scalar(allocator, decompose, second);
+        if second != 0 and excluded_bytes[scalar] == cast<u8>(0) {
+            try pairs.append(allocator, first << 42 | second << 21 | scalar);
+        }
+    }
+    return;
+}
+
+fn mark(
+    table: &var string::String,
+    text: []u8,
+    property: []u8,
+    detail: []u8,
+    value: u8
+) -> Invalid!void {
+    var position = 0;
+    while position < mem::len(text) {
+        let end = find(text, newline, position);
+        let line = text[position..find(text[position..end], hash, 0) + position];
+        position = end + 1;
+        if mem::len(line) == 0 or !mem::equal_bytes(mem::trim_ascii(field(line, 1)), property) {
+            continue;
+        }
+        if mem::len(detail) != 0 and !mem::equal_bytes(mem::trim_ascii(field(line, 2)), detail) {
+            continue;
+        }
+        let range = mem::trim_ascii(field(line, 0));
+        let dots = find(range, dot, 0);
+        let first = try parse_number(range[0..dots], 16);
+        var last = first;
+        if dots < mem::len(range) {
+            last = try parse_number(range[dots + 2..mem::len(range)], 16);
+        }
+        let bytes = table.as_mut_bytes();
+        var scalar = first;
+        while scalar <= last {
+            bytes[scalar] = bytes[scalar] | value;
+            scalar = scalar + 1;
+        }
+    }
+    return;
+}
+
+fn runs_of(allocator: Allocator, table: &string::String) -> Failure!string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    let bytes = table.as_bytes();
+    var scalar = 0;
+    while scalar < scalar_count {
+        if scalar == 0 or bytes[scalar] != bytes[scalar - 1] {
+            try append_scalar(allocator, &var out, scalar);
+            try out.append_byte(allocator, bytes[scalar]);
+        }
+        scalar = scalar + 1;
+    }
+    return move out;
+}
+
+fn append_scalar(allocator: Allocator, out: &var string::String, scalar: i64) -> mem::Error!void {
+    try out.append_byte(allocator, cast<u8>(scalar >> 16 & 0xFF));
+    try out.append_byte(allocator, cast<u8>(scalar >> 8 & 0xFF));
+    try out.append_byte(allocator, cast<u8>(scalar & 0xFF));
+    return;
+}
+
+fn sort_ascending(values: &var array::Array<i64>) -> void {
+    let view = values.as_mut_slice();
+    var index = 1;
+    while index < mem::count<i64>(view) {
+        let value = view[index];
+        var slot = index;
+        while slot > 0 and view[slot - 1] > value {
+            view[slot] = view[slot - 1];
+            slot = slot - 1;
+        }
+        view[slot] = value;
+        index = index + 1;
+    }
+}
+
+fn find(bytes: []u8, byte: u8, from: i64) -> i64 {
+    var index = from;
+    while index < mem::len(bytes) {
+        if bytes[index] == byte {
+            return index;
+        }
+        index = index + 1;
+    }
+    return mem::len(bytes);
+}
+
+fn field(line: []u8, wanted: i64) -> []u8 {
+    var start = 0;
+    var number = 0;
+    while number < wanted {
+        let end = find(line, semicolon, start);
+        if end == mem::len(line) {
+            return line[end..end];
+        }
+        start = end + 1;
+        number = number + 1;
+    }
+    return line[start..find(line, semicolon, start)];
+}
+
+fn parse_number(text: []u8, base: i64) -> Invalid!i64 {
+    let digits = mem::trim_ascii(text);
+    if mem::len(digits) == 0 {
+        return Invalid::BadLine;
+    }
+    var value = 0;
+    var index = 0;
+    while index < mem::len(digits) {
+        let digit = digit_value(digits[index]);
+        if digit < 0 or digit >= base {
+            return Invalid::BadLine;
+        }
+        value = value * base + digit;
+        index = index + 1;
+    }
+    return value;
+}
+
+fn digit_value(byte: u8) -> i64 {
+    let code = cast<i64>(byte);
+    if code >= 48 and code <= 57 {
+        return code - 48;
+    }
+    if code >= 65 and code <= 70 {
+        return code - 55;
+    }
+    return -1;
+}
