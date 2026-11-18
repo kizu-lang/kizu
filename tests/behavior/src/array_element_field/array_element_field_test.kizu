@@ -1,0 +1,59 @@
+import std::testing;
+
+struct Inner {
+    a: i64,
+    b: i64,
+}
+
+struct Outer {
+    tag: i64,
+    inner: Inner,
+}
+
+fn raise(items: &var [3]Outer, i: i64) -> void {
+    items[i].inner.b = items[i].inner.b + 10;
+    items[i].tag = 7;
+    return;
+}
+
+fn sample() -> Outer {
+    return Outer { tag: 0, inner: Inner { a: 1, b: 2 } };
+}
+
+// Writing one field of an element leaves the element's other fields and the
+// other elements as they were.
+test "a field write through a borrowed array changes only that field" {
+    let o = sample();
+    var items = [3]Outer{ o, o, o };
+    raise(&var items, 1);
+    testing::expect_equal<i64>(7, items[1].tag);
+    testing::expect_equal<i64>(12, items[1].inner.b);
+    testing::expect_equal<i64>(1, items[1].inner.a);
+    testing::expect_equal<i64>(0, items[0].tag);
+    testing::expect_equal<i64>(2, items[2].inner.b);
+}
+
+// A copy taken before the write keeps the old value.
+test "a field write to an element leaves an earlier copy alone" {
+    let o = sample();
+    var items = [3]Outer{ o, o, o };
+    items[2].inner.a = 9;
+    let copy = items;
+    items[2].inner.a = 99;
+    items[0].tag = 5;
+    testing::expect_equal<i64>(9, copy[2].inner.a);
+    testing::expect_equal<i64>(0, copy[0].tag);
+    testing::expect_equal<i64>(99, items[2].inner.a);
+    testing::expect_equal<i64>(5, items[0].tag);
+}
+
+test "a field write reaches an element of a nested array" {
+    let o = sample();
+    var grid = [2][2]Outer{ [2]Outer{ o, o }, [2]Outer{ o, o } };
+    for 0..2 |i| {
+        grid[i][1 - i].inner.b = 40 + i;
+    }
+    testing::expect_equal<i64>(40, grid[0][1].inner.b);
+    testing::expect_equal<i64>(41, grid[1][0].inner.b);
+    testing::expect_equal<i64>(2, grid[0][0].inner.b);
+}
