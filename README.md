@@ -253,6 +253,7 @@ just wasi-smoke      # run the wasm examples under wasmtime
 - [docs/language-gaps.md](docs/language-gaps.md): what could not be written yet, and the workaround used
 - [docs/stdlib.md](docs/stdlib.md): the trusted-builtin boundary and the rules for new std APIs
 - [docs/perf.md](docs/perf.md): build and cache performance policy
+- [CONTRIBUTING.md](CONTRIBUTING.md): what a pull request can change and how it is reviewed
 - [AGENTS.md](AGENTS.md): implementation rules for contributors and coding agents
 
 ## License

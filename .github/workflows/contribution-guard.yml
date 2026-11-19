@@ -1,0 +1,138 @@
+name: contribution-guard
+
+# Sorts a pull request from outside the project into the areas CONTRIBUTING.md
+# names, labels it, and fails when it touches what is not open to outside
+# changes.
+#
+# pull_request_target runs this file as it is on the base branch, so a pull
+# request cannot edit its own guard. That event also carries a write token, so
+# this job reads the change through the API only. Do not add a checkout, and do
+# not run anything the pull request contains. File names come from the pull
+# request too: they go to the step summary as JSON strings and never to stdout,
+# where the runner would read them as workflow commands.
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+
+permissions: {}
+
+jobs:
+  guard:
+    if: ${{ !contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Classify the change
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+        run: |
+          set -euo pipefail
+
+          work="$(mktemp -d)"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files?per_page=100" --jq '.[]' |
+            jq -s '.' >"$work/files.json"
+
+          open='^(docs/|examples/|tests/behavior/|readme(\.ja)?\.md$)'
+          agreed='^(compiler/|lib/kizu/std/)'
+          closed='^(docs/principles\.md$|docs/adr/)|(^|/)(agents\.md|claude\.md|\.envrc)$|(^|/)\.claude/'
+          binary='\.(bin|wasm|o|a|so|dylib|dll|exe|zip|gz|tgz|tar|xz|zst)$'
+
+          jq --arg open "$open" --arg agreed "$agreed" --arg closed "$closed" --arg binary "$binary" '
+            def names: [.filename, .previous_filename] | map(select(. != null));
+            def named($pattern): any(names[]; test($pattern; "i"));
+            def unlisted: any(names[]; (test($open; "i") or test($agreed; "i")) | not);
+            {
+              restricted: map(select(named($closed) or unlisted) | .filename),
+              agreed: map(select(named($agreed)) | .filename),
+              opaque: map(select(.status != "removed" and
+                (named($binary) or (.patch == null and (.changes > 0 or .status == "added")))) | .filename),
+              std_api: map(select((.filename | test("^lib/kizu/std/")) and
+                ((.patch // "") | test("(^|\n)[-+][ \t]*pub[ \t]"))) | .filename),
+              expected_output: map(select(.status != "added" and
+                (.filename | test("^(compiler/tests/|tests/unicode/)"))) | .filename)
+            }' "$work/files.json" >"$work/sorted.json"
+
+          count() { jq -r --arg key "$1" '.[$key] | length' "$work/sorted.json"; }
+
+          listed="$(jq 'length' "$work/files.json")"
+          restricted_count="$(count restricted)"
+          if [ "$listed" -lt "$CHANGED_FILES" ]; then
+            restricted_count=$((restricted_count + 1))
+          fi
+
+          accepted=0
+          if [ "$(count agreed)" -gt 0 ]; then
+            # shellcheck disable=SC2016
+            accepted="$(gh api graphql \
+              -f owner="${GITHUB_REPOSITORY%/*}" -f name="${GITHUB_REPOSITORY#*/}" -F number="$PR_NUMBER" \
+              -f query='query($owner: String!, $name: String!, $number: Int!) {
+                repository(owner: $owner, name: $name) {
+                  pullRequest(number: $number) {
+                    closingIssuesReferences(first: 20) {
+                      nodes { state repository { nameWithOwner } labels(first: 50) { nodes { name } } }
+                    }
+                  }
+                }
+              }' |
+              jq --arg repo "$GITHUB_REPOSITORY" '[
+                .data.repository.pullRequest.closingIssuesReferences.nodes[]
+                | select(.state == "OPEN" and .repository.nameWithOwner == $repo)
+                | select(any(.labels.nodes[]; .name == "accepted"))
+              ] | length')"
+          fi
+
+          missing_issue=0
+          if [ "$(count agreed)" -gt 0 ] && [ "$accepted" -eq 0 ]; then
+            missing_issue=1
+          fi
+
+          sync_label() {
+            if [ "$2" -gt 0 ]; then
+              gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" -f "labels[]=$1" --silent
+            else
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/$1" --silent 2>/dev/null || true
+            fi
+          }
+          sync_label restricted-path "$restricted_count"
+          sync_label needs-accepted-issue "$missing_issue"
+          sync_label opaque-file "$(count opaque)"
+          sync_label changes-std-api "$(count std_api)"
+          sync_label changes-expected-output "$(count expected_output)"
+
+          {
+            echo '## Contribution guard'
+            jq -r '
+              to_entries[]
+              | select(.value | length > 0)
+              | "### \(.key)", (.value[] | "- \(@json)")
+            ' "$work/sorted.json"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+          if [ "$(count std_api)" -gt 0 ]; then
+            echo '::warning::This pull request changes a public declaration of the standard library.'
+          fi
+          if [ "$(count expected_output)" -gt 0 ]; then
+            echo '::warning::This pull request changes expected compiler output.'
+          fi
+
+          failed=0
+          if [ "$restricted_count" -gt 0 ]; then
+            echo '::error::This pull request changes files that are not open to outside changes. See CONTRIBUTING.md.'
+            failed=1
+          fi
+          if [ "$(count opaque)" -gt 0 ]; then
+            echo '::error::This pull request adds a binary file or a diff too large to review. See CONTRIBUTING.md.'
+            failed=1
+          fi
+          if [ "$missing_issue" -eq 1 ]; then
+            echo '::error::Changes to compiler/ or lib/kizu/std/ need an open issue labeled accepted, linked with "Closes #N".'
+            failed=1
+          fi
+          exit "$failed"
