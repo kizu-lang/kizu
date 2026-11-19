@@ -119,6 +119,15 @@ commit 前は原則 `pre-commit run --all-files` を通してください(数秒
 ではなく push 時に走ります。Kizu compiler 自身の test(`kizu test compiler`)も
 そこに含まれます。
 
+## CI
+
+`difftest-nightly` が毎晩、direct backend と LLVM の出力を比べる。
+食い違いは `difftest-nightly` ラベルの issue になる。
+
+- 実行結果: `gh run list --workflow difftest-nightly.yml`
+- 見つかったバグ: `gh issue list --label difftest-nightly`
+- 再現: `scripts/difftest-generated.sh target/seed/stage1/bin/kizu <seed>`
+
 ## 形式仕様
 
 `spec/` の Lean、TLA+、Quint は `just selfhost` でも CI でも動かしません。CI を長くしないためで、
