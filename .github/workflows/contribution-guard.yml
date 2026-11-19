@@ -18,7 +18,6 @@ permissions: {}
 
 jobs:
   guard:
-    if: ${{ !contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -32,8 +31,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
+
+          # author_association reads a private organization member as an
+          # outsider, so ask what the author may do to the repository instead.
+          # An answer that does not come back is treated as no access.
+          permission="$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$AUTHOR/permission" --jq '.permission' 2>/dev/null || echo none)"
+          case "$permission" in
+            admin | maintain | write)
+              echo 'The author can push to this repository, so there is nothing to check.'
+              exit 0
+              ;;
+          esac
 
           work="$(mktemp -d)"
           gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files?per_page=100" --jq '.[]' |
