@@ -444,6 +444,76 @@ fn driver(allocator: Allocator, options: &Options, arm64: bool) -> !string::Stri
     return move out;
 }
 
+fn append_field(allocator: Allocator, out: &var string::String, value: []u8) -> !void {
+    try fmt::append_i64(allocator, out, mem::len(value));
+    try out.append_byte(allocator, cast<u8>(58));
+    return out.append_bytes(allocator, value);
+}
+
+fn append_fields(allocator: Allocator, out: &var string::String, values: &array::Array<string::String>) -> !void {
+    try fmt::append_i64(allocator, out, values.len());
+    try out.append_byte(allocator, cast<u8>(10));
+    var index = 0;
+    while values.at(index) |value| {
+        index = index + 1;
+        let value_bytes = value.as_bytes();
+        try append_field(allocator, out, value_bytes);
+    }
+    return;
+}
+
+pub fn append_build_identity(
+    allocator: Allocator,
+    options: &Options,
+    host: &string::String,
+    out: &var string::String
+) -> !?diagnostic::Diagnostic {
+    var version = string::new(allocator);
+    defer version.deinit(allocator);
+    if try linker_version(allocator, options, target_is_arm64(options, host), &var version) |failed| {
+        return move failed;
+    }
+    let version_bytes = version.as_bytes();
+    try append_field(allocator, out, version_bytes);
+    let host_bytes = host.as_bytes();
+    try append_field(allocator, out, host_bytes);
+    try append_field(allocator, out, process::env("SDKROOT") orelse "");
+    let output = options.output.as_bytes();
+    try append_field(allocator, out, output);
+    let triple = options.triple.as_bytes();
+    try append_field(allocator, out, triple);
+    let cpu = options.cpu.as_bytes();
+    try append_field(allocator, out, cpu);
+    let abi = options.abi.as_bytes();
+    try append_field(allocator, out, abi);
+    let libc = options.libc.as_bytes();
+    try append_field(allocator, out, libc);
+    let runtime = options.runtime.as_bytes();
+    try append_field(allocator, out, runtime);
+    let emit = options.emit.as_bytes();
+    try append_field(allocator, out, emit);
+    let linker = options.linker.as_bytes();
+    try append_field(allocator, out, linker);
+    try append_field(allocator, out, optimization_mode_name(options));
+    if options.direct {
+        try append_field(allocator, out, "direct");
+    } else if options.own_backend {
+        try append_field(allocator, out, "default");
+    } else {
+        try append_field(allocator, out, "llvm");
+    }
+    try append_fields(allocator, out, &options.libraries);
+    try append_fields(allocator, out, &options.frameworks);
+    try append_fields(allocator, out, &options.library_search);
+    try append_fields(allocator, out, &options.framework_search);
+    return null;
+}
+
+pub fn links_only_system(options: &Options) -> bool {
+    return options.libraries.len() == 0 and options.frameworks.len() == 0 and
+        options.library_search.len() == 0 and options.framework_search.len() == 0;
+}
+
 fn runtime_cache_target(allocator: Allocator,
     options: &Options,
     host: &string::String,

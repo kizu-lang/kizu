@@ -19,8 +19,8 @@ A1・A2 と U3(`--opt --thinlto`)は実装済みで、今の形は `docs/perf.md
 | **A1(最初の一段)** | front end は今のまま全体。debug build の LLVM 出力を module ごとの unit に割り、unit ごとに object を cache して link | 1 module の編集で clang が compile し直すのはその unit だけ | perf-audit #19(cache の LRU 化) |
 | A2 | unit の compile を並行に起動 | cold build / bootstrap 第 2 段の wall time | A1 |
 | B1 | export data と public interface hash を作る(まだ skip には使わない) | ― (`why-rebuild` の説明) | なし |
-| B2 | compiler identity を cache key に入れられるようにする | ― | 未決 U1 |
-| B3 | module ごとに front end を回し、unit text を cache する | front end(compiler で 7〜10s)の再処理範囲 | B1, B2, 未決 U2 |
+| B2 | compiler identity を cache key に入れられるようにする | no-op build | 実装済み |
+| B3 | module ごとに front end を回し、unit text を cache する | front end(compiler で 7〜10s)の再処理範囲 | B1, 未決 U2 |
 
 A1 は cache key が**生成物の中身(unit の IR text)そのもの**なので、interface hash も
 compiler identity も要らず、stale hit が構造的に起きない(ADR-0126 と同じ理屈)。
@@ -246,9 +246,8 @@ unit 単位の clang を並行に起動する。Go が package を並行に comp
 
 ### B2: compiler identity
 
-front end の出力(unit text)を cache するには、key に compiler 自身が要る。ADR-0126 は
-これが無いので text cache を廃止した。未決 U1 を決め、ADR-0126 を書き換える
-(新しい ADR は足さない)。
+compiler の実行ファイルの SHA-256 を compiler identity とする(ADR-0126)。`build --target
+native` の build plan が使っており、unit text の key にも同じものを入れる。
 
 ### B3: module ごとの front end
 
@@ -275,7 +274,6 @@ front end の出力(unit text)を cache するには、key に compiler 自身�
 
 | ID | 問い | 選択肢 | 判断材料 |
 | --- | --- | --- | --- |
-| U1 | compiler identity をどう作るか(B2) | (a) 実行ファイルの path を std から取れるようにし binary を hash する(Go の build ID 相当) (b) build 時に compiler/ と std の source tree hash を version module に生成して埋める(`gen-selfhost-version` の延長) | ADR-0126 は「selfhost が自分の path を知れない」「version 文字列は開発中に変わらない」で却下した。(b) は両方を避ける。(a) は毎回 18MB 級の hash(perf-audit #3 で Kizu の SHA-256 は遅い) |
 | U2 | error code を module 間で独立に決める方法(B3) | (a) qualified な member 名の hash から code を作り、program unit で衝突を検査 (b) module ごとの番号範囲 (c) 現状維持し、error set を持つ module の追加・削除で後続 module を再処理する | ADR-0127(合成 set は code の和集合で再番号しない)と、runtime の `#define` は std の set だけを使うこと(`runtimeErrorSets`)。code の値が SPEC の約束に入るなら SPEC 判断 |
 | U3 | `--opt` に ThinLTO を入れるか | (a) single unit のまま (b) unit を bitcode にして `-flto=thin` + ThinLTO cache | toolchain 依存(Apple ld64 の libLTO、llvm-mingw の lld)、binary 速度の差、release build 時間。A1 の後に compiler の `--opt` build で測る |
 | U4 | debug の `build --emit-llvm` が何を印字するか | (a) 今どおり single unit の text (b) unit ごとの file を directory に出す | (a) は compile される text と別物になる。(b) は出力の形が変わる |

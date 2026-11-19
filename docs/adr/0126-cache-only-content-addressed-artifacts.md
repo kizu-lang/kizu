@@ -1,4 +1,4 @@
-# ADR-0126: build cache は content-addressed な artifact だけを保持する
+# ADR-0126: build cache の key は、仕事を決めるものをすべて含む
 
 Status: 採用
 
@@ -17,27 +17,34 @@ build cache には 2 種類の entry があった。
 text entry の key は compiler 自身を含まない。compiler を変えて同じ source を
 lower すると、cache は**古い compiler の出力を正とした text** を返す。これは
 「cache は済んだ仕事の記録」に反する: 仕事の同一性には、それを行った道具が
-含まれる。selfhost 移植で Go CLI と selfhost が cache を共有するようになり、
-この取り違えは 2 つの compiler 間でも起きるようになった。
+含まれる。
+
+一方、artifact だけにすると、何も変えていない `kizu build` も front end と backend を
+全部回す。compiler 自身の build で 3.1 秒かかり、合成した 16 万行の package では Go の no-op build の約 24 倍だった。
 
 ## 決定
 
-text entry を廃止し、cache は content-addressed な artifact だけを持つ。
-`build --emit-llvm` と `--target wasm32-wasi` は毎回 lower して印字する。
-`GetOrBuild` / `newFileInput` / `writeEntry` / `Result` は削除する。
+cache の entry は 2 種類とし、どちらも仕事を決めるものをすべて key に持つ。
 
-artifact entry は影響を受けない。runtime object の key はその C source の
-bytes を、実行ファイルの key は LLVM IR text と runtime source の hash を含むので、
-compiler が変われば IR が変わり、key も変わる。stale hit は構造的に起きない。
+- **artifact**: 生成物の中身から key を作る。compiler が変われば IR が変わるので、
+  compiler 自身は key に要らない。
+- **build plan**(`native-plan`): `build --target native` の実行ファイル。key は
+  compiler の実行ファイルの SHA-256、target、lib dir、出力先、native option、
+  toolchain(`clang --version` の 1 行目、host、`SDKROOT`)から作る。entry は前回の
+  build が読んだ入力の一覧と実行ファイルを持つ。入力は読んだ file すべて(source、std、
+  manifest、`@embed_file`)の中身の hash と、走査した directory の `.kizu` file と
+  sub directory の名前の hash で、全部一致したときだけ実行ファイルを返す。
 
-text の生成(parse → check → lower → emit)は toolchain を伴わず安価で、
-cache の利得は計測可能なほど無い。高価なのは clang の compile / link だけで、
-それは artifact 側が持ち続ける。
+library や framework を link する build は plan を残さない。link する file の中身を
+追跡していないため。`build --emit-llvm` と `--target wasm32-wasi` は毎回 lower して
+印字する。text の生成は toolchain を伴わず安価で、cache の利得が無い。
 
 ## 却下した案
 
 | 案 | 却下理由 |
 | --- | --- |
-| compiler binary の hash を key に足す | 決定時の selfhost は自分の実行ファイルの path を知る手段が無く(当時の std::process は argv[0] を出さなかった。今は `std::process::executable_path` がある)、Go CLI とだけ key が付く非対称な cache になる |
-| `Version` 定数を挙動変更のたびに手で bump する | 人の記憶に依存して漂流する。bump を忘れた 1 回が stale text を配る |
+| source の hash だけを key にする | compiler を変えたときに古い出力を返す |
+| `Version` 定数を挙動変更のたびに手で bump する | 人の記憶に依存して漂流する。bump を忘れた 1 回が stale な出力を配る |
 | version command の文字列を key に足す | 開発 build は `devel` で全部同じ key になり、いちばん compiler が変わる状況で効かない |
+| build 時に compiler と std の source tree hash を binary に埋め込む | 毎回の hash(12 MB で約 33 ms)は省けるが、埋め込みの更新を忘れた build が stale な出力を返す |
+| file の時刻と大きさで変更を判定する | 速いが、時刻を保ったまま中身が変わる操作で stale な出力を返す |

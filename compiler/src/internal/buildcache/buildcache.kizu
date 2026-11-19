@@ -171,6 +171,56 @@ pub fn (self: &var Cache) get_or_build_artifact(
     });
 }
 
+pub fn (self: &var Cache) find_artifact(
+    io: Io,
+    allocator: Allocator,
+    name: []u8,
+    target: []u8,
+    content: []u8,
+    out_path: &var string::String
+) -> !bool {
+    let input = try self.new_input(allocator, name, target, content);
+    defer input.deinit(allocator);
+    if !try self.artifact_hit(io, allocator, &input.key) {
+        return false;
+    }
+    try self.mark_used(io, allocator, &input.key);
+    let stored = try output_name_of(allocator, &input.key);
+    defer stored.deinit(allocator);
+    let output = try self.output_path_of(allocator, &stored);
+    defer output.deinit(allocator);
+    try out_path.append_string(allocator, &output);
+    return true;
+}
+
+pub fn (self: &var Cache) replace_artifact(
+    io: Io,
+    allocator: Allocator,
+    name: []u8,
+    target: []u8,
+    content: []u8
+) -> !PendingArtifact {
+    let input = try self.new_input(allocator, name, target, content);
+    errdefer input.deinit(allocator);
+    let stored = try output_name_of(allocator, &input.key);
+    errdefer stored.deinit(allocator);
+    let output = try self.output_path_of(allocator, &stored);
+    errdefer output.deinit(allocator);
+    let dir_bytes = self.dir.as_bytes();
+    try fsutil::create_dir_all(io, dir_bytes);
+    var scratch_name = string::new(allocator);
+    defer scratch_name.deinit(allocator);
+    try fsutil::append_scratch_name(allocator, &input.key, self.scratch_sequence, &var scratch_name);
+    self.scratch_sequence = self.scratch_sequence + 1;
+    let scratch = try self.output_path_of(allocator, &scratch_name);
+    return PendingArtifact {
+        input: move input,
+        scratch: move scratch,
+        stored: move stored,
+        output: move output
+    };
+}
+
 pub fn (self: &Cache) finish_artifact(
     io: Io,
     allocator: Allocator,

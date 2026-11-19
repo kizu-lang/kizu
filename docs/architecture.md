@@ -33,7 +33,7 @@ compiler/            shipping する Kizu 製 compiler(pin した種が build �
     staticexpr, stdmath           static 引数の整数式と、comptime の sin / cos(std::math と同じ bit)
     unsafecap                     unsafe が覆う操作の種類と診断文言
     version                       binary の名乗り(生成 source)
-    fmt, diagnostic, buildcache, cimport
+    fmt, diagnostic, buildcache, buildplan, cimport
   tests/             frontend / IR / LLVM の corpus、MBT fixture、test harness
 scripts/             種の取得と bootstrap(bootstrap.sh)、生成器、計測
 lib/kizu/             release binaryが隣で読むlibrary tree

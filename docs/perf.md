@@ -42,6 +42,7 @@ baseline として `examples/user_registry.kizu` を使います。
 | unit object(`native-obj`) | unit の LLVM IR + toolchain + `clang --version` の 1 行目 | debug の native link で miss した unit(`build --target native` も含む) |
 | unit bitcode(`native-bc`) | 同上(toolchain に `-flto=thin` と link 側の codegen flag が入る) | `build --target native --opt --thinlto` で miss した unit |
 | run/test 実行ファイル | 全 unit の LLVM IR の hash を unit 順に並べたもの + runtime C source の hash + toolchain | `run` / `test` の link |
+| build plan(`native-plan`) | compiler の実行ファイルの hash + target + lib dir + 出力先 + native option + toolchain | library を link しない `build --target native` の成功。同じ key の entry は置き換える |
 
 debug build は LLVM IR を module ごとの unit と program unit(package の `main`、test
 runner、error 名の表)に割り、unit ごとに object を作って link します。cache に無い
@@ -59,6 +60,10 @@ prune も linker の既定に任せます(空の cache で build すればここ
 toolchain は driver・target・flag・SDK です。`build --emit-llvm` の LLVM IR と
 `build --target wasm32-wasi` の出力は cache せず、毎回 lower します(ADR-0126)。
 
+build plan は、前回の build が読んだ file の中身の hash と、走査した directory の
+`.kizu` file と sub directory の名前の hash を持ちます。全部一致すれば compile も link も
+せずに実行ファイルを返し、1 つでも違えば build し直して entry を置き換えます。
+
 `cache prune` が全消し、既定の上限(256 MiB)を超えた分は最後に使われたのが古い順
 (LRU)に落ちます。hit のたびに entry の `used_at` を更新します。保存のたびに見るのは
 artifact の file サイズの合計だけで、entry を全部読んで並べるのは上限を超えたときだけです。
@@ -74,9 +79,10 @@ match で復元しますが、全 test は毎回実行し、key が合わない 
 ## cache 設計の制約
 
 - 既定の上限を持ち、`cache status` で見え、`cache prune` で消せる
-- cache key は artifact が何でできているか(LLVM IR・runtime source・toolchain)
+- artifact の cache key は何でできているか(LLVM IR・runtime source・toolchain)
   だけから作り、source path や時刻を入れない。compiler が変われば IR が変わるので
-  key も変わる(ADR-0126)
+  key も変わる。build plan の key は compiler の実行ファイルの hash を含み、入力は
+  中身の hash で確かめ、時刻を使わない(ADR-0126)
 - debug artifact は明示 opt-in
 - build script と proc macro による隠れた依存を作らない
 - CI の必須 path に巨大 artifact 生成や無制限 cache population を入れない

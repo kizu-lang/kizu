@@ -1,0 +1,414 @@
+import compiler::internal::buildcache;
+import compiler::internal::fsutil;
+import compiler::internal::sha256;
+import std::array;
+import std::fmt;
+import std::fs;
+import std::map;
+import std::mem;
+import std::path;
+import std::sort;
+import std::string;
+
+extern "c" fn chmod(file: ptr<const u8>, mode: u32) -> i32
+extern "c" fn umask(mask: u32) -> u32
+fn artifact_name() -> []u8 {
+    return "native-plan";
+}
+
+fn artifact_target() -> []u8 {
+    return "native-plan/exe";
+}
+
+fn header() -> []u8 {
+    return "kizu-native-plan-1";
+}
+
+pub struct InputLog {
+    pub enabled: bool,
+    pub stable: bool,
+    files: map::Map<[]u8, string::String>,
+    dirs: map::Map<[]u8, string::String>,
+}
+
+pub fn new_log(allocator: Allocator, enabled: bool) -> InputLog {
+    return InputLog {
+        enabled: enabled,
+        stable: true,
+        files: map::new<[]u8, string::String>(allocator),
+        dirs: map::new<[]u8, string::String>(allocator)
+    };
+}
+
+fn note(
+    allocator: Allocator,
+    seen: &var map::Map<[]u8, string::String>,
+    stable: &var bool,
+    name: []u8,
+    bytes: []u8
+) -> !void {
+    var digest = string::new(allocator);
+    errdefer digest.deinit(allocator);
+    try sha256::append_hex_digest(allocator, bytes, &var digest);
+    if seen.at(name) |previous| {
+        let previous_bytes = previous.as_bytes();
+        let digest_bytes = digest.as_bytes();
+        if !mem::equal_bytes(previous_bytes, digest_bytes) {
+            stable.* = false;
+        }
+        digest.deinit(allocator);
+        return;
+    }
+    return seen.insert(allocator, name, move digest);
+}
+
+pub fn (self: &var InputLog) add_file(allocator: Allocator, file: []u8, bytes: []u8) -> !void {
+    if !self.enabled {
+        return;
+    }
+    return note(allocator, &var self.files, &var self.stable, file, bytes);
+}
+
+pub fn (self: &var InputLog) add_text(allocator: Allocator, file: []u8, text: &string::String) -> !void {
+    let bytes = text.as_bytes();
+    return self.add_file(allocator, file, bytes);
+}
+
+pub fn (self: &var InputLog) add_dir(
+    allocator: Allocator,
+    dir: []u8,
+    entries: &array::Array<fs::DirEntry>
+) -> !void {
+    if !self.enabled {
+        return;
+    }
+    var listing = string::new(allocator);
+    defer listing.deinit(allocator);
+    try append_listing(allocator, entries, &var listing);
+    let listing_bytes = listing.as_bytes();
+    return note(allocator, &var self.dirs, &var self.stable, dir, listing_bytes);
+}
+
+pub fn (self: &var InputLog) merge(allocator: Allocator, other: &InputLog) -> !void {
+    if !other.stable {
+        self.stable = false;
+    }
+    try merge_into(allocator, &var self.files, &var self.stable, &other.files);
+    return merge_into(allocator, &var self.dirs, &var self.stable, &other.dirs);
+}
+
+fn merge_into(
+    allocator: Allocator,
+    into: &var map::Map<[]u8, string::String>,
+    stable: &var bool,
+    from: &map::Map<[]u8, string::String>
+) -> !void {
+    var index = 0;
+    while from.key_at(index) |name| {
+        index = index + 1;
+        if from.at(name) |digest| {
+            let digest_bytes = digest.as_bytes();
+            if into.at(name) |previous| {
+                let previous_bytes = previous.as_bytes();
+                if !mem::equal_bytes(previous_bytes, digest_bytes) {
+                    stable.* = false;
+                }
+            } else {
+                try into.insert(allocator, name, try string::from_bytes(allocator, digest_bytes));
+            }
+        }
+    }
+    return;
+}
+
+fn append_listing(
+    allocator: Allocator,
+    entries: &array::Array<fs::DirEntry>,
+    out: &var string::String
+) -> !void {
+    var lines = array::new<string::String>(allocator);
+    defer lines.deinit(allocator);
+    var index = 0;
+    while entries.at(index) |entry| {
+        index = index + 1;
+        let name = entry.name.as_bytes();
+        if entry.is_dir {
+            var line = try string::from_bytes(allocator, "d ");
+            errdefer line.deinit(allocator);
+            try line.append_bytes(allocator, name);
+            try lines.append(allocator, move line);
+        } else if fsutil::has_suffix(name, ".kizu") {
+            var line = try string::from_bytes(allocator, "f ");
+            errdefer line.deinit(allocator);
+            try line.append_bytes(allocator, name);
+            try lines.append(allocator, move line);
+        }
+    }
+    try sort::strings(&var lines);
+    index = 0;
+    while lines.at(index) |line| {
+        index = index + 1;
+        try out.append_string(allocator, line);
+        try out.append_byte(allocator, cast<u8>(10));
+    }
+    return;
+}
+
+fn has_newline(text: []u8) -> bool {
+    for 0..mem::len(text) |index| {
+        if text[index] == cast<u8>(10) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn append_records(
+    allocator: Allocator,
+    kind: []u8,
+    seen: &map::Map<[]u8, string::String>,
+    out: &var string::String
+) -> !bool {
+    var index = 0;
+    while seen.key_at(index) |name| {
+        index = index + 1;
+        if has_newline(name) {
+            return false;
+        }
+        if seen.at(name) |digest| {
+            try out.append_bytes(allocator, kind);
+            try out.append_byte(allocator, cast<u8>(32));
+            try out.append_string(allocator, digest);
+            try out.append_byte(allocator, cast<u8>(32));
+            try out.append_bytes(allocator, name);
+            try out.append_byte(allocator, cast<u8>(10));
+        }
+    }
+    return true;
+}
+
+fn append_section(allocator: Allocator, kind: []u8, bytes: []u8, out: &var string::String) -> !void {
+    try out.append_bytes(allocator, kind);
+    try out.append_byte(allocator, cast<u8>(32));
+    try fmt::append_i64(allocator, out, mem::len(bytes));
+    try out.append_byte(allocator, cast<u8>(10));
+    return out.append_bytes(allocator, bytes);
+}
+
+fn metadata_path(allocator: Allocator, output: []u8) -> !string::String {
+    var file = try string::from_bytes(allocator, output);
+    errdefer file.deinit(allocator);
+    try file.append_bytes(allocator, ".kizu-build.json");
+    return move file;
+}
+
+pub fn store(
+    io: Io,
+    allocator: Allocator,
+    cache: &var buildcache::Cache,
+    request: []u8,
+    log: &InputLog,
+    output: []u8
+) -> !void {
+    if !log.stable {
+        return;
+    }
+    var plan = try string::from_bytes(allocator, header());
+    defer plan.deinit(allocator);
+    try plan.append_byte(allocator, cast<u8>(10));
+    if !try append_records(allocator, "f", &log.files, &var plan) {
+        return;
+    }
+    if !try append_records(allocator, "d", &log.dirs, &var plan) {
+        return;
+    }
+    let metadata_file = try metadata_path(allocator, output);
+    defer metadata_file.deinit(allocator);
+    let metadata_bytes = metadata_file.as_bytes();
+    let metadata = try fs::read_file(io, allocator, metadata_bytes, mem::Limit::Unlimited);
+    defer metadata.deinit(allocator);
+    let executable = try fs::read_file(io, allocator, output, mem::Limit::Unlimited);
+    defer executable.deinit(allocator);
+    let metadata_text = metadata.as_bytes();
+    try append_section(allocator, "meta", metadata_text, &var plan);
+    let executable_bytes = executable.as_bytes();
+    try append_section(allocator, "exe", executable_bytes, &var plan);
+    let pending = try cache.replace_artifact(io, allocator, artifact_name(), artifact_target(), request);
+    errdefer pending.deinit(allocator);
+    let scratch = pending.scratch.as_bytes();
+    let plan_bytes = plan.as_bytes();
+    try fs::write_file(io, scratch, plan_bytes);
+    return cache.finish_artifact(io, allocator, move pending);
+}
+
+fn line_end(bytes: []u8, from: i64) -> i64 {
+    var end = from;
+    while end < mem::len(bytes) {
+        if bytes[end] == cast<u8>(10) {
+            return end;
+        }
+        end = end + 1;
+    }
+    return 0 - 1;
+}
+
+fn parse_length(text: []u8) -> i64 {
+    if mem::len(text) == 0 {
+        return 0 - 1;
+    }
+    var value = 0;
+    for 0..mem::len(text) |index| {
+        let digit = cast<i64>(text[index]) - 48;
+        if digit < 0 or digit > 9 {
+            return 0 - 1;
+        }
+        value = value * 10 + digit;
+    }
+    return value;
+}
+
+fn same_digest(allocator: Allocator, bytes: []u8, want: []u8) -> !bool {
+    var digest = string::new(allocator);
+    defer digest.deinit(allocator);
+    try sha256::append_hex_digest(allocator, bytes, &var digest);
+    let digest_bytes = digest.as_bytes();
+    return mem::equal_bytes(digest_bytes, want);
+}
+
+fn file_matches(io: Io, allocator: Allocator, file: []u8, want: []u8) -> !bool {
+    let text = fs::read_file(io, allocator, file, mem::Limit::Unlimited) catch return false;
+    defer text.deinit(allocator);
+    let bytes = text.as_bytes();
+    return same_digest(allocator, bytes, want);
+}
+
+fn dir_matches(io: Io, allocator: Allocator, dir: []u8, want: []u8) -> !bool {
+    var entries = fs::read_dir(io, allocator, dir) catch return false;
+    defer entries.deinit(allocator);
+    var listing = string::new(allocator);
+    defer listing.deinit(allocator);
+    try append_listing(allocator, &entries, &var listing);
+    let listing_bytes = listing.as_bytes();
+    return same_digest(allocator, listing_bytes, want);
+}
+
+fn record_matches(io: Io, allocator: Allocator, record: []u8) -> !bool {
+    let digest_end = 2 + 64;
+    if mem::len(record) <= digest_end + 1 or record[1] != cast<u8>(32) or record[digest_end] != cast<u8>(32) {
+        return false;
+    }
+    let want = record[2..digest_end];
+    let name = record[digest_end + 1..mem::len(record)];
+    if record[0] == cast<u8>(102) {
+        return file_matches(io, allocator, name, want);
+    }
+    return dir_matches(io, allocator, name, want);
+}
+
+struct Section {
+    start: i64,
+    end: i64,
+}
+
+fn section_at(bytes: []u8, at: i64, kind: []u8) -> ?Section {
+    let end = line_end(bytes, at);
+    let digits = at + mem::len(kind) + 1;
+    if end < digits or !mem::equal_bytes(bytes[at..digits - 1], kind) {
+        return null;
+    }
+    let length = parse_length(bytes[digits..end]);
+    if length < 0 or end + 1 + length > mem::len(bytes) {
+        return null;
+    }
+    return Section { start: end + 1, end: end + 1 + length };
+}
+
+fn is_record(bytes: []u8, at: i64) -> bool {
+    if at + 1 >= mem::len(bytes) or bytes[at + 1] != cast<u8>(32) {
+        return false;
+    }
+    return bytes[at] == cast<u8>(102) or bytes[at] == cast<u8>(100);
+}
+
+fn same_file(io: Io, allocator: Allocator, file: []u8, bytes: []u8) -> !bool {
+    let held = fs::read_file(io, allocator, file, mem::Limit::Unlimited) catch return false;
+    defer held.deinit(allocator);
+    let held_bytes = held.as_bytes();
+    return mem::equal_bytes(held_bytes, bytes);
+}
+
+fn make_executable(allocator: Allocator, file: []u8) -> !void {
+    comptime if !std::target::is_windows() {
+        var spelled = try string::from_bytes(allocator, file);
+        defer spelled.deinit(allocator);
+        try spelled.append_byte(allocator, cast<u8>(0));
+        let spelled_bytes = spelled.as_bytes();
+        // SAFETY: umask(2) only swaps the process mask, and the old mask is put back before anything creates a file
+        let mask = unsafe umask(cast<u32>(0));
+        // SAFETY: as above
+        let _ = unsafe umask(mask);
+        let mode = cast<u32>(511) & ~mask;
+        // SAFETY: spelled_bytes ends in NUL and chmod(2) keeps no pointer to it
+        let _ = unsafe chmod(ptr_of(spelled_bytes), mode);
+    }
+    return;
+}
+
+fn install(io: Io, allocator: Allocator, file: []u8, bytes: []u8, executable: bool) -> !void {
+    if try same_file(io, allocator, file, bytes) {
+        return;
+    }
+    var scratch = try string::from_bytes(allocator, file);
+    defer scratch.deinit(allocator);
+    try scratch.append_byte(allocator, cast<u8>(46));
+    var name = try string::from_bytes(allocator, path::basename(file));
+    defer name.deinit(allocator);
+    try fsutil::append_scratch_name(allocator, &name, 0, &var scratch);
+    let scratch_bytes = scratch.as_bytes();
+    try fs::write_file(io, scratch_bytes, bytes);
+    if executable {
+        try make_executable(allocator, scratch_bytes);
+    }
+    return fs::rename(io, scratch_bytes, file);
+}
+
+pub fn restore(
+    io: Io,
+    allocator: Allocator,
+    cache: &var buildcache::Cache,
+    request: []u8,
+    output: []u8
+) -> !bool {
+    var stored = string::new(allocator);
+    defer stored.deinit(allocator);
+    if !try cache.find_artifact(io, allocator, artifact_name(), artifact_target(), request, &var stored) {
+        return false;
+    }
+    let stored_bytes = stored.as_bytes();
+    let plan = fs::read_file(io, allocator, stored_bytes, mem::Limit::Unlimited) catch return false;
+    defer plan.deinit(allocator);
+    let plan_bytes = plan.as_bytes();
+    let first_end = line_end(plan_bytes, 0);
+    if first_end < 0 or !mem::equal_bytes(plan_bytes[0..first_end], header()) {
+        return false;
+    }
+    var at = first_end + 1;
+    while is_record(plan_bytes, at) {
+        let end = line_end(plan_bytes, at);
+        if end < 0 or !try record_matches(io, allocator, plan_bytes[at..end]) {
+            return false;
+        }
+        at = end + 1;
+    }
+    let metadata_at = section_at(plan_bytes, at, "meta") orelse return false;
+    let executable_at = section_at(plan_bytes, metadata_at.end, "exe") orelse return false;
+    let metadata = plan_bytes[metadata_at.start..metadata_at.end];
+    let executable = plan_bytes[executable_at.start..executable_at.end];
+    try fsutil::create_dir_all(io, path::dirname(output));
+    try install(io, allocator, output, executable, true);
+    let metadata_file = try metadata_path(allocator, output);
+    defer metadata_file.deinit(allocator);
+    let metadata_bytes = metadata_file.as_bytes();
+    try install(io, allocator, metadata_bytes, metadata, false);
+    return true;
+}
