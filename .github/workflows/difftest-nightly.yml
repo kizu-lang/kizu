@@ -1,0 +1,89 @@
+name: difftest-nightly
+
+# Tries seeds of scripts/difftest-generated.sh that pull requests never run,
+# for a fixed time on each platform, and opens an issue when the direct backend
+# and LLVM disagree. Pull requests stay on seed 1, so this job is the one that
+# explores.
+#
+# It runs only on schedule and by hand, so it builds main and nothing from a
+# pull request reaches the issue it writes. The seeds start from the date, and
+# the issue names the seed, so a difference reproduces with
+# `scripts/difftest-generated.sh <kizu> <seed>`.
+on:
+  schedule:
+    - cron: "17 18 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  search:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Build stage1 from the seed
+        run: scripts/bootstrap.sh --stage1-only
+      - name: Search seeds
+        id: search
+        shell: bash
+        env:
+          SEARCH_SECONDS: "900"
+        run: |
+          set -u
+          first="$(date -u +%Y%m%d)000"
+          seed="$first"
+          deadline=$(($(date +%s) + SEARCH_SECONDS))
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            if ! scripts/difftest-generated.sh target/seed/stage1/bin/kizu "$seed" >"$RUNNER_TEMP/difftest.txt" 2>&1; then
+              echo "seed=$seed" >>"$GITHUB_OUTPUT"
+              echo "Seed $seed: the direct backend and LLVM differ." >>"$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+            seed=$((seed + 1))
+          done
+          echo "Seeds $first to $((seed - 1)) match." >>"$GITHUB_STEP_SUMMARY"
+      - name: Report the difference
+        if: failure() && steps.search.outputs.seed != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OS: ${{ matrix.os }}
+          SEED: ${{ steps.search.outputs.seed }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          body="$RUNNER_TEMP/issue.md"
+          {
+            echo "difftest-nightly で direct backend と LLVM の結果が食い違いました。"
+            echo
+            echo "- OS: \`$OS\`"
+            echo "- seed: \`$SEED\`"
+            echo "- commit: \`$GITHUB_SHA\`"
+            echo "- run: $RUN_URL"
+            echo
+            echo '再現:'
+            echo
+            echo '```sh'
+            echo "scripts/difftest-generated.sh target/seed/stage1/bin/kizu $SEED"
+            echo '```'
+            echo
+            echo '```text'
+            head -n 300 "$RUNNER_TEMP/difftest.txt"
+            echo '```'
+          } >"$body"
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --label difftest-nightly --state open \
+            --json number,title | jq -r --arg os "$OS" '[.[] | select(.title | contains($os))][0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body-file "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --label difftest-nightly \
+              --title "difftest-nightly: direct backend と LLVM の結果が食い違う ($OS)" --body-file "$body"
+          fi
