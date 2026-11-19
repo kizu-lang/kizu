@@ -2,13 +2,16 @@ import harness::scratch;
 import std::fmt;
 import std::fs;
 import std::io;
+import std::mem;
 import std::net;
 import std::process;
 import std::string;
 
 // A build that finds nothing changed may hand back the executable of the last
-// one. This suite changes one input at a time and requires the next build to
-// see it, and requires what a repeated build hands back to run.
+// one, and a build may take a function's machine code from the last one. This
+// suite changes one input at a time and requires the next build to see it,
+// requires what a repeated build hands back to run, and requires a cut-off
+// cache of machine code to be read as a partial one.
 
 pub error Failure = scratch::Failure or fs::Error or io::Error or net::Error or process::Error;
 
@@ -160,6 +163,23 @@ fn builds_to(handle: Io, allocator: Allocator, project: &Project, step: []u8, wa
     return report(handle, allocator, step, want, got);
 }
 
+fn cut_function_caches(handle: Io, allocator: Allocator, project: &Project) -> Failure!void {
+    var entries = try fs::read_dir(handle, allocator, project.cache);
+    defer entries.deinit(allocator);
+    var index = 0;
+    while entries.at(index) |entry| {
+        index = index + 1;
+        let file = entry.path.as_bytes();
+        var held = try fs::read_file(handle, allocator, file, mem::Limit::Unlimited);
+        defer held.deinit(allocator);
+        let bytes = held.as_bytes();
+        if mem::starts_with(bytes, "kizu-direct-fn-1") {
+            try fs::write_file(handle, file, bytes[0..mem::len(bytes) / 2]);
+        }
+    }
+    return;
+}
+
 fn steps(handle: Io, allocator: Allocator, project: &Project) -> Failure!bool {
     if !try builds_to(handle, allocator, project, "first build", 13) {
         return false;
@@ -171,6 +191,7 @@ fn steps(handle: Io, allocator: Allocator, project: &Project) -> Failure!bool {
     if !try builds_to(handle, allocator, project, "output removed", 13) {
         return false;
     }
+    try cut_function_caches(handle, allocator, project);
     try write_value(handle, allocator, project, "20");
     if !try builds_to(handle, allocator, project, "source edited", 23) {
         return false;

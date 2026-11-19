@@ -24,7 +24,7 @@ lower すると、cache は**古い compiler の出力を正とした text** を
 
 ## 決定
 
-cache の entry は 2 種類とし、どちらも仕事を決めるものをすべて key に持つ。
+cache の entry は 3 種類とし、どれも仕事を決めるものをすべて key に持つ。
 
 - **artifact**: 生成物の中身から key を作る。compiler が変われば IR が変わるので、
   compiler 自身は key に要らない。
@@ -34,6 +34,10 @@ cache の entry は 2 種類とし、どちらも仕事を決めるものをす�
   build が読んだ入力の一覧と実行ファイルを持つ。入力は読んだ file すべて(source、std、
   manifest、`@embed_file`)の中身の hash と、走査した directory の `.kizu` file と
   sub directory の名前の hash で、全部一致したときだけ実行ファイルを返す。
+
+- **関数の機械語**(`native-fn`): direct backend が出力した関数ごとの機械語。entry の
+  key は compiler の実行ファイルの SHA-256 と target で、中の関数ごとの key は inline を
+  終えた MIR と symbol 名の SHA-256。
 
 library や framework を link する build は plan を残さない。link する file の中身を
 追跡していないため。`build --emit-llvm` と `--target wasm32-wasi` は毎回 lower して

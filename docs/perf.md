@@ -42,6 +42,7 @@ baseline として `examples/user_registry.kizu` を使います。
 | unit object(`native-obj`) | unit の LLVM IR + toolchain + `clang --version` の 1 行目 | debug の native link で miss した unit(`build --target native` も含む) |
 | unit bitcode(`native-bc`) | 同上(toolchain に `-flto=thin` と link 側の codegen flag が入る) | `build --target native --opt --thinlto` で miss した unit |
 | run/test 実行ファイル | 全 unit の LLVM IR の hash を unit 順に並べたもの + runtime C source の hash + toolchain | `run` / `test` の link |
+| 関数の機械語(`native-fn`) | compiler の実行ファイルの hash + arch + object 形式。entry の中は関数ごとに、inline 後の MIR と symbol 名の SHA-256 | direct backend の build のたび。その build が出力した関数だけを持つ entry に置き換える |
 | build plan(`native-plan`) | compiler の実行ファイルの hash + target + lib dir + 出力先 + native option + toolchain | library を link しない `build --target native` の成功。同じ key の entry は置き換える |
 
 debug build は LLVM IR を module ごとの unit と program unit(package の `main`、test
@@ -59,6 +60,10 @@ prune も linker の既定に任せます(空の cache で build すればここ
 
 toolchain は driver・target・flag・SDK です。`build --emit-llvm` の LLVM IR と
 `build --target wasm32-wasi` の出力は cache せず、毎回 lower します(ADR-0126)。
+
+direct backend は、inline を終えた関数の MIR が前回と同じなら、register 割り当てと
+命令の出力を飛ばして前回の機械語を使います。保存するのは jump の長さを決める前の状態で、
+長さはその場で決め直すので、関数の置き場所が変わっても出力は cache なしの build と同じです。
 
 build plan は、前回の build が読んだ file の中身の hash と、走査した directory の
 `.kizu` file と sub directory の名前の hash を持ちます。全部一致すれば compile も link も

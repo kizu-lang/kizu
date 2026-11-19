@@ -12,12 +12,23 @@ pub enum Format {
     Coff,
 }
 
-pub fn emit_object(allocator: Allocator, module: &ir::Module, arch: Arch, format: Format, out: &var string::String) -> !?diagnostic::Diagnostic {
+pub fn emit_object(
+    allocator: Allocator,
+    module: &ir::Module,
+    arch: Arch,
+    format: Format,
+    reuse: &var Reuse,
+    known: []u8,
+    out: &var string::String
+) -> !?diagnostic::Diagnostic {
     var sink = new_out(allocator, format);
     defer sink.deinit(allocator);
     let x86 = is_x86(arch);
     sink.obj.x86 = x86;
-    if try emit_into(allocator, module, arch, format, &var sink) |failed| {
+    if format == Format::Elf and !x86 {
+        reuse.enabled = false;
+    }
+    if try emit_into(allocator, module, arch, format, reuse, known, &var sink) |failed| {
         return move failed;
     }
     if sink.obj.failure.len() > 0 {
@@ -48,7 +59,15 @@ fn (self: &var Out) word(allocator: Allocator, value: i64, what: []u8) -> !void 
     return self.obj.word(allocator, value, what);
 }
 
-fn emit_into(allocator: Allocator, module: &ir::Module, arch: Arch, format: Format, out: &var Out) -> !?diagnostic::Diagnostic {
+fn emit_into(
+    allocator: Allocator,
+    module: &ir::Module,
+    arch: Arch,
+    format: Format,
+    reuse: &var Reuse,
+    known: []u8,
+    out: &var Out
+) -> !?diagnostic::Diagnostic {
     var selector = try new_selector(allocator, arch);
     defer selector.deinit(allocator);
     try selector.index_functions(module);
@@ -92,11 +111,11 @@ fn emit_into(allocator: Allocator, module: &ir::Module, arch: Arch, format: Form
         if try selector.select_function(module, function) |failed| {
             return move failed;
         }
-        try emit_selected(allocator, out, &var selector, &var inliner, symbol, exported, arch, format);
+        try emit_selected(allocator, out, &var selector, &var inliner, reuse, known, symbol, exported, arch, format);
         if thunk {
             try selector.select_export_thunk(module, function_node);
             let thunk_symbol = try selector.export_thunk_symbol(module, name);
-            try emit_selected(allocator, out, &var selector, &var inliner, thunk_symbol, c_symbol, arch, format);
+            try emit_selected(allocator, out, &var selector, &var inliner, reuse, known, thunk_symbol, c_symbol, arch, format);
         }
     }
     if selector.main_wraps {
@@ -104,14 +123,14 @@ fn emit_into(allocator: Allocator, module: &ir::Module, arch: Arch, format: Form
             return move failed;
         }
         let main_symbol = try selector.syms.intern("_main");
-        try emit_selected(allocator, out, &var selector, &var inliner, main_symbol, ir::empty_name(), arch, format);
+        try emit_selected(allocator, out, &var selector, &var inliner, reuse, known, main_symbol, ir::empty_name(), arch, format);
     }
     for 0..2 |kind| {
         let states = kind == 1;
         if (states and selector.state_invokes) or (!states and selector.invokes) {
             try selector.select_thread_invoke(states);
             let invoke_symbol = try selector.invoke_symbol(states);
-            try emit_selected(allocator, out, &var selector, &var inliner, invoke_symbol, ir::empty_name(), arch, format);
+            try emit_selected(allocator, out, &var selector, &var inliner, reuse, known, invoke_symbol, ir::empty_name(), arch, format);
         }
     }
     var task_index = 0;
@@ -121,7 +140,7 @@ fn emit_into(allocator: Allocator, module: &ir::Module, arch: Arch, format: Form
             return move failed;
         }
         let task_symbol = try selector.task_invoke_symbol(module, state_type);
-        try emit_selected(allocator, out, &var selector, &var inliner, task_symbol, ir::empty_name(), arch, format);
+        try emit_selected(allocator, out, &var selector, &var inliner, reuse, known, task_symbol, ir::empty_name(), arch, format);
     }
     if selector.main_wraps {
         try write_error_names(allocator, module, &var selector, out);
@@ -148,6 +167,8 @@ fn emit_selected(
     out: &var Out,
     selector: &var Selector,
     inliner: &var Inliner,
+    reuse: &var Reuse,
+    known: []u8,
     symbol: ir::Name,
     exported: ir::Name,
     arch: Arch,
@@ -158,15 +179,40 @@ fn emit_selected(
     defer func.deinit(allocator);
     try inliner.inline_into(allocator, &var func, symbol);
     try inliner.remember(allocator, &func, symbol);
+    var key = string::new(allocator);
+    defer key.deinit(allocator);
+    if reuse.enabled {
+        let salt = reuse.salt.as_bytes();
+        try function_key(allocator, &func, symbol, exported, &selector.syms, arch, format, salt, &var key);
+        let key_bytes = key.as_bytes();
+        if reuse.reusable(key_bytes, known, &selector.syms) |span| {
+            try begin_symbol(allocator, out, &func, symbol, exported, &selector.syms);
+            try reuse.replay_span(allocator, &var out.obj, &selector.syms, key_bytes, known, span);
+            return out.obj.end_function(allocator);
+        }
+    }
     let allocation = try allocate(allocator, &var func, arch);
     defer allocation.deinit(allocator);
     try begin_symbol(allocator, out, &func, symbol, exported, &selector.syms);
+    let start = out.obj.here();
+    let reloc_start = out.obj.reloc_count();
+    let symbol_start = out.obj.symbols.len();
     if is_x86(arch) {
         try amd64_print_function(allocator, out, &var func, &allocation, &selector.syms, arch, format);
     } else {
         try print_function(allocator, out, &var func, &allocation, &selector.syms);
     }
-    return;
+    if reuse.enabled and out.obj.failure.len() == 0 {
+        var record = string::new(allocator);
+        defer record.deinit(allocator);
+        if try capture(allocator, &out.obj, &selector.syms, start, reloc_start, symbol_start, &var record) {
+            let key_bytes = key.as_bytes();
+            let record_bytes = record.as_bytes();
+            try reuse.keep(allocator, key_bytes, record_bytes);
+        }
+        reuse.misses = reuse.misses + 1;
+    }
+    return out.obj.end_function(allocator);
 }
 
 fn begin_symbol(allocator: Allocator, out: &var Out, func: &MFunction, name: ir::Name, exported: ir::Name, syms: &ir::NameTable) -> !void {
@@ -575,7 +621,6 @@ fn print_function(
             }
         }
     }
-    try out.obj.end_function(allocator);
     return;
 }
 

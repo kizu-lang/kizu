@@ -1861,7 +1861,8 @@ fn default_native_options(allocator: Allocator) -> !native::Options {
         libraries: array::new<string::String>(allocator),
         frameworks: array::new<string::String>(allocator),
         library_search: array::new<string::String>(allocator),
-        framework_search: array::new<string::String>(allocator)
+        framework_search: array::new<string::String>(allocator),
+        compiler: string::new(allocator)
     };
 }
 
@@ -2130,6 +2131,22 @@ fn planned_native_build(
     return code;
 }
 
+fn compiler_digest(io: Io, allocator: Allocator, options: &var native::Options, out: &var string::String) -> !bool {
+    if options.compiler.len() > 0 {
+        try out.append_string(allocator, &options.compiler);
+        return true;
+    }
+    let executable = try process::executable_path(allocator);
+    defer executable.deinit(allocator);
+    let executable_bytes = executable.as_bytes();
+    let compiler = fs::read_file(io, allocator, executable_bytes, mem::Limit::Unlimited) catch return false;
+    defer compiler.deinit(allocator);
+    let compiler_bytes = compiler.as_bytes();
+    try sha256::append_hex_digest(allocator, compiler_bytes, &var options.compiler);
+    try out.append_string(allocator, &options.compiler);
+    return true;
+}
+
 fn native_build_request(
     io: Io,
     allocator: Allocator,
@@ -2153,13 +2170,9 @@ fn native_build_request(
         failed.deinit(allocator);
         return false;
     }
-    let executable = try process::executable_path(allocator);
-    defer executable.deinit(allocator);
-    let executable_bytes = executable.as_bytes();
-    let compiler = fs::read_file(io, allocator, executable_bytes, mem::Limit::Unlimited) catch return false;
-    defer compiler.deinit(allocator);
-    let compiler_bytes = compiler.as_bytes();
-    try sha256::append_hex_digest(allocator, compiler_bytes, out);
+    if !try compiler_digest(io, allocator, options, out) {
+        return false;
+    }
     try out.append_byte(allocator, cast<u8>(10));
     try out.append_bytes(allocator, target);
     try out.append_byte(allocator, cast<u8>(10));
@@ -2607,7 +2620,7 @@ fn native_target_with(
                 try units.append(allocator, string::new(allocator));
                 var failure = false;
                 if units.at_mut(0) |object| {
-                    if try direct::emit_object(allocator, &lowered.lowerer.module, direct_arch, format, object) |failed| {
+                    if try emit_direct_object(io, allocator, &lowered.lowerer.module, direct_arch, format, options, object) |failed| {
                         defer failed.deinit(allocator);
                         try report(io, allocator, &loader.sources, &failed);
                         failure = true;
@@ -2649,6 +2662,57 @@ fn native_target_with(
             return 0;
         },
     }
+}
+
+fn emit_direct_object(
+    io: Io,
+    allocator: Allocator,
+    module: &ir::Module,
+    arch: direct::Arch,
+    format: direct::Format,
+    options: &var native::Options,
+    object: &var string::String
+) -> !?diagnostic::Diagnostic {
+    var reuse = direct::new_reuse(allocator);
+    defer reuse.deinit(allocator);
+    var known = string::new(allocator);
+    defer known.deinit(allocator);
+    var cache = try buildcache::new(io, allocator);
+    defer cache.deinit(allocator);
+    let target = direct::reuse_target(arch, format);
+    if try compiler_digest(io, allocator, options, &var reuse.salt) {
+        reuse.enabled = true;
+        var stored = string::new(allocator);
+        defer stored.deinit(allocator);
+        let salt = reuse.salt.as_bytes();
+        if try cache.find_artifact(io, allocator, "native-fn", target, salt, &var stored) {
+            let stored_bytes = stored.as_bytes();
+            if fs::read_file(io, allocator, stored_bytes, mem::Limit::Unlimited) |text| {
+                defer text.deinit(allocator);
+                try known.append_string(allocator, &text);
+            } else |_| {}
+        }
+    }
+    let known_bytes = known.as_bytes();
+    try reuse.index_known(allocator, known_bytes);
+    if try direct::emit_object(allocator, module, arch, format, &var reuse, known_bytes, object) |failed| {
+        return move failed;
+    }
+    if !reuse.enabled or !reuse.changed(known_bytes) {
+        return null;
+    }
+    var blob = try string::from_bytes(allocator, direct::reuse_header());
+    defer blob.deinit(allocator);
+    try blob.append_byte(allocator, cast<u8>(10));
+    try blob.append_string(allocator, &reuse.kept);
+    let salt = reuse.salt.as_bytes();
+    let pending = try cache.replace_artifact(io, allocator, "native-fn", target, salt);
+    errdefer pending.deinit(allocator);
+    let scratch = pending.scratch.as_bytes();
+    let blob_bytes = blob.as_bytes();
+    try fs::write_file(io, scratch, blob_bytes);
+    try cache.finish_artifact(io, allocator, move pending);
+    return null;
 }
 
 fn emit_unit_texts(
