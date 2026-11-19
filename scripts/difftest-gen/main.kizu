@@ -1,0 +1,805 @@
+// Writes one Kizu package whose cases exercise what a code generator can get
+// wrong, for scripts/difftest-generated.sh to build with two backends:
+//
+//     kizu run scripts/difftest-gen/main.kizu -- <seed> <cases> <dir>
+//
+// <dir>/src/data has to exist. The same seed writes the same package.
+//
+// Every case is a function that returns a u64, and main prints its number and
+// its value. All cases share one program so that a run costs one compile and
+// one link per backend. Inputs go through zero(), which the compiler cannot
+// see through, so that the arithmetic happens at run time. Nothing here divides
+// by zero, divides the smallest signed value by -1, or shifts by a negative
+// amount, and floats stay finite: what SPEC leaves undefined is never asked.
+
+import std::fmt;
+import std::fs;
+import std::io;
+import std::mem;
+import std::process;
+import std::rand;
+import std::string;
+
+error Invalid {
+    BadArgument,
+}
+
+error Failure = mem::Error or fs::Error or io::Error or process::Error or Invalid;
+
+const type_count = 8;
+const float_count = 2;
+const boundary_count = 23;
+const float_literal_count = 6;
+const cases_per_runner = 100;
+
+struct Gen {
+    out: string::String,
+    rng: rand::Rng,
+}
+
+fn main() -> Failure!process::ExitStatus {
+    if process::arg_count() != 3 {
+        print("usage: kizu run scripts/difftest-gen/main.kizu -- <seed> <cases> <dir>");
+        return process::ExitStatus::Failure;
+    }
+    let allocator = mem::page_allocator();
+    let handle = io::blocking();
+    let seed = try parse_number(try process::arg(0));
+    let cases = try parse_number(try process::arg(1));
+    let dir = try process::arg(2);
+
+    var gen = Gen { out: string::new(allocator), rng: rand::new(seed) };
+    defer gen.deinit(allocator);
+    var previous = string::new(allocator);
+    defer previous.deinit(allocator);
+
+    try gen.prelude(allocator);
+    var index = 0;
+    while index < cases {
+        try gen.put(allocator, "// case ");
+        try gen.number(allocator, index);
+        try gen.put(allocator, "$");
+        let kind = gen.rng.below(11);
+        if kind <= 3 {
+            try gen.integer_case(allocator, index);
+        } else if kind == 4 {
+            try gen.loop_case(allocator, index);
+        } else if kind == 5 {
+            try gen.locals_case(allocator, index);
+        } else if kind == 6 {
+            try gen.data_case(allocator, handle, dir, index, &var previous);
+        } else if kind == 7 {
+            try gen.struct_case(allocator, index);
+        } else if kind == 8 {
+            try gen.arguments_case(allocator, index);
+        } else if kind == 9 {
+            try gen.control_case(allocator, index);
+        } else {
+            try gen.union_case(allocator, index);
+        }
+        try gen.put(allocator, "// end ");
+        try gen.number(allocator, index);
+        try gen.put(allocator, "$$");
+        index = index + 1;
+    }
+    try gen.runners(allocator, cases);
+
+    let source = gen.out.as_bytes();
+    let main_path = try joined(allocator, dir, "/src/main.kizu");
+    defer main_path.deinit(allocator);
+    let main_bytes = main_path.as_bytes();
+    try fs::write_file(handle, main_bytes, source);
+    let manifest_path = try joined(allocator, dir, "/kizu.toml");
+    defer manifest_path.deinit(allocator);
+    let manifest_bytes = manifest_path.as_bytes();
+    let manifest =
+        \\[package]
+        \\name = "difftest_generated"
+        \\version = "0.1.0"
+        \\
+        \\[modules]
+        \\paths = ["src"]
+        \\
+    ;
+    try fs::write_file(handle, manifest_bytes, manifest);
+    return process::ExitStatus::Success;
+}
+
+fn (self: Gen) deinit(allocator: Allocator) -> void {
+    self.out.deinit(allocator);
+}
+
+fn joined(allocator: Allocator, left: []u8, right: []u8) -> mem::Error!string::String {
+    var out = try string::from_bytes(allocator, left);
+    errdefer out.deinit(allocator);
+    try out.append_bytes(allocator, right);
+    return move out;
+}
+
+fn parse_number(text: []u8) -> Invalid!i64 {
+    if mem::len(text) == 0 {
+        return Invalid::BadArgument;
+    }
+    var value = 0;
+    var index = 0;
+    while index < mem::len(text) {
+        let digit = cast<i64>(text[index]) - 48;
+        if digit < 0 or digit > 9 {
+            return Invalid::BadArgument;
+        }
+        value = value * 10 + digit;
+        index = index + 1;
+    }
+    return value;
+}
+
+fn type_name(index: i64) -> []u8 {
+    if index == 0 { return "i8"; }
+    if index == 1 { return "i16"; }
+    if index == 2 { return "i32"; }
+    if index == 3 { return "i64"; }
+    if index == 4 { return "u8"; }
+    if index == 5 { return "u16"; }
+    if index == 6 { return "u32"; }
+    if index == 7 { return "u64"; }
+    if index == 8 { return "f32"; }
+    return "f64";
+}
+
+fn is_signed(index: i64) -> bool {
+    return index <= 3;
+}
+
+fn is_float(index: i64) -> bool {
+    return index >= type_count;
+}
+
+fn boundary(index: i64) -> i64 {
+    if index == 0 { return 0; }
+    if index == 1 { return 1; }
+    if index == 2 { return -1; }
+    if index == 3 { return 2; }
+    if index == 4 { return -2; }
+    if index == 5 { return 127; }
+    if index == 6 { return 128; }
+    if index == 7 { return -128; }
+    if index == 8 { return -129; }
+    if index == 9 { return 255; }
+    if index == 10 { return 256; }
+    if index == 11 { return 32767; }
+    if index == 12 { return 32768; }
+    if index == 13 { return -32768; }
+    if index == 14 { return 65535; }
+    if index == 15 { return 65536; }
+    if index == 16 { return 2147483647; }
+    if index == 17 { return 2147483648; }
+    if index == 18 { return -2147483648; }
+    if index == 19 { return 4294967295; }
+    if index == 20 { return 4294967296; }
+    if index == 21 { return 9223372036854775807; }
+    return -9223372036854775807 - 1;
+}
+
+fn float_literal(index: i64) -> []u8 {
+    if index == 0 { return "0.5"; }
+    if index == 1 { return "-1.25"; }
+    if index == 2 { return "3.0"; }
+    if index == 3 { return "1024.5"; }
+    if index == 4 { return "-0.125"; }
+    return "7.75";
+}
+
+// A string literal has no escapes, so the text written here spells a newline
+// `$` and a double quote with a backquote.
+fn (self: &var Gen) put(allocator: Allocator, text: []u8) -> mem::Error!void {
+    var index = 0;
+    while index < mem::len(text) {
+        var byte = text[index];
+        if byte == cast<u8>(36) {
+            byte = cast<u8>(10);
+        } else if byte == cast<u8>(96) {
+            byte = cast<u8>(34);
+        }
+        try self.out.append_byte(allocator, byte);
+        index = index + 1;
+    }
+    return;
+}
+
+fn (self: &var Gen) number(allocator: Allocator, value: i64) -> mem::Error!void {
+    return fmt::append_i64(allocator, &var self.out, value);
+}
+
+fn (self: &var Gen) random(allocator: Allocator, base: i64, bound: i64) -> mem::Error!void {
+    let drawn = self.rng.below(bound);
+    return self.number(allocator, base + drawn);
+}
+
+fn (self: &var Gen) value(allocator: Allocator) -> mem::Error!void {
+    var chosen = boundary(self.rng.below(boundary_count));
+    if self.rng.below(3) == 0 {
+        chosen = self.rng.next() << 32 ^ self.rng.next();
+    }
+    if chosen == -9223372036854775807 - 1 {
+        return self.put(allocator, "(-9223372036854775807 - 1)");
+    }
+    return self.number(allocator, chosen);
+}
+
+fn (self: &var Gen) cast_value(allocator: Allocator, ty: i64) -> mem::Error!void {
+    try self.put(allocator, "cast<");
+    try self.put(allocator, type_name(ty));
+    try self.put(allocator, ">(");
+    if is_float(ty) {
+        let chosen = self.rng.below(float_literal_count);
+        try self.put(allocator, float_literal(chosen));
+    } else {
+        try self.value(allocator);
+    }
+    return self.put(allocator, ")");
+}
+
+fn (self: &var Gen) prelude(allocator: Allocator) -> mem::Error!void {
+    try self.put(allocator, "import std::mem;$import std::process;$$");
+    try self.put(allocator, "error Bad {$    First,$    Second,$}$$");
+    try self.put(allocator, "struct Pair {$    left: i32,$    right: i64,$}$$");
+    try self.put(allocator, "union Shape {$    Empty,$    Small(u8),$    Wide(i64),$    Both(Pair),$}$$");
+    try self.put(allocator, "fn zero() -> i64 {$    return process::arg_count();$}$$");
+    try self.put(allocator, "fn mix(a: i64, b: i64) -> i64 {$    return a * 31 + b;$}$$");
+    try self.put(allocator, "fn hash(bytes: []u8) -> u64 {$");
+    try self.put(allocator, "    var value = cast<u64>(1469598103934665603);$");
+    try self.put(allocator, "    var index = 0;$");
+    try self.put(allocator, "    while index < mem::len(bytes) {$");
+    try self.put(allocator, "        value = (value ^ cast<u64>(bytes[index])) * 1099511628211;$");
+    try self.put(allocator, "        index = index + 1;$    }$");
+    try self.put(allocator, "    return value + cast<u64>(mem::len(bytes));$}$$");
+    try self.put(allocator, "fn report(id: i64, value: u64) -> void {$    print(id);$    print(value);$}$$");
+    var ty = 0;
+    while ty < type_count {
+        try self.helpers(allocator, ty);
+        ty = ty + 1;
+    }
+    return;
+}
+
+fn (self: &var Gen) helpers(allocator: Allocator, ty: i64) -> mem::Error!void {
+    let name = type_name(ty);
+    var guard = "b == 0";
+    if is_signed(ty) {
+        guard = "b == 0 or b == -1";
+    }
+    var op = 0;
+    while op < 4 {
+        var label = "shl";
+        var body = "a << (b & 127)";
+        if op == 1 {
+            label = "shr";
+            body = "a >> (b & 127)";
+        } else if op == 2 {
+            label = "div";
+            body = "a / b";
+        } else if op == 3 {
+            label = "rem";
+            body = "a % b";
+        }
+        try self.put(allocator, "fn ");
+        try self.put(allocator, label);
+        try self.put(allocator, "_");
+        try self.put(allocator, name);
+        try self.put(allocator, "(a: ");
+        try self.put(allocator, name);
+        try self.put(allocator, ", b: ");
+        try self.put(allocator, name);
+        try self.put(allocator, ") -> ");
+        try self.put(allocator, name);
+        try self.put(allocator, " {$");
+        if op >= 2 {
+            try self.put(allocator, "    if ");
+            try self.put(allocator, guard);
+            try self.put(allocator, " {$        return a;$    }$");
+        }
+        try self.put(allocator, "    return ");
+        try self.put(allocator, body);
+        try self.put(allocator, ";$}$$");
+        op = op + 1;
+    }
+    try self.put(allocator, "fn pick_");
+    try self.put(allocator, name);
+    try self.put(allocator, "(c: bool, a: ");
+    try self.put(allocator, name);
+    try self.put(allocator, ", b: ");
+    try self.put(allocator, name);
+    try self.put(allocator, ") -> ");
+    try self.put(allocator, name);
+    try self.put(allocator, " {$    if c {$        return a;$    }$    return b;$}$$");
+    return;
+}
+
+fn (self: &var Gen) expression(allocator: Allocator, ty: i64, depth: i64) -> mem::Error!void {
+    let name = type_name(ty);
+    if depth <= 0 or self.rng.below(5) == 0 {
+        let leaf = self.rng.below(4);
+        if leaf == 0 { return self.put(allocator, "a"); }
+        if leaf == 1 { return self.put(allocator, "b"); }
+        if leaf == 2 { return self.put(allocator, "c"); }
+        return self.cast_value(allocator, ty);
+    }
+    let shape = self.rng.below(13);
+    if shape <= 5 {
+        var operator = " + ";
+        if shape == 1 { operator = " - "; }
+        if shape == 2 { operator = " * "; }
+        if shape == 3 { operator = " & "; }
+        if shape == 4 { operator = " | "; }
+        if shape == 5 { operator = " ^ "; }
+        try self.put(allocator, "(");
+        try self.expression(allocator, ty, depth - 1);
+        try self.put(allocator, operator);
+        try self.expression(allocator, ty, depth - 1);
+        return self.put(allocator, ")");
+    }
+    if shape <= 9 {
+        var label = "shl_";
+        if shape == 7 { label = "shr_"; }
+        if shape == 8 { label = "div_"; }
+        if shape == 9 { label = "rem_"; }
+        try self.put(allocator, label);
+        try self.put(allocator, name);
+        try self.put(allocator, "(");
+        try self.expression(allocator, ty, depth - 1);
+        try self.put(allocator, ", ");
+        try self.expression(allocator, ty, depth - 1);
+        return self.put(allocator, ")");
+    }
+    if shape == 10 {
+        try self.put(allocator, "(~");
+        try self.expression(allocator, ty, depth - 1);
+        return self.put(allocator, ")");
+    }
+    if shape == 11 {
+        let other = type_name(self.rng.below(type_count));
+        try self.put(allocator, "cast<");
+        try self.put(allocator, name);
+        try self.put(allocator, ">(cast<");
+        try self.put(allocator, other);
+        try self.put(allocator, ">(");
+        try self.expression(allocator, ty, depth - 1);
+        return self.put(allocator, "))");
+    }
+    var comparison = " < ";
+    let flavor = self.rng.below(4);
+    if flavor == 1 { comparison = " <= "; }
+    if flavor == 2 { comparison = " == "; }
+    if flavor == 3 { comparison = " != "; }
+    try self.put(allocator, "pick_");
+    try self.put(allocator, name);
+    try self.put(allocator, "(");
+    try self.expression(allocator, ty, depth - 1);
+    try self.put(allocator, comparison);
+    try self.expression(allocator, ty, depth - 1);
+    try self.put(allocator, ", ");
+    try self.expression(allocator, ty, depth - 1);
+    try self.put(allocator, ", ");
+    try self.expression(allocator, ty, depth - 1);
+    return self.put(allocator, ")");
+}
+
+fn (self: &var Gen) signature(allocator: Allocator, index: i64) -> mem::Error!void {
+    try self.put(allocator, "fn case_");
+    try self.number(allocator, index);
+    return self.put(allocator, "() -> u64 {$");
+}
+
+fn (self: &var Gen) inputs(allocator: Allocator, ty: i64) -> mem::Error!void {
+    let name = type_name(ty);
+    try self.put(allocator, "    let z = cast<");
+    try self.put(allocator, name);
+    try self.put(allocator, ">(zero());$");
+    var slot = 0;
+    while slot < 3 {
+        try self.put(allocator, "    let ");
+        if slot == 0 {
+            try self.put(allocator, "a");
+        } else if slot == 1 {
+            try self.put(allocator, "b");
+        } else {
+            try self.put(allocator, "c");
+        }
+        try self.put(allocator, " = ");
+        try self.cast_value(allocator, ty);
+        try self.put(allocator, " + z;$");
+        slot = slot + 1;
+    }
+    return;
+}
+
+fn (self: &var Gen) integer_case(allocator: Allocator, index: i64) -> mem::Error!void {
+    let ty = self.rng.below(type_count);
+    try self.signature(allocator, index);
+    try self.inputs(allocator, ty);
+    try self.put(allocator, "    let r = ");
+    try self.expression(allocator, ty, 4);
+    try self.put(allocator, ";$    return cast<u64>(r) ^ cast<u64>(a) * 3 ^ cast<u64>(b) * 5 ^ cast<u64>(c) * 7;$}$");
+    return;
+}
+
+fn (self: &var Gen) loop_case(allocator: Allocator, index: i64) -> mem::Error!void {
+    let ty = self.rng.below(type_count);
+    try self.signature(allocator, index);
+    try self.inputs(allocator, ty);
+    try self.put(allocator, "    var total = a;$    var turn = 0;$    while turn < ");
+    try self.random(allocator, 1, 24);
+    try self.put(allocator, " {$        total = total ^ ");
+    try self.expression(allocator, ty, 3);
+    try self.put(allocator, ";$        turn = turn + 1;$    }$");
+    try self.put(allocator, "    return cast<u64>(total) ^ cast<u64>(b) * 5 ^ cast<u64>(c) * 7;$}$");
+    return;
+}
+
+fn (self: &var Gen) locals_case(allocator: Allocator, index: i64) -> mem::Error!void {
+    let count = 8 + self.rng.below(33);
+    try self.signature(allocator, index);
+    try self.put(allocator, "    let z = zero();$    let v0 = ");
+    try self.value(allocator);
+    try self.put(allocator, " + z;$");
+    var slot = 1;
+    while slot < count {
+        try self.put(allocator, "    let v");
+        try self.number(allocator, slot);
+        try self.put(allocator, " = mix(v");
+        try self.number(allocator, slot - 1);
+        try self.put(allocator, ", v");
+        try self.random(allocator, 0, slot);
+        try self.put(allocator, " + ");
+        try self.value(allocator);
+        try self.put(allocator, ");$");
+        slot = slot + 1;
+    }
+    try self.put(allocator, "    var total = z;$");
+    slot = 0;
+    while slot < count {
+        try self.put(allocator, "    total = mix(total, v");
+        try self.number(allocator, slot);
+        try self.put(allocator, ");$");
+        slot = slot + 1;
+    }
+    try self.put(allocator, "    return cast<u64>(total);$}$");
+    return;
+}
+
+fn (self: &var Gen) data_case(
+    allocator: Allocator,
+    handle: Io,
+    dir: []u8,
+    index: i64,
+    previous: &var string::String
+) -> Failure!void {
+    var data = string::new(allocator);
+    defer data.deinit(allocator);
+    let shape = self.rng.below(8);
+    let length = 1 + self.rng.below(300);
+    var at = 0;
+    if shape == 6 and previous.len() > 0 {
+        let view = previous.as_bytes();
+        try data.append_bytes(allocator, view);
+    } else if shape == 7 and previous.len() > 1 {
+        let view = previous.as_bytes();
+        try data.append_bytes(allocator, view[self.rng.below(mem::len(view))..mem::len(view)]);
+    } else {
+        while at < length {
+            var byte = 0;
+            if shape == 1 {
+                byte = (at + 1) % 4 / 3 * 3;
+            } else if shape == 2 {
+                byte = self.rng.below(256);
+            } else if shape == 3 {
+                byte = 128 + self.rng.below(128);
+            } else if shape == 4 {
+                byte = 97 + self.rng.below(26);
+                if self.rng.below(5) == 0 {
+                    byte = 0;
+                }
+            } else if shape == 5 and at + 1 < length {
+                byte = 97 + self.rng.below(26);
+            }
+            try data.append_byte(allocator, cast<u8>(byte));
+            at = at + 1;
+        }
+    }
+    previous.clear();
+    let held = data.as_bytes();
+    try previous.append_bytes(allocator, held);
+
+    var relative = try string::from_bytes(allocator, "src/data/d");
+    defer relative.deinit(allocator);
+    try fmt::append_i64(allocator, &var relative, index);
+    try relative.append_bytes(allocator, ".bin");
+    let relative_bytes = relative.as_bytes();
+    var path = try joined(allocator, dir, "/");
+    defer path.deinit(allocator);
+    try path.append_bytes(allocator, relative_bytes);
+    let path_bytes = path.as_bytes();
+    try fs::write_file(handle, path_bytes, held);
+
+    try self.signature(allocator, index);
+    try self.put(allocator, "    return hash(@embed_file(`");
+    try self.put(allocator, relative_bytes);
+    try self.put(allocator, "`)) + cast<u64>(zero());$}$");
+    return;
+}
+
+fn (self: &var Gen) field_type(allocator: Allocator, ty: i64, width: i64) -> mem::Error!void {
+    if width == 0 {
+        return self.put(allocator, type_name(ty));
+    }
+    try self.put(allocator, "[");
+    try self.number(allocator, width);
+    try self.put(allocator, "]");
+    return self.put(allocator, type_name(ty));
+}
+
+fn (self: &var Gen) hashed(allocator: Allocator, ty: i64, place: []u8, slot: i64, element: i64) -> mem::Error!void {
+    try self.put(allocator, "    h = h * 1099511628211 + ");
+    if is_float(ty) {
+        try self.put(allocator, "cast<u64>(cast<i64>(");
+    } else {
+        try self.put(allocator, "cast<u64>(");
+    }
+    try self.put(allocator, place);
+    try self.number(allocator, slot);
+    if element >= 0 {
+        try self.put(allocator, "[");
+        try self.number(allocator, element);
+        try self.put(allocator, "]");
+    }
+    if is_float(ty) {
+        try self.put(allocator, " * 8.0))");
+    } else {
+        try self.put(allocator, ")");
+    }
+    return self.put(allocator, ";$");
+}
+
+fn (self: &var Gen) struct_case(allocator: Allocator, index: i64) -> mem::Error!void {
+    let count = 1 + self.rng.below(6);
+    var types = [6]i64{};
+    var widths = [6]i64{};
+    types[0] = self.rng.below(type_count);
+    var slot = 1;
+    while slot < count {
+        types[slot] = self.rng.below(type_count + float_count);
+        if !is_float(types[slot]) and self.rng.below(3) == 0 {
+            widths[slot] = 2 + self.rng.below(4);
+        }
+        slot = slot + 1;
+    }
+    try self.put(allocator, "struct S");
+    try self.number(allocator, index);
+    try self.put(allocator, " {$");
+    slot = 0;
+    while slot < count {
+        try self.put(allocator, "    f");
+        try self.number(allocator, slot);
+        try self.put(allocator, ": ");
+        try self.field_type(allocator, types[slot], widths[slot]);
+        try self.put(allocator, ",$");
+        slot = slot + 1;
+    }
+    try self.put(allocator, "}$$fn make");
+    try self.number(allocator, index);
+    try self.put(allocator, "(z: i64) -> S");
+    try self.number(allocator, index);
+    try self.put(allocator, " {$    return S");
+    try self.number(allocator, index);
+    try self.put(allocator, " {$");
+    slot = 0;
+    while slot < count {
+        try self.put(allocator, "        f");
+        try self.number(allocator, slot);
+        try self.put(allocator, ": ");
+        if widths[slot] > 0 {
+            try self.field_type(allocator, types[slot], widths[slot]);
+            try self.put(allocator, "{ ");
+            var element = 0;
+            while element < widths[slot] {
+                try self.cast_value(allocator, types[slot]);
+                try self.put(allocator, ", ");
+                element = element + 1;
+            }
+            try self.put(allocator, "}");
+        } else {
+            try self.cast_value(allocator, types[slot]);
+            try self.put(allocator, " + cast<");
+            try self.put(allocator, type_name(types[slot]));
+            try self.put(allocator, ">(z)");
+        }
+        try self.put(allocator, ",$");
+        slot = slot + 1;
+    }
+    try self.put(allocator, "    };$}$$fn pass");
+    try self.number(allocator, index);
+    try self.put(allocator, "(s: S");
+    try self.number(allocator, index);
+    try self.put(allocator, ", k: i64) -> S");
+    try self.number(allocator, index);
+    try self.put(allocator, " {$    var r = s;$    r.f0 = r.f0 + cast<");
+    try self.put(allocator, type_name(types[0]));
+    try self.put(allocator, ">(k);$    return r;$}$$fn poke");
+    try self.number(allocator, index);
+    try self.put(allocator, "(s: &var S");
+    try self.number(allocator, index);
+    try self.put(allocator, ", k: i64) -> void {$    s.f0 = s.f0 ^ cast<");
+    try self.put(allocator, type_name(types[0]));
+    try self.put(allocator, ">(k);$}$$fn sum");
+    try self.number(allocator, index);
+    try self.put(allocator, "(s: &S");
+    try self.number(allocator, index);
+    try self.put(allocator, ") -> u64 {$    var h = cast<u64>(0);$");
+    slot = 0;
+    while slot < count {
+        if widths[slot] > 0 {
+            var element = 0;
+            while element < widths[slot] {
+                try self.hashed(allocator, types[slot], "s.f", slot, element);
+                element = element + 1;
+            }
+        } else {
+            try self.hashed(allocator, types[slot], "s.f", slot, -1);
+        }
+        slot = slot + 1;
+    }
+    try self.put(allocator, "    return h;$}$$");
+    try self.signature(allocator, index);
+    try self.put(allocator, "    let z = zero();$    var s = pass");
+    try self.number(allocator, index);
+    try self.put(allocator, "(make");
+    try self.number(allocator, index);
+    try self.put(allocator, "(z), z + 3);$    poke");
+    try self.number(allocator, index);
+    try self.put(allocator, "(&var s, z + 5);$    return sum");
+    try self.number(allocator, index);
+    try self.put(allocator, "(&s);$}$");
+    return;
+}
+
+fn (self: &var Gen) arguments_case(allocator: Allocator, index: i64) -> mem::Error!void {
+    let count = 4 + self.rng.below(13);
+    var types = [16]i64{};
+    var slot = 0;
+    while slot < count {
+        types[slot] = self.rng.below(type_count + float_count);
+        slot = slot + 1;
+    }
+    try self.put(allocator, "fn args");
+    try self.number(allocator, index);
+    try self.put(allocator, "(");
+    slot = 0;
+    while slot < count {
+        try self.put(allocator, "p");
+        try self.number(allocator, slot);
+        try self.put(allocator, ": ");
+        try self.put(allocator, type_name(types[slot]));
+        try self.put(allocator, ", ");
+        slot = slot + 1;
+    }
+    try self.put(allocator, ") -> u64 {$    var h = cast<u64>(0);$");
+    slot = 0;
+    while slot < count {
+        try self.hashed(allocator, types[slot], "p", slot, -1);
+        slot = slot + 1;
+    }
+    try self.put(allocator, "    return h;$}$$");
+    try self.signature(allocator, index);
+    try self.put(allocator, "    let z = zero();$    return args");
+    try self.number(allocator, index);
+    try self.put(allocator, "($");
+    slot = 0;
+    while slot < count {
+        try self.put(allocator, "        ");
+        try self.cast_value(allocator, types[slot]);
+        try self.put(allocator, " + cast<");
+        try self.put(allocator, type_name(types[slot]));
+        try self.put(allocator, ">(z),$");
+        slot = slot + 1;
+    }
+    try self.put(allocator, "    );$}$");
+    return;
+}
+
+fn (self: &var Gen) control_case(allocator: Allocator, index: i64) -> mem::Error!void {
+    try self.put(allocator, "fn opt");
+    try self.number(allocator, index);
+    try self.put(allocator, "(x: i64) -> ?i64 {$    if x % ");
+    try self.random(allocator, 2, 5);
+    try self.put(allocator, " == 0 {$        return null;$    }$    return x + ");
+    try self.value(allocator);
+    try self.put(allocator, ";$}$$fn fail");
+    try self.number(allocator, index);
+    try self.put(allocator, "(x: i64) -> Bad!i64 {$    if x % ");
+    try self.random(allocator, 2, 5);
+    try self.put(allocator, " == 1 {$        return Bad::First;$    }$    if x % 7 == 3 {$        return Bad::Second;$    }$    return x * ");
+    try self.value(allocator);
+    try self.put(allocator, ";$}$$fn thru");
+    try self.number(allocator, index);
+    try self.put(allocator, "(x: i64) -> Bad!i64 {$    let v = try fail");
+    try self.number(allocator, index);
+    try self.put(allocator, "(x);$    return v + 1;$}$$");
+    try self.signature(allocator, index);
+    try self.put(allocator, "    var total = zero();$    var turn = zero();$    while turn < ");
+    try self.random(allocator, 5, 40);
+    try self.put(allocator, " {$        turn = turn + 1;$        if turn % ");
+    try self.random(allocator, 3, 6);
+    try self.put(allocator, " == 0 {$            continue;$        }$        if opt");
+    try self.number(allocator, index);
+    try self.put(allocator, "(turn) |v| {$            total = mix(total, v);$        } else {$            total = total ^ ");
+    try self.value(allocator);
+    try self.put(allocator, ";$        }$        let t = thru");
+    try self.number(allocator, index);
+    try self.put(allocator, "(turn) catch ");
+    try self.value(allocator);
+    try self.put(allocator, ";$        total = mix(total, t);$        if turn == ");
+    try self.random(allocator, 30, 20);
+    try self.put(allocator, " {$            break;$        }$    }$    return cast<u64>(total);$}$");
+    return;
+}
+
+fn (self: &var Gen) union_case(allocator: Allocator, index: i64) -> mem::Error!void {
+    try self.put(allocator, "fn shape");
+    try self.number(allocator, index);
+    try self.put(allocator, "(x: i64) -> Shape {$    let k = x % 4;$    if k == 0 {$        return Shape::Empty;$    }$");
+    try self.put(allocator, "    if k == 1 {$        return Shape::Small(cast<u8>(x * ");
+    try self.random(allocator, 1, 250);
+    try self.put(allocator, "));$    }$    if k == 2 {$        return Shape::Wide(x * ");
+    try self.value(allocator);
+    try self.put(allocator, ");$    }$    return Shape::Both(Pair { left: cast<i32>(x), right: x + ");
+    try self.value(allocator);
+    try self.put(allocator, " });$}$$");
+    try self.signature(allocator, index);
+    let length = 2 + self.rng.below(30);
+    try self.put(allocator, "    var items = [");
+    try self.number(allocator, length);
+    try self.put(allocator, "]i64{};$    var turn = zero();$    while turn < ");
+    try self.number(allocator, length);
+    try self.put(allocator, " {$        match shape");
+    try self.number(allocator, index);
+    try self.put(allocator, "(turn) {$            Empty => {$                items[turn] = ");
+    try self.value(allocator);
+    try self.put(allocator, ";$            },$            Small(v) => {$                items[turn] = cast<i64>(v);$            },$");
+    try self.put(allocator, "            Wide(v) => {$                items[turn] = v;$            },$");
+    try self.put(allocator, "            Both(p) => {$                items[turn] = cast<i64>(p.left) ^ p.right;$            },$        }$");
+    try self.put(allocator, "        turn = turn + 1;$    }$    var total = zero();$    turn = zero();$    while turn < ");
+    try self.number(allocator, length);
+    try self.put(allocator, " {$        total = mix(total, items[turn]);$        turn = turn + 1;$    }$    return cast<u64>(total);$}$");
+    return;
+}
+
+fn (self: &var Gen) runners(allocator: Allocator, cases: i64) -> mem::Error!void {
+    var runner = 0;
+    var index = 0;
+    while index < cases {
+        try self.put(allocator, "fn run_");
+        try self.number(allocator, runner);
+        try self.put(allocator, "() -> void {$");
+        var slot = 0;
+        while slot < cases_per_runner and index < cases {
+            try self.put(allocator, "    report(");
+            try self.number(allocator, index);
+            try self.put(allocator, ", case_");
+            try self.number(allocator, index);
+            try self.put(allocator, "());$");
+            slot = slot + 1;
+            index = index + 1;
+        }
+        try self.put(allocator, "}$$");
+        runner = runner + 1;
+    }
+    try self.put(allocator, "fn main() {$");
+    index = 0;
+    while index < runner {
+        try self.put(allocator, "    run_");
+        try self.number(allocator, index);
+        try self.put(allocator, "();$");
+        index = index + 1;
+    }
+    return self.put(allocator, "}$");
+}
