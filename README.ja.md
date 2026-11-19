@@ -241,6 +241,7 @@ just wasi-smoke      # wasm の例を wasmtime で走らせる
 - [docs/language-gaps.md](docs/language-gaps.md): まだ書けなかったものと、その場で使った局所解
 - [docs/stdlib.md](docs/stdlib.md): trusted builtin の境界と、std API を足すときの規則
 - [docs/perf.md](docs/perf.md): build/cache performance policy
+- [CONTRIBUTING.md](CONTRIBUTING.md): pull request で変更できる範囲とレビューの流れ
 - [AGENTS.md](AGENTS.md): contributor / coding agent 向けの実装ルール
 
 ## License
