@@ -1,0 +1,618 @@
+import compiler::internal::ir;
+import compiler::internal::sha256;
+import std::fmt;
+import std::map;
+import std::mem;
+import std::string;
+
+pub struct Span {
+    start: i64,
+    end: i64,
+}
+
+pub struct Reuse {
+    pub enabled: bool,
+    pub salt: string::String,
+    index: map::Map<[]u8, Span>,
+    pub kept: string::String,
+    pub hits: i64,
+    pub misses: i64,
+}
+
+pub fn new_reuse(allocator: Allocator) -> Reuse {
+    return Reuse {
+        enabled: false,
+        salt: string::new(allocator),
+        index: map::new<[]u8, Span>(allocator),
+        kept: string::new(allocator),
+        hits: 0,
+        misses: 0
+    };
+}
+
+pub fn reuse_header() -> []u8 {
+    return "kizu-direct-fn-1";
+}
+
+pub fn reuse_target(arch: Arch, format: Format) -> []u8 {
+    if arch == Arch::Arm64 {
+        if format == Format::MachO {
+            return "native-fn/arm64-macho";
+        }
+        return "native-fn/arm64-elf";
+    }
+    if arch == Arch::Amd64Windows {
+        return "native-fn/amd64-coff";
+    }
+    return "native-fn/amd64-elf";
+}
+
+fn put_int(allocator: Allocator, out: &var string::String, value: i64) -> !void {
+    var left = (value << 1) ^ (value >> 63);
+    while true {
+        let low = left & 127;
+        left = (left >> 7) & 0x1FFFFFFFFFFFFFF;
+        if left == 0 {
+            return out.append_byte(allocator, cast<u8>(low));
+        }
+        try out.append_byte(allocator, cast<u8>(low | 128));
+    }
+    return;
+}
+
+fn put_bool(allocator: Allocator, out: &var string::String, value: bool) -> !void {
+    if value {
+        return put_int(allocator, out, 1);
+    }
+    return put_int(allocator, out, 0);
+}
+
+fn put_bytes(allocator: Allocator, out: &var string::String, bytes: []u8) -> !void {
+    try put_int(allocator, out, mem::len(bytes));
+    return out.append_bytes(allocator, bytes);
+}
+
+fn put_name(allocator: Allocator, out: &var string::String, syms: &ir::NameTable, name: ir::Name) -> !void {
+    if ir::is_empty(name) {
+        return put_int(allocator, out, 0 - 1);
+    }
+    let text = ir::name_text(syms, name);
+    let bytes = text.as_bytes();
+    return put_bytes(allocator, out, bytes);
+}
+
+fn take(bytes: []u8, at: &var i64) -> i64 {
+    var value = 0;
+    var shift = 0;
+    while at.* < mem::len(bytes) and shift < 64 {
+        let byte = cast<i64>(bytes[at.*]);
+        at.* = at.* + 1;
+        value = value | ((byte & 127) << shift);
+        shift = shift + 7;
+        if byte < 128 {
+            return ((value >> 1) & 0x7FFFFFFFFFFFFFFF) ^ (0 - (value & 1));
+        }
+    }
+    at.* = mem::len(bytes) + 1;
+    return 0;
+}
+
+fn arch_code(arch: Arch) -> i64 {
+    return match arch {
+        Arm64 => 0,
+        Amd64 => 1,
+        Amd64Windows => 2,
+    };
+}
+
+fn format_code(format: Format) -> i64 {
+    return match format {
+        MachO => 0,
+        Elf => 1,
+        Coff => 2,
+    };
+}
+
+fn op_code(value: MOp) -> i64 {
+    return match value {
+        Mov => 0,
+        MovImm => 1,
+        Add => 2,
+        Sub => 3,
+        Mul => 4,
+        SDiv => 5,
+        UDiv => 6,
+        And => 7,
+        Orr => 8,
+        Eor => 9,
+        Lsl => 10,
+        Lsr => 11,
+        Asr => 12,
+        AddImm => 13,
+        SubImm => 14,
+        LslImm => 15,
+        LsrImm => 16,
+        AsrImm => 17,
+        MSub => 18,
+        MAdd => 19,
+        AddShift => 20,
+        SubShift => 21,
+        AddLsr => 22,
+        SMulH => 23,
+        UMulH => 24,
+        AndImm => 25,
+        TstImm => 26,
+        Neg => 27,
+        Mvn => 28,
+        Extend => 29,
+        Cmp => 30,
+        CmpImm => 31,
+        CmnImm => 32,
+        CSet => 33,
+        CSel => 34,
+        CSInc => 35,
+        Load => 36,
+        Store => 37,
+        LoadIdx => 38,
+        StoreIdx => 39,
+        FrameAddr => 40,
+        SymAddr => 41,
+        GotAddr => 42,
+        Call => 43,
+        CallReg => 44,
+        Trap => 45,
+        ParCopy => 46,
+        VZero => 47,
+        VOnes => 48,
+        VDup => 49,
+        VIns => 50,
+        VLdp => 51,
+        VAdd => 52,
+        VSub => 53,
+        VAnd => 54,
+        VOrr => 55,
+        VEor => 56,
+        VSMax => 57,
+        VSMin => 58,
+        VUMax => 59,
+        VUMin => 60,
+        VCmGt => 61,
+        VCmHi => 62,
+        VBit => 63,
+        VShl => 64,
+        VSShr => 65,
+        VUShr => 66,
+        VExt => 67,
+        VLdr => 68,
+        VXtl => 69,
+        VXtl2 => 70,
+        VCmEq => 71,
+        VCmGe => 72,
+        VCmHs => 73,
+        VBic => 74,
+        VToGpr => 75,
+        VFBin => 76,
+        VFScalar => 77,
+        VSCvtF => 78,
+        VDupLane => 79,
+        FBin => 80,
+        FUn => 81,
+        FMAdd => 82,
+        FCmp => 83,
+        FCvt => 84,
+        FToInt => 85,
+        IntToF => 86,
+        FArg => 87,
+        FRet => 88,
+    };
+}
+
+fn term_code(value: Term) -> i64 {
+    return match value {
+        Open => 0,
+        Jump => 1,
+        Flags => 2,
+        Zero => 3,
+        NonZero => 4,
+        Return => 5,
+        Stop => 6,
+    };
+}
+
+fn cond_code(value: Cond) -> i64 {
+    return match value {
+        Eq => 0,
+        Ne => 1,
+        Lt => 2,
+        Le => 3,
+        Gt => 4,
+        Ge => 5,
+        Lo => 6,
+        Ls => 7,
+        Hi => 8,
+        Hs => 9,
+        Mi => 10,
+        Pl => 11,
+    };
+}
+
+pub fn function_key(
+    allocator: Allocator,
+    func: &MFunction,
+    symbol: ir::Name,
+    exported: ir::Name,
+    syms: &ir::NameTable,
+    arch: Arch,
+    format: Format,
+    salt: []u8,
+    out: &var string::String
+) -> !void {
+    var text = string::new(allocator);
+    defer text.deinit(allocator);
+    try put_bytes(allocator, &var text, salt);
+    try put_int(allocator, &var text, arch_code(arch));
+    try put_int(allocator, &var text, format_code(format));
+    try put_name(allocator, &var text, syms, symbol);
+    try put_name(allocator, &var text, syms, exported);
+    try put_int(allocator, &var text, func.vregs);
+    try put_int(allocator, &var text, func.out_words);
+    try put_bool(allocator, &var text, func.calls);
+    try put_bool(allocator, &var text, func.is_main);
+    try put_int(allocator, &var text, func.blocks.len());
+    var block_index = 0;
+    while func.blocks.at(block_index) |block| {
+        block_index = block_index + 1;
+        try put_int(allocator, &var text, term_code(block.term));
+        try put_int(allocator, &var text, cond_code(block.cond));
+        try put_int(allocator, &var text, block.treg);
+        try put_int(allocator, &var text, block.succ0);
+        try put_int(allocator, &var text, block.succ1);
+        try put_bool(allocator, &var text, block.cold);
+        try put_int(allocator, &var text, block.insts.len());
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            try put_int(allocator, &var text, op_code(inst.op));
+            try put_int(allocator, &var text, inst.rd);
+            try put_int(allocator, &var text, inst.rn);
+            try put_int(allocator, &var text, inst.rm);
+            try put_int(allocator, &var text, inst.ra);
+            try put_int(allocator, &var text, inst.imm);
+            try put_int(allocator, &var text, inst.slot);
+            try put_int(allocator, &var text, inst.width);
+            try put_bool(allocator, &var text, inst.signed);
+            try put_int(allocator, &var text, cond_code(inst.cond));
+            try put_int(allocator, &var text, inst.vec);
+            try put_name(allocator, &var text, syms, inst.sym);
+        }
+    }
+    try put_int(allocator, &var text, func.copies.len());
+    var copy_index = 0;
+    while func.copies.at(copy_index) |copy| {
+        copy_index = copy_index + 1;
+        try put_int(allocator, &var text, copy.dst);
+        try put_int(allocator, &var text, copy.src);
+        try put_int(allocator, &var text, copy.imm);
+        try put_bool(allocator, &var text, copy.src_imm);
+    }
+    try put_int(allocator, &var text, func.slots.len());
+    var slot_index = 0;
+    while func.slots.at(slot_index) |slot| {
+        slot_index = slot_index + 1;
+        try put_int(allocator, &var text, slot.size);
+        try put_int(allocator, &var text, slot.align);
+        try put_int(allocator, &var text, slot.offset);
+    }
+    let text_bytes = text.as_bytes();
+    return sha256::append_hex_digest(allocator, text_bytes, out);
+}
+
+fn line_end(bytes: []u8, from: i64) -> i64 {
+    var end = from;
+    while end < mem::len(bytes) {
+        if bytes[end] == cast<u8>(10) {
+            return end;
+        }
+        end = end + 1;
+    }
+    return 0 - 1;
+}
+
+fn decimal(bytes: []u8) -> i64 {
+    var value = 0;
+    for 0..mem::len(bytes) |index| {
+        let digit = cast<i64>(bytes[index]) - 48;
+        if digit < 0 or digit > 9 {
+            return 0 - 1;
+        }
+        value = value * 10 + digit;
+    }
+    return value;
+}
+
+pub fn (self: &var Reuse) index_known(allocator: Allocator, known: []u8) -> !void {
+    let first = line_end(known, 0);
+    if first < 0 or !mem::equal_bytes(known[0..first], reuse_header()) {
+        return;
+    }
+    var at = first + 1;
+    while at < mem::len(known) {
+        let end = line_end(known, at);
+        if end < at + 66 or known[at + 64] != cast<u8>(32) {
+            return;
+        }
+        let length = decimal(known[at + 65..end]);
+        if length < 0 or end + 1 + length > mem::len(known) {
+            return;
+        }
+        try self.index.insert(allocator, known[at..at + 64], Span { start: end + 1, end: end + 1 + length });
+        at = end + 1 + length;
+    }
+    return;
+}
+
+fn (self: &var Reuse) keep(allocator: Allocator, key: []u8, record: []u8) -> !void {
+    try self.kept.append_bytes(allocator, key);
+    try self.kept.append_byte(allocator, cast<u8>(32));
+    try fmt::append_i64(allocator, &var self.kept, mem::len(record));
+    try self.kept.append_byte(allocator, cast<u8>(10));
+    return self.kept.append_bytes(allocator, record);
+}
+
+pub fn (self: &Reuse) changed(known: []u8) -> bool {
+    return self.misses > 0 or self.kept.len() + mem::len(reuse_header()) + 1 != mem::len(known);
+}
+
+fn (self: &Reuse) find(key: []u8) -> ?Span {
+    if self.index.at(key) |span| {
+        return span.*;
+    }
+    return null;
+}
+
+fn relative(value: i64, start: i64) -> i64 {
+    if value < 0 {
+        return 0 - 1;
+    }
+    return value - start;
+}
+
+fn absolute(value: i64, start: i64) -> i64 {
+    if value < 0 {
+        return 0 - 1;
+    }
+    return value + start;
+}
+
+fn capture(
+    allocator: Allocator,
+    obj: &Obj,
+    syms: &ir::NameTable,
+    start: i64,
+    reloc_start: i64,
+    symbol_start: i64,
+    out: &var string::String
+) -> !bool {
+    var symbol_index = symbol_start;
+    while obj.symbols.at(symbol_index) |created| {
+        symbol_index = symbol_index + 1;
+        if created.section >= 0 or ir::is_empty(created.name) {
+            return false;
+        }
+    }
+    if obj.sections.at(obj.current) |section| {
+        let bytes = section.bytes.as_bytes();
+        try put_int(allocator, out, section.align);
+        try put_bytes(allocator, out, bytes[start..mem::len(bytes)]);
+        try put_int(allocator, out, section.relocs.len() - reloc_start);
+        var reloc_index = reloc_start;
+        while section.relocs.get(reloc_index) |reloc| {
+            reloc_index = reloc_index + 1;
+            var target = ir::empty_name();
+            if obj.symbols.at(reloc.symbol) |held| {
+                target = held.name;
+            }
+            if ir::is_empty(target) {
+                return false;
+            }
+            try put_int(allocator, out, reloc.address - start);
+            try put_int(allocator, out, reloc.kind);
+            try put_int(allocator, out, reloc.addend);
+            try put_name(allocator, out, syms, target);
+        }
+    } else {
+        return false;
+    }
+    try put_int(allocator, out, obj.block_at.len());
+    var index = 0;
+    while obj.block_at.get(index) |at| {
+        index = index + 1;
+        try put_int(allocator, out, relative(at, start));
+    }
+    try put_int(allocator, out, obj.local_at.len());
+    index = 0;
+    while obj.local_at.get(index) |at| {
+        index = index + 1;
+        try put_int(allocator, out, relative(at, start));
+    }
+    try put_int(allocator, out, obj.jumps.len());
+    index = 0;
+    while obj.jumps.get(index) |jump| {
+        index = index + 1;
+        try put_int(allocator, out, jump.at - start);
+        try put_int(allocator, out, jump.cc);
+        try put_int(allocator, out, jump.target);
+        try put_bool(allocator, out, jump.local);
+        try put_bool(allocator, out, jump.pad);
+    }
+    try put_int(allocator, out, obj.branches.len());
+    index = 0;
+    while obj.branches.get(index) |branch| {
+        index = index + 1;
+        try put_int(allocator, out, branch.at - start);
+        try put_int(allocator, out, branch.block);
+        try put_int(allocator, out, branch.word);
+        try put_bool(allocator, out, branch.wide);
+    }
+    return true;
+}
+
+fn record_fits(record: []u8, syms: &ir::NameTable) -> bool {
+    let length = mem::len(record);
+    var at = 0;
+    let _ = take(record, &var at);
+    let code = take(record, &var at);
+    if code < 0 or at + code > length {
+        return false;
+    }
+    at = at + code;
+    let relocs = take(record, &var at);
+    if relocs < 0 {
+        return false;
+    }
+    for 0..relocs |_reloc| {
+        let address = take(record, &var at);
+        let _ = take(record, &var at);
+        let _ = take(record, &var at);
+        let name = take(record, &var at);
+        if address < 0 or address + 4 > code or name < 0 or at + name > length {
+            return false;
+        }
+        if syms.lookup(record[at..at + name]) |_found| {} else {
+            return false;
+        }
+        at = at + name;
+    }
+    let blocks = take(record, &var at);
+    if blocks < 0 {
+        return false;
+    }
+    for 0..blocks |_block| {
+        let place = take(record, &var at);
+        if place > code {
+            return false;
+        }
+    }
+    let locals = take(record, &var at);
+    if locals < 0 {
+        return false;
+    }
+    for 0..locals |_local| {
+        let place = take(record, &var at);
+        if place > code {
+            return false;
+        }
+    }
+    let jumps = take(record, &var at);
+    if jumps < 0 {
+        return false;
+    }
+    for 0..jumps |_jump| {
+        let place = take(record, &var at);
+        let _ = take(record, &var at);
+        let target = take(record, &var at);
+        let local = take(record, &var at) == 1;
+        let pad = take(record, &var at) == 1;
+        var limit = blocks;
+        if local {
+            limit = locals;
+        }
+        if place < 0 or place > code or (!pad and (target < 0 or target >= limit)) {
+            return false;
+        }
+    }
+    let branches = take(record, &var at);
+    if branches < 0 {
+        return false;
+    }
+    for 0..branches |_branch| {
+        let place = take(record, &var at);
+        let block = take(record, &var at);
+        let _ = take(record, &var at);
+        let _ = take(record, &var at);
+        if place < 0 or place + 4 > code or block < 0 or block >= blocks {
+            return false;
+        }
+    }
+    return at == length;
+}
+
+fn replay(allocator: Allocator, obj: &var Obj, syms: &ir::NameTable, record: []u8) -> !void {
+    let start = obj.here();
+    var at = 0;
+    let align = take(record, &var at);
+    let code = take(record, &var at);
+    if obj.sections.at_mut(obj.current) |section| {
+        if section.align < align {
+            section.align = align;
+        }
+        try section.bytes.append_bytes(allocator, record[at..at + code]);
+    }
+    at = at + code;
+    let relocs = take(record, &var at);
+    for 0..relocs |_reloc| {
+        let address = take(record, &var at) + start;
+        let kind = take(record, &var at);
+        let addend = take(record, &var at);
+        let length = take(record, &var at);
+        let name = syms.lookup(record[at..at + length]) orelse ir::empty_name();
+        at = at + length;
+        let index = try obj.symbol_of(allocator, syms, name);
+        if obj.sections.at_mut(obj.current) |section| {
+            try section.relocs.append(allocator, Reloc { address: address, symbol: index, kind: kind, addend: addend });
+        }
+    }
+    let blocks = take(record, &var at);
+    let function_relocs = obj.function_relocs;
+    let function_symbols = obj.function_symbols;
+    try obj.begin_function(allocator, blocks);
+    obj.function_relocs = function_relocs;
+    obj.function_symbols = function_symbols;
+    for 0..blocks |block| {
+        try obj.block_at.set(block, absolute(take(record, &var at), start));
+    }
+    let locals = take(record, &var at);
+    for 0..locals |_local| {
+        try obj.local_at.append(allocator, absolute(take(record, &var at), start));
+    }
+    let jumps = take(record, &var at);
+    for 0..jumps |_jump| {
+        let jump_at = take(record, &var at) + start;
+        let cc = take(record, &var at);
+        let target = take(record, &var at);
+        let local = take(record, &var at) == 1;
+        let pad = take(record, &var at) == 1;
+        try obj.jumps.append(allocator, X86Jump { at: jump_at, cc: cc, target: target, local: local, pad: pad });
+    }
+    let branches = take(record, &var at);
+    for 0..branches |_branch| {
+        let branch_at = take(record, &var at) + start;
+        let block = take(record, &var at);
+        let word = take(record, &var at);
+        let wide = take(record, &var at) == 1;
+        try obj.branches.append(allocator, Branch { at: branch_at, block: block, word: word, wide: wide });
+    }
+    return;
+}
+
+pub fn (self: &Reuse) reusable(key: []u8, known: []u8, syms: &ir::NameTable) -> ?Span {
+    let span = self.find(key) orelse return null;
+    if !record_fits(known[span.start..span.end], syms) {
+        return null;
+    }
+    return span;
+}
+
+pub fn (self: &var Reuse) replay_span(
+    allocator: Allocator,
+    obj: &var Obj,
+    syms: &ir::NameTable,
+    key: []u8,
+    known: []u8,
+    span: Span
+) -> !void {
+    let record = known[span.start..span.end];
+    try replay(allocator, obj, syms, record);
+    self.hits = self.hits + 1;
+    return self.keep(allocator, key, record);
+}
