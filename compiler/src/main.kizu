@@ -1,5 +1,6 @@
 import compiler::internal::ast;
 import compiler::internal::buildcache;
+import compiler::internal::buildplan;
 import compiler::internal::cimport;
 import compiler::internal::diagnostic;
 import compiler::internal::direct;
@@ -15,6 +16,7 @@ import compiler::internal::ownership;
 import compiler::internal::parser;
 import compiler::internal::pool;
 import compiler::internal::project;
+import compiler::internal::sha256;
 import compiler::internal::source;
 import compiler::internal::spirv;
 import compiler::internal::stdfmt;
@@ -1731,6 +1733,7 @@ fn load_one_file(
         Text(text) => {
             defer text.deinit(allocator);
             let text_bytes = text.as_bytes();
+            try loader.inputs.add_file(allocator, target, text_bytes);
             return loader.load_source(tree, target, text_bytes);
         },
     }
@@ -1768,6 +1771,8 @@ fn load_target(
         },
         Text(text) => {
             defer text.deinit(allocator);
+            let manifest_text = text.as_bytes();
+            try loader.inputs.add_file(allocator, manifest_bytes, manifest_text);
             return load_manifest_package(
                 io,
                 allocator,
@@ -1799,7 +1804,7 @@ fn load_manifest_package(
             defer found.deinit(allocator);
             try package_name.append_string(allocator, &found.package_name);
             let root_bytes = root.as_bytes();
-            let resolved = try project::resolve_modules(io, allocator, root_bytes, &found);
+            let resolved = try project::resolve_modules(io, allocator, root_bytes, &found, &var loader.inputs);
             match resolved {
                 Graph(graph) => {
                     defer graph.deinit(allocator);
@@ -2089,7 +2094,82 @@ fn build_native_command(io: Io, allocator: Allocator, lib_dir: []u8, first: i64,
         return parsed;
     }
     let target_bytes = target_path.as_bytes();
-    return native_target(io, allocator, lib_dir, target_bytes, NativeCommand::Build, &var options, null, 0, 0);
+    return planned_native_build(io, allocator, lib_dir, target_bytes, &var options);
+}
+
+fn planned_native_build(
+    io: Io,
+    allocator: Allocator,
+    lib_dir: []u8,
+    target: []u8,
+    options: &var native::Options
+) -> !i64 {
+    var loader = try project::new_loader(io, allocator, lib_dir);
+    defer loader.deinit(allocator);
+    var request = string::new(allocator);
+    defer request.deinit(allocator);
+    if !try native_build_request(io, allocator, lib_dir, target, options, &var request) {
+        return native_target_with(io, allocator, &var loader, target, NativeCommand::Build, options, null, 0, 0);
+    }
+    var cache = try buildcache::new(io, allocator);
+    defer cache.deinit(allocator);
+    let request_bytes = request.as_bytes();
+    var output = string::new(allocator);
+    defer output.deinit(allocator);
+    try output.append_string(allocator, &options.output);
+    let output_bytes = output.as_bytes();
+    if try buildplan::restore(io, allocator, &var cache, request_bytes, output_bytes) {
+        try io::write_stdout_line(io, output_bytes);
+        return 0;
+    }
+    loader.inputs.enabled = true;
+    let code = try native_target_with(io, allocator, &var loader, target, NativeCommand::Build, options, null, 0, 0);
+    if code == 0 and native::links_only_system(options) {
+        try buildplan::store(io, allocator, &var cache, request_bytes, &loader.inputs, output_bytes);
+    }
+    return code;
+}
+
+fn native_build_request(
+    io: Io,
+    allocator: Allocator,
+    lib_dir: []u8,
+    target: []u8,
+    options: &var native::Options,
+    out: &var string::String
+) -> !bool {
+    let emit = options.emit.as_bytes();
+    if !mem::equal_bytes(emit, "exe") or !native::links_only_system(options) {
+        return false;
+    }
+    let triple = options.triple.as_bytes();
+    if try native::target_for(allocator, triple, &var options.target) |failed| {
+        failed.deinit(allocator);
+        return false;
+    }
+    var host = string::new(allocator);
+    defer host.deinit(allocator);
+    if try native::host_key(allocator, &var host) |failed| {
+        failed.deinit(allocator);
+        return false;
+    }
+    let executable = try process::executable_path(allocator);
+    defer executable.deinit(allocator);
+    let executable_bytes = executable.as_bytes();
+    let compiler = fs::read_file(io, allocator, executable_bytes, mem::Limit::Unlimited) catch return false;
+    defer compiler.deinit(allocator);
+    let compiler_bytes = compiler.as_bytes();
+    try sha256::append_hex_digest(allocator, compiler_bytes, out);
+    try out.append_byte(allocator, cast<u8>(10));
+    try out.append_bytes(allocator, target);
+    try out.append_byte(allocator, cast<u8>(10));
+    try out.append_bytes(allocator, lib_dir);
+    try out.append_byte(allocator, cast<u8>(10));
+    if try native::append_build_identity(allocator, options, &host, out) |failed| {
+        failed.deinit(allocator);
+        return false;
+    }
+    return true;
 }
 
 fn parse_native_build_args(
@@ -2429,6 +2509,20 @@ fn native_target(
 ) -> !i64 {
     var loader = try project::new_loader(io, allocator, lib_dir);
     defer loader.deinit(allocator);
+    return native_target_with(io, allocator, &var loader, target, command, options, seed, child_start, child_count);
+}
+
+fn native_target_with(
+    io: Io,
+    allocator: Allocator,
+    loader: &var project::Loader,
+    target: []u8,
+    command: NativeCommand,
+    options: &var native::Options,
+    seed: ?i64,
+    child_start: i64,
+    child_count: i64
+) -> !i64 {
     let triple = options.triple.as_bytes();
     var build_target = stdtarget::host();
     if try native::target_for(allocator, triple, &var build_target) |failed| {
@@ -2442,7 +2536,7 @@ fn native_target(
         try report(io, allocator, &loader.sources, &failed);
         return 1;
     }
-    let lowering = try lower_native(io, allocator, &var loader, target, command, options, seed, build_target);
+    let lowering = try lower_native(io, allocator, loader, target, command, options, seed, build_target);
     match lowering {
         Failed(code) => return code,
         Ready(boxed) => {

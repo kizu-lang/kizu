@@ -1,4 +1,5 @@
 import compiler::internal::ast;
+import compiler::internal::buildplan;
 import compiler::internal::diagnostic;
 import compiler::internal::lexer;
 import compiler::internal::manifest;
@@ -23,7 +24,7 @@ fn print_module_path() -> []u8 {
     return "std::fmt";
 }
 
-fn (self: &Loader) read_std_graph() -> !GraphResult {
+fn (self: &var Loader) read_std_graph() -> !GraphResult {
     let lib_dir = self.lib_dir.as_bytes();
     let dir = try path::join(self.allocator, lib_dir, std_dir_name());
     defer dir.deinit(self.allocator);
@@ -43,11 +44,12 @@ fn (self: &Loader) read_std_graph() -> !GraphResult {
     );
     defer text.deinit(self.allocator);
     let text_bytes = text.as_bytes();
+    try self.inputs.add_file(self.allocator, manifest_path_bytes, text_bytes);
     let outcome_1 = try manifest::parse_std_manifest(self.allocator, text_bytes);
     match outcome_1 {
         Manifest(parsed) => {
             defer parsed.deinit(self.allocator);
-            return resolve_modules(self.io, self.allocator, dir_bytes, &parsed);
+            return resolve_modules(self.io, self.allocator, dir_bytes, &parsed, &var self.inputs);
         },
         Error(message) => {
             return GraphResult::Error(try module_error(self.allocator, move message));
@@ -394,6 +396,8 @@ fn (self: &var Loader) add_source_overrides(
         defer cleaned.deinit(self.allocator);
         let cleaned_bytes = cleaned.as_bytes();
         if sources.at(key) |text| {
+            let text_bytes = text.as_bytes();
+            try self.inputs.add_file(self.allocator, key, text_bytes);
             try self.source_overrides.insert(self.allocator, cleaned_bytes, try copy_string(self.allocator, text));
         }
     }
@@ -410,21 +414,33 @@ pub union StdErrorCodesResult {
     Error(diagnostic::Diagnostic),
 }
 
-pub fn (self: &Loader) std_error_codes() -> !StdErrorCodesResult {
+pub fn (self: &var Loader) std_error_codes() -> !StdErrorCodesResult {
+    var read = buildplan::new_log(self.allocator, self.inputs.enabled);
+    defer read.deinit(self.allocator);
+    let numbered = try self.numbered_std_error_sets(&var read);
+    errdefer numbered.deinit(self.allocator);
+    try self.inputs.merge(self.allocator, &read);
+    return move numbered;
+}
+
+fn (self: &var Loader) numbered_std_error_sets(read: &var buildplan::InputLog) -> !StdErrorCodesResult {
     if self.std_graph.at(0) |graph| {
-        return self.number_std_error_sets(graph);
+        return self.number_std_error_sets(graph, read);
     }
     let outcome = try self.read_std_graph();
     match outcome {
         Error(failed) => return StdErrorCodesResult::Error(move failed),
         Graph(graph) => {
             defer graph.deinit(self.allocator);
-            return self.number_std_error_sets(&graph);
+            return self.number_std_error_sets(&graph, read);
         },
     }
 }
 
-fn (self: &Loader) number_std_error_sets(graph: &Graph) -> !StdErrorCodesResult {
+fn (self: &Loader) number_std_error_sets(
+    graph: &Graph,
+    read: &var buildplan::InputLog
+) -> !StdErrorCodesResult {
     var sets = map::new<[]u8, map::Map<[]u8, i64>>(self.allocator);
     errdefer sets.deinit(self.allocator);
     var code = 1;
@@ -438,7 +454,7 @@ fn (self: &Loader) number_std_error_sets(graph: &Graph) -> !StdErrorCodesResult 
             file_index = file_index + 1;
             let file_bytes = file.as_bytes();
             let module_path = module.path.as_bytes();
-            if try self.collect_error_sets(self.allocator, file_bytes, module_path, &var sets, &var code) |failed| {
+            if try self.collect_error_sets(self.allocator, file_bytes, module_path, &var sets, &var code, read) |failed| {
                 sets.deinit(self.allocator);
                 return StdErrorCodesResult::Error(move failed);
             }
@@ -452,11 +468,13 @@ fn (self: &Loader) collect_error_sets(
     file: []u8,
     module_path: []u8,
     sets: &var map::Map<[]u8, map::Map<[]u8, i64>>,
-    code: &var i64
+    code: &var i64,
+    read: &var buildplan::InputLog
 ) -> !?diagnostic::Diagnostic {
     let text = try fs::read_file(self.io, self.allocator, file, mem::Limit::Unlimited);
     defer text.deinit(self.allocator);
     let bytes = text.as_bytes();
+    try read.add_file(allocator, file, bytes);
     if !may_spell_error(bytes) {
         return null;
     }

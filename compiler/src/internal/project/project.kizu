@@ -1,4 +1,5 @@
 import compiler::internal::ast;
+import compiler::internal::buildplan;
 import compiler::internal::diagnostic;
 import compiler::internal::lexer;
 import compiler::internal::manifest;
@@ -125,7 +126,8 @@ pub fn resolve_modules(
     io: Io,
     allocator: Allocator,
     base_dir: []u8,
-    parsed: &manifest::Manifest
+    parsed: &manifest::Manifest,
+    inputs: &var buildplan::InputLog
 ) -> !GraphResult {
     var modules = array::new<Module>(allocator);
     errdefer modules.deinit(allocator);
@@ -147,6 +149,7 @@ pub fn resolve_modules(
             allocator,
             &var modules,
             &var seen_files,
+            inputs,
             package_name,
             root_bytes,
             root_bytes
@@ -170,12 +173,14 @@ fn collect_source_root(
     allocator: Allocator,
     modules: &var array::Array<Module>,
     seen_files: &var map::Map<[]u8, string::String>,
+    inputs: &var buildplan::InputLog,
     package_name: []u8,
     source_root: []u8,
     dir: []u8
 ) -> !?diagnostic::Diagnostic {
     var entries = try fs::read_dir(io, allocator, dir);
     defer entries.deinit(allocator);
+    try inputs.add_dir(allocator, dir, &entries);
     var index = 0;
     while entries.at(index) |entry| {
         index = index + 1;
@@ -186,6 +191,7 @@ fn collect_source_root(
                 allocator,
                 modules,
                 seen_files,
+                inputs,
                 package_name,
                 source_root,
                 entry_path
@@ -466,6 +472,7 @@ pub struct Loader {
     std_graph: array::Array<Graph>,
     consts: map::Map<[]u8, ConstEntry>,
     pub sources: source::SourceMap,
+    pub inputs: buildplan::InputLog,
 }
 
 pub fn new_loader(io: Io, allocator: Allocator, lib_dir: []u8) -> !Loader {
@@ -485,7 +492,8 @@ pub fn new_loader(io: Io, allocator: Allocator, lib_dir: []u8) -> !Loader {
         source_overrides: map::new<[]u8, string::String>(allocator),
         std_graph: array::new<Graph>(allocator),
         consts: map::new<[]u8, ConstEntry>(allocator),
-        sources: source::new(allocator)
+        sources: source::new(allocator),
+        inputs: buildplan::new_log(allocator, false)
     };
 }
 
@@ -634,6 +642,8 @@ fn (self: &var Loader) parse_module_file(
         return self.parse_module_source(tree, file, move copied, root);
     }
     let text = try fs::read_file(self.io, self.allocator, file, mem::Limit::Unlimited);
+    errdefer text.deinit(self.allocator);
+    try self.inputs.add_text(self.allocator, file, &text);
     return self.parse_module_source(tree, file, move text, root);
 }
 
@@ -671,7 +681,7 @@ fn (self: &var Loader) parse_module_source(
     return LoadResult::Program(ast::new_program(self.allocator));
 }
 
-fn (self: &Loader) embed_file(
+fn (self: &var Loader) embed_file(
     tree: &var ast::Ast,
     expression: ast::Expression,
     root: []u8
@@ -693,6 +703,8 @@ fn (self: &Loader) embed_file(
     defer joined.deinit(self.allocator);
     let joined_bytes = joined.as_bytes();
     if fs::read_file(self.io, self.allocator, joined_bytes, mem::Limit::Unlimited) |data| {
+        errdefer data.deinit(self.allocator);
+        try self.inputs.add_text(self.allocator, joined_bytes, &data);
         let value = try tree.add_text(move data);
         if tree.expressions.at_mut(expression.node) |node| {
             node.* = ast::ExpressionNode::String(ast::StringExpr { value: value, embed: embed });

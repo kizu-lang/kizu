@@ -1,0 +1,243 @@
+import harness::scratch;
+import std::fmt;
+import std::fs;
+import std::io;
+import std::net;
+import std::process;
+import std::string;
+
+// A build that finds nothing changed may hand back the executable of the last
+// one. This suite changes one input at a time and requires the next build to
+// see it, and requires what a repeated build hands back to run.
+
+pub error Failure = scratch::Failure or fs::Error or io::Error or net::Error or process::Error;
+
+fn src_manifest() -> []u8 {
+    return
+        \\[package]
+        \\name = "app"
+        \\version = "0.0.0"
+        \\
+        \\[modules]
+        \\paths = ["src"]
+        \\
+    ;
+}
+
+fn other_manifest() -> []u8 {
+    return
+        \\[package]
+        \\name = "app"
+        \\version = "0.0.0"
+        \\
+        \\[modules]
+        \\paths = ["other"]
+        \\
+    ;
+}
+
+fn main_source() -> []u8 {
+    return
+        \\import app::app;
+        \\import std::mem;
+        \\import std::process;
+        \\
+        \\fn main() -> !process::ExitStatus {
+        \\    let note = @embed_file("data/note.txt");
+        \\    return process::ExitStatus::Specific(cast<u8>(app::value() + mem::len(note)));
+        \\}
+        \\
+    ;
+}
+
+fn clashing_source() -> []u8 {
+    return
+        \\pub fn value() -> i64 {
+        \\    return 1;
+        \\}
+        \\
+    ;
+}
+
+fn other_source() -> []u8 {
+    return
+        \\import std::process;
+        \\
+        \\fn main() -> !process::ExitStatus {
+        \\    return process::ExitStatus::Specific(cast<u8>(4));
+        \\}
+        \\
+    ;
+}
+
+struct Project {
+    kizu: []u8,
+    root: []u8,
+    cache: []u8,
+    output: []u8,
+}
+
+fn write(handle: Io, allocator: Allocator, project: &Project, name: []u8, text: []u8) -> Failure!void {
+    let file = try scratch::join(allocator, project.root, name);
+    defer file.deinit(allocator);
+    let file_path = file.as_bytes();
+    return fs::write_file(handle, file_path, text);
+}
+
+fn remove(handle: Io, allocator: Allocator, project: &Project, name: []u8) -> Failure!void {
+    let file = try scratch::join(allocator, project.root, name);
+    defer file.deinit(allocator);
+    let file_path = file.as_bytes();
+    return fs::remove_file(handle, file_path);
+}
+
+fn write_value(handle: Io, allocator: Allocator, project: &Project, value: []u8) -> Failure!void {
+    var text = try string::from_bytes(allocator, "pub fn value() -> i64 {");
+    defer text.deinit(allocator);
+    try text.append_byte(allocator, cast<u8>(10));
+    try text.append_bytes(allocator, "    return ");
+    try text.append_bytes(allocator, value);
+    try text.append_byte(allocator, cast<u8>(59));
+    try text.append_byte(allocator, cast<u8>(10));
+    try text.append_byte(allocator, cast<u8>(125));
+    try text.append_byte(allocator, cast<u8>(10));
+    let text_bytes = text.as_bytes();
+    return write(handle, allocator, project, "src/app/value.kizu", text_bytes);
+}
+
+fn build(handle: Io, allocator: Allocator, project: &Project, quiet: bool) -> Failure!i64 {
+    var command = try net::command(allocator, project.kizu);
+    defer command.deinit(allocator);
+    try command.arg(allocator, "build");
+    try command.arg(allocator, "--target");
+    try command.arg(allocator, "native");
+    try command.arg(allocator, "-o");
+    try command.arg(allocator, project.output);
+    try command.arg(allocator, project.root);
+    try command.env(allocator, "KIZU_CACHE_DIR", project.cache);
+    command.set_stdin(net::Stdio::Null);
+    command.set_stdout(net::Stdio::Null);
+    if quiet {
+        command.set_stderr(net::Stdio::Null);
+    }
+    var child = try command.spawn(handle);
+    defer child.deinit();
+    return child.wait(handle);
+}
+
+fn built_status(handle: Io, allocator: Allocator, project: &Project) -> Failure!i64 {
+    var command = try net::command(allocator, project.output);
+    defer command.deinit(allocator);
+    command.set_stdin(net::Stdio::Null);
+    command.set_stdout(net::Stdio::Null);
+    var child = try command.spawn(handle);
+    defer child.deinit();
+    return child.wait(handle);
+}
+
+fn report(handle: Io, allocator: Allocator, step: []u8, want: i64, got: i64) -> Failure!bool {
+    if want == got {
+        return true;
+    }
+    var message = try string::from_bytes(allocator, "rebuild: ");
+    defer message.deinit(allocator);
+    try message.append_bytes(allocator, step);
+    try message.append_bytes(allocator, ": want ");
+    try fmt::append_i64(allocator, &var message, want);
+    try message.append_bytes(allocator, ", got ");
+    try fmt::append_i64(allocator, &var message, got);
+    let text = message.as_bytes();
+    try io::write_stdout_line(handle, text);
+    return false;
+}
+
+fn builds_to(handle: Io, allocator: Allocator, project: &Project, step: []u8, want: i64) -> Failure!bool {
+    let status = try build(handle, allocator, project, false);
+    if !try report(handle, allocator, step, 0, status) {
+        return false;
+    }
+    let got = try built_status(handle, allocator, project);
+    return report(handle, allocator, step, want, got);
+}
+
+fn steps(handle: Io, allocator: Allocator, project: &Project) -> Failure!bool {
+    if !try builds_to(handle, allocator, project, "first build", 13) {
+        return false;
+    }
+    if !try builds_to(handle, allocator, project, "nothing changed", 13) {
+        return false;
+    }
+    try fs::remove_file(handle, project.output);
+    if !try builds_to(handle, allocator, project, "output removed", 13) {
+        return false;
+    }
+    try write_value(handle, allocator, project, "20");
+    if !try builds_to(handle, allocator, project, "source edited", 23) {
+        return false;
+    }
+    try write(handle, allocator, project, "data/note.txt", "12345");
+    if !try builds_to(handle, allocator, project, "embedded file edited", 25) {
+        return false;
+    }
+    try write(handle, allocator, project, "src/app/extra.kizu", clashing_source());
+    let clashing = try build(handle, allocator, project, true);
+    if clashing == 0 {
+        try io::write_stdout_line(handle, "rebuild: a new source file that clashes was not seen");
+        return false;
+    }
+    try remove(handle, allocator, project, "src/app/extra.kizu");
+    if !try builds_to(handle, allocator, project, "new source file removed", 25) {
+        return false;
+    }
+    try write(handle, allocator, project, "kizu.toml", other_manifest());
+    return builds_to(handle, allocator, project, "manifest edited", 4);
+}
+
+/// Has `kizu` build a small package again and again in a directory of its
+/// own, with a cache of its own. It answers whether every build saw its input.
+pub fn run(handle: Io, allocator: Allocator, kizu: []u8) -> Failure!bool {
+    var root = try scratch::dir(allocator, "kizu-rebuild-");
+    defer root.deinit(allocator);
+    let root_path = root.as_bytes();
+    try fs::create_dir(handle, root_path);
+    var cache = try scratch::join(allocator, root_path, "cache");
+    defer cache.deinit(allocator);
+    var output = try scratch::join(allocator, root_path, "built");
+    defer output.deinit(allocator);
+    var package = try scratch::join(allocator, root_path, "package");
+    defer package.deinit(allocator);
+    let package_path = package.as_bytes();
+    let cache_path = cache.as_bytes();
+    let output_path = output.as_bytes();
+    let project = Project { kizu: kizu, root: package_path, cache: cache_path, output: output_path };
+    try fs::create_dir(handle, package_path);
+    for 0..4 |index| {
+        var dir = string::new(allocator);
+        defer dir.deinit(allocator);
+        if index == 0 {
+            try dir.append_bytes(allocator, "src");
+        } else if index == 1 {
+            try dir.append_bytes(allocator, "src/app");
+        } else if index == 2 {
+            try dir.append_bytes(allocator, "data");
+        } else {
+            try dir.append_bytes(allocator, "other");
+        }
+        let name = dir.as_bytes();
+        let made = try scratch::join(allocator, package_path, name);
+        defer made.deinit(allocator);
+        let made_path = made.as_bytes();
+        try fs::create_dir(handle, made_path);
+    }
+    try write(handle, allocator, &project, "kizu.toml", src_manifest());
+    try write(handle, allocator, &project, "data/note.txt", "123");
+    try write_value(handle, allocator, &project, "10");
+    try write(handle, allocator, &project, "src/main.kizu", main_source());
+    try write(handle, allocator, &project, "other/main.kizu", other_source());
+    let passed = try steps(handle, allocator, &project);
+    try scratch::remove_tree(handle, allocator, root_path);
+    if passed {
+        try io::write_stdout_line(handle, "rebuild: ok");
+    }
+    return passed;
+}
