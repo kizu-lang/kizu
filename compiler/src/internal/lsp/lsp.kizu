@@ -1,0 +1,404 @@
+import std::fmt;
+import std::io;
+import std::json;
+import std::mem;
+import std::string;
+
+extern "c" fn read(fd: i32, buffer: ptr<u8>, count: i64) -> i64
+extern "c" fn _read(fd: i32, buffer: ptr<u8>, count: i32) -> i32
+pub struct Reader {
+    pending: string::String,
+}
+
+pub fn (self: Reader) deinit(allocator: Allocator) -> void {
+    self.pending.deinit(allocator);
+    return;
+}
+
+pub fn new_reader(allocator: Allocator) -> Reader {
+    return Reader { pending: string::new(allocator) };
+}
+
+fn header_end(bytes: []u8) -> i64 {
+    var at = 0;
+    while at + 4 <= mem::len(bytes) {
+        if bytes[at] == cast<u8>(13) and bytes[at + 1] == cast<u8>(10) and bytes[at + 2] == cast<u8>(13) and bytes[at + 3] == cast<u8>(10) {
+            return at;
+        }
+        at = at + 1;
+    }
+    return 0 - 1;
+}
+
+fn lower(byte: u8) -> u8 {
+    if byte >= cast<u8>(65) and byte <= cast<u8>(90) {
+        return byte + cast<u8>(32);
+    }
+    return byte;
+}
+
+fn content_length(header: []u8) -> i64 {
+    let name = "content-length:";
+    var line = 0;
+    while line < mem::len(header) {
+        var end = line;
+        while end < mem::len(header) and header[end] != cast<u8>(13) {
+            end = end + 1;
+        }
+        if end - line > mem::len(name) {
+            var same = true;
+            for 0..mem::len(name) |index| {
+                if lower(header[line + index]) != name[index] {
+                    same = false;
+                }
+            }
+            if same {
+                var value = 0;
+                var digits = 0;
+                for line + mem::len(name)..end |index| {
+                    let byte = header[index];
+                    if byte >= cast<u8>(48) and byte <= cast<u8>(57) {
+                        value = value * 10 + cast<i64>(byte) - 48;
+                        digits = digits + 1;
+                    }
+                }
+                if digits > 0 {
+                    return value;
+                }
+            }
+        }
+        line = end + 2;
+    }
+    return 0 - 1;
+}
+
+fn take_message(allocator: Allocator, pending: &var string::String, out: &var string::String) -> !bool {
+    let bytes = pending.as_bytes();
+    let end = header_end(bytes);
+    if end < 0 {
+        return false;
+    }
+    let length = content_length(bytes[0..end + 2]);
+    let body_start = end + 4;
+    if length < 0 or body_start + length > mem::len(bytes) {
+        return false;
+    }
+    try out.append_bytes(allocator, bytes[body_start..body_start + length]);
+    var rest = try string::from_bytes(allocator, bytes[body_start + length..mem::len(bytes)]);
+    defer rest.deinit(allocator);
+    pending.clear();
+    try pending.append_string(allocator, &rest);
+    return true;
+}
+
+pub fn (self: &var Reader) next(allocator: Allocator, out: &var string::String) -> !bool {
+    var chunk = [65536]u8{};
+    while true {
+        if try take_message(allocator, &var self.pending, out) {
+            return true;
+        }
+        let view = chunk.as_mut_bytes();
+        var count = 0;
+        comptime if std::target::is_windows() {
+            // SAFETY: view is writable for its whole length and _read keeps no pointer to it
+            count = cast<i64>(unsafe _read(cast<i32>(0), mut_ptr_of(view), cast<i32>(mem::len(view))));
+        } else {
+            // SAFETY: view is writable for its whole length and read(2) keeps no pointer to it
+            count = unsafe read(cast<i32>(0), mut_ptr_of(view), mem::len(view));
+        }
+        if count <= 0 {
+            return false;
+        }
+        try self.pending.append_bytes(allocator, view[0..count]);
+    }
+    return false;
+}
+
+pub fn write_message(io: Io, allocator: Allocator, body: []u8) -> !void {
+    var header = try string::from_bytes(allocator, "Content-Length: ");
+    defer header.deinit(allocator);
+    try fmt::append_i64(allocator, &var header, mem::len(body));
+    for 0..2 |_line| {
+        try header.append_byte(allocator, cast<u8>(13));
+        try header.append_byte(allocator, cast<u8>(10));
+    }
+    try header.append_bytes(allocator, body);
+    let bytes = header.as_bytes();
+    return io::write_stdout(io, bytes);
+}
+
+fn segment_end(names: []u8) -> i64 {
+    var end = 0;
+    while end < mem::len(names) and names[end] != cast<u8>(46) {
+        end = end + 1;
+    }
+    return end;
+}
+
+fn string_of(value: &json::Value) -> []u8 {
+    match value {
+        Str(text) => {
+            let bytes = text.as_bytes();
+            return bytes;
+        },
+        _ => return "",
+    }
+}
+
+pub fn text_at(value: &json::Value, names: []u8) -> []u8 {
+    let end = segment_end(names);
+    match value {
+        Obj(entries) => {
+            if entries.at(names[0..end]) |child| {
+                if end == mem::len(names) {
+                    return string_of(child);
+                }
+                return text_at(child, names[end + 1..mem::len(names)]);
+            }
+            return "";
+        },
+        _ => return "",
+    }
+}
+
+pub fn has(value: &json::Value, name: []u8) -> bool {
+    match value {
+        Obj(entries) => return entries.contains(name),
+        _ => return false,
+    }
+}
+
+fn last_text(value: &json::Value) -> []u8 {
+    match value {
+        Arr(items) => {
+            if items.at(items.len() - 1) |last| {
+                return text_at(last, "text");
+            }
+            return "";
+        },
+        _ => return "",
+    }
+}
+
+pub fn last_change(message: &json::Value) -> []u8 {
+    match message {
+        Obj(entries) => {
+            if entries.at("params") |params| {
+                match params {
+                    Obj(fields) => {
+                        if fields.at("contentChanges") |changes| {
+                            return last_text(changes);
+                        }
+                        return "";
+                    },
+                    _ => return "",
+                }
+            }
+            return "";
+        },
+        _ => return "",
+    }
+}
+
+fn hex_value(byte: u8) -> i64 {
+    let value = cast<i64>(byte);
+    if value >= 48 and value <= 57 {
+        return value - 48;
+    }
+    if value >= 97 and value <= 102 {
+        return value - 87;
+    }
+    if value >= 65 and value <= 70 {
+        return value - 55;
+    }
+    return 0 - 1;
+}
+
+pub fn path_of_uri(allocator: Allocator, uri: []u8, out: &var string::String) -> !bool {
+    let scheme = "file://";
+    if mem::len(uri) < mem::len(scheme) or !mem::equal_bytes(uri[0..mem::len(scheme)], scheme) {
+        return false;
+    }
+    var decoded = string::new(allocator);
+    defer decoded.deinit(allocator);
+    var index = mem::len(scheme);
+    while index < mem::len(uri) {
+        let byte = uri[index];
+        if byte == cast<u8>(37) and index + 2 < mem::len(uri) {
+            let high = hex_value(uri[index + 1]);
+            let low = hex_value(uri[index + 2]);
+            if high >= 0 and low >= 0 {
+                try decoded.append_byte(allocator, cast<u8>(high * 16 + low));
+                index = index + 3;
+                continue;
+            }
+        }
+        try decoded.append_byte(allocator, byte);
+        index = index + 1;
+    }
+    let bytes = decoded.as_bytes();
+    comptime if std::target::is_windows() {
+        var start = 0;
+        if mem::len(bytes) >= 3 and bytes[0] == cast<u8>(47) and bytes[2] == cast<u8>(58) {
+            start = 1;
+        }
+        for start..mem::len(bytes) |at| {
+            if bytes[at] == cast<u8>(47) {
+                try out.append_byte(allocator, cast<u8>(92));
+            } else {
+                try out.append_byte(allocator, bytes[at]);
+            }
+        }
+        return true;
+    } else {
+        try out.append_bytes(allocator, bytes);
+        return true;
+    }
+}
+
+fn unreserved(byte: u8) -> bool {
+    let value = cast<i64>(byte);
+    return (value >= 48 and value <= 57) or (value >= 65 and value <= 90) or (value >= 97 and value <= 122) or
+        value == 45 or value == 46 or value == 95 or value == 126 or value == 47;
+}
+
+pub fn uri_of_path(allocator: Allocator, file: []u8, out: &var string::String) -> !void {
+    let digits = "0123456789ABCDEF";
+    try out.append_bytes(allocator, "file://");
+    comptime if std::target::is_windows() {
+        if mem::len(file) >= 2 and file[1] == cast<u8>(58) {
+            try out.append_byte(allocator, cast<u8>(47));
+        }
+    }
+    for 0..mem::len(file) |index| {
+        var byte = file[index];
+        comptime if std::target::is_windows() {
+            if byte == cast<u8>(92) {
+                byte = cast<u8>(47);
+            }
+        }
+        if unreserved(byte) {
+            try out.append_byte(allocator, byte);
+        } else {
+            let value = cast<i64>(byte);
+            try out.append_byte(allocator, cast<u8>(37));
+            try out.append_byte(allocator, digits[value / 16]);
+            try out.append_byte(allocator, digits[value % 16]);
+        }
+    }
+    return;
+}
+
+pub fn begin_message(encoder: &var json::Encoder) -> !void {
+    try encoder.begin_object();
+    return encoder.write_bytes_field("jsonrpc", "2.0");
+}
+
+pub fn write_id(encoder: &var json::Encoder, message: &json::Value) -> !void {
+    match message {
+        Obj(entries) => {
+            if entries.at("id") |held| {
+                match held {
+                    I64(number) => return encoder.write_i64_field("id", number),
+                    Str(text) => {
+                        let bytes = text.as_bytes();
+                        return encoder.write_bytes_field("id", bytes);
+                    },
+                    _ => return encoder.write_null_field("id"),
+                }
+            }
+            return encoder.write_null_field("id");
+        },
+        _ => return encoder.write_null_field("id"),
+    }
+}
+
+pub fn write_range(encoder: &var json::Encoder, name: []u8, start_line: i64, start_character: i64, end_line: i64, end_character: i64) -> !void {
+    try encoder.begin_object_field(name);
+    try encoder.begin_object_field("start");
+    try encoder.write_i64_field("line", start_line);
+    try encoder.write_i64_field("character", start_character);
+    try encoder.end_object();
+    try encoder.begin_object_field("end");
+    try encoder.write_i64_field("line", end_line);
+    try encoder.write_i64_field("character", end_character);
+    try encoder.end_object();
+    return encoder.end_object();
+}
+
+pub fn finish(io: Io, allocator: Allocator, encoder: json::Encoder) -> !void {
+    var owned = move encoder;
+    defer owned.deinit(allocator);
+    try owned.end_object();
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    try owned.finish_into(allocator, &var body);
+    let bytes = body.as_bytes();
+    return write_message(io, allocator, bytes);
+}
+
+fn is_continuation(byte: u8) -> bool {
+    return byte >= cast<u8>(128) and byte <= cast<u8>(191);
+}
+
+fn scalar_width(text: []u8, at: i64) -> i64 {
+    let length = mem::len(text);
+    let first = text[at];
+    if first < cast<u8>(128) {
+        return 1;
+    }
+    if first >= cast<u8>(194) and first <= cast<u8>(223) and at + 1 < length {
+        if is_continuation(text[at + 1]) {
+            return 2;
+        }
+    }
+    if first >= cast<u8>(224) and first <= cast<u8>(239) and at + 2 < length {
+        let second = text[at + 1];
+        let third = text[at + 2];
+        let second_valid = is_continuation(second) and
+            !(first == cast<u8>(224) and second < cast<u8>(160)) and
+            !(first == cast<u8>(237) and second > cast<u8>(159));
+        if second_valid and is_continuation(third) {
+            return 3;
+        }
+    }
+    if first >= cast<u8>(240) and first <= cast<u8>(244) and at + 3 < length {
+        let second = text[at + 1];
+        let third = text[at + 2];
+        let fourth = text[at + 3];
+        let second_valid = is_continuation(second) and
+            !(first == cast<u8>(240) and second < cast<u8>(144)) and
+            !(first == cast<u8>(244) and second > cast<u8>(143));
+        if second_valid and is_continuation(third) and is_continuation(fourth) {
+            return 4;
+        }
+    }
+    return 1;
+}
+
+pub fn utf16_column(text: []u8, line: i64, scalar_column: i64) -> i64 {
+    if line < 0 or scalar_column <= 0 {
+        return 0;
+    }
+    var at = 0;
+    var current = 0;
+    while current < line and at < mem::len(text) {
+        if text[at] == cast<u8>(10) {
+            current = current + 1;
+        }
+        at = at + 1;
+    }
+    var units = 0;
+    var walked = 0;
+    while walked < scalar_column and at < mem::len(text) and text[at] != cast<u8>(10) {
+        let width = scalar_width(text, at);
+        if width == 4 {
+            units = units + 2;
+        } else {
+            units = units + 1;
+        }
+        at = at + width;
+        walked = walked + 1;
+    }
+    return units + scalar_column - walked;
+}

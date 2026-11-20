@@ -1,0 +1,293 @@
+import harness::scratch;
+import std::fmt;
+import std::fs;
+import std::io;
+import std::mem;
+import std::net;
+import std::process;
+import std::string;
+
+// `kizu lsp` is fed one editing session on stdin, a package with a type
+// error in a file the editor has open and then the file fixed, and what it
+// answers is read back from stdout and checked line by line of the protocol.
+
+pub error Failure = scratch::Failure or fs::Error or io::Error or net::Error or process::Error;
+
+fn manifest() -> []u8 {
+    return
+        \\[package]
+        \\name = "app"
+        \\version = "0.0.0"
+        \\
+        \\[modules]
+        \\paths = ["src"]
+        \\
+    ;
+}
+
+fn value_source() -> []u8 {
+    return
+        \\pub fn value() -> i64 {
+        \\    return 1;
+        \\}
+        \\
+    ;
+}
+
+fn main_source() -> []u8 {
+    return
+        \\import app::app;
+        \\
+        \\fn main() -> void {
+        \\    print(app::value());
+        \\    return;
+        \\}
+        \\
+    ;
+}
+
+fn frame(allocator: Allocator, out: &var string::String, first: []u8, second: []u8, third: []u8) -> mem::Error!void {
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    try body.append_bytes(allocator, first);
+    try body.append_bytes(allocator, second);
+    try body.append_bytes(allocator, third);
+    try out.append_bytes(allocator, "Content-Length: ");
+    try fmt::append_i64(allocator, out, body.len());
+    for 0..2 |_line| {
+        try out.append_byte(allocator, cast<u8>(13));
+        try out.append_byte(allocator, cast<u8>(10));
+    }
+    return out.append_string(allocator, &body);
+}
+
+fn initialize_message() -> []u8 {
+    return
+        \\{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
+    ;
+}
+
+fn initialized_message() -> []u8 {
+    return
+        \\{"jsonrpc":"2.0","method":"initialized","params":{}}
+    ;
+}
+
+fn open_head_message() -> []u8 {
+    return
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"
+    ;
+}
+
+fn open_tail_message() -> []u8 {
+    return
+        \\","languageId":"kizu","version":1,"text":"import app::app;\n\nfn main() -> void {\n    let note = \"日本😀\"; let x: i64 = note;\n    print(app::value() + x);\n    return;\n}\n"}}}
+    ;
+}
+
+fn symbols_head_message() -> []u8 {
+    return
+        \\{"jsonrpc":"2.0","id":2,"method":"textDocument/documentSymbol","params":{"textDocument":{"uri":"
+    ;
+}
+
+fn symbols_tail_message() -> []u8 {
+    return
+        \\"}}}
+    ;
+}
+
+fn folding_head_message() -> []u8 {
+    return
+        \\{"jsonrpc":"2.0","id":3,"method":"textDocument/foldingRange","params":{"textDocument":{"uri":"
+    ;
+}
+
+fn folding_tail_message() -> []u8 {
+    return
+        \\"}}}
+    ;
+}
+
+fn change_head_message() -> []u8 {
+    return
+        \\{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"
+    ;
+}
+
+fn change_tail_message() -> []u8 {
+    return
+        \\","version":2},"contentChanges":[{"text":"import app::app;\n\nfn main() -> void {\n  print(app::value());\n    return;\n}\n"}]}}
+    ;
+}
+
+fn format_head_message() -> []u8 {
+    return
+        \\{"jsonrpc":"2.0","id":4,"method":"textDocument/formatting","params":{"textDocument":{"uri":"
+    ;
+}
+
+fn format_tail_message() -> []u8 {
+    return
+        \\"},"options":{"tabSize":4,"insertSpaces":true}}}
+    ;
+}
+
+fn shutdown_message() -> []u8 {
+    return
+        \\{"jsonrpc":"2.0","id":5,"method":"shutdown"}
+    ;
+}
+
+fn exit_message() -> []u8 {
+    return
+        \\{"jsonrpc":"2.0","method":"exit"}
+    ;
+}
+
+fn session(allocator: Allocator, uri: []u8, out: &var string::String) -> mem::Error!void {
+    try frame(allocator, out, initialize_message(), "", "");
+    try frame(allocator, out, initialized_message(), "", "");
+    try frame(allocator, out, open_head_message(), uri, open_tail_message());
+    try frame(allocator, out, symbols_head_message(), uri, symbols_tail_message());
+    try frame(allocator, out, folding_head_message(), uri, folding_tail_message());
+    try frame(allocator, out, change_head_message(), uri, change_tail_message());
+    try frame(allocator, out, format_head_message(), uri, format_tail_message());
+    try frame(allocator, out, shutdown_message(), "", "");
+    return frame(allocator, out, exit_message(), "", "");
+}
+
+fn want_capability() -> []u8 {
+    return
+        \\"documentFormattingProvider":true
+    ;
+}
+
+fn want_position() -> []u8 {
+    return
+        \\"range":{"start":{"line":3,"character":36},"end":{"line":3,"character":40}}
+    ;
+}
+
+fn want_cleared() -> []u8 {
+    return
+        \\"diagnostics":[]
+    ;
+}
+
+fn want_symbol() -> []u8 {
+    return
+        \\"name":"main","kind":12
+    ;
+}
+
+fn want_folding() -> []u8 {
+    return
+        \\"startLine":2,"endLine":6
+    ;
+}
+
+fn expect(handle: Io, allocator: Allocator, output: []u8, want: []u8, what: []u8) -> Failure!bool {
+    var at = 0;
+    while at + mem::len(want) <= mem::len(output) {
+        if mem::equal_bytes(output[at..at + mem::len(want)], want) {
+            return true;
+        }
+        at = at + 1;
+    }
+    var message = try string::from_bytes(allocator, "lsp: ");
+    defer message.deinit(allocator);
+    try message.append_bytes(allocator, what);
+    try message.append_bytes(allocator, ": missing ");
+    try message.append_bytes(allocator, want);
+    let text = message.as_bytes();
+    try io::write_stdout_line(handle, text);
+    return false;
+}
+
+fn write_file(handle: Io, allocator: Allocator, root: []u8, name: []u8, text: []u8) -> Failure!void {
+    let file = try scratch::join(allocator, root, name);
+    defer file.deinit(allocator);
+    let file_path = file.as_bytes();
+    return fs::write_file(handle, file_path, text);
+}
+
+fn make_dir(handle: Io, allocator: Allocator, root: []u8, name: []u8) -> Failure!void {
+    let dir = try scratch::join(allocator, root, name);
+    defer dir.deinit(allocator);
+    let dir_path = dir.as_bytes();
+    return fs::create_dir(handle, dir_path);
+}
+
+/// Has `kizu lsp` serve one editing session in a package of its own and
+/// answers whether every reply it owed arrived and said what it should.
+pub fn run(handle: Io, allocator: Allocator, kizu: []u8) -> Failure!bool {
+    var root = try scratch::dir(allocator, "kizu-lsp-");
+    defer root.deinit(allocator);
+    let root_path = root.as_bytes();
+    try fs::create_dir(handle, root_path);
+    try make_dir(handle, allocator, root_path, "src");
+    try make_dir(handle, allocator, root_path, "src/app");
+    try write_file(handle, allocator, root_path, "kizu.toml", manifest());
+    try write_file(handle, allocator, root_path, "src/app/app.kizu", value_source());
+    try write_file(handle, allocator, root_path, "src/main.kizu", main_source());
+    var uri = try string::from_bytes(allocator, "file://");
+    defer uri.deinit(allocator);
+    try uri.append_bytes(allocator, root_path);
+    try uri.append_bytes(allocator, "/src/main.kizu");
+    let uri_bytes = uri.as_bytes();
+    var input = string::new(allocator);
+    defer input.deinit(allocator);
+    try session(allocator, uri_bytes, &var input);
+
+    var command = try net::command(allocator, kizu);
+    defer command.deinit(allocator);
+    try command.arg(allocator, "lsp");
+    command.set_stdin(net::Stdio::Pipe);
+    command.set_stdout(net::Stdio::Pipe);
+    var child = try command.spawn(handle);
+    defer child.deinit();
+    let input_bytes = input.as_bytes();
+    try child.write_stdin_all(handle, input_bytes);
+    child.close_stdin();
+    var output = string::new(allocator);
+    defer output.deinit(allocator);
+    var poller = try net::poller_new(handle, 1);
+    defer poller.deinit();
+    try poller.watch_child_stdout(handle, &child, 1);
+    var open = true;
+    while open {
+        let ready = try poller.wait(handle, 0);
+        var at = 0;
+        while at < ready {
+            let event = poller.ready(at) orelse break;
+            at = at + 1;
+            if event.token == 1 and open {
+                if try child.read_stdout_ready(handle, allocator, &var output, 65536) |got| {
+                    if got == 0 {
+                        child.close_stdout();
+                        open = false;
+                    }
+                }
+            }
+        }
+    }
+    let status = try child.wait(handle);
+    try scratch::remove_tree(handle, allocator, root_path);
+    let text = output.as_bytes();
+    var passed = status == 0;
+    if !passed {
+        try io::write_stdout_line(handle, "lsp: did not exit cleanly after shutdown");
+    }
+    passed = try expect(handle, allocator, text, want_capability(), "initialize") and passed;
+    passed = try expect(handle, allocator, text, "`x` is declared i64, got []u8", "diagnostic on open") and passed;
+    passed = try expect(handle, allocator, text, want_position(), "diagnostic position in UTF-16") and passed;
+    passed = try expect(handle, allocator, text, want_cleared(), "diagnostics cleared after the fix") and passed;
+    passed = try expect(handle, allocator, text, want_symbol(), "document symbol") and passed;
+    passed = try expect(handle, allocator, text, want_folding(), "folding range") and passed;
+    passed = try expect(handle, allocator, text, "    print(app::value());", "formatting") and passed;
+    if passed {
+        try io::write_stdout_line(handle, "lsp: ok");
+    }
+    return passed;
+}

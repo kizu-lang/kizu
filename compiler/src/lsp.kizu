@@ -1,0 +1,651 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::fmt;
+import compiler::internal::lexer;
+import compiler::internal::lsp;
+import compiler::internal::ownership;
+import compiler::internal::parser;
+import compiler::internal::project;
+import compiler::internal::source;
+import compiler::internal::stdtarget;
+import compiler::internal::types;
+import std::array;
+import std::fs;
+import std::json;
+import std::map;
+import std::mem;
+import std::path;
+import std::string;
+
+struct Problem {
+    file: string::String,
+    start_line: i64,
+    start_character: i64,
+    end_line: i64,
+    end_character: i64,
+    warning: bool,
+    message: string::String,
+}
+
+struct Session {
+    lib_dir: string::String,
+    documents: map::Map<[]u8, string::String>,
+    published: map::Map<[]u8, bool>,
+    shut_down: bool,
+}
+
+fn (self: Session) deinit(allocator: Allocator) -> void {
+    self.lib_dir.deinit(allocator);
+    self.documents.deinit(allocator);
+    self.published.deinit(allocator);
+    return;
+}
+
+fn lsp_command(io: Io, allocator: Allocator, lib_dir: []u8) -> !i64 {
+    var session = Session {
+        lib_dir: try string::from_bytes(allocator, lib_dir),
+        documents: map::new<[]u8, string::String>(allocator),
+        published: map::new<[]u8, bool>(allocator),
+        shut_down: false
+    };
+    defer session.deinit(allocator);
+    var reader = lsp::new_reader(allocator);
+    defer reader.deinit(allocator);
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    while true {
+        body.clear();
+        if !try reader.next(allocator, &var body) {
+            if session.shut_down {
+                return 0;
+            }
+            return 1;
+        }
+        let body_bytes = body.as_bytes();
+        if json::decode<json::Value>(allocator, body_bytes) |message| {
+            defer message.deinit(allocator);
+            let method = lsp::text_at(&message, "method");
+            if mem::equal_bytes(method, "exit") {
+                if session.shut_down {
+                    return 0;
+                }
+                return 1;
+            }
+            try handle(io, allocator, &var session, method, &message);
+        } else |_| {}
+    }
+    return 1;
+}
+
+fn handle(io: Io, allocator: Allocator, session: &var Session, method: []u8, message: &json::Value) -> !void {
+    if mem::equal_bytes(method, "initialize") {
+        return answer_initialize(io, allocator, message);
+    }
+    if mem::equal_bytes(method, "shutdown") {
+        session.shut_down = true;
+        var encoder = json::encoder(allocator);
+        errdefer encoder.deinit(allocator);
+        try lsp::begin_message(&var encoder);
+        try lsp::write_id(&var encoder, message);
+        try encoder.write_null_field("result");
+        return lsp::finish(io, allocator, move encoder);
+    }
+    let uri = lsp::text_at(message, "params.textDocument.uri");
+    if mem::equal_bytes(method, "textDocument/didOpen") {
+        let text = lsp::text_at(message, "params.textDocument.text");
+        try remember(allocator, session, uri, text);
+        return publish(io, allocator, session, uri);
+    }
+    if mem::equal_bytes(method, "textDocument/didChange") {
+        let text = lsp::last_change(message);
+        try remember(allocator, session, uri, text);
+        return publish(io, allocator, session, uri);
+    }
+    if mem::equal_bytes(method, "textDocument/didSave") {
+        return publish(io, allocator, session, uri);
+    }
+    if mem::equal_bytes(method, "textDocument/didClose") {
+        if session.documents.remove(allocator, uri) |old| {
+            old.deinit(allocator);
+        }
+        var none = array::new<Problem>(allocator);
+        defer none.deinit(allocator);
+        return publish_problems(io, allocator, uri, &none);
+    }
+    if mem::equal_bytes(method, "textDocument/formatting") {
+        return answer_formatting(io, allocator, session, message, uri);
+    }
+    if mem::equal_bytes(method, "textDocument/documentSymbol") {
+        return answer_outline(io, allocator, session, message, uri, false);
+    }
+    if mem::equal_bytes(method, "textDocument/foldingRange") {
+        return answer_outline(io, allocator, session, message, uri, true);
+    }
+    if !lsp::has(message, "id") {
+        return;
+    }
+    var encoder = json::encoder(allocator);
+    errdefer encoder.deinit(allocator);
+    try lsp::begin_message(&var encoder);
+    try lsp::write_id(&var encoder, message);
+    try encoder.begin_object_field("error");
+    try encoder.write_i64_field("code", 0 - 32601);
+    try encoder.write_bytes_field("message", method);
+    try encoder.end_object();
+    return lsp::finish(io, allocator, move encoder);
+}
+
+fn remember(allocator: Allocator, session: &var Session, uri: []u8, text: []u8) -> !void {
+    if session.documents.remove(allocator, uri) |old| {
+        old.deinit(allocator);
+    }
+    return session.documents.insert(allocator, uri, try string::from_bytes(allocator, text));
+}
+
+fn answer_initialize(io: Io, allocator: Allocator, message: &json::Value) -> !void {
+    var encoder = json::encoder(allocator);
+    errdefer encoder.deinit(allocator);
+    try lsp::begin_message(&var encoder);
+    try lsp::write_id(&var encoder, message);
+    try encoder.begin_object_field("result");
+    try encoder.begin_object_field("capabilities");
+    try encoder.write_i64_field("textDocumentSync", 1);
+    try encoder.write_bool_field("documentFormattingProvider", true);
+    try encoder.write_bool_field("documentSymbolProvider", true);
+    try encoder.write_bool_field("foldingRangeProvider", true);
+    try encoder.end_object();
+    try encoder.begin_object_field("serverInfo");
+    try encoder.write_bytes_field("name", "kizu");
+    try encoder.end_object();
+    try encoder.end_object();
+    return lsp::finish(io, allocator, move encoder);
+}
+
+fn package_root(io: Io, allocator: Allocator, file: []u8, out: &var string::String) -> !bool {
+    var dir = path::dirname(file);
+    while mem::len(dir) > 0 {
+        let manifest = try path::join(allocator, dir, "kizu.toml");
+        defer manifest.deinit(allocator);
+        let manifest_bytes = manifest.as_bytes();
+        if fs::exists(io, manifest_bytes) catch false {
+            try out.append_bytes(allocator, dir);
+            return true;
+        }
+        let parent = path::dirname(dir);
+        if mem::equal_bytes(parent, dir) {
+            return false;
+        }
+        dir = parent;
+    }
+    return false;
+}
+
+fn add_problem(
+    allocator: Allocator,
+    sources: &source::SourceMap,
+    fallback_file: []u8,
+    failed: &diagnostic::Diagnostic,
+    problems: &var array::Array<Problem>
+) -> !void {
+    var file = string::new(allocator);
+    errdefer file.deinit(allocator);
+    var start_line = failed.span.start.line - 1;
+    var start_character = failed.span.start.column - 1;
+    var end_line = failed.span.end.line - 1;
+    var end_character = failed.span.end.column - 1;
+    if failed.span.source |id| {
+        if sources.at(id) |input| {
+            try file.append_string(allocator, &input.path);
+            let text = input.text.as_bytes();
+            start_character = lsp::utf16_column(text, start_line, start_character);
+            end_character = lsp::utf16_column(text, end_line, end_character);
+        }
+    }
+    if file.len() == 0 {
+        try file.append_bytes(allocator, fallback_file);
+    }
+    var message = string::new(allocator);
+    errdefer message.deinit(allocator);
+    if failed.category.len() > 0 {
+        try message.append_string(allocator, &failed.category);
+        try message.append_bytes(allocator, ": ");
+    }
+    try message.append_string(allocator, &failed.message);
+    var note_index = 0;
+    while failed.notes.at(note_index) |note| {
+        note_index = note_index + 1;
+        try message.append_byte(allocator, cast<u8>(10));
+        try message.append_string(allocator, note);
+    }
+    if failed.help.len() > 0 {
+        try message.append_byte(allocator, cast<u8>(10));
+        try message.append_bytes(allocator, "help: ");
+        try message.append_string(allocator, &failed.help);
+    }
+    if start_line < 0 {
+        start_line = 0;
+    }
+    if start_character < 0 {
+        start_character = 0;
+    }
+    if end_line < start_line or (end_line == start_line and end_character <= start_character) {
+        end_line = start_line;
+        end_character = start_character + 1;
+    }
+    return problems.append(allocator, Problem {
+        file: move file,
+        start_line: start_line,
+        start_character: start_character,
+        end_line: end_line,
+        end_character: end_character,
+        warning: failed.severity == diagnostic::Severity::Warning,
+        message: move message
+    });
+}
+
+fn override_documents(allocator: Allocator, session: &Session, loader: &var project::Loader) -> !void {
+    var index = 0;
+    while session.documents.key_at(index) |uri| {
+        index = index + 1;
+        var file = string::new(allocator);
+        defer file.deinit(allocator);
+        if try lsp::path_of_uri(allocator, uri, &var file) {
+            if session.documents.at(uri) |text| {
+                let file_bytes = file.as_bytes();
+                let text_bytes = text.as_bytes();
+                try loader.override_source(file_bytes, text_bytes);
+            }
+        }
+    }
+    return;
+}
+
+fn load_for(
+    io: Io,
+    allocator: Allocator,
+    session: &Session,
+    loader: &var project::Loader,
+    tree: &var ast::Ast,
+    file: []u8,
+    uri: []u8,
+    package_name: &var string::String
+) -> !project::LoadResult {
+    var root = string::new(allocator);
+    defer root.deinit(allocator);
+    if try package_root(io, allocator, file, &var root) {
+        let root_bytes = root.as_bytes();
+        return load_target(io, allocator, loader, tree, root_bytes, package_name, project::is_test_file(file));
+    }
+    if session.documents.at(uri) |text| {
+        let text_bytes = text.as_bytes();
+        return loader.load_source(tree, file, text_bytes);
+    }
+    return load_target(io, allocator, loader, tree, file, package_name, false);
+}
+
+fn check_into(
+    io: Io,
+    allocator: Allocator,
+    session: &Session,
+    file: []u8,
+    uri: []u8,
+    problems: &var array::Array<Problem>
+) -> !void {
+    let lib_dir = session.lib_dir.as_bytes();
+    var tree = ast::new(allocator);
+    defer tree.deinit(allocator);
+    var loader = try project::new_loader(io, allocator, lib_dir);
+    defer loader.deinit(allocator);
+    try override_documents(allocator, session, &var loader);
+    var package_name = string::new(allocator);
+    defer package_name.deinit(allocator);
+    let loaded = try load_for(io, allocator, session, &var loader, &var tree, file, uri, &var package_name);
+    match loaded {
+        Error(failed) => {
+            defer failed.deinit(allocator);
+            return add_problem(allocator, &loader.sources, file, &failed, problems);
+        },
+        Program(program) => {
+            defer program.deinit(allocator);
+            let host = stdtarget::host();
+            if try types::check_for_target(allocator, &var tree, &program, host) |failed| {
+                defer failed.deinit(allocator);
+                return add_problem(allocator, &loader.sources, file, &failed, problems);
+            }
+            var checker = try ownership::new_checker_for_target(allocator, &tree, &program, host);
+            defer checker.deinit(allocator);
+            if try checker.check_program(&var tree, &program) |failed| {
+                defer failed.deinit(allocator);
+                return add_problem(allocator, &loader.sources, file, &failed, problems);
+            }
+        },
+    }
+    return;
+}
+
+fn sync_published(
+    io: Io,
+    allocator: Allocator,
+    session: &var Session,
+    next_external: &map::Map<[]u8, bool>,
+    problems: &array::Array<Problem>
+) -> !void {
+    var cleared = array::new<string::String>(allocator);
+    defer cleared.deinit(allocator);
+    var index = 0;
+    while session.published.key_at(index) |previous| {
+        index = index + 1;
+        if !next_external.contains(previous) {
+            try cleared.append(allocator, try string::from_bytes(allocator, previous));
+        }
+    }
+    index = 0;
+    while index < cleared.len() {
+        var stale = string::new(allocator);
+        defer stale.deinit(allocator);
+        if cleared.at(index) |entry| {
+            try stale.append_string(allocator, entry);
+        }
+        index = index + 1;
+        let stale_bytes = stale.as_bytes();
+        let _ = session.published.remove(allocator, stale_bytes);
+        if !session.documents.contains(stale_bytes) {
+            try publish_problems(io, allocator, stale_bytes, problems);
+        }
+    }
+    index = 0;
+    while session.documents.key_at(index) |open| {
+        index = index + 1;
+        try publish_problems(io, allocator, open, problems);
+    }
+    index = 0;
+    while next_external.key_at(index) |external| {
+        index = index + 1;
+        try session.published.insert(allocator, external, true);
+        try publish_problems(io, allocator, external, problems);
+    }
+    return;
+}
+
+fn publish(io: Io, allocator: Allocator, session: &var Session, uri: []u8) -> !void {
+    var file = string::new(allocator);
+    defer file.deinit(allocator);
+    if !try lsp::path_of_uri(allocator, uri, &var file) {
+        return;
+    }
+    var problems = array::new<Problem>(allocator);
+    defer problems.deinit(allocator);
+    let file_bytes = file.as_bytes();
+    try check_into(io, allocator, session, file_bytes, uri, &var problems);
+    var next_external = map::new<[]u8, bool>(allocator);
+    defer next_external.deinit(allocator);
+    var index = 0;
+    while problems.at(index) |problem| {
+        index = index + 1;
+        var problem_uri = string::new(allocator);
+        defer problem_uri.deinit(allocator);
+        let problem_file = problem.file.as_bytes();
+        try lsp::uri_of_path(allocator, problem_file, &var problem_uri);
+        let problem_uri_bytes = problem_uri.as_bytes();
+        if !session.documents.contains(problem_uri_bytes) {
+            try next_external.insert(allocator, problem_uri_bytes, true);
+        }
+    }
+    return sync_published(io, allocator, session, &next_external, &problems);
+}
+
+fn publish_problems(io: Io, allocator: Allocator, uri: []u8, problems: &array::Array<Problem>) -> !void {
+    var file = string::new(allocator);
+    defer file.deinit(allocator);
+    let _ = try lsp::path_of_uri(allocator, uri, &var file);
+    let file_bytes = file.as_bytes();
+    var encoder = json::encoder(allocator);
+    errdefer encoder.deinit(allocator);
+    try lsp::begin_message(&var encoder);
+    try encoder.write_bytes_field("method", "textDocument/publishDiagnostics");
+    try encoder.begin_object_field("params");
+    try encoder.write_bytes_field("uri", uri);
+    try encoder.begin_array_field("diagnostics");
+    if problems.len() > 0 {
+        var index = 0;
+        while problems.at(index) |problem| {
+            index = index + 1;
+            let problem_file = problem.file.as_bytes();
+            if !mem::equal_bytes(problem_file, file_bytes) {
+                continue;
+            }
+            try encoder.begin_object();
+            try lsp::write_range(&var encoder, "range", problem.start_line, problem.start_character, problem.end_line, problem.end_character);
+            if problem.warning {
+                try encoder.write_i64_field("severity", 2);
+            } else {
+                try encoder.write_i64_field("severity", 1);
+            }
+            try encoder.write_bytes_field("source", "kizu");
+            let message = problem.message.as_bytes();
+            try encoder.write_bytes_field("message", message);
+            try encoder.end_object();
+        }
+    }
+    try encoder.end_array();
+    try encoder.end_object();
+    return lsp::finish(io, allocator, move encoder);
+}
+
+fn line_count(text: []u8) -> i64 {
+    var lines = 0;
+    for 0..mem::len(text) |index| {
+        if text[index] == cast<u8>(10) {
+            lines = lines + 1;
+        }
+    }
+    return lines + 1;
+}
+
+fn parses(allocator: Allocator, file: []u8, text: []u8) -> !bool {
+    var sources = source::new(allocator);
+    defer sources.deinit(allocator);
+    let held_path = try string::from_bytes(allocator, file);
+    errdefer held_path.deinit(allocator);
+    let held_text = try string::from_bytes(allocator, text);
+    let id = try sources.add(move held_path, move held_text);
+    var tree = ast::new(allocator);
+    defer tree.deinit(allocator);
+    if sources.at(id) |input| {
+        let bytes = input.text.as_bytes();
+        let scanner = lexer::new_source(allocator, id, bytes);
+        var source_parser = try parser::new(allocator, move scanner);
+        defer source_parser.deinit(allocator);
+        let program = try source_parser.parse_program(&var tree);
+        defer program.deinit(allocator);
+        return source_parser.diagnostics_len() == 0;
+    }
+    return false;
+}
+
+fn answer_formatting(io: Io, allocator: Allocator, session: &Session, message: &json::Value, uri: []u8) -> !void {
+    var encoder = json::encoder(allocator);
+    errdefer encoder.deinit(allocator);
+    try lsp::begin_message(&var encoder);
+    try lsp::write_id(&var encoder, message);
+    var file = string::new(allocator);
+    defer file.deinit(allocator);
+    let known = try lsp::path_of_uri(allocator, uri, &var file);
+    let file_bytes = file.as_bytes();
+    if !known {
+        try encoder.write_null_field("result");
+        return lsp::finish(io, allocator, move encoder);
+    }
+    if session.documents.at(uri) |text| {
+        let original = text.as_bytes();
+        if !try parses(allocator, file_bytes, original) {
+            try encoder.write_null_field("result");
+            return lsp::finish(io, allocator, move encoder);
+        }
+        var marked = try string::from_bytes(allocator, original);
+        defer marked.deinit(allocator);
+        let lib_dir = session.lib_dir.as_bytes();
+        let inserted = try insert_move_markers(io, allocator, lib_dir, file_bytes, &var marked);
+        match inserted {
+            Ok => {},
+            Outside(_) => {
+                try encoder.write_null_field("result");
+                return lsp::finish(io, allocator, move encoder);
+            },
+        }
+        let marked_bytes = marked.as_bytes();
+        let formatted = try fmt::format(allocator, marked_bytes);
+        defer formatted.deinit(allocator);
+        let formatted_bytes = formatted.as_bytes();
+        try encoder.begin_array_field("result");
+        if !mem::equal_bytes(formatted_bytes, original) {
+            try encoder.begin_object();
+            try lsp::write_range(&var encoder, "range", 0, 0, line_count(original), 0);
+            try encoder.write_bytes_field("newText", formatted_bytes);
+            try encoder.end_object();
+        }
+        try encoder.end_array();
+        return lsp::finish(io, allocator, move encoder);
+    }
+    try encoder.write_null_field("result");
+    return lsp::finish(io, allocator, move encoder);
+}
+
+struct Outline {
+    name: string::String,
+    kind: i64,
+    span: ast::Span,
+}
+
+fn text_bytes(tree: &ast::Ast, text: ast::Text) -> []u8 {
+    let held = tree.texts.at(text.node);
+    let bytes = held.as_bytes();
+    return bytes;
+}
+
+fn outline_of(allocator: Allocator, tree: &ast::Ast, declaration: &ast::Declaration, out: &var array::Array<Outline>) -> !void {
+    let handle = declaration.span orelse return;
+    let span = tree.spans.at(handle).*;
+    var name = string::new(allocator);
+    errdefer name.deinit(allocator);
+    var kind = 0;
+    match tree.declarations.at(declaration.node) {
+        Function(function) => {
+            try name.append_bytes(allocator, text_bytes(tree, function.signature.name));
+            kind = 12;
+        },
+        Test(test_decl) => {
+            try name.append_bytes(allocator, "test ");
+            try name.append_bytes(allocator, text_bytes(tree, test_decl.name));
+            kind = 12;
+        },
+        Struct(declared) => {
+            try name.append_bytes(allocator, text_bytes(tree, declared.name));
+            kind = 23;
+        },
+        Enum(declared) => {
+            try name.append_bytes(allocator, text_bytes(tree, declared.name));
+            kind = 10;
+        },
+        ErrorSet(declared) => {
+            try name.append_bytes(allocator, text_bytes(tree, declared.name));
+            kind = 10;
+        },
+        Union(declared) => {
+            try name.append_bytes(allocator, text_bytes(tree, declared.name));
+            kind = 10;
+        },
+        Contract(declared) => {
+            try name.append_bytes(allocator, text_bytes(tree, declared.name));
+            kind = 11;
+        },
+        Impl(declared) => {
+            try name.append_bytes(allocator, text_bytes(tree, declared.contract_name));
+            try name.append_bytes(allocator, " for ");
+            try name.append_bytes(allocator, text_bytes(tree, declared.type_name));
+            kind = 19;
+        },
+        Const(declared) => {
+            try name.append_bytes(allocator, text_bytes(tree, declared.name));
+            kind = 14;
+        },
+        _ => {},
+    }
+    if kind == 0 or name.len() == 0 {
+        name.deinit(allocator);
+        return;
+    }
+    return out.append(allocator, Outline { name: move name, kind: kind, span: span });
+}
+
+fn answer_outline(io: Io, allocator: Allocator, session: &Session, message: &json::Value, uri: []u8, folding: bool) -> !void {
+    var encoder = json::encoder(allocator);
+    errdefer encoder.deinit(allocator);
+    try lsp::begin_message(&var encoder);
+    try lsp::write_id(&var encoder, message);
+    try encoder.begin_array_field("result");
+    var outline = array::new<Outline>(allocator);
+    defer outline.deinit(allocator);
+    if session.documents.at(uri) |text| {
+        var sources = source::new(allocator);
+        defer sources.deinit(allocator);
+        let held = text.as_bytes();
+        let held_path = try string::from_bytes(allocator, uri);
+        errdefer held_path.deinit(allocator);
+        let held_text = try string::from_bytes(allocator, held);
+        let id_in_map = try sources.add(move held_path, move held_text);
+        var tree = ast::new(allocator);
+        defer tree.deinit(allocator);
+        if sources.at(id_in_map) |input| {
+            let bytes = input.text.as_bytes();
+            let scanner = lexer::new_source(allocator, id_in_map, bytes);
+            var source_parser = try parser::new(allocator, move scanner);
+            defer source_parser.deinit(allocator);
+            let program = try source_parser.parse_program(&var tree);
+            defer program.deinit(allocator);
+            var index = 0;
+            while program.declarations.at(index) |declaration| {
+                index = index + 1;
+                try outline_of(allocator, &tree, declaration, &var outline);
+            }
+        }
+    }
+    var document = string::new(allocator);
+    defer document.deinit(allocator);
+    if session.documents.at(uri) |text| {
+        try document.append_string(allocator, text);
+    }
+    let document_bytes = document.as_bytes();
+    var index = 0;
+    while outline.at(index) |entry| {
+        index = index + 1;
+        var start_line = entry.span.start.line - 1;
+        var end_line = entry.span.end.line - 1;
+        if start_line < 0 {
+            start_line = 0;
+        }
+        if end_line < start_line {
+            end_line = start_line;
+        }
+        let start_character = lsp::utf16_column(document_bytes, start_line, entry.span.start.column - 1);
+        let end_character = lsp::utf16_column(document_bytes, end_line, entry.span.end.column - 1);
+        if folding {
+            if end_line > start_line {
+                try encoder.begin_object();
+                try encoder.write_i64_field("startLine", start_line);
+                try encoder.write_i64_field("endLine", end_line);
+                try encoder.end_object();
+            }
+            continue;
+        }
+        try encoder.begin_object();
+        let name = entry.name.as_bytes();
+        try encoder.write_bytes_field("name", name);
+        try encoder.write_i64_field("kind", entry.kind);
+        try lsp::write_range(&var encoder, "range", start_line, start_character, end_line, end_character);
+        try lsp::write_range(&var encoder, "selectionRange", start_line, start_character, start_line, start_character);
+        try encoder.end_object();
+    }
+    try encoder.end_array();
+    return lsp::finish(io, allocator, move encoder);
+}
