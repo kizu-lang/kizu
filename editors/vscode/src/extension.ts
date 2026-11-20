@@ -41,7 +41,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(async event => {
-      if (event.affectsConfiguration("kizu.lsp.path")) {
+      if (event.affectsConfiguration("kizu.cli.path")) {
         await restartClient(output);
       }
     })
@@ -60,14 +60,14 @@ async function restartClient(output: vscode.OutputChannel): Promise<void> {
 }
 
 async function startClient(output: vscode.OutputChannel): Promise<void> {
-  const command = serverCommand();
-  if (!validateExplicitCommand(command)) {
+  const command = cliCommand();
+  if (!validateCLICommand(command)) {
     return;
   }
 
   const serverOptions: ServerOptions = {
     command,
-    args: [],
+    args: ["lsp"],
     options: {}
   };
   const clientOptions: LanguageClientOptions = {
@@ -79,7 +79,7 @@ async function startClient(output: vscode.OutputChannel): Promise<void> {
   };
 
   client = new LanguageClient(
-    "kizu-lsp",
+    "kizu",
     "Kizu Language Server",
     serverOptions,
     clientOptions
@@ -90,7 +90,7 @@ async function startClient(output: vscode.OutputChannel): Promise<void> {
     client = undefined;
     const detail = error instanceof Error ? error.message : String(error);
     vscode.window.showErrorMessage(
-      `Failed to start kizu-lsp. Install kizu-lsp or set kizu.lsp.path. ${detail}`
+      `Failed to start kizu lsp. Install kizu or set kizu.cli.path. ${detail}`
     );
   }
 }
@@ -101,17 +101,6 @@ async function stopClient(): Promise<void> {
   if (running) {
     await running.stop();
   }
-}
-
-function serverCommand(): string {
-  const configured = vscode.workspace
-    .getConfiguration("kizu.lsp")
-    .get<string>("path", "")
-    .trim();
-  if (configured.length === 0) {
-    return "kizu-lsp";
-  }
-  return expandHome(configured);
 }
 
 async function runCurrentFile(mode: "run" | "test"): Promise<void> {
@@ -167,19 +156,6 @@ function validateCLICommand(command: string): boolean {
     return true;
   }
   vscode.window.showErrorMessage(`kizu.cli.path does not exist: ${command}`);
-  return false;
-}
-
-function validateExplicitCommand(command: string): boolean {
-  if (command === "kizu-lsp") {
-    return true;
-  }
-  if (fs.existsSync(command)) {
-    return true;
-  }
-  vscode.window.showErrorMessage(
-    `kizu.lsp.path does not exist: ${command}`
-  );
   return false;
 }
 
