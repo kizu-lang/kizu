@@ -33,7 +33,7 @@ compiler/            shipping する Kizu 製 compiler(pin した種が build �
     staticexpr, stdmath           static 引数の整数式と、comptime の sin / cos(std::math と同じ bit)
     unsafecap                     unsafe が覆う操作の種類と診断文言
     version                       binary の名乗り(生成 source)
-    fmt, diagnostic, buildcache, buildplan, cimport
+    fmt, lsp, diagnostic, buildcache, buildplan, cimport
   tests/             frontend / IR / LLVM の corpus、MBT fixture、test harness
 scripts/             種の取得と bootstrap(bootstrap.sh)、生成器、計測
 lib/kizu/             release binaryが隣で読むlibrary tree
@@ -137,7 +137,7 @@ browser は `main` と `export "browser"` から到達できる関数だけを b
 描画前に target 非対応として拒否します。browser 側の対応範囲と JavaScript ABI は
 [`docs/wasm-browser.md`](wasm-browser.md) が持ちます。
 
-CLI のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
+CLI のコマンド: `run` `parse` `check` `test` `fmt` `init` `lsp` `ir`
 `build`(`--emit-llvm` / `--target native|wasm32-wasi|wasm32-browser|metal|spirv`、nativeの
 `--emit obj`、browserの`--emit esm`。native の `build` / `run` / `test` は `--backend direct|llvm`)`cache` `import-c-header`
 `version`。基本の実行経路は `kizu run examples/hello.kizu`。どのコマンドがどこへ
