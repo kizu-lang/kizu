@@ -137,7 +137,6 @@ deliberately excluded, so the two are not confused.
 | wasm beyond the current target subsets | **in progress.** Every example the Wasm routes do not run is refused as a capability the target lacks |
 | raw pointer runtime operations | **check-only.** `pointer_policy.kizu` and `raw_pointer_deref.kizu` are checked but not executed |
 | type alias | **not started** |
-| `kizu lint` | **not started** |
 | HTTP middleware | **not started.** Middleware waits on closures. `std::http` serves and fetches HTTP/1 over plaintext TCP or TLS 1.3 (`std::tls`) |
 | full generics | **not planned as such.** Explicit static arguments only, no inference, no bounds, no HKT (ADR-0066) |
 | `async fn` / `await` syntax | **not adopted.** Function coloring is the cost this language does not pay (ADR-0025) |
@@ -224,6 +223,7 @@ just wasi-smoke      # run the wasm examples under wasmtime
 - `kizu run <file-or-package>` builds a native executable and runs it.
 - `kizu test <file-or-package>` runs checked top-level test blocks without invoking `main`.
 - `kizu fmt [--write|-w] <file>` prints or writes the formatter's output. It settles spacing, indentation, and the trailing comma of a multi-line declaration; line breaks stay where the author put them, so a block written on one line stays on one line, one blank line between statements is kept, and a comment keeps its line and its column.
+- `kizu lint <file|dir|package>...` checks comment policy: ordinary `//` comments are rejected everywhere, and `///` doc comments are allowed only as a contiguous block with no blank line directly above an external public interface outside `internal` modules.
 - `kizu init [path]` scaffolds a package.
 - `kizu ir [--opt] <file>` prints typed SSA IR.
 - `kizu build --emit-llvm [--opt] <file>` emits LLVM IR text.
@@ -235,8 +235,6 @@ just wasi-smoke      # run the wasm examples under wasmtime
 - `kizu cache status` / `kizu cache prune` show and clear the local build cache.
 - `kizu import-c-header <file>` converts supported C prototypes to Kizu externs.
 - `kizu version` prints what the binary is.
-
-`kizu lint` is not implemented.
 
 ## Project Documents
 

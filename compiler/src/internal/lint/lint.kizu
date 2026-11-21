@@ -1,0 +1,1821 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::fsutil;
+import compiler::internal::lexer;
+import compiler::internal::manifest;
+import compiler::internal::project;
+import compiler::internal::source;
+import compiler::internal::stdmethod;
+import compiler::internal::token;
+import std::array;
+import std::fs;
+import std::map;
+import std::mem;
+import std::path;
+import std::sort;
+import std::string;
+
+struct Comment {
+    line: i64,
+    column: i64,
+    end_column: i64,
+    leading: bool,
+    is_doc: bool,
+}
+
+struct ReceiverCandidate {
+    line: i64,
+    type_path: string::String,
+}
+
+enum Container {
+    None,
+    PubStruct,
+    PubMembers,
+    PubContract,
+}
+
+struct FileAnalysis {
+    allowed_lines: map::Map<i64, bool>,
+    declared_types: map::Map<[]u8, bool>,
+    imports: map::Map<[]u8, string::String>,
+    receivers: array::Array<ReceiverCandidate>,
+}
+
+struct PackageEntry {
+    found: bool,
+    package_name: string::String,
+    source_roots: array::Array<string::String>,
+}
+
+struct FileContext {
+    has_package: bool,
+    package_name: string::String,
+    source_roots: array::Array<string::String>,
+    module_path: string::String,
+    module_dir: string::String,
+    is_internal: bool,
+}
+
+struct Session {
+    io: Io,
+    allocator: Allocator,
+    packages: map::Map<[]u8, PackageEntry>,
+    dir_types: map::Map<[]u8, map::Map<[]u8, bool>>,
+}
+
+pub fn lint_targets(
+    io: Io,
+    allocator: Allocator,
+    targets: &array::Array<string::String>,
+    sources: &var source::SourceMap,
+    diagnostics: &var array::Array<diagnostic::Diagnostic>
+) -> !?string::String {
+    var session = Session {
+        io: io,
+        allocator: allocator,
+        packages: map::new<[]u8, PackageEntry>(allocator),
+        dir_types: map::new<[]u8, map::Map<[]u8, bool>>(allocator)
+    };
+    defer session.deinit(allocator);
+    var files = array::new<string::String>(allocator);
+    defer files.deinit(allocator);
+    var index = 0;
+    while targets.at(index) |target| {
+        index = index + 1;
+        let target_bytes = target.as_bytes();
+        if try collect_target_files(io, allocator, target_bytes, &var files) |failure| {
+            return move failure;
+        }
+    }
+    var file_index = 0;
+    while files.at(file_index) |file| {
+        file_index = file_index + 1;
+        let file_bytes = file.as_bytes();
+        if try session.lint_file(file_bytes, sources, diagnostics) |failure| {
+            return move failure;
+        }
+    }
+    return null;
+}
+
+pub fn lint_source(
+    allocator: Allocator,
+    file_path: []u8,
+    text: []u8,
+    module_path: []u8,
+    sources: &var source::SourceMap,
+    diagnostics: &var array::Array<diagnostic::Diagnostic>
+) -> !void {
+    let path_copy = try string::from_bytes(allocator, file_path);
+    errdefer path_copy.deinit(allocator);
+    let text_copy = try string::from_bytes(allocator, text);
+    errdefer text_copy.deinit(allocator);
+    let source_id = try sources.add(move path_copy, move text_copy);
+    var analysis = try analyze_source(allocator, text);
+    defer analysis.deinit(allocator);
+    let is_internal = project::internal_module(module_path).internal;
+    if !is_internal {
+        var receiver_index = 0;
+        while analysis.receivers.at(receiver_index) |candidate| {
+            receiver_index = receiver_index + 1;
+            let raw_path = candidate.type_path.as_bytes();
+            let resolved = try resolve_receiver_path(allocator, &analysis.imports, raw_path);
+            defer resolved.deinit(allocator);
+            let resolved_bytes = resolved.as_bytes();
+            if is_public_type_in_memory(resolved_bytes, &analysis.declared_types) {
+                try analysis.allowed_lines.insert(allocator, candidate.line, true);
+            }
+        }
+    }
+    let comments = try scan_comments(allocator, text);
+    defer comments.deinit(allocator);
+    return check_comments(
+        allocator,
+        source_id,
+        module_path,
+        is_internal,
+        &comments,
+        &analysis.allowed_lines,
+        diagnostics
+    );
+}
+
+fn is_public_type_in_memory(
+    resolved_path: []u8,
+    declared_types: &map::Map<[]u8, bool>
+) -> bool {
+    if !has_double_colon(resolved_path) {
+        return declared_types.get(resolved_path) orelse false;
+    }
+    let last_sep = last_double_colon(resolved_path);
+    let target_module = resolved_path[0..last_sep];
+    if project::internal_module(target_module).internal {
+        return false;
+    }
+    if stdmethod::container_of(resolved_path) |_| {
+        return true;
+    }
+    return false;
+}
+
+fn (self: &var Session) lint_file(
+    file: []u8,
+    sources: &var source::SourceMap,
+    diagnostics: &var array::Array<diagnostic::Diagnostic>
+) -> !?string::String {
+    let allocator = self.allocator;
+    if fs::read_file(self.io, allocator, file, mem::Limit::Unlimited) |text| {
+        errdefer text.deinit(allocator);
+        let path_copy = try string::from_bytes(allocator, file);
+        errdefer path_copy.deinit(allocator);
+        let source_id = try sources.add(move path_copy, move text);
+        if sources.at(source_id) |stored| {
+            let bytes = stored.text.as_bytes();
+            let file_ctx = try self.resolve_file_context(file);
+            defer file_ctx.deinit(allocator);
+            var analysis = try analyze_source(allocator, bytes);
+            defer analysis.deinit(allocator);
+            if !file_ctx.is_internal {
+                var receiver_index = 0;
+                while analysis.receivers.at(receiver_index) |candidate| {
+                    receiver_index = receiver_index + 1;
+                    let raw_path = candidate.type_path.as_bytes();
+                    let resolved = try resolve_receiver_path(allocator, &analysis.imports, raw_path);
+                    defer resolved.deinit(allocator);
+                    let resolved_bytes = resolved.as_bytes();
+                    if try self.is_public_receiver_type(&file_ctx, &analysis.declared_types, resolved_bytes) {
+                        try analysis.allowed_lines.insert(allocator, candidate.line, true);
+                    }
+                }
+            }
+            let comments = try scan_comments(allocator, bytes);
+            defer comments.deinit(allocator);
+            let module_path = file_ctx.module_path.as_bytes();
+            try check_comments(
+                allocator,
+                source_id,
+                module_path,
+                file_ctx.is_internal,
+                &comments,
+                &analysis.allowed_lines,
+                diagnostics
+            );
+        }
+        return null;
+    } else |failed| {
+        var message = string::new(allocator);
+        errdefer message.deinit(allocator);
+        try append_open_failure(allocator, &var message, file, failed);
+        return move message;
+    }
+}
+
+fn (self: &var Session) is_public_receiver_type(
+    file_ctx: &FileContext,
+    own_types: &map::Map<[]u8, bool>,
+    resolved_path: []u8
+) -> !bool {
+    if !has_double_colon(resolved_path) {
+        if own_types.get(resolved_path) |public| {
+            if public {
+                return true;
+            }
+        }
+        let module_dir = file_ctx.module_dir.as_bytes();
+        if mem::len(module_dir) == 0 {
+            return false;
+        }
+        return self.dir_has_public_type(module_dir, resolved_path);
+    }
+    let last_sep = last_double_colon(resolved_path);
+    let target_module = resolved_path[0..last_sep];
+    let type_name = resolved_path[last_sep + 2..mem::len(resolved_path)];
+    if project::internal_module(target_module).internal {
+        return false;
+    }
+    if stdmethod::container_of(resolved_path) |_| {
+        return true;
+    }
+    if !file_ctx.has_package {
+        return false;
+    }
+    let pkg = file_ctx.package_name.as_bytes();
+    let pkg_len = mem::len(pkg);
+    if !mem::equal_bytes(target_module, pkg) {
+        if mem::len(target_module) <= pkg_len + 2 or
+            !mem::equal_bytes(target_module[0..pkg_len], pkg) or
+            target_module[pkg_len] != cast<u8>(58) or
+            target_module[pkg_len + 1] != cast<u8>(58) {
+            return false;
+        }
+    }
+    var rel = string::new(self.allocator);
+    defer rel.deinit(self.allocator);
+    if mem::len(target_module) > pkg_len + 2 {
+        try append_module_rel_path(self.allocator, &var rel, target_module[pkg_len + 2..mem::len(target_module)]);
+    }
+    let rel_bytes = rel.as_bytes();
+    var index = 0;
+    while file_ctx.source_roots.at(index) |root| {
+        index = index + 1;
+        let root_bytes = root.as_bytes();
+        var dir = string::new(self.allocator);
+        defer dir.deinit(self.allocator);
+        if mem::len(rel_bytes) == 0 {
+            try dir.append_bytes(self.allocator, root_bytes);
+        } else {
+            let joined = try path::join(self.allocator, root_bytes, rel_bytes);
+            defer joined.deinit(self.allocator);
+            try dir.append_string(self.allocator, &joined);
+        }
+        let dir_bytes = dir.as_bytes();
+        if try self.dir_has_public_type(dir_bytes, type_name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn (self: &var Session) dir_has_public_type(dir: []u8, type_name: []u8) -> !bool {
+    if !self.dir_types.contains(dir) {
+        var found = map::new<[]u8, bool>(self.allocator);
+        errdefer found.deinit(self.allocator);
+        try self.scan_dir_types(dir, &var found);
+        try self.dir_types.insert(self.allocator, dir, move found);
+    }
+    if self.dir_types.at(dir) |types| {
+        return types.get(type_name) orelse false;
+    }
+    return false;
+}
+
+fn (self: &Session) scan_dir_types(dir: []u8, out: &var map::Map<[]u8, bool>) -> !void {
+    let exists = fs::exists(self.io, dir) catch false;
+    if !exists {
+        return;
+    }
+    if fs::metadata(self.io, dir) |info| {
+        if !info.is_dir {
+            return;
+        }
+    } else |_| {
+        return;
+    }
+    if fs::read_dir(self.io, self.allocator, dir) |entries| {
+        defer entries.deinit(self.allocator);
+        var index = 0;
+        while entries.at(index) |entry| {
+            index = index + 1;
+            if entry.is_dir {
+                continue;
+            }
+            let entry_path = entry.path.as_bytes();
+            let extension = path::extension(entry_path);
+            if !mem::equal_bytes(extension, ".kizu") {
+                continue;
+            }
+            if fs::read_file(self.io, self.allocator, entry_path, mem::Limit::Unlimited) |text| {
+                defer text.deinit(self.allocator);
+                let bytes = text.as_bytes();
+                try collect_file_declared_types(self.allocator, bytes, out);
+            } else |_| {}
+        }
+    } else |_| {}
+    return;
+}
+
+fn (self: &var Session) resolve_file_context(file: []u8) -> !FileContext {
+    let allocator = self.allocator;
+    let abs = try canonical_path(self.io, allocator, file);
+    defer abs.deinit(allocator);
+    let abs_bytes = abs.as_bytes();
+    let module_dir_bytes = path::dirname(abs_bytes);
+    var current = try string::from_bytes(allocator, module_dir_bytes);
+    defer current.deinit(allocator);
+    while true {
+        let dir_bytes = current.as_bytes();
+        if try self.lookup_package(dir_bytes) {
+            if self.packages.at(dir_bytes) |entry| {
+                if entry.found {
+                    if matching_source_root(&entry.source_roots, abs_bytes) |matched_index| {
+                        if entry.source_roots.at(matched_index) |matched_root| {
+                            let matched_bytes = matched_root.as_bytes();
+                            let pkg_name = entry.package_name.as_bytes();
+                            let module_path = try compute_module_path(allocator, pkg_name, matched_bytes, abs_bytes);
+                            errdefer module_path.deinit(allocator);
+                            let module_path_bytes = module_path.as_bytes();
+                            let is_internal = project::internal_module(module_path_bytes).internal;
+                            let roots_copy = try clone_strings(allocator, &entry.source_roots);
+                            errdefer roots_copy.deinit(allocator);
+                            let pkg_copy = try string::from_bytes(allocator, pkg_name);
+                            errdefer pkg_copy.deinit(allocator);
+                            let dir_copy = try string::from_bytes(allocator, module_dir_bytes);
+                            return FileContext {
+                                has_package: true,
+                                package_name: move pkg_copy,
+                                source_roots: move roots_copy,
+                                module_path: move module_path,
+                                module_dir: move dir_copy,
+                                is_internal: is_internal
+                            };
+                        }
+                    }
+                }
+            }
+        }
+        let parent = path::dirname(dir_bytes);
+        if mem::equal_bytes(parent, dir_bytes) {
+            break;
+        }
+        let next = try string::from_bytes(allocator, parent);
+        defer next.deinit(allocator);
+        current.clear();
+        let next_bytes = next.as_bytes();
+        try current.append_bytes(allocator, next_bytes);
+    }
+    let module_dir = try string::from_bytes(allocator, module_dir_bytes);
+    return FileContext {
+        has_package: false,
+        package_name: string::new(allocator),
+        source_roots: array::new<string::String>(allocator),
+        module_path: string::new(allocator),
+        module_dir: move module_dir,
+        is_internal: false
+    };
+}
+
+fn (self: &var Session) lookup_package(dir: []u8) -> !bool {
+    if self.packages.contains(dir) {
+        return true;
+    }
+    let allocator = self.allocator;
+    let manifest_path = try path::join(allocator, dir, "kizu.toml");
+    defer manifest_path.deinit(allocator);
+    let manifest_bytes = manifest_path.as_bytes();
+    let exists = fs::exists(self.io, manifest_bytes) catch false;
+    if !exists {
+        try self.packages.insert(allocator, dir, empty_package_entry(allocator));
+        return false;
+    }
+    if fs::metadata(self.io, manifest_bytes) |info| {
+        if info.is_dir {
+            try self.packages.insert(allocator, dir, empty_package_entry(allocator));
+            return false;
+        }
+    } else |_| {
+        try self.packages.insert(allocator, dir, empty_package_entry(allocator));
+        return false;
+    }
+    if fs::read_file(self.io, allocator, manifest_bytes, mem::Limit::Unlimited) |text| {
+        defer text.deinit(allocator);
+        let bytes = text.as_bytes();
+        let parsed = try manifest::parse_std_manifest(allocator, bytes);
+        match parsed {
+            Manifest(found) => {
+                defer found.deinit(allocator);
+                var roots = array::new<string::String>(allocator);
+                errdefer roots.deinit(allocator);
+                var index = 0;
+                while found.paths.at(index) |rel| {
+                    index = index + 1;
+                    let rel_bytes = rel.as_bytes();
+                    let joined = try path::join(allocator, dir, rel_bytes);
+                    defer joined.deinit(allocator);
+                    let joined_bytes = joined.as_bytes();
+                    let resolved = try canonical_path(self.io, allocator, joined_bytes);
+                    errdefer resolved.deinit(allocator);
+                    try roots.append(allocator, move resolved);
+                }
+                let found_pkg = found.package_name.as_bytes();
+                let pkg_name = try string::from_bytes(allocator, found_pkg);
+                errdefer pkg_name.deinit(allocator);
+                let entry = PackageEntry {
+                    found: true,
+                    package_name: move pkg_name,
+                    source_roots: move roots
+                };
+                errdefer entry.deinit(allocator);
+                try self.packages.insert(allocator, dir, move entry);
+                return true;
+            },
+            Error(message) => {
+                message.deinit(allocator);
+                try self.packages.insert(allocator, dir, empty_package_entry(allocator));
+                return false;
+            },
+        }
+    } else |_| {
+        try self.packages.insert(allocator, dir, empty_package_entry(allocator));
+        return false;
+    }
+}
+
+fn empty_package_entry(allocator: Allocator) -> PackageEntry {
+    return PackageEntry {
+        found: false,
+        package_name: string::new(allocator),
+        source_roots: array::new<string::String>(allocator)
+    };
+}
+
+fn matching_source_root(roots: &array::Array<string::String>, abs_file: []u8) -> ?i64 {
+    var index = 0;
+    while roots.at(index) |root| {
+        let root_bytes = root.as_bytes();
+        if path_is_under(abs_file, root_bytes) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+fn path_is_under(file: []u8, root: []u8) -> bool {
+    let root_len = mem::len(root);
+    let file_len = mem::len(file);
+    if root_len == 0 or file_len <= root_len {
+        return false;
+    }
+    if !mem::equal_bytes(file[0..root_len], root) {
+        return false;
+    }
+    if root[root_len - 1] == cast<u8>(47) {
+        return true;
+    }
+    return file[root_len] == cast<u8>(47);
+}
+
+fn compute_module_path(
+    allocator: Allocator,
+    package_name: []u8,
+    source_root: []u8,
+    abs_file: []u8
+) -> !string::String {
+    let dir = path::dirname(abs_file);
+    var out = try string::from_bytes(allocator, package_name);
+    errdefer out.deinit(allocator);
+    let root_len = mem::len(source_root);
+    if mem::len(dir) <= root_len {
+        return move out;
+    }
+    var rel_start = root_len;
+    if source_root[root_len - 1] != cast<u8>(47) {
+        rel_start = root_len + 1;
+    }
+    if rel_start >= mem::len(dir) {
+        return move out;
+    }
+    let rel = dir[rel_start..mem::len(dir)];
+    if mem::len(rel) == 0 {
+        return move out;
+    }
+    try out.append_bytes(allocator, "::");
+    var index = 0;
+    while mem::byte_at(rel, index) |byte| {
+        if byte == cast<u8>(47) {
+            try out.append_bytes(allocator, "::");
+        } else {
+            try out.append_byte(allocator, byte);
+        }
+        index = index + 1;
+    }
+    return move out;
+}
+
+fn canonical_path(io: Io, allocator: Allocator, target: []u8) -> !string::String {
+    if fs::real_path(io, allocator, target) |real| {
+        return move real;
+    } else |_| {}
+    return fsutil::absolute(io, allocator, target);
+}
+
+fn collect_target_files(
+    io: Io,
+    allocator: Allocator,
+    target: []u8,
+    out: &var array::Array<string::String>
+) -> !?string::String {
+    let exists = fs::exists(io, target) catch false;
+    if !exists {
+        var message = try string::from_bytes(allocator, "open ");
+        errdefer message.deinit(allocator);
+        try message.append_bytes(allocator, target);
+        try message.append_bytes(allocator, ": no such file or directory");
+        return move message;
+    }
+    if fs::metadata(io, target) |info| {
+        if info.is_dir {
+            let manifest_path = try path::join(allocator, target, "kizu.toml");
+            defer manifest_path.deinit(allocator);
+            let manifest_bytes = manifest_path.as_bytes();
+            let has_manifest = fs::exists(io, manifest_bytes) catch false;
+            if has_manifest {
+                if fs::metadata(io, manifest_bytes) |manifest_info| {
+                    if !manifest_info.is_dir {
+                        return collect_package_files(io, allocator, target, manifest_bytes, out);
+                    }
+                } else |_| {}
+            }
+            return collect_dir_kizu_files(io, allocator, target, out);
+        }
+        if mem::equal_bytes(path::basename(target), "kizu.toml") {
+            let root = path::dirname(target);
+            return collect_package_files(io, allocator, root, target, out);
+        }
+        let target_copy = try string::from_bytes(allocator, target);
+        errdefer target_copy.deinit(allocator);
+        try out.append(allocator, move target_copy);
+        return null;
+    } else |failed| {
+        var message = string::new(allocator);
+        errdefer message.deinit(allocator);
+        try append_open_failure(allocator, &var message, target, failed);
+        return move message;
+    }
+}
+
+fn collect_package_files(
+    io: Io,
+    allocator: Allocator,
+    root: []u8,
+    manifest_path: []u8,
+    out: &var array::Array<string::String>
+) -> !?string::String {
+    if fs::read_file(io, allocator, manifest_path, mem::Limit::Unlimited) |text| {
+        defer text.deinit(allocator);
+        let bytes = text.as_bytes();
+        let parsed = try manifest::parse_std_manifest(allocator, bytes);
+        match parsed {
+            Manifest(found) => {
+                defer found.deinit(allocator);
+                var collected = array::new<string::String>(allocator);
+                defer collected.deinit(allocator);
+                var index = 0;
+                while found.paths.at(index) |rel| {
+                    index = index + 1;
+                    let rel_bytes = rel.as_bytes();
+                    let joined = try path::join(allocator, root, rel_bytes);
+                    defer joined.deinit(allocator);
+                    let joined_bytes = joined.as_bytes();
+                    let cleaned = try path::clean(allocator, joined_bytes);
+                    defer cleaned.deinit(allocator);
+                    let cleaned_bytes = cleaned.as_bytes();
+                    if try walk_kizu_files(io, allocator, cleaned_bytes, &var collected) |failure| {
+                        return move failure;
+                    }
+                }
+                try sort::strings(&var collected);
+                var copy_index = 0;
+                while collected.at(copy_index) |item| {
+                    copy_index = copy_index + 1;
+                    let item_bytes = item.as_bytes();
+                    let item_copy = try string::from_bytes(allocator, item_bytes);
+                    errdefer item_copy.deinit(allocator);
+                    try out.append(allocator, move item_copy);
+                }
+                return null;
+            },
+            Error(message) => return move message,
+        }
+    } else |failed| {
+        var message = string::new(allocator);
+        errdefer message.deinit(allocator);
+        try append_open_failure(allocator, &var message, manifest_path, failed);
+        return move message;
+    }
+}
+
+fn collect_dir_kizu_files(
+    io: Io,
+    allocator: Allocator,
+    dir: []u8,
+    out: &var array::Array<string::String>
+) -> !?string::String {
+    var collected = array::new<string::String>(allocator);
+    defer collected.deinit(allocator);
+    if try walk_kizu_files(io, allocator, dir, &var collected) |failure| {
+        return move failure;
+    }
+    try sort::strings(&var collected);
+    var index = 0;
+    while collected.at(index) |item| {
+        index = index + 1;
+        let item_bytes = item.as_bytes();
+        let item_copy = try string::from_bytes(allocator, item_bytes);
+        errdefer item_copy.deinit(allocator);
+        try out.append(allocator, move item_copy);
+    }
+    return null;
+}
+
+fn walk_kizu_files(
+    io: Io,
+    allocator: Allocator,
+    dir: []u8,
+    out: &var array::Array<string::String>
+) -> !?string::String {
+    if fs::read_dir(io, allocator, dir) |entries| {
+        defer entries.deinit(allocator);
+        var index = 0;
+        while entries.at(index) |entry| {
+            index = index + 1;
+            let entry_path = entry.path.as_bytes();
+            let entry_name = entry.name.as_bytes();
+            if entry.is_dir {
+                if mem::equal_bytes(entry_name, ".git") {
+                    continue;
+                }
+                if try walk_kizu_files(io, allocator, entry_path, out) |failure| {
+                    return move failure;
+                }
+            } else {
+                let extension = path::extension(entry_path);
+                if mem::equal_bytes(extension, ".kizu") {
+                    let path_copy = try string::from_bytes(allocator, entry_path);
+                    errdefer path_copy.deinit(allocator);
+                    try out.append(allocator, move path_copy);
+                }
+            }
+        }
+        return null;
+    } else |failed| {
+        var message = string::new(allocator);
+        errdefer message.deinit(allocator);
+        try append_open_failure(allocator, &var message, dir, failed);
+        return move message;
+    }
+}
+
+fn scan_comments(allocator: Allocator, text: []u8) -> !array::Array<Comment> {
+    var comments = array::new<Comment>(allocator);
+    errdefer comments.deinit(allocator);
+    let length = mem::len(text);
+    var index = 0;
+    var line = 1;
+    var line_start = 0;
+    var line_has_code = false;
+    while index < length {
+        let byte = text[index];
+        if byte == cast<u8>(10) {
+            line = line + 1;
+            index = index + 1;
+            line_start = index;
+            line_has_code = false;
+            continue;
+        }
+        if byte == cast<u8>(34) {
+            line_has_code = true;
+            index = index + 1;
+            while index < length and text[index] != cast<u8>(34) {
+                if text[index] == cast<u8>(10) {
+                    line = line + 1;
+                    index = index + 1;
+                    line_start = index;
+                    line_has_code = false;
+                } else {
+                    index = index + 1;
+                }
+            }
+            if index < length {
+                index = index + 1;
+                line_has_code = true;
+            }
+            continue;
+        }
+        if byte == cast<u8>(92) and index + 1 < length and text[index + 1] == cast<u8>(92) {
+            line_has_code = true;
+            while index < length and text[index] != cast<u8>(10) {
+                index = index + 1;
+            }
+            continue;
+        }
+        if byte == cast<u8>(47) and index + 1 < length and text[index + 1] == cast<u8>(47) {
+            let start_column = index - line_start + 1;
+            let is_doc = index + 2 < length and text[index + 2] == cast<u8>(47) and
+                !(index + 3 < length and text[index + 3] == cast<u8>(47));
+            let leading = !line_has_code;
+            var scalars = 0;
+            while index < length and text[index] != cast<u8>(10) {
+                if text[index] == cast<u8>(13) and
+                    (index + 1 == length or text[index + 1] == cast<u8>(10)) {
+                    index = index + 1;
+                    break;
+                }
+                let width = utf8_scalar_width(text, index);
+                index = index + width;
+                scalars = scalars + 1;
+            }
+            try comments.append(allocator, Comment {
+                line: line,
+                column: start_column,
+                end_column: start_column + scalars,
+                leading: leading,
+                is_doc: is_doc
+            });
+            continue;
+        }
+        if byte != cast<u8>(32) and byte != cast<u8>(9) and byte != cast<u8>(13) {
+            line_has_code = true;
+        }
+        index = index + 1;
+    }
+    return move comments;
+}
+
+fn utf8_scalar_width(bytes: []u8, position: i64) -> i64 {
+    let length = mem::len(bytes);
+    if position >= length {
+        return 1;
+    }
+    let first = bytes[position];
+    if first < cast<u8>(128) {
+        return 1;
+    }
+    if first >= cast<u8>(194) and first <= cast<u8>(223) and position + 1 < length {
+        return 2;
+    }
+    if first >= cast<u8>(224) and first <= cast<u8>(239) and position + 2 < length {
+        return 3;
+    }
+    if first >= cast<u8>(240) and first <= cast<u8>(244) and position + 3 < length {
+        return 4;
+    }
+    return 1;
+}
+
+fn check_comments(
+    allocator: Allocator,
+    source_id: source::SourceId,
+    module_path: []u8,
+    is_internal: bool,
+    comments: &array::Array<Comment>,
+    allowed_lines: &map::Map<i64, bool>,
+    diagnostics: &var array::Array<diagnostic::Diagnostic>
+) -> !void {
+    var index = 0;
+    while comments.get(index) |comment| {
+        if !comment.is_doc {
+            let span = comment_span(source_id, comment);
+            if !comment.leading {
+                var diag = try diagnostic::new(
+                    allocator,
+                    diagnostic::Severity::Error,
+                    "lint error",
+                    span,
+                    "trailing comment is not allowed"
+                );
+                errdefer diag.deinit(allocator);
+                try diag.with_help(allocator, "remove the trailing comment");
+                try diagnostics.append(allocator, move diag);
+            } else {
+                var diag = try diagnostic::new(
+                    allocator,
+                    diagnostic::Severity::Error,
+                    "lint error",
+                    span,
+                    "comment is not allowed"
+                );
+                errdefer diag.deinit(allocator);
+                try diag.with_help(
+                    allocator,
+                    "remove the comment, or use `///` directly above a public declaration"
+                );
+                try diagnostics.append(allocator, move diag);
+            }
+            index = index + 1;
+            continue;
+        }
+        if !comment.leading {
+            let span = comment_span(source_id, comment);
+            var diag = try diagnostic::new(
+                allocator,
+                diagnostic::Severity::Error,
+                "lint error",
+                span,
+                "trailing doc comment is not allowed"
+            );
+            errdefer diag.deinit(allocator);
+            try diag.with_help(
+                allocator,
+                "move `///` to the line directly above a public declaration, or remove it"
+            );
+            try diagnostics.append(allocator, move diag);
+            index = index + 1;
+            continue;
+        }
+        var last_line = comment.line;
+        var next_index = index + 1;
+        while comments.get(next_index) |next_comment| {
+            if next_comment.leading and next_comment.is_doc and next_comment.line == last_line + 1 {
+                last_line = next_comment.line;
+                next_index = next_index + 1;
+            } else {
+                break;
+            }
+        }
+        if is_internal {
+            let span = comment_span(source_id, comment);
+            var message = try string::from_bytes(
+                allocator,
+                "doc comment is not allowed in internal module `"
+            );
+            defer message.deinit(allocator);
+            try message.append_bytes(allocator, module_path);
+            try message.append_bytes(allocator, "`");
+            let message_bytes = message.as_bytes();
+            var diag = try diagnostic::new(
+                allocator,
+                diagnostic::Severity::Error,
+                "lint error",
+                span,
+                message_bytes
+            );
+            errdefer diag.deinit(allocator);
+            try diag.with_help(
+                allocator,
+                "internal modules have no external public interface; remove the doc comment"
+            );
+            try diagnostics.append(allocator, move diag);
+        } else if !allowed_lines.contains(last_line + 1) {
+            let span = comment_span(source_id, comment);
+            var diag = try diagnostic::new(
+                allocator,
+                diagnostic::Severity::Error,
+                "lint error",
+                span,
+                "doc comment must directly precede a public declaration or public type method"
+            );
+            errdefer diag.deinit(allocator);
+            try diag.with_help(
+                allocator,
+                "remove the doc comment, or place it with no blank line above a public declaration or public type method"
+            );
+            try diagnostics.append(allocator, move diag);
+        }
+        index = next_index;
+    }
+    return;
+}
+
+fn comment_span(source_id: source::SourceId, comment: Comment) -> ast::Span {
+    return ast::Span {
+        source: source_id,
+        start: ast::Position { line: comment.line, column: comment.column },
+        end: ast::Position { line: comment.line, column: comment.end_column }
+    };
+}
+
+fn lex_all(allocator: Allocator, text: []u8) -> !array::Array<lexer::Lexeme> {
+    var scanner = lexer::new(allocator, text);
+    defer scanner.deinit(allocator);
+    var out = array::new<lexer::Lexeme>(allocator);
+    errdefer out.deinit(allocator);
+    while true {
+        let item = try scanner.next_lexeme();
+        if item.kind == token::Kind::Eof {
+            return move out;
+        }
+        try out.append(allocator, item);
+    }
+    return move out;
+}
+
+fn collect_file_declared_types(
+    allocator: Allocator,
+    text: []u8,
+    out: &var map::Map<[]u8, bool>
+) -> !void {
+    let lexemes = try lex_all(allocator, text);
+    defer lexemes.deinit(allocator);
+    var brace_depth = 0;
+    var paren_depth = 0;
+    var bracket_depth = 0;
+    var prev_kind = token::Kind::Eof;
+    var index = 0;
+    while lexemes.get(index) |tok| {
+        if brace_depth > 0 {
+            if tok.kind == token::Kind::LBrace {
+                brace_depth = brace_depth + 1;
+            } else if tok.kind == token::Kind::RBrace {
+                brace_depth = brace_depth - 1;
+            }
+            prev_kind = tok.kind;
+            index = index + 1;
+            continue;
+        }
+        if tok.kind == token::Kind::LBrace {
+            brace_depth = 1;
+            paren_depth = 0;
+            bracket_depth = 0;
+            prev_kind = tok.kind;
+            index = index + 1;
+            continue;
+        }
+        if tok.kind == token::Kind::LParen {
+            paren_depth = paren_depth + 1;
+            prev_kind = tok.kind;
+            index = index + 1;
+            continue;
+        }
+        if tok.kind == token::Kind::RParen {
+            if paren_depth > 0 {
+                paren_depth = paren_depth - 1;
+            }
+            prev_kind = tok.kind;
+            index = index + 1;
+            continue;
+        }
+        if tok.kind == token::Kind::LBracket {
+            bracket_depth = bracket_depth + 1;
+            prev_kind = tok.kind;
+            index = index + 1;
+            continue;
+        }
+        if tok.kind == token::Kind::RBracket {
+            if bracket_depth > 0 {
+                bracket_depth = bracket_depth - 1;
+            }
+            prev_kind = tok.kind;
+            index = index + 1;
+            continue;
+        }
+        if paren_depth > 0 or bracket_depth > 0 or !can_start_top_decl(prev_kind) {
+            prev_kind = tok.kind;
+            index = index + 1;
+            continue;
+        }
+        var public = false;
+        var cursor = index;
+        if tok.kind == token::Kind::Public {
+            public = true;
+            cursor = cursor + 1;
+        }
+        if lexemes.get(cursor) |head| {
+            var type_keyword = head;
+            var name_index = cursor + 1;
+            if head.kind == token::Kind::Unsafe {
+                if lexemes.get(cursor + 1) |after_unsafe| {
+                    type_keyword = after_unsafe;
+                    name_index = cursor + 2;
+                }
+            } else if head.kind == token::Kind::Extern {
+                if lexemes.get(cursor + 1) |abi| {
+                    if abi.kind == token::Kind::String {
+                        if lexemes.get(cursor + 2) |after_extern| {
+                            type_keyword = after_extern;
+                            name_index = cursor + 3;
+                        }
+                    }
+                }
+            }
+            if is_type_decl_keyword(text, type_keyword) {
+                if lexemes.get(name_index) |name_tok| {
+                    if name_tok.kind == token::Kind::Ident {
+                        let name = text[name_tok.start..name_tok.end];
+                        try record_declared_type(allocator, out, name, public);
+                        prev_kind = name_tok.kind;
+                        index = name_index + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        prev_kind = tok.kind;
+        index = index + 1;
+    }
+    return;
+}
+
+fn analyze_source(allocator: Allocator, text: []u8) -> !FileAnalysis {
+    var analysis = FileAnalysis {
+        allowed_lines: map::new<i64, bool>(allocator),
+        declared_types: map::new<[]u8, bool>(allocator),
+        imports: map::new<[]u8, string::String>(allocator),
+        receivers: array::new<ReceiverCandidate>(allocator)
+    };
+    errdefer analysis.deinit(allocator);
+    let lexemes = try lex_all(allocator, text);
+    defer lexemes.deinit(allocator);
+    var brace_depth = 0;
+    var paren_depth = 0;
+    var bracket_depth = 0;
+    var angle_depth = 0;
+    var active_container = Container::None;
+    var pending_container = Container::None;
+    var expect_member = false;
+    var prev_kind = token::Kind::Eof;
+    var index = 0;
+    while lexemes.get(index) |tok| {
+        if brace_depth >= 2 {
+            if tok.kind == token::Kind::LBrace {
+                brace_depth = brace_depth + 1;
+            } else if tok.kind == token::Kind::RBrace {
+                brace_depth = brace_depth - 1;
+            }
+            prev_kind = tok.kind;
+            index = index + 1;
+            continue;
+        }
+        if brace_depth == 1 {
+            if tok.kind == token::Kind::LBrace {
+                brace_depth = 2;
+                prev_kind = tok.kind;
+                index = index + 1;
+                continue;
+            }
+            if tok.kind == token::Kind::RBrace {
+                brace_depth = 0;
+                active_container = Container::None;
+                expect_member = false;
+                paren_depth = 0;
+                bracket_depth = 0;
+                angle_depth = 0;
+                prev_kind = tok.kind;
+                index = index + 1;
+                continue;
+            }
+            if active_container == Container::None {
+                prev_kind = tok.kind;
+                index = index + 1;
+                continue;
+            }
+            if expect_member and paren_depth == 0 and bracket_depth == 0 and angle_depth == 0 {
+                if active_container == Container::PubStruct {
+                    if tok.kind == token::Kind::Public {
+                        try analysis.allowed_lines.insert(allocator, tok.line, true);
+                    }
+                    expect_member = false;
+                } else if active_container == Container::PubMembers {
+                    if tok.kind == token::Kind::Ident {
+                        try analysis.allowed_lines.insert(allocator, tok.line, true);
+                    }
+                    expect_member = false;
+                } else if active_container == Container::PubContract {
+                    if tok.kind == token::Kind::Function or tok.kind == token::Kind::Unsafe or
+                        tok.kind == token::Kind::Public {
+                        try analysis.allowed_lines.insert(allocator, tok.line, true);
+                    }
+                    expect_member = false;
+                }
+            }
+            if tok.kind == token::Kind::LParen {
+                paren_depth = paren_depth + 1;
+            } else if tok.kind == token::Kind::RParen {
+                if paren_depth > 0 {
+                    paren_depth = paren_depth - 1;
+                }
+            } else if tok.kind == token::Kind::LBracket {
+                bracket_depth = bracket_depth + 1;
+            } else if tok.kind == token::Kind::RBracket {
+                if bracket_depth > 0 {
+                    bracket_depth = bracket_depth - 1;
+                }
+            } else if tok.kind == token::Kind::Lt {
+                angle_depth = angle_depth + 1;
+            } else if tok.kind == token::Kind::Gt {
+                if angle_depth > 0 {
+                    angle_depth = angle_depth - 1;
+                }
+            } else if tok.kind == token::Kind::Comma and paren_depth == 0 and
+                bracket_depth == 0 and angle_depth == 0 {
+                if active_container == Container::PubStruct or
+                    active_container == Container::PubMembers {
+                    expect_member = true;
+                }
+            } else if tok.kind == token::Kind::Semicolon and paren_depth == 0 and
+                bracket_depth == 0 and angle_depth == 0 {
+                if active_container == Container::PubContract {
+                    expect_member = true;
+                }
+            }
+            prev_kind = tok.kind;
+            index = index + 1;
+            continue;
+        }
+        if tok.kind == token::Kind::LBrace {
+            brace_depth = 1;
+            active_container = pending_container;
+            pending_container = Container::None;
+            expect_member = active_container != Container::None;
+            paren_depth = 0;
+            bracket_depth = 0;
+            angle_depth = 0;
+            prev_kind = tok.kind;
+            index = index + 1;
+            continue;
+        }
+        if tok.kind == token::Kind::LParen {
+            paren_depth = paren_depth + 1;
+            prev_kind = tok.kind;
+            index = index + 1;
+            continue;
+        }
+        if tok.kind == token::Kind::RParen {
+            if paren_depth > 0 {
+                paren_depth = paren_depth - 1;
+            }
+            prev_kind = tok.kind;
+            index = index + 1;
+            continue;
+        }
+        if tok.kind == token::Kind::LBracket {
+            bracket_depth = bracket_depth + 1;
+            prev_kind = tok.kind;
+            index = index + 1;
+            continue;
+        }
+        if tok.kind == token::Kind::RBracket {
+            if bracket_depth > 0 {
+                bracket_depth = bracket_depth - 1;
+            }
+            prev_kind = tok.kind;
+            index = index + 1;
+            continue;
+        }
+        if paren_depth > 0 or bracket_depth > 0 {
+            prev_kind = tok.kind;
+            index = index + 1;
+            continue;
+        }
+        if tok.kind == token::Kind::Assign or tok.kind == token::Kind::Semicolon {
+            pending_container = Container::None;
+            prev_kind = tok.kind;
+            index = index + 1;
+            continue;
+        }
+        if !can_start_top_decl(prev_kind) {
+            prev_kind = tok.kind;
+            index = index + 1;
+            continue;
+        }
+        if tok.kind == token::Kind::Import {
+            pending_container = Container::None;
+            index = try parse_import_stmt(allocator, text, &lexemes, index, &var analysis.imports);
+            prev_kind = token::Kind::Semicolon;
+            continue;
+        }
+        if tok.kind == token::Kind::Ident and
+            mem::equal_bytes(text[tok.start..tok.end], "const") {
+            pending_container = Container::None;
+            index = skip_until_semicolon(&lexemes, index + 1);
+            prev_kind = token::Kind::Semicolon;
+            continue;
+        }
+        if tok.kind == token::Kind::At {
+            let attr_line = tok.line;
+            var cursor = index;
+            while lexemes.get(cursor) |at_tok| {
+                if at_tok.kind != token::Kind::At {
+                    break;
+                }
+                cursor = skip_attribute(&lexemes, cursor);
+            }
+            if lexemes.get(cursor) |target_tok| {
+                if target_tok.kind == token::Kind::Public {
+                    let next_pos = try parse_pub_or_private_decl(
+                        allocator,
+                        text,
+                        &lexemes,
+                        cursor,
+                        true,
+                        &var analysis,
+                        &var pending_container
+                    );
+                    if next_pos > cursor {
+                        if analysis.allowed_lines.contains(target_tok.line) {
+                            try analysis.allowed_lines.insert(allocator, attr_line, true);
+                        }
+                        prev_kind = lexemes.get_or_panic(next_pos - 1).kind;
+                        index = next_pos;
+                        continue;
+                    }
+                }
+            }
+            prev_kind = tok.kind;
+            index = index + 1;
+            continue;
+        }
+        if tok.kind == token::Kind::Public {
+            let next_pos = try parse_pub_or_private_decl(
+                allocator,
+                text,
+                &lexemes,
+                index,
+                true,
+                &var analysis,
+                &var pending_container
+            );
+            if next_pos > index {
+                prev_kind = lexemes.get_or_panic(next_pos - 1).kind;
+                index = next_pos;
+                continue;
+            }
+        }
+        if tok.kind == token::Kind::Export {
+            if lexemes.get(index + 1) |abi| {
+                if abi.kind == token::Kind::String {
+                    if lexemes.get(index + 2) |fn_tok| {
+                        if fn_tok.kind == token::Kind::Function {
+                            try analysis.allowed_lines.insert(allocator, tok.line, true);
+                            pending_container = Container::None;
+                            prev_kind = fn_tok.kind;
+                            index = index + 3;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        if tok.kind == token::Kind::Function or tok.kind == token::Kind::Unsafe or
+            tok.kind == token::Kind::Extern or tok.kind == token::Kind::Struct or
+            tok.kind == token::Kind::Enum or tok.kind == token::Kind::Union or
+            tok.kind == token::Kind::Contract or
+            (tok.kind == token::Kind::Ident and
+            mem::equal_bytes(text[tok.start..tok.end], "error")) {
+            let next_pos = try parse_pub_or_private_decl(
+                allocator,
+                text,
+                &lexemes,
+                index,
+                false,
+                &var analysis,
+                &var pending_container
+            );
+            if next_pos > index {
+                prev_kind = lexemes.get_or_panic(next_pos - 1).kind;
+                index = next_pos;
+                continue;
+            }
+        }
+        prev_kind = tok.kind;
+        index = index + 1;
+    }
+    return move analysis;
+}
+
+fn parse_pub_or_private_decl(
+    allocator: Allocator,
+    text: []u8,
+    lexemes: &array::Array<lexer::Lexeme>,
+    start: i64,
+    public: bool,
+    analysis: &var FileAnalysis,
+    pending_container: &var Container
+) -> !i64 {
+    let decl_line = lexemes.get_or_panic(start).line;
+    var cursor = start;
+    if public {
+        cursor = cursor + 1;
+    }
+    let head = lexemes.get(cursor) orelse return start;
+    if head.kind == token::Kind::Function {
+        pending_container.* = Container::None;
+        return parse_fn_decl_head(allocator, text, lexemes, decl_line, cursor, public, analysis);
+    }
+    if head.kind == token::Kind::Unsafe {
+        let after = lexemes.get(cursor + 1) orelse return start;
+        if after.kind == token::Kind::Function {
+            pending_container.* = Container::None;
+            return parse_fn_decl_head(allocator, text, lexemes, decl_line, cursor + 1, public, analysis);
+        }
+        if after.kind == token::Kind::Struct {
+            return parse_type_decl_head(
+                allocator,
+                text,
+                lexemes,
+                decl_line,
+                cursor + 1,
+                public,
+                Container::PubStruct,
+                analysis,
+                pending_container
+            );
+        }
+        return start;
+    }
+    if head.kind == token::Kind::Extern {
+        let abi = lexemes.get(cursor + 1) orelse return start;
+        if abi.kind != token::Kind::String {
+            return start;
+        }
+        let after = lexemes.get(cursor + 2) orelse return start;
+        if after.kind == token::Kind::Function {
+            pending_container.* = Container::None;
+            if public {
+                try analysis.allowed_lines.insert(allocator, decl_line, true);
+            }
+            return cursor + 3;
+        }
+        if after.kind == token::Kind::Struct {
+            return parse_type_decl_head(
+                allocator,
+                text,
+                lexemes,
+                decl_line,
+                cursor + 2,
+                public,
+                Container::PubMembers,
+                analysis,
+                pending_container
+            );
+        }
+        return start;
+    }
+    if head.kind == token::Kind::Export {
+        let abi = lexemes.get(cursor + 1) orelse return start;
+        if abi.kind != token::Kind::String {
+            return start;
+        }
+        let after = lexemes.get(cursor + 2) orelse return start;
+        if after.kind == token::Kind::Function {
+            pending_container.* = Container::None;
+            try analysis.allowed_lines.insert(allocator, decl_line, true);
+            return cursor + 3;
+        }
+        return start;
+    }
+    if head.kind == token::Kind::Struct {
+        return parse_type_decl_head(
+            allocator,
+            text,
+            lexemes,
+            decl_line,
+            cursor,
+            public,
+            Container::PubStruct,
+            analysis,
+            pending_container
+        );
+    }
+    if head.kind == token::Kind::Enum or head.kind == token::Kind::Union {
+        return parse_type_decl_head(
+            allocator,
+            text,
+            lexemes,
+            decl_line,
+            cursor,
+            public,
+            Container::PubMembers,
+            analysis,
+            pending_container
+        );
+    }
+    if head.kind == token::Kind::Contract {
+        return parse_type_decl_head(
+            allocator,
+            text,
+            lexemes,
+            decl_line,
+            cursor,
+            public,
+            Container::PubContract,
+            analysis,
+            pending_container
+        );
+    }
+    if head.kind == token::Kind::Ident and
+        mem::equal_bytes(text[head.start..head.end], "error") {
+        let name = lexemes.get(cursor + 1) orelse return start;
+        if name.kind != token::Kind::Ident {
+            return start;
+        }
+        let delim = lexemes.get(cursor + 2) orelse return start;
+        if delim.kind != token::Kind::LBrace and delim.kind != token::Kind::Assign {
+            return start;
+        }
+        var container = Container::None;
+        if delim.kind == token::Kind::LBrace {
+            container = Container::PubMembers;
+        }
+        return parse_type_decl_head(
+            allocator,
+            text,
+            lexemes,
+            decl_line,
+            cursor,
+            public,
+            container,
+            analysis,
+            pending_container
+        );
+    }
+    return start;
+}
+
+fn parse_fn_decl_head(
+    allocator: Allocator,
+    text: []u8,
+    lexemes: &array::Array<lexer::Lexeme>,
+    decl_line: i64,
+    fn_index: i64,
+    public: bool,
+    analysis: &var FileAnalysis
+) -> !i64 {
+    if lexemes.get(fn_index + 1) |next| {
+        if next.kind == token::Kind::LParen {
+            var receiver_path = string::new(allocator);
+            errdefer receiver_path.deinit(allocator);
+            let after_rparen = try parse_receiver_type(
+                allocator,
+                text,
+                lexemes,
+                fn_index + 1,
+                &var receiver_path
+            );
+            if after_rparen > fn_index + 1 and receiver_path.len() > 0 {
+                try analysis.receivers.append(allocator, ReceiverCandidate {
+                    line: decl_line,
+                    type_path: move receiver_path
+                });
+                return after_rparen;
+            }
+            receiver_path.deinit(allocator);
+            return fn_index + 1;
+        }
+    }
+    if public {
+        try analysis.allowed_lines.insert(allocator, decl_line, true);
+    }
+    return fn_index + 1;
+}
+
+fn parse_type_decl_head(
+    allocator: Allocator,
+    text: []u8,
+    lexemes: &array::Array<lexer::Lexeme>,
+    decl_line: i64,
+    keyword_index: i64,
+    public: bool,
+    pub_container: Container,
+    analysis: &var FileAnalysis,
+    pending_container: &var Container
+) -> !i64 {
+    if public {
+        try analysis.allowed_lines.insert(allocator, decl_line, true);
+        pending_container.* = pub_container;
+    } else {
+        pending_container.* = Container::None;
+    }
+    if lexemes.get(keyword_index + 1) |name_tok| {
+        if name_tok.kind == token::Kind::Ident {
+            let name = text[name_tok.start..name_tok.end];
+            try record_declared_type(allocator, &var analysis.declared_types, name, public);
+            return keyword_index + 2;
+        }
+    }
+    return keyword_index + 1;
+}
+
+fn parse_receiver_type(
+    allocator: Allocator,
+    text: []u8,
+    lexemes: &array::Array<lexer::Lexeme>,
+    lparen_index: i64,
+    out_path: &var string::String
+) -> !i64 {
+    let receiver_name = lexemes.get(lparen_index + 1) orelse return lparen_index;
+    if receiver_name.kind != token::Kind::Ident {
+        return lparen_index;
+    }
+    let colon = lexemes.get(lparen_index + 2) orelse return lparen_index;
+    if colon.kind != token::Kind::Colon {
+        return lparen_index;
+    }
+    var cursor = lparen_index + 3;
+    if lexemes.get(cursor) |amp| {
+        if amp.kind == token::Kind::Amp {
+            cursor = cursor + 1;
+        }
+    }
+    if lexemes.get(cursor) |mut_tok| {
+        if mut_tok.kind == token::Kind::Var {
+            cursor = cursor + 1;
+        }
+    }
+    let first = lexemes.get(cursor) orelse return lparen_index;
+    if first.kind != token::Kind::Ident {
+        return lparen_index;
+    }
+    try out_path.append_bytes(allocator, text[first.start..first.end]);
+    cursor = cursor + 1;
+    while true {
+        let sep = lexemes.get(cursor) orelse break;
+        if sep.kind != token::Kind::DoubleColon {
+            break;
+        }
+        let part = lexemes.get(cursor + 1) orelse break;
+        if part.kind != token::Kind::Ident {
+            break;
+        }
+        try out_path.append_bytes(allocator, "::");
+        try out_path.append_bytes(allocator, text[part.start..part.end]);
+        cursor = cursor + 2;
+    }
+    var depth = 1;
+    while lexemes.get(cursor) |tok| {
+        cursor = cursor + 1;
+        if tok.kind == token::Kind::LParen {
+            depth = depth + 1;
+        } else if tok.kind == token::Kind::RParen {
+            depth = depth - 1;
+            if depth == 0 {
+                return cursor;
+            }
+        }
+    }
+    return cursor;
+}
+
+fn parse_import_stmt(
+    allocator: Allocator,
+    text: []u8,
+    lexemes: &array::Array<lexer::Lexeme>,
+    import_index: i64,
+    imports: &var map::Map<[]u8, string::String>
+) -> !i64 {
+    let first = lexemes.get(import_index + 1) orelse return import_index + 1;
+    if first.kind != token::Kind::Ident {
+        return import_index + 1;
+    }
+    var full = try string::from_bytes(allocator, text[first.start..first.end]);
+    errdefer full.deinit(allocator);
+    var alias = text[first.start..first.end];
+    var cursor = import_index + 2;
+    while true {
+        let sep = lexemes.get(cursor) orelse break;
+        if sep.kind != token::Kind::DoubleColon {
+            break;
+        }
+        let part = lexemes.get(cursor + 1) orelse break;
+        if part.kind != token::Kind::Ident {
+            break;
+        }
+        try full.append_bytes(allocator, "::");
+        try full.append_bytes(allocator, text[part.start..part.end]);
+        alias = text[part.start..part.end];
+        cursor = cursor + 2;
+    }
+    if lexemes.get(cursor) |semi| {
+        if semi.kind == token::Kind::Semicolon {
+            cursor = cursor + 1;
+        }
+    }
+    if imports.remove(allocator, alias) |previous| {
+        previous.deinit(allocator);
+    }
+    try imports.insert(allocator, alias, move full);
+    return cursor;
+}
+
+fn skip_attribute(lexemes: &array::Array<lexer::Lexeme>, at_index: i64) -> i64 {
+    var cursor = at_index + 1;
+    if lexemes.get(cursor) |name| {
+        if name.kind == token::Kind::Ident {
+            cursor = cursor + 1;
+        }
+    }
+    if lexemes.get(cursor) |lparen| {
+        if lparen.kind == token::Kind::LParen {
+            cursor = cursor + 1;
+            var depth = 1;
+            while lexemes.get(cursor) |tok| {
+                cursor = cursor + 1;
+                if tok.kind == token::Kind::LParen {
+                    depth = depth + 1;
+                } else if tok.kind == token::Kind::RParen {
+                    depth = depth - 1;
+                    if depth == 0 {
+                        return cursor;
+                    }
+                }
+            }
+        }
+    }
+    return cursor;
+}
+
+fn skip_until_semicolon(lexemes: &array::Array<lexer::Lexeme>, start: i64) -> i64 {
+    var cursor = start;
+    var depth = 0;
+    while lexemes.get(cursor) |tok| {
+        cursor = cursor + 1;
+        if tok.kind == token::Kind::LBrace or tok.kind == token::Kind::LParen or
+            tok.kind == token::Kind::LBracket {
+            depth = depth + 1;
+        } else if tok.kind == token::Kind::RBrace or tok.kind == token::Kind::RParen or
+            tok.kind == token::Kind::RBracket {
+            if depth > 0 {
+                depth = depth - 1;
+            }
+        } else if tok.kind == token::Kind::Semicolon and depth == 0 {
+            return cursor;
+        }
+    }
+    return cursor;
+}
+
+fn can_start_top_decl(prev_kind: token::Kind) -> bool {
+    return prev_kind != token::Kind::Arrow and
+        prev_kind != token::Kind::Colon and
+        prev_kind != token::Kind::Assign;
+}
+
+fn is_type_decl_keyword(text: []u8, tok: lexer::Lexeme) -> bool {
+    if tok.kind == token::Kind::Struct or tok.kind == token::Kind::Enum or
+        tok.kind == token::Kind::Union or tok.kind == token::Kind::Contract {
+        return true;
+    }
+    return tok.kind == token::Kind::Ident and
+        mem::equal_bytes(text[tok.start..tok.end], "error");
+}
+
+fn record_declared_type(
+    allocator: Allocator,
+    types: &var map::Map<[]u8, bool>,
+    name: []u8,
+    public: bool
+) -> !void {
+    let existing = types.get(name) orelse false;
+    return types.insert(allocator, name, existing or public);
+}
+
+fn resolve_receiver_path(
+    allocator: Allocator,
+    imports: &map::Map<[]u8, string::String>,
+    raw_path: []u8
+) -> !string::String {
+    if !has_double_colon(raw_path) {
+        return string::from_bytes(allocator, raw_path);
+    }
+    let first_sep = first_double_colon(raw_path);
+    let head = raw_path[0..first_sep];
+    if imports.at(head) |target| {
+        let target_bytes = target.as_bytes();
+        var out = try string::from_bytes(allocator, target_bytes);
+        errdefer out.deinit(allocator);
+        try out.append_bytes(allocator, raw_path[first_sep..mem::len(raw_path)]);
+        return move out;
+    }
+    return string::from_bytes(allocator, raw_path);
+}
+
+fn has_double_colon(bytes: []u8) -> bool {
+    var index = 0;
+    while index + 1 < mem::len(bytes) {
+        if bytes[index] == cast<u8>(58) and bytes[index + 1] == cast<u8>(58) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn first_double_colon(bytes: []u8) -> i64 {
+    var index = 0;
+    while index + 1 < mem::len(bytes) {
+        if bytes[index] == cast<u8>(58) and bytes[index + 1] == cast<u8>(58) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return mem::len(bytes);
+}
+
+fn last_double_colon(bytes: []u8) -> i64 {
+    var found = 0;
+    var index = 0;
+    while index + 1 < mem::len(bytes) {
+        if bytes[index] == cast<u8>(58) and bytes[index + 1] == cast<u8>(58) {
+            found = index;
+        }
+        index = index + 1;
+    }
+    return found;
+}
+
+fn append_module_rel_path(
+    allocator: Allocator,
+    out: &var string::String,
+    module_tail: []u8
+) -> !void {
+    let length = mem::len(module_tail);
+    var index = 0;
+    while index < length {
+        if index + 1 < length and
+            module_tail[index] == cast<u8>(58) and module_tail[index + 1] == cast<u8>(58) {
+            try out.append_byte(allocator, cast<u8>(47));
+            index = index + 2;
+        } else {
+            try out.append_byte(allocator, module_tail[index]);
+            index = index + 1;
+        }
+    }
+    return;
+}
+
+fn clone_strings(
+    allocator: Allocator,
+    items: &array::Array<string::String>
+) -> !array::Array<string::String> {
+    var out = array::new<string::String>(allocator);
+    errdefer out.deinit(allocator);
+    var index = 0;
+    while items.at(index) |item| {
+        index = index + 1;
+        let item_bytes = item.as_bytes();
+        let item_copy = try string::from_bytes(allocator, item_bytes);
+        errdefer item_copy.deinit(allocator);
+        try out.append(allocator, move item_copy);
+    }
+    return move out;
+}
+
+fn append_open_failure(
+    allocator: Allocator,
+    out: &var string::String,
+    target: []u8,
+    failed: fs::Error
+) -> !void {
+    try out.append_bytes(allocator, "open ");
+    try out.append_bytes(allocator, target);
+    try out.append_bytes(allocator, ": ");
+    var reason: []u8 = "input/output error";
+    match failed {
+        NotFound => {
+            reason = "no such file or directory";
+        },
+        PermissionDenied => {
+            reason = "permission denied";
+        },
+        IsDirectory => {
+            reason = "is a directory";
+        },
+        NotDirectory => {
+            reason = "not a directory";
+        },
+        AlreadyExists => {
+            reason = "file exists";
+        },
+        DirectoryNotEmpty => {
+            reason = "directory not empty";
+        },
+        NoSpaceLeft => {
+            reason = "no space left on device";
+        },
+        TooManyOpenFiles => {
+            reason = "too many open files";
+        },
+        InvalidPath => {
+            reason = "invalid argument";
+        },
+        OutOfMemory => {
+            reason = "cannot allocate memory";
+        },
+        LimitExceeded => {
+            reason = "file too large";
+        },
+        _ => {},
+    }
+    return out.append_bytes(allocator, reason);
+}

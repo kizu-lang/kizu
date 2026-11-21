@@ -126,7 +126,6 @@ Windows では `kizu` 自身がそのまま動き、既定で Windows 向けに 
 | 現在の subset を超える wasm backend | **進行中。** Wasm の経路で動かない example は、すべて target が持たない capability として拒否されます |
 | raw pointer の実行時操作 | **check のみ。** `pointer_policy.kizu` と `raw_pointer_deref.kizu` は検査だけで実行しません |
 | type alias | **未着手** |
-| `kizu lint` | **未着手** |
 | HTTP の middleware | **未着手。** middleware は closure 待ちです。`std::http` は平文 TCP か TLS 1.3(`std::tls`)の上で HTTP/1 の server と client を持ちます |
 | full generics | **その形では予定しません。** 明示的な static 引数のみ。推論・bounds・HKT は入れません(ADR-0066) |
 | `async fn` / `await` 構文 | **採用しません。** function coloring はこの言語が払わないコストです(ADR-0025) |
@@ -212,6 +211,7 @@ just wasi-smoke      # wasm の例を wasmtime で走らせる
 - `kizu run <file-or-package>` は native 実行ファイルを作って実行します。
 - `kizu test <file-or-package>` は check 済みの top-level test block を、`main` を呼ばずに実行します。
 - `kizu fmt [--write|-w] <file>` は formatter の出力を表示、または書き込みます。決めるのは空白、indent、複数行宣言の末尾 comma です。改行は書いた人が置いた場所に残るので、1 行で書いた block は 1 行のまま、文の間の空行は 1 行まで保たれ、comment は自分の行と column を保ちます。
+- `kizu lint <file|dir|package>...` はコメント規約を検査します。通常の `//` コメントはすべてエラーとし、`///` doc comment は `internal` ではない module の外部公開インターフェースの直前に空行なしで置かれた連続ブロックだけを許可します。
 - `kizu init [path]` は package の雛形を作ります。
 - `kizu ir [--opt] <file>` は typed SSA IR を表示します。
 - `kizu build --emit-llvm [--opt] <file>` は LLVM IR text を出力します。
@@ -223,8 +223,6 @@ just wasi-smoke      # wasm の例を wasmtime で走らせる
 - `kizu cache status` / `kizu cache prune` はローカルビルドキャッシュの表示と削除です。
 - `kizu import-c-header <file>` は対応する C prototype を Kizu extern に変換します。
 - `kizu version` は binary が何であるかを表示します。
-
-`kizu lint` は未実装です。
 
 ## プロジェクト文書
 

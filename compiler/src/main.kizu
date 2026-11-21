@@ -8,6 +8,7 @@ import compiler::internal::fmt;
 import compiler::internal::fsutil;
 import compiler::internal::ir;
 import compiler::internal::lexer;
+import compiler::internal::lint;
 import compiler::internal::llvm;
 import compiler::internal::manifest;
 import compiler::internal::msl;
@@ -107,6 +108,10 @@ fn main() -> !process::ExitStatus {
             next,
             count
         );
+        return exit_of(code);
+    }
+    if mem::equal_bytes(command, "lint") {
+        let code = try lint_command(io, allocator, next, count);
         return exit_of(code);
     }
     if mem::equal_bytes(command, "ir") {
@@ -630,6 +635,7 @@ fn usage(io: Io) -> !void {
     try io::write_stderr_line(io, "usage: kizu init [path]");
     try io::write_stderr_line(io, "usage: kizu lsp");
     try io::write_stderr_line(io, "usage: kizu fmt [--write] <file>");
+    try io::write_stderr_line(io, "usage: kizu lint <file|dir|package>...");
     try io::write_stderr_line(io, "usage: kizu ir [--opt] <file>");
     try io::write_stderr_line(io, "usage: kizu build --emit-llvm [--opt] <file>");
     try io::write_stderr_line(io, "usage: kizu build --target native [--backend direct|llvm] [native-options] <file>");
@@ -792,6 +798,52 @@ struct InitPackageNameResult {
 
 fn (self: InitPackageNameResult) deinit(allocator: Allocator) -> void {
     self.name.deinit(allocator);
+}
+
+fn lint_command(
+    io: Io,
+    allocator: Allocator,
+    command_index: i64,
+    count: i64
+) -> !i64 {
+    var targets = array::new<string::String>(allocator);
+    defer targets.deinit(allocator);
+    var index = command_index + 1;
+    while index < count {
+        let argument = try process::arg(index);
+        if starts_with_dash(argument) {
+            try usage(io);
+            try io::write_stderr_line(
+                io,
+                "error: lint takes one or more file, directory, or package targets"
+            );
+            return 1;
+        }
+        let target_copy = try string::from_bytes(allocator, argument);
+        errdefer target_copy.deinit(allocator);
+        try targets.append(allocator, move target_copy);
+        index = index + 1;
+    }
+    var sources = source::new(allocator);
+    defer sources.deinit(allocator);
+    var diagnostics = array::new<diagnostic::Diagnostic>(allocator);
+    defer diagnostics.deinit(allocator);
+    if try lint::lint_targets(io, allocator, &targets, &var sources, &var diagnostics) |message| {
+        defer message.deinit(allocator);
+        let message_bytes = message.as_bytes();
+        try write_error_line(io, allocator, message_bytes);
+        return 1;
+    }
+    if diagnostics.len() == 0 {
+        try io::write_stdout_line(io, "lint: ok");
+        return 0;
+    }
+    var diag_index = 0;
+    while diagnostics.at(diag_index) |failed| {
+        diag_index = diag_index + 1;
+        try report(io, allocator, &sources, failed);
+    }
+    return 1;
 }
 
 fn fmt_command(

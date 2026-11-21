@@ -1,0 +1,319 @@
+import harness::conformance;
+import harness::scratch;
+import std::fmt;
+import std::fs;
+import std::io;
+import std::mem;
+import std::net;
+import std::process;
+import std::string;
+
+pub error Failure = scratch::Failure or fs::Error or io::Error or net::Error or process::Error;
+
+struct RunResult {
+    status: i64,
+    stdout: string::String,
+    stderr: string::String,
+}
+
+fn spawn_lint(
+    handle: Io,
+    allocator: Allocator,
+    kizu: []u8,
+    cwd: []u8,
+    first: []u8,
+    second: []u8
+) -> Failure!RunResult {
+    var command = try net::command(allocator, kizu);
+    defer command.deinit(allocator);
+    try command.arg(allocator, "lint");
+    if mem::len(first) > 0 {
+        try command.arg(allocator, first);
+    }
+    if mem::len(second) > 0 {
+        try command.arg(allocator, second);
+    }
+    try command.set_dir(allocator, cwd);
+    command.set_stdin(net::Stdio::Null);
+    command.set_stdout(net::Stdio::Pipe);
+    command.set_stderr(net::Stdio::Pipe);
+    var child = try command.spawn(handle);
+    defer child.deinit();
+    var stdout = string::new(allocator);
+    errdefer stdout.deinit(allocator);
+    var stderr = string::new(allocator);
+    errdefer stderr.deinit(allocator);
+    var poller = try net::poller_new(handle, 2);
+    defer poller.deinit();
+    try poller.watch_child_stdout(handle, &child, 1);
+    try poller.watch_child_stderr(handle, &child, 2);
+    var out_open = true;
+    var err_open = true;
+    while out_open or err_open {
+        let ready = try poller.wait(handle, 0);
+        var at = 0;
+        while at < ready {
+            let event = poller.ready(at) orelse break;
+            at = at + 1;
+            if event.token == 1 and out_open {
+                if try child.read_stdout_ready(handle, allocator, &var stdout, 65536) |got| {
+                    if got == 0 {
+                        child.close_stdout();
+                        out_open = false;
+                    }
+                }
+            }
+            if event.token == 2 and err_open {
+                if try child.read_stderr_ready(handle, allocator, &var stderr, 65536) |got| {
+                    if got == 0 {
+                        child.close_stderr();
+                        err_open = false;
+                    }
+                }
+            }
+        }
+    }
+    let status = try child.wait(handle);
+    return RunResult { status: status, stdout: move stdout, stderr: move stderr };
+}
+
+fn write_file(handle: Io, allocator: Allocator, root: []u8, rel: []u8, content: []u8) -> Failure!void {
+    let full = try scratch::join(allocator, root, rel);
+    defer full.deinit(allocator);
+    let full_bytes = full.as_bytes();
+    return fs::write_file(handle, full_bytes, content);
+}
+
+fn fail_step(handle: Io, allocator: Allocator, step: []u8, detail: []u8) -> Failure!bool {
+    var line = try string::from_bytes(allocator, "lint: ");
+    defer line.deinit(allocator);
+    try line.append_bytes(allocator, step);
+    try line.append_bytes(allocator, ": ");
+    try line.append_bytes(allocator, detail);
+    let line_bytes = line.as_bytes();
+    try io::write_stdout_line(handle, line_bytes);
+    return false;
+}
+
+fn check_ok(handle: Io, allocator: Allocator, step: []u8, result: &RunResult) -> Failure!bool {
+    if result.status != 0 {
+        let stderr_bytes = result.stderr.as_bytes();
+        return fail_step(handle, allocator, step, stderr_bytes);
+    }
+    let stdout_bytes = result.stdout.as_bytes();
+    let expected =
+        \\lint: ok
+        \\
+    ;
+    if !mem::equal_bytes(stdout_bytes, expected) {
+        return fail_step(handle, allocator, step, stdout_bytes);
+    }
+    return true;
+}
+
+fn check_fails(
+    handle: Io,
+    allocator: Allocator,
+    step: []u8,
+    result: &RunResult,
+    want_status: i64,
+    needle: []u8
+) -> Failure!bool {
+    if result.status != want_status {
+        var msg = try string::from_bytes(allocator, "expected status ");
+        defer msg.deinit(allocator);
+        try fmt::append_i64(allocator, &var msg, want_status);
+        try msg.append_bytes(allocator, ", got ");
+        try fmt::append_i64(allocator, &var msg, result.status);
+        let msg_bytes = msg.as_bytes();
+        return fail_step(handle, allocator, step, msg_bytes);
+    }
+    let stderr_bytes = result.stderr.as_bytes();
+    if !conformance::contains(stderr_bytes, needle) {
+        return fail_step(handle, allocator, step, stderr_bytes);
+    }
+    return true;
+}
+
+fn steps(handle: Io, allocator: Allocator, kizu: []u8, root: []u8) -> Failure!bool {
+    let ok_pkg = try spawn_lint(handle, allocator, kizu, root, "good_pkg", "");
+    defer ok_pkg.deinit(allocator);
+    if !try check_ok(handle, allocator, "valid package", &ok_pkg) {
+        return false;
+    }
+
+    let ok_multi = try spawn_lint(
+        handle,
+        allocator,
+        kizu,
+        root,
+        "good_pkg/src/api/types.kizu",
+        "good_pkg/src/api/methods.kizu"
+    );
+    defer ok_multi.deinit(allocator);
+    if !try check_ok(handle, allocator, "multiple files with cross-file receiver", &ok_multi) {
+        return false;
+    }
+
+    let bad_plain = try spawn_lint(handle, allocator, kizu, root, "bad_pkg/src/plain.kizu", "");
+    defer bad_plain.deinit(allocator);
+    if !try check_fails(handle, allocator, "plain comment", &bad_plain, 1, "error: lint error: comment is not allowed") {
+        return false;
+    }
+    let plain_stderr = bad_plain.stderr.as_bytes();
+    if !conformance::contains(plain_stderr, "--> ") {
+        return fail_step(handle, allocator, "plain comment location", plain_stderr);
+    }
+
+    let bad_internal = try spawn_lint(handle, allocator, kizu, root, "bad_pkg/src/internal/secret/secret.kizu", "");
+    defer bad_internal.deinit(allocator);
+    if !try check_fails(
+        handle,
+        allocator,
+        "internal doc comment",
+        &bad_internal,
+        1,
+        "internal module `bad_pkg::internal::secret`"
+    ) {
+        return false;
+    }
+
+    let bad_private = try spawn_lint(handle, allocator, kizu, root, "bad_pkg/src/private_doc.kizu", "");
+    defer bad_private.deinit(allocator);
+    if !try check_fails(
+        handle,
+        allocator,
+        "private doc comment",
+        &bad_private,
+        1,
+        "doc comment must directly precede a public declaration or public type method"
+    ) {
+        return false;
+    }
+
+    let missing = try spawn_lint(handle, allocator, kizu, root, "missing.kizu", "");
+    defer missing.deinit(allocator);
+    if !try check_fails(handle, allocator, "missing file", &missing, 1, "no such file or directory") {
+        return false;
+    }
+
+    let no_args = try spawn_lint(handle, allocator, kizu, root, "", "");
+    defer no_args.deinit(allocator);
+    if !try check_fails(handle, allocator, "missing args", &no_args, 2, "usage: kizu lint") {
+        return false;
+    }
+
+    return true;
+}
+
+pub fn run(handle: Io, allocator: Allocator, kizu: []u8) -> Failure!bool {
+    let kizu_abs = try fs::real_path(handle, allocator, kizu);
+    defer kizu_abs.deinit(allocator);
+    let kizu_path = kizu_abs.as_bytes();
+    var root = try scratch::dir(allocator, "kizu-lint-");
+    defer root.deinit(allocator);
+    let root_path = root.as_bytes();
+    try fs::create_dir(handle, root_path);
+    let dirs =
+        \\good_pkg
+        \\good_pkg/src
+        \\good_pkg/src/api
+        \\good_pkg/src/internal
+        \\good_pkg/src/internal/impl
+        \\bad_pkg
+        \\bad_pkg/src
+        \\bad_pkg/src/internal
+        \\bad_pkg/src/internal/secret
+    ;
+    var start = 0;
+    var index = 0;
+    let length = mem::len(dirs);
+    while index <= length {
+        if index == length or dirs[index] == cast<u8>(10) {
+            let sub = try scratch::join(allocator, root_path, dirs[start..index]);
+            defer sub.deinit(allocator);
+            let sub_bytes = sub.as_bytes();
+            try fs::create_dir(handle, sub_bytes);
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+
+    let good_manifest =
+        \\[package]
+        \\name = "good_pkg"
+        \\version = "0.1.0"
+        \\
+        \\[modules]
+        \\paths = ["src"]
+        \\
+    ;
+    let bad_manifest =
+        \\[package]
+        \\name = "bad_pkg"
+        \\version = "0.1.0"
+        \\
+        \\[modules]
+        \\paths = ["src"]
+        \\
+    ;
+    let good_types =
+        \\/// Public item.
+        \\pub struct Item {
+        \\    /// Public count.
+        \\    pub count: i64,
+        \\}
+        \\
+    ;
+    let good_methods =
+        \\/// Returns the item count.
+        \\fn (self: &Item) len() -> i64 {
+        \\    let text = "https://example.com//not-a-comment";
+        \\    return self.count;
+        \\}
+        \\
+    ;
+    let good_internal =
+        \\pub fn internal_helper() -> i64 {
+        \\    return 1;
+        \\}
+        \\
+    ;
+    let bad_plain =
+        \\fn main() {
+        \\    // SAFETY: ordinary comment is rejected by kizu lint
+        \\    let x = 1;
+        \\}
+        \\
+    ;
+    let bad_internal =
+        \\/// Internal doc is rejected.
+        \\pub fn hidden() -> i64 {
+        \\    return 1;
+        \\}
+        \\
+    ;
+    let bad_private =
+        \\/// Private helper doc is rejected.
+        \\fn helper() -> i64 {
+        \\    return 1;
+        \\}
+        \\
+    ;
+
+    try write_file(handle, allocator, root_path, "good_pkg/kizu.toml", good_manifest);
+    try write_file(handle, allocator, root_path, "good_pkg/src/api/types.kizu", good_types);
+    try write_file(handle, allocator, root_path, "good_pkg/src/api/methods.kizu", good_methods);
+    try write_file(handle, allocator, root_path, "good_pkg/src/internal/impl/impl.kizu", good_internal);
+    try write_file(handle, allocator, root_path, "bad_pkg/kizu.toml", bad_manifest);
+    try write_file(handle, allocator, root_path, "bad_pkg/src/plain.kizu", bad_plain);
+    try write_file(handle, allocator, root_path, "bad_pkg/src/internal/secret/secret.kizu", bad_internal);
+    try write_file(handle, allocator, root_path, "bad_pkg/src/private_doc.kizu", bad_private);
+
+    let passed = try steps(handle, allocator, kizu_path, root_path);
+    try scratch::remove_tree(handle, allocator, root_path);
+    if passed {
+        try io::write_stdout_line(handle, "lint: ok");
+    }
+    return passed;
+}

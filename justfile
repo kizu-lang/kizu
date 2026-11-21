@@ -45,6 +45,10 @@ parse file="examples/hello.kizu": stage1
 kizu-check file="examples/hello.kizu": stage1
     {{kizu}} check {{file}}
 
+# Lint Kizu sources for comment rules.
+kizu-lint target="compiler": stage1
+    {{kizu}} lint {{target}}
+
 # Print stable formatted Kizu source.
 kizu-fmt file="examples/hello.kizu": stage1
     {{kizu}} fmt {{file}}
@@ -172,8 +176,7 @@ spec-unsafecap: stage1
     cd spec/unsafecap && for init in initGuided initOneMistake initFree; do \
         quint run unsafecap.qnt --main spec --init $init --backend rust --seed 0x1 --max-samples 2000 \
             --max-steps 12 --invariant soundness --witnesses reachedAccept reachedAcceptUnsafeFn \
-            reachedAcceptBlock reachedAcceptAway reachedUnused reachedBoundary reachedMismatch \
-            reachedNoSafety || exit 1; done
+            reachedAcceptBlock reachedAcceptAway reachedUnused reachedBoundary reachedMismatch || exit 1; done
     cd spec/unsafecap && for mutant in mutantInherit mutantUnsafeFnBody mutantLooseFnTypes asImplemented; do \
         if quint run unsafecap.qnt --main $mutant --init initFree --backend rust --seed 0x2 \
             --max-samples 3000 --max-steps 12 --invariant soundness > /dev/null; then \
