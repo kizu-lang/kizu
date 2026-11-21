@@ -16,6 +16,48 @@ struct ScopeBinding {
     signature_param: bool,
     borrow_sources: array::Array<string::String>,
     unread: ?ast::Span,
+    selection: ast::Span,
+}
+
+struct BindingSelection {
+    typ: Type,
+    borrowed: bool,
+    mut_borrow: bool,
+}
+
+fn (self: &var ScopeStore) set_extent(scope: ScopeHandle, extent: ast::Span) -> void {
+    if self.scopes.at_mut(scope.node) |entry| {
+        entry.extent = extent;
+    }
+    return;
+}
+
+fn (self: &ScopeStore) extent(scope: ScopeHandle) -> ast::Span {
+    return self.scopes.at(scope.node).extent;
+}
+
+fn (self: &var ScopeStore) set_selection(scope: ScopeHandle, name: []u8, selection: ast::Span) -> ?BindingSelection {
+    if self.scopes.at_mut(scope.node) |current| {
+        if current.bindings.at_mut(name) |binding| {
+            binding.selection = selection;
+            return BindingSelection {
+                typ: binding.typ, borrowed: binding.borrowed, mut_borrow: binding.mut_borrow
+            };
+        }
+    }
+    return null;
+}
+
+fn (self: &ScopeStore) selection(scope: ScopeHandle, name: []u8) -> ast::Span {
+    var current = optional_scope(scope);
+    while current |handle| {
+        let retained = self.scopes.at(handle.node);
+        if retained.bindings.at(name) |binding| {
+            return binding.selection;
+        }
+        current = retained.parent;
+    }
+    return ast::zero_span();
 }
 
 struct BindingFacts {
@@ -27,6 +69,7 @@ struct BindingFacts {
 
 struct Scope {
     parent: ?ScopeHandle,
+    extent: ast::Span,
     bindings: map::Map<[]u8, ScopeBinding>,
 }
 
@@ -46,6 +89,7 @@ pub fn (self: &var ScopeStore) new_scope(parent: ?ScopeHandle) -> !ScopeHandle {
     return ScopeHandle {
         node: try self.scopes.add(self.allocator, Scope {
             parent: parent,
+            extent: ast::zero_span(),
             bindings: map::new<[]u8, ScopeBinding>(self.allocator)
         })
     };
@@ -120,7 +164,8 @@ fn new_scope_binding(
         mut_borrow: mut_borrow,
         signature_param: signature_param,
         borrow_sources: move sources,
-        unread: null
+        unread: null,
+        selection: ast::zero_span()
     };
 }
 

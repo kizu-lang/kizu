@@ -386,7 +386,7 @@ fn (self: &var Loader) resolve_type_node(
     file: arena::Handle<ModuleFile>,
     value: typ::Type
 ) -> !TypeNodeResolution {
-    var names = array::new<string::String>(self.allocator);
+    var names = array::new<TypeNameUse>(self.allocator);
     defer names.deinit(self.allocator);
     try collect_type_names(self.allocator, &tree.types, value, &var names);
     var renames = NameRenames { resolved: map::new<[]u8, string::String>(self.allocator) };
@@ -394,29 +394,42 @@ fn (self: &var Loader) resolve_type_node(
     var index = 0;
     while names.at(index) |name| {
         index = index + 1;
-        let name_bytes = name.as_bytes();
-        if renames.resolved.contains(name_bytes) {
-            continue;
+        let name_bytes = name.name.as_bytes();
+        if !renames.resolved.contains(name_bytes) {
+            let outcome = try self.resolve_base(file, name_bytes);
+            match outcome {
+                Name(resolved) => try renames.resolved.insert(allocator, name_bytes, move resolved),
+                Failed(failed) => return TypeNodeResolution::Failed(move failed),
+            }
         }
-        let outcome = try self.resolve_base(file, name_bytes);
-        match outcome {
-            Name(resolved) => try renames.resolved.insert(allocator, name_bytes, move resolved),
-            Failed(failed) => return TypeNodeResolution::Failed(move failed),
+        if tree.type_sites.get(name.source_site) |selection| {
+            if renames.resolved.at(name_bytes) |target| {
+                let bytes = target.as_bytes();
+                try tree.record_name_reference(selection, bytes);
+            }
         }
     }
     let renamed = try typ::map_names<NameRenames>(&var tree.types, value, &var renames);
     return self.bind_const_lengths(tree, file, renamed);
 }
 
+struct TypeNameUse {
+    name: string::String,
+    source_site: i64,
+}
+
 fn collect_type_names(
     allocator: Allocator,
     table: &typ::Table,
     value: typ::Type,
-    out: &var array::Array<string::String>
+    out: &var array::Array<TypeNameUse>
 ) -> !void {
     match typ::root_node(table, value) {
         Name(node) => {
-            try out.append(allocator, try join_path(allocator, &node.path, 0, node.path.len()));
+            try out.append(allocator, TypeNameUse {
+                name: try join_path(allocator, &node.path, 0, node.path.len()),
+                source_site: node.source_site
+            });
             var index = 0;
             while node.args.get(index) |arg| {
                 try collect_type_names(allocator, table, typ::child_type(value, arg), out);

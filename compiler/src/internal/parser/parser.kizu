@@ -23,6 +23,8 @@ pub struct Parser {
     link_library: ?ast::Text,
     link_framework: ?ast::Text,
     pub embeds: array::Array<ast::Expression>,
+    type_site_base: i64,
+    type_sites: array::Array<ast::Span>,
 }
 
 struct NameList {
@@ -49,7 +51,9 @@ pub fn new(allocator: Allocator, scanner: lexer::Lexer) -> !Parser {
         safety: null,
         link_library: null,
         link_framework: null,
-        embeds: array::new<ast::Expression>(allocator)
+        embeds: array::new<ast::Expression>(allocator),
+        type_site_base: -1,
+        type_sites: array::new<ast::Span>(allocator)
     };
 }
 
@@ -123,6 +127,10 @@ fn (self: &Parser) starts_error_set_decl() -> bool {
 
 pub fn (self: &var Parser) parse_program(tree: &var ast::Ast) -> !ast::Program {
     let allocator = self.allocator;
+    if tree.locate_names {
+        self.type_site_base = tree.type_sites.len();
+        self.type_sites.clear(allocator);
+    }
     var program = ast::new_program(self.allocator);
     errdefer program.deinit(self.allocator);
     while self.current_kind() != token::Kind::Eof {
@@ -135,6 +143,13 @@ pub fn (self: &var Parser) parse_program(tree: &var ast::Ast) -> !ast::Program {
             try program.add_declaration(allocator, placed);
         }
         try self.next_token();
+    }
+    if tree.locate_names {
+        var at = 0;
+        while self.type_sites.get(at) |span| {
+            try tree.type_sites.append(allocator, span);
+            at = at + 1;
+        }
     }
     return move program;
 }
@@ -498,10 +513,10 @@ fn (self: &var Parser) error_extern_struct_pub_field(
 
 fn (self: &var Parser) take_link_attributes(signature: &var ast::FunctionSignature) -> void {
     if self.link_library |value| {
-        signature.link_library = ast::Text { node: value.node };
+        signature.link_library = ast::Text { node: value.node, location: value.location };
     }
     if self.link_framework |value| {
-        signature.link_framework = ast::Text { node: value.node };
+        signature.link_framework = ast::Text { node: value.node, location: value.location };
     }
     self.link_library = null;
     self.link_framework = null;
@@ -1486,6 +1501,10 @@ fn (self: &var Parser) finish_expr_stmt(
 }
 
 fn (self: &var Parser) parse_block_stmt(tree: &var ast::Ast) -> !ast::Block {
+    var first = ast::zero_span();
+    if tree.locate_names {
+        first = token_span_at(self);
+    }
     var statements = array::new<ast::Statement>(self.allocator);
     errdefer statements.deinit(self.allocator);
     try self.next_token();
@@ -1496,7 +1515,11 @@ fn (self: &var Parser) parse_block_stmt(tree: &var ast::Ast) -> !ast::Block {
         try self.next_token();
     }
     try self.expect_list_close("block", "");
-    return try tree.add_block(move statements);
+    var block = try tree.add_block(move statements);
+    if tree.locate_names {
+        block.location = try tree.add_span(span_through(first, token_span_at(self)));
+    }
+    return block;
 }
 
 fn (self: &var Parser) parse_statement(tree: &var ast::Ast) -> !ast::Statement {
@@ -1937,10 +1960,10 @@ fn (self: &var Parser) parse_comptime_match_stmt(
             return try tree.add_recovered_statement(token_span_at(self));
         }
         let first = retained_captures.get_or_panic(0);
-        let name = ast::Text { node: first.node };
+        let name = first;
         var binding = try tree.add_empty_text();
         if retained_captures.at(1) |second| {
-            binding = ast::Text { node: second.node };
+            binding = ast::Text { node: second.node, location: second.location };
         }
         if !try self.expect_peek(token::Kind::LBrace) {
             return try tree.add_recovered_statement(token_span_at(self));
@@ -2118,7 +2141,11 @@ fn (self: &var Parser) parse_optional_branch_label(
 
 fn retain_literal(tree: &var ast::Ast, current: &token::Token) -> !ast::Text {
     let bytes = current.literal.as_bytes();
-    return tree.add_text_from_bytes(bytes);
+    var retained = try tree.add_text_from_bytes(bytes);
+    if tree.locate_names and (current.kind == token::Kind::Ident or current.kind == token::Kind::String) {
+        retained.location = try tree.add_span(token_span(current));
+    }
+    return retained;
 }
 
 fn (self: &Parser) parse_keyword_literal_expression(
@@ -2138,7 +2165,14 @@ fn (self: &var Parser) parse_expression(
     tree: &var ast::Ast,
     binding_power: i64
 ) -> !ast::Expression {
+    var first = ast::zero_span();
+    if tree.locate_names {
+        first = token_span_at(self);
+    }
     var left = try self.parse_prefix_expression(tree);
+    if tree.locate_names {
+        left.location = try tree.add_span(span_through(first, token_span_at(self)));
+    }
     while self.peek_kind() != token::Kind::Semicolon {
         var type_apply = false;
         let shift = try self.shift_pair();
@@ -2151,12 +2185,18 @@ fn (self: &var Parser) parse_expression(
         }
         if shift {
             left = try self.parse_shift_expr(tree, left);
+            if tree.locate_names {
+                left.location = try tree.add_span(span_through(first, token_span_at(self)));
+            }
             continue;
         }
         let next_kind = self.peek_kind();
         if is_binary_operator(next_kind) {
             try self.next_token();
             left = try self.parse_binary_expr(tree, left);
+            if tree.locate_names {
+                left.location = try tree.add_span(span_through(first, token_span_at(self)));
+            }
             continue;
         }
         match next_kind {
@@ -2196,13 +2236,20 @@ fn (self: &var Parser) parse_expression(
                 break;
             },
         }
+        if tree.locate_names {
+            left.location = try tree.add_span(span_through(first, token_span_at(self)));
+        }
     }
     if self.peek_kind() == token::Kind::LBrace {
         if try self.struct_literal_type_name(self.allocator,
             tree,
             left
         ) |type_name| {
-            return self.parse_struct_literal_expr(tree, move type_name);
+            let location = tree.expression_name_location(left);
+            left = try self.parse_struct_literal_expr(tree, move type_name, location);
+            if tree.locate_names {
+                left.location = try tree.add_span(span_through(first, token_span_at(self)));
+            }
         }
     }
     return left;
@@ -2631,7 +2678,7 @@ fn (self: &var Parser) parse_marker_expression(
 
 fn (self: &var Parser) current_safety_text(tree: &var ast::Ast) -> !ast::Text {
     if self.safety |value| {
-        return ast::Text { node: value.node };
+        return ast::Text { node: value.node, location: value.location };
     }
     let empty = try tree.add_empty_text();
     self.safety = empty;
@@ -2656,7 +2703,12 @@ fn (self: &var Parser) parse_ident_prefix_expression(
     if self.peek_kind() == token::Kind::LBrace and
         starts_upper {
         let owned_name = try owned_token_literal(self.allocator, current);
-        return self.parse_struct_literal_expr(tree, move owned_name);
+        errdefer owned_name.deinit(self.allocator);
+        var location: ?arena::Handle<ast::Span> = null;
+        if tree.locate_names {
+            location = try tree.add_span(token_span(current));
+        }
+        return self.parse_struct_literal_expr(tree, move owned_name, location);
     }
     if self.peek_kind() == token::Kind::LBrace and
         token_literal_is_vector(current) {
@@ -2868,9 +2920,10 @@ fn (self: &var Parser) parse_vector_literal_expr(
 
 fn (self: &var Parser) parse_struct_literal_expr(
     tree: &var ast::Ast,
-    type_name: string::String
+    type_name: string::String,
+    location: ?arena::Handle<ast::Span>
 ) -> !ast::Expression {
-    let retained_type = try tree.add_text(move type_name);
+    let retained_type = try tree.add_located_text(move type_name, location);
     let span = token_span_at(self);
     var fields = array::new<ast::FieldValue>(self.allocator);
     errdefer fields.deinit(self.allocator);
@@ -2963,7 +3016,15 @@ fn (self: &var Parser) parse_field_expr(
         ));
     }
     if !try self.expect_peek(token::Kind::Ident) {
-        return try tree.add_recovered_expression(token_span_at(self));
+        let operator = token_span_at(self);
+        if tree.locate_names {
+            let name = try tree.add_empty_text();
+            let span = join_spans(expression_span(tree, receiver), operator);
+            return tree.add_expression(ast::ExpressionNode::Field(ast::FieldExpr {
+                receiver: receiver, name: name, namespace: namespace, span: span
+            }));
+        }
+        return try tree.add_recovered_expression(operator);
     }
     let name = try retain_literal(tree, self.current_token());
     let span = join_spans(expression_span(tree, receiver), token_span_at(self));
@@ -3337,12 +3398,18 @@ fn (self: &var Parser) parse_named_type(
 ) -> !?arena::Handle<typ::Node> {
     var path = try self.parse_type_path();
     errdefer path.deinit(self.allocator);
+    var site = -1;
+    if self.type_site_base >= 0 {
+        site = self.type_site_base + self.type_sites.len();
+        try self.type_sites.append(self.allocator, token_span_at(self));
+    }
     let allow_const = type_path_is_ptr(&path);
     if self.peek_kind() == token::Kind::Bang {
         let args = array::new<arena::Handle<typ::Node>>(self.allocator);
         let err = try builder.add(typ::Node::Name(typ::Name {
             path: move path,
-            args: move args
+            args: move args,
+            source_site: site
         }));
         try self.next_token();
         try self.next_token();
@@ -3359,7 +3426,8 @@ fn (self: &var Parser) parse_named_type(
         let args = array::new<arena::Handle<typ::Node>>(self.allocator);
         return try builder.add(typ::Node::Name(typ::Name {
             path: move path,
-            args: move args
+            args: move args,
+            source_site: site
         }));
     }
     var args = array::new<arena::Handle<typ::Node>>(self.allocator);
@@ -3374,7 +3442,8 @@ fn (self: &var Parser) parse_named_type(
     }
     return try builder.add(typ::Node::Name(typ::Name {
         path: move path,
-        args: move args
+        args: move args,
+        source_site: site
     }));
 }
 

@@ -240,43 +240,16 @@ pub fn run(handle: Io, allocator: Allocator, kizu: []u8) -> Failure!bool {
     defer input.deinit(allocator);
     try session(allocator, uri_bytes, &var input);
 
-    var command = try net::command(allocator, kizu);
-    defer command.deinit(allocator);
-    try command.arg(allocator, "lsp");
-    command.set_stdin(net::Stdio::Pipe);
-    command.set_stdout(net::Stdio::Pipe);
-    var child = try command.spawn(handle);
-    defer child.deinit();
-    let input_bytes = input.as_bytes();
-    try child.write_stdin_all(handle, input_bytes);
-    child.close_stdin();
     var output = string::new(allocator);
     defer output.deinit(allocator);
-    var poller = try net::poller_new(handle, 1);
-    defer poller.deinit();
-    try poller.watch_child_stdout(handle, &child, 1);
-    var open = true;
-    while open {
-        let ready = try poller.wait(handle, 0);
-        var at = 0;
-        while at < ready {
-            let event = poller.ready(at) orelse break;
-            at = at + 1;
-            if event.token == 1 and open {
-                if try child.read_stdout_ready(handle, allocator, &var output, 65536) |got| {
-                    if got == 0 {
-                        child.close_stdout();
-                        open = false;
-                    }
-                }
-            }
-        }
-    }
-    let status = try child.wait(handle);
+    let input_bytes = input.as_bytes();
+    let status = try exchange(handle, allocator, kizu, input_bytes, &var output);
+    let semantic = try editor_session(handle, allocator, kizu, root_path, uri_bytes);
+    let diagnostics = try diagnostics_session(handle, allocator, kizu, root_path);
     try scratch::remove_tree(handle, allocator, root_path);
     let text = output.as_bytes();
-    var passed = status == 0;
-    if !passed {
+    var passed = status == 0 and semantic and diagnostics;
+    if status != 0 {
         try io::write_stdout_line(handle, "lsp: did not exit cleanly after shutdown");
     }
     passed = try expect(handle, allocator, text, want_capability(), "initialize") and passed;
@@ -290,4 +263,37 @@ pub fn run(handle: Io, allocator: Allocator, kizu: []u8) -> Failure!bool {
         try io::write_stdout_line(handle, "lsp: ok");
     }
     return passed;
+}
+
+fn exchange(handle: Io, allocator: Allocator, kizu: []u8, input: []u8, output: &var string::String) -> Failure!i64 {
+    var command = try net::command(allocator, kizu);
+    defer command.deinit(allocator);
+    try command.arg(allocator, "lsp");
+    command.set_stdin(net::Stdio::Pipe);
+    command.set_stdout(net::Stdio::Pipe);
+    var child = try command.spawn(handle);
+    defer child.deinit();
+    try child.write_stdin_all(handle, input);
+    child.close_stdin();
+    var poller = try net::poller_new(handle, 1);
+    defer poller.deinit();
+    try poller.watch_child_stdout(handle, &child, 1);
+    var open = true;
+    while open {
+        let ready = try poller.wait(handle, 0);
+        var at = 0;
+        while at < ready {
+            let event = poller.ready(at) orelse break;
+            at = at + 1;
+            if event.token == 1 and open {
+                if try child.read_stdout_ready(handle, allocator, output, 65536) |got| {
+                    if got == 0 {
+                        child.close_stdout();
+                        open = false;
+                    }
+                }
+            }
+        }
+    }
+    return child.wait(handle);
 }

@@ -472,6 +472,8 @@ pub struct Loader {
     std_graph: array::Array<Graph>,
     consts: map::Map<[]u8, ConstEntry>,
     pub sources: source::SourceMap,
+    pub parse_diagnostics: array::Array<diagnostic::Diagnostic>,
+    pub embedded_inputs: bool,
     pub inputs: buildplan::InputLog,
 }
 
@@ -493,6 +495,8 @@ pub fn new_loader(io: Io, allocator: Allocator, lib_dir: []u8) -> !Loader {
         std_graph: array::new<Graph>(allocator),
         consts: map::new<[]u8, ConstEntry>(allocator),
         sources: source::new(allocator),
+        parse_diagnostics: array::new<diagnostic::Diagnostic>(allocator),
+        embedded_inputs: false,
         inputs: buildplan::new_log(allocator, false)
     };
 }
@@ -526,10 +530,11 @@ pub fn (self: &var Loader) override_source(file: []u8, text: []u8) -> !void {
     let cleaned = try path::clean(self.allocator, file);
     defer cleaned.deinit(self.allocator);
     let cleaned_bytes = cleaned.as_bytes();
-    return self.source_overrides.insert(self.allocator,
-        cleaned_bytes,
-        try string::from_bytes(self.allocator, text)
-    );
+    let owned = try string::from_bytes(self.allocator, text);
+    if self.source_overrides.remove(self.allocator, cleaned_bytes) |previous| {
+        previous.deinit(self.allocator);
+    }
+    return self.source_overrides.insert(self.allocator, cleaned_bytes, move owned);
 }
 
 pub fn (self: &var Loader) load_program(
@@ -665,8 +670,11 @@ fn (self: &var Loader) parse_module_source(
         errdefer program.deinit(self.allocator);
         if source_parser.diagnostic(0) |first| {
             let copied = try first.clone(self.allocator);
-            program.deinit(self.allocator);
-            return LoadResult::Error(move copied);
+            if !tree.locate_names {
+                program.deinit(self.allocator);
+                return LoadResult::Error(move copied);
+            }
+            try self.parse_diagnostics.append(self.allocator, move copied);
         }
         var embed_index = 0;
         while source_parser.embeds.at(embed_index) |embed| {
@@ -687,6 +695,7 @@ fn (self: &var Loader) embed_file(
     root: []u8
 ) -> !?diagnostic::Diagnostic {
     let embed = embedded_file(tree, expression) orelse return null;
+    self.embedded_inputs = true;
     let span = tree.spans.at(embed.span).*;
     let path_text = try copy_string(self.allocator, tree.texts.at(embed.path.node));
     defer path_text.deinit(self.allocator);

@@ -1,0 +1,211 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import compiler::internal::lsp;
+import compiler::internal::msl;
+import compiler::internal::ownership;
+import compiler::internal::project;
+import compiler::internal::source;
+import compiler::internal::spirv;
+import compiler::internal::stdtarget;
+import std::array;
+import std::json;
+import std::map;
+import std::mem;
+import std::string;
+
+fn gpu_kernel(tree: &ast::Ast, program: &ast::Program) -> ast::Span {
+    var at = 0;
+    while program.declarations.get(at) |decl| {
+        at = at + 1;
+        match tree.declarations.at(decl.node) {
+            Function(value) => {
+                let abi = text_bytes(tree, value.signature.export_abi);
+                if mem::equal_bytes(abi, "gpu") {
+                    return tree.declaration_span(decl);
+                }
+            },
+            _ => {},
+        }
+    }
+    return ast::zero_span();
+}
+
+fn check_editor_target(
+    allocator: Allocator, tree: &var ast::Ast, program: &ast::Program, loader: &var project::Loader,
+    file: []u8, kernel: ast::Span, target: stdtarget::Target, problems: &var array::Array<Problem>,
+    unchanged: &map::Map<i64, bool>
+) -> !void {
+    var checker = try ownership::new_checker_for_target(allocator, tree, program, target);
+    defer checker.deinit(allocator);
+    if try checker.check_changed(tree, program, unchanged) |failed| {
+        defer failed.deinit(allocator);
+        return add_problem(allocator, &loader.sources, file, &failed, problems);
+    }
+    if kernel.is_zero() {
+        return;
+    }
+    let result = try loader.std_error_codes();
+    match result {
+        Error(failed) => {
+            defer failed.deinit(allocator);
+            return add_problem(allocator, &loader.sources, file, &failed, problems);
+        },
+        Codes(codes) => {
+            defer codes.deinit(allocator);
+            var lowerer = try ir::new_lowerer_for_target(allocator, tree, program, &checker, target);
+            defer lowerer.deinit(allocator);
+            if try lowerer.lower(tree, program, &codes, &loader.sources) |failed| {
+                let located = diagnostic::locate(move failed, kernel);
+                defer located.deinit(allocator);
+                return add_problem(allocator, &loader.sources, file, &located, problems);
+            }
+            try keep_gpu_roots(allocator, &var lowerer.module);
+            return check_gpu_backends(allocator, &lowerer.module, &loader.sources, file, kernel, problems);
+        },
+    }
+}
+
+fn check_gpu_backends(
+    allocator: Allocator, module: &ir::Module, sources: &source::SourceMap, file: []u8,
+    kernel: ast::Span, problems: &var array::Array<Problem>
+) -> !void {
+    var output = string::new(allocator);
+    defer output.deinit(allocator);
+    if try msl::emit(allocator, module, &var output) |failed| {
+        let located = diagnostic::locate(move failed, kernel);
+        defer located.deinit(allocator);
+        try add_problem(allocator, sources, file, &located, problems);
+    }
+    output.clear();
+    if try spirv::emit(allocator, module, &var output) |failed| {
+        let located = diagnostic::locate(move failed, kernel);
+        defer located.deinit(allocator);
+        try add_problem(allocator, sources, file, &located, problems);
+    }
+    return;
+}
+
+fn overlaps(left: ast::Span, right: ast::Span) -> bool {
+    if left.source |id| {
+        return same_file(right, id) and !before_position(left.end, right.start) and !before_position(right.end, left.start);
+    }
+    return false;
+}
+
+fn requests_quick_fixes(message: &json::Value) -> bool {
+    if lsp::value_at(message, "params.context.only") |only| {
+        match only {
+            Arr(kinds) => {
+                var at = 0;
+                while kinds.at(at) |kind| {
+                    at = at + 1;
+                    match kind {
+                        Str(name) => {
+                            let bytes = name.as_bytes();
+                            if mem::equal_bytes(bytes, "quickfix") {
+                                return true;
+                            }
+                        },
+                        _ => {},
+                    }
+                }
+                return false;
+            },
+            _ => {},
+        }
+    }
+    return true;
+}
+
+fn write_quick_fixes(allocator: Allocator, encoder: &var json::Encoder, snapshot: &Snapshot, range: ast::Span) -> !void {
+    var at = 0;
+    while snapshot.problems.at(at) |problem| {
+        at = at + 1;
+        let failed = &problem.diagnostic;
+        if !overlaps(diagnostic_span(failed.span), range) {
+            continue;
+        }
+        var fix_at = 0;
+        while failed.fixes.at(fix_at) |fix| {
+            fix_at = fix_at + 1;
+            try write_quick_fix(allocator, encoder, snapshot, problem, fix);
+        }
+        let code = failed.code.as_bytes();
+        if mem::equal_bytes(code, "ownership.active_borrow") or mem::equal_bytes(code, "ownership.use_after_move") {
+            if failed.related.at(0) |origin| {
+                try write_ownership_action(allocator, encoder, snapshot, problem, origin, code);
+            }
+        }
+    }
+    return;
+}
+
+fn write_quick_fix(
+    allocator: Allocator, encoder: &var json::Encoder, snapshot: &Snapshot, problem: &Problem, fix: &diagnostic::Fix
+) -> !void {
+    let id = fix.span.source orelse return;
+    if snapshot.sources.at(id) |entry| {
+        var uri = string::new(allocator);
+        defer uri.deinit(allocator);
+        let file = entry.path.as_bytes();
+        try lsp::uri_of_path(allocator, file, &var uri);
+        let uri_bytes = uri.as_bytes();
+        let title = fix.title.as_bytes();
+        let new_text = fix.new_text.as_bytes();
+        try encoder.begin_object();
+        try encoder.write_bytes_field("title", title);
+        try encoder.write_bytes_field("kind", "quickfix");
+        try encoder.write_bool_field("isPreferred", true);
+        try encoder.begin_array_field("diagnostics");
+        try write_problem(allocator, encoder, &snapshot.sources, problem);
+        try encoder.end_array();
+        try encoder.begin_object_field("edit");
+        try encoder.begin_object_field("changes");
+        try encoder.begin_array_field(uri_bytes);
+        try write_edit(encoder, &snapshot.sources, fix.span, new_text);
+        try encoder.end_array();
+        try encoder.end_object();
+        try encoder.end_object();
+        try encoder.end_object();
+    }
+    return;
+}
+
+fn write_ownership_action(
+    allocator: Allocator, encoder: &var json::Encoder, snapshot: &Snapshot, problem: &Problem,
+    origin: &diagnostic::Related, code: []u8
+) -> !void {
+    let id = origin.span.source orelse return;
+    if snapshot.sources.at(id) |entry| {
+        var uri = string::new(allocator);
+        defer uri.deinit(allocator);
+        let file = entry.path.as_bytes();
+        try lsp::uri_of_path(allocator, file, &var uri);
+        let uri_bytes = uri.as_bytes();
+        let text = entry.text.as_bytes();
+        let line = origin.span.start.line - 1;
+        let column = lsp::utf16_column(text, line, origin.span.start.column - 1);
+        var title = "Go to move to adjust the hand-off";
+        if mem::equal_bytes(code, "ownership.active_borrow") {
+            title = "Go to borrow to narrow its scope";
+        }
+        try encoder.begin_object();
+        try encoder.write_bytes_field("title", title);
+        try encoder.write_bytes_field("kind", "quickfix");
+        try encoder.begin_array_field("diagnostics");
+        try write_problem(allocator, encoder, &snapshot.sources, problem);
+        try encoder.end_array();
+        try encoder.begin_object_field("command");
+        try encoder.write_bytes_field("title", title);
+        try encoder.write_bytes_field("command", "kizu.showLocation");
+        try encoder.begin_array_field("arguments");
+        try encoder.write_bytes(uri_bytes);
+        try encoder.write_i64(line);
+        try encoder.write_i64(column);
+        try encoder.end_array();
+        try encoder.end_object();
+        try encoder.end_object();
+    }
+    return;
+}

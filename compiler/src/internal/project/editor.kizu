@@ -1,0 +1,75 @@
+import std::map;
+import std::mem;
+import std::string;
+
+pub struct EditorFile {
+    pub module_name: string::String,
+    pub namespaces: map::Map<[]u8, string::String>,
+}
+
+pub fn (self: &Loader) editor_files() -> !map::Map<[]u8, EditorFile> {
+    var result = map::new<[]u8, EditorFile>(self.allocator);
+    errdefer result.deinit(self.allocator);
+    let groups = try self.modules_in_load_order();
+    defer groups.deinit(self.allocator);
+    let files = try self.files_of(&groups);
+    defer files.deinit(self.allocator);
+    var at = 0;
+    while files.get(at) |handle| {
+        at = at + 1;
+        let file = self.files.at(handle);
+        let group = self.groups.at(file.group);
+        let file_path = file.file.as_bytes();
+        let module_name = try copy_string(self.allocator, &group.path);
+        errdefer module_name.deinit(self.allocator);
+        var namespaces = map::new<[]u8, string::String>(self.allocator);
+        errdefer namespaces.deinit(self.allocator);
+        var alias_index = 0;
+        while file.namespaces.key_at(alias_index) |alias| {
+            alias_index = alias_index + 1;
+            if file.namespaces.at(alias) |target| {
+                try namespaces.insert(self.allocator, alias, try copy_string(self.allocator, target));
+            }
+        }
+        try result.insert(self.allocator, file_path, EditorFile {
+            module_name: move module_name, namespaces: move namespaces
+        });
+    }
+    return move result;
+}
+
+pub fn (self: &Loader) expand_editor_changes(changed: &var map::Map<[]u8, bool>) -> !void {
+    let order = try self.ordered_modules();
+    match order {
+        Ordered(groups) => {
+            defer groups.deinit(self.allocator);
+            var at = 0;
+            while groups.get(at) |handle| {
+                at = at + 1;
+                let group = self.groups.at(handle);
+                let module_name = group.path.as_bytes();
+                if changed.contains(module_name) {
+                    continue;
+                }
+                var index = 0;
+                while group.imports.key_at(index) |dependency| {
+                    index = index + 1;
+                    if changed.contains(dependency) {
+                        try changed.insert(self.allocator, module_name, true);
+                        break;
+                    }
+                }
+            }
+        },
+        Failed(failed) => {
+            failed.deinit(self.allocator);
+        },
+    }
+    return;
+}
+
+pub fn same_editor_module(left: &EditorFile, right: &EditorFile) -> bool {
+    let before = left.module_name.as_bytes();
+    let after = right.module_name.as_bytes();
+    return mem::equal_bytes(before, after);
+}

@@ -517,10 +517,17 @@ fn (self: &var Checker) move_expr_form(
     if !has_marker and handed_off and !span.is_zero() {
         if !self.collect_missing_markers {
             let rendered = try self.names.intern_expression(tree, place);
-            return try self.error2(
+            var failed = try self.error2(
                 tree, span, "move error: `%s` is handed off here; write `move %s`",
                 Arg::Str(rendered), Arg::Str(rendered)
             );
+            errdefer failed.deinit(self.allocator);
+            if self.editor_diagnostics {
+                try failed.with_code(self.allocator, "ownership.missing_move");
+                let insertion = ast::Span { source: span.source, start: span.start, end: span.start };
+                try failed.with_fix(self.allocator, "Insert move", insertion, "move ");
+            }
+            return move failed;
         }
         try self.missing_markers.append(self.allocator, span);
     }
@@ -957,7 +964,7 @@ fn (self: &var Checker) check_value_stmt_form(
         return self.check_match_expr_value_stmt(tree, env, statement, move_tail, out);
     }
     if is_block_stmt(tree, statement) {
-        return self.check_value_block(tree, env, ast::Block { node: statement.node }, move_tail, out);
+        return self.check_value_block(tree, env, ast::Block { node: statement.node, location: null }, move_tail, out);
     }
     return try self.error0(ast::zero_span(), "move error: expression block must end with a value");
 }
