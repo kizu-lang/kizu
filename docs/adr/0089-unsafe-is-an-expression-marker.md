@@ -142,8 +142,6 @@ error を実装に差し替える。
 ### 3. raw pointer field を持つ struct は `unsafe struct` を必須にする
 
 ```kizu
-/// data は少なくとも cap 要素分の有効なメモリを指す。
-/// len <= cap が常に成り立つ。
 unsafe struct Array<T> {
     data: ptr<T>,
     len: usize,
@@ -216,76 +214,25 @@ fn (self: &var Array<T>) append<T>(v: T)   { unsafe self.len = self.len + 1; }
 directory moduleの全fileから使えるが、別fileは `unsafe` を付けてもその型の不変条件を
 作り変えられない。読み出したraw pointerを使う操作には従来どおり `unsafe` が要る。
 
-### 5. 義務を作る場所と果たす場所の両方で、理由の記述を必須にする
+### 5. コメントをコンパイラの必須規則にしない
 
-memory safety obligation の中身はコードに書けない。書ける場所は comment だけで
-ある。checker が検査できるのは「書いてあるか」だけで、中身の正しさは検査できない。
-それでも、書いていないことは検査できる。
+`unsafe fn` / `unsafe struct` への `///` や、`unsafe` を含む文への `// SAFETY:` はコンパイラで必須にしない。
 
-義務は 2 箇所で発生する。**作る場所**(`unsafe fn` / `unsafe struct`)と、
-**果たす場所**(`unsafe` を含む文)である。両方で必須にする。
+コンパイラがコメントについて検査できるのは「文字列が空でないか」という存在だけであり、内容の正しさも実装との乖離も検査できない。必須にしても形骸化や腐敗を止められず、かえって実態と合わない説明を残す原因になる。
 
-#### 5.1 義務を作る場所 — `///` を必須にする
+非自明な前提や不変条件は、コメントではなく次の手段で担保する。
 
-```kizu
-/// data は少なくとも cap 要素分の有効なメモリを指す。
-/// len <= cap が常に成り立つ。
-unsafe struct Array<T> {
-    data: ptr<T>,
-    len: usize,
-    cap: usize,
-}
+- `unsafe` マーカー・`unsafe fn`・`unsafe struct` の `pub` 禁止とファイル閉包(決定 1〜4)による型・構文レベルの境界
+- 実行時の `assert` や境界検査
+- 振る舞いを固定するテスト
 
-/// p は少なくとも 1 バイトの書き込み可能なメモリを指していなければならない。
-unsafe fn raw_write(p: ptr<u8>, v: u8) -> void { ... }
-```
-
-`unsafe struct` は不変条件を、`unsafe fn` は呼び出し側の前提条件を書く。
-`///` が無い、または本文が空なら compile error にする。
-
-Kizu は `///` を持ち(SPEC §6.3)、AST が `Doc` / `MemberDocs` を保持しているので、
-検査は宣言を見るだけで済む。Rust にも同じ位置に `clippy::missing_safety_doc` が
-ある。
-
-#### 5.2 義務を果たす場所 — `// SAFETY:` を必須にする
-
-`unsafe` を含む文の直前に `// SAFETY:` を必須にする。
-
-```kizu
-fn read_tag(node: ptr<const Node>) -> i64 {
-    // SAFETY: node の有効性は呼び出し側が保証する(unsafe fn の契約)
-    return unsafe node.*.tag;
-}
-
-fn (self: &var Array<T>) append<T>(v: T) -> !void {
-    ...
-    // SAFETY: 直前に cap を確認済みなので len <= cap は保たれる
-    unsafe self.len = self.len + 1;
-}
-```
-
-規則は次のとおり。
-
-- 単位は**式ではなく文**である。1 つの文に `unsafe` が複数あっても
-  `// SAFETY:` は 1 つでよい(`unsafe ptr_write(p, unsafe ptr_read(q))` など)
-- 接頭辞は ASCII 固定の `// SAFETY:` とする。後続の本文は自由記述で、日本語でよい
-- 本文が空なら compile error にする
-- 検査するのは存在だけで、内容の妥当性は検査しない
-
-Rust std は同じ規約を持ち、clippy に `undocumented_unsafe_blocks` がある。
-Rust では規約と lint だが、Kizu は言語規則にする。理由は 2 つある。
-`unsafe` を書く側が unsafe を理解しているとは限らず、規約は理解している人に
-しか効かない。そして Kizu には既存コードが 8 箇所しかなく、今なら必須にできる。
-
-**この決定は lexer の変更を要求した。** それまで lexer は `//` 行コメントを
-読み捨て、保持するのは `///` だけだった。`// SAFETY:` も `///` と同じ機構で
-token に載せる(`internal/lexer` の `readSafetyComment`、`token.Token.Safety`)。
+コード全体のコメント規約(通常の `//` 禁止と外部公開インターフェースへの `///` 限定)はコンパイラの型検査に混ぜず、`kizu lint` が独立に強制する。
 
 ## 強制できる範囲
 
 この決定の要点は、**実装者が unsafe を理解していなくても規則が発火する**ことに
 ある。`data: ptr<T>` と書いた時点で `unsafe struct` が要求され、そこから `pub`
-禁止・書き込みの `unsafe`・`///` が連鎖する。
+禁止・書き込みの `unsafe` が連鎖する。
 
 | 規則 | 強制 |
 | --- | --- |
@@ -294,8 +241,6 @@ token に載せる(`internal/lexer` の `readSafetyComment`、`token.Token.Safet
 | `ptr<>` field を持つ struct に `unsafe struct` | 完全 |
 | `unsafe struct` の `pub` field 禁止 | 完全 |
 | `unsafe struct` の構築と field 書き込みに `unsafe` | 完全 |
-| `unsafe fn` / `unsafe struct` の `///` の存在 | 完全(存在のみ) |
-| `unsafe` を含む文の `// SAFETY:` の存在 | 完全(存在のみ) |
 | 関数を `unsafe fn` と**宣言**させる | **不可** |
 | address を `usize` に符号化した struct の検出 | **不可** |
 
@@ -321,6 +266,7 @@ token に載せる(`internal/lexer` の `readSafetyComment`、`token.Token.Safet
 | 契約側の関数名に印を強制する | `import-c-header` は C の名前をそのまま Kizu 名にする。改名を課すと man page にも header にも無い名前が生まれる |
 | field 単位の印(Rust RFC 3458 方式) | 読み・copy・参照すべてに `unsafe` を要求するため、pointer 容器で `unsafe` が全行に出て grep が絞り込みにならない。決定 3/4 は型に印を付けて読みを解放する |
 | 実行時の不変条件検査(Ada `Type_Invariant` / D `invariant`) | public method の出入りに自動で検査が挿入されるのは隠れた制御フローである。静的証明版(SPARK)は SPEC §2 の非目標 |
+| `unsafe fn` / `unsafe struct` への `///` と `unsafe` 文への `// SAFETY:` をコンパイラで必須にする | コンパイラは非空の存在しか検査できず、コメントの腐敗や形骸化を防げない。不変条件と前提は型・`assert`・テストで担保し、コメント規約は `kizu lint` に分離する |
 
 ## 影響
 
@@ -344,7 +290,6 @@ token に載せる(`internal/lexer` の `readSafetyComment`、`token.Token.Safet
 - `lib/kizu/std/src` に `@unsafe` も `ptr<` も 0 件なので、std の書き換えは無い
 - `internal/fmt` と `internal/lsp` は新 surface に追従する。LSP の capability
   completion は不要になる
-- `internal/fmt` は `// SAFETY:` を対応する文に固定して出力する
 
 ## 再評価条件
 

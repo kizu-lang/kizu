@@ -1,0 +1,468 @@
+import compiler::internal::diagnostic;
+import compiler::internal::fsutil;
+import compiler::internal::source;
+import std::array;
+import std::fmt;
+import std::fs;
+import std::io;
+import std::mem;
+import std::path;
+import std::process;
+import std::string;
+import std::testing;
+
+fn lint_text(
+    allocator: Allocator,
+    module_path: []u8,
+    text: []u8,
+    out_diagnostics: &var array::Array<diagnostic::Diagnostic>
+) -> !void {
+    var sources = source::new(allocator);
+    defer sources.deinit(allocator);
+    return lint_source(allocator, "sample.kizu", text, module_path, &var sources, out_diagnostics);
+}
+
+fn expect_diag_at(
+    diagnostics: &array::Array<diagnostic::Diagnostic>,
+    index: i64,
+    line: i64,
+    column: i64,
+    substring: []u8
+) -> void {
+    if diagnostics.at(index) |diag| {
+        testing::expect_equal<i64>(line, diag.span.start.line);
+        testing::expect_equal<i64>(column, diag.span.start.column);
+        let category = diag.category.as_bytes();
+        testing::expect_equal<[]u8>("lint error", category);
+        let message = diag.message.as_bytes();
+        testing::expect(contains_bytes(message, substring));
+    } else {
+        testing::fail("missing expected lint diagnostic");
+    }
+    return;
+}
+
+fn contains_bytes(haystack: []u8, needle: []u8) -> bool {
+    let needle_len = mem::len(needle);
+    let hay_len = mem::len(haystack);
+    if needle_len == 0 {
+        return true;
+    }
+    var index = 0;
+    while index + needle_len <= hay_len {
+        if mem::equal_bytes(haystack[index..index + needle_len], needle) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn create_dir_for(io: Io, dir: &string::String) -> !void {
+    let dir_bytes = dir.as_bytes();
+    return fsutil::create_dir_all(io, dir_bytes);
+}
+
+fn make_temp_dir(io: Io, allocator: Allocator, label: []u8) -> !string::String {
+    var base = string::new(allocator);
+    defer base.deinit(allocator);
+    if process::env("TMPDIR") |tmp| {
+        if mem::len(tmp) > 0 {
+            try base.append_bytes(allocator, tmp);
+        }
+    }
+    if base.len() == 0 {
+        try base.append_bytes(allocator, "/tmp");
+    }
+    var name = try string::from_bytes(allocator, "kizu-lint-test-");
+    defer name.deinit(allocator);
+    try name.append_bytes(allocator, label);
+    try name.append_bytes(allocator, "-");
+    try fmt::append_i64(allocator, &var name, process::unix_millis());
+    let base_bytes = base.as_bytes();
+    let name_bytes = name.as_bytes();
+    let dir = try path::join(allocator, base_bytes, name_bytes);
+    errdefer dir.deinit(allocator);
+    try create_dir_for(io, &dir);
+    return move dir;
+}
+
+fn cleanup_tree(io: Io, allocator: Allocator, dir: []u8) -> void {
+    if remove_tree(io, allocator, dir) {} else |_| {}
+    return;
+}
+
+fn remove_tree(io: Io, allocator: Allocator, dir: []u8) -> fs::Error!void {
+    var entries = try fs::read_dir(io, allocator, dir);
+    defer entries.deinit(allocator);
+    var index = 0;
+    while entries.at(index) |entry| {
+        index = index + 1;
+        let entry_path = entry.path.as_bytes();
+        if entry.is_dir {
+            try remove_tree(io, allocator, entry_path);
+        } else {
+            try fs::remove_file(io, entry_path);
+        }
+    }
+    return fs::remove_dir(io, dir);
+}
+
+fn write_tree_file(io: Io, allocator: Allocator, root: []u8, rel: []u8, body: []u8) -> !void {
+    let full = try path::join(allocator, root, rel);
+    defer full.deinit(allocator);
+    let full_bytes = full.as_bytes();
+    let dir = path::dirname(full_bytes);
+    try fsutil::create_dir_all(io, dir);
+    return fs::write_file(io, full_bytes, body);
+}
+
+test "lint ignores slashes inside strings and multiline strings" {
+    let allocator = mem::page_allocator();
+    let input =
+        \\fn url() -> []u8 {
+        \\    let c = c"http://example.com///doc";
+        \\    let s = "https://example.com//path";
+        \\    return \\int main() { // not a comment
+        \\    \\    /// also not a comment
+        \\    ;
+        \\}
+        \\
+    ;
+    var diagnostics = array::new<diagnostic::Diagnostic>(allocator);
+    defer diagnostics.deinit(allocator);
+    try lint_text(allocator, "app", input, &var diagnostics);
+    testing::expect_equal<i64>(0, diagnostics.len());
+}
+
+test "lint rejects every ordinary comment including SAFETY and four slashes" {
+    let allocator = mem::page_allocator();
+    let input =
+        \\// leading comment
+        \\pub fn add(a: i64, b: i64) -> i64 {
+        \\    // SAFETY: no longer exempt
+        \\    return a + b; // trailing
+        \\}
+        \\
+        \\//// four slashes are ordinary
+        \\pub fn sub(a: i64, b: i64) -> i64 {
+        \\    return a - b;
+        \\}
+        \\
+    ;
+    var diagnostics = array::new<diagnostic::Diagnostic>(allocator);
+    defer diagnostics.deinit(allocator);
+    try lint_text(allocator, "app", input, &var diagnostics);
+    testing::expect_equal<i64>(4, diagnostics.len());
+    expect_diag_at(&diagnostics, 0, 1, 1, "comment is not allowed");
+    expect_diag_at(&diagnostics, 1, 3, 5, "comment is not allowed");
+    expect_diag_at(&diagnostics, 2, 4, 19, "trailing comment is not allowed");
+    expect_diag_at(&diagnostics, 3, 7, 1, "comment is not allowed");
+}
+
+test "lint allows doc comments on public declarations members and public type methods" {
+    let allocator = mem::page_allocator();
+    let input =
+        \\/// Configuration for a service.
+        \\///
+        \\/// Holds only public settings.
+        \\pub struct Config {
+        \\    /// Port number to bind.
+        \\    pub port: i64,
+        \\    /// Callback with comma inside parens.
+        \\    pub on_tick: fn(i64, i64) -> void,
+        \\    /// Map with comma inside generic args.
+        \\    pub labels: std::map::Map<[]u8, i64>,
+        \\    internal_flag: bool,
+        \\}
+        \\
+        \\/// Operational mode.
+        \\pub enum Mode {
+        \\    /// Run synchronously.
+        \\    Sync,
+        \\    /// Run asynchronously.
+        \\    Async,
+        \\}
+        \\
+        \\/// Outcome payload.
+        \\pub union Outcome {
+        \\    /// Empty result.
+        \\    None,
+        \\    /// Pair result.
+        \\    Pair(std::map::Map<[]u8, i64>),
+        \\}
+        \\
+        \\/// Service errors.
+        \\pub error Error {
+        \\    /// Connection timed out.
+        \\    TimedOut,
+        \\}
+        \\
+        \\/// Combined error set.
+        \\pub error AnyError = Error or std::mem::Error;
+        \\
+        \\/// Readable stream contract.
+        \\pub contract Reader {
+        \\    /// Reads one byte.
+        \\    fn read(self: &var Self) -> i64;
+        \\}
+        \\
+        \\/// Builds a default Config.
+        \\pub fn default_config() -> Config {
+        \\    return Config { port: 80, internal_flag: false };
+        \\}
+        \\
+        \\/// Unsafe public entry point.
+        \\pub unsafe fn raw_read(p: ptr<u8>) -> u8 {
+        \\    return unsafe ptr_read(p);
+        \\}
+        \\
+        \\/// Exported C entry point.
+        \\export "c" fn abi_sum(a: i64, b: i64) -> i64 {
+        \\    return a + b;
+        \\}
+        \\
+        \\/// Public C ABI struct.
+        \\pub extern "c" struct CTime {
+        \\    /// Seconds since epoch.
+        \\    sec: i64,
+        \\}
+        \\
+        \\/// Linked public C function.
+        \\@link(library: "m")
+        \\pub extern "c" fn c_abs(x: i32) -> i32;
+        \\
+        \\/// Returns the configured port.
+        \\fn (self: &Config) get_port() -> i64 {
+        \\    return self.port;
+        \\}
+        \\
+        \\/// Works with multiline receiver and non-self receiver name.
+        \\fn (
+        \\    cfg: &var Config
+        \\) reset() -> void {
+        \\    cfg.port = 0;
+        \\}
+        \\
+        \\/// Builtin std container method.
+        \\fn (self: &var std::array::Array<T>) push<T>(v: T) -> void {}
+        \\
+    ;
+    var diagnostics = array::new<diagnostic::Diagnostic>(allocator);
+    defer diagnostics.deinit(allocator);
+    try lint_text(allocator, "app", input, &var diagnostics);
+    testing::expect_equal<i64>(0, diagnostics.len());
+}
+
+test "lint rejects misplaced and non-public doc comments" {
+    let allocator = mem::page_allocator();
+    let input =
+        \\/// Detached from pub fn by blank line.
+        \\
+        \\pub fn ok() -> void {}
+        \\
+        \\/// Private helper.
+        \\/// Second line belongs to the same block.
+        \\fn helper() -> void {
+        \\    /// Inside function body.
+        \\    let x = 1;
+        \\}
+        \\
+        \\/// Private struct.
+        \\struct Hidden {
+        \\    /// Field of private struct.
+        \\    x: i64,
+        \\}
+        \\
+        \\pub struct Visible {
+        \\    /// Private field of public struct.
+        \\    secret: i64,
+        \\}
+        \\
+        \\enum PrivateEnum {
+        \\    /// Tag of private enum.
+        \\    One,
+        \\}
+        \\
+        \\/// Method on private struct.
+        \\fn (self: &Hidden) get() -> i64 {
+        \\    return self.x;
+        \\}
+        \\
+        \\/// Public-marked method on private struct.
+        \\pub fn (self: &Hidden) expose() -> i64 {
+        \\    return self.x;
+        \\}
+        \\
+        \\/// Method on unknown type.
+        \\fn (self: &Elsewhere) nope() -> i64 {
+        \\    return 0;
+        \\}
+        \\
+        \\/// Trailing doc comment.
+        \\pub fn trailing() -> void {} /// bad
+        \\
+        \\/// Trailing doc at end of file.
+        \\
+    ;
+    var diagnostics = array::new<diagnostic::Diagnostic>(allocator);
+    defer diagnostics.deinit(allocator);
+    try lint_text(allocator, "app", input, &var diagnostics);
+    testing::expect_equal<i64>(12, diagnostics.len());
+    expect_diag_at(&diagnostics, 0, 1, 1, "doc comment must directly precede");
+    expect_diag_at(&diagnostics, 1, 5, 1, "doc comment must directly precede");
+    expect_diag_at(&diagnostics, 2, 8, 5, "doc comment must directly precede");
+    expect_diag_at(&diagnostics, 3, 12, 1, "doc comment must directly precede");
+    expect_diag_at(&diagnostics, 4, 14, 5, "doc comment must directly precede");
+    expect_diag_at(&diagnostics, 5, 19, 5, "doc comment must directly precede");
+    expect_diag_at(&diagnostics, 6, 24, 5, "doc comment must directly precede");
+    expect_diag_at(&diagnostics, 7, 28, 1, "doc comment must directly precede");
+    expect_diag_at(&diagnostics, 8, 33, 1, "doc comment must directly precede");
+    expect_diag_at(&diagnostics, 9, 38, 1, "doc comment must directly precede");
+    expect_diag_at(&diagnostics, 10, 44, 30, "trailing doc comment is not allowed");
+    expect_diag_at(&diagnostics, 11, 46, 1, "doc comment must directly precede");
+}
+
+test "lint rejects doc comments in internal modules" {
+    let allocator = mem::page_allocator();
+    let input =
+        \\/// Internal public struct is not an external API.
+        \\pub struct Cell {
+        \\    /// Internal public field.
+        \\    pub value: i64,
+        \\}
+        \\
+        \\/// Internal public fn.
+        \\pub fn get(c: &Cell) -> i64 {
+        \\    return c.value;
+        \\}
+        \\
+    ;
+    var diagnostics = array::new<diagnostic::Diagnostic>(allocator);
+    defer diagnostics.deinit(allocator);
+    try lint_text(allocator, "app::internal::cell", input, &var diagnostics);
+    testing::expect_equal<i64>(3, diagnostics.len());
+    expect_diag_at(&diagnostics, 0, 1, 1, "internal module `app::internal::cell`");
+    expect_diag_at(&diagnostics, 1, 3, 5, "internal module `app::internal::cell`");
+    expect_diag_at(&diagnostics, 2, 7, 1, "internal module `app::internal::cell`");
+}
+
+test "lint resolves package modules sibling files imports and internal paths on disk" {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    let root = try make_temp_dir(io, allocator, "pkg");
+    defer root.deinit(allocator);
+    let root_bytes = root.as_bytes();
+    defer cleanup_tree(io, allocator, root_bytes);
+    let manifest =
+        \\[package]
+        \\name = "demo"
+        \\version = "0.1.0"
+        \\
+        \\[modules]
+        \\paths = ["src"]
+        \\
+    ;
+    let types_file =
+        \\/// Public thing.
+        \\pub struct Thing {
+        \\    /// Public count.
+        \\    pub count: i64,
+        \\}
+        \\
+        \\struct Secret {
+        \\    value: i64,
+        \\}
+        \\
+    ;
+    let methods_file =
+        \\import demo::other;
+        \\
+        \\/// Bare method on sibling file's public type.
+        \\fn (self: &Thing) count_of() -> i64 {
+        \\    return self.count;
+        \\}
+        \\
+        \\/// Qualified method on imported public type.
+        \\fn (self: &other::Shape) sides_of() -> i64 {
+        \\    return self.sides;
+        \\}
+        \\
+        \\/// Full-path method on same-package public type.
+        \\fn (self: &demo::other::Shape) full_sides() -> i64 {
+        \\    return self.sides;
+        \\}
+        \\
+    ;
+    let other_file =
+        \\/// Public shape.
+        \\pub struct Shape {
+        \\    pub sides: i64,
+        \\}
+        \\
+        \\struct HiddenShape {
+        \\    sides: i64,
+        \\}
+        \\
+    ;
+    let bad_internal =
+        \\/// Not allowed in internal module.
+        \\pub struct Inner {}
+        \\
+    ;
+    let bad_cross_file =
+        \\import demo::other;
+        \\
+        \\/// Method on sibling file's private type.
+        \\fn (self: &Secret) leak() -> i64 {
+        \\    return self.value;
+        \\}
+        \\
+        \\/// Method on imported private type.
+        \\fn (self: &other::HiddenShape) hide() -> i64 {
+        \\    return self.sides;
+        \\}
+        \\
+    ;
+    try write_tree_file(io, allocator, root_bytes, "kizu.toml", manifest);
+    try write_tree_file(io, allocator, root_bytes, "src/api/types.kizu", types_file);
+    try write_tree_file(io, allocator, root_bytes, "src/api/methods.kizu", methods_file);
+    try write_tree_file(io, allocator, root_bytes, "src/other/other.kizu", other_file);
+    try write_tree_file(io, allocator, root_bytes, "src/internal/inner/inner.kizu", bad_internal);
+    try write_tree_file(io, allocator, root_bytes, "src/api/bad_methods.kizu", bad_cross_file);
+
+    var good_targets = array::new<string::String>(allocator);
+    defer good_targets.deinit(allocator);
+    let methods_target = try path::join(allocator, root_bytes, "src/api/methods.kizu");
+    errdefer methods_target.deinit(allocator);
+    try good_targets.append(allocator, move methods_target);
+    var sources = source::new(allocator);
+    defer sources.deinit(allocator);
+    var diagnostics = array::new<diagnostic::Diagnostic>(allocator);
+    defer diagnostics.deinit(allocator);
+    if try lint_targets(io, allocator, &good_targets, &var sources, &var diagnostics) |err| {
+        defer err.deinit(allocator);
+        let err_bytes = err.as_bytes();
+        testing::fail(err_bytes);
+    }
+    testing::expect_equal<i64>(0, diagnostics.len());
+
+    var pkg_targets = array::new<string::String>(allocator);
+    defer pkg_targets.deinit(allocator);
+    let pkg_target = try string::from_bytes(allocator, root_bytes);
+    errdefer pkg_target.deinit(allocator);
+    try pkg_targets.append(allocator, move pkg_target);
+    var pkg_sources = source::new(allocator);
+    defer pkg_sources.deinit(allocator);
+    var pkg_diagnostics = array::new<diagnostic::Diagnostic>(allocator);
+    defer pkg_diagnostics.deinit(allocator);
+    if try lint_targets(io, allocator, &pkg_targets, &var pkg_sources, &var pkg_diagnostics) |err| {
+        defer err.deinit(allocator);
+        let err_bytes = err.as_bytes();
+        testing::fail(err_bytes);
+    }
+    testing::expect_equal<i64>(3, pkg_diagnostics.len());
+    expect_diag_at(&pkg_diagnostics, 0, 3, 1, "doc comment must directly precede");
+    expect_diag_at(&pkg_diagnostics, 1, 8, 1, "doc comment must directly precede");
+    expect_diag_at(&pkg_diagnostics, 2, 1, 1, "internal module `demo::internal::inner`");
+}

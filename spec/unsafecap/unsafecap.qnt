@@ -1,8 +1,8 @@
 // -*- mode: Bluespec; -*-
 // The `unsafe` marker check as a model (SPEC §12): which operations the
 // compiler cannot prove, which `unsafe` marker covers each, and what the
-// checker must report when a marker is missing, covers nothing, has no
-// `// SAFETY:` comment, or sits in the wrong file for an `unsafe struct`.
+// checker must report when a marker is missing, covers nothing, or sits in
+// the wrong file for an `unsafe struct`.
 //
 // A program is two functions over the same frame. `g` comes first and `f` may
 // call it; each is a `fn` or an `unsafe fn`, in the file that declares the
@@ -53,7 +53,6 @@ module unsafecap {
   type Kind =
     | Missing(Cap)    // unsafe.missing_marker: an operation no marker covers
     | Unused          // unsafe.unused_marker: a marker that covers no operation
-    | NoSafety        // unsafe.missing_safety_comment
     | Boundary        // unsafe.invariant_file_boundary
     | FnTypeMismatch  // a function bound at a function pointer type it is not
 
@@ -83,9 +82,8 @@ module unsafecap {
     | Single  // M L
     | Sum     // M (L + R)                         with each operand in parentheses
     | Block   // M if true { let t = L; t + R } else { 0 }
-  // An expression: its own markers, its shape and its operands. In a Block the
-  // two inner statements carry their own `// SAFETY:` (lSafety, rSafety).
-  type Expr = { m: int, shape: Shape, l: Leaf, r: Leaf, lSafety: bool, rSafety: bool }
+  // An expression: its own markers, its shape and its operands.
+  type Expr = { m: int, shape: Shape, l: Leaf, r: Leaf }
 
   type FnTy = SafeTy | UnsafeTy | ExternTy  // fn() -> i64 / unsafe fn() -> i64 / extern "c" fn() -> i64
   type FnName = Sf | Uf | Ext               // the function bound to it
@@ -104,12 +102,11 @@ module unsafecap {
     | Bind         // let h: <ty> = <name>; print(M h());
     | FieldBorrow  // M setn(&var b.n);
   // One statement. The fields a form does not use hold their defaults (`mkStmt`),
-  // so equal statements are equal values. `safety` is the `// SAFETY:` line
-  // right before the statement.
-  type Stmt = { form: Form, m: int, e: Expr, ty: FnTy, name: FnName, void: VoidCall, safety: bool }
+  // so equal statements are equal values.
+  type Stmt = { form: Form, m: int, e: Expr, ty: FnTy, name: FnName, void: VoidCall }
 
   pure val NO_EXPR: Expr =
-    { m: 0, shape: Single, l: { m: 0, a: Lit }, r: { m: 0, a: Lit }, lSafety: false, rSafety: false }
+    { m: 0, shape: Single, l: { m: 0, a: Lit }, r: { m: 0, a: Lit } }
 
   pure def hasExpr(f: Form): bool = Set(Print, PtrWriteS, VolWriteS, DerefSet, FieldSet).contains(f)
 
@@ -118,14 +115,13 @@ module unsafecap {
   pure def normalize(e: Expr): Expr =
     if (e.shape == Single) { ...NO_EXPR, l: { m: e.l.m + e.m, a: e.l.a } } else e
 
-  pure def mkStmt(form: Form, m: int, e: Expr, ty: FnTy, name: FnName, void: VoidCall, safety: bool): Stmt = {
+  pure def mkStmt(form: Form, m: int, e: Expr, ty: FnTy, name: FnName, void: VoidCall): Stmt = {
     form: form,
     m: if (form == Print) 0 else m,
     e: if (hasExpr(form)) normalize(e) else NO_EXPR,
     ty: if (form == Bind) ty else SafeTy,
     name: if (form == Bind) name else Sf,
     void: if (form == DeferS) void else Sv,
-    safety: safety,
   }
 
   type FnKind = SafeFn | UnsafeFn
@@ -278,20 +274,11 @@ module unsafecap {
     // covers nothing. Of two markers in a row, the outer one never is.
     val used = charged.foldl(Set(), (acc, site) => acc.union(Set(innermost(sh.marks, site.chain))))
     val unused = 0.to(3).exists(p => sh.marks[p] >= 2 or (sh.marks[p] == 1 and not(used.contains(p))))
-    // A statement with a marker needs `// SAFETY:`; a Block's inner statements
-    // need their own (an outer comment does not reach an inner statement).
-    val outerMarked = sh.outer.exists(p => sh.marks[p] > 0)
-    val nested = s.e
-    val nestedUnsafe = nested.shape == Block and (
-      (sh.marks[2] > 0 and not(nested.lSafety)) or (sh.marks[3] > 0 and not(nested.rSafety))
-    )
-    val noSafety = (outerMarked and not(s.safety)) or nestedUnsafe
     // An unsafe struct is constructed and written only in its own file, marker or not.
     val boundary = ctx.file == Away and lexists(sh.sites, site => site.invariant and site.caps != Set())
     Set()
       .union(missing)
       .union(if (unused) Set(Unused) else Set())
-      .union(if (noSafety) Set(NoSafety) else Set())
       .union(if (boundary) Set(Boundary) else Set())
       .union(if (sh.mismatch and not(LOOSE_FN_TYPES)) Set(FnTypeMismatch) else Set())
   }
@@ -359,9 +346,9 @@ module unsafecap {
   pure val MARKS = Set(0, 1, 2)
   pure val BOOLS = Set(false, true)
 
-  // A statement with every marker where it is needed, a `// SAFETY:` on every
-  // statement that has one, and nothing a file or a type refuses. `outerStyle`
-  // picks between one marker over the expression and one per operand.
+  // A statement with every marker where it is needed and nothing a file or a
+  // type refuses. `outerStyle` picks between one marker over the expression
+  // and one per operand.
   pure def repair(ctx: Ctx, s: Stmt, outerStyle: bool): Stmt = {
     val away = ctx.file == Away
     pure def needs(a: Atom): bool = atomCaps(ctx.gKind, a) != Set()
@@ -378,8 +365,6 @@ module unsafecap {
         shape: e.shape,
         l: { m: lm, a: l },
         r: { m: rm, a: r },
-        lSafety: e.shape == Block and lm > 0,
-        rSafety: e.shape == Block and rm > 0,
       }
     }
     val fixedExpr = fixExpr(s.e, s.form == PtrWriteS or s.form == VolWriteS)
@@ -391,9 +376,7 @@ module unsafecap {
       | Bind => if (fnTyCaps(nameTy(s.name)) != Set()) 1 else 0
       | _ => 1
     }
-    val unmarked = mkStmt(form, m, fixedExpr, nameTy(s.name), s.name, s.void, false)
-    val sh = layout(ctx.gKind, unmarked)
-    { ...unmarked, safety: sh.outer.exists(p => sh.marks[p] > 0) }
+    mkStmt(form, m, fixedExpr, nameTy(s.name), s.name, s.void)
   }
 
   def current: Func = if (building == "g") prog.g else prog.f
@@ -403,16 +386,15 @@ module unsafecap {
     if (building == "g") { ...prog, g: { ...prog.g, body: prog.g.body.append(s) } }
     else { ...prog, f: { ...prog.f, body: prog.f.body.append(s) } }
 
-  // A repaired statement with the markers at one position taken away, or with
-  // its `// SAFETY:` dropped (`pos` 4). A raw draw breaks several rules at once
-  // more often than not, and a checker that reports the first of them can hide
-  // a rule it skips behind the others; a slip breaks one.
+  // A repaired statement with the markers at one position taken away. A raw
+  // draw breaks several rules at once more often than not, and a checker that
+  // reports the first of them can hide a rule it skips behind the others; a
+  // slip breaks one.
   pure def slip(s: Stmt, pos: int): Stmt =
     if (pos == 0) { ...s, m: 0 }
     else if (pos == 1) { ...s, e: { ...s.e, m: 0 } }
-    else if (pos == 2) { ...s, e: { ...s.e, l: { ...s.e.l, m: 0 }, lSafety: false } }
-    else if (pos == 3) { ...s, e: { ...s.e, r: { ...s.e.r, m: 0 }, rSafety: false } }
-    else if (pos == 4) { ...s, safety: false }
+    else if (pos == 2) { ...s, e: { ...s.e, l: { ...s.e.l, m: 0 } } }
+    else if (pos == 3) { ...s, e: { ...s.e, r: { ...s.e.r, m: 0 } } }
     else s
 
   // Adds the drawn statement, or its repair when the drawn one breaks a new
@@ -486,12 +468,9 @@ module unsafecap {
     nondet lm = MARKS.oneOf()
     nondet rm = MARKS.oneOf()
     nondet shape = Set(Single, Sum, Block).oneOf()
-    nondet ls = BOOLS.oneOf()
-    nondet rs = BOOLS.oneOf()
-    nondet safety = BOOLS.oneOf()
     nondet raw = BOOLS.oneOf()
     nondet outerStyle = BOOLS.oneOf()
-    nondet slipAt = Set(-1, 0, 1, 2, 3, 4).oneOf()
+    nondet slipAt = Set(-1, 0, 1, 2, 3).oneOf()
     nondet ty = Set(SafeTy, UnsafeTy, ExternTy).oneOf()
     nondet name = Set(Sf, Uf, Ext).oneOf()
     nondet void = Set(Ev, Uv, Sv).oneOf()
@@ -500,8 +479,6 @@ module unsafecap {
       shape: shape,
       l: { m: lm, a: la },
       r: { m: rm, a: ra },
-      lSafety: shape == Block and ls,
-      rSafety: shape == Block and rs,
     }
     val forms = Set(Print, PtrWriteS, VolWriteS, DerefSet, FieldSet, ViewS, DerefBorrow, DeferS, Bind)
       .union(if (GEN_FIELD_BORROW) Set(FieldBorrow) else Set())
@@ -511,7 +488,7 @@ module unsafecap {
     // row are a form error there, not an unused marker (findings F3).
     val formMarks = if (Set(ViewS, DerefBorrow, DeferS).contains(form) and m0 > 1) 1 else m0
     any {
-      add(mkStmt(form, formMarks, e, ty, name, void, safety), raw, outerStyle, slipAt),
+      add(mkStmt(form, formMarks, e, ty, name, void), raw, outerStyle, slipAt),
       switchToF,
       finish,
       stutter,
@@ -549,7 +526,6 @@ module unsafecap {
   val reachedUnused: bool = done and expected == Set(Unused)
   val reachedBoundary: bool = done and expected.contains(Boundary)
   val reachedMismatch: bool = done and expected == Set(FnTypeMismatch)
-  val reachedNoSafety: bool = done and expected == Set(NoSafety)
 }
 
 // The model as SPEC states it.

@@ -77,6 +77,7 @@ stage1_lane() {
   "$stage1" run compiler/tests/harness -- behavior "$stage1"
   "$stage1" run compiler/tests/harness -- rebuild "$stage1"
   "$stage1" run compiler/tests/harness -- lsp "$stage1"
+  "$stage1" run compiler/tests/harness -- lint "$stage1"
   scripts/check-unicode.sh "$stage1"
 
   rm -rf "$root/target/seed/stage2"

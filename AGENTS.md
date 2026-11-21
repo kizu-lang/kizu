@@ -5,7 +5,7 @@ Kizu はメモリ安全で隠れた制御フローを嫌い、人間がレビュ
 ## 最優先
 
 基本の実行経路は `kizu run examples/hello.kizu` です。
-CLI は `run` / `check` / `test` / `parse` が中核で、`build` / `ir` / `fmt` / `init` /
+CLI は `run` / `check` / `test` / `parse` が中核で、`build` / `ir` / `fmt` / `lint` / `init` /
 `cache` がその周りにあります。
 
 言語の正しさは 2 つが持ちます。`examples/` は読んで分かるプログラムと、その出力。
@@ -52,25 +52,15 @@ CLI は `run` / `check` / `test` / `parse` が中核で、`build` / `ir` / `fmt`
 ## コメント
 
 `compiler/src` と `lib/kizu/std` のコードには説明コメントを書きません。
-コードが何をするかは名前で、何を約束するかはテストと lint で分かるようにします。
+コードが何をするかは名前で、何を約束するかはテストと `assert` と型で分かるようにします。
 なぜそう書いたかの理由・背景は commit message に書きます。
 
-- 例外の 1 つ目は unsafe の正当化です。`// SAFETY:` と、言語が unsafe 宣言に
-  要求する `///` は書きます。短く、前提だけを書きます。
-- 例外の 2 つ目は `lib/kizu/std` の公開 API の契約です。`pub` 宣言と、公開型の
-  receiver method の直前に空行なしで付いた `//` ブロックだけを契約として残します。
-  内部宣言への説明、本体の中の理由、行末のコメントは書きません。何が公開型の
-  method に当たるかは `scripts/comment-lint/check.py` が定義します。
-  `std::internal` は外向けの API ではないので、その下の `pub` 宣言は契約に
-  含めません。
+- 言語公式の `kizu lint` がコメント規約を機械強制します。通常の `//` コメント(`// SAFETY:` や行末コメントを含む)はすべて禁止し、許可するのは `internal` ではない module の外部公開インターフェース(`pub` 宣言、`export "<abi>" fn`、公開型の公開メンバー、公開型を receiver とする method)の直前に空行なしで付いた `///` doc comment ブロックだけです。
+- コンパイラは `unsafe` 文の `// SAFETY:` や `unsafe fn` / `unsafe struct` の `///` を必須にしません(ADR-0089 §5)。ただし `scripts/seed.txt` に pin した種が旧リリースの間は、`compiler/src` 内の既存の `// SAFETY:` と `unsafe` 向け `///` を種更新後の次段階で削除します。
 - `examples/` や `tests/` の末尾ブロック、corpus の期待値のように機械が読む
   コメント形の行はコメントではなくテストデータなので、この規則の外です。
-- これは自前のコードの運用ルールで、言語仕様ではありません。`SPEC.md` には
-  持ち込みません。
 - pre-commit hook `no-code-comments`(`scripts/comment-lint/check.py`、検査は
-  同じ場所の `test.py`)が新しいコメントを止めます。まだコメントを
-  消していないディレクトリは hook の `exclude` に並んでいて、消した PR が
-  その行を外します。
+  同じ場所の `test.py`)は、種の更新と `lib/kizu/std/src` の既存 `//` から `///` への移行が終わるまで暫定的に残しています。移行が完了したら `kizu lint` へ置き換えます。
 
 ## ADR
 

@@ -73,7 +73,6 @@ overflow / truncation behavior for every numeric cast
 raw pointer runtime operations
 option<T> runtime helper
 full stdlib
-kizu lint
 async fn / await syntax
 thread handle / channel / mutex / atomic API
 Rust 同等以上の runtime performance guarantee
@@ -439,41 +438,14 @@ attachment rule:
 * 1 行ごとに先頭の `///` と、直後に 1 つだけある空白を取り除き、
   改行で連結します
 * slash 3 つだけの `///` を doc comment とし、`//// text` は通常の line comment です
-* `// SAFETY:` は「通常の `//` comment」ではないので、間に挟まっても attach を切りません
 * block doc comment は採用しません
 
-doc comment は ownership、name resolution、ABI、実行時挙動に影響しません。
-型検査に対しても、書いてある内容は影響しません。ただし `unsafe fn` と
-`unsafe struct` は doc comment の**存在**を要求します(§12)。private function にも
-書けますが、doc comment の有無は visibility rule を変えません。
+doc comment は型検査、ownership、name resolution、ABI、実行時挙動に影響しません。
+doc comment の有無は visibility rule を変えません。
 tooling は hover / completion / generated docs で attached documentation を表示できます。
 最初の段落は summary として扱えますが、compiler diagnostic の意味づけには
-使いません。
-
-#### safety comment
-
-`unsafe` を含む文の理由は `// SAFETY:` line comment で書きます。`///` が
-「この宣言は何を約束するか」を書くのに対し、`// SAFETY:` は「なぜここで
-コンパイラの証明を外してよいか」を書きます。
-
-```kizu
-// SAFETY: 直前に cap を確認済みなので len <= cap は保たれる
-unsafe self.len = self.len + 1;
-```
-
-attachment rule:
-
-* 接頭辞は ASCII 固定の `// SAFETY:` です。`//` と `SAFETY:` の間の空白は
-  任意個で、後続の本文は自由記述です
-* 文の直前にある連続した `// SAFETY:` 行だけを対象にします。空行、通常の
-  `//` comment、他の token が間にあると attach しません。`///` は「通常の `//`
-  comment」ではないので、間に挟まっても attach を切りません
-* attach 先は式ではなく文です。1 つの文の中の `unsafe` はすべて同じ comment に
-  結びつきます
-* 外側の文に付けた comment は、その中の文には届きません
-
-`unsafe` を含む文が `// SAFETY:` を持たないのは compile error です(§12)。
-comment の内容は検査しません。
+使いません。`kizu lint` は通常の `//` コメントと、外部公開インターフェース以外に
+置かれた `///` を検査します(§17)。
 
 ### 6.3.1 defer / errdefer cleanup statement
 
@@ -1251,7 +1223,6 @@ multi-line literal の値は連結後のバイト列 (`Usage: kizu <command>\n\n
 ```kizu
 extern "c" fn getenv(name: ptr<const u8>) -> ?ptr<const u8>
 
-// SAFETY: the literal is NUL-terminated.
 let home = unsafe getenv(c"HOME");
 ```
 
@@ -2405,28 +2376,6 @@ fn wrap(p: ptr<const u8>, n: usize) -> Bytes {
 }
 ```
 
-義務を作る宣言 —— `unsafe fn` と `unsafe struct` —— には `///` が要ります。義務の
-中身はコードに書けず、書ける場所は comment だけです。何が書いてあるかは検査しませんが、
-何も書いていないことは検査します。
-
-義務を果たす場所 —— `unsafe` を含む文 —— には直前の `// SAFETY:` が要ります。
-
-```kizu
-/// p は少なくとも 1 バイトの書き込み可能なメモリを指していなければならない。
-unsafe fn raw_write(p: ptr<u8>, value: u8) -> void {
-    // SAFETY: p の有効性は呼び出し側が保証する(unsafe fn の契約)
-    unsafe ptr_write(p, value);
-}
-```
-
-接頭辞は ASCII 固定の `// SAFETY:` です。後続の本文は自由記述で、日本語で構いません。
-単位は式ではなく文なので、1 つの文に `unsafe` が複数あっても comment は 1 つで足ります。
-
-```kizu
-// SAFETY: dst と src はどちらも 1 バイト分有効であると呼び出し側が保証する
-unsafe ptr_write(dst, unsafe ptr_read(src));
-```
-
 外部 host の関数宣言は `extern "<abi>" fn` で書きます。C ABI は
 `extern "c" fn` です。
 
@@ -2548,10 +2497,6 @@ extern "c" fn snprintf(buffer: ptr<u8>, size: usize, format: ptr<const u8>, ...)
   compile error
 * `unsafe struct` の field に `pub` は付けられない
 * `unsafe struct` の構築と field への書き込みには `unsafe` が要る
-* `unsafe fn` / `unsafe struct` に `///` が無い、または本文が空なのは compile error
-* `unsafe` を含む文の直前に `// SAFETY:` が無い、または本文が空なのは compile error
-* `// SAFETY:` は文に付く。外側の文の comment は内側の文には届かない
-* `// SAFETY:` と文の間に空行や他の comment を挟むと、その comment は届かない
 
 ```kizu
 struct Node {
@@ -2804,7 +2749,6 @@ Kizu からも普通の関数として呼べます。
 
 ```kizu
 export "c" fn lib_sum(bytes: ptr<const u8>, len: usize) -> u64 {
-    // SAFETY: host は bytes から len バイトを読める状態で渡す
     let view = unsafe view_from_ptr(bytes, cast<i64>(len));
     var total: u64 = 0;
     for 0..cast<i64>(len) |index| {
@@ -2855,10 +2799,9 @@ extern "c" fn qsort(
 ) -> void
 
 export "c" fn ascending(left: ptr<const u8>, right: ptr<const u8>) -> i32 {
-    // ...
+    ...
 }
 
-// SAFETY: base は count 個の i64 を持つ
 unsafe qsort(base, count, 8, ascending);
 ```
 
@@ -4142,6 +4085,7 @@ kizu parse
 kizu check
 kizu run
 kizu fmt
+kizu lint
 kizu test
 ```
 
@@ -4155,6 +4099,12 @@ line comment は落としませんが、canonical form では 1 つ 1 行にな�
 trailing comma を持ち、それ以外の閉じ括弧直前の `,` は落とします。
 `kizu test` は file または package root 内の top-level `test` block runner です。
 `main` 実行、filesystem-wide discovery、filter は行いません。
+`kizu lint` は file、directory、または package(`kizu.toml`)のコメント規約を検査します。
+通常の `//` コメント(行頭・行末・`////` を含む)はすべてエラーとし、`///` doc comment は
+`internal` ではない module の外部公開インターフェース(`pub` 宣言、`export "<abi>" fn`、
+公開型の公開メンバー、公開型を receiver とする method)の直前に空行なしで置かれた
+連続ブロックだけを許可します。文字列リテラル(`"..."`、`c"..."`、複数行文字列 `\\...`)
+の中はコメントとして扱いません。
 
 experimental tooling:
 
@@ -4194,7 +4144,7 @@ source hash、`@embed_file` が埋め込んだ file の中身、public interface
 backend、optimization mode、stdlib hash を含めます。
 
 `kizu test` は top-level `test` block runner として実装済みです。
-`kizu lint` は未実装です。
+`kizu lint` はコメント規約の linter として実装済みです。
 
 ## 18. 実装構成
 

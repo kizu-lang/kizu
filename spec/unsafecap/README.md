@@ -24,7 +24,6 @@ compiler/src/unsafecap_mbt_test.kizu  fixture を 2 file の Kizu module にし�
 | marker の位置 | 式の前置。覆った式の中の**すべて**を覆う。使用は最も内側の marker に数える | 1 文に 4 つの位置(操作 / 式 / 左右の operand)、各 0〜2 個 |
 | 代入の marker | `unsafe p.* = v` の marker は代入先だけを覆う | `DerefSet` / `FieldSet` は値の式を覆わない。`ptr_write` / `volatile_write` は覆う |
 | 未使用 marker | 何も覆わない marker、2 つ重ねた外側は compile error | `Unused` |
-| `// SAFETY:` | `unsafe` を含む文に要る。外側の文の comment は内側の文に届かない | 文ごとの有無。式の中の block の 2 文は別に持つ |
 | 関数の種類 | `unsafe fn` の本体は暗黙に覆われない。呼び出しに marker が要る | 2 つの関数 `g` / `f` がそれぞれ `fn` か `unsafe fn`。`f` は `g` を呼べる |
 | 呼び出し先 | marker は呼び出しを覆うが、呼び先の本体は覆わない | `g` の本体は `g` の marker だけで判定 |
 | 関数 pointer | `fn` 経由は不要、`unsafe fn` / `extern "c" fn` 経由は要る。型は宣言どおり | 3 種の型と 3 種の関数の束縛。型が違えば `FnTypeMismatch` |
@@ -34,8 +33,6 @@ compiler/src/unsafecap_mbt_test.kizu  fixture を 2 file の Kizu module にし�
 
 入れなかったもの:
 
-* **`///` の要求**(`unsafe fn` / `unsafe struct` の doc)。宣言 1 つで決まる検査で、
-  marker の相互作用が無く、既存の negative example が直接押さえています。
 * **raw pointer field を持つ struct の `unsafe struct` 必須、`pub` field 禁止、
   `extern "c"` の型制限、可変長引数**。型の構文検査で、文脈との組み合わせが無い。
 * **`Function` static parameter**。std 専用で利用者が書けない(SPEC §13)。
@@ -52,7 +49,7 @@ compiler/src/unsafecap_mbt_test.kizu  fixture を 2 file の Kizu module にし�
 あります。
 
 * **checker 層** `errorsOf(p)`: checker と同じく、各操作を最も内側の marker に数える。
-  そこから `Missing(Cap)` / `Unused` / `NoSafety` / `Boundary` / `FnTypeMismatch` の集合を
+  そこから `Missing(Cap)` / `Unused` / `Boundary` / `FnTypeMismatch` の集合を
   出します。空集合は「受理しなければならない」。どの誤りを先に報告するかは SPEC に
   無いので、checker の最初の報告がその集合にあれば一致とします(ownership と同じ)。
 * **義務層** `obligationsOf(p)`: 実際に何が走るか。関数 pointer 経由の呼び出しは
@@ -92,14 +89,14 @@ checker 層が受理したプログラムについて、義務層が次を守る
 生成器のモードは ownership と同じ 3 つで、どれも `--invariant soundness` を検査しながら
 走ります。
 
-* `initGuided`: 違反を 1 つも足さない。引いた文が違反するときは、必要な marker と
-  `// SAFETY:` を補い、Away では struct の構築 / 書き込みを読みに替えた文(`repair`)を
+* `initGuided`: 違反を 1 つも足さない。引いた文が違反するときは、必要な marker を
+  補い、Away では struct の構築 / 書き込みを読みに替えた文(`repair`)を
   足します。marker の置き方は「式全体に 1 つ」と「operand ごと」を引きます。
 * `initOneMistake`: 新しい違反をちょうど 1 回まで許す。
 * `initFree`: 何でも足す。
 
 違反を許すモードでは、引いた文をそのまま足す代わりに、修復した文から marker を
-1 か所(または `// SAFETY:`)だけ落とした文(`slip`)も引きます。引いた文をそのまま
+1 か所だけ落とした文(`slip`)も引きます。引いた文をそのまま
 足すと違反が 2 つ以上重なることが多く、checker は最初の 1 つしか報告しないので、
 1 つの規則を飛ばす checker が他の違反の陰に隠れます。`slip` が無かったときは
 「marker の無い `ptr_read` だけ」のプログラムが 5544 本中 0 本で、`ptr_read` を
