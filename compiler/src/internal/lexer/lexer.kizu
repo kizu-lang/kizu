@@ -39,7 +39,6 @@ pub struct Lexer {
     line: i64,
     column: i64,
     pending_doc: array::Array<Span>,
-    pending_safety: array::Array<Span>,
     string_lines: array::Array<Span>,
     source: ?source::SourceId,
 }
@@ -70,7 +69,6 @@ fn make(
         line: 1,
         column: 0,
         pending_doc: array::new<Span>(allocator),
-        pending_safety: array::new<Span>(allocator),
         string_lines: array::new<Span>(allocator),
         source: source_id
     };
@@ -85,7 +83,6 @@ fn (self: &var Lexer) next_token() -> !token::Token {
     errdefer out.deinit(self.allocator);
     try self.attach_comments(&var out);
     clear_spans(&var self.pending_doc);
-    clear_spans(&var self.pending_safety);
     return move out;
 }
 
@@ -93,7 +90,6 @@ pub fn (self: &var Lexer) next_lexeme() -> !Lexeme {
     try self.skip_ignored();
     let lexeme = try self.scan_lexeme();
     clear_spans(&var self.pending_doc);
-    clear_spans(&var self.pending_safety);
     return lexeme;
 }
 
@@ -255,7 +251,6 @@ fn (self: &Lexer) token_from_string(
         line: line,
         column: column,
         doc_comments: array::new<string::String>(self.allocator),
-        safety: array::new<string::String>(self.allocator),
         source: self.source
     };
     return move out;
@@ -268,14 +263,6 @@ fn (self: &var Lexer) attach_comments(out: &var token::Token) -> !void {
         var text = try owned_text(self.allocator, self.input[span.start..span.end]);
         errdefer text.deinit(self.allocator);
         try out.doc_comments.append(self.allocator, move text);
-        index = index + 1;
-    }
-    index = 0;
-    while index < self.pending_safety.len() {
-        let span = self.pending_safety.get_or_panic(index);
-        var text = try owned_text(self.allocator, self.input[span.start..span.end]);
-        errdefer text.deinit(self.allocator);
-        try out.safety.append(self.allocator, move text);
         index = index + 1;
     }
     return;
@@ -320,7 +307,6 @@ fn (self: &var Lexer) skip_ignored() -> !void {
     while true {
         if self.skip_whitespace() {
             clear_spans(&var self.pending_doc);
-            clear_spans(&var self.pending_safety);
         }
         if self.ch != cast<u8>(47) or self.peek_char() != cast<u8>(47) {
             return;
@@ -330,12 +316,7 @@ fn (self: &var Lexer) skip_ignored() -> !void {
             try self.pending_doc.append(self.allocator, comment);
             continue;
         }
-        if self.read_safety_comment() |span| {
-            try self.pending_safety.append(self.allocator, span);
-            continue;
-        }
         clear_spans(&var self.pending_doc);
-        clear_spans(&var self.pending_safety);
         self.skip_line_comment();
     }
     return;
@@ -361,32 +342,6 @@ fn (self: &var Lexer) skip_line_comment() -> void {
 
 fn (self: &Lexer) is_doc_comment_start() -> bool {
     return self.peek_byte(2) == cast<u8>(47) and self.peek_byte(3) != cast<u8>(47);
-}
-
-fn (self: &var Lexer) read_safety_comment() -> ?Span {
-    var offset = 2;
-    while self.peek_byte(offset) == cast<u8>(32) or
-        self.peek_byte(offset) == cast<u8>(9) {
-        offset = offset + 1;
-    }
-    let prefix = "SAFETY:";
-    var index = 0;
-    while index < mem::len(prefix) {
-        if self.peek_byte(offset + index) != prefix[index] {
-            return null;
-        }
-        index = index + 1;
-    }
-    index = 0;
-    while index < offset + mem::len(prefix) {
-        self.read_char();
-        index = index + 1;
-    }
-    let start = self.position;
-    self.skip_line_comment();
-    return trim_space_span(self.input, Span {
-        start: start, end: self.position
-    });
 }
 
 fn (self: &var Lexer) read_doc_comment() -> Span {
@@ -688,32 +643,4 @@ fn decode_scalar(bytes: []u8, position: i64) -> Scalar {
 
 fn is_continuation(byte: u8) -> bool {
     return byte >= cast<u8>(128) and byte <= cast<u8>(191);
-}
-
-fn trim_space_span(bytes: []u8, span: Span) -> Span {
-    var position = span.start;
-    var start = span.end;
-    var end = span.end;
-    var found = false;
-    while position < span.end {
-        let scalar = decode_scalar(bytes, position);
-        if !is_unicode_space(scalar.value) {
-            if !found {
-                start = position;
-                found = true;
-            }
-            end = position + scalar.width;
-        }
-        position = position + scalar.width;
-    }
-    return Span {
-        start: start, end: end
-    };
-}
-
-fn is_unicode_space(value: i64) -> bool {
-    return value == 9 or value == 10 or value == 11 or value == 12 or value == 13 or
-        value == 32 or value == 133 or value == 160 or value == 5760 or
-        (value >= 8192 and value <= 8202) or value == 8232 or value == 8233 or
-        value == 8239 or value == 8287 or value == 12288;
 }

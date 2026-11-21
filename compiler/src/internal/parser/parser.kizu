@@ -19,7 +19,6 @@ pub struct Parser {
     stream: array::Array<arena::Handle<token::Token>>,
     position: i64,
     diagnostics_store: array::Array<diagnostic::Diagnostic>,
-    safety: ?ast::Text,
     link_library: ?ast::Text,
     link_framework: ?ast::Text,
     pub embeds: array::Array<ast::Expression>,
@@ -48,7 +47,6 @@ pub fn new(allocator: Allocator, scanner: lexer::Lexer) -> !Parser {
         stream: move stream,
         position: 0,
         diagnostics_store: array::new<diagnostic::Diagnostic>(allocator),
-        safety: null,
         link_library: null,
         link_framework: null,
         embeds: array::new<ast::Expression>(allocator),
@@ -1523,19 +1521,8 @@ fn (self: &var Parser) parse_block_stmt(tree: &var ast::Ast) -> !ast::Block {
 }
 
 fn (self: &var Parser) parse_statement(tree: &var ast::Ast) -> !ast::Statement {
-    let enclosing = self.safety;
-    var active = self.safety;
-    active = null;
-    let current = self.current_token();
-    if current.safety.len() > 0 {
-        let text = try self.comment_text(&current.safety);
-        active = try tree.add_text(move text);
-    }
-    self.safety = active;
     let first = token_span_at(self);
-    let parsed = self.parse_statement_form(tree);
-    self.safety = enclosing;
-    var statement = try parsed;
+    var statement = try self.parse_statement_form(tree);
     let last = token_span_at(self);
     statement.span = try tree.add_span(
         ast::Span { source: first.source, start: first.start, end: last.end });
@@ -2666,23 +2653,12 @@ fn (self: &var Parser) parse_marker_expression(
             ast::MoveExpr { value: expression, span: marker_span }
         ));
     }
-    let safety = try self.current_safety_text(tree);
     return try tree.add_expression(ast::ExpressionNode::Unsafe(
         ast::UnsafeExpr {
         value: expression,
-        safety: safety,
         span: marker_span
     }
     ));
-}
-
-fn (self: &var Parser) current_safety_text(tree: &var ast::Ast) -> !ast::Text {
-    if self.safety |value| {
-        return ast::Text { node: value.node, location: value.location };
-    }
-    let empty = try tree.add_empty_text();
-    self.safety = empty;
-    return empty;
 }
 
 fn (self: &var Parser) parse_ident_prefix_expression(

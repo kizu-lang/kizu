@@ -65,7 +65,6 @@ union TypeCollectionIssue {
     UnionOptional(CollectionMemberIssue),
     UnionBorrow(CollectionMemberIssue),
     UnionTypeValue(CollectionMemberIssue),
-    StructObligationDoc(ast::Text),
     StructBorrow(CollectionMemberIssue),
     StructRawPointer(CollectionMemberIssue),
     StructCompileTimeOnly(CollectionMemberTypeIssue),
@@ -74,7 +73,6 @@ union TypeCollectionIssue {
     ExternStructTypeParams(ast::Text),
     ExternStructUnsafe(ast::Text),
     ExternStructField(CollectionExternFieldIssue),
-    FunctionObligationDoc(ast::Text),
     ReservedFunctionStaticParam(ast::Text),
     FunctionReturnCompileTimeOnly(CollectionNamedTypeIssue),
     FunctionReturnTypeValue(ast::Text),
@@ -201,11 +199,6 @@ fn (self: &var Checker) collect_struct(
     let name = retained_name.as_bytes();
     if self.metadata.has_collected_type(name) {
         return TypeCollectionIssue::DuplicateType(declaration.name);
-    }
-    let retained_doc = tree.texts.at(declaration.doc.node);
-    let doc = retained_doc.as_bytes();
-    if obligation_doc_missing(declaration.requires_unsafe, doc) {
-        return TypeCollectionIssue::StructObligationDoc(declaration.name);
     }
     if extern_struct_shape_issue(tree, declaration) |issue| {
         return issue;
@@ -614,12 +607,6 @@ fn (self: &var Checker) collect_contract(allocator: Allocator, tree: &ast::Ast, 
 
 fn (self: &var Checker) new_declared_function_type(tree: &ast::Ast, declaration: &ast::FunctionDecl) -> !DeclaredFunctionResult {
     let signature = &declaration.signature;
-    let retained_doc = tree.texts.at(declaration.doc.node);
-    let doc = retained_doc.as_bytes();
-    if obligation_doc_missing(signature.requires_unsafe, doc) {
-        let issue = TypeCollectionIssue::FunctionObligationDoc(signature.name);
-        return DeclaredFunctionResult::Issue(issue);
-    }
     let previous = try self.type_params.enter_ast_signature(self.allocator, tree, signature);
     let result = try self.new_declared_function_type_in_scope(tree, declaration);
     self.type_params.restore(previous);
@@ -1243,12 +1230,6 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
             try append_collection_member(self.allocator, &var message, tree, member, "::");
             try message.append_bytes(self.allocator, "` cannot store type value");
         },
-        StructObligationDoc(name) => {
-            category = "unsafe error";
-            try message.append_bytes(self.allocator, "`unsafe struct ");
-            try append_collection_text(self.allocator, &var message, tree, name);
-            try message.append_bytes(self.allocator, "` needs a `///` comment stating the invariant its fields carry");
-        },
         StructBorrow(member) => {
             try message.append_bytes(self.allocator, "borrow field `");
             try append_collection_member(self.allocator, &var message, tree, member, ".");
@@ -1296,12 +1277,6 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
             try message.append_bytes(self.allocator, "` has type `");
             try self.append_checker_type(&var message, extern_field.type_name);
             try message.append_bytes(self.allocator, "`, which C cannot lay out");
-        },
-        FunctionObligationDoc(name) => {
-            category = "unsafe error";
-            try message.append_bytes(self.allocator, "`unsafe fn ");
-            try append_collection_text(self.allocator, &var message, tree, name);
-            try message.append_bytes(self.allocator, "` needs a `///` comment stating what the caller must uphold");
         },
         ReservedFunctionStaticParam(name) => {
             try message.append_bytes(self.allocator, "Function static parameter `");
@@ -1547,18 +1522,12 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
     var value = try new_checker_diagnostic_at(self.allocator, category, span, move message);
     errdefer value.deinit(self.allocator);
     match issue {
-        StructObligationDoc(_) => try value.with_help(self.allocator,
-            "write `/// <the invariant its fields carry>` above the declaration"
-        ),
-        FunctionObligationDoc(_) => try value.with_help(self.allocator,
-            "write `/// <what the caller must uphold>` above the declaration"
-        ),
         StructRawPointer(member) => {
             var help = string::new(self.allocator);
             defer help.deinit(self.allocator);
             try help.append_bytes(self.allocator, "write `unsafe struct ");
             try append_collection_text(self.allocator, &var help, tree, member.owner);
-            try help.append_bytes(self.allocator, "` and document the invariant its fields carry");
+            try help.append_bytes(self.allocator, "`");
             let help_text = help.as_bytes();
             try value.with_help(self.allocator, help_text);
         },
