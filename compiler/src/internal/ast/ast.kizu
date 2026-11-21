@@ -10,6 +10,7 @@ import std::string;
 
 pub struct Text {
     pub node: arena::Handle<string::String>,
+    pub location: ?arena::Handle<Span>,
 }
 
 pub struct ExpressionList {
@@ -26,6 +27,29 @@ pub struct Ast {
     pub statements: arena::Arena<StatementNode>,
     pub spans: arena::Arena<Span>,
     block_count: i64,
+    pub locate_names: bool,
+    pub type_sites: array::Array<Span>,
+    pub named_references: array::Array<NamedReference>,
+}
+
+pub struct NamedReference {
+    pub selection: Span,
+    pub target: string::String,
+}
+
+fn (self: &var Ast) record_name_reference(selection: Span, target: []u8) -> !void {
+    if selection.is_zero() {
+        return;
+    }
+    return self.named_references.append(self.allocator, NamedReference {
+        selection: selection,
+        target: try string::from_bytes(self.allocator, target)
+    });
+}
+
+fn (self: &var Ast) record_text_reference(selection: Span, target: &string::String) -> !void {
+    let name = target.as_bytes();
+    return self.record_name_reference(selection, name);
 }
 
 pub struct Program {
@@ -40,6 +64,7 @@ pub struct Declaration {
 
 pub struct Expression {
     pub node: arena::Handle<ExpressionNode>,
+    pub location: ?arena::Handle<Span>,
 }
 
 pub struct Statement {
@@ -49,6 +74,7 @@ pub struct Statement {
 
 pub struct Block {
     pub node: arena::Handle<StatementNode>,
+    pub location: ?arena::Handle<Span>,
 }
 
 pub struct Position {
@@ -588,7 +614,10 @@ pub fn new(allocator: Allocator) -> Ast {
         expressions: arena::new<ExpressionNode>(allocator),
         statements: arena::new<StatementNode>(allocator),
         spans: arena::new<Span>(allocator),
-        block_count: 0
+        block_count: 0,
+        locate_names: false,
+        type_sites: array::new<Span>(allocator),
+        named_references: array::new<NamedReference>(allocator)
     };
 }
 
@@ -600,7 +629,25 @@ pub fn new_program(allocator: Allocator) -> Program {
 }
 
 fn (self: &var Ast) add_text(value: string::String) -> !Text {
-    return Text { node: try self.texts.add(self.allocator, move value) };
+    return Text { node: try self.texts.add(self.allocator, move value), location: null };
+}
+
+pub fn (self: &Ast) expression_name_location(value: Expression) -> ?arena::Handle<Span> {
+    match self.expressions.at(value.node) {
+        Ident(name) => return name.name.location,
+        Field(field) => return field.name.location,
+        _ => return null,
+    }
+}
+
+fn (self: &var Ast) add_located_text(value: string::String, location: ?arena::Handle<Span>) -> !Text {
+    var retained = try self.add_text(move value);
+    retained.location = location;
+    return retained;
+}
+
+pub fn (self: &Ast) text_span(value: Text) -> Span {
+    return self.span_at(value.location);
 }
 
 fn (self: &var Ast) add_empty_text() -> !Text {
@@ -660,8 +707,13 @@ fn (self: &var Program) add_declaration(
 
 fn (self: &var Ast) add_expression(node: ExpressionNode) -> !Expression {
     return Expression {
-        node: try self.expressions.add(self.allocator, move node)
+        node: try self.expressions.add(self.allocator, move node),
+        location: null
     };
+}
+
+pub fn (self: &Ast) expression_extent(value: Expression) -> Span {
+    return self.span_at(value.location);
 }
 
 fn (self: &var Ast) add_statement(node: StatementNode) -> !Statement {
@@ -694,7 +746,7 @@ fn (self: &var Ast) add_block(statements: array::Array<Statement>) -> !Block {
     let block = BlockStmt { statements: move statements, id: self.block_count };
     let node = try self.statements.add(self.allocator, StatementNode::Block(move block));
     self.block_count = self.block_count + 1;
-    return Block { node: node };
+    return Block { node: node, location: null };
 }
 
 fn (self: &var Ast) add_recovered_declaration(span: Span) -> !Declaration {
@@ -720,7 +772,7 @@ fn (self: &var Ast) add_empty_block() -> !Block {
 }
 
 fn (self: Block) as_statement() -> Statement {
-    return Statement { node: self.node, span: null };
+    return Statement { node: self.node, span: self.location };
 }
 
 fn (self: Span) is_zero() -> bool {
@@ -1829,7 +1881,7 @@ fn append_text_list(
         if index > 0 {
             try out.append_bytes(allocator, separator);
         }
-        try append_text(allocator, out, ast, Text { node: value.node });
+        try append_text(allocator, out, ast, Text { node: value.node, location: null });
         index = index + 1;
     }
     return;

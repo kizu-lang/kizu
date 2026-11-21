@@ -1,0 +1,412 @@
+import std::fmt;
+import std::json;
+import std::mem;
+import std::string;
+
+fn point_source() -> []u8 {
+    return
+        \\pub struct Point {
+        \\    pub x: i64,
+        \\}
+        \\
+        \\pub fn (self: &Point) read(amount: i64) -> i64 {
+        \\    return self.x + amount;
+        \\}
+        \\
+        \\pub contract Readable {
+        \\    fn read(amount: i64) -> i64;
+        \\}
+        \\
+    ;
+}
+
+fn point_main() -> []u8 {
+    return
+        \\import app::app;
+        \\
+        \\fn main() -> void {
+        \\    let point: app::Point = app::Point { x: 40 };
+        \\    let answer = point.read(2);
+        \\    print(answer);
+        \\    return;
+        \\}
+        \\
+    ;
+}
+
+fn independent_source() -> []u8 {
+    return
+        \\pub fn independent(number: i64) -> i64 {
+        \\    return number;
+        \\}
+        \\
+    ;
+}
+
+fn open_source(allocator: Allocator, out: &var string::String, uri: []u8, text: []u8) -> mem::Error!void {
+    var encoder = json::encoder(allocator);
+    defer encoder.deinit(allocator);
+    try encoder.begin_object();
+    try encoder.write_bytes_field("jsonrpc", "2.0");
+    try encoder.write_bytes_field("method", "textDocument/didOpen");
+    try encoder.begin_object_field("params");
+    try encoder.begin_object_field("textDocument");
+    try encoder.write_bytes_field("uri", uri);
+    try encoder.write_bytes_field("languageId", "kizu");
+    try encoder.write_i64_field("version", 1);
+    try encoder.write_bytes_field("text", text);
+    try encoder.end_object();
+    try encoder.end_object();
+    try encoder.end_object();
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    try encoder.finish_into(allocator, &var body);
+    let bytes = body.as_bytes();
+    return frame(allocator, out, bytes, "", "");
+}
+
+fn change_source(allocator: Allocator, out: &var string::String, uri: []u8, text: []u8) -> mem::Error!void {
+    var encoder = json::encoder(allocator);
+    defer encoder.deinit(allocator);
+    try encoder.begin_object();
+    try encoder.write_bytes_field("jsonrpc", "2.0");
+    try encoder.write_bytes_field("method", "textDocument/didChange");
+    try encoder.begin_object_field("params");
+    try encoder.begin_object_field("textDocument");
+    try encoder.write_bytes_field("uri", uri);
+    try encoder.write_i64_field("version", 2);
+    try encoder.end_object();
+    try encoder.begin_array_field("contentChanges");
+    try encoder.begin_object();
+    try encoder.write_bytes_field("text", text);
+    try encoder.end_object();
+    try encoder.end_array();
+    try encoder.end_object();
+    try encoder.end_object();
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    try encoder.finish_into(allocator, &var body);
+    let bytes = body.as_bytes();
+    return frame(allocator, out, bytes, "", "");
+}
+
+fn document_request(
+    allocator: Allocator, out: &var string::String, id: i64, method: []u8, uri: []u8,
+    line: i64, character: i64, extra: []u8
+) -> mem::Error!void {
+    var body = try string::from_bytes(allocator,
+        \\{"jsonrpc":"2.0","id":
+    );
+    defer body.deinit(allocator);
+    try fmt::append_i64(allocator, &var body, id);
+    try body.append_bytes(allocator,
+        \\,"method":"textDocument/
+    );
+    try body.append_bytes(allocator, method);
+    try body.append_bytes(allocator,
+        \\","params":{"textDocument":{"uri":"
+    );
+    try body.append_bytes(allocator, uri);
+    try body.append_bytes(allocator,
+        \\"},"position":{"line":
+    );
+    try fmt::append_i64(allocator, &var body, line);
+    try body.append_bytes(allocator,
+        \\,"character":
+    );
+    try fmt::append_i64(allocator, &var body, character);
+    try body.append_bytes(allocator, "}");
+    try body.append_bytes(allocator, extra);
+    try body.append_bytes(allocator, "}}");
+    let bytes = body.as_bytes();
+    return frame(allocator, out, bytes, "", "");
+}
+
+fn hierarchy_request(
+    allocator: Allocator, out: &var string::String, id: i64, method: []u8, uri: []u8,
+    line: i64, character: i64
+) -> mem::Error!void {
+    var encoder = json::encoder(allocator);
+    defer encoder.deinit(allocator);
+    try encoder.begin_object();
+    try encoder.write_bytes_field("jsonrpc", "2.0");
+    try encoder.write_i64_field("id", id);
+    try encoder.write_bytes_field("method", method);
+    try encoder.begin_object_field("params");
+    try encoder.begin_object_field("item");
+    try encoder.write_bytes_field("uri", uri);
+    try encoder.begin_object_field("selectionRange");
+    try encoder.begin_object_field("start");
+    try encoder.write_i64_field("line", line);
+    try encoder.write_i64_field("character", character);
+    try encoder.end_object();
+    try encoder.end_object();
+    try encoder.end_object();
+    try encoder.end_object();
+    try encoder.end_object();
+    var body = string::new(allocator);
+    defer body.deinit(allocator);
+    try encoder.finish_into(allocator, &var body);
+    let bytes = body.as_bytes();
+    return frame(allocator, out, bytes, "", "");
+}
+
+fn reply(allocator: Allocator, output: []u8, id: i64) -> []u8 {
+    var at = 0;
+    let header = "Content-Length: ";
+    while at + mem::len(header) <= mem::len(output) {
+        if !mem::starts_with(output[at..mem::len(output)], header) {
+            return "";
+        }
+        at = at + mem::len(header);
+        var length = 0;
+        while at < mem::len(output) and output[at] >= cast<u8>(48) and output[at] <= cast<u8>(57) {
+            length = length * 10 + cast<i64>(output[at]) - 48;
+            at = at + 1;
+        }
+        at = at + 4;
+        let end = at + length;
+        if end > mem::len(output) {
+            return "";
+        }
+        if json::decode<json::Value>(allocator, output[at..end]) |message| {
+            defer message.deinit(allocator);
+            if reply_id(&message) == id {
+                return output[at..end];
+            }
+        } else |_| {}
+        at = end;
+    }
+    return "";
+}
+
+fn reply_id(message: &json::Value) -> i64 {
+    match message {
+        Obj(fields) => {
+            if fields.at("id") |value| {
+                match value {
+                    I64(number) => return number,
+                    _ => {},
+                }
+            }
+        },
+        _ => {},
+    }
+    return -1;
+}
+
+fn expect_reply(handle: Io, allocator: Allocator, output: []u8, id: i64, wanted: []u8, label: []u8) -> Failure!bool {
+    let body = reply(allocator, output, id);
+    return expect(handle, allocator, body, wanted, label);
+}
+
+fn position_range() -> []u8 {
+    return
+        \\,"range":{"start":{"line":0,"character":0},"end":{"line":20,"character":0}}
+    ;
+}
+
+fn editor_session(handle: Io, allocator: Allocator, kizu: []u8, root: []u8, uri: []u8) -> Failure!bool {
+    try write_file(handle, allocator, root, "src/app/app.kizu", point_source());
+    try make_dir(handle, allocator, root, "src/independent");
+    try write_file(handle, allocator, root, "src/independent/independent.kizu", independent_source());
+    var module_uri = try string::from_bytes(allocator, "file://");
+    defer module_uri.deinit(allocator);
+    try module_uri.append_bytes(allocator, root);
+    try module_uri.append_bytes(allocator, "/src/app/app.kizu");
+    let module = module_uri.as_bytes();
+    var independent_uri = try string::from_bytes(allocator, "file://");
+    defer independent_uri.deinit(allocator);
+    try independent_uri.append_bytes(allocator, root);
+    try independent_uri.append_bytes(allocator, "/src/independent/independent.kizu");
+    let independent = independent_uri.as_bytes();
+
+    var conversation = string::new(allocator);
+    defer conversation.deinit(allocator);
+    try frame(allocator, &var conversation, initialize_message(), "", "");
+    try open_source(allocator, &var conversation, uri, point_main());
+    try document_request(allocator, &var conversation, 10, "definition", uri, 4, 23, "");
+    try document_request(allocator, &var conversation, 11, "typeDefinition", uri, 4, 18, "");
+    try document_request(allocator, &var conversation, 12, "implementation", module, 8, 14, "");
+    try document_request(allocator, &var conversation, 13, "references", uri, 4, 18,
+        \\,"context":{"includeDeclaration":true}
+    );
+    try document_request(allocator, &var conversation, 14, "documentHighlight", uri, 4, 18, "");
+    try document_request(allocator, &var conversation, 15, "rename", uri, 5, 11,
+        \\,"newName":"computed_answer"
+    );
+    try document_request(allocator, &var conversation, 16, "hover", uri, 4, 23, "");
+    try document_request(allocator, &var conversation, 17, "prepareCallHierarchy", uri, 4, 23, "");
+    try document_request(allocator, &var conversation, 18, "completion", uri, 4, 23, "");
+    try document_request(allocator, &var conversation, 19, "signatureHelp", uri, 4, 28, "");
+    try document_request(allocator, &var conversation, 20, "inlayHint", uri, 0, 0, position_range());
+    try document_request(allocator, &var conversation, 21, "codeLens", uri, 0, 0, "");
+    try document_request(allocator, &var conversation, 22, "selectionRange", uri, 0, 0,
+        \\,"positions":[{"line":4,"character":23}]
+    );
+    try document_request(allocator, &var conversation, 23, "semanticTokens/full", uri, 0, 0, "");
+    try frame(allocator, &var conversation,
+        \\{"jsonrpc":"2.0","id":24,"method":"workspace/symbol","params":{"query":"Point"}}
+    , "", "");
+
+    var changed = string::new(allocator);
+    defer changed.deinit(allocator);
+    try changed.append_byte(allocator, cast<u8>(10));
+    try changed.append_bytes(allocator, point_source());
+    let changed_bytes = changed.as_bytes();
+    try change_source(allocator, &var conversation, module, changed_bytes);
+    try document_request(allocator, &var conversation, 25, "definition", uri, 4, 23, "");
+    try document_request(allocator, &var conversation, 26, "definition", independent, 1, 13, "");
+    try hierarchy_request(allocator, &var conversation, 27, "callHierarchy/incomingCalls", module, 5, 22);
+    try hierarchy_request(allocator, &var conversation, 28, "callHierarchy/outgoingCalls", uri, 2, 3);
+    try document_request(allocator, &var conversation, 29, "definition", uri, 3, 20, "");
+    try frame(allocator, &var conversation, shutdown_message(), "", "");
+    try frame(allocator, &var conversation, exit_message(), "", "");
+
+    var output = string::new(allocator);
+    defer output.deinit(allocator);
+    let input = conversation.as_bytes();
+    let status = try exchange(handle, allocator, kizu, input, &var output);
+    let text = output.as_bytes();
+    var passed = status == 0;
+    passed = try expect_reply(handle, allocator, text, 10,
+        \\"line":4,"character":22
+    , "method definition") and passed;
+    passed = try expect_reply(handle, allocator, text, 11,
+        \\"line":0,"character":11
+    , "type definition") and passed;
+    passed = try expect_reply(handle, allocator, text, 12,
+        \\"line":0,"character":11
+    , "structural implementation") and passed;
+    passed = try expect_reply(handle, allocator, text, 13,
+        \\"line":3,"character":8
+    , "references include the declaration") and passed;
+    passed = try expect_reply(handle, allocator, text, 14,
+        \\"kind":2
+    , "document highlight") and passed;
+    passed = try expect_reply(handle, allocator, text, 15,
+        \\"newText":"computed_answer"
+    , "rename") and passed;
+    passed = try expect_reply(handle, allocator, text, 16, "fn read(amount: i64) -> i64", "hover") and passed;
+    passed = try expect_reply(handle, allocator, text, 17,
+        \\"selectionRange"
+    , "call hierarchy item") and passed;
+    passed = try expect_reply(handle, allocator, text, 18,
+        \\"label":"read"
+    , "receiver completion") and passed;
+    passed = try expect_reply(handle, allocator, text, 19,
+        \\"activeParameter":0
+    , "signature help") and passed;
+    passed = try expect_reply(handle, allocator, text, 20,
+        \\"label":"amount"
+    , "parameter inlay hint") and passed;
+    passed = try expect_reply(handle, allocator, text, 20,
+        \\"label":"i64"
+    , "inferred type inlay hint") and passed;
+    passed = try expect_reply(handle, allocator, text, 21,
+        \\"command":"kizu.runFile"
+    , "code lens") and passed;
+    passed = try expect_reply(handle, allocator, text, 22,
+        \\"parent"
+    , "selection range") and passed;
+    passed = try expect_reply(handle, allocator, text, 23,
+        \\"data":[0,
+    , "semantic tokens") and passed;
+    passed = try expect_reply(handle, allocator, text, 24,
+        \\"name":"Point"
+    , "workspace symbols") and passed;
+    passed = try expect_reply(handle, allocator, text, 25,
+        \\"line":5,"character":22
+    , "dependent module rechecked") and passed;
+    passed = try expect_reply(handle, allocator, text, 26,
+        \\"line":0,"character":19
+    , "independent module retained") and passed;
+    passed = try expect_reply(handle, allocator, text, 27,
+        \\"from":{"name":"main"
+    , "incoming calls") and passed;
+    passed = try expect_reply(handle, allocator, text, 28,
+        \\"to":{"name":"read"
+    , "outgoing calls") and passed;
+    passed = try expect_reply(handle, allocator, text, 29,
+        \\"line":1,"character":11
+    , "qualified type annotation") and passed;
+    return passed;
+}
+
+fn move_source() -> []u8 {
+    return
+        \\import std::mem;
+        \\import std::string;
+        \\
+        \\fn main() -> !void {
+        \\    let allocator = mem::page_allocator();
+        \\    let text = try string::from_bytes(allocator, "hello");
+        \\    let other = text;
+        \\    other.deinit(allocator);
+        \\    return;
+        \\}
+        \\
+    ;
+}
+
+fn borrow_source() -> []u8 {
+    return
+        \\import std::mem;
+        \\import std::string;
+        \\
+        \\fn main() -> !void {
+        \\    let allocator = mem::page_allocator();
+        \\    var text = try string::from_bytes(allocator, " padded ");
+        \\    defer text.deinit(allocator);
+        \\    let view = text.as_bytes();
+        \\    string::trim_space_in_place(&var text);
+        \\    print(view);
+        \\    return;
+        \\}
+        \\
+    ;
+}
+
+fn gpu_source() -> []u8 {
+    return
+        \\export "gpu" fn bad_kernel(value: f32) -> void {
+        \\    print(value);
+        \\    return;
+        \\}
+        \\
+    ;
+}
+
+fn diagnostics_session(handle: Io, allocator: Allocator, kizu: []u8, root: []u8) -> Failure!bool {
+    var uri = try string::from_bytes(allocator, "file://");
+    defer uri.deinit(allocator);
+    try uri.append_bytes(allocator, root);
+    try uri.append_bytes(allocator, "-standalone.kizu");
+    let uri_bytes = uri.as_bytes();
+    var conversation = string::new(allocator);
+    defer conversation.deinit(allocator);
+    try frame(allocator, &var conversation, initialize_message(), "", "");
+    try open_source(allocator, &var conversation, uri_bytes, move_source());
+    try document_request(allocator, &var conversation, 30, "codeAction", uri_bytes, 6, 17, position_range());
+    try change_source(allocator, &var conversation, uri_bytes, borrow_source());
+    try document_request(allocator, &var conversation, 31, "codeAction", uri_bytes, 8, 34, position_range());
+    try change_source(allocator, &var conversation, uri_bytes, gpu_source());
+    try frame(allocator, &var conversation, shutdown_message(), "", "");
+    try frame(allocator, &var conversation, exit_message(), "", "");
+    var output = string::new(allocator);
+    defer output.deinit(allocator);
+    let input = conversation.as_bytes();
+    let status = try exchange(handle, allocator, kizu, input, &var output);
+    let text = output.as_bytes();
+    var passed = status == 0;
+    passed = try expect_reply(handle, allocator, text, 30,
+        \\"newText":"move "
+    , "move code action") and passed;
+    passed = try expect_reply(handle, allocator, text, 31,
+        \\"relatedInformation"
+    , "borrow origin") and passed;
+    passed = try expect_reply(handle, allocator, text, 31, "Go to borrow to narrow its scope", "borrow code action") and passed;
+    passed = try expect(handle, allocator, text, "metal error", "Metal diagnostics") and passed;
+    passed = try expect(handle, allocator, text, "spirv error", "SPIR-V diagnostics") and passed;
+    return passed;
+}

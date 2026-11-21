@@ -118,7 +118,7 @@ fn (self: &var Loader) qualify_decl_form(
             let outcome = try self.declared_function_name(tree, file, value);
             match outcome {
                 Name(name) => {
-                    let text = try tree.add_text(move name);
+                    let text = try tree.add_located_text(move name, value.signature.name.location);
                     let qualified = try self.qualify_function(tree, file, value, text);
                     return match qualified {
                         Function(function) => DeclarationResult::Declaration(
@@ -131,7 +131,14 @@ fn (self: &var Loader) qualify_decl_form(
             }
         },
         Test(value) => return self.qualify_test_decl(tree, file, value),
-        Const(_) => return DeclarationResult::Skipped,
+        Const(value) => {
+            if tree.locate_names {
+                var node = value;
+                node.name = try self.qualify_text(tree, file, value.name);
+                return DeclarationResult::Declaration(try tree.add_declaration(ast::DeclarationNode::Const(node)));
+            }
+            return DeclarationResult::Skipped;
+        },
         Recovered(_) => return DeclarationResult::Declaration(declaration),
     }
 }
@@ -154,7 +161,7 @@ fn (self: &Loader) qualify_text(tree: &var ast::Ast, file: arena::Handle<ModuleF
     defer source.deinit(self.allocator);
     let bytes = source.as_bytes();
     let qualified = try self.qualify_in(file, bytes);
-    return try tree.add_text(move qualified);
+    return try tree.add_located_text(move qualified, name.location);
 }
 
 fn (self: &Loader) module_is_std(file: arena::Handle<ModuleFile>) -> bool {
@@ -366,11 +373,11 @@ fn (self: &var Loader) qualify_impl(
     let type_outcome = try self.resolve_text(tree, file, decl.type_name);
     match type_outcome {
         Name(type_name) => {
-            node.type_name = try tree.add_text(move type_name);
+            node.type_name = try tree.add_located_text(move type_name, decl.type_name.location);
             let contract_outcome = try self.resolve_text(tree, file, decl.contract_name);
             return match contract_outcome {
                 Name(contract_name) => {
-                    node.contract_name = try tree.add_text(move contract_name);
+                    node.contract_name = try tree.add_located_text(move contract_name, decl.contract_name.location);
                     DeclarationResult::Declaration(try tree.add_declaration(ast::DeclarationNode::Impl(node)))
                 },
                 Failed(failed) => DeclarationResult::Failed(move failed),
@@ -518,7 +525,9 @@ fn (self: &var Loader) qualify_block(
                     },
                 }
             }
-            return BlockResult::Block(try tree.add_block(move statements));
+            var result = try tree.add_block(move statements);
+            result.location = block.location;
+            return BlockResult::Block(result);
         },
         _ => return BlockResult::Block(block),
     }
@@ -638,7 +647,7 @@ fn (self: &var Loader) qualify_stmt_form(
             };
         },
         Block(_) => {
-            let outcome = try self.qualify_block(tree, file, ast::Block { node: stmt.node });
+            let outcome = try self.qualify_block(tree, file, ast::Block { node: stmt.node, location: stmt.span });
             return match outcome {
                 Block(qualified) => StatementResult::Statement(qualified.as_statement()),
                 Failed(failed) => StatementResult::Failed(move failed),
@@ -944,6 +953,22 @@ fn (self: &var Loader) qualify_match_stmt(
 }
 
 fn (self: &var Loader) qualify_expr(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    expr: ast::Expression
+) -> !ExpressionResult {
+    let outcome = try self.qualify_expr_form(tree, file, expr);
+    match outcome {
+        Expression(value) => {
+            var retained = value;
+            retained.location = expr.location;
+            return ExpressionResult::Expression(retained);
+        },
+        Failed(failed) => return ExpressionResult::Failed(move failed),
+    }
+}
+
+fn (self: &var Loader) qualify_expr_form(
     tree: &var ast::Ast,
     file: arena::Handle<ModuleFile>,
     expr: ast::Expression
@@ -1366,7 +1391,7 @@ fn (self: &var Loader) qualify_callee(
                 let outcome = try self.resolve_namespace_path(tree, file, expr);
                 match outcome {
                     Name(name) => {
-                        let retained = try tree.add_text(move name);
+                        let retained = try tree.add_located_text(move name, node.name.location);
                         return ExpressionResult::Expression(try tree.add_expression(
                             ast::ExpressionNode::Ident(ast::IdentExpr { name: retained, span: node.span })
                         ));
@@ -1403,7 +1428,7 @@ fn (self: &var Loader) qualify_field_value(
     let outcome = try self.resolve_namespace_path(tree, file, expr);
     match outcome {
         Name(name) => {
-            let retained = try tree.add_text(move name);
+            let retained = try tree.add_located_text(move name, node.name.location);
             return ExpressionResult::Expression(try tree.add_expression(
                 ast::ExpressionNode::Ident(ast::IdentExpr { name: retained, span: node.span })
             ));
@@ -1422,7 +1447,13 @@ fn (self: &var Loader) qualify_field_expr(
     var node = expr;
     if expr.namespace {
         if try self.resolve_type_namespace_receiver(tree, file, expr.receiver) |resolved| {
-            let name = try tree.add_text(move resolved);
+            errdefer resolved.deinit(self.allocator);
+            let location = tree.expression_name_location(expr.receiver);
+            if tree.locate_names {
+                let selection = tree.span_at(location);
+                try tree.record_text_reference(selection, &resolved);
+            }
+            let name = try tree.add_located_text(move resolved, location);
             node.receiver = try tree.add_expression(ast::ExpressionNode::Ident(ast::IdentExpr {
                 name: name,
                 span: ast::zero_span()
@@ -1562,7 +1593,12 @@ fn (self: &var Loader) qualify_struct_literal(
     let type_outcome = try self.resolve_text(tree, file, expr.type_name);
     match type_outcome {
         Name(resolved) => {
-            node.type_name = try tree.add_text(move resolved);
+            errdefer resolved.deinit(self.allocator);
+            if tree.locate_names {
+                let selection = tree.text_span(expr.type_name);
+                try tree.record_text_reference(selection, &resolved);
+            }
+            node.type_name = try tree.add_located_text(move resolved, expr.type_name.location);
             var index = 0;
             while source.at(index) |field| {
                 index = index + 1;

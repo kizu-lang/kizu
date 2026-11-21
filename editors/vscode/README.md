@@ -1,11 +1,14 @@
 # Kizu for Visual Studio Code
 
 This extension registers `.kizu` files with syntax highlighting and snippets,
-starts `kizu lsp` for diagnostics, formatting, document symbols, and folding
-ranges, and contributes `Kizu: Run File` and `Kizu: Test File` commands that
-run the active `.kizu` file in an integrated terminal. The same commands are
-shown in the editor title while a `.kizu` file is active, and as CodeLens
-actions above `fn main` and top-level `test` blocks.
+and starts `kizu lsp` for diagnostics, formatting, folding, symbol navigation,
+rename, completion, signature help, inlay hints, and semantic highlighting.
+Code actions can insert a missing `move` or take you to the borrow or move
+that caused an ownership diagnostic.
+
+`Kizu: Run File` and `Kizu: Test File` run the active `.kizu` file in an
+integrated terminal. The commands also appear in the editor title and as
+CodeLens actions above `fn main` and top-level `test` blocks.
 
 ## Requirements
 

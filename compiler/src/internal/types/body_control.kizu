@@ -41,6 +41,12 @@ fn (self: &var Checker) check_if_stmt(
     ) |problem| {
         return move problem;
     }
+    if self.editor.len() > 0 {
+        try self.record_capture(tree, consequence, statement.capture, capture, tree.statement_span(consequence_block.as_statement()));
+        if alternative |branch| {
+            try self.record_capture(tree, alternative_scope, statement.err_capture, err_capture, tree.statement_span(branch.as_statement()));
+        }
+    }
     var left_returns = false;
     if try self.check_block(
         tree,
@@ -320,6 +326,7 @@ fn (self: &var Checker) check_while_stmt(
             return move problem;
         }
     }
+    try self.record_capture(tree, body, statement.capture, capture, tree.statement_span(body_block.as_statement()));
     let retained_label = tree.texts.at(label_text.node);
     let label = retained_label.as_bytes();
     if try self.enter_loop(label) |problem| {
@@ -364,6 +371,7 @@ fn (self: &var Checker) check_for_stmt(
         self.leave_loop();
         return move problem;
     }
+    try self.record_capture(tree, child, name_text, name, tree.statement_span(body_block.as_statement()));
     var returns = false;
     if try self.check_block(tree, child, body_block, want_return, &var returns) |problem| {
         self.leave_loop();
@@ -555,6 +563,7 @@ fn (self: &var Checker) check_match_arms(
             if try self.require_scope_definition(binding, defined) |problem| {
                 return move problem;
             }
+            try self.record_capture(tree, arm_scope, arm.binding, binding, tree.statement_span(arm.body));
         }
         let previous_meta = self.meta_bindings.current;
         let capture = owned_capture.as_bytes();
@@ -1308,6 +1317,10 @@ fn (self: &var Checker) check_if_expr(
     let alternative_block = alternative orelse return try self.checker_error_at(
         "type error", ast::zero_span(), "if expression requires else branch"
     );
+    if self.editor.len() > 0 {
+        try self.record_capture(tree, left_scope, statement.capture, capture, tree.statement_span(consequence.as_statement()));
+        try self.record_capture(tree, right_scope, statement.err_capture, err_capture, tree.statement_span(alternative_block.as_statement()));
+    }
     var left = empty_type();
     if try self.check_block_value(tree, left_scope, consequence, &var left) |problem| {
         return move problem;
@@ -1335,6 +1348,9 @@ fn (self: &var Checker) check_block_value(
     block: ast::Block,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
+    if self.editor.len() > 0 {
+        self.scopes.set_extent(scope, tree.statement_span(block.as_statement()));
+    }
     let count = block_statement_count(tree, block);
     var index = 0;
     while block_statement_at(tree, block, index) |statement| {
@@ -1417,7 +1433,7 @@ fn (self: &var Checker) check_stmt_value_form(
         ),
         Block(_) => {
             let child = try self.scopes.new_scope(scope);
-            return self.check_block_value(tree, child, ast::Block { node: statement.node }, out);
+            return self.check_block_value(tree, child, ast::Block { node: statement.node, location: statement.span }, out);
         },
         _ => return try self.checker_error_at(
             "type error", ast::zero_span(),
@@ -1618,6 +1634,7 @@ fn (self: &var Checker) check_match_expr_arm(
         if try self.require_scope_definition(binding, defined) |problem| {
             return move problem;
         }
+        try self.record_capture(tree, arm_scope, arm.binding, binding, tree.statement_span(arm.body));
     }
     return self.check_stmt_value(tree, arm_scope, arm.body, out);
 }

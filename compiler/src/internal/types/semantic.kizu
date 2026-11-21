@@ -1,0 +1,835 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::stdmethod;
+import compiler::internal::stdtarget;
+import compiler::internal::typ;
+import std::array;
+import std::map;
+import std::mem;
+import std::string;
+
+pub enum SymbolKind {
+    Function,
+    Method,
+    Struct,
+    Enum,
+    Contract,
+    Variant,
+    Field,
+    Parameter,
+    Variable,
+    Constant,
+    Test,
+}
+
+pub struct Symbol {
+    pub name: string::String,
+    pub qualified: string::String,
+    pub detail: string::String,
+    pub doc: string::String,
+    pub kind: SymbolKind,
+    pub selection: ast::Span,
+    pub extent: ast::Span,
+    pub container: ast::Span,
+    pub scope: ast::Span,
+    pub public: bool,
+    pub inferred: bool,
+    pub params: array::Array<string::String>,
+}
+
+pub struct Reference {
+    pub selection: ast::Span,
+    pub declaration: ast::Span,
+    pub write: bool,
+}
+
+pub struct ExpressionType {
+    pub span: ast::Span,
+    pub spelling: string::String,
+}
+
+pub struct CallSite {
+    pub callee: ast::Span,
+    pub declaration: ast::Span,
+    pub caller: ast::Span,
+    pub arguments: array::Array<ast::Span>,
+}
+
+pub struct Implementation {
+    pub contract_span: ast::Span,
+    pub implementor: ast::Span,
+}
+
+union IndexedPosition {
+    Declaration(i64),
+    Usage(i64),
+}
+
+pub struct SemanticIndex {
+    pub symbols: array::Array<Symbol>,
+    pub references: array::Array<Reference>,
+    pub expressions: array::Array<ExpressionType>,
+    pub calls: array::Array<CallSite>,
+    pub implementations: array::Array<Implementation>,
+    globals: map::Map<[]u8, i64>,
+    positions: map::Map<i64, map::Map<i64, IndexedPosition>>,
+}
+
+pub struct IndexedCheck {
+    pub index: SemanticIndex,
+    pub problems: array::Array<diagnostic::Diagnostic>,
+}
+
+pub fn new_index(allocator: Allocator) -> SemanticIndex {
+    return SemanticIndex {
+        symbols: array::new<Symbol>(allocator),
+        references: array::new<Reference>(allocator),
+        expressions: array::new<ExpressionType>(allocator),
+        calls: array::new<CallSite>(allocator),
+        implementations: array::new<Implementation>(allocator),
+        globals: map::new<[]u8, i64>(allocator),
+        positions: map::new<i64, map::Map<i64, IndexedPosition>>(allocator)
+    };
+}
+
+pub fn check_indexed(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    program: &ast::Program,
+    target: stdtarget::Target,
+    previous: &SemanticIndex,
+    unchanged: &map::Map<i64, bool>
+) -> !IndexedCheck {
+    var checker = new_checker_for_target(allocator, target);
+    defer checker.deinit(allocator);
+    try checker.editor.append(allocator, new_index(allocator));
+    try checker.index_declarations(tree, program, previous, unchanged);
+    let problems = try checker.check_indexed_bodies(tree, program, unchanged);
+    errdefer problems.deinit(allocator);
+    let index = checker.editor.pop_or_panic();
+    errdefer index.deinit(allocator);
+    return IndexedCheck {
+        index: try merge_unchanged(allocator, move index, previous, unchanged),
+        problems: move problems
+    };
+}
+
+fn (self: &var Checker) check_indexed_bodies(
+    tree: &var ast::Ast,
+    program: &ast::Program,
+    unchanged: &map::Map<i64, bool>
+) -> !array::Array<diagnostic::Diagnostic> {
+    var first = array::new<diagnostic::Diagnostic>(self.allocator);
+    errdefer first.deinit(self.allocator);
+    if try self.check_setup(tree, program) |failed| {
+        try first.append(self.allocator, move failed);
+        return move first;
+    }
+    try self.index_contract_implementations();
+    var index = 0;
+    while program.declarations.get(index) |declaration| {
+        index = index + 1;
+        if retained_span(unchanged, tree.declaration_span(declaration)) {
+            continue;
+        }
+        self.editor_function = declaration_symbol(tree, declaration);
+        if try self.check_declaration_body(tree, declaration) |failed| {
+            if first.len() > 0 {
+                failed.deinit(self.allocator);
+            } else {
+                try first.append(self.allocator, move failed);
+            }
+        }
+    }
+    return move first;
+}
+
+fn declaration_symbol(tree: &ast::Ast, declaration: ast::Declaration) -> ast::Span {
+    match tree.declarations.at(declaration.node) {
+        Function(value) => return tree.text_span(value.signature.name),
+        Test(value) => return tree.text_span(value.name),
+        _ => return ast::zero_span(),
+    }
+}
+
+fn semantic_text(tree: &ast::Ast, text: ast::Text) -> []u8 {
+    let held = tree.texts.at(text.node);
+    let bytes = held.as_bytes();
+    return bytes;
+}
+
+fn short_name(qualified: []u8) -> []u8 {
+    let tail = qualified[last_namespace_end(qualified)..mem::len(qualified)];
+    var index = mem::len(tail);
+    while index > 0 {
+        index = index - 1;
+        if tail[index] == cast<u8>(46) {
+            return tail[index + 1..mem::len(tail)];
+        }
+    }
+    return tail;
+}
+
+fn new_symbol(
+    allocator: Allocator,
+    name: []u8,
+    qualified: []u8,
+    kind: SymbolKind,
+    selection: ast::Span,
+    extent: ast::Span
+) -> !Symbol {
+    let label = try string::from_bytes(allocator, name);
+    errdefer label.deinit(allocator);
+    return Symbol {
+        name: move label,
+        qualified: try string::from_bytes(allocator, qualified),
+        detail: string::new(allocator),
+        doc: string::new(allocator),
+        kind: kind,
+        selection: selection,
+        extent: extent,
+        container: ast::zero_span(),
+        scope: ast::zero_span(),
+        public: false,
+        inferred: false,
+        params: array::new<string::String>(allocator)
+    };
+}
+
+fn (self: &var SemanticIndex) add_symbol(allocator: Allocator, symbol: Symbol) -> !void {
+    errdefer symbol.deinit(allocator);
+    if symbol.selection.is_zero() {
+        symbol.deinit(allocator);
+        return;
+    }
+    let name = symbol.qualified.as_bytes();
+    if mem::len(name) > 0 {
+        try self.globals.insert(allocator, name, self.symbols.len());
+    }
+    try self.place_position(allocator, symbol.selection, IndexedPosition::Declaration(self.symbols.len()));
+    return self.symbols.append(allocator, move symbol);
+}
+
+pub fn (self: &SemanticIndex) global(name: []u8) -> ?&Symbol {
+    let at = self.globals.get(name) orelse return null;
+    return self.symbols.at(at);
+}
+
+fn coordinate_key(position: ast::Position) -> i64 {
+    return position.line * 2147483648 + position.column;
+}
+
+fn (self: &var SemanticIndex) place_position(allocator: Allocator, span: ast::Span, value: IndexedPosition) -> !void {
+    let id = span.source orelse return;
+    let key = coordinate_key(span.start);
+    if self.positions.at_mut(id.index) |file| {
+        return file.insert(allocator, key, value);
+    }
+    var positions = map::new<i64, IndexedPosition>(allocator);
+    errdefer positions.deinit(allocator);
+    try positions.insert(allocator, key, value);
+    return self.positions.insert(allocator, id.index, move positions);
+}
+
+fn (self: &SemanticIndex) position(source_index: i64, point: ast::Position) -> ?IndexedPosition {
+    if self.positions.at(source_index) |positions| {
+        return positions.get(coordinate_key(point));
+    }
+    return null;
+}
+
+pub fn (self: &SemanticIndex) symbol_at_start(source_index: i64, point: ast::Position) -> ?&Symbol {
+    if self.position(source_index, point) |position| {
+        match position {
+            Declaration(index) => return self.symbols.at(index),
+            Usage(_) => {},
+        }
+    }
+    return null;
+}
+
+pub fn (self: &SemanticIndex) reference_at_start(source_index: i64, point: ast::Position) -> ?Reference {
+    if self.position(source_index, point) |position| {
+        match position {
+            Usage(index) => return self.references.get(index),
+            Declaration(_) => {},
+        }
+    }
+    return null;
+}
+
+fn (self: &SemanticIndex) global_span(name: []u8) -> ast::Span {
+    if self.global(name) |symbol| {
+        return symbol.selection;
+    }
+    return ast::zero_span();
+}
+
+fn (self: &var Checker) index_declarations(
+    tree: &ast::Ast, program: &ast::Program, previous: &SemanticIndex, unchanged: &map::Map<i64, bool>
+) -> !void {
+    if self.editor.at_mut(0) |index| {
+        try index.retain_declarations(self.allocator, previous, unchanged);
+        var at = 0;
+        while program.declarations.get(at) |decl| {
+            at = at + 1;
+            if !retained_span(unchanged, tree.declaration_span(decl)) {
+                try index.index_declaration(self.allocator, tree, decl);
+            }
+        }
+        at = 0;
+        while program.declarations.get(at) |decl| {
+            at = at + 1;
+            match tree.declarations.at(decl.node) {
+                Impl(value) => {
+                    let contract_span = index.global_span(semantic_text(tree, value.contract_name));
+                    let implementor = index.global_span(semantic_text(tree, value.type_name));
+                    if !contract_span.is_zero() and !implementor.is_zero() {
+                        let site = tree.text_span(value.contract_name);
+                        if !retained_span(unchanged, site) {
+                            try index.add_reference(self.allocator, site, contract_span, false);
+                            try index.add_reference(self.allocator, tree.text_span(value.type_name), implementor, false);
+                        }
+                    }
+                },
+                _ => {},
+            }
+        }
+    }
+    if self.editor.at_mut(0) |index| {
+        var at = 0;
+        while tree.named_references.at(at) |reference| {
+            at = at + 1;
+            if !retained_span(unchanged, reference.selection) {
+                let target = reference.target.as_bytes();
+                let span = index.global_span(target);
+                try index.add_reference(self.allocator, reference.selection, span, false);
+            }
+        }
+    }
+    return;
+}
+
+fn (self: &var SemanticIndex) index_declaration(allocator: Allocator, tree: &ast::Ast, decl: ast::Declaration) -> !void {
+    let extent = tree.declaration_span(decl);
+    match tree.declarations.at(decl.node) {
+        Function(value) => return self.index_function(allocator, tree, value, extent, ""),
+        Test(value) => {
+            let name = semantic_text(tree, value.name);
+            let symbol = try new_symbol(allocator, name, "", SymbolKind::Test, tree.text_span(value.name), extent);
+            return self.add_symbol(allocator, move symbol);
+        },
+        Struct(value) => {
+            try self.index_top(allocator, tree, value.name, SymbolKind::Struct, extent, value.public);
+            var at = 0;
+            while value.fields.at(at) |field| {
+                at = at + 1;
+                let name = semantic_text(tree, field.name);
+                var symbol = try new_symbol(allocator, name, "", SymbolKind::Field, tree.text_span(field.name), field.span);
+                errdefer symbol.deinit(allocator);
+                symbol.container = tree.text_span(value.name);
+                symbol.public = field.public;
+                try typ::append_render(allocator, &var symbol.detail, &tree.types, field.type_name);
+                try self.add_symbol(allocator, move symbol);
+            }
+        },
+        Enum(value) => {
+            try self.index_top(allocator, tree, value.name, SymbolKind::Enum, extent, value.public);
+            try self.index_members(allocator, tree, value.name, &value.tags, value.public);
+        },
+        Union(value) => {
+            try self.index_top(allocator, tree, value.name, SymbolKind::Enum, extent, value.public);
+            var at = 0;
+            while value.variants.at(at) |variant| {
+                at = at + 1;
+                try self.index_member(allocator, tree, value.name, variant.name, value.public);
+            }
+        },
+        ErrorSet(value) => {
+            try self.index_top(allocator, tree, value.name, SymbolKind::Enum, extent, value.public);
+            try self.index_members(allocator, tree, value.name, &value.members, value.public);
+        },
+        Contract(value) => {
+            try self.index_top(allocator, tree, value.name, SymbolKind::Contract, extent, value.public);
+            let owner = semantic_text(tree, value.name);
+            var at = 0;
+            while value.methods.at(at) |method| {
+                at = at + 1;
+                try self.index_function(allocator, tree, method, method.signature.span, owner);
+            }
+        },
+        Const(value) => return self.index_top(allocator, tree, value.name, SymbolKind::Constant, extent, false),
+        _ => {},
+    }
+    return;
+}
+
+fn (self: &var SemanticIndex) index_top(allocator: Allocator, tree: &ast::Ast, name: ast::Text, kind: SymbolKind, extent: ast::Span, public: bool) -> !void {
+    let qualified = semantic_text(tree, name);
+    let label = short_name(qualified);
+    var symbol = try new_symbol(allocator, label, qualified, kind, tree.text_span(name), extent);
+    symbol.public = public;
+    return self.add_symbol(allocator, move symbol);
+}
+
+fn (self: &var SemanticIndex) index_function(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    decl: &ast::FunctionDecl,
+    extent: ast::Span,
+    owner: []u8
+) -> !void {
+    let signature = &decl.signature;
+    let selection = tree.text_span(signature.name);
+    if selection.is_zero() {
+        return;
+    }
+    let qualified = semantic_text(tree, signature.name);
+    let name = short_name(qualified);
+    var kind = SymbolKind::Function;
+    var key = string::new(allocator);
+    defer key.deinit(allocator);
+    if mem::len(owner) > 0 {
+        try key.append_bytes(allocator, owner);
+        try key.append_bytes(allocator, "::");
+        kind = SymbolKind::Method;
+    }
+    if signature.receiver {
+        kind = SymbolKind::Method;
+    }
+    try key.append_bytes(allocator, qualified);
+    let key_bytes = key.as_bytes();
+    var symbol = try new_symbol(allocator, name, key_bytes, kind, selection, extent);
+    errdefer symbol.deinit(allocator);
+    symbol.public = signature.public;
+    try symbol.doc.append_bytes(allocator, semantic_text(tree, decl.doc));
+    try symbol.detail.append_bytes(allocator, "fn ");
+    try symbol.detail.append_bytes(allocator, name);
+    if signature.static_params.len() > 0 {
+        try symbol.detail.append_bytes(allocator, "<");
+        var at = 0;
+        while signature.static_params.at(at) |parameter| {
+            if at > 0 {
+                try symbol.detail.append_bytes(allocator, ", ");
+            }
+            try ast::append_static_param(allocator, &var symbol.detail, tree, parameter);
+            at = at + 1;
+        }
+        try symbol.detail.append_bytes(allocator, ">");
+    }
+    try symbol.detail.append_bytes(allocator, "(");
+    var at = 0;
+    while signature.params.at(at) |parameter| {
+        let label = semantic_text(tree, parameter.name);
+        if !signature.receiver or at > 0 {
+            if (signature.receiver and at > 1) or (!signature.receiver and at > 0) {
+                try symbol.detail.append_bytes(allocator, ", ");
+            }
+            try symbol.params.append(allocator, try string::from_bytes(allocator, label));
+            try symbol.detail.append_bytes(allocator, label);
+            try symbol.detail.append_bytes(allocator, ": ");
+            if parameter.mut_borrow {
+                try symbol.detail.append_bytes(allocator, "&var ");
+            } else if parameter.borrow {
+                try symbol.detail.append_bytes(allocator, "&");
+            }
+            try typ::append_render(allocator, &var symbol.detail, &tree.types, parameter.type_name);
+        }
+        at = at + 1;
+    }
+    if signature.variadic {
+        if symbol.params.len() > 0 {
+            try symbol.detail.append_bytes(allocator, ", ");
+        }
+        try symbol.detail.append_bytes(allocator, "...");
+    }
+    try symbol.detail.append_bytes(allocator, ") -> ");
+    if signature.return_type |result| {
+        try typ::append_render(allocator, &var symbol.detail, &tree.types, result);
+    } else {
+        try symbol.detail.append_bytes(allocator, "void");
+    }
+    return self.add_symbol(allocator, move symbol);
+}
+
+fn (self: &var Checker) record_binding(
+    scope: ScopeHandle,
+    name: []u8,
+    selection: ast::Span,
+    parameter: bool,
+    inferred: bool
+) -> !void {
+    if self.instantiation_depth > 0 or selection.is_zero() or mem::equal_bytes(name, "_") {
+        return;
+    }
+    let binding = self.scopes.set_selection(scope, name, selection) orelse return;
+    let container = self.editor_function;
+    let visible = self.scopes.extent(scope);
+    if self.editor.at_mut(0) |index| {
+        var kind = SymbolKind::Variable;
+        if parameter {
+            kind = SymbolKind::Parameter;
+        }
+        var symbol = try new_symbol(self.allocator, name, "", kind, selection, selection);
+        errdefer symbol.deinit(self.allocator);
+        symbol.container = container;
+        symbol.scope = visible;
+        symbol.inferred = inferred;
+        if binding.mut_borrow {
+            try symbol.detail.append_bytes(self.allocator, "&var ");
+        } else if binding.borrowed {
+            try symbol.detail.append_bytes(self.allocator, "&");
+        }
+        let spelling = try self.types.copy_text(self.allocator, binding.typ);
+        defer spelling.deinit(self.allocator);
+        try symbol.detail.append_string(self.allocator, &spelling);
+        try index.add_symbol(self.allocator, move symbol);
+    }
+    return;
+}
+
+fn (self: &var SemanticIndex) add_reference(allocator: Allocator, selection: ast::Span, declaration: ast::Span, write: bool) -> !void {
+    if selection.is_zero() or declaration.is_zero() {
+        return;
+    }
+    let id = selection.source orelse return;
+    if self.position(id.index, selection.start) |previous| {
+        match previous {
+            Declaration(_) => return,
+            Usage(index) => {
+                if write {
+                    if self.references.at_mut(index) |found| {
+                        found.write = true;
+                    }
+                }
+                return;
+            },
+        }
+    }
+    try self.place_position(allocator, selection, IndexedPosition::Usage(self.references.len()));
+    return self.references.append(allocator, Reference {
+        selection: selection, declaration: declaration, write: write
+    });
+}
+
+fn (self: &var Checker) record_reference(selection: ast::Span, declaration: ast::Span, write: bool) -> !void {
+    if self.instantiation_depth > 0 {
+        return;
+    }
+    if self.editor.at_mut(0) |index| {
+        return index.add_reference(self.allocator, selection, declaration, write);
+    }
+    return;
+}
+
+fn (self: &var Checker) record_function_reference(selection: ast::Span, function: FunctionHandle) -> !void {
+    if self.instantiation_depth > 0 {
+        return;
+    }
+    if self.metadata.functions.at(function.index) |callable| {
+        let name = callable.name.as_bytes();
+        if self.editor.at_mut(0) |index| {
+            let declaration = index.global_span(name);
+            return index.add_reference(self.allocator, selection, declaration, false);
+        }
+    }
+    return;
+}
+
+fn (self: &var Checker) record_call(
+    tree: &ast::Ast,
+    selection: ast::Span,
+    function: FunctionHandle,
+    args: ast::ExpressionList
+) -> !void {
+    if self.instantiation_depth > 0 or selection.is_zero() {
+        return;
+    }
+    if self.metadata.functions.at(function.index) |callable| {
+        let name = callable.name.as_bytes();
+        if self.editor.at_mut(0) |index| {
+            let declaration = index.global_span(name);
+            if declaration.is_zero() {
+                return;
+            }
+            try index.add_reference(self.allocator, selection, declaration, false);
+            var arguments = array::new<ast::Span>(self.allocator);
+            errdefer arguments.deinit(self.allocator);
+            for 0..args.len(tree) |at| {
+                try arguments.append(self.allocator, tree.expression_extent(args.get_or_panic(tree, at)));
+            }
+            try index.calls.append(self.allocator, CallSite {
+                callee: selection, declaration: declaration, caller: self.editor_function,
+                arguments: move arguments
+            });
+        }
+    }
+    return;
+}
+
+fn (self: &var Checker) record_expression(span: ast::Span, value: Type) -> !void {
+    if self.instantiation_depth > 0 or span.is_zero() {
+        return;
+    }
+    if self.editor.at_mut(0) |index| {
+        let spelling = try self.types.copy_text(self.allocator, value);
+        errdefer spelling.deinit(self.allocator);
+        try index.expressions.append(self.allocator, ExpressionType { span: span, spelling: move spelling });
+    }
+    return;
+}
+
+fn callee_selection(tree: &ast::Ast, callee: ast::Expression) -> ast::Span {
+    match tree.expressions.at(callee.node) {
+        Ident(value) => return tree.text_span(value.name),
+        Field(value) => return tree.text_span(value.name),
+        _ => return ast::zero_span(),
+    }
+}
+
+fn retained_span(unchanged: &map::Map<i64, bool>, span: ast::Span) -> bool {
+    if span.source |id| {
+        return unchanged.contains(id.index);
+    }
+    return false;
+}
+
+fn merge_unchanged(
+    allocator: Allocator, index: SemanticIndex, previous: &SemanticIndex, unchanged: &map::Map<i64, bool>
+) -> !SemanticIndex {
+    var out = move index;
+    errdefer out.deinit(allocator);
+    if unchanged.len() == 0 {
+        return move out;
+    }
+    var at = 0;
+    while previous.symbols.at(at) |symbol| {
+        at = at + 1;
+        if (symbol.kind == SymbolKind::Variable or symbol.kind == SymbolKind::Parameter) and
+            retained_span(unchanged, symbol.selection) {
+            try out.add_symbol(allocator, try copy_symbol(allocator, symbol));
+        }
+    }
+    at = 0;
+    while previous.references.get(at) |reference| {
+        at = at + 1;
+        if retained_span(unchanged, reference.selection) {
+            try out.add_reference(allocator, reference.selection, reference.declaration, reference.write);
+        }
+    }
+    at = 0;
+    while previous.expressions.at(at) |expression| {
+        at = at + 1;
+        if retained_span(unchanged, expression.span) {
+            let spelling = expression.spelling.as_bytes();
+            try out.expressions.append(allocator, ExpressionType {
+                span: expression.span, spelling: try string::from_bytes(allocator, spelling)
+            });
+        }
+    }
+    at = 0;
+    while previous.calls.at(at) |call| {
+        at = at + 1;
+        if retained_span(unchanged, call.callee) {
+            try out.calls.append(allocator, CallSite {
+                callee: call.callee, declaration: call.declaration, caller: call.caller,
+                arguments: try call.arguments.clone(allocator)
+            });
+        }
+    }
+    return move out;
+}
+
+fn (self: &var SemanticIndex) retain_declarations(
+    allocator: Allocator, previous: &SemanticIndex, unchanged: &map::Map<i64, bool>
+) -> !void {
+    if unchanged.len() == 0 {
+        return;
+    }
+    var at = 0;
+    while previous.symbols.at(at) |symbol| {
+        at = at + 1;
+        if symbol.kind != SymbolKind::Variable and symbol.kind != SymbolKind::Parameter and
+            retained_span(unchanged, symbol.selection) {
+            try self.add_symbol(allocator, try copy_symbol(allocator, symbol));
+        }
+    }
+    return;
+}
+
+fn copy_symbol(allocator: Allocator, original: &Symbol) -> !Symbol {
+    let name = original.name.as_bytes();
+    let qualified = original.qualified.as_bytes();
+    var copy = try new_symbol(allocator, name, qualified, original.kind, original.selection, original.extent);
+    errdefer copy.deinit(allocator);
+    try copy.detail.append_string(allocator, &original.detail);
+    try copy.doc.append_string(allocator, &original.doc);
+    var at = 0;
+    while original.params.at(at) |param| {
+        at = at + 1;
+        let bytes = param.as_bytes();
+        try copy.params.append(allocator, try string::from_bytes(allocator, bytes));
+    }
+    copy.container = original.container;
+    copy.scope = original.scope;
+    copy.public = original.public;
+    copy.inferred = original.inferred;
+    return move copy;
+}
+
+fn (self: &var Checker) record_capture(
+    tree: &ast::Ast, scope: ScopeHandle, capture: ast::Text, name: []u8, extent: ast::Span
+) -> !void {
+    if self.editor.len() > 0 {
+        self.scopes.set_extent(scope, extent);
+        try self.record_binding(scope, name, tree.text_span(capture), false, true);
+    }
+    return;
+}
+
+fn (self: &var SemanticIndex) index_members(
+    allocator: Allocator, tree: &ast::Ast, owner: ast::Text, members: &array::Array<ast::Text>, public: bool
+) -> !void {
+    var at = 0;
+    while members.get(at) |member| {
+        at = at + 1;
+        try self.index_member(allocator, tree, owner, member, public);
+    }
+    return;
+}
+
+fn (self: &var SemanticIndex) index_member(
+    allocator: Allocator, tree: &ast::Ast, owner: ast::Text, member: ast::Text, public: bool
+) -> !void {
+    let name = semantic_text(tree, member);
+    let owner_name = semantic_text(tree, owner);
+    let selection = tree.text_span(member);
+    let qualified = try member_path(allocator, owner_name, name);
+    defer qualified.deinit(allocator);
+    let bytes = qualified.as_bytes();
+    var symbol = try new_symbol(allocator, name, bytes, SymbolKind::Variant, selection, selection);
+    symbol.public = public;
+    symbol.container = tree.text_span(owner);
+    return self.add_symbol(allocator, move symbol);
+}
+
+fn member_path(allocator: Allocator, owner: []u8, member: []u8) -> !string::String {
+    var name = try string::from_bytes(allocator, owner);
+    errdefer name.deinit(allocator);
+    try name.append_bytes(allocator, "::");
+    try name.append_bytes(allocator, member);
+    return move name;
+}
+
+fn (self: &var SemanticIndex) record_member(allocator: Allocator, selection: ast::Span, owner: []u8, member: []u8) -> !void {
+    if selection.is_zero() {
+        return;
+    }
+    let qualified = try member_path(allocator, owner, member);
+    defer qualified.deinit(allocator);
+    let bytes = qualified.as_bytes();
+    let target = self.global_span(bytes);
+    return self.add_reference(allocator, selection, target, false);
+}
+
+fn (self: &var Checker) record_literal_field(
+    tree: &ast::Ast, decl: ast::Declaration, written: ast::Text, name: []u8
+) -> !void {
+    match tree.declarations.at(decl.node) {
+        Struct(value) => {
+            var at = 0;
+            while value.fields.at(at) |field| {
+                at = at + 1;
+                let declared = semantic_text(tree, field.name);
+                if mem::equal_bytes(name, declared) {
+                    return self.record_reference(tree.text_span(written), tree.text_span(field.name), true);
+                }
+            }
+        },
+        _ => {},
+    }
+    return;
+}
+
+fn (self: &var Checker) index_contract_implementations() -> !void {
+    var at = 0;
+    while self.metadata.contracts.at(at) |required| {
+        at = at + 1;
+        let contract_name = required.name.as_bytes();
+        var candidate_at = 0;
+        while self.metadata.impls.key_at(candidate_at) |candidate| {
+            candidate_at = candidate_at + 1;
+            if self.implements_contract(candidate, required) {
+                if self.editor.at_mut(0) |index| {
+                    try index.index_implementation(self.allocator, contract_name, candidate, &required.methods);
+                }
+            }
+        }
+    }
+    return;
+}
+
+fn (self: &Checker) implements_contract(candidate: []u8, required: &ContractType) -> bool {
+    var at = 0;
+    while required.methods.key_at(at) |name| {
+        at = at + 1;
+        let want = required.methods.get(name) orelse return false;
+        let actual = self.impl_method(candidate, name) orelse return false;
+        if !self.methods_match(want, actual) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn (self: &var SemanticIndex) index_implementation(
+    allocator: Allocator, contract_name: []u8, candidate: []u8, requirements: &map::Map<[]u8, FunctionHandle>
+) -> !void {
+    let contract_span = self.global_span(contract_name);
+    let implementor = self.global_span(candidate);
+    if contract_span.is_zero() or implementor.is_zero() {
+        return;
+    }
+    try self.implementations.append(allocator, Implementation {
+        contract_span: contract_span, implementor: implementor
+    });
+    var at = 0;
+    while requirements.key_at(at) |name| {
+        at = at + 1;
+        let required = try member_path(allocator, contract_name, name);
+        defer required.deinit(allocator);
+        let method = try stdmethod::method_name(allocator, candidate, name);
+        defer method.deinit(allocator);
+        let required_name = required.as_bytes();
+        let method_name = method.as_bytes();
+        let required_span = self.global_span(required_name);
+        let method_span = self.global_span(method_name);
+        if !required_span.is_zero() and !method_span.is_zero() {
+            try self.implementations.append(allocator, Implementation {
+                contract_span: required_span, implementor: method_span
+            });
+        }
+    }
+    return;
+}
+
+fn (self: &var Checker) record_known_method(
+    tree: &ast::Ast, field: &ast::FieldExpr, receiver: Type, name: []u8, args: ast::ExpressionList
+) -> !void {
+    if self.editor.len() == 0 or self.instantiation_depth > 0 {
+        return;
+    }
+    let spelling = try self.types.copy_text(self.allocator, receiver);
+    defer spelling.deinit(self.allocator);
+    let bytes = spelling.as_bytes();
+    var resolved: ?FunctionHandle = null;
+    if split_generic_type(bytes) |parts| {
+        resolved = self.impl_method(parts.base, name);
+    } else {
+        resolved = self.impl_method(bytes, name);
+    }
+    if resolved |method| {
+        try self.record_call(tree, tree.text_span(field.name), method, args);
+    }
+    return;
+}

@@ -10,18 +10,16 @@ import {
 
 let client: LanguageClient | undefined;
 const terminalName = "Kizu";
-const kizuCodeLensDocumentSelector: vscode.DocumentSelector = [
-  { scheme: "file", language: "kizu" }
-];
-
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const output = vscode.window.createOutputChannel("Kizu Language Server");
   context.subscriptions.push(output);
   context.subscriptions.push(
-    vscode.languages.registerCodeLensProvider(
-      kizuCodeLensDocumentSelector,
-      new KizuCodeLensProvider()
-    )
+    vscode.commands.registerCommand("kizu.showLocation", async (uri: string, line: number, character: number) => {
+      const position = new vscode.Position(line, character);
+      await vscode.window.showTextDocument(vscode.Uri.parse(uri), {
+        selection: new vscode.Range(position, position)
+      });
+    })
   );
 
   context.subscriptions.push(
@@ -180,26 +178,4 @@ function expandHome(input: string): string {
     return path.join(os.homedir(), input.slice(2));
   }
   return input;
-}
-
-class KizuCodeLensProvider implements vscode.CodeLensProvider {
-  provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
-    const lenses: vscode.CodeLens[] = [];
-    for (let index = 0; index < document.lineCount; index++) {
-      const line = document.lineAt(index);
-      if (/^\s*(?:pub\s+)?fn\s+main\s*\(/.test(line.text)) {
-        lenses.push(new vscode.CodeLens(line.range, {
-          title: "Run",
-          command: "kizu.runFile"
-        }));
-      }
-      if (/^\s*test\s+"/.test(line.text)) {
-        lenses.push(new vscode.CodeLens(line.range, {
-          title: "Run Test",
-          command: "kizu.testFile"
-        }));
-      }
-    }
-    return lenses;
-  }
 }

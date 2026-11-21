@@ -19,6 +19,13 @@ pub struct Diagnostic {
     pub notes: array::Array<string::String>,
     pub help: string::String,
     pub related: array::Array<Related>,
+    pub fixes: array::Array<Fix>,
+}
+
+pub struct Fix {
+    pub title: string::String,
+    pub span: ast::Span,
+    pub new_text: string::String,
 }
 
 struct FirstLineParts {
@@ -52,7 +59,8 @@ pub fn new(
         span: span,
         notes: array::new<string::String>(allocator),
         help: string::new(allocator),
-        related: array::new<Related>(allocator)
+        related: array::new<Related>(allocator),
+        fixes: array::new<Fix>(allocator)
     };
     errdefer diagnostic.deinit(allocator);
     try diagnostic.category.append_bytes(allocator, category);
@@ -567,7 +575,24 @@ fn (self: &Diagnostic) clone(allocator: Allocator) -> !Diagnostic {
         try copied.with_related(allocator, related.span, label);
         index = index + 1;
     }
+    index = 0;
+    while self.fixes.at(index) |fix| {
+        index = index + 1;
+        let title = fix.title.as_bytes();
+        let text = fix.new_text.as_bytes();
+        try copied.with_fix(allocator, title, fix.span, text);
+    }
     return move copied;
+}
+
+pub fn (self: &var Diagnostic) with_fix(allocator: Allocator, title: []u8, span: ast::Span, new_text: []u8) -> !void {
+    if span.is_zero() {
+        return;
+    }
+    let label = try string::from_bytes(allocator, title);
+    errdefer label.deinit(allocator);
+    let replacement = try string::from_bytes(allocator, new_text);
+    return self.fixes.append(allocator, Fix { title: move label, span: span, new_text: move replacement });
 }
 
 pub fn (self: &var Diagnostic) with_related(allocator: Allocator, span: ast::Span, label: []u8) -> !void {

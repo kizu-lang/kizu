@@ -1,3 +1,4 @@
+import compiler::internal::ast;
 import std::fmt;
 import std::io;
 import std::json;
@@ -91,10 +92,14 @@ fn take_message(allocator: Allocator, pending: &var string::String, out: &var st
     return true;
 }
 
+pub fn (self: &var Reader) buffered(allocator: Allocator, out: &var string::String) -> !bool {
+    return take_message(allocator, &var self.pending, out);
+}
+
 pub fn (self: &var Reader) next(allocator: Allocator, out: &var string::String) -> !bool {
     var chunk = [65536]u8{};
     while true {
-        if try take_message(allocator, &var self.pending, out) {
+        if try self.buffered(allocator, out) {
             return true;
         }
         let view = chunk.as_mut_bytes();
@@ -159,6 +164,42 @@ pub fn text_at(value: &json::Value, names: []u8) -> []u8 {
         },
         _ => return "",
     }
+}
+
+pub fn value_at(value: &json::Value, names: []u8) -> ?&json::Value {
+    let end = segment_end(names);
+    match value {
+        Obj(entries) => {
+            if entries.at(names[0..end]) |child| {
+                if end == mem::len(names) {
+                    return entries.at(names[0..end]);
+                }
+                return value_at(child, names[end + 1..mem::len(names)]);
+            }
+        },
+        _ => {},
+    }
+    return null;
+}
+
+pub fn integer_at(value: &json::Value, names: []u8, fallback: i64) -> i64 {
+    if value_at(value, names) |child| {
+        match child {
+            I64(number) => return number,
+            _ => {},
+        }
+    }
+    return fallback;
+}
+
+pub fn bool_at(value: &json::Value, names: []u8) -> bool {
+    if value_at(value, names) |child| {
+        match child {
+            Bool(flag) => return flag,
+            _ => {},
+        }
+    }
+    return false;
 }
 
 pub fn has(value: &json::Value, name: []u8) -> bool {
@@ -401,4 +442,62 @@ pub fn utf16_column(text: []u8, line: i64, scalar_column: i64) -> i64 {
         walked = walked + 1;
     }
     return units + scalar_column - walked;
+}
+
+pub fn byte_offset(text: []u8, line: i64, character: i64) -> i64 {
+    if line < 0 or character < 0 {
+        return -1;
+    }
+    var at = 0;
+    var current = 0;
+    while current < line and at < mem::len(text) {
+        if text[at] == cast<u8>(10) {
+            current = current + 1;
+        }
+        at = at + 1;
+    }
+    if current != line {
+        return -1;
+    }
+    var units = 0;
+    while units < character and at < mem::len(text) and text[at] != cast<u8>(10) {
+        let width = scalar_width(text, at);
+        units = units + 1;
+        if width == 4 {
+            units = units + 1;
+        }
+        at = at + width;
+    }
+    return at;
+}
+
+pub fn source_position(text: []u8, line: i64, character: i64) -> ast::Position {
+    let end = byte_offset(text, line, character);
+    if end < 0 {
+        return ast::Position { line: 0, column: 0 };
+    }
+    var at = end;
+    while at > 0 and text[at - 1] != cast<u8>(10) {
+        at = at - 1;
+    }
+    var column = 1;
+    while at < end {
+        at = at + scalar_width(text, at);
+        column = column + 1;
+    }
+    return ast::Position { line: line + 1, column: column };
+}
+
+pub fn utf16_width(text: []u8) -> i64 {
+    var at = 0;
+    var units = 0;
+    while at < mem::len(text) {
+        let width = scalar_width(text, at);
+        if width == 4 {
+            units = units + 1;
+        }
+        units = units + 1;
+        at = at + width;
+    }
+    return units;
 }

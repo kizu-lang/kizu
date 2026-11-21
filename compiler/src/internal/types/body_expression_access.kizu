@@ -201,6 +201,9 @@ fn (self: &var Checker) check_struct_literal_written_value(
     if values.contains(field_name) {
         return try self.struct_member_error("duplicate field", type_name, field_name);
     }
+    if self.editor.len() > 0 {
+        try self.record_literal_field(tree, declaration, field.name, field_name);
+    }
     var got = empty_type();
     if try self.check_struct_literal_field_value(
         tree,
@@ -381,13 +384,14 @@ fn (self: &var Checker) check_field_expr(
     expression: &ast::FieldExpr,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
-    return self.resolve_field_expr(tree, scope, expression, out);
+    return self.resolve_field_expr(tree, scope, expression, false, out);
 }
 
 fn (self: &var Checker) resolve_field_expr(
     tree: &var ast::Ast,
     scope: ScopeHandle,
     expression: &ast::FieldExpr,
+    write: bool,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
     if expression.namespace {
@@ -450,6 +454,9 @@ fn (self: &var Checker) resolve_field_expr(
                     match try self.resolve_instance_field_type(tree, field) {
                         Value(field_type) => {
                             out.* = field_type;
+                            if self.editor.len() > 0 {
+                                try self.record_reference(tree.text_span(expression.name), tree.text_span(field.name), write);
+                            }
                             return null;
                         },
                         Issue(issue) => return try self.type_resolution_diagnostic(issue),
@@ -588,6 +595,11 @@ fn (self: &var Checker) check_namespace_expr(
                 return try self.unknown_namespace_member_error("enum tag", name, member);
             }
             out.* = try self.types.intern(name);
+            if self.instantiation_depth == 0 {
+                if self.editor.at_mut(0) |index| {
+                    try index.record_member(self.allocator, tree.text_span(expression.name), name, member);
+                }
+            }
             return null;
         }
     }
@@ -600,6 +612,11 @@ fn (self: &var Checker) check_namespace_expr(
                     return try self.unknown_namespace_member_error("error", name, member);
                 }
                 out.* = try self.types.intern(name);
+                if self.instantiation_depth == 0 {
+                    if self.editor.at_mut(0) |index| {
+                        try index.record_member(self.allocator, tree.text_span(expression.name), name, member);
+                    }
+                }
                 return null;
             }
         }
@@ -623,6 +640,11 @@ fn (self: &var Checker) check_namespace_expr(
                 return try self.checker_message_at("type error", ast::zero_span(), move message);
             }
             out.* = try self.types.intern(name);
+            if self.instantiation_depth == 0 {
+                if self.editor.at_mut(0) |index| {
+                    try index.record_member(self.allocator, tree.text_span(expression.name), name, member);
+                }
+            }
             return null;
         }
     }

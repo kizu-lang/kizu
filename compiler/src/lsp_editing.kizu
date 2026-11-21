@@ -1,0 +1,681 @@
+import compiler::internal::ast;
+import compiler::internal::lexer;
+import compiler::internal::lsp;
+import compiler::internal::source;
+import compiler::internal::stdmethod;
+import compiler::internal::token;
+import compiler::internal::types;
+import std::array;
+import std::json;
+import std::map;
+import std::mem;
+import std::string;
+
+fn editing_capabilities(encoder: &var json::Encoder) -> !void {
+    try encoder.begin_object_field("completionProvider");
+    try encoder.begin_array_field("triggerCharacters");
+    try encoder.write_bytes(".");
+    try encoder.write_bytes(":");
+    try encoder.end_array();
+    try encoder.end_object();
+    try encoder.begin_object_field("signatureHelpProvider");
+    try encoder.begin_array_field("triggerCharacters");
+    try encoder.write_bytes("(");
+    try encoder.write_bytes(",");
+    try encoder.end_array();
+    try encoder.end_object();
+    try encoder.write_bool_field("inlayHintProvider", true);
+    try encoder.write_bool_field("codeActionProvider", true);
+    try encoder.write_bool_field("codeLensProvider", true);
+    try encoder.write_bool_field("selectionRangeProvider", true);
+    try encoder.begin_object_field("semanticTokensProvider");
+    try encoder.begin_object_field("legend");
+    try encoder.begin_array_field("tokenTypes");
+    try encoder.write_bytes("function");
+    try encoder.write_bytes("method");
+    try encoder.write_bytes("struct");
+    try encoder.write_bytes("enum");
+    try encoder.write_bytes("interface");
+    try encoder.write_bytes("enumMember");
+    try encoder.write_bytes("property");
+    try encoder.write_bytes("parameter");
+    try encoder.write_bytes("variable");
+    try encoder.write_bytes("keyword");
+    try encoder.write_bytes("number");
+    try encoder.write_bytes("string");
+    try encoder.end_array();
+    try encoder.begin_array_field("tokenModifiers");
+    try encoder.write_bytes("declaration");
+    try encoder.write_bytes("readonly");
+    try encoder.end_array();
+    try encoder.end_object();
+    try encoder.write_bool_field("full", true);
+    return encoder.end_object();
+}
+
+fn completion_kind(kind: types::SymbolKind) -> i64 {
+    match kind {
+        Function => return 3,
+        Method => return 2,
+        Struct => return 22,
+        Enum => return 13,
+        Contract => return 8,
+        Variant => return 20,
+        Field => return 5,
+        Constant => return 21,
+        _ => return 6,
+    }
+}
+
+fn identifier_start(text: []u8, end: i64) -> i64 {
+    var start = end;
+    while start > 0 and byte_ident(text[start - 1]) {
+        start = start - 1;
+    }
+    return start;
+}
+
+fn namespace_start(text: []u8, end: i64) -> i64 {
+    var start = identifier_start(text, end);
+    while start > 1 and text[start - 1] == cast<u8>(58) and text[start - 2] == cast<u8>(58) {
+        start = identifier_start(text, start - 2);
+    }
+    return start;
+}
+
+fn module_prefix(qualified: []u8) -> []u8 {
+    var at = mem::len(qualified);
+    while at > 1 {
+        at = at - 1;
+        if qualified[at] == cast<u8>(58) and qualified[at - 1] == cast<u8>(58) {
+            return qualified[0..at - 1];
+        }
+    }
+    return "";
+}
+
+fn contains_scope(index: &types::SemanticIndex, symbol: &types::Symbol, cursor: Cursor) -> bool {
+    if !same_file(symbol.selection, cursor.source_id) or before_position(cursor.position, symbol.selection.end) {
+        return false;
+    }
+    if !symbol.scope.is_zero() {
+        return covers(symbol.scope, cursor);
+    }
+    if symbol_at_span(index, symbol.container) |owner| {
+        return covers(owner.extent, cursor);
+    }
+    return false;
+}
+
+fn complete_member(snapshot: &Snapshot, symbol: &types::Symbol, receiver: []u8, member_type: ast::Span, local: bool) -> bool {
+    if symbol.kind == types::SymbolKind::Field {
+        return same_selection(symbol.container, member_type) and (local or symbol.public);
+    }
+    if symbol.kind == types::SymbolKind::Method {
+        let qualified = symbol.qualified.as_bytes();
+        if stdmethod::split_method_name(qualified) |parts| {
+            let target = snapshot.type_span(parts.receiver);
+            return same_selection(target, member_type) or mem::equal_bytes(parts.receiver, receiver);
+        }
+    }
+    return false;
+}
+
+fn write_completion(
+    allocator: Allocator, encoder: &var json::Encoder, snapshot: &Snapshot, file: []u8, cursor: Cursor, line: i64, character: i64
+) -> !void {
+    try encoder.begin_array_field("result");
+    if snapshot.sources.at(cursor.source_id) |entry| {
+        let text = entry.text.as_bytes();
+        let end = lsp::byte_offset(text, line, character);
+        if end >= 0 {
+            let first = identifier_start(text, end);
+            if first >= 1 and text[first - 1] == cast<u8>(46) {
+                try complete_after_dot(encoder, snapshot, cursor, text, first, text[first..end]);
+            } else if first >= 2 and text[first - 1] == cast<u8>(58) and text[first - 2] == cast<u8>(58) {
+                let start = namespace_start(text, first - 2);
+                try complete_namespace(allocator, encoder, snapshot, file, text[start..first - 2], text[first..end]);
+            } else {
+                try complete_scope(allocator, encoder, snapshot, file, cursor, text[first..end]);
+            }
+        }
+    }
+    return encoder.end_array();
+}
+
+fn complete_after_dot(
+    encoder: &var json::Encoder, snapshot: &Snapshot, cursor: Cursor, text: []u8, first: i64, prefix: []u8
+) -> !void {
+    if cursor.position.column < 3 {
+        return;
+    }
+    let point = ast::Position { line: cursor.position.line, column: cursor.position.column - mem::len(prefix) - 2 };
+    let at_receiver = Cursor { source_id: cursor.source_id, position: point };
+    if tightest_expression(&snapshot.index, at_receiver) |receiver| {
+        let spelling = receiver.spelling.as_bytes();
+        let target = snapshot.type_span(spelling);
+        let local = same_file(target, cursor.source_id);
+        var at = 0;
+        while snapshot.index.symbols.at(at) |symbol| {
+            at = at + 1;
+            let name = symbol.name.as_bytes();
+            if mem::starts_with(name, prefix) and complete_member(snapshot, symbol, spelling, target, local) {
+                try write_completion_item(encoder, symbol);
+            }
+        }
+    } else if first >= 2 and byte_ident(text[first - 2]) {
+        let selected = selection_at(&snapshot.index, at_receiver);
+        if symbol_at_span(&snapshot.index, selected.declaration) |binding| {
+            let spelling = binding.detail.as_bytes();
+            let target = snapshot.type_span(spelling);
+            var at = 0;
+            while snapshot.index.symbols.at(at) |symbol| {
+                at = at + 1;
+                let name = symbol.name.as_bytes();
+                if mem::starts_with(name, prefix) and complete_member(snapshot, symbol, spelling, target, same_file(target, cursor.source_id)) {
+                    try write_completion_item(encoder, symbol);
+                }
+            }
+        }
+    }
+    return;
+}
+
+fn complete_namespace(
+    allocator: Allocator, encoder: &var json::Encoder, snapshot: &Snapshot, file: []u8, written: []u8, prefix: []u8
+) -> !void {
+    var target = try string::from_bytes(allocator, written);
+    defer target.deinit(allocator);
+    var own_module = string::new(allocator);
+    defer own_module.deinit(allocator);
+    if snapshot.files.at(file) |info| {
+        try own_module.append_string(allocator, &info.module_name);
+        var head = 0;
+        while head < mem::len(written) and byte_ident(written[head]) {
+            head = head + 1;
+        }
+        if info.namespaces.at(written[0..head]) |module_name| {
+            target.clear();
+            try target.append_string(allocator, module_name);
+            try target.append_bytes(allocator, written[head..mem::len(written)]);
+        }
+    }
+    let module_name = target.as_bytes();
+    let own = own_module.as_bytes();
+    var at = 0;
+    while snapshot.index.symbols.at(at) |symbol| {
+        at = at + 1;
+        let name = symbol.name.as_bytes();
+        let qualified = symbol.qualified.as_bytes();
+        let enclosing = module_prefix(qualified);
+        if symbol.kind != types::SymbolKind::Method and mem::starts_with(name, prefix) and
+            mem::equal_bytes(enclosing, module_name) and (symbol.public or mem::equal_bytes(enclosing, own)) {
+            try write_completion_item(encoder, symbol);
+        }
+    }
+    return;
+}
+
+fn complete_scope(
+    allocator: Allocator, encoder: &var json::Encoder, snapshot: &Snapshot, file: []u8, cursor: Cursor, prefix: []u8
+) -> !void {
+    var module_name = string::new(allocator);
+    defer module_name.deinit(allocator);
+    if snapshot.files.at(file) |info| {
+        try module_name.append_string(allocator, &info.module_name);
+    }
+    let own = module_name.as_bytes();
+    var names = map::new<[]u8, bool>(allocator);
+    defer names.deinit(allocator);
+    var at = snapshot.index.symbols.len();
+    while at > 0 {
+        at = at - 1;
+        if snapshot.index.symbols.at(at) |symbol| {
+            let name = symbol.name.as_bytes();
+            if !mem::starts_with(name, prefix) or names.contains(name) {
+                continue;
+            }
+            if symbol.kind == types::SymbolKind::Variable or symbol.kind == types::SymbolKind::Parameter {
+                if !contains_scope(&snapshot.index, symbol, cursor) {
+                    continue;
+                }
+            } else {
+                let qualified = symbol.qualified.as_bytes();
+                let enclosing = module_prefix(qualified);
+                if mem::len(qualified) == 0 or symbol.kind == types::SymbolKind::Method or !mem::equal_bytes(enclosing, own) {
+                    continue;
+                }
+            }
+            try names.insert(allocator, name, true);
+            try write_completion_item(encoder, symbol);
+        }
+    }
+    return;
+}
+
+fn write_completion_item(encoder: &var json::Encoder, symbol: &types::Symbol) -> !void {
+    let name = symbol.name.as_bytes();
+    let detail = symbol.detail.as_bytes();
+    try encoder.begin_object();
+    try encoder.write_bytes_field("label", name);
+    try encoder.write_i64_field("kind", completion_kind(symbol.kind));
+    if mem::len(detail) > 0 {
+        try encoder.write_bytes_field("detail", detail);
+    }
+    return encoder.end_object();
+}
+
+struct ActiveCall {
+    declaration: ast::Span,
+    depth: i64,
+    parameter: i64,
+}
+
+fn call_declaration(index: &types::SemanticIndex, id: source::SourceId, position: ast::Position) -> ast::Span {
+    var at = 0;
+    while index.calls.at(at) |call| {
+        at = at + 1;
+        if same_file(call.callee, id) and same_position(call.callee.end, position) {
+            return call.declaration;
+        }
+    }
+    return ast::zero_span();
+}
+
+fn active_call(
+    allocator: Allocator, index: &types::SemanticIndex, text: []u8, cursor: Cursor, end: i64
+) -> !ActiveCall {
+    var scan = lexer::new(allocator, text);
+    defer scan.deinit(allocator);
+    var stack = array::new<ActiveCall>(allocator);
+    defer stack.deinit(allocator);
+    var depth = 0;
+    var previous_end = ast::Position { line: 0, column: 0 };
+    var before_static = previous_end;
+    var static_depth = 0;
+    while true {
+        let lexeme = try scan.next_lexeme();
+        if lexeme.kind == token::Kind::Eof or lexeme.start >= end {
+            break;
+        }
+        if lexeme.kind == token::Kind::Lt {
+            if static_depth == 0 {
+                before_static = previous_end;
+            }
+            static_depth = static_depth + 1;
+        } else if lexeme.kind == token::Kind::Gt and static_depth > 0 {
+            static_depth = static_depth - 1;
+            if static_depth == 0 {
+                previous_end = before_static;
+                continue;
+            }
+        }
+        if lexeme.kind == token::Kind::LParen or lexeme.kind == token::Kind::LBracket or lexeme.kind == token::Kind::LBrace {
+            depth = depth + 1;
+            if lexeme.kind == token::Kind::LParen {
+                let target = call_declaration(index, cursor.source_id, previous_end);
+                if !target.is_zero() {
+                    try stack.append(allocator, ActiveCall { declaration: target, depth: depth, parameter: 0 });
+                }
+            }
+        } else if lexeme.kind == token::Kind::RParen or lexeme.kind == token::Kind::RBracket or lexeme.kind == token::Kind::RBrace {
+            if stack.get(stack.len() - 1) |top| {
+                if top.depth == depth {
+                    let _ = stack.pop();
+                }
+            }
+            depth = depth - 1;
+        } else if lexeme.kind == token::Kind::Comma {
+            if stack.at_mut(stack.len() - 1) |top| {
+                if top.depth == depth {
+                    top.parameter = top.parameter + 1;
+                }
+            }
+        }
+        previous_end = ast::Position { line: lexeme.line, column: lexeme.column + lexeme.end - lexeme.start };
+    }
+    return stack.get(stack.len() - 1) orelse ActiveCall { declaration: ast::zero_span(), depth: 0, parameter: 0 };
+}
+
+fn write_signature_help(
+    allocator: Allocator, encoder: &var json::Encoder, snapshot: &Snapshot, cursor: Cursor, line: i64, character: i64
+) -> !void {
+    if snapshot.sources.at(cursor.source_id) |entry| {
+        let text = entry.text.as_bytes();
+        let end = lsp::byte_offset(text, line, character);
+        let active = try active_call(allocator, &snapshot.index, text, cursor, end);
+        if symbol_at_span(&snapshot.index, active.declaration) |symbol| {
+            let detail = symbol.detail.as_bytes();
+            try encoder.begin_object_field("result");
+            try encoder.begin_array_field("signatures");
+            try encoder.begin_object();
+            try encoder.write_bytes_field("label", detail);
+            try encoder.begin_array_field("parameters");
+            var at = 0;
+            while symbol.params.at(at) |parameter| {
+                at = at + 1;
+                let name = parameter.as_bytes();
+                try encoder.begin_object();
+                try encoder.write_bytes_field("label", name);
+                try encoder.end_object();
+            }
+            try encoder.end_array();
+            try encoder.end_object();
+            try encoder.end_array();
+            try encoder.write_i64_field("activeSignature", 0);
+            if active.parameter < symbol.params.len() {
+                try encoder.write_i64_field("activeParameter", active.parameter);
+            }
+            return encoder.end_object();
+        }
+    }
+    return encoder.write_null_field("result");
+}
+
+fn requested_range(message: &json::Value, snapshot: &Snapshot, id: source::SourceId) -> ast::Span {
+    if snapshot.sources.at(id) |entry| {
+        let text = entry.text.as_bytes();
+        let start_line = lsp::integer_at(message, "params.range.start.line", 0);
+        let start_character = lsp::integer_at(message, "params.range.start.character", 0);
+        let end_line = lsp::integer_at(message, "params.range.end.line", 0);
+        let end_character = lsp::integer_at(message, "params.range.end.character", 0);
+        var end = lsp::source_position(text, end_line, end_character);
+        if end.line == 0 {
+            end = ast::Position { line: end_line + 1, column: 1 };
+        }
+        return ast::Span { source: id, start: lsp::source_position(text, start_line, start_character), end: end };
+    }
+    return ast::zero_span();
+}
+
+fn write_point(
+    encoder: &var json::Encoder, sources: &source::SourceMap, id: source::SourceId, field: []u8, position: ast::Position
+) -> !void {
+    if sources.at(id) |entry| {
+        let text = entry.text.as_bytes();
+        let line = position.line - 1;
+        try encoder.begin_object_field(field);
+        try encoder.write_i64_field("line", line);
+        try encoder.write_i64_field("character", lsp::utf16_column(text, line, position.column - 1));
+        return encoder.end_object();
+    }
+    return;
+}
+
+fn write_inlay_hints(
+    encoder: &var json::Encoder, message: &json::Value, snapshot: &Snapshot, id: source::SourceId
+) -> !void {
+    let range = requested_range(message, snapshot, id);
+    try encoder.begin_array_field("result");
+    var at = 0;
+    while snapshot.index.symbols.at(at) |symbol| {
+        at = at + 1;
+        if symbol.inferred and same_file(symbol.selection, id) and covers(range, Cursor { source_id: id, position: symbol.selection.end }) {
+            let text = symbol.detail.as_bytes();
+            try encoder.begin_object();
+            try write_point(encoder, &snapshot.sources, id, "position", symbol.selection.end);
+            try encoder.write_bytes_field("label", text);
+            try encoder.write_i64_field("kind", 1);
+            try encoder.write_bool_field("paddingLeft", true);
+            try encoder.end_object();
+        }
+    }
+    at = 0;
+    while snapshot.index.calls.at(at) |call| {
+        at = at + 1;
+        if same_file(call.callee, id) {
+            if symbol_at_span(&snapshot.index, call.declaration) |symbol| {
+                try write_argument_hints(encoder, snapshot, id, range, call, symbol);
+            }
+        }
+    }
+    return encoder.end_array();
+}
+
+fn write_argument_hints(
+    encoder: &var json::Encoder, snapshot: &Snapshot, id: source::SourceId, range: ast::Span,
+    call: &types::CallSite, symbol: &types::Symbol
+) -> !void {
+    var at = 0;
+    while call.arguments.get(at) |arg| {
+        if symbol.params.at(at) |parameter| {
+            if covers(range, Cursor { source_id: id, position: arg.start }) {
+                let name = parameter.as_bytes();
+                try encoder.begin_object();
+                try write_point(encoder, &snapshot.sources, id, "position", arg.start);
+                try encoder.write_bytes_field("label", name);
+                try encoder.write_i64_field("kind", 2);
+                try encoder.write_bool_field("paddingRight", true);
+                try encoder.end_object();
+            }
+        } else {
+            break;
+        }
+        at = at + 1;
+    }
+    return;
+}
+
+fn write_code_lenses(encoder: &var json::Encoder, snapshot: &Snapshot, id: source::SourceId) -> !void {
+    try encoder.begin_array_field("result");
+    var at = 0;
+    while snapshot.index.symbols.at(at) |symbol| {
+        at = at + 1;
+        if !same_file(symbol.selection, id) {
+            continue;
+        }
+        let name = symbol.name.as_bytes();
+        var title = "Run";
+        var command = "kizu.runFile";
+        if symbol.kind == types::SymbolKind::Test {
+            title = "Run Test";
+            command = "kizu.testFile";
+        } else if symbol.kind != types::SymbolKind::Function or !mem::equal_bytes(name, "main") {
+            continue;
+        }
+        try encoder.begin_object();
+        try write_span(encoder, &snapshot.sources, "range", symbol.selection);
+        try encoder.begin_object_field("command");
+        try encoder.write_bytes_field("title", title);
+        try encoder.write_bytes_field("command", command);
+        try encoder.end_object();
+        try encoder.end_object();
+    }
+    return encoder.end_array();
+}
+
+fn write_selection_ranges(
+    allocator: Allocator, encoder: &var json::Encoder, message: &json::Value, snapshot: &Snapshot, id: source::SourceId
+) -> !void {
+    try encoder.begin_array_field("result");
+    if lsp::value_at(message, "params.positions") |positions| {
+        match positions {
+            Arr(items) => {
+                if snapshot.sources.at(id) |entry| {
+                    let text = entry.text.as_bytes();
+                    var index = 0;
+                    while items.at(index) |item| {
+                        index = index + 1;
+                        let line = lsp::integer_at(item, "line", 0);
+                        let character = lsp::integer_at(item, "character", 0);
+                        let point = lsp::source_position(text, line, character);
+                        let cursor = Cursor { source_id: id, position: point };
+                        try write_selection_range(allocator, encoder, snapshot, cursor, text);
+                    }
+                }
+            },
+            _ => {},
+        }
+    }
+    return encoder.end_array();
+}
+
+fn write_selection_range(
+    allocator: Allocator, encoder: &var json::Encoder, snapshot: &Snapshot, cursor: Cursor, text: []u8
+) -> !void {
+    var ranges = array::new<ast::Span>(allocator);
+    defer ranges.deinit(allocator);
+    let selected = selection_at(&snapshot.index, cursor);
+    var current = selected.use_span;
+    if current.is_zero() {
+        current = ast::Span { source: cursor.source_id, start: cursor.position, end: cursor.position };
+    }
+    try ranges.append(allocator, current);
+    while true {
+        let parent = next_selection_parent(&snapshot.index, cursor, current);
+        if parent.is_zero() {
+            break;
+        }
+        try ranges.append(allocator, parent);
+        current = parent;
+    }
+    let lines = line_count(text);
+    let end = lsp::source_position(text, lines - 1, mem::len(text));
+    let whole = ast::Span { source: cursor.source_id, start: ast::Position { line: 1, column: 1 }, end: end };
+    if !same_selection(whole, current) {
+        try ranges.append(allocator, whole);
+    }
+    try encoder.begin_object();
+    var at = 0;
+    while ranges.get(at) |range| {
+        if at > 0 {
+            try encoder.begin_object_field("parent");
+        }
+        try write_span(encoder, &snapshot.sources, "range", range);
+        at = at + 1;
+    }
+    for 0..at |_closing| {
+        try encoder.end_object();
+    }
+    return;
+}
+
+fn next_selection_parent(index: &types::SemanticIndex, cursor: Cursor, current: ast::Span) -> ast::Span {
+    var candidate = ast::zero_span();
+    var at = 0;
+    while index.expressions.at(at) |expression| {
+        at = at + 1;
+        if covers(expression.span, cursor) and contains_span(expression.span, current) and !same_selection(expression.span, current) {
+            if candidate.is_zero() or contains_span(candidate, expression.span) {
+                candidate = expression.span;
+            }
+        }
+    }
+    at = 0;
+    while index.symbols.at(at) |symbol| {
+        at = at + 1;
+        if covers(symbol.extent, cursor) and contains_span(symbol.extent, current) and !same_selection(symbol.extent, current) {
+            if candidate.is_zero() or contains_span(candidate, symbol.extent) {
+                candidate = symbol.extent;
+            }
+        }
+    }
+    return candidate;
+}
+
+fn semantic_kind(kind: types::SymbolKind) -> i64 {
+    match kind {
+        Function => return 0,
+        Method => return 1,
+        Struct => return 2,
+        Enum => return 3,
+        Contract => return 4,
+        Variant => return 5,
+        Field => return 6,
+        Parameter => return 7,
+        _ => return 8,
+    }
+}
+
+fn token_role(kind: token::Kind, raw: []u8) -> i64 {
+    match kind {
+        Int => return 10,
+        Float => return 10,
+        String => return 11,
+        CString => return 11,
+        Ident => return -1,
+        _ => {},
+    }
+    if mem::len(raw) > 0 and byte_letter(raw[0]) and kind != token::Kind::Illegal {
+        return 9;
+    }
+    return -1;
+}
+
+fn write_semantic_tokens(allocator: Allocator, encoder: &var json::Encoder, snapshot: &Snapshot, id: source::SourceId) -> !void {
+    try encoder.begin_object_field("result");
+    try encoder.begin_array_field("data");
+    if snapshot.sources.at(id) |entry| {
+        let text = entry.text.as_bytes();
+        var scan = lexer::new(allocator, text);
+        defer scan.deinit(allocator);
+        var previous_line = 0;
+        var previous_column = 0;
+        var line_start = 0;
+        var source_line = 1;
+        while true {
+            let lexeme = try scan.next_lexeme();
+            if lexeme.kind == token::Kind::Eof {
+                break;
+            }
+            let raw = text[lexeme.start..lexeme.end];
+            var kind = token_role(lexeme.kind, raw);
+            var modifiers = 0;
+            if lexeme.kind == token::Kind::Ident {
+                let point = ast::Position { line: lexeme.line, column: lexeme.column };
+                if snapshot.index.symbol_at_start(id.index, point) |symbol| {
+                    kind = semantic_kind(symbol.kind);
+                    modifiers = 1;
+                    if symbol.kind == types::SymbolKind::Constant {
+                        modifiers = modifiers + 2;
+                    }
+                } else if snapshot.index.reference_at_start(id.index, point) |reference| {
+                    if symbol_at_span(&snapshot.index, reference.declaration) |symbol| {
+                        kind = semantic_kind(symbol.kind);
+                        if symbol.kind == types::SymbolKind::Constant {
+                            modifiers = 2;
+                        }
+                    }
+                }
+            }
+            if kind < 0 or lexeme.end <= lexeme.start {
+                continue;
+            }
+            if line_count(raw) > 1 {
+                continue;
+            }
+            while source_line < lexeme.line and line_start < lexeme.start {
+                if text[line_start] == cast<u8>(10) {
+                    source_line = source_line + 1;
+                }
+                line_start = line_start + 1;
+            }
+            let line = lexeme.line - 1;
+            let column = lsp::utf16_width(text[line_start..lexeme.start]);
+            if line != previous_line {
+                previous_column = 0;
+            }
+            try encoder.write_i64(line - previous_line);
+            try encoder.write_i64(column - previous_column);
+            try encoder.write_i64(lsp::utf16_width(raw));
+            try encoder.write_i64(kind);
+            try encoder.write_i64(modifiers);
+            previous_line = line;
+            previous_column = column;
+        }
+    }
+    try encoder.end_array();
+    return encoder.end_object();
+}
+
+fn write_code_actions(
+    allocator: Allocator, encoder: &var json::Encoder, message: &json::Value, snapshot: &Snapshot, file: []u8
+) -> !void {
+    try encoder.begin_array_field("result");
+    let id = snapshot.file_id(file) orelse return encoder.end_array();
+    if requests_quick_fixes(message) {
+        let range = requested_range(message, snapshot, id);
+        try write_quick_fixes(allocator, encoder, snapshot, range);
+    }
+    return encoder.end_array();
+}

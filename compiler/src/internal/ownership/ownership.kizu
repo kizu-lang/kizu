@@ -456,6 +456,7 @@ pub struct Checker {
     places_base: i64,
     current_function: ?FunctionHandle,
     collect_missing_markers: bool,
+    editor_diagnostics: bool,
     missing_markers: array::Array<ast::Span>,
     current_std: bool,
     type_arg_values: SubstStore,
@@ -533,6 +534,7 @@ pub fn new_checker_for_target(
         places_base: 0,
         current_function: null,
         collect_missing_markers: false,
+        editor_diagnostics: tree.locate_names,
         missing_markers: array::new<ast::Span>(allocator),
         current_std: false,
         type_arg_values: new_subst_store(allocator),
@@ -671,7 +673,7 @@ pub fn (self: &Checker) retired_return_at(index: i64) -> ?ast::Statement {
 
 pub fn (self: &Checker) retired_try_at(index: i64) -> ?ast::Expression {
     if self.result.try_retired_err_defers.at(index) |entry| {
-        return ast::Expression { node: entry.node };
+        return ast::Expression { node: entry.node, location: null };
     }
     return null;
 }
@@ -727,6 +729,31 @@ pub fn (self: &var Checker) check_program(tree: &var ast::Ast, program: &ast::Pr
             return move failed;
         }
         index = index + 1;
+    }
+    return null;
+}
+
+pub fn (self: &var Checker) check_changed(
+    tree: &var ast::Ast, program: &ast::Program, unchanged: &map::Map<i64, bool>
+) -> !?diagnostic::Diagnostic {
+    if unchanged.len() == 0 {
+        return self.check_program(tree, program);
+    }
+    if try self.check_setup(tree, program) |failed| {
+        return move failed;
+    }
+    var index = 0;
+    while program.declarations.get(index) |declaration| {
+        index = index + 1;
+        let span = tree.declaration_span(declaration);
+        if span.source |id| {
+            if unchanged.contains(id.index) {
+                continue;
+            }
+        }
+        if try self.check_declaration_body(tree, declaration) |failed| {
+            return move failed;
+        }
     }
     return null;
 }
