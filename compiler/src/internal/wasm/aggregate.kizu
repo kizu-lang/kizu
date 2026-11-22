@@ -107,6 +107,11 @@ fn (self: &var Emitter) write_field_read(
                 return try self.fail0("wasm error: field read has mismatched result type");
             }
             let info = try self.value_of(module, receiver);
+            if self.is_place_alias(node.result.name) {
+                let address = try self.address_at(info.expr, layout.offset);
+                try self.set_value(module, node.result, address);
+                return null;
+            }
             return self.write_load_value(module, node.result, info.expr, layout.offset);
         },
     }
@@ -177,6 +182,21 @@ fn (self: &var Emitter) write_field_set(
             if !ir::same_name(stored.type_name, field.field.type_name) or
                 !ir::same_name(node.result.type_name, receiver.type_name) {
                 return try self.fail0("wasm error: field update has mismatched types");
+            }
+            if self.is_place_update(node.result.name) {
+                let target = try self.value_of(module, receiver);
+                let stored_info = try self.value_of(module, stored);
+                if try self.write_store_value(
+                    module,
+                    target.expr,
+                    field.offset,
+                    field.field.type_name,
+                    stored_info
+                ) |failed| {
+                    return move failed;
+                }
+                try self.set_value(module, node.result, target.expr);
+                return null;
             }
             let slot = try self.result_slot(module, node.result) orelse
                 return try self.fail0("wasm error: no frame slot for field update");
