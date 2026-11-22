@@ -1,0 +1,370 @@
+import compiler::internal::ir;
+import std::array;
+import std::map;
+
+struct PlaceUse {
+    block: i64,
+    position: i64,
+    arg: i64,
+    direct: bool,
+    next: i64,
+}
+
+struct PlaceDef {
+    block: i64,
+    position: i64,
+    instr: ir::Instr,
+}
+
+struct PlaceUses {
+    heads: map::Map<i64, i64>,
+    list: array::Array<PlaceUse>,
+    defs: map::Map<i64, PlaceDef>,
+}
+
+struct PlaceStep {
+    position: i64,
+    receiver: i64,
+}
+
+fn place_uses_new(allocator: Allocator) -> PlaceUses {
+    return PlaceUses {
+        heads: map::new<i64, i64>(allocator),
+        list: array::new<PlaceUse>(allocator),
+        defs: map::new<i64, PlaceDef>(allocator)
+    };
+}
+
+fn (self: &var PlaceUses) note(
+    allocator: Allocator,
+    name: ir::Name,
+    block: i64,
+    position: i64,
+    arg: i64,
+    direct: bool
+) -> !void {
+    let id = ir::name_id(name);
+    let next = self.heads.get(id) orelse -1;
+    try self.heads.insert(allocator, id, self.list.len());
+    return self.list.append(allocator, PlaceUse {
+        block: block,
+        position: position,
+        arg: arg,
+        direct: direct,
+        next: next
+    });
+}
+
+fn (self: PlaceUses) deinit(allocator: Allocator) -> void {
+    self.heads.deinit(allocator);
+    self.list.deinit(allocator);
+    self.defs.deinit(allocator);
+    return;
+}
+
+fn (self: &PlaceUses) first(name: ir::Name) -> i64 {
+    return self.heads.get(ir::name_id(name)) orelse -1;
+}
+
+fn (self: &PlaceUses) count(name: ir::Name) -> i64 {
+    var count = 0;
+    var index = self.first(name);
+    while index >= 0 {
+        count = count + 1;
+        index = self.list.get_or_panic(index).next;
+    }
+    return count;
+}
+
+fn place_collect(
+    allocator: Allocator,
+    module: &ir::Module,
+    node: &ir::FunctionNode,
+    uses: &var PlaceUses
+) -> !void {
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        let b = block_index;
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            let p = instr_index;
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            try uses.defs.insert(allocator, ir::name_id(instr_node.result.name), PlaceDef {
+                block: b,
+                position: p,
+                instr: instr
+            });
+            var index = 0;
+            while instr_node.args.get(index) |arg| {
+                try uses.note(allocator, arg.name, b, p, index, true);
+                index = index + 1;
+            }
+            index = 0;
+            while instr_node.fields.get(index) |field| {
+                index = index + 1;
+                try uses.note(allocator, field.value.name, b, p, -1, true);
+            }
+            index = 0;
+            while instr_node.incoming.get(index) |incoming| {
+                index = index + 1;
+                try uses.note(allocator, incoming.value.name, b, p, -1, false);
+            }
+            index = 0;
+            while instr_node.cleanups.get(index) |cleanup| {
+                index = index + 1;
+                var arg_index = 0;
+                while module.cleanup_arg(cleanup, arg_index) |arg| {
+                    arg_index = arg_index + 1;
+                    try uses.note(allocator, arg.name, b, p, -1, false);
+                }
+            }
+        }
+        let end = block_node.instrs.len();
+        try uses.note(allocator, block_node.terminator.value.name, b, end, -1, false);
+        try uses.note(allocator, block_node.terminator.cond.name, b, end, -1, false);
+    }
+    return;
+}
+
+fn place_instr(module: &ir::Module, node: &ir::FunctionNode, block: i64, position: i64) -> ir::Instr {
+    let block_ref = node.blocks.get_or_panic(block);
+    let block_node = module.blocks.at(block_ref.node);
+    return block_node.instrs.get_or_panic(position);
+}
+
+fn place_reads_now(op: ir::Op, arg: i64) -> bool {
+    return match op {
+        Field => arg == 0,
+        FieldSet => arg == 0 or arg == 1,
+        StructNew => arg == -1,
+        LocalSlot => arg == 0,
+        RefStore => arg == 1,
+        FieldRefSet => arg == 1,
+        _ => false,
+    };
+}
+
+fn place_quiet(op: ir::Op) -> bool {
+    return match op {
+        Const => true,
+        Id => true,
+        Cast => true,
+        Unary => true,
+        Binary => true,
+        Field => true,
+        FieldRef => true,
+        FieldAddr => true,
+        FieldSet => true,
+        StructNew => true,
+        LocalSlot => true,
+        CondFail => true,
+        RefLoad => true,
+        BufferNew => true,
+        BufferAddr => true,
+        _ => false,
+    };
+}
+
+fn place_owner(op: ir::Op) -> bool {
+    return op == ir::Op::StructNew or op == ir::Op::FieldSet or op == ir::Op::RefLoad;
+}
+
+fn (self: &Emitter) is_place_alias(name: ir::Name) -> bool {
+    if self.place_aliases.get(ir::name_id(name)) |filed| {
+        return filed == self.generation;
+    }
+    return false;
+}
+
+fn (self: &Emitter) is_place_update(name: ir::Name) -> bool {
+    if self.place_updates.get(ir::name_id(name)) |filed| {
+        return filed == self.generation;
+    }
+    return false;
+}
+
+fn (self: &Emitter) has_place(name: ir::Name) -> bool {
+    return self.is_place_alias(name) or self.is_place_update(name);
+}
+
+fn (self: &var Emitter) plan_places(module: &ir::Module, node: &ir::FunctionNode) -> !void {
+    var uses = place_uses_new(self.allocator);
+    defer uses.deinit(self.allocator);
+    try place_collect(self.allocator, module, node, &var uses);
+    var reach = map::new<i64, i64>(self.allocator);
+    defer reach.deinit(self.allocator);
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        let b = block_index;
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var p = block_node.instrs.len() - 1;
+        while p >= 0 {
+            let instr = block_node.instrs.get_or_panic(p);
+            let instr_node = module.instrs.at(instr.node);
+            if instr_node.op == ir::Op::Field or instr_node.op == ir::Op::FieldRef {
+                if try self.place_alias_reach(module, node, &uses, &reach, instr_node, b, p) |last| {
+                    let id = ir::name_id(instr_node.result.name);
+                    try self.place_aliases.insert(self.allocator, id, self.generation);
+                    try reach.insert(self.allocator, id, last);
+                }
+            }
+            p = p - 1;
+        }
+    }
+    block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        let b = block_index;
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var p = block_node.instrs.len() - 1;
+        while p >= 0 {
+            let instr = block_node.instrs.get_or_panic(p);
+            let instr_node = module.instrs.at(instr.node);
+            if instr_node.op == ir::Op::FieldSet and !self.is_place_update(instr_node.result.name) {
+                try self.plan_place_update(module, node, &uses, instr_node, b, p);
+            }
+            p = p - 1;
+        }
+    }
+    return;
+}
+
+fn (self: &var Emitter) place_alias_reach(
+    module: &ir::Module,
+    node: &ir::FunctionNode,
+    uses: &PlaceUses,
+    reach: &map::Map<i64, i64>,
+    instr_node: &ir::InstrNode,
+    b: i64,
+    p: i64
+) -> !?i64 {
+    let result = instr_node.result;
+    if !try self.is_memory_type(module, result.type_name) or self.is_flag_result(result.name) or
+        self.is_option_local(result.name) {
+        return null;
+    }
+    var last = p;
+    var index = uses.first(result.name);
+    while index >= 0 {
+        let use = uses.list.get_or_panic(index);
+        index = use.next;
+        if !use.direct or use.block != b or use.position <= p {
+            return null;
+        }
+        let user = module.instrs.at(place_instr(module, node, b, use.position).node);
+        if !place_reads_now(user.op, use.arg) {
+            return null;
+        }
+        var end = use.position;
+        if user.op == ir::Op::Field {
+            if reach.get(ir::name_id(user.result.name)) |further| {
+                if further > end {
+                    end = further;
+                }
+            }
+        }
+        if end > last {
+            last = end;
+        }
+    }
+    var q = p + 1;
+    while q < last {
+        let between = module.instrs.at(place_instr(module, node, b, q).node);
+        if !place_quiet(between.op) {
+            return null;
+        }
+        q = q + 1;
+    }
+    return last;
+}
+
+fn (self: &var Emitter) plan_place_update(
+    module: &ir::Module,
+    node: &ir::FunctionNode,
+    uses: &PlaceUses,
+    top: &ir::InstrNode,
+    b: i64,
+    p: i64
+) -> !void {
+    let target = top.args.get(0) orelse return;
+    let target_def = uses.defs.get(ir::name_id(target.name)) orelse return;
+    if target_def.block != b or !place_owner(module.instrs.at(target_def.instr.node).op) {
+        return;
+    }
+    var steps = array::new<PlaceStep>(self.allocator);
+    defer steps.deinit(self.allocator);
+    try steps.append(self.allocator, PlaceStep { position: p, receiver: ir::name_id(target.name) });
+    var receiver = target.name;
+    var field = top.operand;
+    var stored = top.args.get(1) orelse return;
+    var first = p;
+    while uses.defs.get(ir::name_id(stored.name)) |stored_def| {
+        if stored_def.block != b or stored_def.position >= first or uses.count(stored.name) != 1 {
+            break;
+        }
+        let inner = module.instrs.at(stored_def.instr.node);
+        if inner.op != ir::Op::FieldSet {
+            break;
+        }
+        let projected = inner.args.get(0) orelse break;
+        let projected_def = uses.defs.get(ir::name_id(projected.name)) orelse break;
+        let projection = module.instrs.at(projected_def.instr.node);
+        let source = projection.args.get(0) orelse break;
+        if projection.op != ir::Op::Field or !ir::same_name(projection.operand, field) or
+            !ir::same_name(source.name, receiver) or !self.is_place_alias(projected.name) {
+            break;
+        }
+        try steps.append(self.allocator, PlaceStep {
+            position: stored_def.position,
+            receiver: ir::name_id(projected.name)
+        });
+        receiver = projected.name;
+        field = inner.operand;
+        stored = inner.args.get(1) orelse break;
+        first = stored_def.position;
+    }
+    var group = array::new<ir::Name>(self.allocator);
+    defer group.deinit(self.allocator);
+    try group.append(self.allocator, target.name);
+    var at = 0;
+    while group.get(at) |member| {
+        at = at + 1;
+        var index = uses.first(member);
+        while index >= 0 {
+            let use = uses.list.get_or_panic(index);
+            index = use.next;
+            if !use.direct or use.block != b {
+                return;
+            }
+            let user = module.instrs.at(place_instr(module, node, b, use.position).node);
+            if user.op == ir::Op::Field and use.arg == 0 and self.is_place_alias(user.result.name) {
+                try group.append(self.allocator, user.result.name);
+            }
+            if use.position > first and !place_step_reads(&steps, use, ir::name_id(member)) {
+                return;
+            }
+        }
+    }
+    var step_index = 0;
+    while steps.get(step_index) |step| {
+        step_index = step_index + 1;
+        let updated = module.instrs.at(place_instr(module, node, b, step.position).node);
+        try self.place_updates.insert(self.allocator, ir::name_id(updated.result.name), self.generation);
+    }
+    return;
+}
+
+fn place_step_reads(steps: &array::Array<PlaceStep>, use: PlaceUse, member: i64) -> bool {
+    var index = 0;
+    while steps.get(index) |step| {
+        index = index + 1;
+        if step.position == use.position and step.receiver == member and use.arg == 0 {
+            return true;
+        }
+    }
+    return false;
+}

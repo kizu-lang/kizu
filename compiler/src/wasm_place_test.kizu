@@ -1,0 +1,68 @@
+import std::array;
+import std::io;
+import std::mem;
+import std::string;
+import std::testing;
+
+fn wasm_place_nested_source() -> []u8 {
+    return
+        \\struct Inner {
+        \\    a: [131072]i64,
+        \\    n: i64,
+        \\}
+        \\
+        \\struct Outer {
+        \\    inner: Inner,
+        \\    m: i64,
+        \\}
+        \\
+        \\fn main() {
+        \\    var o = Outer { inner: Inner { a: [131072]i64{}, n: 1 }, m: 2 };
+        \\    o.inner.n = o.inner.n + o.m;
+        \\    o.inner.a[7] = o.inner.n * 10;
+        \\    o.m = o.inner.a[7] + o.inner.n;
+        \\    print(o.inner.n + o.m);
+        \\    print("=");
+        \\}
+    ;
+}
+
+test "nested fields of a struct larger than the wasm stack are read and written in place" {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    let node = try runtime_mbt_find_node(io, allocator);
+    defer node.deinit(allocator);
+    if node.len() == 0 {
+        try io::write_stderr_line(io, "wasm place: node is required to run the wasm32-wasi build; not run");
+        return;
+    }
+    let module_path = try runtime_mbt_module_path(allocator, "place");
+    defer module_path.deinit(allocator);
+    let module_bytes = module_path.as_bytes();
+    var problem = string::new(allocator);
+    defer problem.deinit(allocator);
+    try runtime_mbt_build(io, allocator, wasm_place_nested_source(), module_bytes, &var problem);
+    defer runtime_mbt_remove(io, module_bytes);
+    let built = problem.as_bytes();
+    testing::expect_equal<[]u8>("", built);
+    var argv = array::new<array::Array<string::String>>(allocator);
+    defer argv.deinit(allocator);
+    try argv.append(allocator, array::new<string::String>(allocator));
+    var results = array::new<RuntimeMbtResult>(allocator);
+    defer results.deinit(allocator);
+    let node_bytes = node.as_bytes();
+    try runtime_mbt_run_wasi(io, allocator, node_bytes, module_bytes, &argv, &var results, &var problem);
+    let ran = problem.as_bytes();
+    testing::expect_equal<[]u8>("", ran);
+    testing::expect_equal<i64>(1, results.len());
+    if results.at(0) |r| {
+        let code = r.code.as_bytes();
+        let stdout = r.stdout.as_bytes();
+        var printed = string::new(allocator);
+        defer printed.deinit(allocator);
+        try runtime_mbt_append_fields(allocator, &var printed, stdout);
+        let printed_bytes = printed.as_bytes();
+        testing::expect_equal<[]u8>("0", code);
+        testing::expect_equal<[]u8>("36", printed_bytes);
+    }
+}

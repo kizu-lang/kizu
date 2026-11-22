@@ -43,7 +43,7 @@ fn (self: &var Emitter) plan_frame(
             }
             let result_needs_slot = try self.is_memory_type(module, instr_node.result.type_name);
             if result_needs_slot and instr_node.op != ir::Op::Phi and !self.is_flag_result(instr_node.result.name) and
-                !self.is_option_local(instr_node.result.name) {
+                !self.is_option_local(instr_node.result.name) and !self.has_place(instr_node.result.name) {
                 let outcome = try self.type_layout(module, instr_node.result.type_name);
                 match outcome {
                     Error(failed) => return move failed,
@@ -330,11 +330,18 @@ fn (self: &var Emitter) register_frame_values(
             let instr_node = module.instrs.at(instr.node);
             let result_needs_slot = try self.is_memory_type(module, instr_node.result.type_name);
             if result_needs_slot and instr_node.op != ir::Op::Phi and !self.is_flag_result(instr_node.result.name) and
-                !self.is_option_local(instr_node.result.name) {
+                !self.is_option_local(instr_node.result.name) and !self.has_place(instr_node.result.name) {
                 if try self.result_slot(module, instr_node.result) |slot| {
                     try self.set_value(module, instr_node.result, slot);
                 } else {
                     return try self.fail0("wasm error: no frame slot for aggregate result");
+                }
+            }
+            if self.is_place_update(instr_node.result.name) {
+                let receiver = instr_node.args.get(0) orelse ir::empty_value();
+                if !self.is_place_alias(receiver.name) {
+                    let info = try self.value_of(module, receiver);
+                    try self.set_value(module, instr_node.result, info.expr);
                 }
             }
             if instr_node.op == ir::Op::LocalSlot {
