@@ -29,12 +29,43 @@ kizu="$1"
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
+default_jobs() {
+  n=''
+  if command -v nproc >/dev/null 2>&1; then
+    n="$(nproc 2>/dev/null || true)"
+  elif command -v getconf >/dev/null 2>&1; then
+    n="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
+  elif command -v sysctl >/dev/null 2>&1; then
+    n="$(sysctl -n hw.ncpu 2>/dev/null || true)"
+  fi
+  case "$n" in
+    '' | *[!0-9]* | 0) n=4 ;;
+  esac
+  if [ "$n" -gt 8 ]; then n=8; fi
+  echo "$n"
+}
+
+fmt_jobs="${KIZU_FMT_JOBS:-$(default_jobs)}"
+case "$fmt_jobs" in
+  '' | *[!0-9]* | 0)
+    echo "error: KIZU_FMT_JOBS must be a positive integer (got '$fmt_jobs')" >&2
+    exit 2
+    ;;
+esac
+
 unformatted="$(
   find lib/kizu/std/src examples tests/behavior/src tests/unicode/src compiler/src compiler/tests/harness/src \
-    -path examples/negative -prune -o -name '*.kizu' -print | sort |
-    while IFS= read -r file; do
-      if ! "$kizu" fmt "$file" | cmp -s - "$file"; then echo "$file"; fi
-    done
+    -path examples/negative -prune -o -name '*.kizu' -print0 |
+    xargs -0 -P "$fmt_jobs" -n 32 sh -c '
+      kizu="$1"
+      shift
+      for file in "$@"; do
+        if ! "$kizu" fmt "$file" | cmp -s - "$file"; then
+          printf "%s\n" "$file"
+        fi
+      done
+    ' _ "$kizu" |
+    sort
 )"
 if [ -n "$unformatted" ]; then
   echo "these files differ from \`kizu fmt\`; run \`kizu fmt --write\` on them:" >&2
