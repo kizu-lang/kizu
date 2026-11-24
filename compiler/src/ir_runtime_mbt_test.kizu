@@ -1,6 +1,7 @@
 import compiler::internal::ast;
 import compiler::internal::ir;
 import compiler::internal::ownership;
+import compiler::internal::pool;
 import compiler::internal::project;
 import compiler::internal::stdtarget;
 import compiler::internal::types;
@@ -859,12 +860,33 @@ fn runtime_mbt_build(
     path: []u8,
     problem: &var string::String
 ) -> !void {
+    let cached = try project::load_std_cache(io, allocator, "lib/kizu");
+    match cached {
+        Error(failed) => {
+            defer failed.deinit(allocator);
+            return problem.append_bytes(allocator, "std cache could not be read");
+        },
+        Cache(std_cache) => {
+            defer std_cache.deinit(allocator);
+            return runtime_mbt_build_cached(io, allocator, &std_cache, source, path, problem);
+        },
+    }
+}
+
+fn runtime_mbt_build_cached(
+    io: Io,
+    allocator: Allocator,
+    std_cache: &project::StdCache,
+    source: []u8,
+    path: []u8,
+    problem: &var string::String
+) -> !void {
     let target = stdtarget::Target::WasmWasi;
     var tree = ast::new(allocator);
     defer tree.deinit(allocator);
     var loader = try project::new_loader(io, allocator, "lib/kizu");
     defer loader.deinit(allocator);
-    let loaded = try loader.load_source(&var tree, "cases.kizu", source);
+    let loaded = try loader.load_source_cached(&var tree, "cases.kizu", source, std_cache);
     match loaded {
         Error(failed) => {
             defer failed.deinit(allocator);
@@ -888,50 +910,38 @@ fn runtime_mbt_build(
                 defer text.deinit(allocator);
                 return problem.append_string(allocator, &text);
             }
-            let codes = try loader.std_error_codes();
-            match codes {
-                Error(failed) => {
-                    defer failed.deinit(allocator);
-                    let text = try failed.error(allocator, &loader.sources);
-                    defer text.deinit(allocator);
-                    return problem.append_string(allocator, &text);
-                },
-                Codes(std_errors) => {
-                    defer std_errors.deinit(allocator);
-                    var lowerer = try ir::new_lowerer_for_target(allocator, &tree, &program, &checker, target);
-                    defer lowerer.deinit(allocator);
-                    if try lowerer.lower(&var tree, &program, &std_errors, &loader.sources) |failed| {
-                        defer failed.deinit(allocator);
-                        let text = try failed.error(allocator, &loader.sources);
-                        defer text.deinit(allocator);
-                        return problem.append_string(allocator, &text);
-                    }
-                    if try ir::optimize(allocator, &var lowerer.module, target) |failed| {
-                        defer failed.deinit(allocator);
-                        let text = try failed.error(allocator, &loader.sources);
-                        defer text.deinit(allocator);
-                        return problem.append_string(allocator, &text);
-                    }
-                    var roots = array::new<string::String>(allocator);
-                    defer roots.deinit(allocator);
-                    let main_root = try string::from_bytes(allocator, "main");
-                    try roots.append(allocator, move main_root);
-                    try ir::keep_target_reachable_functions(allocator, &var lowerer.module, &roots, "");
-                    var encoded = string::new(allocator);
-                    defer encoded.deinit(allocator);
-                    if try wasm::emit_binary(allocator, &lowerer.module, &var encoded) |failed| {
-                        defer failed.deinit(allocator);
-                        let text = try failed.error(allocator, &loader.sources);
-                        defer text.deinit(allocator);
-                        return problem.append_string(allocator, &text);
-                    }
-                    if mem::len(path) > 0 {
-                        let bytes = encoded.as_bytes();
-                        try fs::write_file(io, path, bytes);
-                    }
-                    return;
-                },
+            var lowerer = try ir::new_lowerer_for_target(allocator, &tree, &program, &checker, target);
+            defer lowerer.deinit(allocator);
+            if try lowerer.lower(&var tree, &program, &std_cache.error_codes, &loader.sources) |failed| {
+                defer failed.deinit(allocator);
+                let text = try failed.error(allocator, &loader.sources);
+                defer text.deinit(allocator);
+                return problem.append_string(allocator, &text);
             }
+            if try ir::optimize(allocator, &var lowerer.module, target) |failed| {
+                defer failed.deinit(allocator);
+                let text = try failed.error(allocator, &loader.sources);
+                defer text.deinit(allocator);
+                return problem.append_string(allocator, &text);
+            }
+            var roots = array::new<string::String>(allocator);
+            defer roots.deinit(allocator);
+            let main_root = try string::from_bytes(allocator, "main");
+            try roots.append(allocator, move main_root);
+            try ir::keep_target_reachable_functions(allocator, &var lowerer.module, &roots, "");
+            var encoded = string::new(allocator);
+            defer encoded.deinit(allocator);
+            if try wasm::emit_binary(allocator, &lowerer.module, &var encoded) |failed| {
+                defer failed.deinit(allocator);
+                let text = try failed.error(allocator, &loader.sources);
+                defer text.deinit(allocator);
+                return problem.append_string(allocator, &text);
+            }
+            if mem::len(path) > 0 {
+                let bytes = encoded.as_bytes();
+                try fs::write_file(io, path, bytes);
+            }
+            return;
         },
     }
 }
@@ -939,6 +949,7 @@ fn runtime_mbt_build(
 fn runtime_mbt_build_chosen(
     io: Io,
     allocator: Allocator,
+    std_cache: &project::StdCache,
     model: RuntimeMbtModel,
     cases: &array::Array<RuntimeMbtCase>,
     chosen: &array::Array<i64>,
@@ -951,7 +962,7 @@ fn runtime_mbt_build_chosen(
         return problem.append_bytes(allocator, "a case is not well formed");
     }
     let source_bytes = source.as_bytes();
-    return runtime_mbt_build(io, allocator, source_bytes, path, problem);
+    return runtime_mbt_build_cached(io, allocator, std_cache, source_bytes, path, problem);
 }
 
 fn runtime_mbt_write_program(io: Io, allocator: Allocator, model: RuntimeMbtModel, n: i64, c: &RuntimeMbtCase) -> !void {
@@ -970,6 +981,7 @@ fn runtime_mbt_write_program(io: Io, allocator: Allocator, model: RuntimeMbtMode
 fn runtime_mbt_split_build(
     io: Io,
     allocator: Allocator,
+    std_cache: &project::StdCache,
     model: RuntimeMbtModel,
     cases: &array::Array<RuntimeMbtCase>,
     chosen: &array::Array<i64>,
@@ -977,7 +989,7 @@ fn runtime_mbt_split_build(
 ) -> !i64 {
     var problem = string::new(allocator);
     defer problem.deinit(allocator);
-    try runtime_mbt_build_chosen(io, allocator, model, cases, chosen, "", &var problem);
+    try runtime_mbt_build_chosen(io, allocator, std_cache, model, cases, chosen, "", &var problem);
     if problem.len() == 0 {
         var index = 0;
         while chosen.get(index) |n| {
@@ -1018,8 +1030,8 @@ fn runtime_mbt_split_build(
         }
         index = index + 1;
     }
-    let failed = try runtime_mbt_split_build(io, allocator, model, cases, &first, built);
-    return failed + try runtime_mbt_split_build(io, allocator, model, cases, &second, built);
+    let failed = try runtime_mbt_split_build(io, allocator, std_cache, model, cases, &first, built);
+    return failed + try runtime_mbt_split_build(io, allocator, std_cache, model, cases, &second, built);
 }
 
 fn runtime_mbt_text_field(
@@ -1171,6 +1183,29 @@ fn runtime_mbt_replay(
         try io::write_stderr_line(io, ": node is required to run the wasm32-wasi build; not replayed");
         return 0;
     }
+    let cached = try project::load_std_cache(io, allocator, "lib/kizu");
+    match cached {
+        Error(failed) => {
+            defer failed.deinit(allocator);
+            try io::write_stderr_line(io, "std cache could not be read");
+            return -1;
+        },
+        Cache(std_cache) => {
+            defer std_cache.deinit(allocator);
+            return runtime_mbt_replay_with_cache(io, allocator, &std_cache, model, label, cases, &node);
+        },
+    }
+}
+
+fn runtime_mbt_replay_with_cache(
+    io: Io,
+    allocator: Allocator,
+    std_cache: &project::StdCache,
+    model: RuntimeMbtModel,
+    label: []u8,
+    cases: &array::Array<RuntimeMbtCase>,
+    node: &string::String
+) -> !i64 {
     var all = array::new<i64>(allocator);
     defer all.deinit(allocator);
     var built = array::new<bool>(allocator);
@@ -1187,7 +1222,7 @@ fn runtime_mbt_replay(
     var failures = 0;
     var problem = string::new(allocator);
     defer problem.deinit(allocator);
-    try runtime_mbt_build_chosen(io, allocator, model, cases, &all, module_bytes, &var problem);
+    try runtime_mbt_build_chosen(io, allocator, std_cache, model, cases, &all, module_bytes, &var problem);
     if problem.len() == 0 {
         n = 0;
         while n < cases.len() {
@@ -1195,7 +1230,7 @@ fn runtime_mbt_replay(
             n = n + 1;
         }
     } else {
-        failures = try runtime_mbt_split_build(io, allocator, model, cases, &all, &var built);
+        failures = try runtime_mbt_split_build(io, allocator, std_cache, model, cases, &all, &var built);
         var kept = array::new<i64>(allocator);
         defer kept.deinit(allocator);
         n = 0;
@@ -1206,7 +1241,7 @@ fn runtime_mbt_replay(
             n = n + 1;
         }
         problem.clear();
-        try runtime_mbt_build_chosen(io, allocator, model, cases, &kept, module_bytes, &var problem);
+        try runtime_mbt_build_chosen(io, allocator, std_cache, model, cases, &kept, module_bytes, &var problem);
         if problem.len() > 0 {
             try io::write_stderr(io, label);
             try io::write_stderr(io, ": the cases that build alone do not build together: ");
@@ -1326,9 +1361,7 @@ fn runtime_mbt_replay(
     return failures;
 }
 
-fn runtime_mbt_known(model: RuntimeMbtModel, label: []u8, shapes: []u8, count: i64) -> !void {
-    let allocator = mem::page_allocator();
-    let io = io::blocking();
+fn runtime_mbt_known_with(io: Io, allocator: Allocator, model: RuntimeMbtModel, label: []u8, shapes: []u8, count: i64) -> !void {
     let cases = try runtime_mbt_known_cases(allocator, shapes);
     defer cases.deinit(allocator);
     testing::expect_equal<i64>(count, cases.len());
@@ -1337,15 +1370,27 @@ fn runtime_mbt_known(model: RuntimeMbtModel, label: []u8, shapes: []u8, count: i
     return;
 }
 
-fn runtime_mbt_traces(model: RuntimeMbtModel, label: []u8, fixture_name: []u8) -> !void {
-    let allocator = mem::page_allocator();
-    let io = io::blocking();
+fn runtime_mbt_known(model: RuntimeMbtModel, label: []u8, shapes: []u8, count: i64) -> !void {
+    var mem_pool = try pool::new(mem::page_allocator());
+    defer mem_pool.deinit(mem::page_allocator());
+    let allocator = pool::allocator_of(&var mem_pool);
+    return runtime_mbt_known_with(io::blocking(), allocator, model, label, shapes, count);
+}
+
+fn runtime_mbt_traces_with(io: Io, allocator: Allocator, model: RuntimeMbtModel, label: []u8, fixture_name: []u8) -> !void {
     let fixture = try runtime_mbt_read_fixture(io, allocator, fixture_name);
     defer fixture.deinit(allocator);
     testing::expect(fixture.cases.len() > 0);
     let failures = try runtime_mbt_replay(io, allocator, model, label, &fixture.cases);
     testing::expect_equal<i64>(0, failures);
     return;
+}
+
+fn runtime_mbt_traces(model: RuntimeMbtModel, label: []u8, fixture_name: []u8) -> !void {
+    var mem_pool = try pool::new(mem::page_allocator());
+    defer mem_pool.deinit(mem::page_allocator());
+    let allocator = pool::allocator_of(&var mem_pool);
+    return runtime_mbt_traces_with(io::blocking(), allocator, model, label, fixture_name);
 }
 
 test "bounds model harness agrees on the known shapes" {

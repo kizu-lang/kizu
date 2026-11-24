@@ -470,6 +470,9 @@ pub struct Checker {
     lazy_default: Name,
     returned_views: array::Array<ast::Expression>,
     ident_uses: IdentUses,
+    lazy_std: bool,
+    reached_std: map::Map<[]u8, bool>,
+    pending_std: array::Array<FunctionHandle>,
     result: Result,
 }
 
@@ -548,6 +551,9 @@ pub fn new_checker_for_target(
         lazy_default: empty_name(),
         returned_views: array::new<ast::Expression>(allocator),
         ident_uses: new_ident_uses(allocator),
+        lazy_std: false,
+        reached_std: map::new<[]u8, bool>(allocator),
+        pending_std: array::new<FunctionHandle>(allocator),
         result: new_result(allocator)
     };
 }
@@ -582,7 +588,72 @@ fn (self: Checker) deinit(allocator: Allocator) -> void {
     self.pending_alloc_taints.deinit(allocator);
     self.returned_views.deinit(allocator);
     self.ident_uses.deinit(allocator);
+    self.reached_std.deinit(allocator);
+    self.pending_std.deinit(allocator);
     self.result.deinit(allocator);
+    return;
+}
+
+fn is_std_module_name(name: []u8) -> bool {
+    return mem::equal_bytes(name, "std") or mem::starts_with(name, "std::");
+}
+
+fn program_has_non_std_decl(tree: &ast::Ast, program: &ast::Program) -> bool {
+    var index = 0;
+    while program.declarations.get(index) |declaration| {
+        index = index + 1;
+        match tree.declarations.at(declaration.node) {
+            Function(function) => {
+                if !function.signature.std {
+                    let retained = tree.texts.at(function.signature.name.node);
+                    let name = retained.as_bytes();
+                    if !mem::starts_with(name, "std::") {
+                        return true;
+                    }
+                }
+            },
+            Test(test) => {
+                let retained = tree.texts.at(test.module.node);
+                let module_name = retained.as_bytes();
+                if !is_std_module_name(module_name) {
+                    return true;
+                }
+            },
+            _ => {},
+        }
+    }
+    return false;
+}
+
+fn (self: &Checker) is_std_function(handle: FunctionHandle) -> bool {
+    let info = self.functions.at(handle.index);
+    return info.std or self.names.starts_with(info.name, "std::");
+}
+
+fn (self: &var Checker) reach_std_function(handle: FunctionHandle) -> !void {
+    if !self.lazy_std {
+        return;
+    }
+    if !self.is_std_function(handle) or self.has_type_params(handle) {
+        return;
+    }
+    let name = self.functions.at(handle.index).name;
+    let retained = name_text(&self.names, name);
+    let bytes = retained.as_bytes();
+    if self.reached_std.contains(bytes) {
+        return;
+    }
+    try self.reached_std.insert(self.allocator, bytes, true);
+    return self.pending_std.append(self.allocator, handle);
+}
+
+fn (self: &var Checker) reach_std_by_name(name: []u8) -> !void {
+    if !self.lazy_std {
+        return;
+    }
+    if self.functions_by_name.get(name) |handle| {
+        return self.reach_std_function(handle);
+    }
     return;
 }
 
@@ -593,6 +664,7 @@ pub fn check_all(
 ) -> !array::Array<diagnostic::Diagnostic> {
     var checker = try new_checker(allocator, tree, program);
     defer checker.deinit(allocator);
+    checker.lazy_std = program_has_non_std_decl(tree, program);
     var out = array::new<diagnostic::Diagnostic>(allocator);
     errdefer out.deinit(allocator);
     if try checker.check_setup(tree, program) |failed| {
@@ -601,10 +673,20 @@ pub fn check_all(
     }
     var index = 0;
     while program.declarations.get(index) |declaration| {
+        index = index + 1;
+        if checker.lazy_std and checker.is_std_declaration(tree, declaration) {
+            continue;
+        }
         if try checker.check_declaration_body(tree, declaration) |failed| {
             try out.append(allocator, move failed);
         }
-        index = index + 1;
+    }
+    var pending_index = 0;
+    while checker.pending_std.get(pending_index) |handle| {
+        pending_index = pending_index + 1;
+        if try checker.check_function(tree, handle) |failed| {
+            try out.append(allocator, move failed);
+        }
     }
     return move out;
 }
@@ -719,16 +801,44 @@ pub fn (self: &Checker) append_method_callee_name(index: i64, out: &var string::
     return out.append_bytes(self.allocator, bytes);
 }
 
+fn (self: &Checker) is_std_declaration(tree: &ast::Ast, declaration: ast::Declaration) -> bool {
+    match tree.declarations.at(declaration.node) {
+        Function(function) => {
+            if signature_has_type_params(&function.signature) {
+                return false;
+            }
+            if function.signature.std {
+                return true;
+            }
+            let retained = tree.texts.at(function.signature.name.node);
+            let name = retained.as_bytes();
+            return mem::starts_with(name, "std::");
+        },
+        _ => return false,
+    }
+}
+
 pub fn (self: &var Checker) check_program(tree: &var ast::Ast, program: &ast::Program) -> !?diagnostic::Diagnostic {
+    self.lazy_std = program_has_non_std_decl(tree, program);
     if try self.check_setup(tree, program) |failed| {
         return move failed;
     }
     var index = 0;
     while program.declarations.get(index) |declaration| {
+        index = index + 1;
+        if self.lazy_std and self.is_std_declaration(tree, declaration) {
+            continue;
+        }
         if try self.check_declaration_body(tree, declaration) |failed| {
             return move failed;
         }
-        index = index + 1;
+    }
+    var pending_index = 0;
+    while self.pending_std.get(pending_index) |handle| {
+        pending_index = pending_index + 1;
+        if try self.check_function(tree, handle) |failed| {
+            return move failed;
+        }
     }
     return null;
 }

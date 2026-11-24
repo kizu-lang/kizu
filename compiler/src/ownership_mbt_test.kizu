@@ -1,9 +1,11 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::ownership;
+import compiler::internal::pool;
 import compiler::internal::project;
 import compiler::internal::types;
 import std::array;
+import std::fmt;
 import std::fs;
 import std::io;
 import std::json;
@@ -51,6 +53,22 @@ fn known_shapes() -> []u8 {
         \\shortest/defer|defer|
         \\shortest/try|mutate|Leak
         \\sharedViewAndBorrowCoexist|view 0;borrow 1;use_view 0;use_borrow 1;deinit|
+    ;
+}
+
+fn batch_prelude() -> []u8 {
+    return
+        \\import std::mem;
+        \\import std::string;
+        \\
+        \\fn sink(allocator: Allocator, x: string::String) {
+        \\    x.deinit(allocator);
+        \\}
+        \\
+        \\fn main() -> !void {
+        \\    return;
+        \\}
+        \\
     ;
 }
 
@@ -110,6 +128,14 @@ fn statement_lines(token: []u8) -> []u8 {
 
 fn render(allocator: Allocator, out: &var string::String, prog: &array::Array<string::String>) -> !bool {
     try out.append_bytes(allocator, prelude());
+    if !try render_body(allocator, out, prog) {
+        return false;
+    }
+    try out.append_bytes(allocator, epilogue());
+    return true;
+}
+
+fn render_body(allocator: Allocator, out: &var string::String, prog: &array::Array<string::String>) -> !bool {
     var depth = 1;
     var whiles = array::new<bool>(allocator);
     defer whiles.deinit(allocator);
@@ -179,7 +205,6 @@ fn render(allocator: Allocator, out: &var string::String, prog: &array::Array<st
     if whiles.len() != 0 {
         return false;
     }
-    try out.append_bytes(allocator, epilogue());
     return true;
 }
 
@@ -238,12 +263,19 @@ fn mbt_kind(message: []u8) -> []u8 {
     return "";
 }
 
-fn check_source(io: Io, allocator: Allocator, source: []u8, out: &var string::String) -> !void {
+fn check_source(
+    io: Io,
+    allocator: Allocator,
+    std_cache: &project::StdCache,
+    source: []u8,
+    out: &var string::String
+) -> !void {
     var tree = ast::new(allocator);
     defer tree.deinit(allocator);
     var loader = try project::new_loader(io, allocator, "lib/kizu");
     defer loader.deinit(allocator);
-    let loaded = try loader.load_source(&var tree, "mbt.kizu", source);
+    loader.std_signatures_only = true;
+    let loaded = try loader.load_source_cached(&var tree, "mbt.kizu", source, std_cache);
     match loaded {
         Error(failed) => {
             defer failed.deinit(allocator);
@@ -280,7 +312,12 @@ fn append_first(
     return;
 }
 
-fn diverges(io: Io, allocator: Allocator, c: &MbtCase) -> !bool {
+fn diverges(
+    io: Io,
+    allocator: Allocator,
+    std_cache: &project::StdCache,
+    c: &MbtCase
+) -> !bool {
     var source = string::new(allocator);
     defer source.deinit(allocator);
     let rendered = try render(allocator, &var source, &c.prog);
@@ -292,7 +329,7 @@ fn diverges(io: Io, allocator: Allocator, c: &MbtCase) -> !bool {
         try problem.append_bytes(allocator, "the program is not well formed");
     } else {
         let source_bytes = source.as_bytes();
-        try check_source(io, allocator, source_bytes, &var got);
+        try check_source(io, allocator, std_cache, source_bytes, &var got);
         let message = got.as_bytes();
         let kind = mbt_kind(message);
         if mem::len(message) == 0 {
@@ -393,56 +430,249 @@ fn known_case(allocator: Allocator, line: []u8) -> !MbtCase {
     return move c;
 }
 
-test "ownership model harness agrees on the known shapes" {
-    let allocator = mem::page_allocator();
-    let io = io::blocking();
-    let shapes = known_shapes();
-    var cases = 0;
-    var failures = 0;
-    var start = 0;
-    var index = 0;
-    while index <= mem::len(shapes) {
-        var at_end = true;
-        if mem::byte_at(shapes, index) |byte| {
-            at_end = byte == cast<u8>(10);
+fn count_newlines(bytes: []u8, from: i64) -> i64 {
+    var count = 0;
+    var index = from;
+    while index < mem::len(bytes) {
+        if bytes[index] == cast<u8>(10) {
+            count = count + 1;
         }
-        if at_end and index > start {
-            let c = try known_case(allocator, shapes[start..index]);
-            defer c.deinit(allocator);
-            cases = cases + 1;
-            if try diverges(io, allocator, &c) {
+        index = index + 1;
+    }
+    return count;
+}
+
+fn find_line_owner(starts: &array::Array<i64>, ends: &array::Array<i64>, line: i64) -> i64 {
+    var index = 0;
+    while starts.get(index) |start| {
+        let end = ends.get(index) orelse 0;
+        if line >= start and line <= end {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+fn check_batch_standalone(
+    io: Io,
+    allocator: Allocator,
+    std_cache: &project::StdCache,
+    cases: &array::Array<MbtCase>,
+    start: i64,
+    end: i64
+) -> !i64 {
+    var failures = 0;
+    var index = start;
+    while index < end {
+        if cases.at(index) |c| {
+            if try diverges(io, allocator, std_cache, c) {
                 failures = failures + 1;
             }
         }
-        if at_end {
-            start = index + 1;
-        }
         index = index + 1;
     }
-    testing::expect_equal<i64>(26, cases);
-    testing::expect_equal<i64>(0, failures);
+    return failures;
+}
+
+fn check_batch(
+    io: Io,
+    allocator: Allocator,
+    std_cache: &project::StdCache,
+    cases: &array::Array<MbtCase>,
+    start: i64,
+    end: i64
+) -> !i64 {
+    var source = string::new(allocator);
+    defer source.deinit(allocator);
+    try source.append_bytes(allocator, batch_prelude());
+    let prelude_bytes = source.as_bytes();
+    var line = count_newlines(prelude_bytes, 0) + 1;
+    var starts = array::new<i64>(allocator);
+    defer starts.deinit(allocator);
+    var ends = array::new<i64>(allocator);
+    defer ends.deinit(allocator);
+    var index = start;
+    while index < end {
+        let before = source.len();
+        let case_start = line;
+        try source.append_bytes(allocator, "fn case");
+        try fmt::append_i64(allocator, &var source, index - start);
+        try source.append_bytes(allocator,
+            \\() -> !void {
+            \\    let allocator = mem::page_allocator();
+            \\    var s = try string::from_bytes(allocator, "ab");
+            \\
+        );
+        var rendered = false;
+        if cases.at(index) |c| {
+            rendered = try render_body(allocator, &var source, &c.prog);
+        }
+        if !rendered {
+            return check_batch_standalone(io, allocator, std_cache, cases, start, end);
+        }
+        try source.append_bytes(allocator, epilogue());
+        let added = source.as_bytes();
+        line = line + count_newlines(added, before);
+        try starts.append(allocator, case_start);
+        try ends.append(allocator, line - 1);
+        index = index + 1;
+    }
+    var tree = ast::new(allocator);
+    defer tree.deinit(allocator);
+    var loader = try project::new_loader(io, allocator, "lib/kizu");
+    defer loader.deinit(allocator);
+    loader.std_signatures_only = true;
+    let source_bytes = source.as_bytes();
+    let loaded = try loader.load_source_cached(&var tree, "mbt.kizu", source_bytes, std_cache);
+    match loaded {
+        Error(failed) => {
+            failed.deinit(allocator);
+            return check_batch_standalone(io, allocator, std_cache, cases, start, end);
+        },
+        Program(program) => {
+            defer program.deinit(allocator);
+            var type_diags = try types::check_all(allocator, &var tree, &program);
+            defer type_diags.deinit(allocator);
+            if type_diags.len() > 0 {
+                return check_batch_standalone(io, allocator, std_cache, cases, start, end);
+            }
+            var moves = try ownership::check_all(allocator, &var tree, &program);
+            defer moves.deinit(allocator);
+            let count = end - start;
+            var first_diag = array::new<i64>(allocator);
+            defer first_diag.deinit(allocator);
+            for 0..count |_k| {
+                try first_diag.append(allocator, -1);
+            }
+            var diag_index = 0;
+            while moves.at(diag_index) |entry| {
+                if entry.span.is_zero() {
+                    return check_batch_standalone(io, allocator, std_cache, cases, start, end);
+                }
+                let owner = find_line_owner(&starts, &ends, entry.span.start.line);
+                if owner < 0 {
+                    return check_batch_standalone(io, allocator, std_cache, cases, start, end);
+                }
+                let previous = first_diag.get(owner) orelse -1;
+                if previous < 0 {
+                    try first_diag.set(owner, diag_index);
+                }
+                diag_index = diag_index + 1;
+            }
+            var failures = 0;
+            var k = 0;
+            while k < count {
+                let diag = first_diag.get(k) orelse -1;
+                var ok = false;
+                if cases.at(start + k) |c| {
+                    if diag < 0 {
+                        ok = c.expect.len() == 0;
+                    } else if moves.at(diag) |entry| {
+                        let message = entry.message.as_bytes();
+                        let kind = mbt_kind(message);
+                        ok = mem::len(kind) > 0 and c.expect.len() > 0 and holds(&c.expect, kind);
+                    }
+                    if !ok {
+                        if try diverges(io, allocator, std_cache, c) {
+                            failures = failures + 1;
+                        }
+                    }
+                }
+                k = k + 1;
+            }
+            return failures;
+        },
+    }
+}
+
+fn run_ownership_known(io: Io, allocator: Allocator) -> !void {
+    let cached = try project::load_std_cache(io, allocator, "lib/kizu");
+    match cached {
+        Error(failed) => {
+            defer failed.deinit(allocator);
+            try io::write_stderr_line(io, "std cache could not be read");
+            testing::expect(false);
+        },
+        Cache(std_cache) => {
+            defer std_cache.deinit(allocator);
+            let shapes = known_shapes();
+            var cases = 0;
+            var failures = 0;
+            var start = 0;
+            var index = 0;
+            while index <= mem::len(shapes) {
+                var at_end = true;
+                if mem::byte_at(shapes, index) |byte| {
+                    at_end = byte == cast<u8>(10);
+                }
+                if at_end and index > start {
+                    let c = try known_case(allocator, shapes[start..index]);
+                    defer c.deinit(allocator);
+                    cases = cases + 1;
+                    if try diverges(io, allocator, &std_cache, &c) {
+                        failures = failures + 1;
+                    }
+                }
+                if at_end {
+                    start = index + 1;
+                }
+                index = index + 1;
+            }
+            testing::expect_equal<i64>(26, cases);
+            testing::expect_equal<i64>(0, failures);
+        },
+    }
+    return;
+}
+
+test "ownership model harness agrees on the known shapes" {
+    var mem_pool = try pool::new(mem::page_allocator());
+    defer mem_pool.deinit(mem::page_allocator());
+    let allocator = pool::allocator_of(&var mem_pool);
+    return run_ownership_known(io::blocking(), allocator);
+}
+
+fn run_ownership_sampled(io: Io, allocator: Allocator) -> !void {
+    let cached = try project::load_std_cache(io, allocator, "lib/kizu");
+    match cached {
+        Error(failed) => {
+            defer failed.deinit(allocator);
+            try io::write_stderr_line(io, "std cache could not be read");
+            testing::expect(false);
+        },
+        Cache(std_cache) => {
+            defer std_cache.deinit(allocator);
+            var path = "compiler/tests/mbt/ownership.json";
+            if process::env("KIZU_MBT_FIXTURE") |other| {
+                path = other;
+            }
+            let data = try fs::read_file(io, allocator, path, mem::Limit::Unlimited);
+            defer data.deinit(allocator);
+            let bytes = data.as_bytes();
+            var fixture = try json::decode<MbtFixture>(allocator, bytes);
+            defer fixture.deinit(allocator);
+            var failures = 0;
+            var index = 0;
+            let total = fixture.cases.len();
+            while index < total {
+                var end = index + 64;
+                if end > total {
+                    end = total;
+                }
+                failures = failures + try check_batch(io, allocator, &std_cache, &fixture.cases, index, end);
+                index = end;
+            }
+            testing::expect(total > 0);
+            testing::expect_equal<i64>(0, failures);
+        },
+    }
+    return;
 }
 
 test "ownership checker agrees with the sampled model programs" {
-    let allocator = mem::page_allocator();
-    let io = io::blocking();
-    var path = "compiler/tests/mbt/ownership.json";
-    if process::env("KIZU_MBT_FIXTURE") |other| {
-        path = other;
-    }
-    let data = try fs::read_file(io, allocator, path, mem::Limit::Unlimited);
-    defer data.deinit(allocator);
-    let bytes = data.as_bytes();
-    var fixture = try json::decode<MbtFixture>(allocator, bytes);
-    defer fixture.deinit(allocator);
-    var failures = 0;
-    var index = 0;
-    while fixture.cases.at(index) |c| {
-        index = index + 1;
-        if try diverges(io, allocator, c) {
-            failures = failures + 1;
-        }
-    }
-    testing::expect(fixture.cases.len() > 0);
-    testing::expect_equal<i64>(0, failures);
+    var mem_pool = try pool::new(mem::page_allocator());
+    defer mem_pool.deinit(mem::page_allocator());
+    let allocator = pool::allocator_of(&var mem_pool);
+    return run_ownership_sampled(io::blocking(), allocator);
 }

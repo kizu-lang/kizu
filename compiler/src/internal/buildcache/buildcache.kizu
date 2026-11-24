@@ -2,6 +2,7 @@ import compiler::internal::fsutil;
 import compiler::internal::sha256;
 import std::array;
 import std::date;
+import std::fmt;
 import std::fs;
 import std::json;
 import std::mem;
@@ -139,8 +140,23 @@ pub fn (self: &var Cache) get_or_build_artifact(
     content: []u8,
     out_path: &var string::String
 ) -> !ArtifactPlan {
+    var unused_key = string::new(allocator);
+    defer unused_key.deinit(allocator);
+    return self.get_or_build_artifact_key(io, allocator, name, target, content, out_path, &var unused_key);
+}
+
+pub fn (self: &var Cache) get_or_build_artifact_key(
+    io: Io,
+    allocator: Allocator,
+    name: []u8,
+    target: []u8,
+    content: []u8,
+    out_path: &var string::String,
+    out_key: &var string::String
+) -> !ArtifactPlan {
     let input = try self.new_input(allocator, name, target, content);
     errdefer input.deinit(allocator);
+    try out_key.append_string(allocator, &input.key);
     let stored = try output_name_of(allocator, &input.key);
     errdefer stored.deinit(allocator);
     let output = try self.output_path_of(allocator, &stored);
@@ -169,6 +185,26 @@ pub fn (self: &var Cache) get_or_build_artifact(
         stored: move stored,
         output: move output
     });
+}
+
+pub fn (self: &Cache) find_artifact_by_key(
+    io: Io,
+    allocator: Allocator,
+    key: []u8,
+    out_path: &var string::String
+) -> !bool {
+    if try self.has_artifact(io, allocator, key) |entry| {
+        defer entry.deinit(allocator);
+        var key_copy = try string::from_bytes(allocator, key);
+        defer key_copy.deinit(allocator);
+        try self.mark_used(io, allocator, &key_copy);
+        let name_bytes = entry.output.as_bytes();
+        let output = try self.output_path(allocator, name_bytes);
+        defer output.deinit(allocator);
+        try out_path.append_string(allocator, &output);
+        return true;
+    }
+    return false;
 }
 
 pub fn (self: &var Cache) find_artifact(
@@ -270,13 +306,19 @@ pub fn (self: &Cache) discard_artifact(
     return;
 }
 
-fn remove_scratch(io: Io, pending: &PendingArtifact) -> !void {
-    let scratch_bytes = pending.scratch.as_bytes();
-    let found = try fs::exists(io, scratch_bytes);
-    if found {
-        try fs::remove_file(io, scratch_bytes);
+fn remove_if_present(io: Io, file: []u8) -> !void {
+    if fs::remove_file(io, file) {} else |err| {
+        match err {
+            NotFound => return,
+            _ => return err,
+        }
     }
     return;
+}
+
+fn remove_scratch(io: Io, pending: &PendingArtifact) -> !void {
+    let scratch_bytes = pending.scratch.as_bytes();
+    return remove_if_present(io, scratch_bytes);
 }
 
 pub fn (self: &Cache) has_artifact(io: Io, allocator: Allocator, key: []u8) -> !?Entry {
@@ -388,8 +430,18 @@ fn (self: &Cache) write_fields(
     let meta = try self.meta_path(allocator, key_bytes);
     defer meta.deinit(allocator);
     let meta_bytes = meta.as_bytes();
+    var scratch_name = try string::from_bytes(allocator, ".meta-");
+    defer scratch_name.deinit(allocator);
+    try scratch_name.append_bytes(allocator, key_bytes);
+    try scratch_name.append_byte(allocator, cast<u8>(45));
+    try fmt::append_i64(allocator, &var scratch_name, fsutil::current_pid());
+    try scratch_name.append_bytes(allocator, ".tmp");
+    let scratch_path = try self.output_path_of(allocator, &scratch_name);
+    defer scratch_path.deinit(allocator);
+    let scratch_bytes = scratch_path.as_bytes();
     let text = out.as_bytes();
-    try fs::write_file(io, meta_bytes, text);
+    try fs::write_file(io, scratch_bytes, text);
+    try fs::rename(io, scratch_bytes, meta_bytes);
     return;
 }
 
@@ -637,19 +689,12 @@ fn (self: &Cache) remove_entry_files(io: Io, allocator: Allocator, entry: &Entry
     let meta = try self.meta_path(allocator, key_bytes);
     defer meta.deinit(allocator);
     let meta_bytes = meta.as_bytes();
-    let meta_found = try fs::exists(io, meta_bytes);
-    if meta_found {
-        try fs::remove_file(io, meta_bytes);
-    }
+    try remove_if_present(io, meta_bytes);
     let output_bytes = entry.output.as_bytes();
     let stored = try self.output_path(allocator, output_bytes);
     defer stored.deinit(allocator);
     let stored_bytes = stored.as_bytes();
-    let stored_found = try fs::exists(io, stored_bytes);
-    if stored_found {
-        try fs::remove_file(io, stored_bytes);
-    }
-    return;
+    return remove_if_present(io, stored_bytes);
 }
 
 fn used_moment(entry: &Entry) -> ?date::DateTime {

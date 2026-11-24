@@ -449,6 +449,7 @@ struct ModuleGroup {
 struct ModuleFile {
     group: arena::Handle<ModuleGroup>,
     file: string::String,
+    source: ?source::SourceId,
     program: ast::Program,
     imports: map::Map<[]u8, string::String>,
     namespaces: map::Map<[]u8, string::String>,
@@ -471,9 +472,11 @@ pub struct Loader {
     source_overrides: map::Map<[]u8, string::String>,
     std_graph: array::Array<Graph>,
     consts: map::Map<[]u8, ConstEntry>,
+    last_source: ?source::SourceId,
     pub sources: source::SourceMap,
     pub parse_diagnostics: array::Array<diagnostic::Diagnostic>,
     pub embedded_inputs: bool,
+    pub std_signatures_only: bool,
     pub inputs: buildplan::InputLog,
 }
 
@@ -494,9 +497,11 @@ pub fn new_loader(io: Io, allocator: Allocator, lib_dir: []u8) -> !Loader {
         source_overrides: map::new<[]u8, string::String>(allocator),
         std_graph: array::new<Graph>(allocator),
         consts: map::new<[]u8, ConstEntry>(allocator),
+        last_source: null,
         sources: source::new(allocator),
         parse_diagnostics: array::new<diagnostic::Diagnostic>(allocator),
         embedded_inputs: false,
+        std_signatures_only: false,
         inputs: buildplan::new_log(allocator, false)
     };
 }
@@ -526,6 +531,32 @@ pub fn (self: &var Loader) load_source(
     return self.load_program_with_sources(tree, &graph, false);
 }
 
+pub fn (self: &var Loader) load_source_cached(
+    tree: &var ast::Ast,
+    file: []u8,
+    text: []u8,
+    cache: &StdCache
+) -> !LoadResult {
+    var files = array::new<string::String>(self.allocator);
+    errdefer files.deinit(self.allocator);
+    try files.append(self.allocator, try string::from_bytes(self.allocator, file));
+    var modules = array::new<Module>(self.allocator);
+    errdefer modules.deinit(self.allocator);
+    try modules.append(self.allocator, Module {
+        path: string::new(self.allocator),
+        files: move files,
+        test_files: array::new<string::String>(self.allocator)
+    });
+    let graph = Graph {
+        package_name: string::new(self.allocator),
+        modules: move modules,
+        root: string::new(self.allocator)
+    };
+    defer graph.deinit(self.allocator);
+    try self.override_source(file, text);
+    return self.load_program_with_cache(tree, &graph, false, cache);
+}
+
 pub fn (self: &var Loader) override_source(file: []u8, text: []u8) -> !void {
     let cleaned = try path::clean(self.allocator, file);
     defer cleaned.deinit(self.allocator);
@@ -544,11 +575,27 @@ pub fn (self: &var Loader) load_program(
     return self.load_program_with_sources(tree, graph, false);
 }
 
+pub fn (self: &var Loader) load_program_cached(
+    tree: &var ast::Ast,
+    graph: &Graph,
+    cache: &StdCache
+) -> !LoadResult {
+    return self.load_program_with_cache(tree, graph, false, cache);
+}
+
 pub fn (self: &var Loader) load_test_program(
     tree: &var ast::Ast,
     graph: &Graph
 ) -> !LoadResult {
     return self.load_program_with_sources(tree, graph, true);
+}
+
+pub fn (self: &var Loader) load_test_program_cached(
+    tree: &var ast::Ast,
+    graph: &Graph,
+    cache: &StdCache
+) -> !LoadResult {
+    return self.load_program_with_cache(tree, graph, true, cache);
 }
 
 fn (self: &var Loader) load_program_with_sources(
@@ -560,6 +607,27 @@ fn (self: &var Loader) load_program_with_sources(
         return LoadResult::Error(move failed);
     }
     if try self.load_std(tree) |failed| {
+        return LoadResult::Error(move failed);
+    }
+    if try self.collect_types(tree) |failed| {
+        return LoadResult::Error(move failed);
+    }
+    if try self.collect_functions(tree) |failed| {
+        return LoadResult::Error(move failed);
+    }
+    return self.program(tree);
+}
+
+fn (self: &var Loader) load_program_with_cache(
+    tree: &var ast::Ast,
+    graph: &Graph,
+    include_tests: bool,
+    cache: &StdCache
+) -> !LoadResult {
+    if try self.load_package(tree, graph, include_tests, false) |failed| {
+        return LoadResult::Error(move failed);
+    }
+    if try self.load_std_cached(tree, cache) |failed| {
         return LoadResult::Error(move failed);
     }
     if try self.collect_types(tree) |failed| {
@@ -599,11 +667,12 @@ fn (self: &var Loader) load_package(
             imports: map::new<[]u8, string::String>(allocator)
         });
         var file_index = 0;
+        let skip_bodies = std and self.std_signatures_only and !tree.locate_names;
         while files.at(file_index) |file| {
             file_index = file_index + 1;
             let file_bytes = file.as_bytes();
             let root = graph.root.as_bytes();
-            let outcome_1 = try self.parse_module_file(tree, file_bytes, root);
+            let outcome_1 = try self.parse_module_file(tree, file_bytes, root, skip_bodies);
             match outcome_1 {
                 Program(program) => {
                     errdefer program.deinit(allocator);
@@ -611,6 +680,7 @@ fn (self: &var Loader) load_package(
                     let handle = try self.files.add(allocator, ModuleFile {
                         group: group,
                         file: move file_copy,
+                        source: self.last_source,
                         program: move program,
                         imports: map::new<[]u8, string::String>(allocator),
                         namespaces: map::new<[]u8, string::String>(allocator),
@@ -637,35 +707,39 @@ fn (self: &var Loader) load_package(
 fn (self: &var Loader) parse_module_file(
     tree: &var ast::Ast,
     file: []u8,
-    root: []u8
+    root: []u8,
+    skip_bodies: bool
 ) -> !LoadResult {
     let cleaned = try path::clean(self.allocator, file);
     defer cleaned.deinit(self.allocator);
     let cleaned_bytes = cleaned.as_bytes();
     if self.source_overrides.at(cleaned_bytes) |text| {
         let copied = try copy_string(self.allocator, text);
-        return self.parse_module_source(tree, file, move copied, root);
+        return self.parse_module_source(tree, file, move copied, root, skip_bodies);
     }
     let text = try fs::read_file(self.io, self.allocator, file, mem::Limit::Unlimited);
     errdefer text.deinit(self.allocator);
     try self.inputs.add_text(self.allocator, file, &text);
-    return self.parse_module_source(tree, file, move text, root);
+    return self.parse_module_source(tree, file, move text, root, skip_bodies);
 }
 
 fn (self: &var Loader) parse_module_source(
     tree: &var ast::Ast,
     file: []u8,
     text: string::String,
-    root: []u8
+    root: []u8,
+    skip_bodies: bool
 ) -> !LoadResult {
     errdefer text.deinit(self.allocator);
     let path_copy = try string::from_bytes(self.allocator, file);
     let id = try self.sources.add(move path_copy, move text);
+    self.last_source = id;
     if self.sources.at(id) |input| {
         let bytes = input.text.as_bytes();
         let scanner = lexer::new_source(self.allocator, id, bytes);
         var source_parser = try parser::new(self.allocator, move scanner);
         defer source_parser.deinit(self.allocator);
+        source_parser.skip_non_generic_bodies = skip_bodies;
         var program = try source_parser.parse_program(tree);
         errdefer program.deinit(self.allocator);
         if source_parser.diagnostic(0) |first| {

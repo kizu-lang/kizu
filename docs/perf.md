@@ -43,7 +43,7 @@ baseline として `examples/user_registry.kizu` を使います。
 | unit bitcode(`native-bc`) | 同上(toolchain に `-flto=thin` と link 側の codegen flag が入る) | `build --target native --opt --thinlto` で miss した unit |
 | run/test 実行ファイル | 全 unit の LLVM IR の hash を unit 順に並べたもの + runtime C source の hash + toolchain | `run` / `test` の link |
 | 関数の機械語(`native-fn`) | compiler の実行ファイルの hash + arch + object 形式。entry の中は関数ごとに、inline 後の MIR と symbol 名の SHA-256 | direct backend の build のたび。その build が出力した関数だけを持つ entry に置き換える |
-| build plan(`native-plan`) | compiler の実行ファイルの hash + target + lib dir + 出力先 + native option + toolchain | library を link しない `build --target native` の成功。同じ key の entry は置き換える |
+| build plan(`native-plan`) | compiler の実行ファイルの hash + target + lib dir + command/seed + 出力先(build/`test -o`) + native option + toolchain(`build`/`test -o` は `clang --version` も含む) | library を link しない `build --target native` / `run` / `test` の成功。同じ key の entry は置き換える(`run` / `test` は `native-exe` の key を記録し、cache に残っていればそのまま実行する) |
 
 debug build は LLVM IR を module ごとの unit と program unit(package の `main`、test
 runner、error 名の表)に割り、unit ごとに object を作って link します。cache に無い

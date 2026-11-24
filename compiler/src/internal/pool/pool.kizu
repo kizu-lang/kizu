@@ -4,7 +4,7 @@ import std::mem;
 extern "c" fn malloc(size: usize) -> ptr<u8>
 extern "c" fn free(p: ptr<u8>) -> void
 fn class_count() -> i64 {
-    return 32;
+    return 40;
 }
 
 fn class_step() -> i64 {
@@ -18,6 +18,7 @@ fn chunk_bytes() -> i64 {
 pub struct Pool {
     header: mem::AllocatorHeader,
     lists: array::Array<i64>,
+    chunks: usize,
     bump: usize,
     remaining: i64,
 }
@@ -33,9 +34,23 @@ pub fn new(allocator: Allocator) -> !Pool {
     return Pool {
         header: mem::allocator_header(),
         lists: move free_lists,
+        chunks: cast<usize>(0),
         bump: cast<usize>(0),
         remaining: 0
     };
+}
+
+pub fn (self: Pool) deinit(allocator: Allocator) -> void {
+    var cur = self.chunks;
+    while cur != cast<usize>(0) {
+        // SAFETY: cur is a chunk returned by malloc whose first word links to the previous chunk
+        let next = unsafe ptr_from_int<ptr<usize>>(cur).*;
+        // SAFETY: cur is a pool chunk freed once the pool is destroyed
+        unsafe free(ptr_from_int<ptr<u8>>(cur));
+        cur = next;
+    }
+    self.lists.deinit(allocator);
+    return;
 }
 
 pub fn allocator_of(pool: &var Pool) -> Allocator {
@@ -46,15 +61,62 @@ fn class_of(size: i64) -> i64 {
     if size <= 0 {
         return -1;
     }
-    let index = (size - 1) / class_step();
-    if index >= class_count() {
-        return -1;
+    if size <= 256 {
+        return (size - 1) / class_step();
     }
-    return index;
+    if size <= 512 {
+        return 32;
+    }
+    if size <= 1024 {
+        return 33;
+    }
+    if size <= 2048 {
+        return 34;
+    }
+    if size <= 4096 {
+        return 35;
+    }
+    if size <= 8192 {
+        return 36;
+    }
+    if size <= 16384 {
+        return 37;
+    }
+    if size <= 32768 {
+        return 38;
+    }
+    if size <= 65536 {
+        return 39;
+    }
+    return -1;
 }
 
 fn class_bytes(index: i64) -> i64 {
-    return (index + 1) * class_step();
+    if index < 32 {
+        return (index + 1) * class_step();
+    }
+    if index == 32 {
+        return 512;
+    }
+    if index == 33 {
+        return 1024;
+    }
+    if index == 34 {
+        return 2048;
+    }
+    if index == 35 {
+        return 4096;
+    }
+    if index == 36 {
+        return 8192;
+    }
+    if index == 37 {
+        return 16384;
+    }
+    if index == 38 {
+        return 32768;
+    }
+    return 65536;
 }
 
 /// Returns an address with size writable bytes, or null. The address is not
@@ -77,9 +139,16 @@ unsafe fn pool_alloc(pool: &var Pool, size: i64) -> ?ptr<u8> {
     if pool.remaining < want {
         // SAFETY: a fresh chunk of chunk_bytes() bytes
         let chunk = unsafe malloc(cast<usize>(chunk_bytes()));
-        // SAFETY: chunk is a live region of chunk_bytes() bytes
-        pool.bump = unsafe int_from_ptr<usize>(chunk);
-        pool.remaining = chunk_bytes();
+        // SAFETY: chunk is either null or a live region of chunk_bytes() bytes
+        let addr = unsafe int_from_ptr<usize>(chunk);
+        if addr == cast<usize>(0) {
+            return null;
+        }
+        // SAFETY: the first 8 bytes of the newly allocated chunk store the chunk list link
+        unsafe ptr_from_int<ptr<usize>>(addr).* = pool.chunks;
+        pool.chunks = addr;
+        pool.bump = addr + cast<usize>(16);
+        pool.remaining = chunk_bytes() - 16;
     }
     let out = pool.bump;
     pool.bump = pool.bump + cast<usize>(want);

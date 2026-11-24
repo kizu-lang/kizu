@@ -239,6 +239,7 @@ fn (self: &var Checker) check_user_call(
     let called = try self.resolve_called_function(name);
     let function = self.function_named(called) orelse
         return try self.error1(tree, ast::zero_span(), "move error: undefined function `%s`", Arg::Str(called));
+    try self.reach_std_function(function);
     if self.has_type_params(function) {
         return try self.error1(
             tree, ast::zero_span(), "move error: `%s` requires explicit static arguments", Arg::Str(name)
@@ -1547,14 +1548,44 @@ fn (self: &var Checker) check_print_call(
     call: ast::CallExpr,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
-    var ignored = empty_name();
+    var arg_type = empty_name();
     var index = 0;
     while arg_at(tree, call.args, index) |arg| {
-        if try self.read_expr(tree, env, arg, &var ignored) |failed| {
+        if try self.read_expr(tree, env, arg, &var arg_type) |failed| {
             return move failed;
         }
         index = index + 1;
     }
+    try self.reach_print_target(arg_type);
     out.* = self.common.void_name;
     return null;
+}
+
+fn (self: &var Checker) reach_print_target(arg_type: Name) -> !void {
+    if !self.lazy_std {
+        return;
+    }
+    if self.names.is(arg_type, "[]u8") or self.names.is(arg_type, "bool") or self.is_error_set(arg_type) {
+        return;
+    }
+    if self.names.is(arg_type, "i64") or self.names.is(arg_type, "i32") or
+        self.names.is(arg_type, "i16") or self.names.is(arg_type, "i8") or
+        self.names.is(arg_type, "isize") {
+        return self.reach_std_by_name("std::fmt::write_i64");
+    }
+    if self.names.is(arg_type, "u64") or self.names.is(arg_type, "u32") or
+        self.names.is(arg_type, "u16") or self.names.is(arg_type, "u8") or
+        self.names.is(arg_type, "usize") {
+        return self.reach_std_by_name("std::fmt::write_u64");
+    }
+    if self.names.is(arg_type, "f64") or self.names.is(arg_type, "f32") {
+        return self.reach_std_by_name("std::fmt::write_f64");
+    }
+    if self.is_enum(arg_type) {
+        return self.reach_std_by_name("std::mem::fixed_buffer");
+    }
+    try self.reach_std_by_name("std::fmt::write_i64");
+    try self.reach_std_by_name("std::fmt::write_u64");
+    try self.reach_std_by_name("std::fmt::write_f64");
+    return self.reach_std_by_name("std::mem::fixed_buffer");
 }

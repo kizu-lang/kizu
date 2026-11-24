@@ -20,8 +20,16 @@ fn artifact_target() -> []u8 {
     return "native-plan/exe";
 }
 
+fn exec_target() -> []u8 {
+    return "native-plan/exec";
+}
+
 fn header() -> []u8 {
     return "kizu-native-plan-1";
+}
+
+fn exec_header() -> []u8 {
+    return "kizu-native-exec-plan-1";
 }
 
 pub struct InputLog {
@@ -411,4 +419,79 @@ pub fn restore(
     let metadata_bytes = metadata_file.as_bytes();
     try install(io, allocator, metadata_bytes, metadata, false);
     return true;
+}
+
+pub fn store_exec(
+    io: Io,
+    allocator: Allocator,
+    cache: &var buildcache::Cache,
+    request: []u8,
+    log: &InputLog,
+    exe_key: []u8
+) -> !void {
+    if !log.stable or mem::len(exe_key) == 0 or has_newline(exe_key) {
+        return;
+    }
+    var plan = try string::from_bytes(allocator, exec_header());
+    defer plan.deinit(allocator);
+    try plan.append_byte(allocator, cast<u8>(10));
+    if !try append_records(allocator, "f", &log.files, &var plan) {
+        return;
+    }
+    if !try append_records(allocator, "d", &log.dirs, &var plan) {
+        return;
+    }
+    try plan.append_bytes(allocator, "exe-key ");
+    try plan.append_bytes(allocator, exe_key);
+    try plan.append_byte(allocator, cast<u8>(10));
+    let pending = try cache.replace_artifact(io, allocator, artifact_name(), exec_target(), request);
+    errdefer pending.deinit(allocator);
+    let scratch = pending.scratch.as_bytes();
+    let plan_bytes = plan.as_bytes();
+    try fs::write_file(io, scratch, plan_bytes);
+    return cache.finish_artifact(io, allocator, move pending);
+}
+
+pub fn restore_exec(
+    io: Io,
+    allocator: Allocator,
+    cache: &var buildcache::Cache,
+    request: []u8,
+    out_exe: &var string::String
+) -> !bool {
+    var stored = string::new(allocator);
+    defer stored.deinit(allocator);
+    if !try cache.find_artifact(io, allocator, artifact_name(), exec_target(), request, &var stored) {
+        return false;
+    }
+    let stored_bytes = stored.as_bytes();
+    let plan = fs::read_file(io, allocator, stored_bytes, mem::Limit::Unlimited) catch return false;
+    defer plan.deinit(allocator);
+    let plan_bytes = plan.as_bytes();
+    let first_end = line_end(plan_bytes, 0);
+    if first_end < 0 or !mem::equal_bytes(plan_bytes[0..first_end], exec_header()) {
+        return false;
+    }
+    var at = first_end + 1;
+    while is_record(plan_bytes, at) {
+        let end = line_end(plan_bytes, at);
+        if end < 0 or !try record_matches(io, allocator, plan_bytes[at..end]) {
+            return false;
+        }
+        at = end + 1;
+    }
+    let key_end = line_end(plan_bytes, at);
+    if key_end < 0 {
+        return false;
+    }
+    let key_line = plan_bytes[at..key_end];
+    let prefix = "exe-key ";
+    if !mem::starts_with(key_line, prefix) {
+        return false;
+    }
+    let exe_key = key_line[mem::len(prefix)..mem::len(key_line)];
+    if mem::len(exe_key) == 0 {
+        return false;
+    }
+    return cache.find_artifact_by_key(io, allocator, exe_key, out_exe);
 }

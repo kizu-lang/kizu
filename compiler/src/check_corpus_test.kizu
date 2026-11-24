@@ -1,6 +1,7 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::ownership;
+import compiler::internal::pool;
 import compiler::internal::project;
 import compiler::internal::types;
 import std::array;
@@ -79,6 +80,7 @@ fn text_starts_with_std(tree: &ast::Ast, text: ast::Text) -> bool {
 fn render_load_section(
     io: Io,
     allocator: Allocator,
+    std_cache: &project::StdCache,
     input: []u8
 ) -> !string::String {
     var out = string::new(allocator);
@@ -89,7 +91,8 @@ fn render_load_section(
     defer tree.deinit(allocator);
     var loader = try project::new_loader(io, allocator, "lib/kizu");
     defer loader.deinit(allocator);
-    let loaded = try loader.load_source(&var tree, "", input);
+    loader.std_signatures_only = true;
+    let loaded = try loader.load_source_cached(&var tree, "", input, std_cache);
     match loaded {
         Error(failed) => {
             defer failed.deinit(allocator);
@@ -220,44 +223,61 @@ fn append_diagnostic_line(allocator: Allocator,
     return;
 }
 
-test "check corpus loads and checks like the shipping compiler" {
-    let allocator = mem::page_allocator();
-    let io = io::blocking();
-    var entries = try fs::read_dir(io, allocator, "compiler/tests/check");
-    defer entries.deinit(allocator);
-    var cases = 0;
-    var failures = 0;
-    var index = 0;
-    while entries.at(index) |entry| {
-        index = index + 1;
-        if entry.is_dir {
-            continue;
-        }
-        cases = cases + 1;
-        let entry_path = entry.path.as_bytes();
-        let data = try fs::read_file(io, allocator, entry_path, mem::Limit::Unlimited);
-        defer data.deinit(allocator);
-        let bytes = data.as_bytes();
-        if split_check_case(bytes) |cut| {
-            let input = bytes[0..cut];
-            let want = bytes[cut + mem::len(check_marker())..mem::len(bytes)];
-            let got = try render_load_section(io, allocator, input);
-            defer got.deinit(allocator);
-            let got_bytes = got.as_bytes();
-            if !mem::equal_bytes(want, got_bytes) {
-                failures = failures + 1;
-                try io::write_stderr_line(io, entry_path);
-                try io::write_stderr_line(io, "--- want");
-                try io::write_stderr(io, want);
-                try io::write_stderr_line(io, "--- got");
-                try io::write_stderr(io, got_bytes);
+fn run_check_corpus(io: Io, allocator: Allocator) -> !void {
+    let cached = try project::load_std_cache(io, allocator, "lib/kizu");
+    match cached {
+        Error(failed) => {
+            defer failed.deinit(allocator);
+            try io::write_stderr_line(io, "std cache could not be read");
+            testing::expect(false);
+        },
+        Cache(std_cache) => {
+            defer std_cache.deinit(allocator);
+            var entries = try fs::read_dir(io, allocator, "compiler/tests/check");
+            defer entries.deinit(allocator);
+            var cases = 0;
+            var failures = 0;
+            var index = 0;
+            while entries.at(index) |entry| {
+                index = index + 1;
+                if entry.is_dir {
+                    continue;
+                }
+                cases = cases + 1;
+                let entry_path = entry.path.as_bytes();
+                let data = try fs::read_file(io, allocator, entry_path, mem::Limit::Unlimited);
+                defer data.deinit(allocator);
+                let bytes = data.as_bytes();
+                if split_check_case(bytes) |cut| {
+                    let input = bytes[0..cut];
+                    let want = bytes[cut + mem::len(check_marker())..mem::len(bytes)];
+                    let got = try render_load_section(io, allocator, &std_cache, input);
+                    defer got.deinit(allocator);
+                    let got_bytes = got.as_bytes();
+                    if !mem::equal_bytes(want, got_bytes) {
+                        failures = failures + 1;
+                        try io::write_stderr_line(io, entry_path);
+                        try io::write_stderr_line(io, "--- want");
+                        try io::write_stderr(io, want);
+                        try io::write_stderr_line(io, "--- got");
+                        try io::write_stderr(io, got_bytes);
+                    }
+                } else {
+                    failures = failures + 1;
+                    try io::write_stderr(io, "no `// check` marker: ");
+                    try io::write_stderr_line(io, entry_path);
+                }
             }
-        } else {
-            failures = failures + 1;
-            try io::write_stderr(io, "no `// check` marker: ");
-            try io::write_stderr_line(io, entry_path);
-        }
+            testing::expect(cases > 0);
+            testing::expect_equal<i64>(0, failures);
+        },
     }
-    testing::expect(cases > 0);
-    testing::expect_equal<i64>(0, failures);
+    return;
+}
+
+test "check corpus loads and checks like the shipping compiler" {
+    var mem_pool = try pool::new(mem::page_allocator());
+    defer mem_pool.deinit(mem::page_allocator());
+    let allocator = pool::allocator_of(&var mem_pool);
+    return run_check_corpus(io::blocking(), allocator);
 }

@@ -34,6 +34,7 @@ pub struct Options {
     pub library_search: array::Array<string::String>,
     pub framework_search: array::Array<string::String>,
     pub compiler: string::String,
+    pub linker_version: string::String,
 }
 
 pub struct TempDirs {
@@ -66,6 +67,8 @@ pub fn (self: &var TempDirs) claim_dir(io: Io, allocator: Allocator) -> !string:
     defer dir.deinit(allocator);
     try dir.append_string(allocator, &self.base);
     try dir.append_bytes(allocator, "/kizu-native-");
+    try fmt::append_i64(allocator, &var dir, fsutil::current_pid());
+    try dir.append_bytes(allocator, "-");
     try fmt::append_i64(allocator, &var dir, self.stamp);
     try dir.append_bytes(allocator, "-");
     try fmt::append_i64(allocator, &var dir, self.next);
@@ -156,6 +159,22 @@ pub fn executable(
     sets: &map::Map<[]u8, map::Map<[]u8, i64>>,
     out_exe: &var string::String
 ) -> !?diagnostic::Diagnostic {
+    var unused_key = string::new(allocator);
+    defer unused_key.deinit(allocator);
+    return executable_with_key(io, allocator, temps, options, host, units, sets, out_exe, &var unused_key);
+}
+
+pub fn executable_with_key(
+    io: Io,
+    allocator: Allocator,
+    temps: &var TempDirs,
+    options: &Options,
+    host: &string::String,
+    units: &array::Array<string::String>,
+    sets: &map::Map<[]u8, map::Map<[]u8, i64>>,
+    out_exe: &var string::String,
+    out_key: &var string::String
+) -> !?diagnostic::Diagnostic {
     if try validate_options(allocator, options) |failed| {
         return move failed;
     }
@@ -175,13 +194,14 @@ pub fn executable(
     defer digests.deinit(allocator);
     try append_unit_digests(allocator, &cache, units, &var digests);
     let digest_bytes = digests.as_bytes();
-    let plan = try cache.get_or_build_artifact(
+    let plan = try cache.get_or_build_artifact_key(
         io,
         allocator,
         "native-exe",
         target_bytes,
         digest_bytes,
-        out_exe
+        out_exe,
+        out_key
     );
     match plan {
         Hit => {
@@ -465,22 +485,43 @@ fn append_fields(allocator: Allocator, out: &var string::String, values: &array:
 
 pub fn append_build_identity(
     allocator: Allocator,
-    options: &Options,
+    options: &var Options,
     host: &string::String,
     out: &var string::String
 ) -> !?diagnostic::Diagnostic {
-    var version = string::new(allocator);
-    defer version.deinit(allocator);
-    if try linker_version(allocator, options, target_is_arm64(options, host), &var version) |failed| {
+    let arm64 = target_is_arm64(options, host);
+    if try ensure_linker_version(allocator, options, arm64) |failed| {
         return move failed;
     }
-    let version_bytes = version.as_bytes();
+    let version_bytes = options.linker_version.as_bytes();
     try append_field(allocator, out, version_bytes);
+    try append_common_identity(allocator, options, host, true, out);
+    return null;
+}
+
+pub fn append_exec_identity(
+    allocator: Allocator,
+    options: &Options,
+    host: &string::String,
+    out: &var string::String
+) -> !void {
+    return append_common_identity(allocator, options, host, false, out);
+}
+
+fn append_common_identity(
+    allocator: Allocator,
+    options: &Options,
+    host: &string::String,
+    include_output: bool,
+    out: &var string::String
+) -> !void {
     let host_bytes = host.as_bytes();
     try append_field(allocator, out, host_bytes);
     try append_field(allocator, out, process::env("SDKROOT") orelse "");
-    let output = options.output.as_bytes();
-    try append_field(allocator, out, output);
+    if include_output {
+        let output = options.output.as_bytes();
+        try append_field(allocator, out, output);
+    }
     let triple = options.triple.as_bytes();
     try append_field(allocator, out, triple);
     let cpu = options.cpu.as_bytes();
@@ -507,7 +548,7 @@ pub fn append_build_identity(
     try append_fields(allocator, out, &options.frameworks);
     try append_fields(allocator, out, &options.library_search);
     try append_fields(allocator, out, &options.framework_search);
-    return null;
+    return;
 }
 
 pub fn links_only_system(options: &Options) -> bool {
@@ -968,7 +1009,37 @@ fn module_for_linker(
     return out.append_bytes(allocator, text[at + mem::len(inline_probe)..size]);
 }
 
+fn ensure_linker_version(
+    allocator: Allocator,
+    options: &var Options,
+    arm64: bool
+) -> !?diagnostic::Diagnostic {
+    if options.linker_version.len() > 0 {
+        return null;
+    }
+    var version = string::new(allocator);
+    defer version.deinit(allocator);
+    if try probe_linker_version(allocator, options, arm64, &var version) |failed| {
+        return move failed;
+    }
+    try options.linker_version.append_string(allocator, &version);
+    return null;
+}
+
 fn linker_version(
+    allocator: Allocator,
+    options: &Options,
+    arm64: bool,
+    out: &var string::String
+) -> !?diagnostic::Diagnostic {
+    if options.linker_version.len() > 0 {
+        try out.append_string(allocator, &options.linker_version);
+        return null;
+    }
+    return probe_linker_version(allocator, options, arm64, out);
+}
+
+fn probe_linker_version(
     allocator: Allocator,
     options: &Options,
     arm64: bool,

@@ -78,6 +78,10 @@ fn (self: &Loader) missing_lib_file(file: []u8) -> !diagnostic::Diagnostic {
 
 fn (self: &var Loader) remember_std_modules(graph: &Graph) -> !void {
     let allocator = self.allocator;
+    if graph.package_name.len() > 0 {
+        let package_name = graph.package_name.as_bytes();
+        try self.packages.insert(allocator, package_name, true);
+    }
     var index = 0;
     while graph.modules.at(index) |module| {
         index = index + 1;
@@ -96,8 +100,272 @@ struct StdLoader {
     allocator: Allocator,
     io: Io,
     paths: array::Array<string::String>,
+    module_index: map::Map<[]u8, i64>,
     visited: map::Map<[]u8, bool>,
     out: array::Array<string::String>,
+}
+
+pub struct StdCache {
+    pub graph: Graph,
+    module_index: map::Map<[]u8, i64>,
+    paths: array::Array<string::String>,
+    deps: map::Map<[]u8, array::Array<string::String>>,
+    files: map::Map<[]u8, string::String>,
+    pub error_codes: StdErrorCodes,
+}
+
+pub union StdCacheResult {
+    Cache(StdCache),
+    Error(diagnostic::Diagnostic),
+}
+
+pub fn load_std_cache(io: Io, allocator: Allocator, lib_dir: []u8) -> !StdCacheResult {
+    var loader = try new_loader(io, allocator, lib_dir);
+    defer loader.deinit(allocator);
+    let outcome = try loader.read_std_graph();
+    match outcome {
+        Error(failed) => return StdCacheResult::Error(move failed),
+        Graph(graph) => return build_std_cache(io, allocator, move graph),
+    }
+}
+
+fn build_std_cache(io: Io, allocator: Allocator, graph: Graph) -> !StdCacheResult {
+    errdefer graph.deinit(allocator);
+    var module_index = map::new<[]u8, i64>(allocator);
+    errdefer module_index.deinit(allocator);
+    var paths = array::new<string::String>(allocator);
+    errdefer paths.deinit(allocator);
+    var files = map::new<[]u8, string::String>(allocator);
+    errdefer files.deinit(allocator);
+    var index = 0;
+    while graph.modules.at(index) |module| {
+        let mod_path = module.path.as_bytes();
+        try module_index.insert(allocator, mod_path, index);
+        if module.files.len() > 0 {
+            try paths.append(allocator, try copy_string(allocator, &module.path));
+            var file_index = 0;
+            while module.files.at(file_index) |file| {
+                file_index = file_index + 1;
+                let file_bytes = file.as_bytes();
+                let cleaned = try path::clean(allocator, file_bytes);
+                defer cleaned.deinit(allocator);
+                let cleaned_bytes = cleaned.as_bytes();
+                if !files.contains(cleaned_bytes) {
+                    let text = try fs::read_file(io, allocator, file_bytes, mem::Limit::Unlimited);
+                    errdefer text.deinit(allocator);
+                    try files.insert(allocator, cleaned_bytes, move text);
+                }
+            }
+        }
+        index = index + 1;
+    }
+    try sort::strings(&var paths);
+    let deps = try build_std_cache_deps(allocator, &graph, &paths, &files);
+    errdefer deps.deinit(allocator);
+    let codes_outcome = try number_cached_error_sets(allocator, &graph, &files);
+    match codes_outcome {
+        Error(failed) => {
+            deps.deinit(allocator);
+            files.deinit(allocator);
+            paths.deinit(allocator);
+            module_index.deinit(allocator);
+            graph.deinit(allocator);
+            return StdCacheResult::Error(move failed);
+        },
+        Codes(error_codes) => {
+            return StdCacheResult::Cache(StdCache {
+                graph: move graph,
+                module_index: move module_index,
+                paths: move paths,
+                deps: move deps,
+                files: move files,
+                error_codes: move error_codes
+            });
+        },
+    }
+}
+
+fn build_std_cache_deps(
+    allocator: Allocator,
+    graph: &Graph,
+    paths: &array::Array<string::String>,
+    files: &map::Map<[]u8, string::String>
+) -> !map::Map<[]u8, array::Array<string::String>> {
+    var deps = map::new<[]u8, array::Array<string::String>>(allocator);
+    errdefer deps.deinit(allocator);
+    var index = 0;
+    while graph.modules.at(index) |module| {
+        index = index + 1;
+        if module.files.len() == 0 {
+            continue;
+        }
+        var mod_deps = array::new<string::String>(allocator);
+        errdefer mod_deps.deinit(allocator);
+        var seen_deps = map::new<[]u8, bool>(allocator);
+        defer seen_deps.deinit(allocator);
+        var file_index = 0;
+        while module.files.at(file_index) |file| {
+            file_index = file_index + 1;
+            let file_bytes = file.as_bytes();
+            let cleaned = try path::clean(allocator, file_bytes);
+            defer cleaned.deinit(allocator);
+            let cleaned_bytes = cleaned.as_bytes();
+            if files.at(cleaned_bytes) |text| {
+                let text_bytes = text.as_bytes();
+                var scanned = try scan_std_paths(allocator, text_bytes);
+                defer scanned.deinit(allocator);
+                var path_index = 0;
+                while paths.at(path_index) |candidate| {
+                    path_index = path_index + 1;
+                    let cand_bytes = candidate.as_bytes();
+                    if scanned.contains(cand_bytes) and !seen_deps.contains(cand_bytes) {
+                        try seen_deps.insert(allocator, cand_bytes, true);
+                        try mod_deps.append(allocator, try copy_string(allocator, candidate));
+                    }
+                }
+            }
+        }
+        let mod_path = module.path.as_bytes();
+        try deps.insert(allocator, mod_path, move mod_deps);
+    }
+    return move deps;
+}
+
+pub fn (self: &StdCache) clone_error_codes(allocator: Allocator) -> !StdErrorCodes {
+    var sets = map::new<[]u8, map::Map<[]u8, i64>>(allocator);
+    errdefer sets.deinit(allocator);
+    var index = 0;
+    while self.error_codes.sets.key_at(index) |set_name| {
+        index = index + 1;
+        if self.error_codes.sets.at(set_name) |members| {
+            var copied = map::new<[]u8, i64>(allocator);
+            errdefer copied.deinit(allocator);
+            var member_index = 0;
+            while members.key_at(member_index) |member_name| {
+                member_index = member_index + 1;
+                if members.get(member_name) |code| {
+                    try copied.insert(allocator, member_name, code);
+                }
+            }
+            try sets.insert(allocator, set_name, move copied);
+        }
+    }
+    return StdErrorCodes { sets: move sets, base: self.error_codes.base };
+}
+
+fn (self: &StdCache) visit_cached(
+    allocator: Allocator,
+    module_path: []u8,
+    visited: &var map::Map<[]u8, bool>,
+    out: &var array::Array<string::String>
+) -> !void {
+    if visited.contains(module_path) {
+        return;
+    }
+    try visited.insert(allocator, module_path, true);
+    if self.deps.at(module_path) |dependencies| {
+        var dep_index = 0;
+        while dependencies.at(dep_index) |dependency| {
+            dep_index = dep_index + 1;
+            let dep_bytes = dependency.as_bytes();
+            try self.visit_cached(allocator, dep_bytes, visited, out);
+        }
+    }
+    return out.append(allocator, try string::from_bytes(allocator, module_path));
+}
+
+fn (self: &StdCache) named_cached(
+    allocator: Allocator,
+    import_path: []u8
+) -> !array::Array<string::String> {
+    var wanted = array::new<string::String>(allocator);
+    errdefer wanted.deinit(allocator);
+    if mem::equal_bytes(import_path, std_root()) {
+        var index = 0;
+        while self.paths.at(index) |module_path| {
+            index = index + 1;
+            let bytes = module_path.as_bytes();
+            if !internal_module(bytes).internal {
+                try wanted.append(allocator, try copy_string(allocator, module_path));
+            }
+        }
+        return move wanted;
+    }
+    if self.module_index.get(import_path) |slot| {
+        if self.graph.modules.at(slot) |module| {
+            if module.files.len() > 0 {
+                try wanted.append(allocator, try copy_string(allocator, &module.path));
+            }
+        }
+    }
+    return move wanted;
+}
+
+fn (self: &var Loader) load_std_cached(
+    tree: &var ast::Ast,
+    cache: &StdCache
+) -> !?diagnostic::Diagnostic {
+    try self.remember_std_modules(&cache.graph);
+    let imports = try self.std_import_paths(tree);
+    defer imports.deinit(self.allocator);
+    if imports.len() == 0 {
+        return null;
+    }
+    var visited = map::new<[]u8, bool>(self.allocator);
+    defer visited.deinit(self.allocator);
+    var out = array::new<string::String>(self.allocator);
+    defer out.deinit(self.allocator);
+    var index = 0;
+    while imports.at(index) |import_path| {
+        index = index + 1;
+        let import_bytes = import_path.as_bytes();
+        let wanted = try cache.named_cached(self.allocator, import_bytes);
+        defer wanted.deinit(self.allocator);
+        var wanted_index = 0;
+        while wanted.at(wanted_index) |module_path| {
+            wanted_index = wanted_index + 1;
+            let module_bytes = module_path.as_bytes();
+            try cache.visit_cached(self.allocator, module_bytes, &var visited, &var out);
+        }
+    }
+    var modules = array::new<Module>(self.allocator);
+    errdefer modules.deinit(self.allocator);
+    index = 0;
+    while out.at(index) |module_path| {
+        index = index + 1;
+        let mod_bytes = module_path.as_bytes();
+        if cache.module_index.get(mod_bytes) |slot| {
+            if cache.graph.modules.at(slot) |module| {
+                var file_index = 0;
+                while module.files.at(file_index) |file| {
+                    file_index = file_index + 1;
+                    let file_bytes = file.as_bytes();
+                    let cleaned = try path::clean(self.allocator, file_bytes);
+                    defer cleaned.deinit(self.allocator);
+                    let cleaned_bytes = cleaned.as_bytes();
+                    if cache.files.at(cleaned_bytes) |text| {
+                        let text_bytes = text.as_bytes();
+                        try self.inputs.add_file(self.allocator, file_bytes, text_bytes);
+                        try self.source_overrides.insert(
+                            self.allocator,
+                            cleaned_bytes,
+                            try copy_string(self.allocator, text)
+                        );
+                    }
+                }
+                try modules.append(self.allocator, try clone_module(self.allocator, module));
+            }
+        }
+    }
+    var root = try copy_string(self.allocator, &cache.graph.root);
+    errdefer root.deinit(self.allocator);
+    let std_graph = Graph {
+        package_name: try copy_string(self.allocator, &cache.graph.package_name),
+        modules: move modules,
+        root: move root
+    };
+    defer std_graph.deinit(self.allocator);
+    return self.load_package(tree, &std_graph, false, true);
 }
 
 fn (self: &Loader) std_modules_for(
@@ -109,17 +377,19 @@ fn (self: &Loader) std_modules_for(
         allocator: self.allocator,
         io: self.io,
         paths: array::new<string::String>(self.allocator),
+        module_index: map::new<[]u8, i64>(self.allocator),
         visited: map::new<[]u8, bool>(self.allocator),
         out: array::new<string::String>(self.allocator)
     };
     defer loader.deinit(self.allocator);
     var index = 0;
     while graph.modules.at(index) |module| {
-        index = index + 1;
-        if module.files.len() == 0 {
-            continue;
+        let mod_path = module.path.as_bytes();
+        try loader.module_index.insert(self.allocator, mod_path, index);
+        if module.files.len() > 0 {
+            try loader.paths.append(self.allocator, try copy_string(self.allocator, &module.path));
         }
-        try loader.paths.append(self.allocator, try copy_string(self.allocator, &module.path));
+        index = index + 1;
     }
     try sort::strings(&var loader.paths);
     index = 0;
@@ -140,10 +410,9 @@ fn (self: &Loader) std_modules_for(
     index = 0;
     while loader.out.at(index) |module_path| {
         index = index + 1;
-        var graph_index = 0;
-        while graph.modules.at(graph_index) |module| {
-            graph_index = graph_index + 1;
-            if same_text(&module.path, module_path) {
+        let mod_bytes = module_path.as_bytes();
+        if loader.module_index.get(mod_bytes) |slot| {
+            if graph.modules.at(slot) |module| {
                 try modules.append(self.allocator, try clone_module(self.allocator, module));
             }
         }
@@ -193,13 +462,8 @@ fn (self: &StdLoader) named(import_path: []u8) -> !array::Array<string::String> 
         }
         return move wanted;
     }
-    var index = 0;
-    while self.paths.at(index) |module_path| {
-        index = index + 1;
-        if text_is(module_path, import_path) {
-            try wanted.append(self.allocator, try copy_string(self.allocator, module_path));
-            return move wanted;
-        }
+    if self.module_index.get(import_path) |_| {
+        try wanted.append(self.allocator, try string::from_bytes(self.allocator, import_path));
     }
     return move wanted;
 }
@@ -214,26 +478,23 @@ fn (self: &var StdLoader) visit(
         return;
     }
     try self.visited.insert(allocator, module_path, true);
-    var graph_index = 0;
-    while graph.modules.at(graph_index) |module| {
-        graph_index = graph_index + 1;
-        if !text_is(&module.path, module_path) {
-            continue;
-        }
-        var file_index = 0;
-        while module.files.at(file_index) |file| {
-            file_index = file_index + 1;
-            let file_bytes = file.as_bytes();
-            let text = try fs::read_file(self.io, self.allocator, file_bytes, mem::Limit::Unlimited);
-            errdefer text.deinit(self.allocator);
-            let dependencies = try self.references(&text);
-            defer dependencies.deinit(self.allocator);
-            try sources.insert(allocator, file_bytes, move text);
-            var dependency_index = 0;
-            while dependencies.at(dependency_index) |dependency| {
-                dependency_index = dependency_index + 1;
-                let dependency_bytes = dependency.as_bytes();
-                try self.visit(allocator, graph, dependency_bytes, sources);
+    if self.module_index.get(module_path) |slot| {
+        if graph.modules.at(slot) |module| {
+            var file_index = 0;
+            while module.files.at(file_index) |file| {
+                file_index = file_index + 1;
+                let file_bytes = file.as_bytes();
+                let text = try fs::read_file(self.io, self.allocator, file_bytes, mem::Limit::Unlimited);
+                errdefer text.deinit(self.allocator);
+                let dependencies = try self.references(&text);
+                defer dependencies.deinit(self.allocator);
+                try sources.insert(allocator, file_bytes, move text);
+                var dependency_index = 0;
+                while dependencies.at(dependency_index) |dependency| {
+                    dependency_index = dependency_index + 1;
+                    let dependency_bytes = dependency.as_bytes();
+                    try self.visit(allocator, graph, dependency_bytes, sources);
+                }
             }
         }
     }
@@ -291,6 +552,10 @@ fn scan_std_paths(allocator: Allocator, text: []u8) -> !map::Map<[]u8, bool> {
             try prefix.append_bytes(allocator, "::");
             try prefix.append_bytes(allocator, text[part.start..part.end]);
         }
+        if segments == 2 {
+            let prefix_bytes = prefix.as_bytes();
+            try seen.insert(allocator, prefix_bytes, true);
+        }
     }
     return move seen;
 }
@@ -303,6 +568,10 @@ fn (self: &var Loader) load_std(tree: &var ast::Ast) -> !?diagnostic::Diagnostic
             try self.remember_std_modules(&graph);
             let imports = try self.std_import_paths(tree);
             defer imports.deinit(self.allocator);
+            if imports.len() == 0 {
+                try self.std_graph.append(self.allocator, move graph);
+                return null;
+            }
             var std_sources = map::new<[]u8, string::String>(self.allocator);
             defer std_sources.deinit(self.allocator);
             let std_graph = try self.std_modules_for(&graph, &imports, &var std_sources);
@@ -320,10 +589,12 @@ fn (self: &Loader) std_import_paths(tree: &ast::Ast) -> !array::Array<string::St
     defer seen.deinit(self.allocator);
     var paths = array::new<string::String>(self.allocator);
     errdefer paths.deinit(self.allocator);
-    let print_module = try string::from_bytes(self.allocator, print_module_path());
-    errdefer print_module.deinit(self.allocator);
-    try set_insert(self.allocator, &var seen, &print_module);
-    try paths.append(self.allocator, move print_module);
+    if tree.uses_print {
+        let print_module = try string::from_bytes(self.allocator, print_module_path());
+        errdefer print_module.deinit(self.allocator);
+        try set_insert(self.allocator, &var seen, &print_module);
+        try paths.append(self.allocator, move print_module);
+    }
     let groups = try self.sorted_module_groups();
     defer groups.deinit(self.allocator);
     var group_index = 0;
@@ -344,7 +615,10 @@ fn (self: &Loader) std_import_paths(tree: &ast::Ast) -> !array::Array<string::St
                         }
                         let joined = try join_import_path(self.allocator, tree, value);
                         errdefer joined.deinit(self.allocator);
-                        if set_contains(&seen, &joined) {
+                        if !tree.locate_names and text_is(&joined, std_root()) {
+                            joined.deinit(self.allocator);
+                            try self.append_referenced_std_paths(file, &var seen, &var paths);
+                        } else if set_contains(&seen, &joined) {
                             joined.deinit(self.allocator);
                         } else {
                             try set_insert(self.allocator, &var seen, &joined);
@@ -357,6 +631,38 @@ fn (self: &Loader) std_import_paths(tree: &ast::Ast) -> !array::Array<string::St
         }
     }
     return move paths;
+}
+
+fn (self: &Loader) append_referenced_std_paths(
+    file: &ModuleFile,
+    seen: &var map::Map<[]u8, bool>,
+    paths: &var array::Array<string::String>
+) -> !void {
+    let source_id = file.source orelse return;
+    if self.sources.at(source_id) |input| {
+        let text = input.text.as_bytes();
+        var scanned = try scan_std_paths(self.allocator, text);
+        defer scanned.deinit(self.allocator);
+        var found = array::new<string::String>(self.allocator);
+        defer found.deinit(self.allocator);
+        var index = 0;
+        while scanned.key_at(index) |candidate| {
+            index = index + 1;
+            if self.std_module(candidate) and !internal_module(candidate).internal {
+                try found.append(self.allocator, try string::from_bytes(self.allocator, candidate));
+            }
+        }
+        try sort::strings(&var found);
+        var found_index = 0;
+        while found.at(found_index) |module_path| {
+            found_index = found_index + 1;
+            if !set_contains(seen, module_path) {
+                try set_insert(self.allocator, seen, module_path);
+                try paths.append(self.allocator, try copy_string(self.allocator, module_path));
+            }
+        }
+    }
+    return;
 }
 
 fn import_starts_with_std(tree: &ast::Ast, value: &ast::ImportDecl) -> bool {
@@ -463,6 +769,41 @@ fn (self: &Loader) number_std_error_sets(
     return StdErrorCodesResult::Codes(StdErrorCodes { sets: move sets, base: code });
 }
 
+fn number_cached_error_sets(
+    allocator: Allocator,
+    graph: &Graph,
+    files: &map::Map<[]u8, string::String>
+) -> !StdErrorCodesResult {
+    var sets = map::new<[]u8, map::Map<[]u8, i64>>(allocator);
+    errdefer sets.deinit(allocator);
+    var code = 1;
+    var index = 0;
+    while graph.modules.at(index) |module| {
+        index = index + 1;
+        let mod_files = try module.source_files(allocator, false);
+        defer mod_files.deinit(allocator);
+        var file_index = 0;
+        while mod_files.at(file_index) |file| {
+            file_index = file_index + 1;
+            let file_bytes = file.as_bytes();
+            let cleaned = try path::clean(allocator, file_bytes);
+            defer cleaned.deinit(allocator);
+            let cleaned_bytes = cleaned.as_bytes();
+            if files.at(cleaned_bytes) |text| {
+                let bytes = text.as_bytes();
+                let module_path = module.path.as_bytes();
+                if try collect_error_sets_from_bytes(
+                    allocator, file_bytes, module_path, bytes, &var sets, &var code
+                ) |failed| {
+                    sets.deinit(allocator);
+                    return StdErrorCodesResult::Error(move failed);
+                }
+            }
+        }
+    }
+    return StdErrorCodesResult::Codes(StdErrorCodes { sets: move sets, base: code });
+}
+
 fn (self: &Loader) collect_error_sets(
     allocator: Allocator,
     file: []u8,
@@ -471,10 +812,29 @@ fn (self: &Loader) collect_error_sets(
     code: &var i64,
     read: &var buildplan::InputLog
 ) -> !?diagnostic::Diagnostic {
+    let cleaned = try path::clean(allocator, file);
+    defer cleaned.deinit(allocator);
+    let cleaned_bytes = cleaned.as_bytes();
+    if self.source_overrides.at(cleaned_bytes) |override_text| {
+        let bytes = override_text.as_bytes();
+        try read.add_file(allocator, file, bytes);
+        return collect_error_sets_from_bytes(allocator, file, module_path, bytes, sets, code);
+    }
     let text = try fs::read_file(self.io, self.allocator, file, mem::Limit::Unlimited);
     defer text.deinit(self.allocator);
     let bytes = text.as_bytes();
     try read.add_file(allocator, file, bytes);
+    return collect_error_sets_from_bytes(allocator, file, module_path, bytes, sets, code);
+}
+
+fn collect_error_sets_from_bytes(
+    allocator: Allocator,
+    file: []u8,
+    module_path: []u8,
+    bytes: []u8,
+    sets: &var map::Map<[]u8, map::Map<[]u8, i64>>,
+    code: &var i64
+) -> !?diagnostic::Diagnostic {
     if !may_spell_error(bytes) {
         return null;
     }

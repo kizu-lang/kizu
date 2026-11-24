@@ -1,3 +1,4 @@
+import compiler::internal::ast;
 import compiler::internal::lexer;
 import compiler::internal::token;
 import std::fs;
@@ -96,6 +97,93 @@ test "may_spell_error keeps every std file that declares an error set" {
                         testing::expect(may_spell_error(bytes));
                     }
                 }
+            }
+        },
+    }
+    return;
+}
+
+test "std cache skips std::fmt without print and loads it when print is used" {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    let cached = try load_std_cache(io, allocator, "lib/kizu");
+    match cached {
+        Error(failed) => {
+            defer failed.deinit(allocator);
+            testing::fail("std cache did not load");
+        },
+        Cache(std_cache) => {
+            defer std_cache.deinit(allocator);
+            var plain_tree = ast::new(allocator);
+            defer plain_tree.deinit(allocator);
+            var plain_loader = try new_loader(io, allocator, "lib/kizu");
+            defer plain_loader.deinit(allocator);
+            let plain = try plain_loader.load_source_cached(&var plain_tree, "plain.kizu", "fn main() -> i64 { return 1; }", &std_cache);
+            match plain {
+                Error(failed) => {
+                    defer failed.deinit(allocator);
+                    testing::fail("plain source did not load");
+                },
+                Program(program) => {
+                    defer program.deinit(allocator);
+                    testing::expect(!plain_tree.uses_print);
+                    testing::expect_equal<i64>(1, program.declarations.len());
+                },
+            }
+            var print_tree = ast::new(allocator);
+            defer print_tree.deinit(allocator);
+            var print_loader = try new_loader(io, allocator, "lib/kizu");
+            defer print_loader.deinit(allocator);
+            print_loader.std_signatures_only = true;
+            let printed = try print_loader.load_source_cached(&var print_tree, "print.kizu", "fn main() { print(1); }", &std_cache);
+            match printed {
+                Error(failed) => {
+                    defer failed.deinit(allocator);
+                    testing::fail("print source did not load");
+                },
+                Program(program) => {
+                    defer program.deinit(allocator);
+                    testing::expect(print_tree.uses_print);
+                    testing::expect(program.declarations.len() > 1);
+                },
+            }
+            var umbrella_tree = ast::new(allocator);
+            defer umbrella_tree.deinit(allocator);
+            var umbrella_loader = try new_loader(io, allocator, "lib/kizu");
+            defer umbrella_loader.deinit(allocator);
+            let umbrella_source =
+                \\import std;
+                \\fn main() -> i64 { return std::mem::len("ab"); }
+            ;
+            let umbrella = try umbrella_loader.load_source_cached(
+                &var umbrella_tree,
+                "umbrella.kizu",
+                umbrella_source,
+                &std_cache
+            );
+            match umbrella {
+                Error(failed) => {
+                    defer failed.deinit(allocator);
+                    testing::fail("umbrella import std did not load");
+                },
+                Program(program) => {
+                    defer program.deinit(allocator);
+                    var has_mem = false;
+                    var has_http = false;
+                    var mod_index = 0;
+                    while program.modules.get(mod_index) |mod_text| {
+                        mod_index = mod_index + 1;
+                        let name = umbrella_tree.texts.at(mod_text.node);
+                        if text_is(name, "std::mem") {
+                            has_mem = true;
+                        }
+                        if text_is(name, "std::http") {
+                            has_http = true;
+                        }
+                    }
+                    testing::expect(has_mem);
+                    testing::expect(!has_http);
+                },
             }
         },
     }
