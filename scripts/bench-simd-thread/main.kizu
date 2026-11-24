@@ -1,0 +1,683 @@
+import std::array;
+import std::fmt;
+import std::io;
+import std::mem;
+import std::process;
+import std::simd;
+import std::string;
+import std::thread;
+
+error Failure = thread::Error or mem::Error;
+
+struct Q8MatmulCtx {
+    w: []u8,
+    scales: []f32,
+    x: []f32,
+    in_dim: i64,
+    out_dim: i64,
+    chunk_patches: i64,
+}
+
+fn q8_scalar_batch(
+    w: []u8,
+    scales: []f32,
+    x: []f32,
+    out: &var []f32,
+    patches: i64,
+    in_dim: i64,
+    out_dim: i64
+) -> void {
+    for 0..patches |p| {
+        let x_off = p * in_dim;
+        let y_off = p * out_dim;
+        for 0..out_dim |r| {
+            let w_off = r * in_dim;
+            var acc: f32 = 0.0;
+            for 0..in_dim |c| {
+                let sv = (cast<i32>(w[w_off + c]) ^ 128) - 128;
+                acc = acc + cast<f32>(sv) * x[x_off + c];
+            }
+            out[y_off + r] = acc * scales[r];
+        }
+    }
+    return;
+}
+
+fn q8_simd_batch(
+    w: []u8,
+    scales: []f32,
+    x: []f32,
+    out: &var []f32,
+    patches: i64,
+    in_dim: i64,
+    out_dim: i64
+) -> void {
+    for 0..patches |p| {
+        let x_row = x[p * in_dim..(p + 1) * in_dim];
+        let y_off = p * out_dim;
+        for 0..out_dim |r| {
+            let w_row = w[r * in_dim..(r + 1) * in_dim];
+            out[y_off + r] = simd::dot_q8_f32(w_row, x_row) * scales[r];
+        }
+    }
+    return;
+}
+
+fn q8_simd_worker(ctx: &Q8MatmulCtx, out_chunk: &var []f32, chunk_idx: i64) -> Failure!void {
+    let in_dim = ctx.in_dim;
+    let out_dim = ctx.out_dim;
+    let p0 = chunk_idx * ctx.chunk_patches;
+    let local_patches = mem::count<f32>(out_chunk) / out_dim;
+    for 0..local_patches |lp| {
+        let p = p0 + lp;
+        let x_row = ctx.x[p * in_dim..(p + 1) * in_dim];
+        let y_off = lp * out_dim;
+        for 0..out_dim |r| {
+            let w_row = ctx.w[r * in_dim..(r + 1) * in_dim];
+            out_chunk[y_off + r] = simd::dot_q8_f32(w_row, x_row) * ctx.scales[r];
+        }
+    }
+    return;
+}
+
+struct LutCtx {
+    tables: []u8,
+    idx0: []i64,
+    idx1: []i64,
+    idx2: []i64,
+    idx3: []i64,
+    in_bits: []u8,
+    patches: i64,
+    chunk_gates: i64,
+}
+
+fn lut_scalar_all(ctx: &LutCtx, out: &var []u8, gates: i64) -> void {
+    let patches = ctx.patches;
+    for 0..gates |g| {
+        let t_off = g * 16;
+        let a_off = ctx.idx0[g] * patches;
+        let b_off = ctx.idx1[g] * patches;
+        let c_off = ctx.idx2[g] * patches;
+        let d_off = ctx.idx3[g] * patches;
+        let o_off = g * patches;
+        for 0..patches |p| {
+            let key = cast<i64>(ctx.in_bits[a_off + p]) +
+                cast<i64>(ctx.in_bits[b_off + p]) * 2 +
+                cast<i64>(ctx.in_bits[c_off + p]) * 4 +
+                cast<i64>(ctx.in_bits[d_off + p]) * 8;
+            out[o_off + p] = ctx.tables[t_off + key];
+        }
+    }
+    return;
+}
+
+fn lut_simd_range(ctx: &LutCtx, out: &var []u8, g0: i64, count: i64) -> void {
+    let patches = ctx.patches;
+    let one = simd::splat_u8x16(1);
+    let two = simd::splat_u8x16(2);
+    let four = simd::splat_u8x16(4);
+    let eight = simd::splat_u8x16(8);
+    for 0..count |lg| {
+        let g = g0 + lg;
+        let tbl = simd::load_u8x16(ctx.tables, g * 16);
+        let a_off = ctx.idx0[g] * patches;
+        let b_off = ctx.idx1[g] * patches;
+        let c_off = ctx.idx2[g] * patches;
+        let d_off = ctx.idx3[g] * patches;
+        let o_off = lg * patches;
+        var p = 0;
+        while p + 16 <= patches {
+            let b0 = simd::load_u8x16(ctx.in_bits, a_off + p) & one;
+            let b1 = simd::load_u8x16(ctx.in_bits, b_off + p) * two;
+            let b2 = simd::load_u8x16(ctx.in_bits, c_off + p) * four;
+            let b3 = simd::load_u8x16(ctx.in_bits, d_off + p) * eight;
+            let key = b0 | b1 | b2 | b3;
+            simd::store_u8x16(out, o_off + p, simd::tbl16(tbl, key));
+            p = p + 16;
+        }
+        while p < patches {
+            let key = cast<i64>(ctx.in_bits[a_off + p]) +
+                cast<i64>(ctx.in_bits[b_off + p]) * 2 +
+                cast<i64>(ctx.in_bits[c_off + p]) * 4 +
+                cast<i64>(ctx.in_bits[d_off + p]) * 8;
+            out[o_off + p] = ctx.tables[g * 16 + key];
+            p = p + 1;
+        }
+    }
+    return;
+}
+
+fn lut_simd_worker(ctx: &LutCtx, out_chunk: &var []u8, chunk_idx: i64) -> Failure!void {
+    let g0 = chunk_idx * ctx.chunk_gates;
+    let count = mem::len(out_chunk) / ctx.patches;
+    lut_simd_range(ctx, out_chunk, g0, count);
+    return;
+}
+
+struct FwhtCtx {
+    src: []f32,
+    reps: i64,
+    chunk_blocks: i64,
+}
+
+fn fwht256_scalar(buf: &var []f32, off: i64) -> void {
+    var h = 1;
+    while h < 256 {
+        var i = 0;
+        while i < 256 {
+            var j = i;
+            let end = i + h;
+            while j < end {
+                let u = buf[off + j];
+                let v = buf[off + j + h];
+                buf[off + j] = u + v;
+                buf[off + j + h] = u - v;
+                j = j + 1;
+            }
+            i = i + h * 2;
+        }
+        h = h * 2;
+    }
+    return;
+}
+
+fn fwht256_simd(buf: &var []f32, off: i64) -> void {
+    let n = mem::count<f32>(buf);
+    if off < 0 or off + 256 > n {
+        return;
+    }
+    var i = 0;
+    while i < 256 {
+        let a = buf[off + i];
+        let b = buf[off + i + 1];
+        let c = buf[off + i + 2];
+        let d = buf[off + i + 3];
+        let t0 = a + b;
+        let t1 = a - b;
+        let t2 = c + d;
+        let t3 = c - d;
+        simd::store_f32x4(buf, off + i, f32x4 { t0 + t2, t1 + t3, t0 - t2, t1 - t3 });
+        i = i + 4;
+    }
+    var h = 4;
+    while h < 256 {
+        var base = 0;
+        while base < 256 {
+            var j = base;
+            let end = base + h;
+            while j < end {
+                let u = simd::load_f32x4(buf, off + j);
+                let v = simd::load_f32x4(buf, off + j + h);
+                simd::store_f32x4(buf, off + j, u + v);
+                simd::store_f32x4(buf, off + j + h, u - v);
+                j = j + 4;
+            }
+            base = base + h * 2;
+        }
+        h = h * 2;
+    }
+    return;
+}
+
+fn fwht_simd_worker(ctx: &FwhtCtx, out_chunk: &var []f32, chunk_idx: i64) -> Failure!void {
+    let blocks = mem::count<f32>(out_chunk) / 256;
+    let b0 = chunk_idx * ctx.chunk_blocks;
+    for 0..blocks |lb| {
+        let src_off = (b0 + lb) * 256;
+        let dst_off = lb * 256;
+        for 0..ctx.reps |_| {
+            var k = 0;
+            while k < 256 {
+                simd::store_f32x4(out_chunk, dst_off + k, simd::load_f32x4(ctx.src, src_off + k));
+                k = k + 4;
+            }
+            fwht256_simd(out_chunk, dst_off);
+        }
+    }
+    return;
+}
+
+struct I8DotCtx {
+    w: []i8,
+    x: []i8,
+    in_dim: i64,
+    out_dim: i64,
+    chunk_patches: i64,
+}
+
+fn i8_dot_scalar_batch(
+    w: []i8,
+    x: []i8,
+    out: &var []i32,
+    patches: i64,
+    in_dim: i64,
+    out_dim: i64
+) -> void {
+    for 0..patches |p| {
+        let x_off = p * in_dim;
+        let y_off = p * out_dim;
+        for 0..out_dim |r| {
+            let w_off = r * in_dim;
+            var acc: i32 = 0;
+            for 0..in_dim |c| {
+                acc = acc + cast<i32>(w[w_off + c]) * cast<i32>(x[x_off + c]);
+            }
+            out[y_off + r] = acc;
+        }
+    }
+    return;
+}
+
+fn i8_dot_simd_batch(
+    w: []i8,
+    x: []i8,
+    out: &var []i32,
+    patches: i64,
+    in_dim: i64,
+    out_dim: i64
+) -> void {
+    for 0..patches |p| {
+        let x_row = x[p * in_dim..(p + 1) * in_dim];
+        let y_off = p * out_dim;
+        for 0..out_dim |r| {
+            let w_row = w[r * in_dim..(r + 1) * in_dim];
+            out[y_off + r] = simd::dot_i8_i8(w_row, x_row);
+        }
+    }
+    return;
+}
+
+fn i8_dot_simd_worker(ctx: &I8DotCtx, out_chunk: &var []i32, chunk_idx: i64) -> Failure!void {
+    let in_dim = ctx.in_dim;
+    let out_dim = ctx.out_dim;
+    let p0 = chunk_idx * ctx.chunk_patches;
+    let local_patches = mem::count<i32>(out_chunk) / out_dim;
+    for 0..local_patches |lp| {
+        let p = p0 + lp;
+        let x_row = ctx.x[p * in_dim..(p + 1) * in_dim];
+        let y_off = lp * out_dim;
+        for 0..out_dim |r| {
+            let w_row = ctx.w[r * in_dim..(r + 1) * in_dim];
+            out_chunk[y_off + r] = simd::dot_i8_i8(w_row, x_row);
+        }
+    }
+    return;
+}
+
+fn print_bench_line(
+    io: Io,
+    allocator: Allocator,
+    name: []u8,
+    scalar_us: i64,
+    simd_us: i64,
+    mt_us: i64,
+    threads: i64,
+    diff_int: i64
+) -> !void {
+    var line = string::new(allocator);
+    defer line.deinit(allocator);
+    try line.append_bytes(allocator, name);
+    try line.append_bytes(allocator, " | scalar_1t=");
+    try append_ms_tenths(allocator, &var line, scalar_us);
+    try line.append_bytes(allocator, " | simd_1t=");
+    try append_ms_tenths(allocator, &var line, simd_us);
+    try line.append_bytes(allocator, " (");
+    try append_ratio(allocator, &var line, scalar_us, simd_us);
+    try line.append_bytes(allocator, ") | simd_mt(");
+    try fmt::append_i64(allocator, &var line, threads);
+    try line.append_bytes(allocator, "t)=");
+    try append_ms_tenths(allocator, &var line, mt_us);
+    try line.append_bytes(allocator, " (");
+    try append_ratio(allocator, &var line, scalar_us, mt_us);
+    try line.append_bytes(allocator, ") | max_diff_x1e6=");
+    try fmt::append_i64(allocator, &var line, diff_int);
+    try line.append_byte(allocator, cast<u8>(10));
+    let bytes = line.as_bytes();
+    try io::write_stdout(io, bytes);
+    return;
+}
+
+fn append_ms_tenths(allocator: Allocator, line: &var string::String, us: i64) -> !void {
+    let tenths = (us + 50) / 100;
+    try fmt::append_i64(allocator, line, tenths / 10);
+    try line.append_byte(allocator, cast<u8>(46));
+    try fmt::append_i64(allocator, line, tenths % 10);
+    try line.append_bytes(allocator, "ms");
+    return;
+}
+
+fn append_ratio(allocator: Allocator, line: &var string::String, num: i64, den: i64) -> !void {
+    let d = max1(den);
+    let hundredths = (num * 100 + d / 2) / d;
+    try fmt::append_i64(allocator, line, hundredths / 100);
+    try line.append_byte(allocator, cast<u8>(46));
+    let frac = hundredths % 100;
+    if frac < 10 {
+        try line.append_byte(allocator, cast<u8>(48));
+    }
+    try fmt::append_i64(allocator, line, frac);
+    try line.append_byte(allocator, cast<u8>(120));
+    return;
+}
+
+fn max1(v: i64) -> i64 {
+    if v < 1 {
+        return 1;
+    }
+    return v;
+}
+
+fn bench_q8(
+    io: Io,
+    allocator: Allocator,
+    pool: &var thread::Pool,
+    label: []u8,
+    patches: i64,
+    in_dim: i64,
+    out_dim: i64,
+    scalar_reps: i64,
+    simd_reps: i64,
+    mt_reps: i64
+) -> !void {
+    var w = string::new(allocator);
+    defer w.deinit(allocator);
+    for 0..(out_dim * in_dim) |k| {
+        let v: i8 = cast<i8>(((k * 17 + 3) % 251) - 125);
+        try w.append_byte(allocator, cast<u8>(v));
+    }
+    var scales = array::new<f32>(allocator);
+    defer scales.deinit(allocator);
+    for 0..out_dim |r| {
+        try scales.append(allocator, 0.01 + cast<f32>(r % 13) * 0.001);
+    }
+    var x = array::new<f32>(allocator);
+    defer x.deinit(allocator);
+    for 0..(patches * in_dim) |k| {
+        try x.append(allocator, cast<f32>(((k * 7) % 19) - 9) * 0.125);
+    }
+    var out_ref = array::new<f32>(allocator);
+    defer out_ref.deinit(allocator);
+    var out_simd = array::new<f32>(allocator);
+    defer out_simd.deinit(allocator);
+    var out_mt = array::new<f32>(allocator);
+    defer out_mt.deinit(allocator);
+    for 0..(patches * out_dim) |_| {
+        try out_ref.append(allocator, 0.0);
+        try out_simd.append(allocator, 0.0);
+        try out_mt.append(allocator, 0.0);
+    }
+
+    let w_s = w.as_bytes();
+    let sc_s = scales.as_slice();
+    let x_s = x.as_slice();
+
+    let ref_m = out_ref.as_mut_slice();
+    let t0 = process::monotonic_millis();
+    for 0..scalar_reps |_| {
+        q8_scalar_batch(w_s, sc_s, x_s, ref_m, patches, in_dim, out_dim);
+    }
+    let scalar_us = ((process::monotonic_millis() - t0) * 1000) / scalar_reps;
+
+    let simd_m = out_simd.as_mut_slice();
+    let t1 = process::monotonic_millis();
+    for 0..simd_reps |_| {
+        q8_simd_batch(w_s, sc_s, x_s, simd_m, patches, in_dim, out_dim);
+    }
+    let simd_us = ((process::monotonic_millis() - t1) * 1000) / simd_reps;
+
+    let chunk_patches = 4;
+    let ctx = Q8MatmulCtx {
+        w: w_s, scales: sc_s, x: x_s, in_dim: in_dim, out_dim: out_dim, chunk_patches: chunk_patches
+    };
+    let mt_m = out_mt.as_mut_slice();
+    try thread::each_shared<f32, Q8MatmulCtx, Failure>(pool, mt_m, chunk_patches * out_dim, &ctx, q8_simd_worker);
+    let t2 = process::monotonic_millis();
+    for 0..mt_reps |_| {
+        try thread::each_shared<f32, Q8MatmulCtx, Failure>(pool, mt_m, chunk_patches * out_dim, &ctx, q8_simd_worker);
+    }
+    let mt_us = ((process::monotonic_millis() - t2) * 1000) / mt_reps;
+
+    var max_diff: f32 = 0.0;
+    for 0..(patches * out_dim) |i| {
+        var d1 = out_ref.get_or_panic(i) - out_simd.get_or_panic(i);
+        if d1 < 0.0 { d1 = 0.0 - d1; }
+        var d2 = out_ref.get_or_panic(i) - out_mt.get_or_panic(i);
+        if d2 < 0.0 { d2 = 0.0 - d2; }
+        if d1 > max_diff { max_diff = d1; }
+        if d2 > max_diff { max_diff = d2; }
+    }
+    try print_bench_line(
+        io, allocator, label, scalar_us, simd_us, mt_us, pool.threads(), cast<i64>(max_diff * 1000000.0));
+    return;
+}
+
+fn main() -> !void {
+    let io = io::blocking();
+    let allocator = mem::page_allocator();
+    let threads = thread::cpu_count(io);
+    var pool = try thread::init(io, allocator, threads);
+    defer pool.deinit(allocator);
+
+    try bench_q8(io, allocator, &var pool, "Q8 matmul 196x768->768 ", 196, 768, 768, 3, 15, 80);
+    try bench_q8(io, allocator, &var pool, "Q8 matmul 196x768->3072", 196, 768, 3072, 2, 8, 40);
+
+    let gates = 12288;
+    let patches = 196;
+    let in_ch = 768;
+    let lut_scalar_reps = 40;
+    let lut_simd_reps = 200;
+    let lut_mt_reps = 400;
+    var tables = string::new(allocator);
+    defer tables.deinit(allocator);
+    for 0..(gates * 16) |k| {
+        try tables.append_byte(allocator, cast<u8>((k * 29 + 7) & 1));
+    }
+    var idx0 = array::new<i64>(allocator);
+    defer idx0.deinit(allocator);
+    var idx1 = array::new<i64>(allocator);
+    defer idx1.deinit(allocator);
+    var idx2 = array::new<i64>(allocator);
+    defer idx2.deinit(allocator);
+    var idx3 = array::new<i64>(allocator);
+    defer idx3.deinit(allocator);
+    for 0..gates |g| {
+        try idx0.append(allocator, (g * 5 + 1) % in_ch);
+        try idx1.append(allocator, (g * 7 + 3) % in_ch);
+        try idx2.append(allocator, (g * 11 + 5) % in_ch);
+        try idx3.append(allocator, (g * 13 + 7) % in_ch);
+    }
+    var in_bits = string::new(allocator);
+    defer in_bits.deinit(allocator);
+    for 0..(in_ch * patches) |k| {
+        try in_bits.append_byte(allocator, cast<u8>((k * 31 + 11) & 1));
+    }
+    var lut_ref = string::new(allocator);
+    defer lut_ref.deinit(allocator);
+    var lut_simd = string::new(allocator);
+    defer lut_simd.deinit(allocator);
+    var lut_mt = string::new(allocator);
+    defer lut_mt.deinit(allocator);
+    for 0..(gates * patches) |_| {
+        try lut_ref.append_byte(allocator, 0);
+        try lut_simd.append_byte(allocator, 0);
+        try lut_mt.append_byte(allocator, 0);
+    }
+    let chunk_gates = 128;
+    let tables_s = tables.as_bytes();
+    let idx0_s = idx0.as_slice();
+    let idx1_s = idx1.as_slice();
+    let idx2_s = idx2.as_slice();
+    let idx3_s = idx3.as_slice();
+    let in_bits_s = in_bits.as_bytes();
+    let lut_ctx = LutCtx {
+        tables: tables_s,
+        idx0: idx0_s,
+        idx1: idx1_s,
+        idx2: idx2_s,
+        idx3: idx3_s,
+        in_bits: in_bits_s,
+        patches: patches,
+        chunk_gates: chunk_gates
+    };
+    let lr_m = lut_ref.as_mut_bytes();
+    let lt0 = process::monotonic_millis();
+    for 0..lut_scalar_reps |_| {
+        lut_scalar_all(&lut_ctx, lr_m, gates);
+    }
+    let lut_scalar_us = ((process::monotonic_millis() - lt0) * 1000) / lut_scalar_reps;
+    let ls_m = lut_simd.as_mut_bytes();
+    let lt1 = process::monotonic_millis();
+    for 0..lut_simd_reps |_| {
+        lut_simd_range(&lut_ctx, ls_m, 0, gates);
+    }
+    let lut_simd_us = ((process::monotonic_millis() - lt1) * 1000) / lut_simd_reps;
+    let lm_m = lut_mt.as_mut_bytes();
+    try thread::each_shared<u8, LutCtx, Failure>(&var pool, lm_m, chunk_gates * patches, &lut_ctx, lut_simd_worker);
+    let lt2 = process::monotonic_millis();
+    for 0..lut_mt_reps |_| {
+        try thread::each_shared<u8, LutCtx, Failure>(&var pool, lm_m, chunk_gates * patches, &lut_ctx, lut_simd_worker);
+    }
+    let lut_mt_us = ((process::monotonic_millis() - lt2) * 1000) / lut_mt_reps;
+    var lut_mismatches = 0;
+    for 0..(gates * patches) |i| {
+        if lr_m[i] != ls_m[i] or lr_m[i] != lm_m[i] {
+            lut_mismatches = lut_mismatches + 1;
+        }
+    }
+    try print_bench_line(
+        io, allocator, "N=4 LUT tbl16 12288x196", lut_scalar_us, lut_simd_us, lut_mt_us, threads, lut_mismatches);
+
+    let fwht_blocks = 196 * 32;
+    let fwht_scalar_reps = 100;
+    let fwht_simd_reps = 100;
+    let fwht_mt_reps = 400;
+    var fwht_src = array::new<f32>(allocator);
+    defer fwht_src.deinit(allocator);
+    var fwht_ref = array::new<f32>(allocator);
+    defer fwht_ref.deinit(allocator);
+    var fwht_simd = array::new<f32>(allocator);
+    defer fwht_simd.deinit(allocator);
+    var fwht_mt = array::new<f32>(allocator);
+    defer fwht_mt.deinit(allocator);
+    for 0..(fwht_blocks * 256) |k| {
+        let v = cast<f32>(((k * 13) % 17) - 8) * 0.25;
+        try fwht_src.append(allocator, v);
+        try fwht_ref.append(allocator, v);
+        try fwht_simd.append(allocator, v);
+        try fwht_mt.append(allocator, v);
+    }
+    let src_s = fwht_src.as_slice();
+    let fr_m = fwht_ref.as_mut_slice();
+    let ft0 = process::monotonic_millis();
+    for 0..fwht_scalar_reps |_| {
+        for 0..fwht_blocks |b| {
+            let off = b * 256;
+            for 0..256 |k| {
+                fr_m[off + k] = src_s[off + k];
+            }
+            fwht256_scalar(fr_m, off);
+        }
+    }
+    let fwht_scalar_us = ((process::monotonic_millis() - ft0) * 1000) / fwht_scalar_reps;
+    let fs_m = fwht_simd.as_mut_slice();
+    let ft1 = process::monotonic_millis();
+    for 0..fwht_simd_reps |_| {
+        for 0..fwht_blocks |b| {
+            let off = b * 256;
+            var k = 0;
+            while k < 256 {
+                simd::store_f32x4(fs_m, off + k, simd::load_f32x4(src_s, off + k));
+                k = k + 4;
+            }
+            fwht256_simd(fs_m, off);
+        }
+    }
+    let fwht_simd_us = ((process::monotonic_millis() - ft1) * 1000) / fwht_simd_reps;
+    let chunk_blocks = 64;
+    let fwht_ctx = FwhtCtx { src: src_s, reps: fwht_mt_reps, chunk_blocks: chunk_blocks };
+    let fm_m = fwht_mt.as_mut_slice();
+    let ft2 = process::monotonic_millis();
+    try thread::each_shared<f32, FwhtCtx, Failure>(&var pool, fm_m, chunk_blocks * 256, &fwht_ctx, fwht_simd_worker);
+    let fwht_mt_us = ((process::monotonic_millis() - ft2) * 1000) / fwht_mt_reps;
+    var fwht_diff: f32 = 0.0;
+    for 0..(fwht_blocks * 256) |i| {
+        var d1 = fr_m[i] - fs_m[i];
+        if d1 < 0.0 { d1 = 0.0 - d1; }
+        var d2 = fr_m[i] - fm_m[i];
+        if d2 < 0.0 { d2 = 0.0 - d2; }
+        if d1 > fwht_diff { fwht_diff = d1; }
+        if d2 > fwht_diff { fwht_diff = d2; }
+    }
+    try print_bench_line(
+        io,
+        allocator,
+        "Block-FWHT 256pt x6272 ",
+        fwht_scalar_us,
+        fwht_simd_us,
+        fwht_mt_us,
+        threads,
+        cast<i64>(fwht_diff * 1000000.0)
+    );
+
+    let i8_patches = 196;
+    let i8_in = 768;
+    let i8_out = 768;
+    let i8_scalar_reps = 10;
+    let i8_simd_reps = 30;
+    let i8_mt_reps = 150;
+    var wi8 = array::new<i8>(allocator);
+    defer wi8.deinit(allocator);
+    for 0..(i8_out * i8_in) |k| {
+        try wi8.append(allocator, cast<i8>(((k * 19 + 5) % 251) - 125));
+    }
+    var xi8 = array::new<i8>(allocator);
+    defer xi8.deinit(allocator);
+    for 0..(i8_patches * i8_in) |k| {
+        try xi8.append(allocator, cast<i8>(((k * 11 + 2) % 251) - 125));
+    }
+    var i8_ref = array::new<i32>(allocator);
+    defer i8_ref.deinit(allocator);
+    var i8_simd = array::new<i32>(allocator);
+    defer i8_simd.deinit(allocator);
+    var i8_mt = array::new<i32>(allocator);
+    defer i8_mt.deinit(allocator);
+    for 0..(i8_patches * i8_out) |_| {
+        try i8_ref.append(allocator, 0);
+        try i8_simd.append(allocator, 0);
+        try i8_mt.append(allocator, 0);
+    }
+    let wi8_s = wi8.as_slice();
+    let xi8_s = xi8.as_slice();
+    let ir_m = i8_ref.as_mut_slice();
+    let it0 = process::monotonic_millis();
+    for 0..i8_scalar_reps |_| {
+        i8_dot_scalar_batch(wi8_s, xi8_s, ir_m, i8_patches, i8_in, i8_out);
+    }
+    let i8_scalar_us = ((process::monotonic_millis() - it0) * 1000) / i8_scalar_reps;
+    let is_m = i8_simd.as_mut_slice();
+    let it1 = process::monotonic_millis();
+    for 0..i8_simd_reps |_| {
+        i8_dot_simd_batch(wi8_s, xi8_s, is_m, i8_patches, i8_in, i8_out);
+    }
+    let i8_simd_us = ((process::monotonic_millis() - it1) * 1000) / i8_simd_reps;
+    let i8_chunk = 4;
+    let i8_ctx = I8DotCtx {
+        w: wi8_s, x: xi8_s, in_dim: i8_in, out_dim: i8_out, chunk_patches: i8_chunk
+    };
+    let im_m = i8_mt.as_mut_slice();
+    try thread::each_shared<i32, I8DotCtx, Failure>(&var pool, im_m, i8_chunk * i8_out, &i8_ctx, i8_dot_simd_worker);
+    let it2 = process::monotonic_millis();
+    for 0..i8_mt_reps |_| {
+        try thread::each_shared<i32, I8DotCtx, Failure>(&var pool, im_m, i8_chunk * i8_out, &i8_ctx, i8_dot_simd_worker);
+    }
+    let i8_mt_us = ((process::monotonic_millis() - it2) * 1000) / i8_mt_reps;
+    var i8_mismatches = 0;
+    for 0..(i8_patches * i8_out) |r| {
+        if ir_m[r] != is_m[r] or ir_m[r] != im_m[r] {
+            i8_mismatches = i8_mismatches + 1;
+        }
+    }
+    try print_bench_line(
+        io, allocator, "i8x16 sdot 196x768->768", i8_scalar_us, i8_simd_us, i8_mt_us, threads, i8_mismatches);
+    return;
+}
