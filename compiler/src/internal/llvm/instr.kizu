@@ -201,7 +201,14 @@ fn (self: &var Emitter) write_unary(module: &ir::Module, node: &ir::InstrNode) -
         } else {
             if module.names.is(node.operand, "~") {
                 let result_type = try self.llvm_type_of(module, node.result.type_name);
-                try self.line3("  %s = xor %s %s, -1", Arg::Str(name), Arg::Str(result_type), Arg::Str(value.operand));
+                let result_text = ir::name_text(&module.names, node.result.type_name);
+                let result_bytes = result_text.as_bytes();
+                if typ::is_vector(result_bytes) {
+                    let all_ones = try self.vector_splat_int(result_bytes, "-1");
+                    try self.line4("  %s = xor %s %s, %s", Arg::Str(name), Arg::Str(result_type), Arg::Str(value.operand), Arg::Str(all_ones));
+                } else {
+                    try self.line3("  %s = xor %s %s, -1", Arg::Str(name), Arg::Str(result_type), Arg::Str(value.operand));
+                }
             } else {
                 return try self.fail_name1(module, "llvm error: unsupported unary `%s`", node.operand);
             }
@@ -361,8 +368,19 @@ fn (self: &var Emitter) write_float_fma(module: &ir::Module, node: &ir::InstrNod
     let y = try self.operand(module, node.args.get_or_panic(1));
     let z = try self.operand(module, node.args.get_or_panic(2));
     let name = try self.local_name(module, node.result.name);
-    try self.line4("  %s = call double @llvm.fma.f64(double %s, double %s, double %s)",
-        Arg::Str(name), Arg::Str(x.operand), Arg::Str(y.operand), Arg::Str(z.operand));
+    if module.names.is(node.result.type_name, "f32") {
+        try self.line4("  %s = call float @llvm.fma.f32(float %s, float %s, float %s)",
+            Arg::Str(name), Arg::Str(x.operand), Arg::Str(y.operand), Arg::Str(z.operand));
+    } else if module.names.is(node.result.type_name, "f32x4") {
+        try self.line4("  %s = call <4 x float> @llvm.fma.v4f32(<4 x float> %s, <4 x float> %s, <4 x float> %s)",
+            Arg::Str(name), Arg::Str(x.operand), Arg::Str(y.operand), Arg::Str(z.operand));
+    } else if module.names.is(node.result.type_name, "f64x2") {
+        try self.line4("  %s = call <2 x double> @llvm.fma.v2f64(<2 x double> %s, <2 x double> %s, <2 x double> %s)",
+            Arg::Str(name), Arg::Str(x.operand), Arg::Str(y.operand), Arg::Str(z.operand));
+    } else {
+        try self.line4("  %s = call double @llvm.fma.f64(double %s, double %s, double %s)",
+            Arg::Str(name), Arg::Str(x.operand), Arg::Str(y.operand), Arg::Str(z.operand));
+    }
     try self.set_value(module, node.result, name);
     return null;
 }
@@ -904,6 +922,292 @@ fn (self: &var Emitter) write_vector_lane(module: &ir::Module, node: &ir::InstrN
         "  %s = extractelement %s %s, i32 %s",
         Arg::Str(name), Arg::Str(vector_type), Arg::Str(operand.operand), Arg::Str(immediate)
     );
+    try self.set_value(module, node.result, name);
+    return null;
+}
+
+fn (self: &var Emitter) vector_splat_int(vec_type: []u8, value: []u8) -> !ir::Name {
+    let kind = typ::vector_kind(vec_type);
+    let lane = typ::vector_lane_of_kind(kind);
+    let lanes = typ::vector_lanes(vec_type);
+    let lane_llvm = llvm_primitive_type(lane);
+    var out = try string::from_bytes(self.allocator, "<");
+    errdefer out.deinit(self.allocator);
+    var index = 0;
+    while index < lanes {
+        if index > 0 {
+            try out.append_bytes(self.allocator, ", ");
+        }
+        try out.append_bytes(self.allocator, lane_llvm);
+        try out.append_byte(self.allocator, cast<u8>(32));
+        try out.append_bytes(self.allocator, value);
+        index = index + 1;
+    }
+    try out.append_byte(self.allocator, cast<u8>(62));
+    return self.names.intern_owned(move out);
+}
+
+fn slice_elem_align(elem: []u8) -> i64 {
+    if mem::equal_bytes(elem, "f64") or mem::equal_bytes(elem, "i64") or mem::equal_bytes(elem, "u64") {
+        return 8;
+    }
+    if mem::equal_bytes(elem, "f32") or mem::equal_bytes(elem, "i32") or mem::equal_bytes(elem, "u32") {
+        return 4;
+    }
+    if mem::equal_bytes(elem, "i16") or mem::equal_bytes(elem, "u16") {
+        return 2;
+    }
+    return 1;
+}
+
+fn (self: &var Emitter) write_vector_load(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 {
+        return try self.fail0("llvm error: vector.load expects slice and offset");
+    }
+    let slice_arg = node.args.get_or_panic(0);
+    let view_text = ir::name_text(&module.names, slice_arg.type_name);
+    let view_bytes = view_text.as_bytes();
+    if !mem::starts_with(view_bytes, "[]") {
+        return try self.fail0("llvm error: vector.load expects []T, i64");
+    }
+    let elem = view_bytes[2..mem::len(view_bytes)];
+    let elem_llvm = try self.llvm_type(module, elem);
+    let vec_llvm = try self.llvm_type_of(module, node.result.type_name);
+    let slice = try self.operand(module, slice_arg);
+    let offset = try self.operand(module, node.args.get_or_panic(1));
+    let name = try self.local_name(module, node.result.name);
+    let ptr_name = try self.suffixed(name, ".ptr");
+    let elem_ptr = try self.suffixed(name, ".elem.ptr");
+    try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 0", Arg::Str(ptr_name), Arg::Str(slice.operand));
+    try self.line4(
+        "  %s = getelementptr inbounds %s, ptr %s, i64 %s",
+        Arg::Str(elem_ptr), Arg::Str(elem_llvm), Arg::Str(ptr_name), Arg::Str(offset.operand)
+    );
+    try self.line4(
+        "  %s = load %s, ptr %s, align %d",
+        Arg::Str(name), Arg::Str(vec_llvm), Arg::Str(elem_ptr), Arg::Int(slice_elem_align(elem))
+    );
+    try self.set_value(module, node.result, name);
+    return null;
+}
+
+fn (self: &var Emitter) write_vector_store(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 3 {
+        return try self.fail0("llvm error: vector.store expects slice, offset, vector");
+    }
+    let slice_arg = node.args.get_or_panic(0);
+    let view_text = ir::name_text(&module.names, slice_arg.type_name);
+    let view_bytes = view_text.as_bytes();
+    if !mem::starts_with(view_bytes, "[]") {
+        return try self.fail0("llvm error: vector.store expects []T, i64, V");
+    }
+    let elem = view_bytes[2..mem::len(view_bytes)];
+    let elem_llvm = try self.llvm_type(module, elem);
+    let val_arg = node.args.get_or_panic(2);
+    let vec_llvm = try self.llvm_type_of(module, val_arg.type_name);
+    let slice = try self.operand(module, slice_arg);
+    let offset = try self.operand(module, node.args.get_or_panic(1));
+    let value = try self.operand(module, val_arg);
+    let synthetic = try self.next_synthetic_value("vector.store");
+    let base = try self.percent(synthetic);
+    let ptr_name = try self.suffixed(base, ".ptr");
+    let elem_ptr = try self.suffixed(base, ".elem.ptr");
+    try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 0", Arg::Str(ptr_name), Arg::Str(slice.operand));
+    try self.line4(
+        "  %s = getelementptr inbounds %s, ptr %s, i64 %s",
+        Arg::Str(elem_ptr), Arg::Str(elem_llvm), Arg::Str(ptr_name), Arg::Str(offset.operand)
+    );
+    try self.line4(
+        "  store %s %s, ptr %s, align %d",
+        Arg::Str(vec_llvm), Arg::Str(value.operand), Arg::Str(elem_ptr), Arg::Int(slice_elem_align(elem))
+    );
+    try self.set_void_value(module, node.result);
+    return null;
+}
+
+fn (self: &var Emitter) write_vector_tbl16(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 {
+        return try self.fail0("llvm error: vector.tbl16 expects 2 args");
+    }
+    let tbl = try self.operand(module, node.args.get_or_panic(0));
+    let idx = try self.operand(module, node.args.get_or_panic(1));
+    let name = try self.local_name(module, node.result.name);
+    if self.arch == Arch::Arm64 {
+        try self.line3(
+            "  %s = call <16 x i8> @llvm.aarch64.neon.tbl1.v16i8(<16 x i8> %s, <16 x i8> %s)",
+            Arg::Str(name), Arg::Str(tbl.operand), Arg::Str(idx.operand)
+        );
+        try self.set_value(module, node.result, name);
+        return null;
+    }
+    if self.has_ssse3 {
+        let oob = try self.suffixed(name, ".oob");
+        let masked = try self.suffixed(name, ".masked");
+        let sixteen = try self.vector_splat_int("u8x16", "16");
+        let neg128 = try self.vector_splat_int("u8x16", "-128");
+        try self.line3(
+            "  %s = icmp uge <16 x i8> %s, %s",
+            Arg::Str(oob), Arg::Str(idx.operand), Arg::Str(sixteen)
+        );
+        try self.line4(
+            "  %s = select <16 x i1> %s, <16 x i8> %s, <16 x i8> %s",
+            Arg::Str(masked), Arg::Str(oob), Arg::Str(neg128), Arg::Str(idx.operand)
+        );
+        try self.line3(
+            "  %s = call <16 x i8> @llvm.x86.ssse3.pshuf.b.128(<16 x i8> %s, <16 x i8> %s)",
+            Arg::Str(name), Arg::Str(tbl.operand), Arg::Str(masked)
+        );
+        try self.set_value(module, node.result, name);
+        return null;
+    }
+    let slot = try self.suffixed(name, ".tbl");
+    try self.line1("  %s = alloca [16 x i8], align 16", Arg::Str(slot));
+    try self.line2("  store <16 x i8> %s, ptr %s, align 16", Arg::Str(tbl.operand), Arg::Str(slot));
+    var current = try self.names.intern("poison");
+    for 0..16 |lane| {
+        var suffix = try string::from_bytes(self.allocator, ".l");
+        defer suffix.deinit(self.allocator);
+        try fmt::append_i64(self.allocator, &var suffix, lane);
+        let sbytes = suffix.as_bytes();
+        let lane_base = try self.suffixed(name, sbytes);
+        let k = try self.suffixed(lane_base, ".k");
+        let ok = try self.suffixed(lane_base, ".ok");
+        let safe = try self.suffixed(lane_base, ".safe");
+        let ext = try self.suffixed(lane_base, ".ext");
+        let ptr = try self.suffixed(lane_base, ".p");
+        let val = try self.suffixed(lane_base, ".v");
+        let picked = try self.suffixed(lane_base, ".o");
+        var next = name;
+        if lane < 15 {
+            next = try self.suffixed(lane_base, ".vec");
+        }
+        try self.line3("  %s = extractelement <16 x i8> %s, i32 %d", Arg::Str(k), Arg::Str(idx.operand), Arg::Int(lane));
+        try self.line2("  %s = icmp ult i8 %s, 16", Arg::Str(ok), Arg::Str(k));
+        try self.line3("  %s = select i1 %s, i8 %s, i8 0", Arg::Str(safe), Arg::Str(ok), Arg::Str(k));
+        try self.line2("  %s = zext i8 %s to i64", Arg::Str(ext), Arg::Str(safe));
+        try self.line3("  %s = getelementptr inbounds [16 x i8], ptr %s, i64 0, i64 %s", Arg::Str(ptr), Arg::Str(slot), Arg::Str(ext));
+        try self.line2("  %s = load i8, ptr %s, align 1", Arg::Str(val), Arg::Str(ptr));
+        try self.line3("  %s = select i1 %s, i8 %s, i8 0", Arg::Str(picked), Arg::Str(ok), Arg::Str(val));
+        try self.line4("  %s = insertelement <16 x i8> %s, i8 %s, i32 %d", Arg::Str(next), Arg::Str(current), Arg::Str(picked), Arg::Int(lane));
+        current = next;
+    }
+    try self.set_value(module, node.result, name);
+    return null;
+}
+
+fn (self: &var Emitter) write_vector_sdot(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 3 {
+        return try self.fail0("llvm error: vector.sdot expects 3 args");
+    }
+    let acc = try self.operand(module, node.args.get_or_panic(0));
+    let a = try self.operand(module, node.args.get_or_panic(1));
+    let b = try self.operand(module, node.args.get_or_panic(2));
+    let name = try self.local_name(module, node.result.name);
+    if self.has_dotprod {
+        try self.line4(
+            "  %s = call <4 x i32> @llvm.aarch64.neon.sdot.v4i32.v16i8(<4 x i32> %s, <16 x i8> %s, <16 x i8> %s)",
+            Arg::Str(name), Arg::Str(acc.operand), Arg::Str(a.operand), Arg::Str(b.operand)
+        );
+        try self.set_value(module, node.result, name);
+        return null;
+    }
+    let ae = try self.suffixed(name, ".ae");
+    let be = try self.suffixed(name, ".be");
+    let mul = try self.suffixed(name, ".m");
+    let lo1 = try self.suffixed(name, ".lo1");
+    let hi1 = try self.suffixed(name, ".hi1");
+    let p1 = try self.suffixed(name, ".p1");
+    let lo2 = try self.suffixed(name, ".lo2");
+    let hi2 = try self.suffixed(name, ".hi2");
+    let p2 = try self.suffixed(name, ".p2");
+    try self.line2("  %s = sext <16 x i8> %s to <16 x i32>", Arg::Str(ae), Arg::Str(a.operand));
+    try self.line2("  %s = sext <16 x i8> %s to <16 x i32>", Arg::Str(be), Arg::Str(b.operand));
+    try self.line3("  %s = mul <16 x i32> %s, %s", Arg::Str(mul), Arg::Str(ae), Arg::Str(be));
+    try self.line2(
+        "  %s = shufflevector <16 x i32> %s, <16 x i32> poison, <8 x i32> <i32 0, i32 2, i32 4, i32 6, i32 8, i32 10, i32 12, i32 14>",
+        Arg::Str(lo1), Arg::Str(mul)
+    );
+    try self.line2(
+        "  %s = shufflevector <16 x i32> %s, <16 x i32> poison, <8 x i32> <i32 1, i32 3, i32 5, i32 7, i32 9, i32 11, i32 13, i32 15>",
+        Arg::Str(hi1), Arg::Str(mul)
+    );
+    try self.line3("  %s = add <8 x i32> %s, %s", Arg::Str(p1), Arg::Str(lo1), Arg::Str(hi1));
+    try self.line2(
+        "  %s = shufflevector <8 x i32> %s, <8 x i32> poison, <4 x i32> <i32 0, i32 2, i32 4, i32 6>",
+        Arg::Str(lo2), Arg::Str(p1)
+    );
+    try self.line2(
+        "  %s = shufflevector <8 x i32> %s, <8 x i32> poison, <4 x i32> <i32 1, i32 3, i32 5, i32 7>",
+        Arg::Str(hi2), Arg::Str(p1)
+    );
+    try self.line3("  %s = add <4 x i32> %s, %s", Arg::Str(p2), Arg::Str(lo2), Arg::Str(hi2));
+    try self.line3("  %s = add <4 x i32> %s, %s", Arg::Str(name), Arg::Str(acc.operand), Arg::Str(p2));
+    try self.set_value(module, node.result, name);
+    return null;
+}
+
+fn (self: &var Emitter) write_vector_convert(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("llvm error: vector.convert expects 1 arg");
+    }
+    let src_arg = node.args.get_or_panic(0);
+    let src = try self.operand(module, src_arg);
+    if (module.names.is(src_arg.type_name, "u8x16") and module.names.is(node.result.type_name, "i8x16")) or
+        (module.names.is(src_arg.type_name, "i8x16") and module.names.is(node.result.type_name, "u8x16")) {
+        try self.set_value(module, node.result, src.operand);
+        return null;
+    }
+    let name = try self.local_name(module, node.result.name);
+    if module.names.is(src_arg.type_name, "i32x4") and module.names.is(node.result.type_name, "f32x4") {
+        try self.line2("  %s = sitofp <4 x i32> %s to <4 x float>", Arg::Str(name), Arg::Str(src.operand));
+        try self.set_value(module, node.result, name);
+        return null;
+    }
+    if module.names.is(src_arg.type_name, "f32x4") and module.names.is(node.result.type_name, "i32x4") {
+        try self.line2("  %s = call <4 x i32> @llvm.fptosi.sat.v4i32.v4f32(<4 x float> %s)", Arg::Str(name), Arg::Str(src.operand));
+        try self.set_value(module, node.result, name);
+        return null;
+    }
+    if module.names.is(src_arg.type_name, "i8x16") and module.names.is(node.result.type_name, "f32x4") {
+        var mask = "<i32 0, i32 1, i32 2, i32 3>";
+        if module.names.is(node.immediate, "1") {
+            mask = "<i32 4, i32 5, i32 6, i32 7>";
+        } else if module.names.is(node.immediate, "2") {
+            mask = "<i32 8, i32 9, i32 10, i32 11>";
+        } else if module.names.is(node.immediate, "3") {
+            mask = "<i32 12, i32 13, i32 14, i32 15>";
+        }
+        let shuf = try self.suffixed(name, ".shuf");
+        let ext = try self.suffixed(name, ".ext");
+        try self.line3(
+            "  %s = shufflevector <16 x i8> %s, <16 x i8> poison, <4 x i32> %s",
+            Arg::Str(shuf), Arg::Str(src.operand), Arg::Lit(mask)
+        );
+        try self.line2("  %s = sext <4 x i8> %s to <4 x i32>", Arg::Str(ext), Arg::Str(shuf));
+        try self.line2("  %s = sitofp <4 x i32> %s to <4 x float>", Arg::Str(name), Arg::Str(ext));
+        try self.set_value(module, node.result, name);
+        return null;
+    }
+    return try self.fail_name2(
+        module, "llvm error: unsupported vector.convert from %s to %s", src_arg.type_name, node.result.type_name
+    );
+}
+
+fn (self: &var Emitter) write_int_popcount(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("llvm error: int.popcount expects 1 arg");
+    }
+    let src = try self.operand(module, node.args.get_or_panic(0));
+    let name = try self.local_name(module, node.result.name);
+    if module.names.is(node.result.type_name, "u32") {
+        try self.line2("  %s = call i32 @llvm.ctpop.i32(i32 %s)", Arg::Str(name), Arg::Str(src.operand));
+    } else if module.names.is(node.result.type_name, "u64") {
+        try self.line2("  %s = call i64 @llvm.ctpop.i64(i64 %s)", Arg::Str(name), Arg::Str(src.operand));
+    } else if module.names.is(node.result.type_name, "u8x16") {
+        try self.line2("  %s = call <16 x i8> @llvm.ctpop.v16i8(<16 x i8> %s)", Arg::Str(name), Arg::Str(src.operand));
+    } else {
+        return try self.fail_name1(module, "llvm error: unsupported int.popcount type `%s`", node.result.type_name);
+    }
     try self.set_value(module, node.result, name);
     return null;
 }

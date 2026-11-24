@@ -7,12 +7,15 @@ pub enum Source {
     Out,
     Value,
     Address,
+    Context,
     TaskInvoke,
     SizeOf,
     ElementSize,
     Zero,
     PoolInvoke,
     PoolStateInvoke,
+    PoolSharedInvoke,
+    PoolSharedStateInvoke,
 }
 
 pub enum CType {
@@ -92,7 +95,16 @@ pub fn declare(allocator: Allocator, module: &ir::Module, name: ir::Name, node: 
         try params.append(allocator, param(Source::Value, 0, CType::I64));
         try append_data(allocator, &var params, 1);
         try params.append(allocator, param(Source::Value, 2, CType::I64));
-        try append_round_worker(allocator, &var params, node, 3);
+        try append_round_worker(allocator, &var params, node, 3, false);
+        return Signature { out: true, params: move params };
+    }
+    if module.names.is(name, "std::internal::builtin::thread_pool_each_shared") {
+        try params.append(allocator, param(Source::Out, 0 - 1, CType::Pointer));
+        try params.append(allocator, param(Source::Value, 0, CType::I64));
+        try append_data(allocator, &var params, 1);
+        try params.append(allocator, param(Source::Value, 2, CType::I64));
+        try params.append(allocator, param(Source::Context, 3, CType::Pointer));
+        try append_round_worker(allocator, &var params, node, 4, true);
         return Signature { out: true, params: move params };
     }
     if module.names.is(name, "std::internal::builtin::thread_pool_each_lane") {
@@ -102,7 +114,18 @@ pub fn declare(allocator: Allocator, module: &ir::Module, name: ir::Name, node: 
         try append_data(allocator, &var params, 2);
         try params.append(allocator, param(Source::Value, 3, CType::I64));
         try params.append(allocator, param(Source::Value, 4, CType::I64));
-        try append_round_worker(allocator, &var params, node, 5);
+        try append_round_worker(allocator, &var params, node, 5, false);
+        return Signature { out: true, params: move params };
+    }
+    if module.names.is(name, "std::internal::builtin::thread_pool_each_lane_shared") {
+        try params.append(allocator, param(Source::Out, 0 - 1, CType::Pointer));
+        try params.append(allocator, param(Source::Value, 0, CType::I64));
+        try params.append(allocator, param(Source::Value, 1, CType::Pointer));
+        try append_data(allocator, &var params, 2);
+        try params.append(allocator, param(Source::Value, 3, CType::I64));
+        try params.append(allocator, param(Source::Value, 4, CType::I64));
+        try params.append(allocator, param(Source::Context, 5, CType::Pointer));
+        try append_round_worker(allocator, &var params, node, 6, true);
         return Signature { out: true, params: move params };
     }
     let out = uses_out(module, name, node);
@@ -127,13 +150,20 @@ fn append_data(allocator: Allocator, params: &var array::Array<Param>, data: i64
     return;
 }
 
-fn append_round_worker(allocator: Allocator, params: &var array::Array<Param>, node: &ir::InstrNode, states: i64) -> !void {
+fn append_round_worker(allocator: Allocator, params: &var array::Array<Param>, node: &ir::InstrNode, states: i64, shared: bool) -> !void {
     let worker = node.args.len() - 1;
     var invoke = Source::PoolInvoke;
+    if shared {
+        invoke = Source::PoolSharedInvoke;
+    }
     if worker > states {
         try params.append(allocator, param(Source::Value, states, CType::Pointer));
         try params.append(allocator, param(Source::ElementSize, states, CType::I64));
-        invoke = Source::PoolStateInvoke;
+        if shared {
+            invoke = Source::PoolSharedStateInvoke;
+        } else {
+            invoke = Source::PoolStateInvoke;
+        }
     } else {
         try params.append(allocator, param(Source::Zero, 0 - 1, CType::Pointer));
         try params.append(allocator, param(Source::Zero, 0 - 1, CType::I64));
@@ -163,7 +193,9 @@ pub fn element_type(type_name: []u8) -> ?Span {
 
 pub fn hands_worker(module: &ir::Module, name: ir::Name) -> bool {
     return module.names.is(name, "std::internal::builtin::thread_pool_each") or
-        module.names.is(name, "std::internal::builtin::thread_pool_each_lane");
+        module.names.is(name, "std::internal::builtin::thread_pool_each_lane") or
+        module.names.is(name, "std::internal::builtin::thread_pool_each_shared") or
+        module.names.is(name, "std::internal::builtin::thread_pool_each_lane_shared");
 }
 
 fn param(source: Source, arg: i64, c_type: CType) -> Param {

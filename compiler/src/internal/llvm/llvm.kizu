@@ -10,7 +10,7 @@ import std::mem;
 import std::string;
 
 pub fn emit(allocator: Allocator, module: &var ir::Module, out: &var string::String) -> !?diagnostic::Diagnostic {
-    return emit_for_native_target(allocator, module, out, false, Arch::Arm64);
+    return emit_for_native_target(allocator, module, out, false, Arch::Arm64, "");
 }
 
 fn emit_for_native_target(
@@ -18,21 +18,53 @@ fn emit_for_native_target(
     module: &var ir::Module,
     out: &var string::String,
     darwin: bool,
-    arch: Arch
+    arch: Arch,
+    cpu: []u8
 ) -> !?diagnostic::Diagnostic {
-    var emitter = try new_emitter(allocator, module, darwin, arch);
+    var emitter = try new_emitter(allocator, module, darwin, arch, cpu);
     defer emitter.deinit(allocator);
     return emitter.finish(module, out);
+}
+
+fn cpu_enables_arm_dotprod(cpu: []u8) -> bool {
+    if mem::len(cpu) == 0 {
+        return false;
+    }
+    return mem::equal_bytes(cpu, "native") or
+        contains_bytes(cpu, "apple") or
+        contains_bytes(cpu, "neoverse") or
+        contains_bytes(cpu, "cortex-a7") or
+        contains_bytes(cpu, "cortex-x") or
+        contains_bytes(cpu, "armv8.2") or
+        contains_bytes(cpu, "armv8.3") or
+        contains_bytes(cpu, "armv8.4") or
+        contains_bytes(cpu, "armv8.5") or
+        contains_bytes(cpu, "armv8.6") or
+        contains_bytes(cpu, "armv9");
+}
+
+fn cpu_enables_x86_ssse3(darwin: bool, cpu: []u8) -> bool {
+    if darwin {
+        return true;
+    }
+    if mem::len(cpu) == 0 or mem::equal_bytes(cpu, "x86-64") {
+        return false;
+    }
+    return true;
 }
 
 fn new_emitter(
     allocator: Allocator,
     module: &var ir::Module,
     darwin: bool,
-    arch: Arch
+    arch: Arch,
+    cpu: []u8
 ) -> !Emitter {
     let void_name = try module.names.intern("void");
     let names = try ir::new_name_table(allocator);
+    let is_x86 = arch == Arch::X86_64 or arch == Arch::X86_64Windows;
+    let has_dotprod = arch == Arch::Arm64 and (darwin or cpu_enables_arm_dotprod(cpu));
+    let has_ssse3 = is_x86 and cpu_enables_x86_ssse3(darwin, cpu);
     return Emitter {
         allocator: allocator,
         void_name: void_name,
@@ -63,6 +95,8 @@ fn new_emitter(
         frame_records: darwin,
         darwin: darwin,
         arch: arch,
+        has_dotprod: has_dotprod,
+        has_ssse3: has_ssse3,
         tbaa_used: false,
         bool_range_used: false,
         memory_types: array::new<i64>(allocator),
@@ -140,6 +174,8 @@ struct Emitter {
     frame_records: bool,
     darwin: bool,
     arch: Arch,
+    has_dotprod: bool,
+    has_ssse3: bool,
     tbaa_used: bool,
     bool_range_used: bool,
     memory_types: array::Array<i64>,
@@ -1574,6 +1610,12 @@ fn (self: &var Emitter) write_instr(module: &ir::Module, node: &ir::InstrNode) -
         LocalSlot => return self.write_local_slot(module, node),
         VectorNew => return self.write_vector_new(module, node),
         VectorLane => return self.write_vector_lane(module, node),
+        VectorLoad => return self.write_vector_load(module, node),
+        VectorStore => return self.write_vector_store(module, node),
+        VectorTbl16 => return self.write_vector_tbl16(module, node),
+        VectorSdot => return self.write_vector_sdot(module, node),
+        VectorConvert => return self.write_vector_convert(module, node),
+        IntPopcount => return self.write_int_popcount(module, node),
         BufferNew => return self.write_buffer_new(module, node),
         BufferAsBytes => return self.write_buffer_as_bytes(module, node),
         BufferAddr => return self.write_buffer_addr(module, node),

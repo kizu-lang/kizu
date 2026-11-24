@@ -1642,11 +1642,19 @@ fn (self: &var Checker) check_builtin_type_apply(
     }
     if mem::equal_bytes(name, "std::internal::builtin::thread_pool_each") {
         handled.* = true;
-        return self.check_thread_pool_each(tree, scope, type_arg, args, out);
+        return self.check_thread_pool_each(tree, scope, type_arg, args, false, out);
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::thread_pool_each_shared") {
+        handled.* = true;
+        return self.check_thread_pool_each(tree, scope, type_arg, args, true, out);
     }
     if mem::equal_bytes(name, "std::internal::builtin::thread_pool_each_lane") {
         handled.* = true;
-        return self.check_thread_pool_each_lane(tree, scope, type_arg, args, out);
+        return self.check_thread_pool_each_lane(tree, scope, type_arg, args, false, out);
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::thread_pool_each_lane_shared") {
+        handled.* = true;
+        return self.check_thread_pool_each_lane(tree, scope, type_arg, args, true, out);
     }
     return self.check_builtin_array_method_type_apply(
         tree,
@@ -1799,14 +1807,22 @@ fn (self: &var Checker) check_thread_pool_each(
     scope: ScopeHandle,
     type_arg: []u8,
     args: ast::ExpressionList,
+    shared: bool,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
     var label = "std::thread::each";
-    var parts = try self.thread_round_type_args(type_arg) orelse
-        return try self.thread_round_type_args_error(label, type_arg);
+    if shared {
+        label = "std::thread::each_shared";
+    }
+    var parts = try self.thread_round_type_args(type_arg, shared) orelse
+        return try self.thread_round_type_args_error(label, type_arg, shared);
     defer parts.deinit(self.allocator);
     if parts.state.len() > 0 {
-        label = "std::thread::each_with";
+        if shared {
+            label = "std::thread::each_with_shared";
+        } else {
+            label = "std::thread::each_with";
+        }
     }
     var shape = array::new<stdprim::ArgKind>(self.allocator);
     defer shape.deinit(self.allocator);
@@ -1826,14 +1842,22 @@ fn (self: &var Checker) check_thread_pool_each_lane(
     scope: ScopeHandle,
     type_arg: []u8,
     args: ast::ExpressionList,
+    shared: bool,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
     var label = "std::thread::each_lane";
-    var parts = try self.thread_round_type_args(type_arg) orelse
-        return try self.thread_round_type_args_error(label, type_arg);
+    if shared {
+        label = "std::thread::each_lane_shared";
+    }
+    var parts = try self.thread_round_type_args(type_arg, shared) orelse
+        return try self.thread_round_type_args_error(label, type_arg, shared);
     defer parts.deinit(self.allocator);
     if parts.state.len() > 0 {
-        label = "std::thread::each_lane_with";
+        if shared {
+            label = "std::thread::each_lane_with_shared";
+        } else {
+            label = "std::thread::each_lane_with";
+        }
     }
     let set = parts.set.as_bytes();
     let thread_error = try self.types.intern("std::thread::Error");
@@ -1863,22 +1887,30 @@ fn (self: &var Checker) check_thread_pool_each_lane(
 
 struct ThreadRoundTypeArgs {
     elem: string::String,
+    context: string::String,
     state: string::String,
     set: string::String,
 }
 
 fn (self: ThreadRoundTypeArgs) deinit(allocator: Allocator) -> void {
     self.elem.deinit(allocator);
+    self.context.deinit(allocator);
     self.state.deinit(allocator);
     self.set.deinit(allocator);
     return;
 }
 
-fn (self: &var Checker) thread_round_type_args(type_arg: []u8) -> !?ThreadRoundTypeArgs {
+fn (self: &var Checker) thread_round_type_args(type_arg: []u8, shared: bool) -> !?ThreadRoundTypeArgs {
     var parts = try split_generic_args(self.allocator, type_arg) orelse return null;
     defer parts.deinit(self.allocator);
     let count = parts.len();
-    if count != 2 and count != 3 {
+    var min_count = 2;
+    var max_count = 3;
+    if shared {
+        min_count = 3;
+        max_count = 4;
+    }
+    if count < min_count or count > max_count {
         return null;
     }
     var is_set = false;
@@ -1892,6 +1924,8 @@ fn (self: &var Checker) thread_round_type_args(type_arg: []u8) -> !?ThreadRoundT
     }
     var elem = string::new(self.allocator);
     errdefer elem.deinit(self.allocator);
+    var context = string::new(self.allocator);
+    errdefer context.deinit(self.allocator);
     var state = string::new(self.allocator);
     errdefer state.deinit(self.allocator);
     var set = string::new(self.allocator);
@@ -1900,7 +1934,18 @@ fn (self: &var Checker) thread_round_type_args(type_arg: []u8) -> !?ThreadRoundT
         let bytes = text.as_bytes();
         try elem.append_bytes(self.allocator, bytes);
     }
-    if count == 3 {
+    if shared {
+        if parts.at(1) |text| {
+            let bytes = text.as_bytes();
+            try context.append_bytes(self.allocator, bytes);
+        }
+        if count == 4 {
+            if parts.at(2) |text| {
+                let bytes = text.as_bytes();
+                try state.append_bytes(self.allocator, bytes);
+            }
+        }
+    } else if count == 3 {
         if parts.at(1) |text| {
             let bytes = text.as_bytes();
             try state.append_bytes(self.allocator, bytes);
@@ -1910,18 +1955,26 @@ fn (self: &var Checker) thread_round_type_args(type_arg: []u8) -> !?ThreadRoundT
         let bytes = text.as_bytes();
         try set.append_bytes(self.allocator, bytes);
     }
-    return ThreadRoundTypeArgs { elem: move elem, state: move state, set: move set };
+    return ThreadRoundTypeArgs { elem: move elem, context: move context, state: move state, set: move set };
 }
 
 fn (self: &var Checker) thread_round_type_args_error(
     label: []u8,
-    type_arg: []u8
+    type_arg: []u8,
+    shared: bool
 ) -> !?diagnostic::Diagnostic {
     var message = try string::from_bytes(self.allocator, "`");
     errdefer message.deinit(self.allocator);
     try message.append_bytes(self.allocator, label);
-    try message.append_bytes(
-        self.allocator, "` expects an element type, an optional state type and an error set, got `");
+    if shared {
+        try message.append_bytes(
+            self.allocator,
+            "` expects an element type, a shared context type, an optional state type and an error set, got `"
+        );
+    } else {
+        try message.append_bytes(
+            self.allocator, "` expects an element type, an optional state type and an error set, got `");
+    }
     try message.append_bytes(self.allocator, type_arg);
     try message.append_bytes(self.allocator, "`");
     return try self.checker_message_at("type error", ast::zero_span(), move message);
@@ -1944,8 +1997,12 @@ fn (self: &var Checker) check_thread_round_args(
     data_index: i64,
     args: ast::ExpressionList
 ) -> !?diagnostic::Diagnostic {
+    let has_context = parts.context.len() > 0;
     let has_state = parts.state.len() > 0;
     var want = shape.len() + 1;
+    if has_context {
+        want = want + 1;
+    }
     if has_state {
         want = want + 1;
     }
@@ -1978,6 +2035,21 @@ fn (self: &var Checker) check_thread_round_args(
     if try self.check_thread_borrowed_arg(tree, scope, label, "data", data_bytes, data_arg) |problem| {
         return move problem;
     }
+    var next_arg = shape.len();
+    if has_context {
+        var context_want = try string::from_bytes(self.allocator, "&");
+        defer context_want.deinit(self.allocator);
+        let ctx = parts.context.as_bytes();
+        try context_want.append_bytes(self.allocator, ctx);
+        let context_bytes = context_want.as_bytes();
+        let context_arg = args.get_or_panic(tree, next_arg);
+        if try self.check_thread_shared_arg(
+            tree, scope, label, "context", context_bytes, context_arg
+        ) |problem| {
+            return move problem;
+        }
+        next_arg = next_arg + 1;
+    }
     if has_state {
         var states_want = try string::from_bytes(self.allocator, "&var std::array::Array<");
         defer states_want.deinit(self.allocator);
@@ -1985,7 +2057,7 @@ fn (self: &var Checker) check_thread_round_args(
         try states_want.append_bytes(self.allocator, state);
         try states_want.append_bytes(self.allocator, ">");
         let states_bytes = states_want.as_bytes();
-        let states_arg = args.get_or_panic(tree, shape.len());
+        let states_arg = args.get_or_panic(tree, next_arg);
         if try self.check_thread_borrowed_arg(
             tree, scope, label, "states", states_bytes, states_arg
         ) |problem| {
@@ -2016,6 +2088,26 @@ fn (self: &var Checker) check_thread_borrowed_arg(
     return null;
 }
 
+fn (self: &var Checker) check_thread_shared_arg(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    label: []u8,
+    role: []u8,
+    want_bytes: []u8,
+    arg: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    let want_type = try self.types.intern(want_bytes);
+    let bare_type = try self.types.intern(want_bytes[1..mem::len(want_bytes)]);
+    var got = empty_type();
+    if try self.check_expr(tree, scope, arg, &var got) |problem| {
+        return move problem;
+    }
+    if !same_type(got, want_type) and !same_type(got, bare_type) {
+        return try self.task_arg_error(label, role, want_type, got);
+    }
+    return null;
+}
+
 fn (self: &var Checker) check_thread_worker_arg(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -2025,6 +2117,12 @@ fn (self: &var Checker) check_thread_worker_arg(
 ) -> !?diagnostic::Diagnostic {
     var worker_want = try string::from_bytes(self.allocator, "fn(");
     defer worker_want.deinit(self.allocator);
+    if parts.context.len() > 0 {
+        let ctx = parts.context.as_bytes();
+        try worker_want.append_bytes(self.allocator, "&");
+        try worker_want.append_bytes(self.allocator, ctx);
+        try worker_want.append_bytes(self.allocator, ", ");
+    }
     if parts.state.len() > 0 {
         let state = parts.state.as_bytes();
         try worker_want.append_bytes(self.allocator, "&var ");

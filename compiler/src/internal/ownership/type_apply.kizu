@@ -258,7 +258,11 @@ fn (self: &var Checker) check_type_apply_call_expr(
     }
     if self.names.is(name, "std::internal::builtin::thread_pool_each") or
         self.names.is(name, "std::internal::builtin::thread_pool_each_lane") {
-        return self.check_thread_pool_round(tree, env, args, type_arg, out);
+        return self.check_thread_pool_round(tree, env, args, type_arg, false, out);
+    }
+    if self.names.is(name, "std::internal::builtin::thread_pool_each_shared") or
+        self.names.is(name, "std::internal::builtin::thread_pool_each_lane_shared") {
+        return self.check_thread_pool_round(tree, env, args, type_arg, true, out);
     }
     return try self.error1(
         tree, ast::zero_span(), "move error: `%s` does not take static arguments", Arg::Str(name)
@@ -330,6 +334,7 @@ fn (self: &var Checker) check_thread_pool_round(
     env: ScopeHandle,
     args: ast::ExpressionList,
     type_arg: Name,
+    shared: bool,
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
     var index = 0;
@@ -345,7 +350,13 @@ fn (self: &var Checker) check_thread_pool_round(
         "move error: a pool round expects an element type, an optional state type and an error set");
     defer parts.deinit(self.allocator);
     let count = parts.len();
-    if count != 2 and count != 3 {
+    var min_count = 2;
+    var max_count = 3;
+    if shared {
+        min_count = 3;
+        max_count = 4;
+    }
+    if count < min_count or count > max_count {
         return try self.error0(ast::zero_span(),
             "move error: a pool round expects an element type, an optional state type and an error set");
     }
@@ -1649,6 +1660,38 @@ fn (self: &var Checker) check_generic_wrapper_type_args(
             return move failed;
         }
         return self.check_thread_round_type_arg(tree, name, "state", type_args.get_or_panic(1));
+    }
+    if self.names.is(name, "std::thread::each_shared") or self.names.is(name, "std::thread::each_lane_shared") {
+        if try self.check_thread_round_type_arg(tree, name, "element", type_args.get_or_panic(0)) |failed| {
+            return move failed;
+        }
+        return self.check_thread_shared_context_type_arg(tree, name, type_args.get_or_panic(1));
+    }
+    if self.names.is(name, "std::thread::each_with_shared") or self.names.is(name, "std::thread::each_lane_with_shared") {
+        if try self.check_thread_round_type_arg(tree, name, "element", type_args.get_or_panic(0)) |failed| {
+            return move failed;
+        }
+        if try self.check_thread_shared_context_type_arg(tree, name, type_args.get_or_panic(1)) |failed| {
+            return move failed;
+        }
+        return self.check_thread_round_type_arg(tree, name, "state", type_args.get_or_panic(2));
+    }
+    return null;
+}
+
+fn (self: &var Checker) check_thread_shared_context_type_arg(
+    tree: &ast::Ast,
+    name: Name,
+    type_arg: Name
+) -> !?diagnostic::Diagnostic {
+    if try self.borrow_carrying_type(type_arg) or try self.capability_carrying_type(type_arg) {
+        return try self.error2(
+            tree,
+            ast::zero_span(),
+            "borrow error: `%s` context `%s` must contain no borrow, Io or Allocator",
+            Arg::Str(name),
+            Arg::Str(type_arg)
+        );
     }
     return null;
 }

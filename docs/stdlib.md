@@ -24,6 +24,7 @@ std からしか届かず、user code からの直接呼び出しは拒否され
 | test | `test_seed`、`test_seed_set` | `std::testing::seed`(`kizu test --seed`) |
 | diagnostic | `print_line` | `std::fmt::print`(builtin `print` の body、SPEC §14.1) |
 | float | `f64_bits`、`f64_from_bits`、`f64_sqrt`、`f64_floor`、`f64_ceil`、`f64_trunc`、`f64_fma`(native のみ) | `std::float`、`std::math` |
+| simd | `simd_load_*`、`simd_store_*`、`simd_tbl16`、`simd_fma_*`、`simd_sdot_i8x16`、`simd_i8x16_to_f32x4_*`、`simd_*_from_*`、`simd_popcount_*` | `std::simd` |
 
 規則:
 

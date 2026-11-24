@@ -448,6 +448,60 @@ fn (self: &var Checker) view_free_return_type(type_name: Name) -> !bool {
         self.names.is(payload, "u64") or self.names.is(payload, "f64");
 }
 
+fn (self: &var Checker) borrow_carrying_type(type_name: Name) -> !bool {
+    var seen = map::new<[]u8, bool>(self.allocator);
+    defer seen.deinit(self.allocator);
+    return self.borrow_carrying_type_seen(type_name, &var seen);
+}
+
+fn (self: &var Checker) borrow_carrying_type_seen(
+    type_name: Name,
+    seen: &var map::Map<[]u8, bool>
+) -> !bool {
+    let payload = try self.view_carrier_payload(type_name);
+    if self.names.starts_with(payload, "&") {
+        return true;
+    }
+    if self.seen_contains(seen, payload) {
+        return false;
+    }
+    try self.mark_seen(self.allocator, seen, payload, true);
+    var base = payload;
+    if try self.names.split_generic(payload) |parts| {
+        base = parts.base;
+        if !self.names.is(base, "std::arena::Handle") {
+            let args = try self.names.split_generic_args(parts.args) orelse
+                return self.borrow_carrying_type_seen(parts.args, seen);
+            defer args.deinit(self.allocator);
+            var arg_index = 0;
+            while args.get(arg_index) |arg_type| {
+                arg_index = arg_index + 1;
+                if try self.borrow_carrying_type_seen(arg_type, seen) {
+                    return true;
+                }
+            }
+        }
+    }
+    var index = 0;
+    while self.struct_field_at(base, index) |field| {
+        index = index + 1;
+        let field_type = self.struct_field_type(base, field) orelse continue;
+        if try self.borrow_carrying_type_seen(field_type, seen) {
+            return true;
+        }
+    }
+    index = 0;
+    while self.union_variant_at(base, index) |variant| {
+        index = index + 1;
+        let variant_payload = self.union_variant_payload_name(base, variant) orelse continue;
+        if !is_empty(variant_payload) and
+            try self.borrow_carrying_type_seen(variant_payload, seen) {
+            return true;
+        }
+    }
+    return false;
+}
+
 fn (self: &var Checker) view_carrying_type(type_name: Name) -> !bool {
     var seen = map::new<[]u8, bool>(self.allocator);
     defer seen.deinit(self.allocator);
@@ -654,7 +708,9 @@ fn (self: &var Checker) place_view_roots(
     let direct = try self.direct_field_root(tree, env, expression) orelse return;
     let root = direct.root;
     if !self.binding(root).local_borrow and !self.has_borrow_targets(root) {
-        return;
+        if !reference or !self.binding(root).borrowed_param {
+            return;
+        }
     }
     var type_name = self.binding(root).type_name;
     if !is_empty(direct.path) {
@@ -898,6 +954,20 @@ fn (self: &var Checker) check_core_arg(
             return move failed;
         }
         if !self.names.is_view_type(got) {
+            let spelled = try self.names.intern(name);
+            return try self.error4(
+                tree, ast::zero_span(), "move error: `%s` arg %d expects %s, got %s",
+                Arg::Str(spelled), Arg::Int(index + 1), Arg::Str(want_name), Arg::Str(got)
+            );
+        }
+        return null;
+    }
+    if mem::starts_with(spelling, "&var []") {
+        let bare_name = try self.names.intern(spelling[5..mem::len(spelling)]);
+        if try self.read_expr(tree, env, arg, &var got) |failed| {
+            return move failed;
+        }
+        if !same_name(got, want_name) and !same_name(got, bare_name) {
             let spelled = try self.names.intern(name);
             return try self.error4(
                 tree, ast::zero_span(), "move error: `%s` arg %d expects %s, got %s",

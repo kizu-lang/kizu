@@ -1607,7 +1607,7 @@ SIMD は明示です。vector 型は固定名の 128-bit 値で、lane 数と la
 名前が言います:
 
 ```text
-f64x2  f32x4  i64x2  i32x4  i16x8  u64x2  u32x4  u16x8
+f64x2  f32x4  i64x2  i32x4  i16x8  i8x16  u64x2  u32x4  u16x8  u8x16
 ```
 
 vector は copy data です(§7.1 の view の要素にも、struct field、`Array<T>`
@@ -1620,8 +1620,10 @@ let re = a[0];                    // f64。index は整数 literal 限定で、�
 let swapped = f64x2{a[1], a[0]};
 ```
 
-演算は両辺が同じ vector 型の `+ - *`、float lane の `/`、符号付き lane の単項 `-`
-で、すべて lane ごとです。比較、`%`、bit 演算、shuffle、reduce は持ちません。
+演算は両辺が同じ vector 型の `+ - *`、float lane の `/`、符号付き lane の単項 `-`、
+整数 lane の `& | ^` と単項 `~` で、すべて lane ごとです。比較と `%` は持ちません。
+連続 load / store、`tbl16`、FMA、`sdot`、型変換、popcount などの操作は `std::simd`
+が提供します(`docs/std/simd.md`)。
 backend は native では LLVM の vector 型、wasm では simd128 の `v128` に写します
 (wasmtime と browser はどちらも既定で有効)。名前が返るものを言う `[N]T` と同じで、
 `Vector<N, T>` のような任意の lane 数は持ちません(ADR-0149)。
@@ -3991,18 +3993,25 @@ stdio operation が `Io` capability を必ず要求し、I/O failure を error u
 state を持つ `states: &var std::array::Array<S>` も受け取り、worker
 `fn(&var S, &var []T, i64) -> E!void` に、その呼び出しを走らせている thread の
 state を渡します。1 つの state を使うのは 1 つの thread だけです。
+`each_shared<T, C, E>` / `each_with_shared<T, C, S, E>` / `each_lane_shared<T, C, E>` /
+`each_lane_with_shared<T, C, S, E>` は、さらに読み取り専用の共有コンテキスト
+`context: &C` を受け取り、全 worker へゼロコピーで渡します。
 API の形は `docs/std/thread.md` にあります。
 
-compiler が知っている規則は次の 2 つです。
+compiler が知っている規則は次の 3 つです。
 
-* `data` と `states` の借用は呼び出しの間だけです。thread に渡った塊や state が
-  呼び出しより長く生きることはないので、借用の規則は普通の呼び出しと同じです
+* `data`、`states`、`context` の借用は呼び出しの間だけです。thread に渡った塊や
+  state、context が呼び出しより長く生きることはないので、借用の規則は普通の呼び出しと
+  同じです(`data` と同じ所有物を指す view を `context` に載せて同時に渡すと借用エラーになります)
 * `T` と `S` は view と `Io` / `Allocator` を含めません。2 つの塊や state に同じ
   capability が複製されると、1 つの allocator や Io を 2 つの thread が同時に使う
   ことになるためです(`std::io::spawn` の state と同じ述語)
+* `C` は読み取り専用 view(`[]U`)と所有型を含められますが、借用(`&U` / `&var U`)と
+  `Io` / `Allocator` は含めません
 
 worker は top-level function なので何も捕捉しません。書き換えられる global も
-無いので、worker が触れるのは渡された塊だけです。
+無いので、worker が触れるのは渡された塊と、その thread の state、読み取り専用の
+共有コンテキストだけです。
 
 ## 16. contract / impl 方針
 

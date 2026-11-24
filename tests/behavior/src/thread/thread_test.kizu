@@ -345,3 +345,244 @@ test "each_with returns a worker's failure and keeps the states' writes" {
 test "the processor count is at least one" {
     testing::expect(thread::cpu_count(io::blocking()) >= 1);
 }
+
+struct SharedWeights {
+    weights: []i64,
+    bias: i64,
+    chunk: i64,
+}
+
+struct SharedOwned {
+    values: array::Array<i64>,
+    offset: i64,
+    chunk: i64,
+}
+
+fn (self: SharedOwned) deinit(allocator: Allocator) -> void {
+    self.values.deinit(allocator);
+    return;
+}
+
+fn apply_shared_weights(ctx: &SharedWeights, part: &var []i64, index: i64) -> Failure!void {
+    let base = index * ctx.chunk;
+    for 0..mem::count<i64>(part) |i| {
+        part[i] = ctx.weights[base + i] * 3 + ctx.bias;
+    }
+    return;
+}
+
+fn apply_shared_owned(ctx: &SharedOwned, part: &var []i64, index: i64) -> Failure!void {
+    let values = ctx.values.as_slice();
+    let base = index * ctx.chunk;
+    for 0..mem::count<i64>(part) |i| {
+        part[i] = values[base + i] + ctx.offset;
+    }
+    return;
+}
+
+fn apply_shared_slice_with_state(
+    weights: &[]i64,
+    calls: &var i64,
+    part: &var []i64,
+    index: i64
+) -> Failure!void {
+    calls.* = calls.* + 1;
+    let base = index * 5;
+    for 0..mem::count<i64>(part) |i| {
+        part[i] = part[i] + weights[base + i];
+    }
+    return;
+}
+
+fn apply_shared_scalar(scale: &f32, part: &var []f32, _index: i64) -> Failure!void {
+    for 0..mem::count<f32>(part) |i| {
+        part[i] = part[i] * scale.*;
+    }
+    return;
+}
+
+fn apply_shared_lane(delta: &i64, lane: &var []i64, index: i64) -> Failure!void {
+    for 0..mem::count<i64>(lane) |i| {
+        lane[i] = lane[i] + delta.* + index * 100;
+    }
+    return;
+}
+
+fn apply_shared_lane_with_state(
+    ctx: &SharedWeights,
+    state: &var Reverser,
+    lane: &var []i64,
+    _index: i64
+) -> Failure!void {
+    let n = mem::count<i64>(lane);
+    let scratch = state.scratch.as_mut_slice();
+    for 0..n |i| {
+        scratch[i] = lane[n - 1 - i] + ctx.weights[i] + ctx.bias;
+    }
+    for 0..n |i| {
+        lane[i] = scratch[i];
+    }
+    state.lanes = state.lanes + 1;
+    return;
+}
+
+fn fail_shared_on(bad: &i64, part: &var []i64, index: i64) -> Failure!void {
+    for 0..mem::count<i64>(part) |i| {
+        part[i] = 1;
+    }
+    if index == bad.* {
+        return mem::Error::OutOfMemory;
+    }
+    return;
+}
+
+fn shared_fails(pool: &var thread::Pool, cells: &var []i64, bad: &i64) -> bool {
+    thread::each_shared<i64, i64, Failure>(pool, cells, 1, bad, fail_shared_on) catch return true;
+    return false;
+}
+
+test "each_shared passes a read-only view-carrying context to every chunk" {
+    let allocator = mem::page_allocator();
+    var pool = try thread::init(io::blocking(), allocator, 4);
+    defer pool.deinit(allocator);
+    var weights = array::new<i64>(allocator);
+    defer weights.deinit(allocator);
+    try count_up(&var weights, allocator, 35);
+    var out = array::new<i64>(allocator);
+    defer out.deinit(allocator);
+    for 0..35 |_| {
+        try out.append(allocator, 0);
+    }
+    let w_view = weights.as_slice();
+    let ctx = SharedWeights { weights: w_view, bias: 7, chunk: 6 };
+    let cells = out.as_mut_slice();
+    try thread::each_shared<i64, SharedWeights, Failure>(&var pool, cells, 6, &ctx, apply_shared_weights);
+    for 0..35 |i| {
+        testing::expect_equal<i64>(i * 3 + 7, out.get_or_panic(i));
+    }
+}
+
+test "each_shared borrows an owning context without copying its storage" {
+    let allocator = mem::page_allocator();
+    var pool = try thread::init(io::blocking(), allocator, 4);
+    defer pool.deinit(allocator);
+    var src = array::new<i64>(allocator);
+    errdefer src.deinit(allocator);
+    try count_up(&var src, allocator, 20);
+    let owned = SharedOwned { values: move src, offset: 100, chunk: 4 };
+    defer owned.deinit(allocator);
+    var out = array::new<i64>(allocator);
+    defer out.deinit(allocator);
+    for 0..20 |_| {
+        try out.append(allocator, 0);
+    }
+    let cells = out.as_mut_slice();
+    try thread::each_shared<i64, SharedOwned, Failure>(&var pool, cells, 4, &owned, apply_shared_owned);
+    for 0..20 |i| {
+        testing::expect_equal<i64>(i + 100, out.get_or_panic(i));
+    }
+}
+
+test "each_with_shared combines a shared slice context and per-thread state" {
+    let allocator = mem::page_allocator();
+    var pool = try thread::init(io::blocking(), allocator, 4);
+    defer pool.deinit(allocator);
+    var weights = array::new<i64>(allocator);
+    defer weights.deinit(allocator);
+    try count_up(&var weights, allocator, 23);
+    var out = array::new<i64>(allocator);
+    defer out.deinit(allocator);
+    for 0..23 |i| {
+        try out.append(allocator, i * 10);
+    }
+    var states = array::new<i64>(allocator);
+    defer states.deinit(allocator);
+    for 0..pool.threads() |_| {
+        try states.append(allocator, 0);
+    }
+    let w_view = weights.as_slice();
+    let cells = out.as_mut_slice();
+    try thread::each_with_shared<i64, []i64, i64, Failure>(
+        &var pool, cells, 5, &w_view, &var states, apply_shared_slice_with_state);
+    for 0..23 |i| {
+        testing::expect_equal<i64>(i * 11, out.get_or_panic(i));
+    }
+    var calls = 0;
+    for 0..states.len() |i| {
+        calls = calls + states.get_or_panic(i);
+    }
+    testing::expect_equal<i64>(5, calls);
+}
+
+test "each_shared supports scalar float context and one-thread pool" {
+    let allocator = mem::page_allocator();
+    var pool = try thread::init(io::blocking(), allocator, 1);
+    defer pool.deinit(allocator);
+    var values = array::new<f32>(allocator);
+    defer values.deinit(allocator);
+    for 0..12 |i| {
+        try values.append(allocator, cast<f32>(i));
+    }
+    let scale: f32 = 2.5;
+    let cells = values.as_mut_slice();
+    try thread::each_shared<f32, f32, Failure>(&var pool, cells, 4, &scale, apply_shared_scalar);
+    for 0..12 |i| {
+        testing::expect(values.get_or_panic(i) == cast<f32>(i) * 2.5);
+    }
+}
+
+test "each_lane_shared and each_lane_with_shared work across strided lanes" {
+    let allocator = mem::page_allocator();
+    var pool = try thread::init(io::blocking(), allocator, 4);
+    defer pool.deinit(allocator);
+    var values = array::new<i64>(allocator);
+    defer values.deinit(allocator);
+    try count_up(&var values, allocator, 12);
+    let delta: i64 = 1000;
+    let cells = values.as_mut_slice();
+    try thread::each_lane_shared<i64, i64, Failure>(&var pool, allocator, cells, 3, 4, &delta, apply_shared_lane);
+    for 0..12 |offset| {
+        let lane = offset % 4;
+        testing::expect_equal<i64>(offset + 1000 + lane * 100, values.get_or_panic(offset));
+    }
+
+    var w = array::new<i64>(allocator);
+    defer w.deinit(allocator);
+    try count_up(&var w, allocator, 5);
+    let w_view = w.as_slice();
+    let ctx = SharedWeights { weights: w_view, bias: 10, chunk: 1 };
+    var states = try reversers(allocator, pool.threads(), 5);
+    defer states.deinit(allocator);
+    var grid = array::new<i64>(allocator);
+    defer grid.deinit(allocator);
+    try count_up(&var grid, allocator, 30);
+    let grid_cells = grid.as_mut_slice();
+    try thread::each_lane_with_shared<i64, SharedWeights, Reverser, Failure>(
+        &var pool, allocator, grid_cells, 5, 6, &ctx, &var states, apply_shared_lane_with_state);
+    for 0..30 |i| {
+        let row = i / 6;
+        let col = i % 6;
+        testing::expect_equal<i64>((4 - row) * 6 + col + row + 10, grid.get_or_panic(i));
+    }
+    var lanes = 0;
+    for 0..states.len() |i| {
+        if states.at(i) |state| {
+            lanes = lanes + state.lanes;
+        }
+    }
+    testing::expect_equal<i64>(6, lanes);
+}
+
+test "each_shared returns a worker failure and stays reusable" {
+    let allocator = mem::page_allocator();
+    var pool = try thread::init(io::blocking(), allocator, 4);
+    defer pool.deinit(allocator);
+    var values = array::new<i64>(allocator);
+    defer values.deinit(allocator);
+    try count_up(&var values, allocator, 16);
+    let bad: i64 = 5;
+    let cells = values.as_mut_slice();
+    testing::expect(shared_fails(&var pool, cells, &bad));
+    testing::expect_equal<i64>(1, values.get_or_panic(5));
+    try check_stamps(&var pool, allocator, 20, 4);
+}

@@ -3,6 +3,7 @@ import compiler::internal::hostabi;
 import compiler::internal::ir;
 import std::array;
 import std::map;
+import std::mem;
 import std::string;
 
 fn (self: &var Emitter) thread_round_set(module: &ir::Module, node: &ir::InstrNode) -> !string::String {
@@ -13,18 +14,38 @@ fn (self: &var Emitter) thread_round_set(module: &ir::Module, node: &ir::InstrNo
     return move parts.err;
 }
 
-fn (self: &var Emitter) thread_invoke_thunk_name(set: []u8, states: bool) -> !ir::Name {
+fn (self: &var Emitter) thread_context_load_type(module: &ir::Module, node: &ir::InstrNode) -> !string::String {
+    let context_index = try hostabi::source_arg(self.allocator, module, node, hostabi::Source::Context) orelse
+        return string::new(self.allocator);
+    let arg = node.args.get_or_panic(context_index);
+    let text = ir::name_text(&module.names, arg.type_name);
+    let bytes = text.as_bytes();
+    if mem::starts_with(bytes, "&") or uses_indirect_struct_param_abi(module, bytes) {
+        return string::new(self.allocator);
+    }
+    return string::from_bytes(self.allocator, bytes);
+}
+
+fn (self: &var Emitter) thread_invoke_thunk_name(set: []u8, context_load: []u8, shared: bool, states: bool) -> !ir::Name {
     var prefix = "kizu.thread.each.invoke.";
-    if states {
+    if shared and states {
+        prefix = "kizu.thread.each.shared.state.invoke.";
+    } else if shared {
+        prefix = "kizu.thread.each.shared.invoke.";
+    } else if states {
         prefix = "kizu.thread.each.state.invoke.";
     }
     var out = try string::from_bytes(self.allocator, prefix);
     errdefer out.deinit(self.allocator);
     try append_llvm_name_part(self.allocator, &var out, set);
+    if mem::len(context_load) > 0 {
+        try out.append_byte(self.allocator, cast<u8>(46));
+        try append_llvm_name_part(self.allocator, &var out, context_load);
+    }
     return self.names.intern_owned(move out);
 }
 
-fn (self: &var Emitter) thread_round_sets(module: &ir::Module, states: bool) -> !array::Array<string::String> {
+fn (self: &var Emitter) thread_round_sets(module: &ir::Module, shared: bool, states: bool) -> !array::Array<string::String> {
     var seen = map::new<[]u8, bool>(self.allocator);
     defer seen.deinit(self.allocator);
     var function_index = 0;
@@ -46,13 +67,26 @@ fn (self: &var Emitter) thread_round_sets(module: &ir::Module, states: bool) -> 
                     continue;
                 }
                 var source = hostabi::Source::PoolInvoke;
-                if states {
+                if shared and states {
+                    source = hostabi::Source::PoolSharedStateInvoke;
+                } else if shared {
+                    source = hostabi::Source::PoolSharedInvoke;
+                } else if states {
                     source = hostabi::Source::PoolStateInvoke;
                 }
                 let _ = try hostabi::source_arg(self.allocator, module, &node, source) orelse continue;
-                let set = try self.thread_round_set(module, &node);
-                defer set.deinit(self.allocator);
-                let bytes = set.as_bytes();
+                var entry = try self.thread_round_set(module, &node);
+                defer entry.deinit(self.allocator);
+                if shared {
+                    let load_type = try self.thread_context_load_type(module, &node);
+                    defer load_type.deinit(self.allocator);
+                    let load_bytes = load_type.as_bytes();
+                    if mem::len(load_bytes) > 0 {
+                        try entry.append_byte(self.allocator, cast<u8>(10));
+                        try entry.append_bytes(self.allocator, load_bytes);
+                    }
+                }
+                let bytes = entry.as_bytes();
                 let name = try self.names.intern(bytes);
                 let retained = ir::name_text(&self.names, name);
                 let key = retained.as_bytes();
@@ -64,42 +98,76 @@ fn (self: &var Emitter) thread_round_sets(module: &ir::Module, states: bool) -> 
 }
 
 fn (self: &var Emitter) write_thread_each_invoke_thunks(module: &ir::Module) -> !void {
-    try self.write_thread_invoke_thunks(module, false);
-    try self.write_thread_invoke_thunks(module, true);
+    try self.write_thread_invoke_thunks(module, false, false);
+    try self.write_thread_invoke_thunks(module, false, true);
+    try self.write_thread_invoke_thunks(module, true, false);
+    try self.write_thread_invoke_thunks(module, true, true);
     return;
 }
 
-fn (self: &var Emitter) write_thread_invoke_thunks(module: &ir::Module, states: bool) -> !void {
-    var sets = try self.thread_round_sets(module, states);
-    defer sets.deinit(self.allocator);
-    var state_arg = "";
-    if states {
-        state_arg = "ptr %kizu.state, ";
-    }
+fn split_thunk_key(bytes: []u8) -> i64 {
     var index = 0;
-    while sets.at(index) |set| {
+    while index < mem::len(bytes) {
+        if bytes[index] == cast<u8>(10) {
+            return index;
+        }
         index = index + 1;
-        let set_bytes = set.as_bytes();
+    }
+    return 0 - 1;
+}
+
+fn (self: &var Emitter) write_thread_invoke_thunks(module: &ir::Module, shared: bool, states: bool) -> !void {
+    var sets = try self.thread_round_sets(module, shared, states);
+    defer sets.deinit(self.allocator);
+    var index = 0;
+    while sets.at(index) |entry| {
+        index = index + 1;
+        let entry_bytes = entry.as_bytes();
+        let entry_len = mem::len(entry_bytes);
+        let cut = split_thunk_key(entry_bytes);
+        var set_end = entry_len;
+        var load_start = entry_len;
+        if cut >= 0 {
+            set_end = cut;
+            load_start = cut + 1;
+        }
+        let set_bytes = entry_bytes[0..set_end];
+        let load_bytes = entry_bytes[load_start..entry_len];
         var union_text = try string::from_bytes(self.allocator, set_bytes);
         defer union_text.deinit(self.allocator);
         try union_text.append_bytes(self.allocator, "!void");
         let union_bytes = union_text.as_bytes();
         let union_type = try self.llvm_type(module, union_bytes);
-        let thunk = try self.thread_invoke_thunk_name(set_bytes, states);
+        let thunk = try self.thread_invoke_thunk_name(set_bytes, load_bytes, shared, states);
         let linkage = self.thunk_linkage();
         let comdat = try self.thunk_comdat(thunk);
         try self.line3(
-            "define %si64 @%s(ptr %%kizu.worker, ptr %%kizu.state, ptr %%kizu.part, i64 %%kizu.index) #0%s {",
+            "define %si64 @%s(ptr %%kizu.worker, ptr %%kizu.context, ptr %%kizu.state, ptr %%kizu.part, i64 %%kizu.index) #0%s {",
             Arg::Lit(linkage),
             Arg::Str(thunk),
             Arg::Lit(comdat)
         );
         try self.line("entry:");
         try self.line("  %kizu.part.value = load %kizu.slice.u8, ptr %kizu.part");
+        var prefix = string::new(self.allocator);
+        errdefer prefix.deinit(self.allocator);
+        if shared {
+            if mem::len(load_bytes) > 0 {
+                let context_type = try self.llvm_type(module, load_bytes);
+                try self.line1("  %%kizu.context.value = load %s, ptr %%kizu.context", Arg::Str(context_type));
+                try self.names.append_to(&var prefix, context_type);
+                try prefix.append_bytes(self.allocator, " %kizu.context.value, ");
+            } else {
+                try prefix.append_bytes(self.allocator, "ptr %kizu.context, ");
+            }
+        }
+        if states {
+            try prefix.append_bytes(self.allocator, "ptr %kizu.state, ");
+        }
         try self.line2(
             "  %%kizu.result = call %s %%kizu.worker(%s%%kizu.slice.u8 %%kizu.part.value, i64 %%kizu.index)",
             Arg::Str(union_type),
-            Arg::Lit(state_arg)
+            Arg::Owned(move prefix)
         );
         try self.line1("  %%kizu.code = extractvalue %s %%kizu.result, 0", Arg::Str(union_type));
         try self.line("  ret i64 %kizu.code");
@@ -139,6 +207,27 @@ fn (self: &var Emitter) write_thread_pool_round(module: &ir::Module, node: &ir::
                 try self.line3("  store %s %s, ptr %s.data", Arg::Str(arg_type), Arg::Str(value.operand), Arg::Str(slot));
                 try args.append(self.allocator, try self.sprint2("ptr %s.data", Arg::Str(slot), Arg::None));
             },
+            Context => {
+                let arg = node.args.get_or_panic(param.arg);
+                let type_text = ir::name_text(&module.names, arg.type_name);
+                let type_bytes = type_text.as_bytes();
+                if mem::starts_with(type_bytes, "&") {
+                    let value = try self.operand(module, arg);
+                    try args.append(self.allocator, try self.sprint2("ptr %s", Arg::Str(value.operand), Arg::None));
+                } else if try self.address_arg(module, node, param.arg) |addr| {
+                    try args.append(self.allocator, try self.sprint2("ptr %s", Arg::Str(addr), Arg::None));
+                } else {
+                    let arg_type = try self.llvm_type_of(module, arg.type_name);
+                    let target = try self.text1("%s.context", Arg::Str(slot));
+                    try self.line2("  %s = alloca %s", Arg::Str(target), Arg::Str(arg_type));
+                    if !try self.copied_from_memory(module, node, param.arg, target) and
+                        !try self.zeroed_memory(module, arg, target) {
+                        let value = try self.operand(module, arg);
+                        try self.line3("  store %s %s, ptr %s", Arg::Str(arg_type), Arg::Str(value.operand), Arg::Str(target));
+                    }
+                    try args.append(self.allocator, try self.sprint2("ptr %s", Arg::Str(target), Arg::None));
+                }
+            },
             _ => {
                 if try self.append_hosted_arg(module, node, param, &var args) |failed| {
                     return move failed;
@@ -158,6 +247,7 @@ fn (self: &var Emitter) write_thread_pool_round(module: &ir::Module, node: &ir::
 fn (self: &var Emitter) pool_invoke_arg(
     module: &ir::Module,
     node: &ir::InstrNode,
+    shared: bool,
     states: bool,
     args: &var array::Array<string::String>
 ) -> !?diagnostic::Diagnostic {
@@ -168,7 +258,15 @@ fn (self: &var Emitter) pool_invoke_arg(
             module, "llvm error: %s returns %s, not E!void", node.operand, node.result.type_name);
     }
     let set_bytes = set.as_bytes();
-    let thunk = try self.thread_invoke_thunk_name(set_bytes, states);
+    if shared {
+        let load_type = try self.thread_context_load_type(module, node);
+        defer load_type.deinit(self.allocator);
+        let load_bytes = load_type.as_bytes();
+        let thunk = try self.thread_invoke_thunk_name(set_bytes, load_bytes, shared, states);
+        try args.append(self.allocator, try self.sprint2("ptr @%s", Arg::Str(thunk), Arg::None));
+        return null;
+    }
+    let thunk = try self.thread_invoke_thunk_name(set_bytes, "", shared, states);
     try args.append(self.allocator, try self.sprint2("ptr @%s", Arg::Str(thunk), Arg::None));
     return null;
 }

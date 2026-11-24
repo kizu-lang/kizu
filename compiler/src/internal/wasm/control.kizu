@@ -158,6 +158,42 @@ fn (self: &var Emitter) write_instr_node(
     if node.op == ir::Op::VectorLane {
         return self.write_vector_lane(module, node);
     }
+    if node.op == ir::Op::VectorTbl16 {
+        let tbl = try self.arg_expr(module, node, 0);
+        let idx = try self.arg_expr(module, node, 1);
+        var expression = try string::from_bytes(self.allocator, "(i8x16.swizzle ");
+        errdefer expression.deinit(self.allocator);
+        try self.names.append_to(&var expression, tbl);
+        try expression.append_byte(self.allocator, cast<u8>(32));
+        try self.names.append_to(&var expression, idx);
+        try expression.append_byte(self.allocator, cast<u8>(41));
+        let expr = try self.names.intern_owned(move expression);
+        return self.write_scalar_result(module, node.result, expr);
+    }
+    if node.op == ir::Op::IntPopcount {
+        let val = try self.arg_expr(module, node, 0);
+        var expression = string::new(self.allocator);
+        errdefer expression.deinit(self.allocator);
+        if module.names.is(node.result.type_name, "u8x16") {
+            try expression.append_bytes(self.allocator, "(i8x16.popcnt ");
+            try self.names.append_to(&var expression, val);
+            try expression.append_byte(self.allocator, cast<u8>(41));
+        } else if module.names.is(node.result.type_name, "u32") {
+            try expression.append_bytes(self.allocator, "(i64.extend_i32_u (i32.popcnt (i32.wrap_i64 ");
+            try self.names.append_to(&var expression, val);
+            try expression.append_bytes(self.allocator, ")))");
+        } else {
+            try expression.append_bytes(self.allocator, "(i64.popcnt ");
+            try self.names.append_to(&var expression, val);
+            try expression.append_byte(self.allocator, cast<u8>(41));
+        }
+        let expr = try self.names.intern_owned(move expression);
+        return self.write_scalar_result(module, node.result, expr);
+    }
+    if node.op == ir::Op::VectorLoad or node.op == ir::Op::VectorStore or
+        node.op == ir::Op::VectorSdot or node.op == ir::Op::VectorConvert {
+        return try self.fail_op(module, node, "wasm error: %s has no wasm lowering yet");
+    }
     if node.op == ir::Op::StructNew {
         return self.write_struct_new(module, node);
     }
@@ -330,6 +366,14 @@ fn (self: &var Emitter) write_binary(
     if module.names.is(node.operand, "<<") or module.names.is(node.operand, ">>") {
         return self.write_shift(module, node, left, right);
     }
+    if module.names.is(node.operand, "*") {
+        let rt = ir::name_text(&module.names, node.result.type_name);
+        let rb = rt.as_bytes();
+        let vk = typ::vector_kind(rb);
+        if vk == 8 or vk == 9 {
+            return try self.fail0("wasm error: 8-bit vector multiply is not supported");
+        }
+    }
     let result_retained = ir::name_text(&module.names, node.result.name);
     let result_bytes = result_retained.as_bytes();
     let symbol = try self.symbol_name_of(result_bytes);
@@ -452,15 +496,23 @@ fn (self: &var Emitter) write_unary(
         try expression.append_byte(self.allocator, cast<u8>(41));
     } else {
         if module.names.is(node.operand, "~") {
-            if !is_integer_type(&module.names, node.result.type_name) {
-                expression.deinit(self.allocator);
-                return try self.fail0("wasm error: unary ~ expects integer");
+            let result_text = ir::name_text(&module.names, node.result.type_name);
+            let result_bytes = result_text.as_bytes();
+            if typ::is_vector(result_bytes) {
+                try expression.append_bytes(self.allocator, "(v128.not ");
+                try self.names.append_to(&var expression, value);
+                try expression.append_byte(self.allocator, cast<u8>(41));
+            } else {
+                if !is_integer_type(&module.names, node.result.type_name) {
+                    expression.deinit(self.allocator);
+                    return try self.fail0("wasm error: unary ~ expects integer");
+                }
+                try expression.append_bytes(self.allocator, narrow_prefix(&module.names, node.result.type_name));
+                try expression.append_bytes(self.allocator, "(i64.xor ");
+                try self.names.append_to(&var expression, value);
+                try expression.append_bytes(self.allocator, " (i64.const -1))");
+                try expression.append_bytes(self.allocator, narrow_suffix(&module.names, node.result.type_name));
             }
-            try expression.append_bytes(self.allocator, narrow_prefix(&module.names, node.result.type_name));
-            try expression.append_bytes(self.allocator, "(i64.xor ");
-            try self.names.append_to(&var expression, value);
-            try expression.append_bytes(self.allocator, " (i64.const -1))");
-            try expression.append_bytes(self.allocator, narrow_suffix(&module.names, node.result.type_name));
         } else {
             if !module.names.is(node.operand, "-") {
                 expression.deinit(self.allocator);

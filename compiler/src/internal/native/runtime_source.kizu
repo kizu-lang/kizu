@@ -4464,9 +4464,10 @@ pub fn runtime_source() -> []u8 {
         \\       round, and only read after that. */
         \\    void *worker;
         \\    /* Calls the worker and answers its failure code, 0 for success. The
-        \\       second argument is the taking thread's state, NULL in a round that
-        \\       has none. */
-        \\    int64_t (*invoke)(void *, unsigned char *, KizuSliceU8 *, int64_t);
+        \\       second argument is the shared read-only context (NULL if none), and
+        \\       the third is the taking thread's state (NULL if none). */
+        \\    int64_t (*invoke)(void *, const void *, unsigned char *, KizuSliceU8 *, int64_t);
+        \\    const void *context;
         \\    /* A round with states hands thread `participant` the state at
         \\       states + participant * state_size and no other. */
         \\    unsigned char *states;
@@ -4583,13 +4584,13 @@ pub fn runtime_source() -> []u8 {
         \\        pool->base + (block * pool->length * pool->stride + lane) * size;
         \\    if (pool->stride == 1) {
         \\        KizuSliceU8 part = {first, pool->length};
-        \\        return pool->invoke(pool->worker, kizu_pool_state(pool, participant), &part, index);
+        \\        return pool->invoke(pool->worker, pool->context, kizu_pool_state(pool, participant), &part, index);
         \\    }
         \\    unsigned char *scratch = pool->scratch + participant * pool->scratch_step;
         \\    int64_t step = pool->stride * size;
         \\    kizu_pool_copy_strided(scratch, size, first, step, pool->length, size);
         \\    KizuSliceU8 part = {scratch, pool->length};
-        \\    int64_t failure = pool->invoke(pool->worker, kizu_pool_state(pool, participant), &part, index);
+        \\    int64_t failure = pool->invoke(pool->worker, pool->context, kizu_pool_state(pool, participant), &part, index);
         \\    /* Copied back whether or not the worker failed: what it wrote before it
         \\       failed stays, the way a chunk's writes do. */
         \\    kizu_pool_copy_strided(first, step, scratch, size, pool->length, size);
@@ -4607,7 +4608,7 @@ pub fn runtime_source() -> []u8 {
         \\        count = pool->chunk;
         \\    }
         \\    KizuSliceU8 part = {pool->base + start * pool->elem_size, count};
-        \\    return pool->invoke(pool->worker, kizu_pool_state(pool, participant), &part, index);
+        \\    return pool->invoke(pool->worker, pool->context, kizu_pool_state(pool, participant), &part, index);
         \\}
         \\
         \\/* Records the round's first failure and takes every batch nobody has taken
@@ -4912,12 +4913,13 @@ pub fn runtime_source() -> []u8 {
         \\   and answers its failure code. The first failure is the round's result.
         \\   `states`, NULL for a round without them, is the Array holding one state
         \\   of `state_size` bytes per thread of the pool, the caller's first. */
-        \\void std__internal__builtin__thread_pool_each(
+        \\void std__internal__builtin__thread_pool_each_shared(
         \\    KizuErrorVoid *out,
         \\    int64_t handle,
         \\    KizuSliceU8 *data,
         \\    int64_t elem_size,
         \\    int64_t chunk,
+        \\    const void *context,
         \\    KizuArray *states,
         \\    int64_t state_size,
         \\    void *worker,
@@ -4929,7 +4931,8 @@ pub fn runtime_source() -> []u8 {
         \\        return;
         \\    }
         \\    pool->worker = worker;
-        \\    pool->invoke = (int64_t (*)(void *, unsigned char *, KizuSliceU8 *, int64_t))invoke;
+        \\    pool->invoke = (int64_t (*)(void *, const void *, unsigned char *, KizuSliceU8 *, int64_t))invoke;
+        \\    pool->context = context;
         \\    pool->base = data->ptr;
         \\    pool->len = data->len;
         \\    pool->elem_size = elem_size;
@@ -4938,9 +4941,24 @@ pub fn runtime_source() -> []u8 {
         \\    pool->scratch = NULL;
         \\    pool->items = (data->len + chunk - 1) / chunk;
         \\    int64_t failure = kizu_pool_round(pool);
+        \\    pool->context = NULL;
         \\    if (failure != 0) {
         \\        *out = kizu_err_void(failure);
         \\    }
+        \\}
+        \\
+        \\void std__internal__builtin__thread_pool_each(
+        \\    KizuErrorVoid *out,
+        \\    int64_t handle,
+        \\    KizuSliceU8 *data,
+        \\    int64_t elem_size,
+        \\    int64_t chunk,
+        \\    KizuArray *states,
+        \\    int64_t state_size,
+        \\    void *worker,
+        \\    void *invoke) {
+        \\    std__internal__builtin__thread_pool_each_shared(
+        \\        out, handle, data, elem_size, chunk, NULL, states, state_size, worker, invoke);
         \\}
         \\
         \\/* Runs one lane round. `data` is whole blocks of length * stride elements;
@@ -4948,7 +4966,7 @@ pub fn runtime_source() -> []u8 {
         \\   i + stride, ... The caller has checked that shape. A stride above 1 needs a
         \\   scratch run of `length` elements per thread, bought from `allocator` for
         \\   the round and returned after it. `states` is each's. */
-        \\void std__internal__builtin__thread_pool_each_lane(
+        \\void std__internal__builtin__thread_pool_each_lane_shared(
         \\    KizuErrorVoid *out,
         \\    int64_t handle,
         \\    void *allocator,
@@ -4956,6 +4974,7 @@ pub fn runtime_source() -> []u8 {
         \\    int64_t elem_size,
         \\    int64_t length,
         \\    int64_t stride,
+        \\    const void *context,
         \\    KizuArray *states,
         \\    int64_t state_size,
         \\    void *worker,
@@ -4981,7 +5000,8 @@ pub fn runtime_source() -> []u8 {
         \\        }
         \\    }
         \\    pool->worker = worker;
-        \\    pool->invoke = (int64_t (*)(void *, unsigned char *, KizuSliceU8 *, int64_t))invoke;
+        \\    pool->invoke = (int64_t (*)(void *, const void *, unsigned char *, KizuSliceU8 *, int64_t))invoke;
+        \\    pool->context = context;
         \\    pool->base = data->ptr;
         \\    pool->len = data->len;
         \\    pool->elem_size = elem_size;
@@ -4991,6 +5011,7 @@ pub fn runtime_source() -> []u8 {
         \\    pool->scratch_step = scratch_step;
         \\    pool->items = data->len / length;
         \\    int64_t failure = kizu_pool_round(pool);
+        \\    pool->context = NULL;
         \\    pool->scratch = NULL;
         \\    if (scratch) {
         \\        kizu_rt_free(allocator, scratch, scratch_bytes);
@@ -4998,6 +5019,22 @@ pub fn runtime_source() -> []u8 {
         \\    if (failure != 0) {
         \\        *out = kizu_err_void(failure);
         \\    }
+        \\}
+        \\
+        \\void std__internal__builtin__thread_pool_each_lane(
+        \\    KizuErrorVoid *out,
+        \\    int64_t handle,
+        \\    void *allocator,
+        \\    KizuSliceU8 *data,
+        \\    int64_t elem_size,
+        \\    int64_t length,
+        \\    int64_t stride,
+        \\    KizuArray *states,
+        \\    int64_t state_size,
+        \\    void *worker,
+        \\    void *invoke) {
+        \\    std__internal__builtin__thread_pool_each_lane_shared(
+        \\        out, handle, allocator, data, elem_size, length, stride, NULL, states, state_size, worker, invoke);
         \\}
         \\
         \\void std__internal__builtin__thread_pool_close(int64_t handle, void *allocator) {

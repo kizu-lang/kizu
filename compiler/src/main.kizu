@@ -2657,6 +2657,10 @@ fn native_target_with(
                 try io::write_stderr_line(io, "error: --thinlto optimizes LLVM bitcode in the link; build with --backend llvm");
                 return 1;
             }
+            if options.direct and options.cpu.len() > 0 {
+                try io::write_stderr_line(io, "error: --cpu tunes LLVM code generation; build with --backend llvm");
+                return 1;
+            }
             if options.direct {
                 if !arm and !amd and !amd_windows {
                     try io::write_stderr_line(io, "error: --backend direct needs a Darwin or Linux arm64, or a Linux or Windows x86_64 target");
@@ -2686,10 +2690,13 @@ fn native_target_with(
                 if failure {
                     return 1;
                 }
-            } else if try emit_unit_texts(allocator, &var lowered.lowerer.module, darwin, arch, split, &var units) |failed| {
-                defer failed.deinit(allocator);
-                try report(io, allocator, &loader.sources, &failed);
-                return 1;
+            } else {
+                let cpu = options.cpu.as_bytes();
+                if try emit_unit_texts(allocator, &var lowered.lowerer.module, darwin, arch, cpu, split, &var units) |failed| {
+                    defer failed.deinit(allocator);
+                    try report(io, allocator, &loader.sources, &failed);
+                    return 1;
+                }
             }
             if options.output.len() > 0 {
                 if try native::build(io, allocator, &var temps, options, &host, &units, &lowered.std_errors.sets) |failed| {
@@ -2777,12 +2784,13 @@ fn emit_unit_texts(
     module: &var ir::Module,
     darwin: bool,
     arch: llvm::Arch,
+    cpu: []u8,
     split: llvm::Split,
     texts: &var array::Array<string::String>
 ) -> !?diagnostic::Diagnostic {
     var units = array::new<llvm::Unit>(allocator);
     defer units.deinit(allocator);
-    if try llvm::emit_units(allocator, module, darwin, arch, split, &var units) |failed| {
+    if try llvm::emit_units_for_cpu(allocator, module, darwin, arch, cpu, split, &var units) |failed| {
         return move failed;
     }
     var index = 0;

@@ -218,6 +218,15 @@ fn (self: &var Checker) check_prefix_expr(
         return null;
     }
     if mem::equal_bytes(operator, "~") {
+        let kind = try self.vector_kind_of(right);
+        if kind >= 0 {
+            let lane = typ::vector_lane_of_kind(kind);
+            if mem::equal_bytes(lane, "f32") or mem::equal_bytes(lane, "f64") {
+                return try self.unary_type_error(operator, "integer lanes", right);
+            }
+            out.* = right;
+            return null;
+        }
         if !self.checker_integer_type(right) {
             return try self.unary_type_error(operator, "integer", right);
         }
@@ -390,6 +399,20 @@ fn (self: &var Checker) check_vector_operands(
         mem::equal_bytes(operator, "*") {
         out.* = left;
         return null;
+    }
+    if mem::equal_bytes(operator, "&") or mem::equal_bytes(operator, "|") or
+        mem::equal_bytes(operator, "^") {
+        if !mem::equal_bytes(lane, "f32") and !mem::equal_bytes(lane, "f64") {
+            out.* = left;
+            return null;
+        }
+        var message = string::new(self.allocator);
+        errdefer message.deinit(self.allocator);
+        try message.append_bytes(self.allocator, "operator `");
+        try message.append_bytes(self.allocator, operator);
+        try message.append_bytes(self.allocator, "` on a vector expects integer lanes, got ");
+        try self.append_checker_type(&var message, left);
+        return try self.checker_message_at("type error", span, move message);
     }
     var message = string::new(self.allocator);
     errdefer message.deinit(self.allocator);

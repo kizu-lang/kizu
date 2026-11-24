@@ -78,6 +78,15 @@ fn (self: &var Selector) select_vector_binary(module: &ir::Module, node: &ir::In
         kind = float_mul();
     } else if float and module.names.is(node.operand, "/") {
         kind = float_div();
+    } else if !float and module.names.is(node.operand, "&") {
+        op = MOp::And;
+        kind = 0;
+    } else if !float and module.names.is(node.operand, "|") {
+        op = MOp::Orr;
+        kind = 0;
+    } else if !float and module.names.is(node.operand, "^") {
+        op = MOp::Eor;
+        kind = 0;
     }
     if kind < 0 {
         return try self.fail_op(module, node);
@@ -110,7 +119,12 @@ fn (self: &var Selector) select_vector_binary(module: &ir::Module, node: &ir::In
 fn (self: &var Selector) select_vector_unary(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let source = node.args.get(0) orelse return try self.fail_op(module, node);
     let lane = vector_lane(module, node.result.type_name) orelse return try self.fail_op(module, node);
-    if !module.names.is(node.operand, "-") or !ir::same_name(source.type_name, node.result.type_name) {
+    let is_neg = module.names.is(node.operand, "-");
+    let is_not = module.names.is(node.operand, "~");
+    if (!is_neg and !is_not) or !ir::same_name(source.type_name, node.result.type_name) {
+        return try self.fail_op(module, node);
+    }
+    if is_not and lane.shape.class == Class::Float {
         return try self.fail_op(module, node);
     }
     let base = try self.addr(module, source) orelse return try self.fail_op(module, node);
@@ -123,7 +137,9 @@ fn (self: &var Selector) select_vector_unary(module: &ir::Module, node: &ir::Ins
         let value = self.func.new_vreg();
         try self.load(value, base, offset, size, lane.shape.signed);
         let rd = self.func.new_vreg();
-        if lane.shape.class == Class::Float {
+        if is_not {
+            try self.op3(MOp::Mvn, rd, value, reg_none());
+        } else if lane.shape.class == Class::Float {
             try self.float_op(MOp::FUn, float_neg(), size, rd, value, reg_none());
         } else {
             try self.op3(MOp::Neg, rd, value, reg_none());
@@ -132,5 +148,288 @@ fn (self: &var Selector) select_vector_unary(module: &ir::Module, node: &ir::Ins
         index = index + 1;
     }
     try self.set_val(node.result.name, fresh_val(address));
+    return null;
+}
+
+fn (self: &var Selector) select_vector_fma(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let lane = vector_lane(module, node.result.type_name) orelse return try self.fail_op(module, node);
+    if lane.shape.class != Class::Float or node.args.len() != 3 {
+        return try self.fail_op(module, node);
+    }
+    let ax = try self.addr(module, node.args.get_or_panic(0)) orelse return try self.fail_op(module, node);
+    let ay = try self.addr(module, node.args.get_or_panic(1)) orelse return try self.fail_op(module, node);
+    let az = try self.addr(module, node.args.get_or_panic(2)) orelse return try self.fail_op(module, node);
+    let result = self.shapes.of(module, node.result.type_name);
+    let address = try self.new_slot(result);
+    let size = lane.shape.size;
+    var index = 0;
+    while index < lane.count {
+        let offset = index * size;
+        let x = self.func.new_vreg();
+        let y = self.func.new_vreg();
+        let z = self.func.new_vreg();
+        try self.load(x, ax, offset, size, false);
+        try self.load(y, ay, offset, size, false);
+        try self.load(z, az, offset, size, false);
+        let rd = self.func.new_vreg();
+        if is_x86(self.arch) {
+            try self.call_float_c("fma", size, rd, x, y, z);
+        } else {
+            var inst = blank(MOp::FMAdd);
+            inst.rd = rd;
+            inst.rn = x;
+            inst.rm = y;
+            inst.ra = z;
+            inst.width = size;
+            try self.inst(inst);
+        }
+        try self.store(rd, address, offset, size);
+        index = index + 1;
+    }
+    try self.set_val(node.result.name, fresh_val(address));
+    return null;
+}
+
+fn (self: &var Selector) select_vector_load(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let source = node.args.get(0) orelse return try self.fail_op(module, node);
+    let offset_arg = node.args.get(1) orelse return try self.fail_op(module, node);
+    let lane = vector_lane(module, node.result.type_name) orelse return try self.fail_op(module, node);
+    let regs = try self.slice_regs(module, source) orelse return try self.fail_op(module, node);
+    let address = try self.element_addr(module, regs.reg, offset_arg, lane.shape.size) orelse
+        return try self.fail_op(module, node);
+    let result = self.shapes.of(module, node.result.type_name);
+    let slot = try self.new_slot(result);
+    let lo = self.func.new_vreg();
+    let hi = self.func.new_vreg();
+    try self.load(lo, address, 0, 8, false);
+    try self.load(hi, address, 8, 8, false);
+    try self.store(lo, slot, 0, 8);
+    try self.store(hi, slot, 8, 8);
+    try self.set_val(node.result.name, fresh_val(slot));
+    return null;
+}
+
+fn (self: &var Selector) select_vector_store(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let source = node.args.get(0) orelse return try self.fail_op(module, node);
+    let offset_arg = node.args.get(1) orelse return try self.fail_op(module, node);
+    let value = node.args.get(2) orelse return try self.fail_op(module, node);
+    let lane = vector_lane(module, value.type_name) orelse return try self.fail_op(module, node);
+    let regs = try self.slice_regs(module, source) orelse return try self.fail_op(module, node);
+    let dst = try self.element_addr(module, regs.reg, offset_arg, lane.shape.size) orelse
+        return try self.fail_op(module, node);
+    let src = try self.addr(module, value) orelse return try self.fail_op(module, node);
+    let lo = self.func.new_vreg();
+    let hi = self.func.new_vreg();
+    try self.load(lo, src, 0, 8, false);
+    try self.load(hi, src, 8, 8, false);
+    try self.store(lo, dst, 0, 8);
+    try self.store(hi, dst, 8, 8);
+    try self.set_val(node.result.name, no_val());
+    return null;
+}
+
+fn (self: &var Selector) select_vector_tbl16(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 {
+        return try self.fail_op(module, node);
+    }
+    let tbl = try self.addr(module, node.args.get_or_panic(0)) orelse return try self.fail_op(module, node);
+    let idx = try self.addr(module, node.args.get_or_panic(1)) orelse return try self.fail_op(module, node);
+    let result = self.shapes.of(module, node.result.type_name);
+    let slot = try self.new_slot(result);
+    let zero = try self.imm_reg(0);
+    for 0..16 |lane| {
+        let k = self.func.new_vreg();
+        try self.load(k, idx, lane, 1, false);
+        try self.cmp_imm_or_reg(k, 16);
+        let safe = self.func.new_vreg();
+        var pick_idx = blank(MOp::CSel);
+        pick_idx.rd = safe;
+        pick_idx.rn = k;
+        pick_idx.rm = zero;
+        pick_idx.cond = Cond::Lo;
+        try self.inst(pick_idx);
+        let val = self.func.new_vreg();
+        var ld = blank(MOp::LoadIdx);
+        ld.rd = val;
+        ld.rn = tbl;
+        ld.rm = safe;
+        ld.imm = 0;
+        ld.width = 1;
+        ld.signed = false;
+        try self.inst(ld);
+        try self.cmp_imm_or_reg(k, 16);
+        let out_byte = self.func.new_vreg();
+        var pick_val = blank(MOp::CSel);
+        pick_val.rd = out_byte;
+        pick_val.rn = val;
+        pick_val.rm = zero;
+        pick_val.cond = Cond::Lo;
+        try self.inst(pick_val);
+        try self.store(out_byte, slot, lane, 1);
+    }
+    try self.set_val(node.result.name, fresh_val(slot));
+    return null;
+}
+
+fn (self: &var Selector) select_vector_sdot(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 3 {
+        return try self.fail_op(module, node);
+    }
+    let acc_addr = try self.addr(module, node.args.get_or_panic(0)) orelse return try self.fail_op(module, node);
+    let a_addr = try self.addr(module, node.args.get_or_panic(1)) orelse return try self.fail_op(module, node);
+    let b_addr = try self.addr(module, node.args.get_or_panic(2)) orelse return try self.fail_op(module, node);
+    let result = self.shapes.of(module, node.result.type_name);
+    let slot = try self.new_slot(result);
+    for 0..4 |group| {
+        var sum = self.func.new_vreg();
+        try self.load(sum, acc_addr, group * 4, 4, true);
+        for 0..4 |j| {
+            let offset = group * 4 + j;
+            let a = self.func.new_vreg();
+            let b = self.func.new_vreg();
+            try self.load(a, a_addr, offset, 1, true);
+            try self.load(b, b_addr, offset, 1, true);
+            let prod = self.func.new_vreg();
+            try self.op3(MOp::Mul, prod, a, b);
+            let next = self.func.new_vreg();
+            try self.op3(MOp::Add, next, sum, prod);
+            sum = next;
+        }
+        try self.store(sum, slot, group * 4, 4);
+    }
+    try self.set_val(node.result.name, fresh_val(slot));
+    return null;
+}
+
+fn (self: &var Selector) select_vector_convert(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let source = node.args.get(0) orelse return try self.fail_op(module, node);
+    if (module.names.is(source.type_name, "u8x16") and module.names.is(node.result.type_name, "i8x16")) or
+        (module.names.is(source.type_name, "i8x16") and module.names.is(node.result.type_name, "u8x16")) {
+        try self.set_val(node.result.name, self.val(source.name));
+        return null;
+    }
+    let src = try self.addr(module, source) orelse return try self.fail_op(module, node);
+    let result = self.shapes.of(module, node.result.type_name);
+    let slot = try self.new_slot(result);
+    if module.names.is(source.type_name, "i32x4") and module.names.is(node.result.type_name, "f32x4") {
+        for 0..4 |lane| {
+            let val = self.func.new_vreg();
+            try self.load(val, src, lane * 4, 4, true);
+            let flt = self.func.new_vreg();
+            var inst = blank(MOp::IntToF);
+            inst.rd = flt;
+            inst.rn = val;
+            inst.width = 4;
+            inst.signed = true;
+            try self.inst(inst);
+            try self.store(flt, slot, lane * 4, 4);
+        }
+        try self.set_val(node.result.name, fresh_val(slot));
+        return null;
+    }
+    if module.names.is(source.type_name, "f32x4") and module.names.is(node.result.type_name, "i32x4") {
+        for 0..4 |lane| {
+            let val = self.func.new_vreg();
+            try self.load(val, src, lane * 4, 4, false);
+            let out = self.func.new_vreg();
+            var inst = blank(MOp::FToInt);
+            inst.rd = out;
+            inst.rn = val;
+            inst.imm = 4;
+            inst.width = 4;
+            inst.signed = true;
+            try self.inst(inst);
+            try self.store(out, slot, lane * 4, 4);
+        }
+        try self.set_val(node.result.name, fresh_val(slot));
+        return null;
+    }
+    if module.names.is(source.type_name, "i8x16") and module.names.is(node.result.type_name, "f32x4") {
+        var base = 0;
+        if module.names.is(node.immediate, "1") {
+            base = 4;
+        } else if module.names.is(node.immediate, "2") {
+            base = 8;
+        } else if module.names.is(node.immediate, "3") {
+            base = 12;
+        }
+        for 0..4 |lane| {
+            let val = self.func.new_vreg();
+            try self.load(val, src, base + lane, 1, true);
+            let flt = self.func.new_vreg();
+            var inst = blank(MOp::IntToF);
+            inst.rd = flt;
+            inst.rn = val;
+            inst.width = 4;
+            inst.signed = true;
+            try self.inst(inst);
+            try self.store(flt, slot, lane * 4, 4);
+        }
+        try self.set_val(node.result.name, fresh_val(slot));
+        return null;
+    }
+    return try self.fail_op(module, node);
+}
+
+fn (self: &var Selector) swar_byte_popcount(input: i64) -> !i64 {
+    let m1 = try self.imm_reg(6148914691236517205);
+    let m2 = try self.imm_reg(3689348814741910323);
+    let m4 = try self.imm_reg(1085102592571150095);
+    let s1 = self.func.new_vreg();
+    try self.op_imm(MOp::LsrImm, s1, input, 1);
+    let a1 = self.func.new_vreg();
+    try self.op3(MOp::And, a1, s1, m1);
+    let x1 = self.func.new_vreg();
+    try self.op3(MOp::Sub, x1, input, a1);
+    let l2 = self.func.new_vreg();
+    try self.op3(MOp::And, l2, x1, m2);
+    let s2 = self.func.new_vreg();
+    try self.op_imm(MOp::LsrImm, s2, x1, 2);
+    let r2 = self.func.new_vreg();
+    try self.op3(MOp::And, r2, s2, m2);
+    let x2 = self.func.new_vreg();
+    try self.op3(MOp::Add, x2, l2, r2);
+    let s4 = self.func.new_vreg();
+    try self.op_imm(MOp::LsrImm, s4, x2, 4);
+    let a4 = self.func.new_vreg();
+    try self.op3(MOp::Add, a4, x2, s4);
+    let out = self.func.new_vreg();
+    try self.op3(MOp::And, out, a4, m4);
+    return out;
+}
+
+fn (self: &var Selector) select_int_popcount(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let source = node.args.get(0) orelse return try self.fail_op(module, node);
+    if module.names.is(node.result.type_name, "u8x16") {
+        let src = try self.addr(module, source) orelse return try self.fail_op(module, node);
+        let result = self.shapes.of(module, node.result.type_name);
+        let slot = try self.new_slot(result);
+        let lo = self.func.new_vreg();
+        let hi = self.func.new_vreg();
+        try self.load(lo, src, 0, 8, false);
+        try self.load(hi, src, 8, 8, false);
+        let out_lo = try self.swar_byte_popcount(lo);
+        let out_hi = try self.swar_byte_popcount(hi);
+        try self.store(out_lo, slot, 0, 8);
+        try self.store(out_hi, slot, 8, 8);
+        try self.set_val(node.result.name, fresh_val(slot));
+        return null;
+    }
+    var val = try self.reg(module, source) orelse return try self.fail_op(module, node);
+    if module.names.is(node.result.type_name, "u32") {
+        let mask32 = try self.imm_reg(4294967295);
+        let masked = self.func.new_vreg();
+        try self.op3(MOp::And, masked, val, mask32);
+        val = masked;
+    } else if !module.names.is(node.result.type_name, "u64") {
+        return try self.fail_op(module, node);
+    }
+    let bytes = try self.swar_byte_popcount(val);
+    let h01 = try self.imm_reg(72340172838076673);
+    let prod = self.func.new_vreg();
+    try self.op3(MOp::Mul, prod, bytes, h01);
+    let out = self.func.new_vreg();
+    try self.op_imm(MOp::LsrImm, out, prod, 56);
+    try self.set_val(node.result.name, reg_val(out));
     return null;
 }
