@@ -124,6 +124,7 @@ pub struct Selector {
     is_main: bool,
     pub invokes: bool,
     pub state_invokes: bool,
+    pub shared_invoke_mask: i64,
     pub task_invokes: array::Array<ir::Name>,
     exports_c: bool,
     pub stacks_variadics: bool,
@@ -172,6 +173,7 @@ pub fn new_selector(allocator: Allocator, arch: Arch) -> !Selector {
         is_main: false,
         invokes: false,
         state_invokes: false,
+        shared_invoke_mask: 0,
         task_invokes: array::new<ir::Name>(allocator),
         exports_c: false,
         stacks_variadics: true,
@@ -1308,6 +1310,25 @@ fn (self: &var Selector) select_hosted_call(module: &ir::Module, node: &ir::Inst
                 let address = try self.addr(module, arg) orelse return try self.fail_op(module, node);
                 try words.append(self.allocator, address);
             },
+            Context => {
+                if module.names.starts_with(arg.type_name, "&") {
+                    let reg = try self.reg(module, arg) orelse return try self.fail_op(module, node);
+                    try words.append(self.allocator, reg);
+                } else if arg_shape.class == Class::Void {
+                    try words.append(self.allocator, reg_zr());
+                } else if arg_shape.class == Class::Aggregate {
+                    let address = try self.addr(module, arg) orelse return try self.fail_op(module, node);
+                    try words.append(self.allocator, address);
+                } else if arg_shape.class == Class::Scalar or arg_shape.class == Class::Float {
+                    let address = try self.new_slot(arg_shape);
+                    if !try self.store_value(module, arg, arg_shape, address, 0) {
+                        return try self.fail_op(module, node);
+                    }
+                    try words.append(self.allocator, address);
+                } else {
+                    return try self.fail_op(module, node);
+                }
+            },
             TaskInvoke => {
                 if arg_shape.class != Class::Aggregate or is_slice(module, arg.type_name) {
                     return try self.fail_op(module, node);
@@ -1337,12 +1358,22 @@ fn (self: &var Selector) select_hosted_call(module: &ir::Module, node: &ir::Inst
                 try words.append(self.allocator, try self.imm_reg(element_shape.size));
             },
             PoolInvoke => {
-                if !try self.pool_invoke_word(module, node, false, &var words) {
+                if !try self.pool_invoke_word(module, node, false, false, &var words) {
                     return try self.fail_op(module, node);
                 }
             },
             PoolStateInvoke => {
-                if !try self.pool_invoke_word(module, node, true, &var words) {
+                if !try self.pool_invoke_word(module, node, false, true, &var words) {
+                    return try self.fail_op(module, node);
+                }
+            },
+            PoolSharedInvoke => {
+                if !try self.pool_invoke_word(module, node, true, false, &var words) {
+                    return try self.fail_op(module, node);
+                }
+            },
+            PoolSharedStateInvoke => {
+                if !try self.pool_invoke_word(module, node, true, true, &var words) {
                     return try self.fail_op(module, node);
                 }
             },
@@ -1642,24 +1673,103 @@ fn (self: &var Selector) select_indirect_call(module: &ir::Module, node: &ir::In
     return null;
 }
 
-pub fn (self: &var Selector) invoke_symbol(states: bool) -> !ir::Name {
-    if states {
-        return self.syms.intern("_kz$thread_invoke_state");
+fn (self: &var Selector) context_invoke_kind(module: &ir::Module, type_name: ir::Name) -> i64 {
+    if module.names.starts_with(type_name, "&") {
+        return 0;
     }
-    return self.syms.intern("_kz$thread_invoke");
+    let shape = self.shapes.of(module, type_name);
+    if shape.class == Class::Void {
+        return 9;
+    }
+    if is_slice(module, type_name) {
+        return 1;
+    }
+    if shape.class == Class::Aggregate {
+        return 0;
+    }
+    if shape.class != Class::Scalar and shape.class != Class::Float {
+        return 0 - 1;
+    }
+    if shape.size == 1 {
+        if shape.signed {
+            return 3;
+        }
+        return 2;
+    }
+    if shape.size == 2 {
+        if shape.signed {
+            return 5;
+        }
+        return 4;
+    }
+    if shape.size == 4 {
+        if shape.signed {
+            return 7;
+        }
+        return 6;
+    }
+    if shape.size == 8 {
+        return 8;
+    }
+    return 0 - 1;
 }
 
-fn (self: &var Selector) pool_invoke_word(module: &ir::Module, node: &ir::InstrNode, states: bool, words: &var array::Array<i64>) -> !bool {
+pub fn shared_invoke_bit(states: bool, kind: i64) -> i64 {
+    var slot = kind * 2;
+    if states {
+        slot = slot + 1;
+    }
+    return 1 << slot;
+}
+
+pub fn (self: &var Selector) invoke_symbol(shared: bool, states: bool, kind: i64) -> !ir::Name {
+    if !shared {
+        if states {
+            return self.syms.intern("_kz$thread_invoke_state");
+        }
+        return self.syms.intern("_kz$thread_invoke");
+    }
+    var out = try string::from_bytes(self.allocator, "_kz$thread_invoke_shared");
+    defer out.deinit(self.allocator);
+    if states {
+        try out.append_bytes(self.allocator, "_state");
+    }
+    if kind > 0 {
+        try out.append_bytes(self.allocator, "_k");
+        try out.append_byte(self.allocator, cast<u8>(48 + kind));
+    }
+    let bytes = out.as_bytes();
+    return self.syms.intern(bytes);
+}
+
+fn (self: &var Selector) pool_invoke_word(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    shared: bool,
+    states: bool,
+    words: &var array::Array<i64>
+) -> !bool {
     if !self.shapes.is_coded(module, node.result.type_name) {
         return false;
+    }
+    var kind = 0;
+    if shared {
+        let context_index = try hostabi::source_arg(self.allocator, module, node, hostabi::Source::Context) orelse return false;
+        let context_arg = node.args.get(context_index) orelse return false;
+        kind = self.context_invoke_kind(module, context_arg.type_name);
+        if kind < 0 {
+            return false;
+        }
     }
     let thunk = self.func.new_vreg();
     var thunk_addr = blank(MOp::SymAddr);
     thunk_addr.rd = thunk;
-    thunk_addr.sym = try self.invoke_symbol(states);
+    thunk_addr.sym = try self.invoke_symbol(shared, states, kind);
     try self.inst(thunk_addr);
     try words.append(self.allocator, thunk);
-    if states {
+    if shared {
+        self.shared_invoke_mask = self.shared_invoke_mask | shared_invoke_bit(states, kind);
+    } else if states {
         self.state_invokes = true;
     } else {
         self.invokes = true;
@@ -1667,7 +1777,7 @@ fn (self: &var Selector) pool_invoke_word(module: &ir::Module, node: &ir::InstrN
     return true;
 }
 
-pub fn (self: &var Selector) select_thread_invoke(states: bool) -> !void {
+pub fn (self: &var Selector) select_thread_invoke(shared: bool, states: bool, kind: i64) -> !void {
     self.gen = self.gen + 1;
     self.func.reset(self.allocator);
     self.cold.clear(self.allocator);
@@ -1681,15 +1791,44 @@ pub fn (self: &var Selector) select_thread_invoke(states: bool) -> !void {
     try self.cold.append(self.allocator, false);
     try self.start_block(entry);
     let worker = try self.param_word(0);
-    let state = try self.param_word(1);
-    let part = try self.param_word(2);
-    let index = try self.param_word(3);
+    let context = try self.param_word(1);
+    let state = try self.param_word(2);
+    let part = try self.param_word(3);
+    let index = try self.param_word(4);
     let ptr = self.func.new_vreg();
     let len = self.func.new_vreg();
     try self.load(ptr, part, 0, 8, false);
     try self.load(len, part, 8, 8, true);
     var words = array::new<i64>(self.allocator);
     defer words.deinit(self.allocator);
+    if shared {
+        if kind == 0 {
+            try words.append(self.allocator, context);
+        } else if kind == 1 {
+            let cptr = self.func.new_vreg();
+            let clen = self.func.new_vreg();
+            try self.load(cptr, context, 0, 8, false);
+            try self.load(clen, context, 8, 8, true);
+            try words.append(self.allocator, cptr);
+            try words.append(self.allocator, clen);
+        } else if kind >= 2 and kind <= 8 {
+            var width = 8;
+            var signed = false;
+            if kind == 2 or kind == 3 {
+                width = 1;
+                signed = kind == 3;
+            } else if kind == 4 or kind == 5 {
+                width = 2;
+                signed = kind == 5;
+            } else if kind == 6 or kind == 7 {
+                width = 4;
+                signed = kind == 7;
+            }
+            let cval = self.func.new_vreg();
+            try self.load(cval, context, 0, width, signed);
+            try words.append(self.allocator, cval);
+        }
+    }
     if states {
         try words.append(self.allocator, state);
     }

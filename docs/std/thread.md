@@ -72,6 +72,44 @@ pub fn each_lane_with<T, S, E>(
     states: &var std::array::Array<S>,
     worker: fn(&var S, &var []T, i64) -> E!void
 ) -> E!void
+
+pub fn each_shared<T, C, E>(
+    pool: &var std::thread::Pool,
+    data: &var []T,
+    chunk: i64,
+    context: &C,
+    worker: fn(&C, &var []T, i64) -> E!void
+) -> E!void
+
+pub fn each_with_shared<T, C, S, E>(
+    pool: &var std::thread::Pool,
+    data: &var []T,
+    chunk: i64,
+    context: &C,
+    states: &var std::array::Array<S>,
+    worker: fn(&C, &var S, &var []T, i64) -> E!void
+) -> E!void
+
+pub fn each_lane_shared<T, C, E>(
+    pool: &var std::thread::Pool,
+    allocator: Allocator,
+    data: &var []T,
+    length: i64,
+    stride: i64,
+    context: &C,
+    worker: fn(&C, &var []T, i64) -> E!void
+) -> E!void
+
+pub fn each_lane_with_shared<T, C, S, E>(
+    pool: &var std::thread::Pool,
+    allocator: Allocator,
+    data: &var []T,
+    length: i64,
+    stride: i64,
+    context: &C,
+    states: &var std::array::Array<S>,
+    worker: fn(&C, &var S, &var []T, i64) -> E!void
+) -> E!void
 ```
 
 `cpu_count` は、この process がいま使える processor の数です。1 以上です。
@@ -151,9 +189,44 @@ try thread::each_lane_with<f64, Smoother, Failure>(
 長さが `pool.threads()` でなければ panic です。それ以外は `each` / `each_lane` と
 同じです。
 
+## 読み取り専用の共有コンテキスト: `each_shared` / `each_with_shared` / `each_lane_shared` / `each_lane_with_shared`
+
+全 thread から同じ読み取り専用データ(重み配列、LUT 表、不変の設定 struct など)を
+ゼロコピーで参照したいときは、`context: &C` を取る `*_shared` を使います。
+
+```kizu
+struct Weights {
+    rows: []u8,
+    input: []f32,
+    dim: i64,
+    chunk: i64,
+}
+
+fn project(ctx: &Weights, out: &var []f32, index: i64) -> Failure!void {
+    let row0 = index * ctx.chunk;
+    for 0..mem::count<f32>(out) |i| {
+        let r = row0 + i;
+        out[i] = simd::dot_q8_f32(ctx.rows[r * ctx.dim..(r + 1) * ctx.dim], ctx.input);
+    }
+    return;
+}
+
+try thread::each_shared<f32, Weights, Failure>(&var pool, out, 8, &ctx, project);
+```
+
+- `context: &C` の借用は呼び出しの間だけ続き、round が終わると解放されます。
+  通常の借用検査により、`data` や `states` と同じ所有物を指す view を `context` に
+  載せて同時に渡すことは compile error になります。
+- `C` は読み取り専用 view(`[]U`)や所有型(`Array<U>` など)を含められますが、借用
+  (`&U` / `&var U`)と `Io` / `Allocator` は含められません。Kizu に内部可変性はない
+  ため、すべての worker は `context: &C` を data race なく並列に読めます。
+- `T` と `S` の制約、chunk / lane 分割、エラー伝播は `each` / `each_with` /
+  `each_lane` / `each_lane_with` と同じです。
+
 ## worker に届くもの
 
-worker が触れるのは、渡された塊と、`_with` ならその thread の state だけです。
+worker が触れるのは、渡された塊と、`_shared` なら読み取り専用の `context: &C`、
+`_with` ならその thread の state だけです。
 
 - worker は top-level function なので、何も捕捉しません
 - 書き換えられる global はありません

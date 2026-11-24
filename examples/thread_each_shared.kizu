@@ -1,0 +1,71 @@
+import std::array;
+import std::io;
+import std::mem;
+import std::thread;
+
+error Failure = thread::Error or mem::Error;
+
+struct Weights {
+    rows: []i64,
+    input: []i64,
+    width: i64,
+    chunk: i64,
+}
+
+fn matvec(ctx: &Weights, out: &var []i64, index: i64) -> Failure!void {
+    let row0 = index * ctx.chunk;
+    for 0..mem::count<i64>(out) |i| {
+        let row = row0 + i;
+        var sum = 0;
+        for 0..ctx.width |c| {
+            sum = sum + ctx.rows[row * ctx.width + c] * ctx.input[c];
+        }
+        out[i] = sum;
+    }
+    return;
+}
+
+// `each_shared` passes a read-only context `&C` alongside each worker's
+// disjoint mutable chunk `&var []T`. `C` may carry read-only views (`[]T`) and
+// owned containers without copying their backing memory, while the compiler
+// rejects any borrow aliasing `data` and any `Io` or `Allocator` capability.
+fn main() -> Failure!void {
+    let allocator = mem::page_allocator();
+    var pool = try thread::init(io::blocking(), allocator, 4);
+    defer pool.deinit(allocator);
+
+    var matrix = array::new<i64>(allocator);
+    defer matrix.deinit(allocator);
+    for 0..12 |i| {
+        try matrix.append(allocator, i + 1);
+    }
+    var input = array::new<i64>(allocator);
+    defer input.deinit(allocator);
+    try input.append(allocator, 1);
+    try input.append(allocator, 2);
+    try input.append(allocator, 3);
+
+    var out = array::new<i64>(allocator);
+    defer out.deinit(allocator);
+    for 0..4 |_| {
+        try out.append(allocator, 0);
+    }
+
+    let rows = matrix.as_slice();
+    let vec = input.as_slice();
+    let ctx = Weights { rows: rows, input: vec, width: 3, chunk: 2 };
+    let dst = out.as_mut_slice();
+    try thread::each_shared<i64, Weights, Failure>(&var pool, dst, 2, &ctx, matvec);
+    for 0..out.len() |i| {
+        print(out.get_or_panic(i));
+    }
+    return;
+}
+
+// run
+// features: thread
+// output:
+// 14
+// 32
+// 50
+// 68
