@@ -1,6 +1,7 @@
 import compiler::internal::ast;
 import compiler::internal::ir;
 import compiler::internal::ownership;
+import compiler::internal::pool;
 import compiler::internal::project;
 import compiler::internal::stdtarget;
 import compiler::internal::types;
@@ -67,7 +68,7 @@ fn append_rendered(allocator: Allocator, out: &var string::String, rendered: []u
 fn render_ir_case(
     io: Io,
     allocator: Allocator,
-    std_errors: &project::StdErrorCodes,
+    std_cache: &project::StdCache,
     input: []u8
 ) -> !string::String {
     var out = string::new(allocator);
@@ -76,7 +77,7 @@ fn render_ir_case(
     defer tree.deinit(allocator);
     var loader = try project::new_loader(io, allocator, "lib/kizu");
     defer loader.deinit(allocator);
-    let loaded = try loader.load_source(&var tree, "", input);
+    let loaded = try loader.load_source_cached(&var tree, "", input, std_cache);
     match loaded {
         Error(failed) => {
             defer failed.deinit(allocator);
@@ -108,7 +109,7 @@ fn render_ir_case(
             }
             var lowerer = try ir::new_lowerer(allocator, &tree, &program, &checker);
             defer lowerer.deinit(allocator);
-            if try lowerer.lower(&var tree, &program, std_errors, &loader.sources) |failed| {
+            if try lowerer.lower(&var tree, &program, &std_cache.error_codes, &loader.sources) |failed| {
                 defer failed.deinit(allocator);
                 let text = try failed.error(allocator, &loader.sources);
                 defer text.deinit(allocator);
@@ -195,20 +196,16 @@ fn last_is_newline(out: &string::String) -> bool {
     return bytes[out.len() - 1] == cast<u8>(10);
 }
 
-test "ir corpus lowers like the shipping compiler" {
-    let allocator = mem::page_allocator();
-    let io = io::blocking();
-    var std_loader = try project::new_loader(io, allocator, "lib/kizu");
-    defer std_loader.deinit(allocator);
-    let codes = try std_loader.std_error_codes();
-    match codes {
+fn run_ir_corpus(io: Io, allocator: Allocator) -> !void {
+    let cached = try project::load_std_cache(io, allocator, "lib/kizu");
+    match cached {
         Error(failed) => {
             defer failed.deinit(allocator);
-            try io::write_stderr_line(io, "std error codes could not be read");
+            try io::write_stderr_line(io, "std cache could not be read");
             testing::expect(false);
         },
-        Codes(std_errors) => {
-            defer std_errors.deinit(allocator);
+        Cache(std_cache) => {
+            defer std_cache.deinit(allocator);
             var entries = try fs::read_dir(io, allocator, "compiler/tests/ir");
             defer entries.deinit(allocator);
             var cases = 0;
@@ -227,7 +224,7 @@ test "ir corpus lowers like the shipping compiler" {
                 if split_ir_case(bytes) |cut| {
                     let input = bytes[0..cut];
                     let want = bytes[cut + mem::len(ir_marker())..mem::len(bytes)];
-                    let got = try render_ir_case(io, allocator, &std_errors, input);
+                    let got = try render_ir_case(io, allocator, &std_cache, input);
                     defer got.deinit(allocator);
                     let got_bytes = got.as_bytes();
                     if !mem::equal_bytes(want, got_bytes) {
@@ -248,4 +245,12 @@ test "ir corpus lowers like the shipping compiler" {
             testing::expect_equal<i64>(0, failures);
         },
     }
+    return;
+}
+
+test "ir corpus lowers like the shipping compiler" {
+    var mem_pool = try pool::new(mem::page_allocator());
+    defer mem_pool.deinit(mem::page_allocator());
+    let allocator = pool::allocator_of(&var mem_pool);
+    return run_ir_corpus(io::blocking(), allocator);
 }

@@ -1,6 +1,7 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::ownership;
+import compiler::internal::pool;
 import compiler::internal::project;
 import compiler::internal::types;
 import compiler::internal::unsafecap;
@@ -193,13 +194,19 @@ struct UcSources {
 
 fn uc_render(allocator: Allocator, out: &var UcSources, c: &UcCase) -> !bool {
     try out.home.append_bytes(allocator, uc_prelude());
-    if !try uc_render_func(allocator, out, "g", &c.g) {
+    if !try uc_render_func(allocator, out, "g", "g", &c.g) {
         return false;
     }
-    return uc_render_func(allocator, out, "f", &c.f);
+    return uc_render_func(allocator, out, "f", "g", &c.f);
 }
 
-fn uc_render_func(allocator: Allocator, sources: &var UcSources, name: []u8, f: &UcFunc) -> !bool {
+fn uc_render_func(
+    allocator: Allocator,
+    sources: &var UcSources,
+    name: []u8,
+    g_name: []u8,
+    f: &UcFunc
+) -> !bool {
     var text = string::new(allocator);
     defer text.deinit(allocator);
     let kind = f.kind.as_bytes();
@@ -223,7 +230,7 @@ fn uc_render_func(allocator: Allocator, sources: &var UcSources, name: []u8, f: 
         index = index + 1;
         let stmt_bytes = stmt.as_bytes();
         let id_bytes = id.as_bytes();
-        if !try uc_render_stmt(allocator, &var text, id_bytes, stmt_bytes) {
+        if !try uc_render_stmt(allocator, &var text, id_bytes, g_name, stmt_bytes) {
             return false;
         }
     }
@@ -275,7 +282,13 @@ fn uc_leading_marks(text: []u8) -> i64 {
     return count;
 }
 
-fn uc_render_stmt(allocator: Allocator, out: &var string::String, id: []u8, text: []u8) -> !bool {
+fn uc_render_stmt(
+    allocator: Allocator,
+    out: &var string::String,
+    id: []u8,
+    g_name: []u8,
+    text: []u8
+) -> !bool {
     var fields = array::new<string::String>(allocator);
     defer fields.deinit(allocator);
     try uc_split_fields(allocator, &var fields, text, cast<u8>(32));
@@ -290,7 +303,7 @@ fn uc_render_stmt(allocator: Allocator, out: &var string::String, id: []u8, text
         if mem::equal_bytes(form_bytes, "print") {
             var e = string::new(allocator);
             defer e.deinit(allocator);
-            if !try uc_render_field_expr(allocator, &var e, &fields, 1, id) {
+            if !try uc_render_field_expr(allocator, &var e, &fields, 1, id, g_name) {
                 return false;
             }
             try line_text.append_bytes(allocator, "print(");
@@ -315,7 +328,7 @@ fn uc_render_stmt(allocator: Allocator, out: &var string::String, id: []u8, text
         var prefix = string::new(allocator);
         defer prefix.deinit(allocator);
         try uc_markers(allocator, &var prefix, m);
-        return uc_render_marked(allocator, out, id, &fields, &prefix);
+        return uc_render_marked(allocator, out, id, g_name, &fields, &prefix);
     }
     return false;
 }
@@ -325,11 +338,12 @@ fn uc_render_field_expr(
     out: &var string::String,
     fields: &array::Array<string::String>,
     at: i64,
-    id: []u8
+    id: []u8,
+    g_name: []u8
 ) -> !bool {
     if fields.at(at) |field| {
         let bytes = field.as_bytes();
-        return uc_render_expr(allocator, out, id, bytes);
+        return uc_render_expr(allocator, out, id, g_name, bytes);
     }
     return false;
 }
@@ -338,6 +352,7 @@ fn uc_render_marked(
     allocator: Allocator,
     out: &var string::String,
     id: []u8,
+    g_name: []u8,
     fields: &array::Array<string::String>,
     prefix: &string::String
 ) -> !bool {
@@ -349,7 +364,7 @@ fn uc_render_marked(
         mem::equal_bytes(form, "deref_set") or mem::equal_bytes(form, "field_set") {
         var e = string::new(allocator);
         defer e.deinit(allocator);
-        if !try uc_render_field_expr(allocator, &var e, fields, 2, id) {
+        if !try uc_render_field_expr(allocator, &var e, fields, 2, id, g_name) {
             return false;
         }
         if mem::equal_bytes(form, "ptr_write") {
@@ -457,9 +472,21 @@ fn uc_render_marked(
     return false;
 }
 
-fn uc_render_leaf(allocator: Allocator, out: &var string::String, text: []u8) -> !bool {
+fn uc_render_leaf(
+    allocator: Allocator,
+    out: &var string::String,
+    g_name: []u8,
+    text: []u8
+) -> !bool {
     let m = uc_leading_marks(text);
-    let source = uc_atom_source(text[m..mem::len(text)]);
+    let atom = text[m..mem::len(text)];
+    if mem::equal_bytes(atom, "g") {
+        try uc_markers(allocator, out, m);
+        try out.append_bytes(allocator, g_name);
+        try out.append_bytes(allocator, "(p, b, fu, fe, fs)");
+        return true;
+    }
+    let source = uc_atom_source(atom);
     if mem::len(source) == 0 {
         return false;
     }
@@ -468,7 +495,13 @@ fn uc_render_leaf(allocator: Allocator, out: &var string::String, text: []u8) ->
     return true;
 }
 
-fn uc_render_expr(allocator: Allocator, out: &var string::String, id: []u8, text: []u8) -> !bool {
+fn uc_render_expr(
+    allocator: Allocator,
+    out: &var string::String,
+    id: []u8,
+    g_name: []u8,
+    text: []u8
+) -> !bool {
     let m = uc_leading_marks(text);
     let rest = text[m..mem::len(text)];
     let length = mem::len(rest);
@@ -480,11 +513,11 @@ fn uc_render_expr(allocator: Allocator, out: &var string::String, id: []u8, text
         }
         try uc_markers(allocator, out, m);
         try out.append_bytes(allocator, "((");
-        if !try uc_render_leaf(allocator, out, inner[0..cut]) {
+        if !try uc_render_leaf(allocator, out, g_name, inner[0..cut]) {
             return false;
         }
         try out.append_bytes(allocator, ") + (");
-        if !try uc_render_leaf(allocator, out, inner[cut + 1..mem::len(inner)]) {
+        if !try uc_render_leaf(allocator, out, g_name, inner[cut + 1..mem::len(inner)]) {
             return false;
         }
         try out.append_bytes(allocator, "))");
@@ -499,10 +532,10 @@ fn uc_render_expr(allocator: Allocator, out: &var string::String, id: []u8, text
         try uc_markers(allocator, out, m);
         try out.append_bytes(allocator, "if true {");
         try out.append_byte(allocator, cast<u8>(10));
-        if !try uc_render_block_part(allocator, out, id, inner[0..cut], true) {
+        if !try uc_render_block_part(allocator, out, id, g_name, inner[0..cut], true) {
             return false;
         }
-        if !try uc_render_block_part(allocator, out, id, inner[cut + 1..mem::len(inner)], false) {
+        if !try uc_render_block_part(allocator, out, id, g_name, inner[cut + 1..mem::len(inner)], false) {
             return false;
         }
         try out.append_bytes(allocator, "    } else {");
@@ -512,13 +545,20 @@ fn uc_render_expr(allocator: Allocator, out: &var string::String, id: []u8, text
         try out.append_bytes(allocator, "    }");
         return true;
     }
-    return uc_render_leaf(allocator, out, text);
+    return uc_render_leaf(allocator, out, g_name, text);
 }
 
-fn uc_render_block_part(allocator: Allocator, out: &var string::String, id: []u8, part: []u8, first: bool) -> !bool {
+fn uc_render_block_part(
+    allocator: Allocator,
+    out: &var string::String,
+    id: []u8,
+    g_name: []u8,
+    part: []u8,
+    first: bool
+) -> !bool {
     var leaf = string::new(allocator);
     defer leaf.deinit(allocator);
-    if !try uc_render_leaf(allocator, &var leaf, part) {
+    if !try uc_render_leaf(allocator, &var leaf, g_name, part) {
         return false;
     }
     if first {
@@ -539,11 +579,18 @@ fn uc_render_block_part(allocator: Allocator, out: &var string::String, id: []u8
     return true;
 }
 
-fn uc_check_sources(io: Io, allocator: Allocator, sources: &UcSources, out: &var string::String) -> !void {
+fn uc_check_sources(
+    io: Io,
+    allocator: Allocator,
+    std_cache: &project::StdCache,
+    sources: &UcSources,
+    out: &var string::String
+) -> !void {
     var tree = ast::new(allocator);
     defer tree.deinit(allocator);
     var loader = try project::new_loader(io, allocator, "lib/kizu");
     defer loader.deinit(allocator);
+    loader.std_signatures_only = true;
     let home = sources.home.as_bytes();
     try loader.override_source("home.kizu", home);
     var files = array::new<string::String>(allocator);
@@ -569,7 +616,7 @@ fn uc_check_sources(io: Io, allocator: Allocator, sources: &UcSources, out: &var
         root: string::new(allocator)
     };
     defer graph.deinit(allocator);
-    let loaded = try loader.load_program(&var tree, &graph);
+    let loaded = try loader.load_program_cached(&var tree, &graph, std_cache);
     match loaded {
         Error(failed) => {
             defer failed.deinit(allocator);
@@ -676,11 +723,18 @@ fn uc_compare(
     return problem.append_bytes(allocator, got);
 }
 
-fn uc_run_case(io: Io, allocator: Allocator, c: &UcCase, sources: &var UcSources, got: &var string::String) -> !bool {
+fn uc_run_case(
+    io: Io,
+    allocator: Allocator,
+    std_cache: &project::StdCache,
+    c: &UcCase,
+    sources: &var UcSources,
+    got: &var string::String
+) -> !bool {
     if !try uc_render(allocator, sources, c) {
         return false;
     }
-    try uc_check_sources(io, allocator, sources, got);
+    try uc_check_sources(io, allocator, std_cache, sources, got);
     return true;
 }
 
@@ -691,14 +745,19 @@ fn uc_new_sources(allocator: Allocator) -> UcSources {
     };
 }
 
-fn uc_diverges(io: Io, allocator: Allocator, c: &UcCase) -> !bool {
+fn uc_diverges(
+    io: Io,
+    allocator: Allocator,
+    std_cache: &project::StdCache,
+    c: &UcCase
+) -> !bool {
     var sources = uc_new_sources(allocator);
     defer sources.deinit(allocator);
     var got = string::new(allocator);
     defer got.deinit(allocator);
     var problem = string::new(allocator);
     defer problem.deinit(allocator);
-    if try uc_run_case(io, allocator, c, &var sources, &var got) {
+    if try uc_run_case(io, allocator, std_cache, c, &var sources, &var got) {
         let got_bytes = got.as_bytes();
         try uc_compare(allocator, &var problem, &c.expect, got_bytes);
     } else {
@@ -947,117 +1006,429 @@ fn uc_table_rows(allocator: Allocator, table: []u8) -> !array::Array<array::Arra
     return move rows;
 }
 
-test "unsafe model harness agrees on the known shapes and notices each flipped verdict" {
-    let allocator = mem::page_allocator();
-    let io = io::blocking();
-    let rows = try uc_table_rows(allocator, uc_known_shapes());
-    defer rows.deinit(allocator);
-    var failures = 0;
-    var index = 0;
-    while rows.at(index) |fields| {
+struct UcBatchSpan {
+    g_away: bool,
+    g_start: i64,
+    g_end: i64,
+    f_away: bool,
+    f_start: i64,
+    f_end: i64,
+}
+
+fn uc_count_newlines(bytes: []u8, from: i64) -> i64 {
+    var count = 0;
+    var index = from;
+    while index < mem::len(bytes) {
+        if bytes[index] == cast<u8>(10) {
+            count = count + 1;
+        }
         index = index + 1;
-        let c = try uc_known_case(allocator, fields);
-        defer c.deinit(allocator);
-        if try uc_diverges(io, allocator, &c) {
-            failures = failures + 1;
-        }
-        var flipped = array::new<string::String>(allocator);
-        defer flipped.deinit(allocator);
-        if c.expect.len() == 0 {
-            try flipped.append(allocator, try string::from_bytes(allocator, "Missing:ptr_read"));
-        }
-        var sources = uc_new_sources(allocator);
-        defer sources.deinit(allocator);
-        var got = string::new(allocator);
-        defer got.deinit(allocator);
-        var problem = string::new(allocator);
-        defer problem.deinit(allocator);
-        if try uc_run_case(io, allocator, &c, &var sources, &var got) {
-            let got_bytes = got.as_bytes();
-            try uc_compare(allocator, &var problem, &flipped, got_bytes);
-        }
-        if problem.len() == 0 {
-            failures = failures + 1;
-            let name = c.bucket.as_bytes();
-            try io::write_stderr(io, name);
-            try io::write_stderr_line(io, ": the harness did not notice the flipped verdict");
-        }
     }
-    testing::expect_equal<i64>(52, rows.len());
-    testing::expect_equal<i64>(0, failures);
+    return count;
+}
+
+fn uc_find_diag_owner(
+    spans: &array::Array<UcBatchSpan>,
+    in_away: bool,
+    line: i64
+) -> i64 {
+    var index = 0;
+    while spans.at(index) |span| {
+        if span.g_away == in_away and line >= span.g_start and line <= span.g_end {
+            return index;
+        }
+        if span.f_away == in_away and line >= span.f_start and line <= span.f_end {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+fn uc_check_batch_standalone(
+    io: Io,
+    allocator: Allocator,
+    std_cache: &project::StdCache,
+    cases: &array::Array<UcCase>,
+    start: i64,
+    end: i64
+) -> !i64 {
+    var failures = 0;
+    var index = start;
+    while index < end {
+        if cases.at(index) |c| {
+            if try uc_diverges(io, allocator, std_cache, c) {
+                failures = failures + 1;
+            }
+        }
+        index = index + 1;
+    }
+    return failures;
+}
+
+fn uc_check_batch(
+    io: Io,
+    allocator: Allocator,
+    std_cache: &project::StdCache,
+    cases: &array::Array<UcCase>,
+    start: i64,
+    end: i64,
+    accepted: bool
+) -> !i64 {
+    var sources = uc_new_sources(allocator);
+    defer sources.deinit(allocator);
+    try sources.home.append_bytes(allocator, uc_prelude());
+    let home_init = sources.home.as_bytes();
+    var home_line = uc_count_newlines(home_init, 0) + 1;
+    var away_line = 1;
+    var spans = array::new<UcBatchSpan>(allocator);
+    defer spans.deinit(allocator);
+    var index = start;
+    while index < end {
+        let local_idx = index - start;
+        var g_name = try string::from_bytes(allocator, "g");
+        defer g_name.deinit(allocator);
+        try fmt::append_i64(allocator, &var g_name, local_idx);
+        var f_name = try string::from_bytes(allocator, "f");
+        defer f_name.deinit(allocator);
+        try fmt::append_i64(allocator, &var f_name, local_idx);
+        let g_bytes = g_name.as_bytes();
+        let f_bytes = f_name.as_bytes();
+        var rendered = false;
+        var g_away = false;
+        var g_start = 0;
+        var g_end = 0;
+        var f_away = false;
+        var f_start = 0;
+        var f_end = 0;
+        if cases.at(index) |c| {
+            let g_file = c.g.file.as_bytes();
+            g_away = mem::equal_bytes(g_file, "away");
+            let g_before = if g_away { sources.away.len() } else { sources.home.len() };
+            g_start = if g_away { away_line } else { home_line };
+            if try uc_render_func(allocator, &var sources, g_bytes, g_bytes, &c.g) {
+                if g_away {
+                    let added = sources.away.as_bytes();
+                    away_line = away_line + uc_count_newlines(added, g_before);
+                    g_end = away_line - 1;
+                } else {
+                    let added = sources.home.as_bytes();
+                    home_line = home_line + uc_count_newlines(added, g_before);
+                    g_end = home_line - 1;
+                }
+                let f_file = c.f.file.as_bytes();
+                f_away = mem::equal_bytes(f_file, "away");
+                let f_before = if f_away { sources.away.len() } else { sources.home.len() };
+                f_start = if f_away { away_line } else { home_line };
+                if try uc_render_func(allocator, &var sources, f_bytes, g_bytes, &c.f) {
+                    if f_away {
+                        let added = sources.away.as_bytes();
+                        away_line = away_line + uc_count_newlines(added, f_before);
+                        f_end = away_line - 1;
+                    } else {
+                        let added = sources.home.as_bytes();
+                        home_line = home_line + uc_count_newlines(added, f_before);
+                        f_end = home_line - 1;
+                    }
+                    rendered = true;
+                }
+            }
+        }
+        if !rendered {
+            return uc_check_batch_standalone(io, allocator, std_cache, cases, start, end);
+        }
+        try spans.append(allocator, UcBatchSpan {
+            g_away: g_away,
+            g_start: g_start,
+            g_end: g_end,
+            f_away: f_away,
+            f_start: f_start,
+            f_end: f_end
+        });
+        index = index + 1;
+    }
+    var tree = ast::new(allocator);
+    defer tree.deinit(allocator);
+    var loader = try project::new_loader(io, allocator, "lib/kizu");
+    defer loader.deinit(allocator);
+    loader.std_signatures_only = true;
+    let home = sources.home.as_bytes();
+    try loader.override_source("home.kizu", home);
+    var files = array::new<string::String>(allocator);
+    errdefer files.deinit(allocator);
+    let home_name = try string::from_bytes(allocator, "home.kizu");
+    try files.append(allocator, move home_name);
+    if sources.away.len() > 0 {
+        let away = sources.away.as_bytes();
+        try loader.override_source("away.kizu", away);
+        let away_name = try string::from_bytes(allocator, "away.kizu");
+        try files.append(allocator, move away_name);
+    }
+    var modules = array::new<project::Module>(allocator);
+    errdefer modules.deinit(allocator);
+    try modules.append(allocator, project::Module {
+        path: string::new(allocator),
+        files: move files,
+        test_files: array::new<string::String>(allocator)
+    });
+    let graph = project::Graph {
+        package_name: string::new(allocator),
+        modules: move modules,
+        root: string::new(allocator)
+    };
+    defer graph.deinit(allocator);
+    let loaded = try loader.load_program_cached(&var tree, &graph, std_cache);
+    match loaded {
+        Error(failed) => {
+            failed.deinit(allocator);
+            return uc_check_batch_standalone(io, allocator, std_cache, cases, start, end);
+        },
+        Program(program) => {
+            defer program.deinit(allocator);
+            var diagnostics = try types::check_all(allocator, &var tree, &program);
+            defer diagnostics.deinit(allocator);
+            if accepted {
+                if diagnostics.len() > 0 {
+                    return uc_check_batch_standalone(io, allocator, std_cache, cases, start, end);
+                }
+                var moves = try ownership::check_all(allocator, &var tree, &program);
+                defer moves.deinit(allocator);
+                if moves.len() > 0 {
+                    return uc_check_batch_standalone(io, allocator, std_cache, cases, start, end);
+                }
+                return 0;
+            }
+            let count = end - start;
+            var first_diag = array::new<i64>(allocator);
+            defer first_diag.deinit(allocator);
+            for 0..count |_k| {
+                try first_diag.append(allocator, -1);
+            }
+            var diag_index = 0;
+            while diagnostics.at(diag_index) |entry| {
+                var in_away = false;
+                var has_source = false;
+                if entry.span.source |source_id| {
+                    if loader.sources.at(source_id) |src_file| {
+                        let src_path = src_file.path.as_bytes();
+                        in_away = mem::equal_bytes(src_path, "away.kizu");
+                        has_source = in_away or mem::equal_bytes(src_path, "home.kizu");
+                    }
+                }
+                if !has_source or entry.span.is_zero() {
+                    return uc_check_batch_standalone(io, allocator, std_cache, cases, start, end);
+                }
+                let owner = uc_find_diag_owner(&spans, in_away, entry.span.start.line);
+                if owner < 0 {
+                    return uc_check_batch_standalone(io, allocator, std_cache, cases, start, end);
+                }
+                let previous = first_diag.get(owner) orelse -1;
+                if previous < 0 {
+                    try first_diag.set(owner, diag_index);
+                }
+                diag_index = diag_index + 1;
+            }
+            var failures = 0;
+            var k = 0;
+            while k < count {
+                let diag = first_diag.get(k) orelse -1;
+                var ok = false;
+                if cases.at(start + k) |c| {
+                    if diag >= 0 {
+                        if diagnostics.at(diag) |entry| {
+                            let text = try entry.error(allocator, &loader.sources);
+                            defer text.deinit(allocator);
+                            let text_bytes = text.as_bytes();
+                            var problem = string::new(allocator);
+                            defer problem.deinit(allocator);
+                            try uc_compare(allocator, &var problem, &c.expect, text_bytes);
+                            ok = problem.len() == 0;
+                        }
+                    }
+                    if !ok {
+                        if try uc_diverges(io, allocator, std_cache, c) {
+                            failures = failures + 1;
+                        }
+                    }
+                }
+                k = k + 1;
+            }
+            return failures;
+        },
+    }
+}
+
+fn uc_run_known_shapes_test(io: Io, allocator: Allocator) -> !void {
+    let cached = try project::load_std_cache(io, allocator, "lib/kizu");
+    match cached {
+        Error(failed) => {
+            defer failed.deinit(allocator);
+            try io::write_stderr_line(io, "std cache could not be read");
+            testing::expect(false);
+        },
+        Cache(std_cache) => {
+            defer std_cache.deinit(allocator);
+            let rows = try uc_table_rows(allocator, uc_known_shapes());
+            defer rows.deinit(allocator);
+            var failures = 0;
+            var index = 0;
+            while rows.at(index) |fields| {
+                index = index + 1;
+                let c = try uc_known_case(allocator, fields);
+                defer c.deinit(allocator);
+                var sources = uc_new_sources(allocator);
+                defer sources.deinit(allocator);
+                var got = string::new(allocator);
+                defer got.deinit(allocator);
+                var direct_problem = string::new(allocator);
+                defer direct_problem.deinit(allocator);
+                let ok_run = try uc_run_case(io, allocator, &std_cache, &c, &var sources, &var got);
+                if ok_run {
+                    let got_bytes = got.as_bytes();
+                    try uc_compare(allocator, &var direct_problem, &c.expect, got_bytes);
+                } else {
+                    try direct_problem.append_bytes(allocator, "the program is not well formed");
+                }
+                if direct_problem.len() > 0 {
+                    try uc_report(io, &c, &direct_problem, &sources);
+                    failures = failures + 1;
+                }
+                var flipped = array::new<string::String>(allocator);
+                defer flipped.deinit(allocator);
+                if c.expect.len() == 0 {
+                    try flipped.append(allocator, try string::from_bytes(allocator, "Missing:ptr_read"));
+                }
+                var problem = string::new(allocator);
+                defer problem.deinit(allocator);
+                if ok_run {
+                    let got_bytes = got.as_bytes();
+                    try uc_compare(allocator, &var problem, &flipped, got_bytes);
+                }
+                if problem.len() == 0 {
+                    failures = failures + 1;
+                    let name = c.bucket.as_bytes();
+                    try io::write_stderr(io, name);
+                    try io::write_stderr_line(io, ": the harness did not notice the flipped verdict");
+                }
+            }
+            testing::expect_equal<i64>(52, rows.len());
+            testing::expect_equal<i64>(0, failures);
+        },
+    }
+    return;
+}
+
+test "unsafe model harness agrees on the known shapes and notices each flipped verdict" {
+    var mem_pool = try pool::new(mem::page_allocator());
+    defer mem_pool.deinit(mem::page_allocator());
+    let allocator = pool::allocator_of(&var mem_pool);
+    return uc_run_known_shapes_test(io::blocking(), allocator);
+}
+
+fn uc_run_divergences_test(io: Io, allocator: Allocator) -> !void {
+    let cached = try project::load_std_cache(io, allocator, "lib/kizu");
+    match cached {
+        Error(failed) => {
+            defer failed.deinit(allocator);
+            try io::write_stderr_line(io, "std cache could not be read");
+            testing::expect(false);
+        },
+        Cache(std_cache) => {
+            defer std_cache.deinit(allocator);
+            let rows = try uc_table_rows(allocator, uc_known_divergences());
+            defer rows.deinit(allocator);
+            var failures = 0;
+            var index = 0;
+            while rows.at(index) |fields| {
+                index = index + 1;
+                let c = try uc_known_case(allocator, fields);
+                defer c.deinit(allocator);
+                var sources = uc_new_sources(allocator);
+                defer sources.deinit(allocator);
+                var got = string::new(allocator);
+                defer got.deinit(allocator);
+                var problem = string::new(allocator);
+                defer problem.deinit(allocator);
+                var kind = string::new(allocator);
+                defer kind.deinit(allocator);
+                if try uc_run_case(io, allocator, &std_cache, &c, &var sources, &var got) {
+                    let got_bytes = got.as_bytes();
+                    try uc_compare(allocator, &var problem, &c.expect, got_bytes);
+                    try uc_classify(allocator, &var kind, got_bytes);
+                }
+                let name = c.bucket.as_bytes();
+                let recorded = uc_field_at(fields, 8);
+                let kind_bytes = kind.as_bytes();
+                if problem.len() == 0 {
+                    failures = failures + 1;
+                    try io::write_stderr(io, name);
+                    try io::write_stderr_line(io, ": the checker now agrees with the model");
+                } else if !mem::equal_bytes(kind_bytes, recorded) {
+                    failures = failures + 1;
+                    try io::write_stderr(io, name);
+                    try io::write_stderr(io, ": checker reported ");
+                    try io::write_stderr(io, kind_bytes);
+                    try io::write_stderr(io, ", recorded ");
+                    try io::write_stderr_line(io, recorded);
+                }
+            }
+            testing::expect_equal<i64>(3, rows.len());
+            testing::expect_equal<i64>(0, failures);
+        },
+    }
+    return;
 }
 
 test "unsafe model known divergences still diverge the recorded way" {
-    let allocator = mem::page_allocator();
-    let io = io::blocking();
-    let rows = try uc_table_rows(allocator, uc_known_divergences());
-    defer rows.deinit(allocator);
-    var failures = 0;
-    var index = 0;
-    while rows.at(index) |fields| {
-        index = index + 1;
-        let c = try uc_known_case(allocator, fields);
-        defer c.deinit(allocator);
-        var sources = uc_new_sources(allocator);
-        defer sources.deinit(allocator);
-        var got = string::new(allocator);
-        defer got.deinit(allocator);
-        var problem = string::new(allocator);
-        defer problem.deinit(allocator);
-        var kind = string::new(allocator);
-        defer kind.deinit(allocator);
-        if try uc_run_case(io, allocator, &c, &var sources, &var got) {
-            let got_bytes = got.as_bytes();
-            try uc_compare(allocator, &var problem, &c.expect, got_bytes);
-            try uc_classify(allocator, &var kind, got_bytes);
-        }
-        let name = c.bucket.as_bytes();
-        let recorded = uc_field_at(fields, 8);
-        let kind_bytes = kind.as_bytes();
-        if problem.len() == 0 {
-            failures = failures + 1;
-            try io::write_stderr(io, name);
-            try io::write_stderr_line(io, ": the checker now agrees with the model");
-        } else if !mem::equal_bytes(kind_bytes, recorded) {
-            failures = failures + 1;
-            try io::write_stderr(io, name);
-            try io::write_stderr(io, ": checker reported ");
-            try io::write_stderr(io, kind_bytes);
-            try io::write_stderr(io, ", recorded ");
-            try io::write_stderr_line(io, recorded);
-        }
+    var mem_pool = try pool::new(mem::page_allocator());
+    defer mem_pool.deinit(mem::page_allocator());
+    let allocator = pool::allocator_of(&var mem_pool);
+    return uc_run_divergences_test(io::blocking(), allocator);
+}
+
+fn uc_run_raw_borrow_test(io: Io, allocator: Allocator) -> !void {
+    let cached = try project::load_std_cache(io, allocator, "lib/kizu");
+    match cached {
+        Error(failed) => {
+            defer failed.deinit(allocator);
+            try io::write_stderr_line(io, "std cache could not be read");
+            testing::expect(false);
+        },
+        Cache(std_cache) => {
+            defer std_cache.deinit(allocator);
+            var c = UcCase {
+                bucket: try string::from_bytes(allocator, "unmarkedRawBorrow"),
+                g: uc_new_func(allocator),
+                f: uc_new_func(allocator),
+                expect: array::new<string::String>(allocator),
+            };
+            defer c.deinit(allocator);
+            try c.g.kind.append_bytes(allocator, "fn");
+            try c.g.file.append_bytes(allocator, "home");
+            try c.f.kind.append_bytes(allocator, "fn");
+            try c.f.file.append_bytes(allocator, "home");
+            try c.f.body.append(allocator, try string::from_bytes(allocator, "deref_borrow -"));
+            var sources = uc_new_sources(allocator);
+            defer sources.deinit(allocator);
+            var got = string::new(allocator);
+            defer got.deinit(allocator);
+            testing::expect(try uc_run_case(io, allocator, &std_cache, &c, &var sources, &var got));
+            let message = got.as_bytes();
+            testing::expect(uc_contains_bytes(message, uc_raw_borrow_form_message()));
+            testing::expect(!uc_contains_bytes(message, "requires `unsafe`"));
+        },
     }
-    testing::expect_equal<i64>(3, rows.len());
-    testing::expect_equal<i64>(0, failures);
+    return;
 }
 
 test "unsafe model known raw borrow diagnostic names the form" {
-    let allocator = mem::page_allocator();
-    let io = io::blocking();
-    var c = UcCase {
-        bucket: try string::from_bytes(allocator, "unmarkedRawBorrow"),
-        g: uc_new_func(allocator),
-        f: uc_new_func(allocator),
-        expect: array::new<string::String>(allocator),
-    };
-    defer c.deinit(allocator);
-    try c.g.kind.append_bytes(allocator, "fn");
-    try c.g.file.append_bytes(allocator, "home");
-    try c.f.kind.append_bytes(allocator, "fn");
-    try c.f.file.append_bytes(allocator, "home");
-    try c.f.body.append(allocator, try string::from_bytes(allocator, "deref_borrow -"));
-    var sources = uc_new_sources(allocator);
-    defer sources.deinit(allocator);
-    var got = string::new(allocator);
-    defer got.deinit(allocator);
-    testing::expect(try uc_run_case(io, allocator, &c, &var sources, &var got));
-    let message = got.as_bytes();
-    testing::expect(uc_contains_bytes(message, uc_raw_borrow_form_message()));
-    testing::expect(!uc_contains_bytes(message, "requires `unsafe`"));
+    var mem_pool = try pool::new(mem::page_allocator());
+    defer mem_pool.deinit(mem::page_allocator());
+    let allocator = pool::allocator_of(&var mem_pool);
+    return uc_run_raw_borrow_test(io::blocking(), allocator);
 }
 
-test "unsafe model known shapes cover every operation kind" {
-    let allocator = mem::page_allocator();
+fn uc_run_cover_test(allocator: Allocator) -> !void {
     let rows = try uc_table_rows(allocator, uc_known_shapes());
     defer rows.deinit(allocator);
     let infos = try unsafecap::all(allocator);
@@ -1089,30 +1460,80 @@ test "unsafe model known shapes cover every operation kind" {
     }
     testing::expect(infos.len() > 0);
     testing::expect_equal<i64>(0, missing);
+    return;
+}
+
+test "unsafe model known shapes cover every operation kind" {
+    var mem_pool = try pool::new(mem::page_allocator());
+    defer mem_pool.deinit(mem::page_allocator());
+    let allocator = pool::allocator_of(&var mem_pool);
+    return uc_run_cover_test(allocator);
+}
+
+fn uc_run_sampled_test(io: Io, allocator: Allocator) -> !void {
+    let cached = try project::load_std_cache(io, allocator, "lib/kizu");
+    match cached {
+        Error(failed) => {
+            defer failed.deinit(allocator);
+            try io::write_stderr_line(io, "std cache could not be read");
+            testing::expect(false);
+        },
+        Cache(std_cache) => {
+            defer std_cache.deinit(allocator);
+            var path = "compiler/tests/mbt/unsafecap.json";
+            if process::env("KIZU_MBT_FIXTURE") |other| {
+                path = other;
+            }
+            let data = try fs::read_file(io, allocator, path, mem::Limit::Unlimited);
+            defer data.deinit(allocator);
+            let bytes = data.as_bytes();
+            var fixture = try json::decode<UcFixture>(allocator, bytes);
+            defer fixture.deinit(allocator);
+            var accepted = array::new<UcCase>(allocator);
+            defer accepted.deinit(allocator);
+            var rejected = array::new<UcCase>(allocator);
+            defer rejected.deinit(allocator);
+            var index = 0;
+            while fixture.cases.at(index) |value| {
+                index = index + 1;
+                let c = try uc_case_from(allocator, value);
+                if c.expect.len() == 0 {
+                    try accepted.append(allocator, move c);
+                } else {
+                    try rejected.append(allocator, move c);
+                }
+            }
+            var failures = 0;
+            var pos = 0;
+            let accepted_len = accepted.len();
+            while pos < accepted_len {
+                var end = pos + 32;
+                if end > accepted_len {
+                    end = accepted_len;
+                }
+                failures = failures + try uc_check_batch(io, allocator, &std_cache, &accepted, pos, end, true);
+                pos = end;
+            }
+            pos = 0;
+            let rejected_len = rejected.len();
+            while pos < rejected_len {
+                var end = pos + 32;
+                if end > rejected_len {
+                    end = rejected_len;
+                }
+                failures = failures + try uc_check_batch(io, allocator, &std_cache, &rejected, pos, end, false);
+                pos = end;
+            }
+            testing::expect(fixture.cases.len() > 0);
+            testing::expect_equal<i64>(0, failures);
+        },
+    }
+    return;
 }
 
 test "unsafe marker checker agrees with the sampled model programs" {
-    let allocator = mem::page_allocator();
-    let io = io::blocking();
-    var path = "compiler/tests/mbt/unsafecap.json";
-    if process::env("KIZU_MBT_FIXTURE") |other| {
-        path = other;
-    }
-    let data = try fs::read_file(io, allocator, path, mem::Limit::Unlimited);
-    defer data.deinit(allocator);
-    let bytes = data.as_bytes();
-    var fixture = try json::decode<UcFixture>(allocator, bytes);
-    defer fixture.deinit(allocator);
-    var failures = 0;
-    var index = 0;
-    while fixture.cases.at(index) |value| {
-        index = index + 1;
-        let c = try uc_case_from(allocator, value);
-        defer c.deinit(allocator);
-        if try uc_diverges(io, allocator, &c) {
-            failures = failures + 1;
-        }
-    }
-    testing::expect(fixture.cases.len() > 0);
-    testing::expect_equal<i64>(0, failures);
+    var mem_pool = try pool::new(mem::page_allocator());
+    defer mem_pool.deinit(mem::page_allocator());
+    let allocator = pool::allocator_of(&var mem_pool);
+    return uc_run_sampled_test(io::blocking(), allocator);
 }

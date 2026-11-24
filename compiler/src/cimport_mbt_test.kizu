@@ -2,6 +2,7 @@ import compiler::internal::ast;
 import compiler::internal::cimport;
 import compiler::internal::diagnostic;
 import compiler::internal::ownership;
+import compiler::internal::pool;
 import compiler::internal::project;
 import compiler::internal::types;
 import std::array;
@@ -191,7 +192,13 @@ fn ci_append_i64(allocator: Allocator, out: &var string::String, value: i64) -> 
     return out.append_byte(allocator, cast<u8>(48 + value % 10));
 }
 
-fn ci_run(io: Io, allocator: Allocator, c: &CiCase, got: &var CiResult) -> !void {
+fn ci_run(
+    io: Io,
+    allocator: Allocator,
+    std_cache: &project::StdCache,
+    c: &CiCase,
+    got: &var CiResult
+) -> !void {
     let header = c.header.as_bytes();
     let imported = try cimport::import_header(allocator, header);
     match imported {
@@ -212,14 +219,21 @@ fn ci_run(io: Io, allocator: Allocator, c: &CiCase, got: &var CiResult) -> !void
         try ci_render_caller(allocator, &var source, &c.caller);
     }
     let source_bytes = source.as_bytes();
-    return ci_check_source(io, allocator, source_bytes, &var got.check_error);
+    return ci_check_source(io, allocator, std_cache, source_bytes, &var got.check_error);
 }
 
-fn ci_check_source(io: Io, allocator: Allocator, source: []u8, out: &var string::String) -> !void {
+fn ci_check_source(
+    io: Io,
+    allocator: Allocator,
+    std_cache: &project::StdCache,
+    source: []u8,
+    out: &var string::String
+) -> !void {
     var tree = ast::new(allocator);
     defer tree.deinit(allocator);
     var loader = try project::new_loader(io, allocator, "lib/kizu");
     defer loader.deinit(allocator);
+    loader.std_signatures_only = true;
     try loader.override_source("a.kizu", source);
     var files = array::new<string::String>(allocator);
     errdefer files.deinit(allocator);
@@ -238,7 +252,7 @@ fn ci_check_source(io: Io, allocator: Allocator, source: []u8, out: &var string:
         root: string::new(allocator)
     };
     defer graph.deinit(allocator);
-    let loaded = try loader.load_program(&var tree, &graph);
+    let loaded = try loader.load_program_cached(&var tree, &graph, std_cache);
     match loaded {
         Error(failed) => {
             defer failed.deinit(allocator);
@@ -379,10 +393,16 @@ fn ci_new_result(allocator: Allocator) -> CiResult {
     };
 }
 
-fn ci_problem(io: Io, allocator: Allocator, c: &CiCase, problem: &var string::String) -> !void {
+fn ci_problem(
+    io: Io,
+    allocator: Allocator,
+    std_cache: &project::StdCache,
+    c: &CiCase,
+    problem: &var string::String
+) -> !void {
     var got = ci_new_result(allocator);
     defer got.deinit(allocator);
-    try ci_run(io, allocator, c, &var got);
+    try ci_run(io, allocator, std_cache, c, &var got);
     try ci_compare(allocator, problem, c, &got);
     if problem.len() > 0 {
         try ci_report(io, allocator, c, problem, &got);
@@ -390,10 +410,15 @@ fn ci_problem(io: Io, allocator: Allocator, c: &CiCase, problem: &var string::St
     return;
 }
 
-fn ci_diverges(io: Io, allocator: Allocator, c: &CiCase) -> !bool {
+fn ci_diverges(
+    io: Io,
+    allocator: Allocator,
+    std_cache: &project::StdCache,
+    c: &CiCase
+) -> !bool {
     var problem = string::new(allocator);
     defer problem.deinit(allocator);
-    try ci_problem(io, allocator, c, &var problem);
+    try ci_problem(io, allocator, std_cache, c, &var problem);
     return problem.len() > 0;
 }
 
@@ -711,52 +736,73 @@ fn ci_table_rows(allocator: Allocator, table: []u8) -> !array::Array<array::Arra
     return move rows;
 }
 
-test "C import model harness agrees on the known shapes and notices each flipped verdict" {
-    let allocator = mem::page_allocator();
-    let io = io::blocking();
-    let rows = try ci_table_rows(allocator, ci_known_shapes());
-    defer rows.deinit(allocator);
-    var failures = 0;
-    var index = 0;
-    while rows.at(index) |fields| {
-        index = index + 1;
-        let c = try ci_known_case(allocator, fields);
-        defer c.deinit(allocator);
-        if try ci_diverges(io, allocator, &c) {
-            failures = failures + 1;
-        }
-        var flipped = ci_new_case(allocator);
-        defer flipped.deinit(allocator);
-        try flipped.bucket.append_string(allocator, &c.bucket);
-        try flipped.header.append_string(allocator, &c.header);
-        flipped.has_caller = c.has_caller;
-        flipped.caller.marked = c.caller.marked;
-        try ci_append_copies(allocator, &var flipped.caller.args, &c.caller.args);
-        try flipped.caller.ret.append_string(allocator, &c.caller.ret);
-        var want = ci_new_prediction(allocator);
-        defer want.deinit(allocator);
-        try ci_wanted(allocator, &var want, &c);
-        if want.expect.len() == 0 {
-            try flipped.spec.expect.append(allocator, try string::from_bytes(allocator, "Import:type"));
-        } else {
-            flipped.spec.has_decls = want.has_decls;
-            try flipped.spec.decls.append_string(allocator, &want.decls);
-        }
-        var got = ci_new_result(allocator);
-        defer got.deinit(allocator);
-        try ci_run(io, allocator, &flipped, &var got);
-        var problem = string::new(allocator);
-        defer problem.deinit(allocator);
-        try ci_compare(allocator, &var problem, &flipped, &got);
-        if problem.len() == 0 {
-            failures = failures + 1;
-            let name = c.bucket.as_bytes();
-            try io::write_stderr(io, name);
-            try io::write_stderr_line(io, ": the harness did not notice the flipped verdict");
-        }
+fn ci_run_known_shapes_test(io: Io, allocator: Allocator) -> !void {
+    let cached = try project::load_std_cache(io, allocator, "lib/kizu");
+    match cached {
+        Error(failed) => {
+            defer failed.deinit(allocator);
+            try io::write_stderr_line(io, "std cache could not be read");
+            testing::expect(false);
+        },
+        Cache(std_cache) => {
+            defer std_cache.deinit(allocator);
+            let rows = try ci_table_rows(allocator, ci_known_shapes());
+            defer rows.deinit(allocator);
+            var failures = 0;
+            var index = 0;
+            while rows.at(index) |fields| {
+                index = index + 1;
+                let c = try ci_known_case(allocator, fields);
+                defer c.deinit(allocator);
+                var got = ci_new_result(allocator);
+                defer got.deinit(allocator);
+                try ci_run(io, allocator, &std_cache, &c, &var got);
+                var direct_problem = string::new(allocator);
+                defer direct_problem.deinit(allocator);
+                try ci_compare(allocator, &var direct_problem, &c, &got);
+                if direct_problem.len() > 0 {
+                    try ci_report(io, allocator, &c, &direct_problem, &got);
+                    failures = failures + 1;
+                }
+                var flipped = ci_new_case(allocator);
+                defer flipped.deinit(allocator);
+                try flipped.bucket.append_string(allocator, &c.bucket);
+                try flipped.header.append_string(allocator, &c.header);
+                flipped.has_caller = c.has_caller;
+                flipped.caller.marked = c.caller.marked;
+                try ci_append_copies(allocator, &var flipped.caller.args, &c.caller.args);
+                try flipped.caller.ret.append_string(allocator, &c.caller.ret);
+                var want = ci_new_prediction(allocator);
+                defer want.deinit(allocator);
+                try ci_wanted(allocator, &var want, &c);
+                if want.expect.len() == 0 {
+                    try flipped.spec.expect.append(allocator, try string::from_bytes(allocator, "Import:type"));
+                } else {
+                    flipped.spec.has_decls = want.has_decls;
+                    try flipped.spec.decls.append_string(allocator, &want.decls);
+                }
+                var problem = string::new(allocator);
+                defer problem.deinit(allocator);
+                try ci_compare(allocator, &var problem, &flipped, &got);
+                if problem.len() == 0 {
+                    failures = failures + 1;
+                    let name = c.bucket.as_bytes();
+                    try io::write_stderr(io, name);
+                    try io::write_stderr_line(io, ": the harness did not notice the flipped verdict");
+                }
+            }
+            testing::expect_equal<i64>(40, rows.len());
+            testing::expect_equal<i64>(0, failures);
+        },
     }
-    testing::expect_equal<i64>(40, rows.len());
-    testing::expect_equal<i64>(0, failures);
+    return;
+}
+
+test "C import model harness agrees on the known shapes and notices each flipped verdict" {
+    var mem_pool = try pool::new(mem::page_allocator());
+    defer mem_pool.deinit(mem::page_allocator());
+    let allocator = pool::allocator_of(&var mem_pool);
+    return ci_run_known_shapes_test(io::blocking(), allocator);
 }
 
 fn ci_append_copies(
@@ -774,8 +820,7 @@ fn ci_append_copies(
     return;
 }
 
-test "C import model known shapes cover every class the classifier knows" {
-    let allocator = mem::page_allocator();
+fn ci_run_classes_test(allocator: Allocator) -> !void {
     let rows = try ci_table_rows(allocator, ci_known_shapes());
     defer rows.deinit(allocator);
     var classes = array::new<string::String>(allocator);
@@ -807,30 +852,55 @@ test "C import model known shapes cover every class the classifier knows" {
     }
     testing::expect_equal<i64>(16, classes.len());
     testing::expect_equal<i64>(0, missing);
+    return;
+}
+
+test "C import model known shapes cover every class the classifier knows" {
+    var mem_pool = try pool::new(mem::page_allocator());
+    defer mem_pool.deinit(mem::page_allocator());
+    let allocator = pool::allocator_of(&var mem_pool);
+    return ci_run_classes_test(allocator);
+}
+
+fn ci_run_sampled_test(io: Io, allocator: Allocator) -> !void {
+    let cached = try project::load_std_cache(io, allocator, "lib/kizu");
+    match cached {
+        Error(failed) => {
+            defer failed.deinit(allocator);
+            try io::write_stderr_line(io, "std cache could not be read");
+            testing::expect(false);
+        },
+        Cache(std_cache) => {
+            defer std_cache.deinit(allocator);
+            var path = "compiler/tests/mbt/cimport.json";
+            if process::env("KIZU_MBT_FIXTURE") |other| {
+                path = other;
+            }
+            let data = try fs::read_file(io, allocator, path, mem::Limit::Unlimited);
+            defer data.deinit(allocator);
+            let bytes = data.as_bytes();
+            var fixture = try json::decode<CiFixture>(allocator, bytes);
+            defer fixture.deinit(allocator);
+            var failures = 0;
+            var index = 0;
+            while fixture.cases.at(index) |value| {
+                index = index + 1;
+                let c = try ci_case_from(allocator, value);
+                defer c.deinit(allocator);
+                if try ci_diverges(io, allocator, &std_cache, &c) {
+                    failures = failures + 1;
+                }
+            }
+            testing::expect(fixture.cases.len() > 0);
+            testing::expect_equal<i64>(0, failures);
+        },
+    }
+    return;
 }
 
 test "C import pipeline agrees with the sampled model programs" {
-    let allocator = mem::page_allocator();
-    let io = io::blocking();
-    var path = "compiler/tests/mbt/cimport.json";
-    if process::env("KIZU_MBT_FIXTURE") |other| {
-        path = other;
-    }
-    let data = try fs::read_file(io, allocator, path, mem::Limit::Unlimited);
-    defer data.deinit(allocator);
-    let bytes = data.as_bytes();
-    var fixture = try json::decode<CiFixture>(allocator, bytes);
-    defer fixture.deinit(allocator);
-    var failures = 0;
-    var index = 0;
-    while fixture.cases.at(index) |value| {
-        index = index + 1;
-        let c = try ci_case_from(allocator, value);
-        defer c.deinit(allocator);
-        if try ci_diverges(io, allocator, &c) {
-            failures = failures + 1;
-        }
-    }
-    testing::expect(fixture.cases.len() > 0);
-    testing::expect_equal<i64>(0, failures);
+    var mem_pool = try pool::new(mem::page_allocator());
+    defer mem_pool.deinit(mem::page_allocator());
+    let allocator = pool::allocator_of(&var mem_pool);
+    return ci_run_sampled_test(io::blocking(), allocator);
 }
