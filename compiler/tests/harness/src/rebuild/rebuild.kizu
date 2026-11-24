@@ -128,6 +128,24 @@ fn build(handle: Io, allocator: Allocator, project: &Project, quiet: bool) -> Fa
     return child.wait(handle);
 }
 
+fn run_project(handle: Io, allocator: Allocator, project: &Project) -> Failure!i64 {
+    var command = try net::command(allocator, project.kizu);
+    defer command.deinit(allocator);
+    try command.arg(allocator, "run");
+    try command.arg(allocator, project.root);
+    try command.env(allocator, "KIZU_CACHE_DIR", project.cache);
+    command.set_stdin(net::Stdio::Null);
+    command.set_stdout(net::Stdio::Null);
+    var child = try command.spawn(handle);
+    defer child.deinit();
+    return child.wait(handle);
+}
+
+fn runs_to(handle: Io, allocator: Allocator, project: &Project, step: []u8, want: i64) -> Failure!bool {
+    let got = try run_project(handle, allocator, project);
+    return report(handle, allocator, step, want, got);
+}
+
 fn built_status(handle: Io, allocator: Allocator, project: &Project) -> Failure!i64 {
     var command = try net::command(allocator, project.output);
     defer command.deinit(allocator);
@@ -192,7 +210,16 @@ fn steps(handle: Io, allocator: Allocator, project: &Project) -> Failure!bool {
         return false;
     }
     try cut_function_caches(handle, allocator, project);
+    if !try runs_to(handle, allocator, project, "first run", 13) {
+        return false;
+    }
+    if !try runs_to(handle, allocator, project, "run nothing changed", 13) {
+        return false;
+    }
     try write_value(handle, allocator, project, "20");
+    if !try runs_to(handle, allocator, project, "run source edited", 23) {
+        return false;
+    }
     if !try builds_to(handle, allocator, project, "source edited", 23) {
         return false;
     }

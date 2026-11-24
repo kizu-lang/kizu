@@ -634,7 +634,7 @@ fn usage(io: Io) -> !void {
     try io::write_stderr_line(io, "usage: kizu test [--seed N] [--backend direct|llvm] [--triple T] -o file <file|package>");
     try io::write_stderr_line(io, "usage: kizu init [path]");
     try io::write_stderr_line(io, "usage: kizu lsp");
-    try io::write_stderr_line(io, "usage: kizu fmt [--write] <file>");
+    try io::write_stderr_line(io, "usage: kizu fmt [--write|--check] <file>...");
     try io::write_stderr_line(io, "usage: kizu lint <file|dir|package>...");
     try io::write_stderr_line(io, "usage: kizu ir [--opt] <file>");
     try io::write_stderr_line(io, "usage: kizu build --emit-llvm [--opt] <file>");
@@ -846,6 +846,24 @@ fn lint_command(
     return 1;
 }
 
+enum FmtMode {
+    Stdout,
+    Write,
+    Check,
+}
+
+enum FmtParseOutcome {
+    Failed,
+    SkipMoves,
+    CheckMoves,
+    CheckMovesWithStd,
+}
+
+struct FmtStdCache {
+    attempted: bool,
+    items: array::Array<project::StdCache>,
+}
+
 fn fmt_command(
     io: Io,
     allocator: Allocator,
@@ -853,38 +871,93 @@ fn fmt_command(
     command_index: i64,
     count: i64
 ) -> !i64 {
-    let argument_count = count - command_index - 1;
     var write = false;
-    var file_index = command_index + 1;
-    if argument_count == 2 {
-        let flag = try process::arg(file_index);
-        if is_fmt_write_flag(flag) {
+    var check = false;
+    var index = command_index + 1;
+    while index < count {
+        let arg = try process::arg(index);
+        if is_fmt_write_flag(arg) {
             write = true;
-            file_index = file_index + 1;
+            index = index + 1;
+            continue;
         }
+        if mem::equal_bytes(arg, "--check") {
+            check = true;
+            index = index + 1;
+            continue;
+        }
+        if starts_with_dash(arg) {
+            try usage(io);
+            try io::write_stderr_line(
+                io,
+                "error: fmt takes an optional --write or --check and at least one target"
+            );
+            return 1;
+        }
+        break;
     }
-    let file = try process::arg(file_index);
-    if (argument_count != 1 and !write) or
-        (argument_count == 1 and starts_with_dash(file)) {
+    if write and check {
+        try usage(io);
+        try io::write_stderr_line(io, "error: fmt cannot combine --write and --check");
+        return 1;
+    }
+    let file_count = count - index;
+    if file_count < 1 {
         try usage(io);
         try io::write_stderr_line(
             io,
-            "error: fmt takes an optional --write and one target"
+            "error: fmt takes an optional --write or --check and at least one target"
         );
         return 1;
     }
-    let read = try read_source_file(io, allocator, file);
-    match read {
-        Failed(message) => {
-            defer message.deinit(allocator);
-            let bytes = message.as_bytes();
-            try write_error_line(io, allocator, bytes);
-            return 1;
-        },
-        Text(source_text) => {
-            return format_source(io, allocator, lib_dir, file, write, move source_text);
-        },
+    if file_count > 1 and !write and !check {
+        try usage(io);
+        try io::write_stderr_line(
+            io,
+            "error: fmt takes one target without --write or --check"
+        );
+        return 1;
     }
+    var mode = FmtMode::Stdout;
+    if write {
+        mode = FmtMode::Write;
+    } else if check {
+        mode = FmtMode::Check;
+    }
+    var std_cache = FmtStdCache {
+        attempted: false,
+        items: array::new<project::StdCache>(allocator)
+    };
+    defer std_cache.deinit(allocator);
+    var status = 0;
+    while index < count {
+        let file = try process::arg(index);
+        index = index + 1;
+        let read = try read_source_file(io, allocator, file);
+        match read {
+            Failed(message) => {
+                defer message.deinit(allocator);
+                let bytes = message.as_bytes();
+                try write_error_line(io, allocator, bytes);
+                status = 1;
+            },
+            Text(source_text) => {
+                let code = try format_source(
+                    io,
+                    allocator,
+                    lib_dir,
+                    file,
+                    mode,
+                    &var std_cache,
+                    move source_text
+                );
+                if code != 0 {
+                    status = code;
+                }
+            },
+        }
+    }
+    return status;
 }
 
 fn format_source(
@@ -892,19 +965,37 @@ fn format_source(
     allocator: Allocator,
     lib_dir: []u8,
     file: []u8,
-    write: bool,
+    mode: FmtMode,
+    std_cache: &var FmtStdCache,
     text: string::String
 ) -> !i64 {
     var source_text = move text;
     defer source_text.deinit(allocator);
-    if !try validate_fmt_parse(io, allocator, file) {
+    let initial_bytes = source_text.as_bytes();
+    let parsed = try validate_fmt_source(io, allocator, file, initial_bytes);
+    if parsed == FmtParseOutcome::Failed {
         return 1;
     }
-    let inserted = try insert_move_markers(
+    if parsed == FmtParseOutcome::SkipMoves {
+        let formatted = try fmt::format(allocator, initial_bytes);
+        defer formatted.deinit(allocator);
+        let formatted_bytes = formatted.as_bytes();
+        return finish_fmt_output(io, file, mode, initial_bytes, formatted_bytes);
+    }
+    var original = string::new(allocator);
+    defer original.deinit(allocator);
+    if mode != FmtMode::Stdout {
+        try original.append_string(allocator, &source_text);
+    }
+    if parsed == FmtParseOutcome::CheckMovesWithStd {
+        try load_fmt_std_cache(io, allocator, lib_dir, std_cache);
+    }
+    let inserted = try insert_move_markers_cached(
         io,
         allocator,
         lib_dir,
         file,
+        std_cache,
         &var source_text
     );
     match inserted {
@@ -917,13 +1008,59 @@ fn format_source(
     let source_bytes = source_text.as_bytes();
     let formatted = try fmt::format(allocator, source_bytes);
     defer formatted.deinit(allocator);
+    let original_bytes = original.as_bytes();
     let formatted_bytes = formatted.as_bytes();
-    if write {
-        try fs::write_file(io, file, formatted_bytes);
-        return 0;
+    return finish_fmt_output(io, file, mode, original_bytes, formatted_bytes);
+}
+
+fn finish_fmt_output(
+    io: Io,
+    file: []u8,
+    mode: FmtMode,
+    original: []u8,
+    formatted: []u8
+) -> !i64 {
+    match mode {
+        Stdout => {
+            try io::write_stdout(io, formatted);
+            return 0;
+        },
+        Write => {
+            if !mem::equal_bytes(original, formatted) {
+                try fs::write_file(io, file, formatted);
+            }
+            return 0;
+        },
+        Check => {
+            if !mem::equal_bytes(original, formatted) {
+                try io::write_stdout_line(io, file);
+                return 1;
+            }
+            return 0;
+        },
     }
-    try io::write_stdout(io, formatted_bytes);
-    return 0;
+}
+
+fn load_fmt_std_cache(
+    io: Io,
+    allocator: Allocator,
+    lib_dir: []u8,
+    holder: &var FmtStdCache
+) -> !void {
+    if holder.attempted {
+        return;
+    }
+    holder.attempted = true;
+    let outcome = try project::load_std_cache(io, allocator, lib_dir);
+    match outcome {
+        Cache(loaded) => {
+            try holder.items.append(allocator, move loaded);
+        },
+        Error(failed) => {
+            failed.deinit(allocator);
+        },
+    }
+    return;
 }
 
 fn is_fmt_write_flag(argument: []u8) -> bool {
@@ -934,30 +1071,45 @@ fn starts_with_dash(argument: []u8) -> bool {
     return mem::len(argument) > 0 and argument[0] == cast<u8>(45);
 }
 
-fn validate_fmt_parse(io: Io, allocator: Allocator, file: []u8) -> !bool {
-    let read = try read_source_file(io, allocator, file);
-    match read {
-        Failed(message) => {
-            defer message.deinit(allocator);
-            let bytes = message.as_bytes();
-            try write_error_line(io, allocator, bytes);
-            return false;
-        },
-        Text(text) => return validate_fmt_source(io, allocator, file, move text),
+fn classify_fmt_imports(tree: &ast::Ast, program: &ast::Program) -> FmtParseOutcome {
+    var uses_std = tree.uses_print;
+    var index = 0;
+    while program.declarations.at(index) |decl| {
+        index = index + 1;
+        match tree.declarations.at(decl.node) {
+            Import(imported) => {
+                if imported.path.at(0) |first| {
+                    let text = tree.texts.at(first.node);
+                    let bytes = text.as_bytes();
+                    if mem::equal_bytes(bytes, "std") {
+                        uses_std = true;
+                    } else {
+                        return FmtParseOutcome::SkipMoves;
+                    }
+                }
+            },
+            _ => {},
+        }
     }
+    if uses_std {
+        return FmtParseOutcome::CheckMovesWithStd;
+    }
+    return FmtParseOutcome::CheckMoves;
 }
 
 fn validate_fmt_source(
     io: Io,
     allocator: Allocator,
     file: []u8,
-    text: string::String
-) -> !bool {
-    errdefer text.deinit(allocator);
+    source_bytes: []u8
+) -> !FmtParseOutcome {
     var sources = source::new(allocator);
     defer sources.deinit(allocator);
     let path_copy = try string::from_bytes(allocator, file);
-    let id = try sources.add(move path_copy, move text);
+    errdefer path_copy.deinit(allocator);
+    let text_copy = try string::from_bytes(allocator, source_bytes);
+    errdefer text_copy.deinit(allocator);
+    let id = try sources.add(move path_copy, move text_copy);
     var tree = ast::new(allocator);
     defer tree.deinit(allocator);
     if sources.at(id) |input| {
@@ -968,7 +1120,10 @@ fn validate_fmt_source(
         let program = try source_parser.parse_program(&var tree);
         defer program.deinit(allocator);
         if source_parser.diagnostics_len() == 0 {
-            return true;
+            if source_parser.embeds.len() > 0 {
+                return FmtParseOutcome::SkipMoves;
+            }
+            return classify_fmt_imports(&tree, &program);
         }
         var index = 0;
         while source_parser.diagnostic(index) |failed| {
@@ -976,9 +1131,22 @@ fn validate_fmt_source(
             index = index + 1;
         }
         try io::write_stderr_line(io, "error: parse failed");
-        return false;
+        return FmtParseOutcome::Failed;
     }
-    return true;
+    return FmtParseOutcome::SkipMoves;
+}
+
+fn load_fmt_source(
+    loader: &var project::Loader,
+    tree: &var ast::Ast,
+    file: []u8,
+    source_bytes: []u8,
+    std_cache: &FmtStdCache
+) -> !project::LoadResult {
+    if std_cache.items.at(0) |cached| {
+        return loader.load_source_cached(tree, file, source_bytes, cached);
+    }
+    return loader.load_source(tree, file, source_bytes);
 }
 
 fn insert_move_markers(
@@ -988,15 +1156,34 @@ fn insert_move_markers(
     file: []u8,
     source_text: &var string::String
 ) -> !MarkerInsertResult {
+    var empty = FmtStdCache {
+        attempted: true,
+        items: array::new<project::StdCache>(allocator)
+    };
+    defer empty.deinit(allocator);
+    return insert_move_markers_cached(io, allocator, lib_dir, file, &empty, source_text);
+}
+
+fn insert_move_markers_cached(
+    io: Io,
+    allocator: Allocator,
+    lib_dir: []u8,
+    file: []u8,
+    std_cache: &FmtStdCache,
+    source_text: &var string::String
+) -> !MarkerInsertResult {
     var tree = ast::new(allocator);
     defer tree.deinit(allocator);
     var loader = try project::new_loader(io, allocator, lib_dir);
     defer loader.deinit(allocator);
+    loader.std_signatures_only = true;
     let source_bytes = source_text.as_bytes();
-    let loaded = try loader.load_source(
+    let loaded = try load_fmt_source(
+        &var loader,
         &var tree,
         file,
-        source_bytes
+        source_bytes,
+        std_cache
     );
     match loaded {
         Error(failed) => {
@@ -1919,7 +2106,8 @@ fn default_native_options(allocator: Allocator) -> !native::Options {
         frameworks: array::new<string::String>(allocator),
         library_search: array::new<string::String>(allocator),
         framework_search: array::new<string::String>(allocator),
-        compiler: string::new(allocator)
+        compiler: string::new(allocator),
+        linker_version: string::new(allocator)
     };
 }
 
@@ -2029,7 +2217,7 @@ fn run_command(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, next: 
             child_count = count - child_start;
         }
     }
-    return native_target(io, allocator, lib_dir, path, NativeCommand::Run, &var options, null, child_start, child_count);
+    return planned_native_exec(io, allocator, lib_dir, path, NativeCommand::Run, &var options, null, child_start, child_count);
 }
 
 fn test_command(io: Io, allocator: Allocator, lib_dir: []u8, next: i64, count: i64) -> !i64 {
@@ -2113,7 +2301,10 @@ fn test_command(io: Io, allocator: Allocator, lib_dir: []u8, next: i64, count: i
         try io::write_stderr_line(io, "error: test error: -o builds the test executable without running it, so it takes no program args");
         return 1;
     }
-    return native_target(io, allocator, lib_dir, path, NativeCommand::Test, &var options, seed, child_start, child_count);
+    if options.output.len() > 0 {
+        return planned_native_build(io, allocator, lib_dir, path, NativeCommand::Test, &var options, seed);
+    }
+    return planned_native_exec(io, allocator, lib_dir, path, NativeCommand::Test, &var options, seed, child_start, child_count);
 }
 
 fn parse_seed(text: []u8) -> ?i64 {
@@ -2152,7 +2343,7 @@ fn build_native_command(io: Io, allocator: Allocator, lib_dir: []u8, first: i64,
         return parsed;
     }
     let target_bytes = target_path.as_bytes();
-    return planned_native_build(io, allocator, lib_dir, target_bytes, &var options);
+    return planned_native_build(io, allocator, lib_dir, target_bytes, NativeCommand::Build, &var options, null);
 }
 
 fn planned_native_build(
@@ -2160,14 +2351,16 @@ fn planned_native_build(
     allocator: Allocator,
     lib_dir: []u8,
     target: []u8,
-    options: &var native::Options
+    command: NativeCommand,
+    options: &var native::Options,
+    seed: ?i64
 ) -> !i64 {
     var loader = try project::new_loader(io, allocator, lib_dir);
     defer loader.deinit(allocator);
     var request = string::new(allocator);
     defer request.deinit(allocator);
-    if !try native_build_request(io, allocator, lib_dir, target, options, &var request) {
-        return native_target_with(io, allocator, &var loader, target, NativeCommand::Build, options, null, 0, 0);
+    if !try native_build_request(io, allocator, lib_dir, target, command, options, seed, &var request) {
+        return native_target_with(io, allocator, &var loader, target, command, options, seed, 0, 0, "");
     }
     var cache = try buildcache::new(io, allocator);
     defer cache.deinit(allocator);
@@ -2181,11 +2374,70 @@ fn planned_native_build(
         return 0;
     }
     loader.inputs.enabled = true;
-    let code = try native_target_with(io, allocator, &var loader, target, NativeCommand::Build, options, null, 0, 0);
+    let code = try native_target_with(io, allocator, &var loader, target, command, options, seed, 0, 0, "");
     if code == 0 and native::links_only_system(options) {
         try buildplan::store(io, allocator, &var cache, request_bytes, &loader.inputs, output_bytes);
     }
     return code;
+}
+
+fn planned_native_exec(
+    io: Io,
+    allocator: Allocator,
+    lib_dir: []u8,
+    target: []u8,
+    command: NativeCommand,
+    options: &var native::Options,
+    seed: ?i64,
+    child_start: i64,
+    child_count: i64
+) -> !i64 {
+    var loader = try project::new_loader(io, allocator, lib_dir);
+    defer loader.deinit(allocator);
+    var request = string::new(allocator);
+    defer request.deinit(allocator);
+    if !try native_exec_request(io, allocator, lib_dir, target, command, options, seed, &var request) {
+        return native_target_with(io, allocator, &var loader, target, command, options, seed, child_start, child_count, "");
+    }
+    var cache = try buildcache::new(io, allocator);
+    defer cache.deinit(allocator);
+    let request_bytes = request.as_bytes();
+    var cached_exe = string::new(allocator);
+    defer cached_exe.deinit(allocator);
+    if try buildplan::restore_exec(io, allocator, &var cache, request_bytes, &var cached_exe) {
+        let exe_bytes = cached_exe.as_bytes();
+        let code = try execute_built(allocator, exe_bytes, child_start, child_count);
+        if code != 0 {
+            return code;
+        }
+        if command == NativeCommand::Test {
+            try io::write_stdout_line(io, "test: ok");
+        }
+        return 0;
+    }
+    loader.inputs.enabled = true;
+    return native_target_with(io, allocator, &var loader, target, command, options, seed, child_start, child_count, request_bytes);
+}
+
+fn append_command_and_seed(
+    allocator: Allocator,
+    command: NativeCommand,
+    seed: ?i64,
+    out: &var string::String
+) -> !void {
+    match command {
+        Build => try out.append_bytes(allocator, "build"),
+        Run => try out.append_bytes(allocator, "run"),
+        Test => try out.append_bytes(allocator, "test"),
+    }
+    try out.append_byte(allocator, cast<u8>(10));
+    if seed |given| {
+        try out.append_bytes(allocator, "seed:");
+        try stdfmt::append_i64(allocator, out, given);
+    } else {
+        try out.append_bytes(allocator, "seed:none");
+    }
+    return out.append_byte(allocator, cast<u8>(10));
 }
 
 fn compiler_digest(io: Io, allocator: Allocator, options: &var native::Options, out: &var string::String) -> !bool {
@@ -2209,7 +2461,9 @@ fn native_build_request(
     allocator: Allocator,
     lib_dir: []u8,
     target: []u8,
+    command: NativeCommand,
     options: &var native::Options,
+    seed: ?i64,
     out: &var string::String
 ) -> !bool {
     let emit = options.emit.as_bytes();
@@ -2235,10 +2489,48 @@ fn native_build_request(
     try out.append_byte(allocator, cast<u8>(10));
     try out.append_bytes(allocator, lib_dir);
     try out.append_byte(allocator, cast<u8>(10));
+    try append_command_and_seed(allocator, command, seed, out);
     if try native::append_build_identity(allocator, options, &host, out) |failed| {
         failed.deinit(allocator);
         return false;
     }
+    return true;
+}
+
+fn native_exec_request(
+    io: Io,
+    allocator: Allocator,
+    lib_dir: []u8,
+    target: []u8,
+    command: NativeCommand,
+    options: &var native::Options,
+    seed: ?i64,
+    out: &var string::String
+) -> !bool {
+    if !native::links_only_system(options) {
+        return false;
+    }
+    let triple = options.triple.as_bytes();
+    if try native::target_for(allocator, triple, &var options.target) |failed| {
+        failed.deinit(allocator);
+        return false;
+    }
+    var host = string::new(allocator);
+    defer host.deinit(allocator);
+    if try native::host_key(allocator, &var host) |failed| {
+        failed.deinit(allocator);
+        return false;
+    }
+    if !try compiler_digest(io, allocator, options, out) {
+        return false;
+    }
+    try out.append_byte(allocator, cast<u8>(10));
+    try out.append_bytes(allocator, target);
+    try out.append_byte(allocator, cast<u8>(10));
+    try out.append_bytes(allocator, lib_dir);
+    try out.append_byte(allocator, cast<u8>(10));
+    try append_command_and_seed(allocator, command, seed, out);
+    try native::append_exec_identity(allocator, options, &host, out);
     return true;
 }
 
@@ -2566,22 +2858,6 @@ fn lower_native(
     }
 }
 
-fn native_target(
-    io: Io,
-    allocator: Allocator,
-    lib_dir: []u8,
-    target: []u8,
-    command: NativeCommand,
-    options: &var native::Options,
-    seed: ?i64,
-    child_start: i64,
-    child_count: i64
-) -> !i64 {
-    var loader = try project::new_loader(io, allocator, lib_dir);
-    defer loader.deinit(allocator);
-    return native_target_with(io, allocator, &var loader, target, command, options, seed, child_start, child_count);
-}
-
 fn native_target_with(
     io: Io,
     allocator: Allocator,
@@ -2591,7 +2867,8 @@ fn native_target_with(
     options: &var native::Options,
     seed: ?i64,
     child_start: i64,
-    child_count: i64
+    child_count: i64,
+    exec_plan_request: []u8
 ) -> !i64 {
     let triple = options.triple.as_bytes();
     var build_target = stdtarget::host();
@@ -2710,10 +2987,18 @@ fn native_target_with(
             }
             var exe = string::new(allocator);
             defer exe.deinit(allocator);
-            if try native::executable(io, allocator, &var temps, options, &host, &units, &lowered.std_errors.sets, &var exe) |failed| {
+            var exe_key = string::new(allocator);
+            defer exe_key.deinit(allocator);
+            if try native::executable_with_key(io, allocator, &var temps, options, &host, &units, &lowered.std_errors.sets, &var exe, &var exe_key) |failed| {
                 defer failed.deinit(allocator);
                 try report(io, allocator, &loader.sources, &failed);
                 return 1;
+            }
+            if mem::len(exec_plan_request) > 0 and native::links_only_system(options) {
+                var plan_cache = try buildcache::new(io, allocator);
+                defer plan_cache.deinit(allocator);
+                let exe_key_bytes = exe_key.as_bytes();
+                try buildplan::store_exec(io, allocator, &var plan_cache, exec_plan_request, &loader.inputs, exe_key_bytes);
             }
             let exe_bytes = exe.as_bytes();
             let code = try execute_built(allocator, exe_bytes, child_start, child_count);
