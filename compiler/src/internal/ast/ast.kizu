@@ -27,7 +27,9 @@ pub struct Ast {
     pub statements: arena::Arena<StatementNode>,
     pub spans: arena::Arena<Span>,
     block_count: i64,
+    empty_text: ?Text,
     pub locate_names: bool,
+    pub uses_print: bool,
     pub type_sites: array::Array<Span>,
     pub named_references: array::Array<NamedReference>,
 }
@@ -614,7 +616,9 @@ pub fn new(allocator: Allocator) -> Ast {
         statements: arena::new<StatementNode>(allocator),
         spans: arena::new<Span>(allocator),
         block_count: 0,
+        empty_text: null,
         locate_names: false,
+        uses_print: false,
         type_sites: array::new<Span>(allocator),
         named_references: array::new<NamedReference>(allocator)
     };
@@ -650,7 +654,12 @@ pub fn (self: &Ast) text_span(value: Text) -> Span {
 }
 
 fn (self: &var Ast) add_empty_text() -> !Text {
-    return try self.add_text(string::new(self.allocator));
+    if self.empty_text |cached| {
+        return cached;
+    }
+    let empty = try self.add_text(string::new(self.allocator));
+    self.empty_text = empty;
+    return empty;
 }
 
 fn (self: &var Ast) add_text_from_bytes(
@@ -705,8 +714,21 @@ fn (self: &var Program) add_declaration(
 }
 
 fn (self: &var Ast) add_expression(node: ExpressionNode) -> !Expression {
+    let handle = try self.expressions.add(self.allocator, move node);
+    if !self.uses_print {
+        match self.expressions.at(handle) {
+            Ident(value) => {
+                let text = self.texts.at(value.name.node);
+                let bytes = text.as_bytes();
+                if mem::equal_bytes(bytes, "print") {
+                    self.uses_print = true;
+                }
+            },
+            _ => {},
+        }
+    }
     return Expression {
-        node: try self.expressions.add(self.allocator, move node),
+        node: handle,
         location: null
     };
 }

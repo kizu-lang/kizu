@@ -15,13 +15,15 @@ import std::string;
 pub struct Parser {
     allocator: Allocator,
     scanner: lexer::Lexer,
-    tokens: arena::Arena<token::Token>,
-    stream: array::Array<arena::Handle<token::Token>>,
+    tokens: array::Array<lexer::StreamLexeme>,
+    owned_literals: array::Array<string::String>,
+    doc_spans: array::Array<lexer::Span>,
     position: i64,
     diagnostics_store: array::Array<diagnostic::Diagnostic>,
     link_library: ?ast::Text,
     link_framework: ?ast::Text,
     pub embeds: array::Array<ast::Expression>,
+    pub skip_non_generic_bodies: bool,
     type_site_base: i64,
     type_sites: array::Array<ast::Span>,
 }
@@ -34,22 +36,34 @@ struct NameList {
 pub fn new(allocator: Allocator, scanner: lexer::Lexer) -> !Parser {
     var input = move scanner;
     errdefer input.deinit(allocator);
-    var tokens = arena::new<token::Token>(allocator);
+    var tokens = array::new<lexer::StreamLexeme>(allocator);
     errdefer tokens.deinit(allocator);
-    var stream = array::new<arena::Handle<token::Token>>(allocator);
-    errdefer stream.deinit(allocator);
-    try append_next_token(allocator, &var input, &var tokens, &var stream);
-    try append_next_token(allocator, &var input, &var tokens, &var stream);
+    var estimate = input.input_len() / 8;
+    if estimate < 32 {
+        estimate = 32;
+    }
+    if estimate > 4096 {
+        estimate = 4096;
+    }
+    try tokens.reserve(allocator, estimate);
+    var owned_literals = array::new<string::String>(allocator);
+    errdefer owned_literals.deinit(allocator);
+    var doc_spans = array::new<lexer::Span>(allocator);
+    errdefer doc_spans.deinit(allocator);
+    try append_next_token(allocator, &var input, &var tokens, &var owned_literals, &var doc_spans);
+    try append_next_token(allocator, &var input, &var tokens, &var owned_literals, &var doc_spans);
     return Parser {
         allocator: allocator,
         scanner: move input,
         tokens: move tokens,
-        stream: move stream,
+        owned_literals: move owned_literals,
+        doc_spans: move doc_spans,
         position: 0,
         diagnostics_store: array::new<diagnostic::Diagnostic>(allocator),
         link_library: null,
         link_framework: null,
         embeds: array::new<ast::Expression>(allocator),
+        skip_non_generic_bodies: false,
         type_site_base: -1,
         type_sites: array::new<ast::Span>(allocator)
     };
@@ -79,14 +93,12 @@ fn (self: &Parser) diagnostic(index: i64) -> ?&diagnostic::Diagnostic {
     return self.diagnostics_store.at(index);
 }
 
-fn (self: &Parser) current_token() -> &token::Token {
-    let handle = self.stream.get_or_panic(self.position);
-    return self.tokens.at(handle);
+fn (self: &Parser) current_token() -> lexer::StreamLexeme {
+    return self.tokens.get_or_panic(self.position);
 }
 
-fn (self: &Parser) peek_token() -> &token::Token {
-    let handle = self.stream.get_or_panic(self.position + 1);
-    return self.tokens.at(handle);
+fn (self: &Parser) peek_token() -> lexer::StreamLexeme {
+    return self.tokens.get_or_panic(self.position + 1);
 }
 
 fn (self: &Parser) current_kind() -> token::Kind {
@@ -95,6 +107,19 @@ fn (self: &Parser) current_kind() -> token::Kind {
 
 fn (self: &Parser) peek_kind() -> token::Kind {
     return self.peek_token().kind;
+}
+
+fn (self: &Parser) token_bytes(current: lexer::StreamLexeme) -> []u8 {
+    if current.owned_literal >= 0 {
+        if self.owned_literals.at(current.owned_literal) |owned| {
+            let bytes = owned.as_bytes();
+            return bytes;
+        }
+    }
+    if current.kind == token::Kind::Eof {
+        return "";
+    }
+    return self.scanner.slice(current.start, current.end);
 }
 
 fn (self: &Parser) comment_text(
@@ -109,17 +134,41 @@ fn (self: &Parser) comment_text(
     return move out;
 }
 
+fn (self: &Parser) token_comment_text(
+    current: lexer::StreamLexeme
+) -> !string::String {
+    if current.doc_len == 0 {
+        return string::new(self.allocator);
+    }
+    var out = string::new(self.allocator);
+    errdefer out.deinit(self.allocator);
+    var index = 0;
+    while index < current.doc_len {
+        if index > 0 {
+            try out.append_byte(self.allocator, cast<u8>(10));
+        }
+        let span = self.doc_spans.get_or_panic(current.doc_start + index);
+        try lexer::append_normalized_utf8(
+            self.allocator,
+            &var out,
+            self.scanner.slice(span.start, span.end)
+        );
+        index = index + 1;
+    }
+    string::trim_space_in_place(&var out);
+    return move out;
+}
+
 fn (self: &Parser) current_comment_text() -> !string::String {
-    let current = self.current_token();
-    return self.comment_text(&current.doc_comments);
+    return self.token_comment_text(self.current_token());
 }
 
 fn (self: &Parser) retain_current_literal(tree: &var ast::Ast) -> !ast::Text {
-    return retain_literal(tree, self.current_token());
+    return self.retain_literal(tree, self.current_token());
 }
 
 fn (self: &Parser) starts_error_set_decl() -> bool {
-    return token_literal_equal(self.current_token(), "error") and
+    return self.token_literal_equal(self.current_token(), "error") and
         self.peek_kind() == token::Kind::Ident;
 }
 
@@ -314,13 +363,13 @@ fn (self: &Parser) function_stub(
 fn (self: &var Parser) parse_ident_led_decl(
     tree: &var ast::Ast
 ) -> !?ast::Declaration {
-    if token_literal_equal(self.current_token(), "test") {
+    if self.token_literal_equal(self.current_token(), "test") {
         return try self.parse_test_decl(tree);
     }
     if self.starts_error_set_decl() {
         return try self.parse_error_set_decl(tree);
     }
-    if token_literal_equal(self.current_token(), "const") and
+    if self.token_literal_equal(self.current_token(), "const") and
         self.peek_kind() == token::Kind::Ident {
         return try self.parse_const_decl(tree);
     }
@@ -394,9 +443,81 @@ fn (self: &var Parser) parse_function_after_fn(
     if !try self.expect_peek(token::Kind::LBrace) {
         return add_function_decl(self.allocator, tree, move value);
     }
+    if self.skip_non_generic_bodies and can_skip_function_body(tree, &value.signature) {
+        try self.skip_block_stmt();
+        return add_function_decl(self.allocator, tree, move value);
+    }
     let body = try self.parse_block_stmt(tree);
     value.body = body;
     return add_function_decl(self.allocator, tree, move value);
+}
+
+fn can_skip_function_body(tree: &ast::Ast, signature: &ast::FunctionSignature) -> bool {
+    if signature.static_params.len() > 0 {
+        return false;
+    }
+    if signature.receiver {
+        if text_equal(tree, signature.name, "deinit") {
+            return false;
+        }
+        if signature.params.at(0) |first| {
+            if typ::has_type_args(&tree.types, first.type_name) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+fn (self: &var Parser) skip_block_stmt() -> !void {
+    let allocator = self.allocator;
+    var depth = 1;
+    var index = self.position + 1;
+    while index < self.tokens.len() {
+        let kind = self.tokens.get_or_panic(index).kind;
+        if kind == token::Kind::LBrace {
+            depth = depth + 1;
+        } else if kind == token::Kind::RBrace {
+            depth = depth - 1;
+            if depth == 0 {
+                self.position = index;
+                if self.position + 1 >= self.tokens.len() {
+                    try append_next_token(allocator,
+                        &var self.scanner,
+                        &var self.tokens,
+                        &var self.owned_literals,
+                        &var self.doc_spans
+                    );
+                }
+                return;
+            }
+        } else if kind == token::Kind::Eof {
+            self.position = index;
+            if self.position + 1 >= self.tokens.len() {
+                try append_next_token(allocator,
+                    &var self.scanner,
+                    &var self.tokens,
+                    &var self.owned_literals,
+                    &var self.doc_spans
+                );
+            }
+            return self.expect_list_close("block", "");
+        }
+        index = index + 1;
+    }
+    let lexeme = self.scanner.skip_balanced_block(depth);
+    try self.tokens.append(allocator, lexer::stream_lexeme_from_lexeme(&lexeme));
+    self.position = self.tokens.len() - 1;
+    try append_next_token(allocator,
+        &var self.scanner,
+        &var self.tokens,
+        &var self.owned_literals,
+        &var self.doc_spans
+    );
+    if lexeme.kind != token::Kind::RBrace {
+        return self.expect_list_close("block", "");
+    }
+    return;
 }
 
 fn (self: &var Parser) parse_unsafe_decl(
@@ -451,7 +572,7 @@ fn (self: &var Parser) parse_extern_decl_with_doc(
     var function = try self.function_stub(tree, public, move docs);
     errdefer function.deinit(self.allocator);
     function.signature.extern_abi = abi;
-    if !token_literal_is(self.current_token(), "") {
+    if !self.token_literal_is(self.current_token(), "") {
         self.take_link_attributes(&var function.signature);
     }
     if !try self.expect_peek(token::Kind::Function) {
@@ -463,7 +584,7 @@ fn (self: &var Parser) parse_extern_decl_with_doc(
 }
 
 fn (self: &var Parser) require_abi_name(message: []u8) -> !void {
-    if token_literal_is(self.current_token(), "") {
+    if self.token_literal_is(self.current_token(), "") {
         try self.error_text(message);
     }
     return;
@@ -581,8 +702,8 @@ fn (self: &var Parser) parse_link_attribute(tree: &var ast::Ast) -> !bool {
     if !try self.expect_peek(token::Kind::Ident) {
         return false;
     }
-    let is_library = token_literal_equal(self.current_token(), "link_library");
-    let is_framework = token_literal_equal(self.current_token(), "link_framework");
+    let is_library = self.token_literal_equal(self.current_token(), "link_library");
+    let is_framework = self.token_literal_equal(self.current_token(), "link_framework");
     let name = try self.retain_current_literal(tree);
     if !try self.expect_peek(token::Kind::LParen) {
         return false;
@@ -775,7 +896,7 @@ fn (self: &var Parser) parse_error_set_reference(
     }
     var name = string::new(self.allocator);
     errdefer name.deinit(self.allocator);
-    try append_token_literal(self.allocator, &var name, self.current_token());
+    try self.append_token_literal(self.allocator, &var name, self.current_token());
     while self.peek_kind() == token::Kind::DoubleColon {
         try self.next_token();
         if !try self.expect_peek(token::Kind::Ident) {
@@ -783,19 +904,17 @@ fn (self: &var Parser) parse_error_set_reference(
             return null;
         }
         try name.append_bytes(self.allocator, "::");
-        try append_token_literal(self.allocator, &var name, self.current_token());
+        try self.append_token_literal(self.allocator, &var name, self.current_token());
     }
     return try tree.add_text(move name);
 }
 
-fn token_literal_is(current: &token::Token, text: []u8) -> bool {
-    let bytes = current.literal.as_bytes();
-    return mem::equal_bytes(bytes, text);
+fn (self: &Parser) token_literal_is(current: lexer::StreamLexeme, text: []u8) -> bool {
+    return mem::equal_bytes(self.token_bytes(current), text);
 }
 
-fn append_token_literal(allocator: Allocator, name: &var string::String, current: &token::Token) -> !void {
-    let bytes = current.literal.as_bytes();
-    return name.append_bytes(allocator, bytes);
+fn (self: &Parser) append_token_literal(allocator: Allocator, name: &var string::String, current: lexer::StreamLexeme) -> !void {
+    return name.append_bytes(allocator, self.token_bytes(current));
 }
 
 fn (self: &var Parser) parse_name_list(
@@ -810,20 +929,19 @@ fn (self: &var Parser) parse_name_list(
     try self.next_token();
     while self.current_kind() != token::Kind::RBrace and
         self.current_kind() != token::Kind::Eof {
-        let handle = self.stream.get_or_panic(self.position);
-        if self.current_kind() != token::Kind::Ident {
-            try self.error_expected(label, self.tokens.at(handle));
+        let current = self.current_token();
+        if current.kind != token::Kind::Ident {
+            try self.error_expected(label, current);
             return finish_name_list(self.allocator, move names, move docs);
         }
-        let current = self.tokens.at(handle);
-        let name = try retain_literal(tree, current);
+        let name = try self.retain_literal(tree, current);
         try names.append(self.allocator, name);
-        let text = try self.comment_text(&current.doc_comments);
+        let text = try self.token_comment_text(current);
         if text.len() == 0 {
             text.deinit(self.allocator);
         } else {
             let retained = try tree.add_text(move text);
-            let key = current.literal.as_bytes();
+            let key = self.token_bytes(current);
             try docs.insert(allocator, key, retained);
         }
         if !try self.consume_list_delimiter(label) {
@@ -944,7 +1062,7 @@ fn (self: &var Parser) parse_union_variant(
         try self.error_expected("union variant", self.current_token());
         return null;
     }
-    let name = try retain_literal(tree, self.current_token());
+    let name = try self.retain_literal(tree, self.current_token());
     let first = token_span_at(self);
     if self.peek_kind() != token::Kind::LParen {
         return ast::UnionVariant {
@@ -1069,7 +1187,7 @@ fn (self: &var Parser) parse_struct_field(tree: &var ast::Ast) -> !?ast::Field {
         try self.error_expected("field name", self.current_token());
         return null;
     }
-    let name_handle = self.stream.get_or_panic(self.position);
+    let name_token = self.current_token();
     let first = token_span_at(self);
     if !try self.expect_peek(token::Kind::Colon) {
         return null;
@@ -1087,7 +1205,7 @@ fn (self: &var Parser) parse_struct_field(tree: &var ast::Ast) -> !?ast::Field {
     }
     let parsed = try self.parse_type_name(tree);
     if parsed |type_name| {
-        let name = try retain_literal(tree, self.tokens.at(name_handle));
+        let name = try self.retain_literal(tree, name_token);
         return ast::Field {
             name: name,
             doc: doc,
@@ -1287,7 +1405,7 @@ fn (self: &var Parser) parse_params(
             try self.error_token("expected parameter name, got ", self.current_token());
             return move params;
         }
-        let name_handle = self.stream.get_or_panic(self.position);
+        let name_token = self.current_token();
         let first = token_span_at(self);
         if !try self.expect_peek(token::Kind::Colon) {
             return move params;
@@ -1305,7 +1423,7 @@ fn (self: &var Parser) parse_params(
         }
         let parsed = try self.parse_type_name(tree);
         if parsed |type_name| {
-            let name = try retain_literal(tree, self.tokens.at(name_handle));
+            let name = try self.retain_literal(tree, name_token);
             try params.append(self.allocator, ast::Param {
                 name: name,
                 type_name: type_name,
@@ -1383,26 +1501,26 @@ fn (self: &var Parser) parse_impl_decl(
     if !try self.expect_peek(token::Kind::Ident) {
         return try tree.add_recovered_declaration(token_span_at(self));
     }
-    let contract_handle = self.stream.get_or_panic(self.position);
+    let contract_token = self.current_token();
     if self.peek_kind() != token::Kind::For {
-        try self.error_impl_missing_for(self.tokens.at(contract_handle));
+        try self.error_impl_missing_for(contract_token);
         return try tree.add_recovered_declaration(token_span_at(self));
     }
     try self.next_token();
     if !try self.expect_peek(token::Kind::Ident) {
         return try tree.add_recovered_declaration(token_span_at(self));
     }
-    let type_handle = self.stream.get_or_panic(self.position);
+    let type_token = self.current_token();
     if self.peek_kind() == token::Kind::LBrace {
         try self.error_impl_body(
-            self.tokens.at(contract_handle),
-            self.tokens.at(type_handle)
+            contract_token,
+            type_token
         );
         return try tree.add_recovered_declaration(token_span_at(self));
     }
     let _ = try self.expect_statement_terminator("impl declaration");
-    let contract_name = try retain_literal(tree, self.tokens.at(contract_handle));
-    let type_name = try retain_literal(tree, self.tokens.at(type_handle));
+    let contract_name = try self.retain_literal(tree, contract_token);
+    let type_name = try self.retain_literal(tree, type_token);
     return try tree.add_declaration(ast::DeclarationNode::Impl(ast::ImplDecl {
         contract_name: contract_name,
         type_name: type_name
@@ -2126,11 +2244,11 @@ fn (self: &var Parser) parse_optional_branch_label(
     return self.retain_current_literal(tree);
 }
 
-fn retain_literal(tree: &var ast::Ast, current: &token::Token) -> !ast::Text {
-    let bytes = current.literal.as_bytes();
+fn (self: &Parser) retain_literal(tree: &var ast::Ast, current: lexer::StreamLexeme) -> !ast::Text {
+    let bytes = self.token_bytes(current);
     var retained = try tree.add_text_from_bytes(bytes);
     if tree.locate_names and (current.kind == token::Kind::Ident or current.kind == token::Kind::String) {
-        retained.location = try tree.add_span(token_span(current));
+        retained.location = try tree.add_span(self.token_span(current));
     }
     return retained;
 }
@@ -2389,7 +2507,7 @@ fn (self: &var Parser) parse_builtin_expr(
         return try tree.add_recovered_expression(start);
     }
     try self.next_token();
-    if !token_literal_equal(self.current_token(), "embed_file") {
+    if !self.token_literal_equal(self.current_token(), "embed_file") {
         try self.error_literal("parse error: unknown builtin @", self.current_token());
         return try tree.add_recovered_expression(start);
     }
@@ -2433,7 +2551,7 @@ fn (self: &Parser) retain_literal_expression(
 fn (self: &var Parser) parse_c_string_literal_expression(
     tree: &var ast::Ast
 ) -> !ast::Expression {
-    if token_literal_has_line_break(self.current_token()) {
+    if self.token_literal_has_line_break(self.current_token()) {
         try self.error_text("a C string literal ends on the line it starts on");
         let empty = try tree.add_empty_text();
         return try tree.add_expression(ast::ExpressionNode::CString(
@@ -2446,8 +2564,8 @@ fn (self: &var Parser) parse_c_string_literal_expression(
     ));
 }
 
-fn token_literal_has_line_break(current: &token::Token) -> bool {
-    let bytes = current.literal.as_bytes();
+fn (self: &Parser) token_literal_has_line_break(current: lexer::StreamLexeme) -> bool {
+    let bytes = self.token_bytes(current);
     var index = 0;
     while index < mem::len(bytes) {
         if bytes[index] == cast<u8>(10) {
@@ -2504,39 +2622,27 @@ fn (self: &Parser) current_float_in_range() -> !bool {
 }
 
 fn (self: &Parser) current_float_spelling() -> !string::String {
-    return clean_float_token(self.allocator, self.current_token());
-}
-
-fn clean_float_token(allocator: Allocator, current: &token::Token) -> !string::String {
-    let bytes = current.literal.as_bytes();
-    return typ::clean_float_literal(allocator, bytes);
+    return typ::clean_float_literal(self.allocator, self.token_bytes(self.current_token()));
 }
 
 fn (self: &var Parser) error_float_range() -> !void {
     var entry = try self.error_entry();
     errdefer entry.deinit(self.allocator);
     try entry.message.append_bytes(self.allocator, "float literal `");
-    let current = self.current_token();
-    try entry.message.append_string(self.allocator, &current.literal);
+    try entry.message.append_bytes(self.allocator, self.token_bytes(self.current_token()));
     try entry.message.append_bytes(self.allocator, "` is outside the range of f64");
     return self.record(move entry);
 }
 
 fn (self: &Parser) current_integer_value() -> ?i64 {
-    return token_integer_value(self.current_token());
-}
-
-fn token_integer_value(current: &token::Token) -> ?i64 {
-    let bytes = current.literal.as_bytes();
-    return integer_literal_value(bytes);
+    return integer_literal_value(self.token_bytes(self.current_token()));
 }
 
 fn (self: &var Parser) error_invalid_integer() -> !void {
     var entry = try self.error_entry();
     errdefer entry.deinit(self.allocator);
     try entry.message.append_bytes(self.allocator, "invalid integer literal `");
-    let current = self.current_token();
-    try entry.message.append_string(self.allocator, &current.literal);
+    try entry.message.append_bytes(self.allocator, self.token_bytes(self.current_token()));
     try entry.message.append_byte(self.allocator, cast<u8>(96));
     return self.record(move entry);
 }
@@ -2634,7 +2740,7 @@ fn (self: &var Parser) parse_marker_expression(
 ) -> !ast::Expression {
     let marker = self.current_token();
     let marker_kind = marker.kind;
-    let marker_span = token_span(marker);
+    let marker_span = self.token_span(marker);
     try self.next_token();
     if marker_kind == token::Kind::Comptime {
         let expression = try self.parse_expression(tree, lowest_precedence());
@@ -2665,45 +2771,44 @@ fn (self: &var Parser) parse_ident_prefix_expression(
     tree: &var ast::Ast
 ) -> !ast::Expression {
     let current = self.current_token();
-    let cast_name = token_literal_equal(current, "cast");
+    let cast_name = self.token_literal_equal(current, "cast");
     if cast_name and
         self.peek_kind() == token::Kind::Lt {
         return self.parse_cast_expr(tree);
     }
-    let type_name = token_literal_equal(current, "type");
+    let type_name = self.token_literal_equal(current, "type");
     if type_name and
         self.peek_kind() == token::Kind::Lt {
         return self.parse_type_expr(tree);
     }
-    let starts_upper = token_literal_starts_upper(current);
+    let starts_upper = self.token_literal_starts_upper(current);
     if self.peek_kind() == token::Kind::LBrace and
         starts_upper {
-        let owned_name = try owned_token_literal(self.allocator, current);
+        let owned_name = try self.owned_token_literal(self.allocator, current);
         errdefer owned_name.deinit(self.allocator);
         var location: ?arena::Handle<ast::Span> = null;
         if tree.locate_names {
-            location = try tree.add_span(token_span(current));
+            location = try tree.add_span(self.token_span(current));
         }
         return self.parse_struct_literal_expr(tree, move owned_name, location);
     }
     if self.peek_kind() == token::Kind::LBrace and
-        token_literal_is_vector(current) {
+        self.token_literal_is_vector(current) {
         return self.parse_vector_literal_expr(tree);
     }
-    let name = try retain_literal(tree, current);
+    let name = try self.retain_literal(tree, current);
     return try tree.add_expression(ast::ExpressionNode::Ident(ast::IdentExpr {
         name: name,
-        span: token_span(current)
+        span: self.token_span(current)
     }));
 }
 
-fn token_literal_is_vector(current: &token::Token) -> bool {
-    let bytes = current.literal.as_bytes();
-    return typ::is_vector(bytes);
+fn (self: &Parser) token_literal_is_vector(current: lexer::StreamLexeme) -> bool {
+    return typ::is_vector(self.token_bytes(current));
 }
 
-fn token_literal_starts_upper(current: &token::Token) -> bool {
-    let bytes = current.literal.as_bytes();
+fn (self: &Parser) token_literal_starts_upper(current: lexer::StreamLexeme) -> bool {
+    let bytes = self.token_bytes(current);
     return mem::len(bytes) > 0 and
         bytes[0] >= cast<u8>(65) and bytes[0] <= cast<u8>(90);
 }
@@ -2799,8 +2904,8 @@ fn (self: &var Parser) parse_binary_expr(
     left: ast::Expression
 ) -> !ast::Expression {
     let current = self.current_token();
-    let operator = try retain_literal(tree, current);
-    let operator_span = token_span(current);
+    let operator = try self.retain_literal(tree, current);
+    let operator_span = self.token_span(current);
     let binding_power = self.current_precedence();
     try self.next_token();
     let right = try self.parse_expression(tree, binding_power);
@@ -2820,7 +2925,7 @@ fn (self: &var Parser) parse_shift_expr(
 ) -> !ast::Expression {
     try self.next_token();
     let first = self.current_token();
-    var operator_span = token_span(first);
+    var operator_span = self.token_span(first);
     operator_span.end.column = operator_span.end.column + 1;
     var spelling = "<<";
     if first.kind == token::Kind::Gt {
@@ -2872,8 +2977,8 @@ fn (self: &var Parser) parse_vector_literal_expr(
     tree: &var ast::Ast
 ) -> !ast::Expression {
     let current = self.current_token();
-    let type_name = try retain_literal(tree, current);
-    let span = token_span(current);
+    let type_name = try self.retain_literal(tree, current);
+    let span = self.token_span(current);
     var lanes = array::new<ast::Expression>(self.allocator);
     errdefer lanes.deinit(self.allocator);
     try self.next_token();
@@ -3002,7 +3107,7 @@ fn (self: &var Parser) parse_field_expr(
         }
         return try tree.add_recovered_expression(operator);
     }
-    let name = try retain_literal(tree, self.current_token());
+    let name = try self.retain_literal(tree, self.current_token());
     let span = join_spans(expression_span(tree, receiver), token_span_at(self));
     return try tree.add_expression(ast::ExpressionNode::Field(ast::FieldExpr {
         receiver: receiver,
@@ -3139,7 +3244,7 @@ fn span_through(first: ast::Span, last: ast::Span) -> ast::Span {
 }
 
 fn token_span_at(parser: &Parser) -> ast::Span {
-    return token_span(parser.current_token());
+    return parser.token_span(parser.current_token());
 }
 
 fn (self: &var Parser) parse_payload_capture(
@@ -3156,8 +3261,7 @@ fn (self: &var Parser) parse_payload_capture(
     if !try self.expect_peek(token::Kind::Pipe) {
         return null;
     }
-    let handle = self.stream.get_or_panic(self.position - 1);
-    let capture = try retain_literal(tree, self.tokens.at(handle));
+    let capture = try self.retain_literal(tree, self.tokens.get_or_panic(self.position - 1));
     return capture;
 }
 
@@ -3171,21 +3275,21 @@ fn (self: &var Parser) parse_variant_capture(
         !try self.expect_peek(token::Kind::Ident) {
         return null;
     }
-    let first_handle = self.stream.get_or_panic(self.position);
+    let first_token = self.current_token();
     if self.peek_kind() == token::Kind::Comma {
         try self.next_token();
         if !try self.expect_peek(token::Kind::Ident) {
             return null;
         }
-        let second_handle = self.stream.get_or_panic(self.position);
+        let second_token = self.current_token();
         if !try self.expect_peek(token::Kind::Pipe) {
             return null;
         }
         var captures = array::new<ast::Text>(self.allocator);
         errdefer captures.deinit(self.allocator);
-        let first = try retain_literal(tree, self.tokens.at(first_handle));
+        let first = try self.retain_literal(tree, first_token);
         try captures.append(self.allocator, first);
-        let second = try retain_literal(tree, self.tokens.at(second_handle));
+        let second = try self.retain_literal(tree, second_token);
         try captures.append(self.allocator, second);
         return move captures;
     }
@@ -3194,7 +3298,7 @@ fn (self: &var Parser) parse_variant_capture(
     }
     var captures = array::new<ast::Text>(self.allocator);
     errdefer captures.deinit(self.allocator);
-    let first = try retain_literal(tree, self.tokens.at(first_handle));
+    let first = try self.retain_literal(tree, first_token);
     try captures.append(self.allocator, first);
     return move captures;
 }
@@ -3247,7 +3351,7 @@ fn (self: &var Parser) parse_extern_func_type(
     if !try self.expect_peek(token::Kind::String) {
         return null;
     }
-    if !token_literal_is(self.current_token(), "c") {
+    if !self.token_literal_is(self.current_token(), "c") {
         try self.error_text("a function type names only the `c` ABI");
         return null;
     }
@@ -3426,7 +3530,7 @@ fn (self: &var Parser) parse_named_type(
 fn (self: &var Parser) parse_type_path() -> !array::Array<string::String> {
     var path = array::new<string::String>(self.allocator);
     errdefer path.deinit(self.allocator);
-    try path.append(self.allocator, try owned_token_literal(self.allocator,
+    try path.append(self.allocator, try self.owned_token_literal(self.allocator,
         self.current_token()
     ));
     while self.peek_kind() == token::Kind::DoubleColon {
@@ -3434,7 +3538,7 @@ fn (self: &var Parser) parse_type_path() -> !array::Array<string::String> {
         if !try self.expect_peek(token::Kind::Ident) {
             return move path;
         }
-        try path.append(self.allocator, try owned_token_literal(self.allocator,
+        try path.append(self.allocator, try self.owned_token_literal(self.allocator,
             self.current_token()
         ));
     }
@@ -3534,13 +3638,13 @@ fn (self: &var Parser) parse_static_param_list(
             params.deinit(self.allocator);
             return null;
         }
-        if static_param_seen(&seen, current) {
+        if self.static_param_seen(&seen, current) {
             try self.error_literal("duplicate static parameter ", current);
             params.deinit(self.allocator);
             return null;
         }
-        try retain_static_param_name(self.allocator, &var seen, current);
-        let name = try retain_literal(tree, current);
+        try self.retain_static_param_name(self.allocator, &var seen, current);
+        let name = try self.retain_literal(tree, current);
         if self.peek_kind() == token::Kind::Colon {
             try self.next_token();
             try self.next_token();
@@ -3567,21 +3671,19 @@ fn (self: &var Parser) parse_static_param_list(
     return move params;
 }
 
-fn static_param_seen(
+fn (self: &Parser) static_param_seen(
     seen: &map::Map<[]u8, bool>,
-    current: &token::Token
+    current: lexer::StreamLexeme
 ) -> bool {
-    let key = current.literal.as_bytes();
-    return seen.contains(key);
+    return seen.contains(self.token_bytes(current));
 }
 
-fn retain_static_param_name(
+fn (self: &Parser) retain_static_param_name(
     allocator: Allocator,
     seen: &var map::Map<[]u8, bool>,
-    current: &token::Token
+    current: lexer::StreamLexeme
 ) -> !void {
-    let key = current.literal.as_bytes();
-    return seen.insert(allocator, key, true);
+    return seen.insert(allocator, self.token_bytes(current), true);
 }
 
 fn append_retained_text(
@@ -3629,7 +3731,7 @@ fn (self: &var Parser) parse_static_type_arg(
     if kind == token::Kind::Int or
         kind == token::Kind::True or
         kind == token::Kind::False {
-        return try owned_token_literal(self.allocator, self.current_token());
+        return try self.owned_token_literal(self.allocator, self.current_token());
     }
     if kind == token::Kind::LParen {
         return self.parse_static_expr_arg(tree);
@@ -3670,7 +3772,7 @@ fn (self: &var Parser) parse_type_argument(
     allow_const: bool
 ) -> !?arena::Handle<typ::Node> {
     let is_const = self.current_kind() == token::Kind::Ident and
-        token_literal_equal(self.current_token(), "const");
+        self.token_literal_equal(self.current_token(), "const");
     if !is_const {
         return self.parse_type_node(builder);
     }
@@ -3713,12 +3815,12 @@ fn (self: &var Parser) parse_buffer_type(
     var size = 0;
     let kind = self.current_kind();
     if kind == token::Kind::Ident {
-        try append_token_literal(self.allocator, &var len, self.current_token());
+        try self.append_token_literal(self.allocator, &var len, self.current_token());
     } else if kind == token::Kind::LParen {
         size = try self.parse_length_expr(&var len);
     } else {
         let current = self.current_token();
-        if positive_decimal(current) |parsed| {
+        if self.positive_decimal(current) |parsed| {
             size = parsed;
         } else {
             len.deinit(self.allocator);
@@ -3768,17 +3870,15 @@ fn (self: &var Parser) parse_length_expr(len: &var string::String) -> !i64 {
     return 0;
 }
 
-fn owned_token_literal(
+fn (self: &Parser) owned_token_literal(
     allocator: Allocator,
-    current: &token::Token
+    current: lexer::StreamLexeme
 ) -> !string::String {
-    let bytes = current.literal.as_bytes();
-    return string::from_bytes(allocator, bytes);
+    return string::from_bytes(allocator, self.token_bytes(current));
 }
 
-fn token_literal_equal(current: &token::Token, expected: []u8) -> bool {
-    let bytes = current.literal.as_bytes();
-    return mem::equal_bytes(bytes, expected);
+fn (self: &Parser) token_literal_equal(current: lexer::StreamLexeme, expected: []u8) -> bool {
+    return mem::equal_bytes(self.token_bytes(current), expected);
 }
 
 fn type_path_is_ptr(path: &array::Array<string::String>) -> bool {
@@ -3792,8 +3892,8 @@ fn type_path_is_ptr(path: &array::Array<string::String>) -> bool {
     return false;
 }
 
-fn positive_decimal(current: &token::Token) -> ?i64 {
-    let bytes = current.literal.as_bytes();
+fn (self: &Parser) positive_decimal(current: lexer::StreamLexeme) -> ?i64 {
+    let bytes = self.token_bytes(current);
     var value = 0;
     var index = 0;
     while index < mem::len(bytes) {
@@ -3816,7 +3916,7 @@ fn (self: &var Parser) error_expected_declaration() -> !void {
 }
 
 fn (self: &Parser) error_entry() -> !diagnostic::Diagnostic {
-    return diagnostic_at_token(self.allocator, self.current_token(), "");
+    return self.diagnostic_at_token(self.allocator, self.current_token(), "");
 }
 
 fn (self: &var Parser) record(entry: diagnostic::Diagnostic) -> !void {
@@ -3838,44 +3938,43 @@ fn (self: &var Parser) error_context(prefix: []u8, context: []u8) -> !void {
     return self.record(move entry);
 }
 
-fn (self: &var Parser) error_token(prefix: []u8, actual: &token::Token) -> !void {
+fn (self: &var Parser) error_token(prefix: []u8, actual: lexer::StreamLexeme) -> !void {
     var entry = try self.error_entry();
     errdefer entry.deinit(self.allocator);
     try entry.message.append_bytes(self.allocator, prefix);
-    try append_token_description(self.allocator, &var entry.message, actual);
+    try self.append_token_description(self.allocator, &var entry.message, actual);
     return self.record(move entry);
 }
 
-fn (self: &var Parser) error_expected(label: []u8, actual: &token::Token) -> !void {
+fn (self: &var Parser) error_expected(label: []u8, actual: lexer::StreamLexeme) -> !void {
     var entry = try self.error_entry();
     errdefer entry.deinit(self.allocator);
     try entry.message.append_bytes(self.allocator, "expected ");
     try entry.message.append_bytes(self.allocator, label);
     try entry.message.append_bytes(self.allocator, ", got ");
-    try append_token_description(self.allocator, &var entry.message, actual);
+    try self.append_token_description(self.allocator, &var entry.message, actual);
     return self.record(move entry);
 }
 
 fn (self: &var Parser) error_expected_kind(
     prefix: []u8,
     expected: token::Kind,
-    actual: &token::Token
+    actual: lexer::StreamLexeme
 ) -> !void {
     var entry = try self.error_entry();
     errdefer entry.deinit(self.allocator);
     try entry.message.append_bytes(self.allocator, prefix);
     try append_token_type_description(self.allocator, &var entry.message, expected);
     try entry.message.append_bytes(self.allocator, ", got ");
-    try append_token_description(self.allocator, &var entry.message, actual);
+    try self.append_token_description(self.allocator, &var entry.message, actual);
     return self.record(move entry);
 }
 
-fn (self: &var Parser) error_literal(prefix: []u8, actual: &token::Token) -> !void {
+fn (self: &var Parser) error_literal(prefix: []u8, actual: lexer::StreamLexeme) -> !void {
     var entry = try self.error_entry();
     errdefer entry.deinit(self.allocator);
     try entry.message.append_bytes(self.allocator, prefix);
-    let bytes = actual.literal.as_bytes();
-    try entry.message.append_bytes(self.allocator, bytes);
+    try entry.message.append_bytes(self.allocator, self.token_bytes(actual));
     return self.record(move entry);
 }
 
@@ -3893,11 +3992,11 @@ fn (self: &var Parser) error_value(
     return self.record(move entry);
 }
 
-fn (self: &var Parser) error_impl_missing_for(contract_token: &token::Token) -> !void {
+fn (self: &var Parser) error_impl_missing_for(contract_token: lexer::StreamLexeme) -> !void {
     var entry = try self.error_entry();
     errdefer entry.deinit(self.allocator);
     try entry.message.append_bytes(self.allocator, "expected `impl <contract> for ");
-    let name = contract_token.literal.as_bytes();
+    let name = self.token_bytes(contract_token);
     try entry.message.append_bytes(self.allocator, name);
     try entry.message.append_bytes(self.allocator, ";`; a method on a type is `fn (self: ");
     try entry.message.append_bytes(self.allocator, name);
@@ -3906,13 +4005,13 @@ fn (self: &var Parser) error_impl_missing_for(contract_token: &token::Token) -> 
 }
 
 fn (self: &var Parser) error_impl_body(
-    contract_token: &token::Token,
-    type_token: &token::Token
+    contract_token: lexer::StreamLexeme,
+    type_token: lexer::StreamLexeme
 ) -> !void {
     var entry = try self.error_entry();
     errdefer entry.deinit(self.allocator);
-    let contract_name = contract_token.literal.as_bytes();
-    let type_name = type_token.literal.as_bytes();
+    let contract_name = self.token_bytes(contract_token);
+    let type_name = self.token_bytes(type_token);
     try entry.message.append_bytes(self.allocator, "`impl ");
     try entry.message.append_bytes(self.allocator, contract_name);
     try entry.message.append_bytes(self.allocator, " for ");
@@ -3934,12 +4033,12 @@ fn (self: &var Parser) error_expected_type_param(
     return self.record(move entry);
 }
 
-fn append_token_description(
+fn (self: &Parser) append_token_description(
     allocator: Allocator,
     out: &var string::String,
-    actual: &token::Token
+    actual: lexer::StreamLexeme
 ) -> !void {
-    let literal = actual.literal.as_bytes();
+    let literal = self.token_bytes(actual);
     let class = token_class_description(actual.kind);
     if mem::len(class) > 0 {
         try out.append_bytes(allocator, class);
@@ -4041,19 +4140,19 @@ fn (self: &var Parser) peek_precedence() -> !i64 {
 
 fn (self: &var Parser) ensure_lookahead(offset: i64) -> !void {
     let allocator = self.allocator;
-    while self.position + offset >= self.stream.len() {
+    while self.position + offset >= self.tokens.len() {
         try append_next_token(allocator,
             &var self.scanner,
             &var self.tokens,
-            &var self.stream
+            &var self.owned_literals,
+            &var self.doc_spans
         );
     }
     return;
 }
 
-fn (self: &Parser) token_at(offset: i64) -> &token::Token {
-    let handle = self.stream.get_or_panic(self.position + offset);
-    return self.tokens.at(handle);
+fn (self: &Parser) token_at(offset: i64) -> lexer::StreamLexeme {
+    return self.tokens.get_or_panic(self.position + offset);
 }
 
 fn (self: &var Parser) kind_at(offset: i64) -> !token::Kind {
@@ -4187,24 +4286,24 @@ fn retained_string_has_bytes(value: &string::String) -> bool {
     return value.len() > 0;
 }
 
-fn diagnostic_at_token(
+fn (self: &Parser) diagnostic_at_token(
     allocator: Allocator,
-    current: &token::Token,
+    current: lexer::StreamLexeme,
     message: []u8
 ) -> !diagnostic::Diagnostic {
     return diagnostic::new(
         allocator,
         diagnostic::Severity::Error,
         "",
-        token_span(current),
+        self.token_span(current),
         message
     );
 }
 
-fn token_span(current: &token::Token) -> ast::Span {
-    let width = token_width(current);
+fn (self: &Parser) token_span(current: lexer::StreamLexeme) -> ast::Span {
+    let width = self.token_width(current);
     return ast::Span {
-        source: current.source,
+        source: self.scanner.source_id(),
         start: ast::Position {
             line: current.line,
             column: current.column
@@ -4216,8 +4315,18 @@ fn token_span(current: &token::Token) -> ast::Span {
     };
 }
 
-fn token_width(current: &token::Token) -> i64 {
-    let bytes = current.literal.as_bytes();
+fn (self: &Parser) token_width(current: lexer::StreamLexeme) -> i64 {
+    if current.owned_literal < 0 and
+        current.kind != token::Kind::String and
+        current.kind != token::Kind::CString and
+        current.kind != token::Kind::Illegal {
+        let width = current.end - current.start;
+        if width < 1 {
+            return 1;
+        }
+        return width;
+    }
+    let bytes = self.token_bytes(current);
     var width = 0;
     var index = 0;
     while index < mem::len(bytes) {
@@ -4263,11 +4372,12 @@ fn join_spans(first: ast::Span, last: ast::Span) -> ast::Span {
 fn (self: &var Parser) next_token() -> !void {
     let allocator = self.allocator;
     let next_position = self.position + 1;
-    if next_position + 1 >= self.stream.len() {
+    if next_position + 1 >= self.tokens.len() {
         try append_next_token(allocator,
             &var self.scanner,
             &var self.tokens,
-            &var self.stream
+            &var self.owned_literals,
+            &var self.doc_spans
         );
     }
     self.position = next_position;
@@ -4277,13 +4387,12 @@ fn (self: &var Parser) next_token() -> !void {
 fn append_next_token(
     allocator: Allocator,
     scanner: &var lexer::Lexer,
-    tokens: &var arena::Arena<token::Token>,
-    stream: &var array::Array<arena::Handle<token::Token>>
+    tokens: &var array::Array<lexer::StreamLexeme>,
+    owned_literals: &var array::Array<string::String>,
+    doc_spans: &var array::Array<lexer::Span>
 ) -> !void {
-    try stream.reserve(allocator, 1);
-    let next = try scanner.next_token();
-    let handle = try tokens.add(allocator, move next);
-    return stream.append(allocator, handle);
+    let next = try scanner.next_stream_lexeme(allocator, owned_literals, doc_spans);
+    return tokens.append(allocator, next);
 }
 
 fn text_equal(tree: &ast::Ast, value: ast::Text, expected: []u8) -> bool {

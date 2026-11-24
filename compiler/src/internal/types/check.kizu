@@ -2,12 +2,72 @@ import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::stdtarget;
 import std::array;
+import std::map;
+import std::mem;
 
 union BodyCheckTarget {
     None,
     Missing,
     Function(FunctionHandle),
     Test(ast::TestDecl),
+}
+
+fn is_std_module_name(name: []u8) -> bool {
+    return mem::equal_bytes(name, "std") or mem::starts_with(name, "std::");
+}
+
+fn program_has_non_std_decl(tree: &ast::Ast, program: &ast::Program) -> bool {
+    var index = 0;
+    while program.declarations.get(index) |declaration| {
+        index = index + 1;
+        match tree.declarations.at(declaration.node) {
+            Function(function) => {
+                if !function.signature.std {
+                    let retained = tree.texts.at(function.signature.name.node);
+                    let name = retained.as_bytes();
+                    if !mem::starts_with(name, "std::") {
+                        return true;
+                    }
+                }
+            },
+            Test(test) => {
+                let retained = tree.texts.at(test.module.node);
+                let module_name = retained.as_bytes();
+                if !is_std_module_name(module_name) {
+                    return true;
+                }
+            },
+            _ => {},
+        }
+    }
+    return false;
+}
+
+fn (self: &Checker) is_std_function(handle: FunctionHandle) -> bool {
+    if self.metadata.functions.at(handle.index) |function| {
+        let name = function.name.as_bytes();
+        return function.signature.std or mem::starts_with(name, "std::");
+    }
+    return false;
+}
+
+fn (self: &var Checker) reach_std_function(handle: FunctionHandle) -> !void {
+    if !self.lazy_std {
+        return;
+    }
+    if self.metadata.functions.at(handle.index) |function| {
+        let name = function.name.as_bytes();
+        if (!function.signature.std and !mem::starts_with(name, "std::")) or
+            function_has_type_params(function) {
+            return;
+        }
+        if self.reached_std.contains(handle.index) {
+            return;
+        }
+        try self.reached_std.insert(self.allocator, handle.index, true);
+        try self.pending_std.append(self.allocator, handle);
+    }
+    return;
 }
 
 pub fn check(
@@ -28,15 +88,37 @@ pub fn check_for_target(
 ) -> !?diagnostic::Diagnostic {
     var checker = new_checker_for_target(allocator, target);
     defer checker.deinit(allocator);
+    checker.lazy_std = program_has_non_std_decl(tree, program);
     if try checker.check_setup(tree, program) |failed| {
         return move failed;
     }
+    var std_spans = map::new<i64, ast::Span>(allocator);
+    defer std_spans.deinit(allocator);
     var index = 0;
     while program.declarations.get(index) |declaration| {
+        index = index + 1;
+        if checker.lazy_std {
+            match checker.body_check_target(tree, declaration) {
+                Function(handle) => {
+                    if checker.is_std_function(handle) {
+                        try std_spans.insert(allocator, handle.index, tree.declaration_span(declaration));
+                        continue;
+                    }
+                },
+                _ => {},
+            }
+        }
         if try checker.check_declaration_body(tree, declaration) |failed| {
             return move failed;
         }
-        index = index + 1;
+    }
+    var pending_index = 0;
+    while checker.pending_std.get(pending_index) |handle| {
+        pending_index = pending_index + 1;
+        if try checker.check_function(tree, handle) |failed| {
+            let span = std_spans.get(handle.index) orelse ast::zero_span();
+            return diagnostic::locate(move failed, span);
+        }
     }
     return null;
 }
@@ -48,18 +130,40 @@ pub fn check_all(
 ) -> !array::Array<diagnostic::Diagnostic> {
     var checker = new_checker(allocator);
     defer checker.deinit(allocator);
+    checker.lazy_std = program_has_non_std_decl(tree, program);
     var out = array::new<diagnostic::Diagnostic>(allocator);
     errdefer out.deinit(allocator);
     if try checker.check_setup(tree, program) |failed| {
         try out.append(allocator, move failed);
         return move out;
     }
+    var std_spans = map::new<i64, ast::Span>(allocator);
+    defer std_spans.deinit(allocator);
     var index = 0;
     while program.declarations.get(index) |declaration| {
+        index = index + 1;
+        if checker.lazy_std {
+            match checker.body_check_target(tree, declaration) {
+                Function(handle) => {
+                    if checker.is_std_function(handle) {
+                        try std_spans.insert(allocator, handle.index, tree.declaration_span(declaration));
+                        continue;
+                    }
+                },
+                _ => {},
+            }
+        }
         if try checker.check_declaration_body(tree, declaration) |failed| {
             try out.append(allocator, move failed);
         }
-        index = index + 1;
+    }
+    var pending_index = 0;
+    while checker.pending_std.get(pending_index) |handle| {
+        pending_index = pending_index + 1;
+        if try checker.check_function(tree, handle) |failed| {
+            let span = std_spans.get(handle.index) orelse ast::zero_span();
+            try out.append(allocator, diagnostic::locate(move failed, span));
+        }
     }
     return move out;
 }
