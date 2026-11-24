@@ -26,17 +26,39 @@ trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/program/src/data"
 "$kizu" run scripts/difftest-gen/main.kizu -- "$seed" "$cases" "$work/program"
 
+run_backend() {
+  backend="$1"
+  mkdir -p "$work/$backend.tmp"
+  if ! TMPDIR="$work/$backend.tmp" "$kizu" build --target native --backend "$backend" -o "$work/$backend" "$work/program" \
+    >"$work/$backend.build" 2>&1; then
+    echo "1" >"$work/$backend.build_failed"
+    return 1
+  fi
+  status=0
+  TMPDIR="$work/$backend.tmp" "$work/$backend" >"$work/$backend.out" 2>"$work/$backend.err" </dev/null || status=$?
+  echo "$status" >"$work/$backend.status"
+}
+
+run_backend direct &
+direct_pid=$!
+run_backend llvm &
+llvm_pid=$!
+
+direct_ok=0
+wait "$direct_pid" || direct_ok=$?
+llvm_ok=0
+wait "$llvm_pid" || llvm_ok=$?
+
 for backend in direct llvm; do
-  "$kizu" build --target native --backend "$backend" -o "$work/$backend" "$work/program" \
-    >"$work/$backend.build" 2>&1 || {
+  if [ -f "$work/$backend.build_failed" ]; then
     echo "difftest generated: seed $seed does not build with $backend" >&2
     sed 's/^/  /' "$work/$backend.build" >&2
     exit 1
-  }
-  status=0
-  "$work/$backend" >"$work/$backend.out" 2>"$work/$backend.err" </dev/null || status=$?
-  echo "$status" >"$work/$backend.status"
+  fi
 done
+if [ "$direct_ok" -ne 0 ] || [ "$llvm_ok" -ne 0 ]; then
+  exit 1
+fi
 
 if cmp -s "$work/direct.out" "$work/llvm.out" && cmp -s "$work/direct.status" "$work/llvm.status"; then
   echo "difftest generated: seed $seed, $cases cases match"

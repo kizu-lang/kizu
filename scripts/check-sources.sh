@@ -53,29 +53,26 @@ case "$fmt_jobs" in
     ;;
 esac
 
-unformatted="$(
-  find lib/kizu/std/src examples tests/behavior/src tests/unicode/src compiler/src compiler/tests/harness/src \
-    -path examples/negative -prune -o -name '*.kizu' -print0 |
-    xargs -0 -P "$fmt_jobs" -n 32 sh -c '
-      kizu="$1"
-      shift
-      for file in "$@"; do
-        if ! "$kizu" fmt "$file" | cmp -s - "$file"; then
-          printf "%s\n" "$file"
-        fi
-      done
-    ' _ "$kizu" |
-    sort
-)"
-if [ -n "$unformatted" ]; then
-  echo "these files differ from \`kizu fmt\`; run \`kizu fmt --write\` on them:" >&2
-  echo "$unformatted" >&2
+files_tmp="$(mktemp)"
+unformatted_tmp="$(mktemp)"
+tables=""
+trap 'rm -f "$files_tmp" "$unformatted_tmp" "$tables"' EXIT
+
+find lib/kizu/std/src examples tests/behavior/src tests/unicode/src compiler/src compiler/tests/harness/src \
+  -path examples/negative -prune -o -name '*.kizu' -print | sort > "$files_tmp"
+
+fmt_status=0
+tr '\n' '\0' < "$files_tmp" | xargs -0 -P "$fmt_jobs" -n 128 "$kizu" fmt --check > "$unformatted_tmp" || fmt_status=$?
+if [ "$fmt_status" -ne 0 ]; then
+  if [ -s "$unformatted_tmp" ]; then
+    echo "these files differ from \`kizu fmt\`; run \`kizu fmt --write\` on them:" >&2
+    sort "$unformatted_tmp" >&2
+  fi
   exit 1
 fi
 echo "fmt: ok"
 
 tables="$(mktemp)"
-trap 'rm -f "$tables"' EXIT
 "$kizu" run spec/tls_machine.kizu > "$tables"
 "$kizu" run scripts/machine-lean/main.kizu -- -check spec/Tls.lean client server < "$tables"
 "$kizu" run scripts/machine-tla/main.kizu -- -check spec/tls_client.tla spec/tls_server.tla < "$tables"

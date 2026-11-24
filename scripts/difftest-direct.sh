@@ -117,13 +117,13 @@ if [ "$jobs" -gt "$total" ]; then
 fi
 
 cache_base="${KIZU_CACHE_DIR:-$work/cache}"
+mkdir -p "$cache_base"
 
 run_worker() {
   wid="$1"
   worker_work="$work/w$wid"
-  worker_cache="$cache_base/worker-$wid"
-  mkdir -p "$worker_work/direct" "$worker_work/llvm" "$worker_work/build-tmp" "$worker_cache"
-  export KIZU_CACHE_DIR="$worker_cache"
+  mkdir -p "$worker_work/direct" "$worker_work/llvm" "$worker_work/build-tmp"
+  export KIZU_CACHE_DIR="$cache_base"
   export TMPDIR="$worker_work/build-tmp"
   w_matched=0
   w_failed=0
