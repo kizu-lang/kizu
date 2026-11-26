@@ -29,6 +29,7 @@ struct LengthFact {
 struct BoundsFacts {
     less: map::Map<i64, bool>,
     less_left: map::Map<i64, bool>,
+    less_const: map::Map<i64, i64>,
     nonneg: map::Map<i64, bool>,
     length: map::Map<i64, LengthFact>,
     view_length: map::Map<i64, Value>,
@@ -40,6 +41,7 @@ fn new_bounds_facts(allocator: Allocator) -> BoundsFacts {
     return BoundsFacts {
         less: map::new<i64, bool>(allocator),
         less_left: map::new<i64, bool>(allocator),
+        less_const: map::new<i64, i64>(allocator),
         nonneg: map::new<i64, bool>(allocator),
         length: map::new<i64, LengthFact>(allocator),
         view_length: map::new<i64, Value>(allocator),
@@ -51,6 +53,7 @@ fn new_bounds_facts(allocator: Allocator) -> BoundsFacts {
 fn (self: BoundsFacts) deinit(allocator: Allocator) -> void {
     self.less.deinit(allocator);
     self.less_left.deinit(allocator);
+    self.less_const.deinit(allocator);
     self.nonneg.deinit(allocator);
     self.length.deinit(allocator);
     self.view_length.deinit(allocator);
@@ -70,6 +73,13 @@ fn (self: &BoundsFacts) copy_facts(allocator: Allocator) -> !BoundsFacts {
     while self.less_left.key_at(index) |key| {
         index = index + 1;
         try out.less_left.insert(allocator, key, true);
+    }
+    index = 0;
+    while self.less_const.key_at(index) |key| {
+        index = index + 1;
+        if self.less_const.get(key) |bound| {
+            try out.less_const.insert(allocator, key, bound);
+        }
     }
     index = 0;
     while self.nonneg.key_at(index) |key| {
@@ -112,6 +122,16 @@ fn (self: &var BoundsFacts) forget_headers() -> void {
 fn (self: &var BoundsFacts) add_less(allocator: Allocator, left: Name, right: Name) -> !void {
     try self.less.insert(allocator, pair_key(left, right), true);
     return self.less_left.insert(allocator, name_id(left), true);
+}
+
+fn (self: &var BoundsFacts) add_less_const(allocator: Allocator, left: Name, bound: i64) -> !void {
+    let key = name_id(left);
+    if self.less_const.get(key) |existing| {
+        if existing <= bound {
+            return;
+        }
+    }
+    return self.less_const.insert(allocator, key, bound);
 }
 
 fn (self: &BoundsFacts) length_of(container: Name) -> ?Value {
@@ -630,12 +650,27 @@ fn (self: &BoundsWalker) learn_condition(
         ordering = negated_ordering(ordering);
     }
     match ordering {
-        Less => return facts.add_less(allocator, left, right),
-        Greater => return facts.add_less(allocator, right, left),
+        Less => {
+            try facts.add_less(allocator, left, right);
+            if constant_value(module, right_arg, &self.defs) |bound| {
+                try facts.add_less_const(allocator, left, bound);
+            }
+        },
+        Greater => {
+            try facts.add_less(allocator, right, left);
+            if constant_value(module, left_arg, &self.defs) |bound| {
+                try facts.add_less_const(allocator, right, bound);
+            }
+        },
         GreaterEqual => {
             if constant_value(module, right_arg, &self.defs) |zero| {
                 if zero >= 0 {
                     try facts.nonneg.insert(allocator, name_id(left), true);
+                }
+            }
+            if constant_value(module, left_arg, &self.defs) |bound| {
+                if bound < 9223372036854775807 {
+                    try facts.add_less_const(allocator, right, bound + 1);
                 }
             }
         },
@@ -643,6 +678,11 @@ fn (self: &BoundsWalker) learn_condition(
             if constant_value(module, left_arg, &self.defs) |zero| {
                 if zero >= 0 {
                     try facts.nonneg.insert(allocator, name_id(right), true);
+                }
+            }
+            if constant_value(module, right_arg, &self.defs) |bound| {
+                if bound < 9223372036854775807 {
+                    try facts.add_less_const(allocator, left, bound + 1);
                 }
             }
         },
@@ -781,7 +821,7 @@ fn (self: &BoundsWalker) visit_unsigned_check(
     length: Value,
     key: i64
 ) -> !void {
-    if upper_bound(module, &self.defs, index, 0) |most| {
+    if self.upper_bound_in(module, counters, plan, facts, index, 0) |most| {
         if constant_length(module, self.function, &self.defs, length) |count| {
             if most < count {
                 return plan.drops.insert(allocator, key, true);
@@ -790,13 +830,26 @@ fn (self: &BoundsWalker) visit_unsigned_check(
     }
     let index_name = self.fact_name(plan, index.name);
     let length_name = self.fact_name(plan, length.name);
-    let pair = pair_key(index_name, length_name);
-    if self.non_negative(module, counters, plan, facts, index) and facts.less.contains(pair) {
-        return plan.drops.insert(allocator, key, true);
+    let const_count = constant_length(module, self.function, &self.defs, length);
+    if self.non_negative(module, counters, plan, facts, index) {
+        if const_count |count| {
+            if facts.less_const.get(name_id(index_name)) |bound| {
+                if bound <= count {
+                    return plan.drops.insert(allocator, key, true);
+                }
+            }
+        }
+        let pair = pair_key(index_name, length_name);
+        if facts.less.contains(pair) {
+            return plan.drops.insert(allocator, key, true);
+        }
     }
     if self.non_negative(module, counters, plan, facts, length) {
         try facts.nonneg.insert(allocator, name_id(index_name), true);
         try facts.add_less(allocator, index_name, length_name);
+        if const_count |count| {
+            try facts.add_less_const(allocator, index_name, count);
+        }
     }
     return;
 }
@@ -814,8 +867,23 @@ fn (self: &BoundsWalker) non_negative(
         return true;
     }
     let instr = self.defs.get(name_id(name)) orelse return false;
-    let op = module.instr_op(instr);
-    return op == Op::ArrayLen or op == Op::SliceLen;
+    let node = module.instrs.at(instr.node);
+    if node.op == Op::ArrayLen or node.op == Op::SliceLen or node.op == Op::GpuIndex {
+        return true;
+    }
+    if node.op == Op::Cast and node.args.len() == 1 {
+        let source = node.args.get_or_panic(0);
+        if unsigned_max(module, source.type_name) |_| {
+            return true;
+        }
+    }
+    if node.op == Op::Binary and node.args.len() == 2 and module.names.is(node.operand, "&") {
+        if non_negative_constant(module, node.args.get_or_panic(0), &self.defs) or
+            non_negative_constant(module, node.args.get_or_panic(1), &self.defs) {
+            return true;
+        }
+    }
+    return false;
 }
 
 fn visit_length(
@@ -1090,9 +1158,31 @@ fn upper_bound_depth() -> i64 {
     return 16;
 }
 
-fn upper_bound(module: &Module, defs: &map::Map<i64, Instr>, value: Value, depth: i64) -> ?i64 {
-    let limit = unsigned_max(module, value.type_name);
-    if integer_immediate(module, value, defs) |number| {
+fn (self: &BoundsWalker) upper_bound_in(
+    module: &Module,
+    counters: &LoopCounters,
+    plan: &BoundsPlan,
+    facts: &BoundsFacts,
+    value: Value,
+    depth: i64
+) -> ?i64 {
+    var limit = unsigned_max(module, value.type_name);
+    if self.non_negative(module, counters, plan, facts, value) {
+        let fact = self.fact_name(plan, value.name);
+        if facts.less_const.get(name_id(fact)) |bound| {
+            if bound > 0 {
+                let tight = bound - 1;
+                if limit |existing| {
+                    if tight < existing {
+                        limit = tight;
+                    }
+                } else {
+                    limit = tight;
+                }
+            }
+        }
+    }
+    if integer_immediate(module, value, &self.defs) |number| {
         if number >= 0 {
             return number;
         }
@@ -1101,16 +1191,19 @@ fn upper_bound(module: &Module, defs: &map::Map<i64, Instr>, value: Value, depth
     if depth >= upper_bound_depth() {
         return limit;
     }
-    let instr = defs.get(name_id(value.name)) orelse return limit;
+    let instr = self.defs.get(name_id(value.name)) orelse return limit;
     let node = module.instrs.at(instr.node);
+    if node.op == Op::GpuIndex {
+        return 4294967295;
+    }
     if node.op == Op::Id and node.args.len() == 1 {
-        if upper_bound(module, defs, node.args.get_or_panic(0), depth + 1) |most| {
+        if self.upper_bound_in(module, counters, plan, facts, node.args.get_or_panic(0), depth + 1) |most| {
             return most;
         }
         return limit;
     }
     if node.op == Op::Cast and node.args.len() == 1 {
-        let most = upper_bound(module, defs, node.args.get_or_panic(0), depth + 1) orelse return limit;
+        let most = self.upper_bound_in(module, counters, plan, facts, node.args.get_or_panic(0), depth + 1) orelse return limit;
         if integer_max(module, node.result.type_name) |widest| {
             if most <= widest {
                 return most;
@@ -1128,8 +1221,8 @@ fn upper_bound(module: &Module, defs: &map::Map<i64, Instr>, value: Value, depth
     let right = node.args.get_or_panic(1);
     let names = &module.names;
     if names.is(node.operand, "&") {
-        let left_most = upper_bound(module, defs, left, depth + 1);
-        let right_most = upper_bound(module, defs, right, depth + 1);
+        let left_most = self.upper_bound_in(module, counters, plan, facts, left, depth + 1);
+        let right_most = self.upper_bound_in(module, counters, plan, facts, right, depth + 1);
         if left_most |l| {
             if right_most |r| {
                 if l < r {
@@ -1144,9 +1237,9 @@ fn upper_bound(module: &Module, defs: &map::Map<i64, Instr>, value: Value, depth
         }
         return limit;
     }
-    let left_most = upper_bound(module, defs, left, depth + 1) orelse return limit;
+    let left_most = self.upper_bound_in(module, counters, plan, facts, left, depth + 1) orelse return limit;
     if names.is(node.operand, "|") {
-        let right_most = upper_bound(module, defs, right, depth + 1) orelse return limit;
+        let right_most = self.upper_bound_in(module, counters, plan, facts, right, depth + 1) orelse return limit;
         var larger = left_most;
         if right_most > larger {
             larger = right_most;
@@ -1158,20 +1251,20 @@ fn upper_bound(module: &Module, defs: &map::Map<i64, Instr>, value: Value, depth
         return filled;
     }
     if names.is(node.operand, "+") {
-        let right_most = upper_bound(module, defs, right, depth + 1) orelse return limit;
+        let right_most = self.upper_bound_in(module, counters, plan, facts, right, depth + 1) orelse return limit;
         if right_most <= widest - left_most {
             return left_most + right_most;
         }
         return limit;
     }
     if names.is(node.operand, "*") {
-        let right_most = upper_bound(module, defs, right, depth + 1) orelse return limit;
+        let right_most = self.upper_bound_in(module, counters, plan, facts, right, depth + 1) orelse return limit;
         if left_most == 0 or right_most <= widest / left_most {
             return left_most * right_most;
         }
         return limit;
     }
-    let amount = integer_immediate(module, right, defs) orelse return limit;
+    let amount = integer_immediate(module, right, &self.defs) orelse return limit;
     if names.is(node.operand, ">>") {
         if amount >= 0 and amount < 63 {
             return left_most >> amount;

@@ -1,0 +1,226 @@
+import std::array;
+import std::fmt;
+import std::io;
+import std::mem;
+import std::string;
+import std::testing;
+
+fn bounds_version_source() -> []u8 {
+    return
+        \\import std::mem;
+        \\import std::process;
+        \\
+        \\fn parse_arg(index: i64) -> i64 {
+        \\    let text = process::arg(index) catch return 0;
+        \\    let n = mem::len(text);
+        \\    var pos = 0;
+        \\    var neg = false;
+        \\    if n > 0 and text[0] == cast<u8>(45) {
+        \\        neg = true;
+        \\        pos = 1;
+        \\    }
+        \\    var value: i64 = 0;
+        \\    while pos < n {
+        \\        value = value * 10 + cast<i64>(text[pos] - cast<u8>(48));
+        \\        pos = pos + 1;
+        \\    }
+        \\    if neg {
+        \\        return -value;
+        \\    }
+        \\    return value;
+        \\}
+        \\
+        \\fn run_strided(buf: []i64, base: i64, start: i64, limit: i64) -> i64 {
+        \\    var total: i64 = 0;
+        \\    var i = start;
+        \\    while i < limit {
+        \\        total = total + buf[base + i];
+        \\        i = i + 4;
+        \\    }
+        \\    return total;
+        \\}
+        \\
+        \\fn run_scaled(buf: []i64, base: i64, limit: i64) -> i64 {
+        \\    var total: i64 = 0;
+        \\    for 0..limit |i| {
+        \\        total = total + buf[base + i * 5];
+        \\    }
+        \\    return total;
+        \\}
+        \\
+        \\fn run_dyn_scaled(buf: []i64, base: i64, offset: i64, stride: i64, limit: i64) -> i64 {
+        \\    var total: i64 = 0;
+        \\    for 0..limit |i| {
+        \\        total = total + buf[base + i * stride + offset];
+        \\    }
+        \\    return total;
+        \\}
+        \\
+        \\fn run_slice_range(buf: []i64, base: i64, limit: i64) -> i64 {
+        \\    var total: i64 = 0;
+        \\    for 0..limit |i| {
+        \\        let chunk = buf[base + i * 4..base + i * 4 + 4];
+        \\        total = total + chunk[0] + chunk[3];
+        \\    }
+        \\    return total;
+        \\}
+        \\
+        \\fn run_nested_add(buf: []i64, a: i64, b: i64, limit: i64) -> i64 {
+        \\    var total: i64 = 0;
+        \\    for 0..limit |i| {
+        \\        let col = b + i;
+        \\        total = total + buf[a + col];
+        \\    }
+        \\    return total;
+        \\}
+        \\
+        \\fn run_fixed(limit: i64) -> i64 {
+        \\    var storage = [8]i64{1, 2, 3, 4, 5, 6, 7, 8};
+        \\    var total: i64 = 0;
+        \\    for 0..limit |i| {
+        \\        total = total + storage[i];
+        \\    }
+        \\    let view = storage.as_slice();
+        \\    for 0..8 |k| {
+        \\        total = total + view[k];
+        \\    }
+        \\    return total;
+        \\}
+        \\
+        \\fn main() {
+        \\    var storage = [16]i64{};
+        \\    for 0..16 |i| {
+        \\        storage[i] = i + 1;
+        \\    }
+        \\    let buf = storage.as_slice();
+        \\    var at: i64 = 0;
+        \\    while at < process::arg_count() {
+        \\        let kind = parse_arg(at);
+        \\        let a = parse_arg(at + 1);
+        \\        let b = parse_arg(at + 2);
+        \\        let c = parse_arg(at + 3);
+        \\        let d = parse_arg(at + 4);
+        \\        var answer: i64 = 0;
+        \\        if kind == 1 {
+        \\            answer = run_strided(buf, a, b, c);
+        \\        } else if kind == 2 {
+        \\            answer = run_scaled(buf, a, b);
+        \\        } else if kind == 3 {
+        \\            answer = run_dyn_scaled(buf, a, b, c, d);
+        \\        } else if kind == 4 {
+        \\            answer = run_slice_range(buf, a, b);
+        \\        } else if kind == 5 {
+        \\            answer = run_nested_add(buf, a, b, c);
+        \\        } else {
+        \\            answer = run_fixed(a);
+        \\        }
+        \\        print(answer);
+        \\        print("=");
+        \\        at = at + 5;
+        \\    }
+        \\}
+    ;
+}
+
+fn push_argv(allocator: Allocator, argv: &var array::Array<array::Array<string::String>>, line: []u8) -> !void {
+    var args = array::new<string::String>(allocator);
+    errdefer args.deinit(allocator);
+    var start = 0;
+    var index = 0;
+    let length = mem::len(line);
+    while index <= length {
+        var sep = true;
+        if mem::byte_at(line, index) |byte| {
+            sep = byte == cast<u8>(32);
+        }
+        if sep {
+            if index > start {
+                let item = try string::from_bytes(allocator, line[start..index]);
+                try args.append(allocator, move item);
+            }
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    return argv.append(allocator, move args);
+}
+
+test "affine, strided, slice-range, and fixed-array bounds optimization preserves safety" {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    let node = try runtime_mbt_find_node(io, allocator);
+    defer node.deinit(allocator);
+    if node.len() == 0 {
+        try io::write_stderr_line(io, "bounds version: node is required to run the wasm32-wasi build; not run");
+        return;
+    }
+    let module_path = try runtime_mbt_module_path(allocator, "bounds_version");
+    defer module_path.deinit(allocator);
+    let module_bytes = module_path.as_bytes();
+    var problem = string::new(allocator);
+    defer problem.deinit(allocator);
+    try runtime_mbt_build(io, allocator, bounds_version_source(), module_bytes, &var problem);
+    defer runtime_mbt_remove(io, module_bytes);
+    let built = problem.as_bytes();
+    testing::expect_equal<[]u8>("", built);
+    var argv = array::new<array::Array<string::String>>(allocator);
+    defer argv.deinit(allocator);
+    try push_argv(allocator, &var argv, "1 2 1 14 0");
+    try push_argv(allocator, &var argv, "1 2 2 15 0");
+    try push_argv(allocator, &var argv, "1 -1 0 4 0");
+    try push_argv(allocator, &var argv, "1 0 0 9223372036854775807 0");
+    try push_argv(allocator, &var argv, "2 0 4 0 0");
+    try push_argv(allocator, &var argv, "2 1 4 0 0");
+    try push_argv(allocator, &var argv, "3 1 2 4 4");
+    try push_argv(allocator, &var argv, "3 2 2 4 4");
+    try push_argv(allocator, &var argv, "4 0 4 0 0");
+    try push_argv(allocator, &var argv, "4 1 4 0 0");
+    try push_argv(allocator, &var argv, "5 2 3 11 0");
+    try push_argv(allocator, &var argv, "5 2 3 12 0");
+    try push_argv(allocator, &var argv, "5 -1 2 4 0");
+    try push_argv(allocator, &var argv, "6 8 0 0 0");
+    try push_argv(allocator, &var argv, "6 9 0 0 0");
+    var results = array::new<RuntimeMbtResult>(allocator);
+    defer results.deinit(allocator);
+    let node_bytes = node.as_bytes();
+    try runtime_mbt_run_wasi(io, allocator, node_bytes, module_bytes, &argv, &var results, &var problem);
+    let ran = problem.as_bytes();
+    testing::expect_equal<[]u8>("", ran);
+    testing::expect_equal<i64>(15, results.len());
+    let expect_trap = [15]bool{
+        false, true, true, true,
+        false, true,
+        false, true,
+        false, true,
+        false, true, false,
+        false, true
+    };
+    let expected_values = [15]i64{
+        40, 0, 0, 0,
+        34, 0,
+        40, 0,
+        68, 0,
+        121, 0, 14,
+        72, 0
+    };
+    for 0..15 |case_index| {
+        if results.at(case_index) |r| {
+            let code = r.code.as_bytes();
+            if expect_trap[case_index] {
+                testing::expect(!mem::equal_bytes(code, "0"));
+            } else {
+                testing::expect_equal<[]u8>("0", code);
+                let stdout = r.stdout.as_bytes();
+                var printed = string::new(allocator);
+                defer printed.deinit(allocator);
+                try runtime_mbt_append_fields(allocator, &var printed, stdout);
+                let printed_bytes = printed.as_bytes();
+                var want = string::new(allocator);
+                defer want.deinit(allocator);
+                try fmt::append_i64(allocator, &var want, expected_values[case_index]);
+                let want_bytes = want.as_bytes();
+                testing::expect_equal<[]u8>(want_bytes, printed_bytes);
+            }
+        }
+    }
+}
