@@ -1,0 +1,137 @@
+import compiler::internal::ir;
+import std::array;
+import std::mem;
+import std::testing;
+
+fn new_flow_module(allocator: Allocator) -> !ir::Module {
+    var module = try ir::new_module(allocator);
+    errdefer module.deinit(allocator);
+    let name = try module.names.intern("kernel");
+    let void_type = try module.names.intern("void");
+    let export_abi = try module.names.intern("gpu");
+    let function = ir::Function {
+        node: try module.function_nodes.add(allocator, ir::FunctionNode {
+            name: name,
+            params: array::new<ir::Param>(allocator),
+            return_type: void_type,
+            blocks: array::new<ir::Block>(allocator),
+            export_abi: export_abi,
+            export_name: name,
+            module: ir::empty_name(),
+            instance: false
+        })
+    };
+    try module.functions.append(allocator, function);
+    return move module;
+}
+
+fn add_named_block(module: &var ir::Module, label: []u8) -> !ir::Block {
+    let function = module.functions.get_or_panic(0);
+    let name = try module.names.intern(label);
+    return module.add_block(function, name);
+}
+
+fn set_jump(module: &var ir::Module, block: ir::Block, target: []u8) -> !void {
+    let target_name = try module.names.intern(target);
+    module.set_terminator(block, ir::jump_terminator(target_name));
+    return;
+}
+
+fn set_branch(module: &var ir::Module, block: ir::Block, then_label: []u8, else_label: []u8) -> !void {
+    let cond = ir::Value {
+        name: try module.names.intern("%c"),
+        type_name: try module.names.intern("bool")
+    };
+    let then_name = try module.names.intern(then_label);
+    let else_name = try module.names.intern(else_label);
+    module.set_terminator(block, ir::branch_terminator(cond, then_name, else_name));
+    return;
+}
+
+fn set_return(module: &var ir::Module, block: ir::Block) -> !void {
+    let void_val = ir::Value {
+        name: try module.names.intern("void"),
+        type_name: try module.names.intern("void")
+    };
+    module.set_terminator(block, ir::return_terminator(void_val));
+    return;
+}
+
+test "analyze_flow structures a for loop with an early break block" {
+    let allocator = mem::page_allocator();
+    var module = try new_flow_module(allocator);
+    defer module.deinit(allocator);
+    let entry = try add_named_block(&var module, "entry");
+    let header = try add_named_block(&var module, "for.header");
+    let body = try add_named_block(&var module, "for.body");
+    let step = try add_named_block(&var module, "for.step");
+    let end = try add_named_block(&var module, "for.end");
+    let brk = try add_named_block(&var module, "if.then");
+    let cont = try add_named_block(&var module, "if.else");
+    try set_jump(&var module, entry, "for.header");
+    try set_branch(&var module, header, "for.body", "for.end");
+    try set_branch(&var module, body, "if.then", "if.else");
+    try set_jump(&var module, brk, "for.end");
+    try set_jump(&var module, cont, "for.step");
+    try set_jump(&var module, step, "for.header");
+    try set_return(&var module, end);
+    let node = module.function_nodes.at(module.functions.get_or_panic(0).node);
+    var flow = try analyze_flow(allocator, &module, node);
+    defer flow.deinit(allocator);
+    testing::expect(flow.header.get_or_panic(1));
+    testing::expect_equal<i64>(1, flow.loop_exits.get_or_panic(1));
+    testing::expect_equal<i64>(4, flow.loop_exit.get_or_panic(1));
+}
+
+test "analyze_flow structures a loop with both break and early return" {
+    let allocator = mem::page_allocator();
+    var module = try new_flow_module(allocator);
+    defer module.deinit(allocator);
+    let entry = try add_named_block(&var module, "entry");
+    let header = try add_named_block(&var module, "for.header");
+    let body = try add_named_block(&var module, "for.body");
+    let step = try add_named_block(&var module, "for.step");
+    let end = try add_named_block(&var module, "for.end");
+    let brk = try add_named_block(&var module, "if.break");
+    let check_ret = try add_named_block(&var module, "if.check_ret");
+    let ret = try add_named_block(&var module, "if.ret");
+    try set_jump(&var module, entry, "for.header");
+    try set_branch(&var module, header, "for.body", "for.end");
+    try set_branch(&var module, body, "if.break", "if.check_ret");
+    try set_jump(&var module, brk, "for.end");
+    try set_branch(&var module, check_ret, "if.ret", "for.step");
+    try set_return(&var module, ret);
+    try set_jump(&var module, step, "for.header");
+    try set_return(&var module, end);
+    let node = module.function_nodes.at(module.functions.get_or_panic(0).node);
+    var flow = try analyze_flow(allocator, &module, node);
+    defer flow.deinit(allocator);
+    testing::expect(flow.header.get_or_panic(1));
+    testing::expect_equal<i64>(1, flow.loop_exits.get_or_panic(1));
+    testing::expect_equal<i64>(4, flow.loop_exit.get_or_panic(1));
+}
+
+test "analyze_flow keeps multi-exit nested loop rejected" {
+    let allocator = mem::page_allocator();
+    var module = try new_flow_module(allocator);
+    defer module.deinit(allocator);
+    let entry = try add_named_block(&var module, "entry");
+    let outer_h = try add_named_block(&var module, "outer.h");
+    let inner_h = try add_named_block(&var module, "inner.h");
+    let inner_b = try add_named_block(&var module, "inner.b");
+    let inner_e = try add_named_block(&var module, "inner.e");
+    let outer_e = try add_named_block(&var module, "outer.e");
+    let brk_outer = try add_named_block(&var module, "brk.outer");
+    try set_jump(&var module, entry, "outer.h");
+    try set_branch(&var module, outer_h, "inner.h", "outer.e");
+    try set_branch(&var module, inner_h, "inner.b", "inner.e");
+    try set_branch(&var module, inner_b, "brk.outer", "inner.h");
+    try set_jump(&var module, brk_outer, "outer.e");
+    try set_jump(&var module, inner_e, "outer.h");
+    try set_return(&var module, outer_e);
+    let node = module.function_nodes.at(module.functions.get_or_panic(0).node);
+    var flow = try analyze_flow(allocator, &module, node);
+    defer flow.deinit(allocator);
+    testing::expect(flow.header.get_or_panic(2));
+    testing::expect(flow.loop_exits.get_or_panic(2) > 1);
+}

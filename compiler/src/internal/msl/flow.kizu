@@ -298,20 +298,179 @@ fn (self: &var Flow) find_loops(allocator: Allocator) -> !void {
         }
         var exit: i64 = -1;
         var exits = 0;
+        var seen_exit = array::new<bool>(allocator);
+        defer seen_exit.deinit(allocator);
+        for 0..self.count |_| {
+            try seen_exit.append(allocator, false);
+        }
         for 0..self.count |node| {
             if !body.get_or_panic(node) {
                 continue;
             }
             for 0..2 |which| {
                 let target = self.successor(node, which);
-                if target >= 0 and !body.get_or_panic(target) and target != exit {
+                if target >= 0 and !body.get_or_panic(target) and !seen_exit.get_or_panic(target) {
+                    try seen_exit.set(target, true);
                     exit = target;
                     exits = exits + 1;
                 }
+            }
+        }
+        if exits > 1 {
+            let chosen = try self.choose_loop_exit(allocator, header, &body);
+            if chosen >= 0 {
+                exit = chosen;
+                exits = 1;
             }
         }
         try self.loop_exit.set(header, exit);
         try self.loop_exits.set(header, exits);
     }
     return;
+}
+
+fn (self: &Flow) valid_loop_exit(
+    allocator: Allocator,
+    header: i64,
+    body: &array::Array<bool>,
+    candidate: i64
+) -> !i64 {
+    if candidate < 0 or candidate >= self.count or body.get_or_panic(candidate) {
+        return -1;
+    }
+    var region = array::new<bool>(allocator);
+    defer region.deinit(allocator);
+    var work = array::new<i64>(allocator);
+    defer work.deinit(allocator);
+    for 0..self.count |node| {
+        let inside = body.get_or_panic(node);
+        try region.append(allocator, inside);
+        if inside {
+            try work.append(allocator, node);
+        }
+    }
+    while work.pop() |node| {
+        for 0..2 |which| {
+            let target = self.successor(node, which);
+            if target < 0 or target == candidate {
+                continue;
+            }
+            if !self.dominates(header, target) {
+                return -1;
+            }
+            if !region.get_or_panic(target) {
+                try region.set(target, true);
+                try work.append(allocator, target);
+            }
+        }
+    }
+    if self.dominates(header, candidate) {
+        var seen = array::new<bool>(allocator);
+        defer seen.deinit(allocator);
+        for 0..self.count |_| {
+            try seen.append(allocator, false);
+        }
+        var check = array::new<i64>(allocator);
+        defer check.deinit(allocator);
+        try seen.set(candidate, true);
+        try check.append(allocator, candidate);
+        while check.pop() |node| {
+            for 0..2 |which| {
+                let target = self.successor(node, which);
+                if target < 0 or target == header or !self.dominates(header, target) {
+                    continue;
+                }
+                if region.get_or_panic(target) {
+                    return -1;
+                }
+                if !seen.get_or_panic(target) {
+                    try seen.set(target, true);
+                    try check.append(allocator, target);
+                }
+            }
+        }
+    }
+    var incoming = 0;
+    for 0..self.count |node| {
+        if !region.get_or_panic(node) {
+            continue;
+        }
+        for 0..2 |which| {
+            if self.successor(node, which) == candidate {
+                incoming = incoming + 1;
+            }
+        }
+    }
+    if incoming == 0 {
+        return -1;
+    }
+    return incoming;
+}
+
+fn (self: &Flow) choose_loop_exit(
+    allocator: Allocator,
+    header: i64,
+    body: &array::Array<bool>
+) -> !i64 {
+    let ipdom = self.ipdom.get_or_panic(header);
+    if ipdom >= 0 and (try self.valid_loop_exit(allocator, header, body, ipdom)) > 0 {
+        return ipdom;
+    }
+    var visited = array::new<bool>(allocator);
+    defer visited.deinit(allocator);
+    var work = array::new<i64>(allocator);
+    defer work.deinit(allocator);
+    var candidates = array::new<i64>(allocator);
+    defer candidates.deinit(allocator);
+    for 0..self.count |node| {
+        let inside = body.get_or_panic(node);
+        try visited.append(allocator, inside);
+        if inside {
+            try work.append(allocator, node);
+        }
+    }
+    while work.pop() |node| {
+        for 0..2 |which| {
+            let target = self.successor(node, which);
+            if target < 0 or visited.get_or_panic(target) {
+                continue;
+            }
+            try visited.set(target, true);
+            try candidates.append(allocator, target);
+            if self.dominates(header, target) {
+                try work.append(allocator, target);
+            }
+        }
+    }
+    var best: i64 = -1;
+    var best_direct = false;
+    var best_non_leaf = false;
+    var best_incoming: i64 = -1;
+    var index = 0;
+    while candidates.get(index) |candidate| {
+        index = index + 1;
+        let incoming = try self.valid_loop_exit(allocator, header, body, candidate);
+        if incoming <= 0 {
+            continue;
+        }
+        let direct = self.edge(header, candidate);
+        let non_leaf = !self.exits.get_or_panic(candidate);
+        var better = best < 0;
+        if !better and direct != best_direct {
+            better = direct;
+        }
+        if !better and direct == best_direct and non_leaf != best_non_leaf {
+            better = non_leaf;
+        }
+        if !better and direct == best_direct and non_leaf == best_non_leaf and incoming > best_incoming {
+            better = true;
+        }
+        if better {
+            best = candidate;
+            best_direct = direct;
+            best_non_leaf = non_leaf;
+            best_incoming = incoming;
+        }
+    }
+    return best;
 }

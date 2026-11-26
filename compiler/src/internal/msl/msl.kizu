@@ -205,6 +205,9 @@ struct Emitter {
     emitted: i64,
     spaces: map::Map<i64, Space>,
     uses: map::Map<i64, i64>,
+    def_blocks: map::Map<i64, i64>,
+    aliased_slots: map::Map<i64, bool>,
+    aliased_loads: map::Map<i64, bool>,
     wide_constants: map::Map<i64, ir::Name>,
     kernel_views: array::Array<i64>,
     role: Role,
@@ -220,6 +223,9 @@ fn (self: Emitter) deinit(allocator: Allocator) -> void {
     self.instances.deinit(allocator);
     self.spaces.deinit(allocator);
     self.uses.deinit(allocator);
+    self.def_blocks.deinit(allocator);
+    self.aliased_slots.deinit(allocator);
+    self.aliased_loads.deinit(allocator);
     self.wide_constants.deinit(allocator);
     self.kernel_views.deinit(allocator);
     return;
@@ -240,6 +246,9 @@ pub fn emit(
         emitted: 0,
         spaces: map::new<i64, Space>(allocator),
         uses: map::new<i64, i64>(allocator),
+        def_blocks: map::new<i64, i64>(allocator),
+        aliased_slots: map::new<i64, bool>(allocator),
+        aliased_loads: map::new<i64, bool>(allocator),
         wide_constants: map::new<i64, ir::Name>(allocator),
         kernel_views: array::new<i64>(allocator),
         role: Role::Kernel,
@@ -475,6 +484,7 @@ fn (self: &var Emitter) study_values(module: &ir::Module, node: &ir::FunctionNod
         round = round + 1;
         var block_index = 0;
         while node.blocks.get(block_index) |block| {
+            let current_block = block_index;
             block_index = block_index + 1;
             let block_node = module.blocks.at(block.node);
             var instr_index = 0;
@@ -482,6 +492,9 @@ fn (self: &var Emitter) study_values(module: &ir::Module, node: &ir::FunctionNod
                 instr_index = instr_index + 1;
                 let instr_node = module.instrs.at(instr.node);
                 if round == 1 {
+                    if !ir::is_empty(instr_node.result.name) {
+                        try self.def_blocks.insert(self.allocator, self.key(instr_node.result.name), current_block);
+                    }
                     var arg_index = 0;
                     while instr_node.args.get(arg_index) |arg| {
                         arg_index = arg_index + 1;
@@ -499,6 +512,151 @@ fn (self: &var Emitter) study_values(module: &ir::Module, node: &ir::FunctionNod
                 let terminator = block_node.terminator;
                 try self.count_use(terminator.value.name);
                 try self.count_use(terminator.cond.name);
+            }
+        }
+    }
+    return self.study_array_aliases(module, node);
+}
+
+fn (self: &Emitter) slot_dies_at_load(
+    module: &ir::Module,
+    node: &ir::FunctionNode,
+    load_block: i64,
+    load_index: i64,
+    slot_name: ir::Name
+) -> !bool {
+    var derived = map::new<i64, bool>(self.allocator);
+    defer derived.deinit(self.allocator);
+    try derived.insert(self.allocator, ir::name_id(slot_name), true);
+    var changed = true;
+    while changed {
+        changed = false;
+        var block_index = 0;
+        while node.blocks.get(block_index) |block| {
+            let current_block = block_index;
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                let current_instr = instr_index;
+                instr_index = instr_index + 1;
+                if current_block == load_block and current_instr == load_index {
+                    continue;
+                }
+                let instr_node = module.instrs.at(instr.node);
+                var reads_derived = false;
+                var arg_index = 0;
+                while instr_node.args.get(arg_index) |arg| {
+                    arg_index = arg_index + 1;
+                    if derived.contains(ir::name_id(arg.name)) {
+                        reads_derived = true;
+                        break;
+                    }
+                }
+                if !reads_derived {
+                    var incoming_index = 0;
+                    while instr_node.incoming.get(incoming_index) |incoming| {
+                        incoming_index = incoming_index + 1;
+                        if derived.contains(ir::name_id(incoming.value.name)) {
+                            reads_derived = true;
+                            break;
+                        }
+                    }
+                }
+                if !reads_derived {
+                    continue;
+                }
+                if current_block != load_block or current_instr > load_index {
+                    return false;
+                }
+                if ir::is_empty(instr_node.result.name) or module.names.is(instr_node.result.type_name, "void") {
+                    continue;
+                }
+                if shape_named(module, instr_node.result.type_name) |shape| {
+                    if shape.form != Form::Value {
+                        let result_id = ir::name_id(instr_node.result.name);
+                        if !derived.contains(result_id) {
+                            try derived.insert(self.allocator, result_id, true);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            let terminator = block_node.terminator;
+            if derived.contains(ir::name_id(terminator.value.name)) or
+                derived.contains(ir::name_id(terminator.cond.name)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+fn (self: &var Emitter) study_array_aliases(module: &ir::Module, node: &ir::FunctionNode) -> !void {
+    var local_slots = map::new<i64, bool>(self.allocator);
+    defer local_slots.deinit(self.allocator);
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if instr_node.op == ir::Op::LocalSlot {
+                try local_slots.insert(self.allocator, ir::name_id(instr_node.result.name), true);
+            }
+        }
+    }
+    block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        let current_block = block_index;
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            let current_instr = instr_index;
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if instr_node.op == ir::Op::RefLoad {
+                let shape = shape_named(module, instr_node.result.type_name) orelse continue;
+                if shape.form != Form::Array or instr_node.args.len() != 1 {
+                    continue;
+                }
+                let source = instr_node.args.get_or_panic(0);
+                if !local_slots.contains(ir::name_id(source.name)) {
+                    continue;
+                }
+                let space = self.space_of(source.name) orelse Space::Thread;
+                if space != Space::Thread {
+                    continue;
+                }
+                let source_block = self.def_blocks.get(self.key(source.name)) orelse -1;
+                if source_block != current_block {
+                    continue;
+                }
+                if try self.slot_dies_at_load(module, node, current_block, current_instr, source.name) {
+                    try self.aliased_loads.insert(self.allocator, self.key(instr_node.result.name), true);
+                }
+                continue;
+            }
+            if instr_node.op == ir::Op::LocalSlot {
+                let source = instr_node.args.get_or_panic(0);
+                let shape = shape_named(module, source.type_name) orelse continue;
+                if shape.form != Form::Array {
+                    continue;
+                }
+                let space = self.space_of(instr_node.result.name) orelse Space::Thread;
+                if space != Space::Thread {
+                    try self.aliased_slots.insert(self.allocator, self.key(instr_node.result.name), true);
+                    continue;
+                }
+                if self.use_count(source.name) == 1 {
+                    let source_block = self.def_blocks.get(self.key(source.name)) orelse -1;
+                    if source_block == current_block {
+                        try self.aliased_slots.insert(self.allocator, self.key(instr_node.result.name), true);
+                    }
+                }
             }
         }
     }
@@ -782,15 +940,25 @@ fn (self: &var Emitter) declare_value(module: &ir::Module, node: &ir::InstrNode)
                 return try fail(self.allocator, module, node.span, "`std::gpu::group_array` of type `", result.type_name,
                     "` is allowed only in the body of a gpu export");
             }
-            try self.text("    ");
-            try self.text(space_spelling(space));
-            try self.text(" ");
-            try self.text(element);
-            try self.text(" ");
-            try self.value(result.name);
-            try self.text("[");
-            try self.number(shape.count);
-            try self.text("];");
+            if node.op == ir::Op::RefLoad and self.aliased_loads.contains(self.key(result.name)) {
+                try self.text("    ");
+                try self.text(space_spelling(space));
+                try self.text(" ");
+                try self.text(element);
+                try self.text(" *");
+                try self.value(result.name);
+                try self.text(";");
+            } else {
+                try self.text("    ");
+                try self.text(space_spelling(space));
+                try self.text(" ");
+                try self.text(element);
+                try self.text(" ");
+                try self.value(result.name);
+                try self.text("[");
+                try self.number(shape.count);
+                try self.text("];");
+            }
         },
         ViewSlot => {},
         Pointer => {
@@ -804,7 +972,8 @@ fn (self: &var Emitter) declare_value(module: &ir::Module, node: &ir::InstrNode)
             try self.text(" *");
             try self.value(result.name);
             try self.text(";");
-            if node.op == ir::Op::LocalSlot and space == Space::Thread {
+            if node.op == ir::Op::LocalSlot and space == Space::Thread and
+                !self.aliased_slots.contains(self.key(result.name)) {
                 try self.text(" thread ");
                 try self.text(element);
                 try self.text(" ");
@@ -908,18 +1077,8 @@ fn (self: &var Emitter) emit_instr(module: &ir::Module, node: &ir::InstrNode) ->
                 try self.emit_view_copy(result, source.name);
                 return null;
             }
-            let space = self.space_of(result) orelse Space::Thread;
-            if shape.form == Form::Array and space != Space::Thread {
-                try self.text("            ");
-                try self.value(result);
-                try self.text(" = ");
-                try self.value(source.name);
-                try self.text(";");
-                try self.end_line();
-                return null;
-            }
             if shape.form == Form::Array {
-                if self.use_count(source.name) == 1 {
+                if self.aliased_slots.contains(self.key(result)) {
                     try self.text("            ");
                     try self.value(result);
                     try self.text(" = ");
@@ -959,6 +1118,15 @@ fn (self: &var Emitter) emit_instr(module: &ir::Module, node: &ir::InstrNode) ->
             let shape = shape_named(module, node.result.type_name) orelse return try unsupported(module, self.allocator, node.span,
                 "a kernel loads a value of type `", node.result.type_name);
             if shape.form == Form::Array {
+                if self.aliased_loads.contains(self.key(result)) {
+                    try self.text("            ");
+                    try self.value(result);
+                    try self.text(" = ");
+                    try self.value(node.args.get_or_panic(0).name);
+                    try self.text(";");
+                    try self.end_line();
+                    return null;
+                }
                 try self.emit_copy(result, "", node.args.get_or_panic(0).name, shape.count);
                 return null;
             }

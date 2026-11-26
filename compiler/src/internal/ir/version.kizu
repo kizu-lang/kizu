@@ -4,7 +4,7 @@ import std::map;
 import std::string;
 
 fn version_limit() -> i64 {
-    return 64;
+    return 256;
 }
 
 pub fn version_loops_for_bounds(allocator: Allocator, module: &var Module) -> !void {
@@ -61,8 +61,27 @@ fn version_loops_in(allocator: Allocator, module: &var Module, function: Functio
 
 struct BoundedCheck {
     container: Value,
-    base: Value,
+    const_len: i64,
+    has_const_len: bool,
+    bases: [4]Value,
+    base_count: i64,
+    const_scale: i64,
+    dyn_scale: Value,
+    span: i64,
     view: bool,
+}
+
+struct AffineParts {
+    bases: [4]Value,
+    base_count: i64,
+    const_scale: i64,
+    dyn_scale: Value,
+    has_counter: bool,
+}
+
+struct StepInfo {
+    from: Name,
+    stride: i64,
 }
 
 struct VersionedLoop {
@@ -77,6 +96,7 @@ struct VersionedLoop {
     counter: Name,
     start: Value,
     limit: Value,
+    step: i64,
     checks: array::Array<BoundedCheck>,
     answered: map::Map<i64, bool>,
 }
@@ -122,6 +142,7 @@ fn versionable_loop(
         counter: empty_name(),
         start: empty_value(),
         limit: empty_value(),
+        step: 1,
         checks: array::new<BoundedCheck>(allocator),
         answered: map::new<i64, bool>(allocator)
     };
@@ -142,7 +163,7 @@ fn (self: &var VersionedLoop) qualifies(
     term: Terminator
 ) -> !bool {
     let body = self.split_entries(module, blocks, preds, tree, term) orelse return false;
-    if !try self.collect_blocks(allocator, module, blocks, tree, body) or !self.leaves_only_through_header(module, blocks) or
+    if !try self.collect_blocks(allocator, module, blocks, tree, body) or !self.leaves_only_through_header(module, blocks, tree) or
         !try self.read_definitions(allocator, module, blocks) or !self.find_counter(module, blocks) {
         return false;
     }
@@ -219,7 +240,7 @@ fn (self: &VersionedLoop) defines(name: Name) -> bool {
     return self.defined.contains(name_id(name));
 }
 
-fn (self: &VersionedLoop) leaves_only_through_header(module: &Module, blocks: &BlockIndex) -> bool {
+fn (self: &VersionedLoop) leaves_only_through_header(module: &Module, blocks: &BlockIndex, tree: &DominatorTree) -> bool {
     let header = blocks.name_at(self.header);
     var position = 0;
     while position < blocks.len() {
@@ -243,6 +264,11 @@ fn (self: &VersionedLoop) leaves_only_through_header(module: &Module, blocks: &B
             }
             if !self.is_inside(target) {
                 return false;
+            }
+            if blocks.position_of(module, target) |target_pos| {
+                if tree.dominates(target_pos, at) {
+                    return false;
+                }
             }
         }
     }
@@ -289,6 +315,28 @@ fn instr_leaves_headers(module: &Module, instr: Instr) -> bool {
     return module.names.starts_with(reference.type_name, "&") and is_forward_scalar(module, stored.type_name);
 }
 
+fn step_stride(module: &Module, defs: &map::Map<i64, Instr>, value: Value) -> ?StepInfo {
+    let instr = defs.get(name_id(value.name)) orelse return null;
+    let node = module.instrs.at(instr.node);
+    if node.op != Op::Binary or !module.names.is(node.operand, "+") or node.args.len() != 2 or
+        !module.names.is(node.result.type_name, "i64") {
+        return null;
+    }
+    let left = node.args.get_or_panic(0);
+    let right = node.args.get_or_panic(1);
+    if constant_value(module, right, defs) |stride| {
+        if stride >= 1 {
+            return StepInfo { from: left.name, stride: stride };
+        }
+    }
+    if constant_value(module, left, defs) |stride| {
+        if stride >= 1 {
+            return StepInfo { from: right.name, stride: stride };
+        }
+    }
+    return null;
+}
+
 fn (self: &var VersionedLoop) find_counter(module: &Module, blocks: &BlockIndex) -> bool {
     let header_term = module.block_terminator(blocks.block_at(self.header));
     let cond = self.defs.get(name_id(header_term.cond.name)) orelse return false;
@@ -308,6 +356,7 @@ fn (self: &var VersionedLoop) find_counter(module: &Module, blocks: &BlockIndex)
     }
     let pre = blocks.name_at(self.pre);
     let latch = blocks.name_at(self.latch);
+    var stride: i64 = 1;
     var index = 0;
     while counter_node.incoming.get(index) |incoming| {
         index = index + 1;
@@ -316,16 +365,18 @@ fn (self: &var VersionedLoop) find_counter(module: &Module, blocks: &BlockIndex)
             continue;
         }
         if same_name(incoming.block, latch) {
-            let from = step_of(module, &self.defs, incoming.value) orelse return false;
-            if !same_name(from, counter_node.result.name) {
+            let info = step_stride(module, &self.defs, incoming.value) orelse return false;
+            if !same_name(info.from, counter_node.result.name) {
                 return false;
             }
+            stride = info.stride;
             continue;
         }
         return false;
     }
     self.counter = counter_node.result.name;
     self.limit = limit;
+    self.step = stride;
     return !is_empty(self.start.name) and !self.defines(self.start.name);
 }
 
@@ -338,9 +389,15 @@ fn (self: &VersionedLoop) invariant(module: &Module, value: Value) -> bool {
     var computes = false;
     match node.op {
         Const => return true,
+        GpuIndex => return true,
+        Id => {
+            computes = true;
+        },
         Binary => {
             computes = module.names.is(node.operand, "+") or module.names.is(node.operand, "-") or
-                module.names.is(node.operand, "*");
+                module.names.is(node.operand, "*") or module.names.is(node.operand, "&") or
+                module.names.is(node.operand, "|") or module.names.is(node.operand, "^") or
+                module.names.is(node.operand, "<<") or module.names.is(node.operand, ">>");
         },
         Cast => {
             computes = true;
@@ -363,34 +420,141 @@ fn (self: &VersionedLoop) invariant(module: &Module, value: Value) -> bool {
     return true;
 }
 
-fn (self: &VersionedLoop) index_base(module: &Module, index: Value) -> ?Value {
-    if same_name(index.name, self.counter) {
-        return empty_value();
+fn empty_bases() -> [4]Value {
+    let blank = empty_value();
+    return [4]Value{ blank, blank, blank, blank };
+}
+
+fn (self: &VersionedLoop) collect_affine(module: &Module, value: Value, depth: i64, out: &var AffineParts) -> bool {
+    if depth > 8 or !module.names.is(value.type_name, "i64") {
+        return false;
     }
-    let instr = self.defs.get(name_id(index.name)) orelse return null;
+    if same_name(value.name, self.counter) {
+        if out.has_counter {
+            return false;
+        }
+        out.has_counter = true;
+        out.const_scale = 1;
+        out.dyn_scale = empty_value();
+        return true;
+    }
+    if self.invariant(module, value) {
+        if constant_value(module, value, &self.defs) |zero| {
+            if zero == 0 {
+                return true;
+            }
+        }
+        if out.base_count >= 4 {
+            return false;
+        }
+        out.bases[out.base_count] = value;
+        out.base_count = out.base_count + 1;
+        return true;
+    }
+    let instr = self.defs.get(name_id(value.name)) orelse return false;
     let node = module.instrs.at(instr.node);
-    if node.op != Op::Binary or !module.names.is(node.operand, "+") or node.args.len() != 2 or
-        !module.names.is(node.result.type_name, "i64") {
-        return null;
+    if node.op == Op::Id and node.args.len() == 1 {
+        return self.collect_affine(module, node.args.get_or_panic(0), depth + 1, out);
+    }
+    if node.op != Op::Binary or node.args.len() != 2 {
+        return false;
     }
     let first = node.args.get_or_panic(0);
     let second = node.args.get_or_panic(1);
-    if same_name(first.name, self.counter) and self.invariant(module, second) {
-        return second;
+    if module.names.is(node.operand, "+") {
+        return self.collect_affine(module, first, depth + 1, out) and
+            self.collect_affine(module, second, depth + 1, out);
     }
-    if same_name(second.name, self.counter) and self.invariant(module, first) {
-        return first;
+    if module.names.is(node.operand, "*") {
+        if out.has_counter {
+            return false;
+        }
+        var factor = empty_value();
+        if same_name(first.name, self.counter) and self.invariant(module, second) {
+            factor = second;
+        } else if same_name(second.name, self.counter) and self.invariant(module, first) {
+            factor = first;
+        } else {
+            return false;
+        }
+        if constant_value(module, factor, &self.defs) |scale| {
+            if scale < 1 {
+                return false;
+            }
+            out.has_counter = true;
+            out.const_scale = scale;
+            out.dyn_scale = empty_value();
+            return true;
+        }
+        out.has_counter = true;
+        out.const_scale = 0;
+        out.dyn_scale = factor;
+        return true;
     }
-    return null;
+    return false;
+}
+
+fn (self: &VersionedLoop) parse_affine(module: &Module, index: Value) -> ?AffineParts {
+    var parts = AffineParts {
+        bases: empty_bases(),
+        base_count: 0,
+        const_scale: 0,
+        dyn_scale: empty_value(),
+        has_counter: false
+    };
+    if !self.collect_affine(module, index, 0, &var parts) or !parts.has_counter {
+        return null;
+    }
+    return parts;
+}
+
+fn check_from_affine(
+    container: Value,
+    const_len: i64,
+    has_const_len: bool,
+    affine: AffineParts,
+    span: i64,
+    view: bool
+) -> BoundedCheck {
+    return BoundedCheck {
+        container: container,
+        const_len: const_len,
+        has_const_len: has_const_len,
+        bases: affine.bases,
+        base_count: affine.base_count,
+        const_scale: affine.const_scale,
+        dyn_scale: affine.dyn_scale,
+        span: span,
+        view: view
+    };
+}
+
+fn same_check_key(left: BoundedCheck, right: BoundedCheck) -> bool {
+    if !same_value(left.container, right.container) or left.has_const_len != right.has_const_len or
+        left.const_len != right.const_len or left.base_count != right.base_count or
+        left.const_scale != right.const_scale or !same_value(left.dyn_scale, right.dyn_scale) or
+        left.view != right.view {
+        return false;
+    }
+    var index = 0;
+    while index < left.base_count {
+        if !same_value(left.bases[index], right.bases[index]) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
 }
 
 fn (self: &var VersionedLoop) add_check(allocator: Allocator, check: BoundedCheck, key: i64) -> !void {
     try self.answered.insert(allocator, key, true);
     var index = 0;
-    while self.checks.get(index) |known| {
+    while self.checks.at_mut(index) |known| {
         index = index + 1;
-        if same_value(known.container, check.container) and same_value(known.base, check.base) and
-            known.view == check.view {
+        if same_check_key(known.*, check) {
+            if check.span > known.span {
+                known.span = check.span;
+            }
             return;
         }
     }
@@ -417,8 +581,9 @@ fn (self: &var VersionedLoop) find_checks(allocator: Allocator, module: &Module,
                     continue;
                 }
                 let index = node.args.get_or_panic(1);
-                if self.index_base(module, index) |base| {
-                    try self.add_check(allocator, BoundedCheck { container: container, base: base, view: false }, key);
+                if self.parse_affine(module, index) |affine| {
+                    let check = check_from_affine(container, 0, false, affine, 1, false);
+                    try self.add_check(allocator, check, key);
                 }
                 continue;
             }
@@ -430,63 +595,120 @@ fn (self: &var VersionedLoop) find_checks(allocator: Allocator, module: &Module,
     return;
 }
 
-fn (self: &var VersionedLoop) find_unsigned_view_check(
+fn (self: &var VersionedLoop) add_length_check(
     allocator: Allocator,
     module: &Module,
-    index: Value,
+    affine: AffineParts,
     length: Value,
+    span: i64,
     key: i64
 ) -> !void {
-    let base = self.index_base(module, index) orelse return;
+    if constant_value(module, length, &self.defs) |const_len| {
+        if const_len >= 0 {
+            let check = check_from_affine(empty_value(), const_len, true, affine, span, false);
+            return self.add_check(allocator, check, key);
+        }
+        return;
+    }
     let view = self.defs.get(name_id(length.name)) orelse return;
     let view_node = module.instrs.at(view.node);
     if view_node.op != Op::SliceLen or !self.invariant(module, length) {
         return;
     }
     let viewed = view_node.args.get_or_panic(0);
-    try self.add_check(allocator, BoundedCheck { container: empty_value(), base: base, view: false }, key);
-    return self.add_check(allocator, BoundedCheck { container: viewed, base: base, view: true }, key);
+    let check = check_from_affine(viewed, 0, false, affine, span, true);
+    return self.add_check(allocator, check, key);
+}
+
+fn end_span_of(module: &Module, defs: &map::Map<i64, Instr>, start: Value, end: Value) -> ?i64 {
+    let instr = defs.get(name_id(end.name)) orelse return null;
+    let node = module.instrs.at(instr.node);
+    if node.op != Op::Binary or !module.names.is(node.operand, "+") or node.args.len() != 2 {
+        return null;
+    }
+    let left = node.args.get_or_panic(0);
+    let right = node.args.get_or_panic(1);
+    if same_name(left.name, start.name) {
+        if constant_value(module, right, defs) |span| {
+            if span >= 1 {
+                return span;
+            }
+        }
+    }
+    if same_name(right.name, start.name) {
+        if constant_value(module, left, defs) |span| {
+            if span >= 1 {
+                return span;
+            }
+        }
+    }
+    return null;
+}
+
+fn (self: &var VersionedLoop) find_range_check(
+    allocator: Allocator,
+    module: &Module,
+    node: &InstrNode,
+    cond_node: &InstrNode,
+    key: i64
+) -> !void {
+    if node.args.len() != 4 or !module.names.is(cond_node.operand, ">") {
+        return;
+    }
+    let left = unsigned_of(module, &self.defs, cond_node.args.get_or_panic(0)) orelse return;
+    let right = unsigned_of(module, &self.defs, cond_node.args.get_or_panic(1)) orelse return;
+    let start = node.args.get_or_panic(1);
+    let end = node.args.get_or_panic(2);
+    let length = node.args.get_or_panic(3);
+    let is_order = same_name(left.name, start.name) and same_name(right.name, end.name);
+    let is_limit = same_name(left.name, end.name) and same_name(right.name, length.name);
+    if !is_order and !is_limit {
+        return;
+    }
+    let span = end_span_of(module, &self.defs, start, end) orelse return;
+    let affine = self.parse_affine(module, start) orelse return;
+    return self.add_length_check(allocator, module, affine, length, span, key);
 }
 
 fn (self: &var VersionedLoop) find_view_check(allocator: Allocator, module: &Module, instr: Instr, key: i64) -> !void {
     let node = module.instrs.at(instr.node);
-    if node.args.len() == 0 or !module.names.is(node.immediate, "bounds") {
+    if node.args.len() == 0 {
         return;
     }
     let tested = node.args.get_or_panic(0);
     let cond = self.defs.get(name_id(tested.name)) orelse return;
     let cond_node = module.instrs.at(cond.node);
-    if cond_node.args.len() != 2 {
+    if cond_node.op != Op::Binary or cond_node.args.len() != 2 {
+        return;
+    }
+    if module.names.is(node.immediate, "range") {
+        return self.find_range_check(allocator, module, node, cond_node, key);
+    }
+    if !module.names.is(node.immediate, "bounds") {
         return;
     }
     let left = cond_node.args.get_or_panic(0);
     let right = cond_node.args.get_or_panic(1);
-    if cond_node.op != Op::Binary {
-        return;
-    }
     if module.names.is(cond_node.operand, ">=") {
         if unsigned_of(module, &self.defs, left) |index| {
             if unsigned_of(module, &self.defs, right) |length| {
-                return self.find_unsigned_view_check(allocator, module, index, length, key);
+                let affine = self.parse_affine(module, index) orelse return;
+                return self.add_length_check(allocator, module, affine, length, 1, key);
             }
         }
     }
-    let base = self.index_base(module, left) orelse return;
+    let affine = self.parse_affine(module, left) orelse return;
     if module.names.is(cond_node.operand, "<") {
         if constant_value(module, right, &self.defs) |zero| {
             if zero == 0 {
-                try self.add_check(allocator, BoundedCheck { container: empty_value(), base: base, view: false }, key);
+                let check = check_from_affine(empty_value(), 0, false, affine, 1, false);
+                try self.add_check(allocator, check, key);
             }
         }
         return;
     }
     if module.names.is(cond_node.operand, ">=") {
-        let length = self.defs.get(name_id(right.name)) orelse return;
-        let length_node = module.instrs.at(length.node);
-        if length_node.op == Op::SliceLen and self.invariant(module, right) {
-            let viewed = length_node.args.get_or_panic(0);
-            try self.add_check(allocator, BoundedCheck { container: viewed, base: base, view: true }, key);
-        }
+        return self.add_length_check(allocator, module, affine, right, 1, key);
     }
     return;
 }
@@ -573,6 +795,99 @@ fn (self: &VersionWriter) begin_check(allocator: Allocator, module: &var Module,
     return block;
 }
 
+fn known_non_negative(module: &Module, value: Value, defs: &map::Map<i64, Instr>) -> bool {
+    if non_negative_constant(module, value, defs) {
+        return true;
+    }
+    let instr = defs.get(name_id(value.name)) orelse return false;
+    let node = module.instrs.at(instr.node);
+    if node.op == Op::GpuIndex or node.op == Op::SliceLen or node.op == Op::ArrayLen {
+        return true;
+    }
+    if node.op == Op::Cast and node.args.len() == 1 {
+        let source = node.args.get_or_panic(0);
+        if unsigned_max(module, source.type_name) |_| {
+            return true;
+        }
+    }
+    if node.op == Op::Binary and node.args.len() == 2 {
+        if module.names.is(node.operand, "&") {
+            if non_negative_constant(module, node.args.get_or_panic(0), defs) or
+                non_negative_constant(module, node.args.get_or_panic(1), defs) {
+                return true;
+            }
+        }
+        if module.names.is(node.operand, ">>") {
+            if constant_value(module, node.args.get_or_panic(1), defs) |shift| {
+                if shift >= 0 and shift < 63 {
+                    return known_non_negative(module, node.args.get_or_panic(0), defs);
+                }
+            }
+        }
+    }
+    return false;
+}
+
+fn (self: &var VersionWriter) and_ok(
+    allocator: Allocator,
+    module: &var Module,
+    block: Block,
+    ok: &var Value,
+    cond: Value
+) -> !void {
+    if is_empty(ok.name) {
+        ok.* = cond;
+        return;
+    }
+    let combined = try self.fresh(allocator, module, "ok", "bool");
+    let both = try module.names.intern("&");
+    try add_new_instr(allocator, module, block, combined, Op::Binary, both, empty_name(), 2, ok.*, cond);
+    ok.* = combined;
+    return;
+}
+
+fn (self: &var VersionWriter) emit_const_i64(allocator: Allocator, module: &var Module, block: Block, role: []u8, value: i64) -> !Value {
+    let dest = try self.fresh(allocator, module, role, "i64");
+    let text = try module.names.intern_i64(value);
+    try add_new_instr(allocator, module, block, dest, Op::Const, empty_name(), text, 0, empty_value(), empty_value());
+    return dest;
+}
+
+fn (self: &var VersionWriter) emit_const_u64(allocator: Allocator, module: &var Module, block: Block, role: []u8, value: i64) -> !Value {
+    let dest = try self.fresh(allocator, module, role, "u64");
+    let text = try module.names.intern_i64(value);
+    try add_new_instr(allocator, module, block, dest, Op::Const, empty_name(), text, 0, empty_value(), empty_value());
+    return dest;
+}
+
+fn (self: &var VersionWriter) emit_cast_u64(allocator: Allocator, module: &var Module, block: Block, role: []u8, value: Value) -> !Value {
+    let dest = try self.fresh(allocator, module, role, "u64");
+    let u64_type = try module.names.intern("u64");
+    try add_new_instr(allocator, module, block, dest, Op::Cast, empty_name(), u64_type, 1, value, empty_value());
+    return dest;
+}
+
+fn (self: &var VersionWriter) check_non_negative_in(
+    allocator: Allocator,
+    module: &var Module,
+    loop: &VersionedLoop,
+    block: Block,
+    value: Value,
+    checked: &var map::Map<i64, bool>,
+    ok: &var Value
+) -> !void {
+    if known_non_negative(module, value, &loop.defs) or checked.contains(name_id(value.name)) {
+        return;
+    }
+    try checked.insert(allocator, name_id(value.name), true);
+    let zero = try self.emit_const_i64(allocator, module, block, "zero", 0);
+    let test = try self.fresh(allocator, module, "nonneg", "bool");
+    let hoisted = try self.hoist(allocator, module, loop, block, value);
+    let at_least = try module.names.intern(">=");
+    try add_new_instr(allocator, module, block, test, Op::Binary, at_least, empty_name(), 2, hoisted, zero);
+    return self.and_ok(allocator, module, block, ok, test);
+}
+
 fn (self: &var VersionWriter) write_checks(
     allocator: Allocator,
     module: &var Module,
@@ -581,79 +896,122 @@ fn (self: &var VersionWriter) write_checks(
     fast: Name,
     checks: &var array::Array<Block>
 ) -> !void {
-    try self.check_non_negative(allocator, module, loop, loop.start, slow, checks);
+    let current = try self.begin_check(allocator, module, checks);
+    var ok = empty_value();
+    var checked_nonneg = map::new<i64, bool>(allocator);
+    defer checked_nonneg.deinit(allocator);
+    var cached_lengths = map::new<i64, Value>(allocator);
+    defer cached_lengths.deinit(allocator);
+    try self.check_non_negative_in(allocator, module, loop, current, loop.start, &var checked_nonneg, &var ok);
+    let limit = try self.hoist(allocator, module, loop, current, loop.limit);
+    if loop.step > 1 {
+        let max_limit = try self.emit_const_i64(allocator, module, current, "smax", 9223372036854775807 - (loop.step - 1));
+        let step_ok = try self.fresh(allocator, module, "step", "bool");
+        let at_most = try module.names.intern("<=");
+        try add_new_instr(allocator, module, current, step_ok, Op::Binary, at_most, empty_name(), 2, limit, max_limit);
+        try self.and_ok(allocator, module, current, &var ok, step_ok);
+    }
+    let at_most = try module.names.intern("<=");
+    let at_least = try module.names.intern(">=");
+    let minus = try module.names.intern("-");
+    let divide = try module.names.intern("/");
+    let times = try module.names.intern("*");
+    var u_lim_m1 = empty_value();
     var index = 0;
     while loop.checks.get(index) |check| {
         index = index + 1;
-        if !is_empty(check.base.name) {
-            try self.check_non_negative(allocator, module, loop, check.base, slow, checks);
-        }
-    }
-    index = 0;
-    while loop.checks.get(index) |check| {
-        index = index + 1;
-        if is_empty(check.container.name) {
+        if !check.has_const_len and is_empty(check.container.name) {
+            var base_index = 0;
+            while base_index < check.base_count {
+                try self.check_non_negative_in(allocator, module, loop, current, check.bases[base_index], &var checked_nonneg, &var ok);
+                base_index = base_index + 1;
+            }
             continue;
         }
-        let current = try self.begin_check(allocator, module, checks);
-        let length = try self.fresh(allocator, module, "len", "i64");
-        var length_op = Op::ArrayLen;
-        if check.view {
-            length_op = Op::SliceLen;
+        var length = empty_value();
+        if check.has_const_len {
+            length = try self.emit_const_i64(allocator, module, current, "len", check.const_len);
+        } else {
+            var len_key = name_id(check.container.name) * 2;
+            if check.view {
+                len_key = len_key + 1;
+            }
+            if cached_lengths.get(len_key) |known_len| {
+                length = known_len;
+            } else {
+                length = try self.fresh(allocator, module, "len", "i64");
+                var length_op = Op::ArrayLen;
+                if check.view {
+                    length_op = Op::SliceLen;
+                }
+                let container = try self.hoist(allocator, module, loop, current, check.container);
+                try add_new_instr(allocator, module, current, length, length_op, empty_name(), empty_name(), 1, container, empty_value());
+                try cached_lengths.insert(allocator, len_key, length);
+            }
         }
-        let container = try self.hoist(allocator, module, loop, current, check.container);
-        try add_new_instr(allocator, module, current, length, length_op, empty_name(), empty_name(), 1, container, empty_value());
-        var room = length;
-        if !is_empty(check.base.name) {
-            room = try self.fresh(allocator, module, "room", "i64");
-            let base = try self.hoist(allocator, module, loop, current, check.base);
-            let minus = try module.names.intern("-");
-            try add_new_instr(allocator, module, current, room, Op::Binary, minus, empty_name(), 2, length, base);
+        if check.base_count == 0 and check.const_scale == 1 and is_empty(check.dyn_scale.name) and check.span == 1 {
+            let fits = try self.fresh(allocator, module, "fits", "bool");
+            try add_new_instr(allocator, module, current, fits, Op::Binary, at_most, empty_name(), 2, limit, length);
+            try self.and_ok(allocator, module, current, &var ok, fits);
+            continue;
         }
-        let fits = try self.fresh(allocator, module, "fits", "bool");
-        let limit = try self.hoist(allocator, module, loop, current, loop.limit);
-        let at_most = try module.names.intern("<=");
-        try add_new_instr(allocator, module, current, fits, Op::Binary, at_most, empty_name(), 2, limit, room);
-        module.set_terminator(current, branch_terminator(fits, empty_name(), slow));
+        var u_rem = try self.emit_cast_u64(allocator, module, current, "ulen", length);
+        var base_index = 0;
+        while base_index < check.base_count {
+            let hoisted_base = try self.hoist(allocator, module, loop, current, check.bases[base_index]);
+            let u_base = try self.emit_cast_u64(allocator, module, current, "ubase", hoisted_base);
+            let base_ok = try self.fresh(allocator, module, "bfit", "bool");
+            try add_new_instr(allocator, module, current, base_ok, Op::Binary, at_most, empty_name(), 2, u_base, u_rem);
+            try self.and_ok(allocator, module, current, &var ok, base_ok);
+            let next_rem = try self.fresh(allocator, module, "urem", "u64");
+            try add_new_instr(allocator, module, current, next_rem, Op::Binary, minus, empty_name(), 2, u_rem, u_base);
+            u_rem = next_rem;
+            base_index = base_index + 1;
+        }
+        let u_span = try self.emit_const_u64(allocator, module, current, "uspan", check.span);
+        let span_ok = try self.fresh(allocator, module, "sfit", "bool");
+        try add_new_instr(allocator, module, current, span_ok, Op::Binary, at_least, empty_name(), 2, u_rem, u_span);
+        try self.and_ok(allocator, module, current, &var ok, span_ok);
+        let u_avail = try self.fresh(allocator, module, "uavail", "u64");
+        try add_new_instr(allocator, module, current, u_avail, Op::Binary, minus, empty_name(), 2, u_rem, u_span);
+        if is_empty(u_lim_m1.name) {
+            let u_lim = try self.emit_cast_u64(allocator, module, current, "ulim", limit);
+            let u_one = try self.emit_const_u64(allocator, module, current, "uone", 1);
+            u_lim_m1 = try self.fresh(allocator, module, "ulimm", "u64");
+            try add_new_instr(allocator, module, current, u_lim_m1, Op::Binary, minus, empty_name(), 2, u_lim, u_one);
+        }
+        if check.const_scale >= 1 {
+            var u_bound = u_avail;
+            if check.const_scale > 1 {
+                let u_scale = try self.emit_const_u64(allocator, module, current, "uscale", check.const_scale);
+                u_bound = try self.fresh(allocator, module, "umax", "u64");
+                try add_new_instr(allocator, module, current, u_bound, Op::Binary, divide, empty_name(), 2, u_avail, u_scale);
+            }
+            let fits = try self.fresh(allocator, module, "fits", "bool");
+            try add_new_instr(allocator, module, current, fits, Op::Binary, at_most, empty_name(), 2, u_lim_m1, u_bound);
+            try self.and_ok(allocator, module, current, &var ok, fits);
+        } else {
+            let hoisted_scale = try self.hoist(allocator, module, loop, current, check.dyn_scale);
+            let u_scale = try self.emit_cast_u64(allocator, module, current, "uscale", hoisted_scale);
+            let u_cap = try self.emit_const_u64(allocator, module, current, "ucap", 2147483647);
+            let scale_ok = try self.fresh(allocator, module, "sok", "bool");
+            try add_new_instr(allocator, module, current, scale_ok, Op::Binary, at_most, empty_name(), 2, u_scale, u_cap);
+            try self.and_ok(allocator, module, current, &var ok, scale_ok);
+            let lim_ok = try self.fresh(allocator, module, "lok", "bool");
+            try add_new_instr(allocator, module, current, lim_ok, Op::Binary, at_most, empty_name(), 2, u_lim_m1, u_cap);
+            try self.and_ok(allocator, module, current, &var ok, lim_ok);
+            let u_prod = try self.fresh(allocator, module, "uprod", "u64");
+            try add_new_instr(allocator, module, current, u_prod, Op::Binary, times, empty_name(), 2, u_scale, u_lim_m1);
+            let fits = try self.fresh(allocator, module, "fits", "bool");
+            try add_new_instr(allocator, module, current, fits, Op::Binary, at_most, empty_name(), 2, u_prod, u_avail);
+            try self.and_ok(allocator, module, current, &var ok, fits);
+        }
     }
-    if checks.len() == 0 {
-        let current = try self.begin_check(allocator, module, checks);
+    if is_empty(ok.name) {
         module.set_terminator(current, jump_terminator(fast));
         return;
     }
-    index = 0;
-    while checks.get(index) |block| {
-        var term = module.block_terminator(block);
-        term.target = fast;
-        if index + 1 < checks.len() {
-            term.target = module.block_name(checks.get_or_panic(index + 1));
-        }
-        module.set_terminator(block, term);
-        index = index + 1;
-    }
-    return;
-}
-
-fn (self: &var VersionWriter) check_non_negative(
-    allocator: Allocator,
-    module: &var Module,
-    loop: &VersionedLoop,
-    value: Value,
-    slow: Name,
-    checks: &var array::Array<Block>
-) -> !void {
-    if non_negative_constant(module, value, &loop.defs) {
-        return;
-    }
-    let current = try self.begin_check(allocator, module, checks);
-    let zero = try self.fresh(allocator, module, "zero", "i64");
-    let test = try self.fresh(allocator, module, "nonneg", "bool");
-    let hoisted = try self.hoist(allocator, module, loop, current, value);
-    let zero_text = try module.names.intern("0");
-    try add_new_instr(allocator, module, current, zero, Op::Const, empty_name(), zero_text, 0, empty_value(), empty_value());
-    let at_least = try module.names.intern(">=");
-    try add_new_instr(allocator, module, current, test, Op::Binary, at_least, empty_name(), 2, hoisted, zero);
-    module.set_terminator(current, branch_terminator(test, empty_name(), slow));
+    module.set_terminator(current, branch_terminator(ok, fast, slow));
     return;
 }
 
