@@ -239,7 +239,7 @@ just wasi-smoke      # wasm の例を wasmtime で走らせる
 - [docs/language-gaps.md](docs/language-gaps.md): まだ書けなかったものと、その場で使った局所解
 - [docs/stdlib.md](docs/stdlib.md): trusted builtin の境界と、std API を足すときの規則
 - [docs/perf.md](docs/perf.md): build/cache performance policy
-- [CONTRIBUTING.md](CONTRIBUTING.md): pull request で変更できる範囲とレビューの流れ
+- [CONTRIBUTING.md](CONTRIBUTING.md): コントリビューション方針(PR・issue は保守者のみ、質問や不具合報告は [GitHub Discussions](https://github.com/kizu-lang/kizu/discussions) へ)
 - [AGENTS.md](AGENTS.md): contributor / coding agent 向けの実装ルール
 
 ## License
