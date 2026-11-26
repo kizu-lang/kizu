@@ -29,6 +29,10 @@ pub enum ArgKind {
     MutSliceI32,
     MutSliceU8,
     MutSliceI8,
+    Bool,
+    SliceU16,
+    SimdMatrix8x8F32,
+    SimdMatrix8x8F16,
 }
 
 pub fn arg_kind_spelling(kind: ArgKind) -> []u8 {
@@ -59,6 +63,10 @@ pub fn arg_kind_spelling(kind: ArgKind) -> []u8 {
         MutSliceI32 => "&var []i32",
         MutSliceU8 => "&var []u8",
         MutSliceI8 => "&var []i8",
+        Bool => "bool",
+        SliceU16 => "[]u16",
+        SimdMatrix8x8F32 => "std::gpu::SimdMatrix8x8F32",
+        SimdMatrix8x8F16 => "std::gpu::SimdMatrix8x8F16",
     };
 }
 
@@ -116,6 +124,9 @@ enum CoreArgs {
     CoroEntryI64I64,
     Io,
     AllocatorI64I64,
+    SliceU16I64I64Bool,
+    SimdMatrixF32F16F16,
+    SimdMatrixF32MutSliceF32I64I64,
 }
 
 pub struct CoreSignature {
@@ -178,6 +189,9 @@ pub fn (self: &CoreSignature) args_len() -> i64 {
         MutSliceI32I64I32x4 => 3,
         MutSliceU8I64U8x16 => 3,
         MutSliceI8I64I8x16 => 3,
+        SliceU16I64I64Bool => 4,
+        SimdMatrixF32F16F16 => 3,
+        SimdMatrixF32MutSliceF32I64I64 => 4,
     };
 }
 
@@ -364,6 +378,23 @@ pub fn (self: &CoreSignature) arg_at(index: i64) -> ?ArgKind {
         if index == 0 { return ArgKind::MutSliceI8; }
         if index == 1 { return ArgKind::I64; }
         if index == 2 { return ArgKind::I8x16; }
+        return null;
+    }
+    if self.args == CoreArgs::SliceU16I64I64Bool {
+        if index == 0 { return ArgKind::SliceU16; }
+        if index == 1 or index == 2 { return ArgKind::I64; }
+        if index == 3 { return ArgKind::Bool; }
+        return null;
+    }
+    if self.args == CoreArgs::SimdMatrixF32F16F16 {
+        if index == 0 { return ArgKind::SimdMatrix8x8F32; }
+        if index == 1 or index == 2 { return ArgKind::SimdMatrix8x8F16; }
+        return null;
+    }
+    if self.args == CoreArgs::SimdMatrixF32MutSliceF32I64I64 {
+        if index == 0 { return ArgKind::SimdMatrix8x8F32; }
+        if index == 1 { return ArgKind::MutSliceF32; }
+        if index == 2 or index == 3 { return ArgKind::I64; }
         return null;
     }
     if self.args == CoreArgs::Allocator {
@@ -757,10 +788,23 @@ pub fn simple_core_signature(name: []u8) -> ?CoreSignature {
         return signature(CoreArgs::F32I64, "f32");
     }
     if mem::equal_bytes(name, "std::internal::builtin::gpu_simd_max_f32") or
+        mem::equal_bytes(name, "std::internal::builtin::gpu_simd_sum_f32") or
         mem::equal_bytes(name, "std::internal::builtin::gpu_sqrt_f32") or
         mem::equal_bytes(name, "std::internal::builtin::gpu_exp_f32") or
         mem::equal_bytes(name, "std::internal::builtin::gpu_log_f32") {
         return signature(CoreArgs::F32, "f32");
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::gpu_simd_matrix_zero_f32") {
+        return signature(CoreArgs::NoArgs, "std::gpu::SimdMatrix8x8F32");
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::gpu_simd_matrix_load_f16") {
+        return signature(CoreArgs::SliceU16I64I64Bool, "std::gpu::SimdMatrix8x8F16");
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::gpu_simd_matrix_mma_f16") {
+        return signature(CoreArgs::SimdMatrixF32F16F16, "std::gpu::SimdMatrix8x8F32");
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::gpu_simd_matrix_store_f32") {
+        return signature(CoreArgs::SimdMatrixF32MutSliceF32I64I64, "void");
     }
     if mem::equal_bytes(name, "std::internal::builtin::io_write_stdout") {
         return signature(CoreArgs::IoBytes, "std::io::Error!void");
@@ -1184,330 +1228,345 @@ fn builtin_name(index: i64) -> ?[]u8 {
         return "std::internal::builtin::gpu_shuffle_xor_f32";
     }
     if index == 66 {
-        return "std::internal::builtin::gpu_simd_max_f32";
+        return "std::internal::builtin::gpu_simd_matrix_load_f16";
     }
     if index == 67 {
-        return "std::internal::builtin::gpu_simdgroup_index";
+        return "std::internal::builtin::gpu_simd_matrix_mma_f16";
     }
     if index == 68 {
-        return "std::internal::builtin::gpu_sqrt_f32";
+        return "std::internal::builtin::gpu_simd_matrix_store_f32";
     }
     if index == 69 {
-        return "std::internal::builtin::gpu_thread_index";
+        return "std::internal::builtin::gpu_simd_matrix_zero_f32";
     }
     if index == 70 {
-        return "std::internal::builtin::io_blocking";
+        return "std::internal::builtin::gpu_simd_max_f32";
     }
     if index == 71 {
-        return "std::internal::builtin::io_evented";
+        return "std::internal::builtin::gpu_simd_sum_f32";
     }
     if index == 72 {
-        return "std::internal::builtin::io_failing";
+        return "std::internal::builtin::gpu_simdgroup_index";
     }
     if index == 73 {
-        return "std::internal::builtin::io_loop_close";
+        return "std::internal::builtin::gpu_sqrt_f32";
     }
     if index == 74 {
-        return "std::internal::builtin::io_loop_new";
+        return "std::internal::builtin::gpu_thread_index";
     }
     if index == 75 {
-        return "std::internal::builtin::io_read_stdin_into";
+        return "std::internal::builtin::io_blocking";
     }
     if index == 76 {
-        return "std::internal::builtin::io_write_stderr";
+        return "std::internal::builtin::io_evented";
     }
     if index == 77 {
-        return "std::internal::builtin::io_write_stdout";
+        return "std::internal::builtin::io_failing";
     }
     if index == 78 {
-        return "std::internal::builtin::map";
+        return "std::internal::builtin::io_loop_close";
     }
     if index == 79 {
-        return "std::internal::builtin::map_at";
+        return "std::internal::builtin::io_loop_new";
     }
     if index == 80 {
-        return "std::internal::builtin::map_at_mut";
+        return "std::internal::builtin::io_read_stdin_into";
     }
     if index == 81 {
-        return "std::internal::builtin::map_contains";
+        return "std::internal::builtin::io_write_stderr";
     }
     if index == 82 {
-        return "std::internal::builtin::map_deinit";
+        return "std::internal::builtin::io_write_stdout";
     }
     if index == 83 {
-        return "std::internal::builtin::map_get";
+        return "std::internal::builtin::map";
     }
     if index == 84 {
-        return "std::internal::builtin::map_insert";
+        return "std::internal::builtin::map_at";
     }
     if index == 85 {
-        return "std::internal::builtin::map_key_at";
+        return "std::internal::builtin::map_at_mut";
     }
     if index == 86 {
-        return "std::internal::builtin::map_len";
+        return "std::internal::builtin::map_contains";
     }
     if index == 87 {
-        return "std::internal::builtin::map_remove";
+        return "std::internal::builtin::map_deinit";
     }
     if index == 88 {
-        return "std::internal::builtin::map_take_value_at";
+        return "std::internal::builtin::map_get";
     }
     if index == 89 {
-        return "std::internal::builtin::mem_allocator_from";
+        return "std::internal::builtin::map_insert";
     }
     if index == 90 {
-        return "std::internal::builtin::mem_compare";
+        return "std::internal::builtin::map_key_at";
     }
     if index == 91 {
-        return "std::internal::builtin::mem_fixed_buffer";
+        return "std::internal::builtin::map_len";
     }
     if index == 92 {
-        return "std::internal::builtin::mem_len";
+        return "std::internal::builtin::map_remove";
     }
     if index == 93 {
-        return "std::internal::builtin::mem_page_allocator";
+        return "std::internal::builtin::map_take_value_at";
     }
     if index == 94 {
-        return "std::internal::builtin::mem_size_of";
+        return "std::internal::builtin::mem_allocator_from";
     }
     if index == 95 {
-        return "std::internal::builtin::net_accept";
+        return "std::internal::builtin::mem_compare";
     }
     if index == 96 {
-        return "std::internal::builtin::net_child_close";
+        return "std::internal::builtin::mem_fixed_buffer";
     }
     if index == 97 {
-        return "std::internal::builtin::net_child_close_fd";
+        return "std::internal::builtin::mem_len";
     }
     if index == 98 {
-        return "std::internal::builtin::net_child_fd";
+        return "std::internal::builtin::mem_page_allocator";
     }
     if index == 99 {
-        return "std::internal::builtin::net_child_kill";
+        return "std::internal::builtin::mem_size_of";
     }
     if index == 100 {
-        return "std::internal::builtin::net_child_spawn";
+        return "std::internal::builtin::net_accept";
     }
     if index == 101 {
-        return "std::internal::builtin::net_child_wait";
+        return "std::internal::builtin::net_child_close";
     }
     if index == 102 {
-        return "std::internal::builtin::net_close";
+        return "std::internal::builtin::net_child_close_fd";
     }
     if index == 103 {
-        return "std::internal::builtin::net_connect";
+        return "std::internal::builtin::net_child_fd";
     }
     if index == 104 {
-        return "std::internal::builtin::net_listen";
+        return "std::internal::builtin::net_child_kill";
     }
     if index == 105 {
-        return "std::internal::builtin::net_local_port";
+        return "std::internal::builtin::net_child_spawn";
     }
     if index == 106 {
-        return "std::internal::builtin::net_poller_add";
+        return "std::internal::builtin::net_child_wait";
     }
     if index == 107 {
-        return "std::internal::builtin::net_poller_close";
+        return "std::internal::builtin::net_close";
     }
     if index == 108 {
-        return "std::internal::builtin::net_poller_flags";
+        return "std::internal::builtin::net_connect";
     }
     if index == 109 {
-        return "std::internal::builtin::net_poller_new";
+        return "std::internal::builtin::net_listen";
     }
     if index == 110 {
-        return "std::internal::builtin::net_poller_remove";
+        return "std::internal::builtin::net_local_port";
     }
     if index == 111 {
-        return "std::internal::builtin::net_poller_token";
+        return "std::internal::builtin::net_poller_add";
     }
     if index == 112 {
-        return "std::internal::builtin::net_poller_wait";
+        return "std::internal::builtin::net_poller_close";
     }
     if index == 113 {
-        return "std::internal::builtin::net_read";
+        return "std::internal::builtin::net_poller_flags";
     }
     if index == 114 {
-        return "std::internal::builtin::net_shutdown_write";
+        return "std::internal::builtin::net_poller_new";
     }
     if index == 115 {
-        return "std::internal::builtin::net_write_all";
+        return "std::internal::builtin::net_poller_remove";
     }
     if index == 116 {
-        return "std::internal::builtin::net_write_some";
+        return "std::internal::builtin::net_poller_token";
     }
     if index == 117 {
-        return "std::internal::builtin::panic";
+        return "std::internal::builtin::net_poller_wait";
     }
     if index == 118 {
-        return "std::internal::builtin::print_line";
+        return "std::internal::builtin::net_read";
     }
     if index == 119 {
-        return "std::internal::builtin::process_arg";
+        return "std::internal::builtin::net_shutdown_write";
     }
     if index == 120 {
-        return "std::internal::builtin::process_arg_count";
+        return "std::internal::builtin::net_write_all";
     }
     if index == 121 {
-        return "std::internal::builtin::process_env";
+        return "std::internal::builtin::net_write_some";
     }
     if index == 122 {
-        return "std::internal::builtin::process_executable_path_into";
+        return "std::internal::builtin::panic";
     }
     if index == 123 {
-        return "std::internal::builtin::process_monotonic_millis";
+        return "std::internal::builtin::print_line";
     }
     if index == 124 {
-        return "std::internal::builtin::process_spawn_output8";
+        return "std::internal::builtin::process_arg";
     }
     if index == 125 {
-        return "std::internal::builtin::process_spawn_wait8";
+        return "std::internal::builtin::process_arg_count";
     }
     if index == 126 {
-        return "std::internal::builtin::process_unix_millis";
+        return "std::internal::builtin::process_env";
     }
     if index == 127 {
-        return "std::internal::builtin::simd_f32x4_from_i32x4";
+        return "std::internal::builtin::process_executable_path_into";
     }
     if index == 128 {
-        return "std::internal::builtin::simd_fma_f32";
+        return "std::internal::builtin::process_monotonic_millis";
     }
     if index == 129 {
-        return "std::internal::builtin::simd_fma_f32x4";
+        return "std::internal::builtin::process_spawn_output8";
     }
     if index == 130 {
-        return "std::internal::builtin::simd_fma_f64x2";
+        return "std::internal::builtin::process_spawn_wait8";
     }
     if index == 131 {
-        return "std::internal::builtin::simd_i32x4_from_f32x4";
+        return "std::internal::builtin::process_unix_millis";
     }
     if index == 132 {
-        return "std::internal::builtin::simd_i8x16_from_u8x16";
+        return "std::internal::builtin::simd_f32x4_from_i32x4";
     }
     if index == 133 {
-        return "std::internal::builtin::simd_i8x16_to_f32x4_0";
+        return "std::internal::builtin::simd_fma_f32";
     }
     if index == 134 {
-        return "std::internal::builtin::simd_i8x16_to_f32x4_1";
+        return "std::internal::builtin::simd_fma_f32x4";
     }
     if index == 135 {
-        return "std::internal::builtin::simd_i8x16_to_f32x4_2";
+        return "std::internal::builtin::simd_fma_f64x2";
     }
     if index == 136 {
-        return "std::internal::builtin::simd_i8x16_to_f32x4_3";
+        return "std::internal::builtin::simd_i32x4_from_f32x4";
     }
     if index == 137 {
-        return "std::internal::builtin::simd_load_f32x4";
+        return "std::internal::builtin::simd_i8x16_from_u8x16";
     }
     if index == 138 {
-        return "std::internal::builtin::simd_load_f64x2";
+        return "std::internal::builtin::simd_i8x16_to_f32x4_0";
     }
     if index == 139 {
-        return "std::internal::builtin::simd_load_i32x4";
+        return "std::internal::builtin::simd_i8x16_to_f32x4_1";
     }
     if index == 140 {
-        return "std::internal::builtin::simd_load_i8x16";
+        return "std::internal::builtin::simd_i8x16_to_f32x4_2";
     }
     if index == 141 {
-        return "std::internal::builtin::simd_load_i8x16_u8";
+        return "std::internal::builtin::simd_i8x16_to_f32x4_3";
     }
     if index == 142 {
-        return "std::internal::builtin::simd_load_u8x16";
+        return "std::internal::builtin::simd_load_f32x4";
     }
     if index == 143 {
-        return "std::internal::builtin::simd_popcount_u32";
+        return "std::internal::builtin::simd_load_f64x2";
     }
     if index == 144 {
-        return "std::internal::builtin::simd_popcount_u64";
+        return "std::internal::builtin::simd_load_i32x4";
     }
     if index == 145 {
-        return "std::internal::builtin::simd_popcount_u8x16";
+        return "std::internal::builtin::simd_load_i8x16";
     }
     if index == 146 {
-        return "std::internal::builtin::simd_sdot_i8x16";
+        return "std::internal::builtin::simd_load_i8x16_u8";
     }
     if index == 147 {
-        return "std::internal::builtin::simd_store_f32x4";
+        return "std::internal::builtin::simd_load_u8x16";
     }
     if index == 148 {
-        return "std::internal::builtin::simd_store_f64x2";
+        return "std::internal::builtin::simd_popcount_u32";
     }
     if index == 149 {
-        return "std::internal::builtin::simd_store_i32x4";
+        return "std::internal::builtin::simd_popcount_u64";
     }
     if index == 150 {
-        return "std::internal::builtin::simd_store_i8x16";
+        return "std::internal::builtin::simd_popcount_u8x16";
     }
     if index == 151 {
-        return "std::internal::builtin::simd_store_u8x16";
+        return "std::internal::builtin::simd_sdot_i8x16";
     }
     if index == 152 {
-        return "std::internal::builtin::simd_tbl16";
+        return "std::internal::builtin::simd_store_f32x4";
     }
     if index == 153 {
-        return "std::internal::builtin::simd_u8x16_from_i8x16";
+        return "std::internal::builtin::simd_store_f64x2";
     }
     if index == 154 {
-        return "std::internal::builtin::task_await";
+        return "std::internal::builtin::simd_store_i32x4";
     }
     if index == 155 {
-        return "std::internal::builtin::task_cancel";
+        return "std::internal::builtin::simd_store_i8x16";
     }
     if index == 156 {
-        return "std::internal::builtin::task_close";
+        return "std::internal::builtin::simd_store_u8x16";
     }
     if index == 157 {
-        return "std::internal::builtin::task_finished";
+        return "std::internal::builtin::simd_tbl16";
     }
     if index == 158 {
-        return "std::internal::builtin::task_new";
+        return "std::internal::builtin::simd_u8x16_from_i8x16";
     }
     if index == 159 {
-        return "std::internal::builtin::task_set_close";
+        return "std::internal::builtin::task_await";
     }
     if index == 160 {
-        return "std::internal::builtin::task_set_new";
+        return "std::internal::builtin::task_cancel";
     }
     if index == 161 {
-        return "std::internal::builtin::task_set_running";
+        return "std::internal::builtin::task_close";
     }
     if index == 162 {
-        return "std::internal::builtin::task_set_spawn";
+        return "std::internal::builtin::task_finished";
     }
     if index == 163 {
-        return "std::internal::builtin::task_set_wait_one";
+        return "std::internal::builtin::task_new";
     }
     if index == 164 {
-        return "std::internal::builtin::test_fail";
+        return "std::internal::builtin::task_set_close";
     }
     if index == 165 {
-        return "std::internal::builtin::test_fail_equal";
+        return "std::internal::builtin::task_set_new";
     }
     if index == 166 {
-        return "std::internal::builtin::test_seed";
+        return "std::internal::builtin::task_set_running";
     }
     if index == 167 {
-        return "std::internal::builtin::test_seed_set";
+        return "std::internal::builtin::task_set_spawn";
     }
     if index == 168 {
-        return "std::internal::builtin::thread_cpu_count";
+        return "std::internal::builtin::task_set_wait_one";
     }
     if index == 169 {
-        return "std::internal::builtin::thread_pool_close";
+        return "std::internal::builtin::test_fail";
     }
     if index == 170 {
-        return "std::internal::builtin::thread_pool_each";
+        return "std::internal::builtin::test_fail_equal";
     }
     if index == 171 {
-        return "std::internal::builtin::thread_pool_each_lane";
+        return "std::internal::builtin::test_seed";
     }
     if index == 172 {
-        return "std::internal::builtin::thread_pool_each_lane_shared";
+        return "std::internal::builtin::test_seed_set";
     }
     if index == 173 {
-        return "std::internal::builtin::thread_pool_each_shared";
+        return "std::internal::builtin::thread_cpu_count";
     }
     if index == 174 {
+        return "std::internal::builtin::thread_pool_close";
+    }
+    if index == 175 {
+        return "std::internal::builtin::thread_pool_each";
+    }
+    if index == 176 {
+        return "std::internal::builtin::thread_pool_each_lane";
+    }
+    if index == 177 {
+        return "std::internal::builtin::thread_pool_each_lane_shared";
+    }
+    if index == 178 {
+        return "std::internal::builtin::thread_pool_each_shared";
+    }
+    if index == 179 {
         return "std::internal::builtin::thread_pool_new";
     }
     return null;

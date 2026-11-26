@@ -1,0 +1,107 @@
+import compiler::internal::ir;
+import std::array;
+import std::mem;
+import std::string;
+import std::testing;
+
+fn make_spirv_kernel(
+    allocator: Allocator,
+    module: &var ir::Module,
+    name: []u8,
+    params: &array::Array<ir::Param>
+) -> !ir::Function {
+    let fn_name = try module.names.intern(name);
+    let void_type = try module.names.intern("void");
+    let export_abi = try module.names.intern("gpu");
+    var copied = array::new<ir::Param>(allocator);
+    errdefer copied.deinit(allocator);
+    var index = 0;
+    while params.get(index) |param| {
+        index = index + 1;
+        try copied.append(allocator, param);
+    }
+    let function = ir::Function {
+        node: try module.function_nodes.add(allocator, ir::FunctionNode {
+            name: fn_name,
+            params: move copied,
+            return_type: void_type,
+            blocks: array::new<ir::Block>(allocator),
+            export_abi: export_abi,
+            export_name: fn_name,
+            module: ir::empty_name(),
+            instance: false
+        })
+    };
+    try module.functions.append(allocator, function);
+    return function;
+}
+
+fn add_spirv_block(module: &var ir::Module, function: ir::Function, label: []u8) -> !ir::Block {
+    let name = try module.names.intern(label);
+    return module.add_block(function, name);
+}
+
+fn set_spirv_return_void(module: &var ir::Module, block: ir::Block) -> !void {
+    let void_name = try module.names.intern("void");
+    let void_val = ir::Value { name: void_name, type_name: void_name };
+    module.set_terminator(block, ir::return_terminator(void_val));
+    return;
+}
+
+test "spirv emit supports gpu simd_sum" {
+    let allocator = mem::page_allocator();
+    var module = try ir::new_module(allocator);
+    defer module.deinit(allocator);
+    var params = array::new<ir::Param>(allocator);
+    defer params.deinit(allocator);
+    try params.append(allocator, ir::Param {
+        name: try module.names.intern("%v"),
+        type_name: try module.names.intern("f32"),
+        passing: ir::Passing::Value
+    });
+    let kernel = try make_spirv_kernel(allocator, &var module, "sum_k", &params);
+    let entry = try add_spirv_block(&var module, kernel, "entry");
+    let sum_result = ir::Value {
+        name: try module.names.intern("%s"),
+        type_name: try module.names.intern("f32")
+    };
+    var node = module.blank_instr(sum_result, ir::Op::GpuSimdSum, ir::empty_name(), ir::empty_name());
+    errdefer node.deinit(allocator);
+    try node.args.append(allocator, ir::Value {
+        name: try module.names.intern("%v"),
+        type_name: try module.names.intern("f32")
+    });
+    let _ = try module.add_instr(allocator, entry, move node);
+    try set_spirv_return_void(&var module, entry);
+    var words = string::new(allocator);
+    defer words.deinit(allocator);
+    if try emit(allocator, &module, &var words) |failed| {
+        failed.deinit(allocator);
+        testing::fail("expected spirv::emit to succeed for gpu.simd_sum");
+    }
+    testing::expect(words.len() > 0);
+}
+
+test "spirv emit rejects simdgroup_matrix" {
+    let allocator = mem::page_allocator();
+    var module = try ir::new_module(allocator);
+    defer module.deinit(allocator);
+    var params = array::new<ir::Param>(allocator);
+    defer params.deinit(allocator);
+    let kernel = try make_spirv_kernel(allocator, &var module, "mat_k", &params);
+    let entry = try add_spirv_block(&var module, kernel, "entry");
+    let mat_result = ir::Value {
+        name: try module.names.intern("%acc"),
+        type_name: try module.names.intern("std::gpu::SimdMatrix8x8F32")
+    };
+    let node = module.blank_instr(mat_result, ir::Op::GpuSimdMatrixZeroF32, ir::empty_name(), ir::empty_name());
+    let _ = try module.add_instr(allocator, entry, move node);
+    try set_spirv_return_void(&var module, entry);
+    var words = string::new(allocator);
+    defer words.deinit(allocator);
+    if try emit(allocator, &module, &var words) |failed| {
+        failed.deinit(allocator);
+    } else {
+        testing::fail("expected spirv::emit to reject simdgroup_matrix");
+    }
+}

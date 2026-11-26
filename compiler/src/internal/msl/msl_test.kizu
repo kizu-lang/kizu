@@ -1,0 +1,355 @@
+import compiler::internal::ir;
+import std::array;
+import std::mem;
+import std::string;
+import std::testing;
+
+fn add_empty_instr(
+    allocator: Allocator,
+    module: &var ir::Module,
+    block: ir::Block,
+    op: ir::Op,
+    result_name: []u8,
+    result_type: []u8,
+    args: &array::Array<ir::Value>
+) -> !ir::Value {
+    var result = ir::empty_value();
+    if mem::len(result_name) > 0 {
+        result = ir::Value {
+            name: try module.names.intern(result_name),
+            type_name: try module.names.intern(result_type)
+        };
+    } else {
+        result = ir::Value {
+            name: ir::empty_name(),
+            type_name: try module.names.intern(result_type)
+        };
+    }
+    var node = module.blank_instr(result, op, ir::empty_name(), ir::empty_name());
+    errdefer node.deinit(allocator);
+    var index = 0;
+    while args.get(index) |arg| {
+        index = index + 1;
+        try node.args.append(allocator, arg);
+    }
+    let _ = try module.add_instr(allocator, block, move node);
+    return result;
+}
+
+fn add_const_instr(
+    allocator: Allocator,
+    module: &var ir::Module,
+    block: ir::Block,
+    result_name: []u8,
+    result_type: []u8,
+    literal: []u8
+) -> !ir::Value {
+    let result = ir::Value {
+        name: try module.names.intern(result_name),
+        type_name: try module.names.intern(result_type)
+    };
+    let imm = try module.names.intern(literal);
+    let node = module.blank_instr(result, ir::Op::Const, ir::empty_name(), imm);
+    let _ = try module.add_instr(allocator, block, move node);
+    return result;
+}
+
+fn add_msl_block(module: &var ir::Module, function: ir::Function, label: []u8) -> !ir::Block {
+    let name = try module.names.intern(label);
+    return module.add_block(function, name);
+}
+
+fn set_return_void(module: &var ir::Module, block: ir::Block) -> !void {
+    let void_name = try module.names.intern("void");
+    let void_val = ir::Value { name: void_name, type_name: void_name };
+    module.set_terminator(block, ir::return_terminator(void_val));
+    return;
+}
+
+fn make_kernel(
+    allocator: Allocator,
+    module: &var ir::Module,
+    name: []u8,
+    params: &array::Array<ir::Param>
+) -> !ir::Function {
+    let fn_name = try module.names.intern(name);
+    let void_type = try module.names.intern("void");
+    let export_abi = try module.names.intern("gpu");
+    var copied_params = array::new<ir::Param>(allocator);
+    errdefer copied_params.deinit(allocator);
+    var index = 0;
+    while params.get(index) |param| {
+        index = index + 1;
+        try copied_params.append(allocator, param);
+    }
+    let function = ir::Function {
+        node: try module.function_nodes.add(allocator, ir::FunctionNode {
+            name: fn_name,
+            params: move copied_params,
+            return_type: void_type,
+            blocks: array::new<ir::Block>(allocator),
+            export_abi: export_abi,
+            export_name: fn_name,
+            module: ir::empty_name(),
+            instance: false
+        })
+    };
+    try module.functions.append(allocator, function);
+    return function;
+}
+
+fn make_param(module: &var ir::Module, name: []u8, type_name: []u8) -> !ir::Param {
+    return ir::Param {
+        name: try module.names.intern(name),
+        type_name: try module.names.intern(type_name),
+        passing: ir::Passing::Value
+    };
+}
+
+test "msl emit succeeds for simdgroup_matrix loop and simd_sum" {
+    let allocator = mem::page_allocator();
+    var module = try ir::new_module(allocator);
+    defer module.deinit(allocator);
+    var params = array::new<ir::Param>(allocator);
+    defer params.deinit(allocator);
+    try params.append(allocator, try make_param(&var module, "%a", "[]u16"));
+    try params.append(allocator, try make_param(&var module, "%out", "[]f32"));
+    try params.append(allocator, try make_param(&var module, "%val", "f32"));
+    let kernel = try make_kernel(allocator, &var module, "matmul_tile", &params);
+    let entry = try add_msl_block(&var module, kernel, "entry");
+    let loop_b = try add_msl_block(&var module, kernel, "loop");
+    let done = try add_msl_block(&var module, kernel, "done");
+
+    var no_args = array::new<ir::Value>(allocator);
+    defer no_args.deinit(allocator);
+    let zero_acc = try add_empty_instr(
+        allocator, &var module, entry, ir::Op::GpuSimdMatrixZeroF32,
+        "%acc0", "std::gpu::SimdMatrix8x8F32", &no_args
+    );
+    let tg_arr = try add_empty_instr(
+        allocator, &var module, entry, ir::Op::GpuGroupArray,
+        "%tg", "[64]u16", &no_args
+    );
+    var slot_args = array::new<ir::Value>(allocator);
+    defer slot_args.deinit(allocator);
+    try slot_args.append(allocator, tg_arr);
+    let tg_slot = try add_empty_instr(
+        allocator, &var module, entry, ir::Op::LocalSlot,
+        "%tg_slot", "&var [64]u16", &slot_args
+    );
+    var view_args = array::new<ir::Value>(allocator);
+    defer view_args.deinit(allocator);
+    try view_args.append(allocator, tg_slot);
+    let tg_view = try add_empty_instr(
+        allocator, &var module, entry, ir::Op::BufferAsBytes,
+        "%tg_view", "[]u16", &view_args
+    );
+    let zero_i64 = try add_const_instr(allocator, &var module, entry, "%c0", "i64", "0");
+    let eight_i64 = try add_const_instr(allocator, &var module, entry, "%c8", "i64", "8");
+    let false_b = try add_const_instr(allocator, &var module, entry, "%cfalse", "bool", "false");
+    let true_b = try add_const_instr(allocator, &var module, entry, "%ctrue", "bool", "true");
+    let cond_b = try add_const_instr(allocator, &var module, entry, "%ccond", "bool", "false");
+    let entry_name = try module.names.intern("entry");
+    let loop_name = try module.names.intern("loop");
+    let done_name = try module.names.intern("done");
+    module.set_terminator(entry, ir::jump_terminator(loop_name));
+
+    let acc_phi_val = ir::Value {
+        name: try module.names.intern("%acc"),
+        type_name: try module.names.intern("std::gpu::SimdMatrix8x8F32")
+    };
+    let acc_next_val = ir::Value {
+        name: try module.names.intern("%acc_next"),
+        type_name: try module.names.intern("std::gpu::SimdMatrix8x8F32")
+    };
+    var phi = module.blank_instr(acc_phi_val, ir::Op::Phi, ir::empty_name(), ir::empty_name());
+    errdefer phi.deinit(allocator);
+    try phi.incoming.append(allocator, ir::Incoming {
+        block: entry_name,
+        value: zero_acc
+    });
+    try phi.incoming.append(allocator, ir::Incoming {
+        block: loop_name,
+        value: acc_next_val
+    });
+    let _ = try module.add_instr(allocator, loop_b, move phi);
+
+    var load_a_args = array::new<ir::Value>(allocator);
+    defer load_a_args.deinit(allocator);
+    try load_a_args.append(allocator, tg_view);
+    try load_a_args.append(allocator, zero_i64);
+    try load_a_args.append(allocator, eight_i64);
+    try load_a_args.append(allocator, false_b);
+    let ma = try add_empty_instr(
+        allocator, &var module, loop_b, ir::Op::GpuSimdMatrixLoadF16,
+        "%ma", "std::gpu::SimdMatrix8x8F16", &load_a_args
+    );
+
+    var load_b_args = array::new<ir::Value>(allocator);
+    defer load_b_args.deinit(allocator);
+    try load_b_args.append(allocator, ir::Value {
+        name: try module.names.intern("%a"),
+        type_name: try module.names.intern("[]u16")
+    });
+    try load_b_args.append(allocator, zero_i64);
+    try load_b_args.append(allocator, eight_i64);
+    try load_b_args.append(allocator, true_b);
+    let mb = try add_empty_instr(
+        allocator, &var module, loop_b, ir::Op::GpuSimdMatrixLoadF16,
+        "%mb", "std::gpu::SimdMatrix8x8F16", &load_b_args
+    );
+
+    var mma_args = array::new<ir::Value>(allocator);
+    defer mma_args.deinit(allocator);
+    try mma_args.append(allocator, acc_phi_val);
+    try mma_args.append(allocator, ma);
+    try mma_args.append(allocator, mb);
+    let _ = try add_empty_instr(
+        allocator, &var module, loop_b, ir::Op::GpuSimdMatrixMmaF16,
+        "%acc_next", "std::gpu::SimdMatrix8x8F32", &mma_args
+    );
+    module.set_terminator(loop_b, ir::branch_terminator(cond_b, loop_name, done_name));
+
+    var store_args = array::new<ir::Value>(allocator);
+    defer store_args.deinit(allocator);
+    try store_args.append(allocator, acc_next_val);
+    try store_args.append(allocator, ir::Value {
+        name: try module.names.intern("%out"),
+        type_name: try module.names.intern("[]f32")
+    });
+    try store_args.append(allocator, zero_i64);
+    try store_args.append(allocator, eight_i64);
+    let _ = try add_empty_instr(
+        allocator, &var module, done, ir::Op::GpuSimdMatrixStoreF32,
+        "", "void", &store_args
+    );
+
+    var sum_args = array::new<ir::Value>(allocator);
+    defer sum_args.deinit(allocator);
+    try sum_args.append(allocator, ir::Value {
+        name: try module.names.intern("%val"),
+        type_name: try module.names.intern("f32")
+    });
+    let _ = try add_empty_instr(
+        allocator, &var module, done, ir::Op::GpuSimdSum,
+        "%sum", "f32", &sum_args
+    );
+    try set_return_void(&var module, done);
+
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    if try emit(allocator, &module, &var out) |failed| {
+        failed.deinit(allocator);
+        testing::fail("expected msl::emit to succeed for simdgroup_matrix and simd_sum");
+    }
+    testing::expect(out.len() > 0);
+}
+
+test "msl emit rejects simd_matrix_load_f16 from thread-local array" {
+    let allocator = mem::page_allocator();
+    var module = try ir::new_module(allocator);
+    defer module.deinit(allocator);
+    var params = array::new<ir::Param>(allocator);
+    defer params.deinit(allocator);
+    let kernel = try make_kernel(allocator, &var module, "bad_load", &params);
+    let entry = try add_msl_block(&var module, kernel, "entry");
+
+    var no_args = array::new<ir::Value>(allocator);
+    defer no_args.deinit(allocator);
+    let local_arr = try add_empty_instr(
+        allocator, &var module, entry, ir::Op::BufferNew,
+        "%local", "[64]u16", &no_args
+    );
+    var slot_args = array::new<ir::Value>(allocator);
+    defer slot_args.deinit(allocator);
+    try slot_args.append(allocator, local_arr);
+    let slot = try add_empty_instr(
+        allocator, &var module, entry, ir::Op::LocalSlot,
+        "%slot", "&var [64]u16", &slot_args
+    );
+    var view_args = array::new<ir::Value>(allocator);
+    defer view_args.deinit(allocator);
+    try view_args.append(allocator, slot);
+    let view = try add_empty_instr(
+        allocator, &var module, entry, ir::Op::BufferAsBytes,
+        "%view", "[]u16", &view_args
+    );
+    let zero_i64 = try add_const_instr(allocator, &var module, entry, "%c0", "i64", "0");
+    let eight_i64 = try add_const_instr(allocator, &var module, entry, "%c8", "i64", "8");
+    let false_b = try add_const_instr(allocator, &var module, entry, "%cf", "bool", "false");
+    var load_args = array::new<ir::Value>(allocator);
+    defer load_args.deinit(allocator);
+    try load_args.append(allocator, view);
+    try load_args.append(allocator, zero_i64);
+    try load_args.append(allocator, eight_i64);
+    try load_args.append(allocator, false_b);
+    let _ = try add_empty_instr(
+        allocator, &var module, entry, ir::Op::GpuSimdMatrixLoadF16,
+        "%m", "std::gpu::SimdMatrix8x8F16", &load_args
+    );
+    try set_return_void(&var module, entry);
+
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    if try emit(allocator, &module, &var out) |failed| {
+        failed.deinit(allocator);
+    } else {
+        testing::fail("expected msl::emit to reject thread-memory simd_matrix_load_f16");
+    }
+}
+
+test "msl emit rejects simd_matrix_store_f32 to thread-local array" {
+    let allocator = mem::page_allocator();
+    var module = try ir::new_module(allocator);
+    defer module.deinit(allocator);
+    var params = array::new<ir::Param>(allocator);
+    defer params.deinit(allocator);
+    let kernel = try make_kernel(allocator, &var module, "bad_store", &params);
+    let entry = try add_msl_block(&var module, kernel, "entry");
+
+    var no_args = array::new<ir::Value>(allocator);
+    defer no_args.deinit(allocator);
+    let acc = try add_empty_instr(
+        allocator, &var module, entry, ir::Op::GpuSimdMatrixZeroF32,
+        "%acc", "std::gpu::SimdMatrix8x8F32", &no_args
+    );
+    let local_arr = try add_empty_instr(
+        allocator, &var module, entry, ir::Op::BufferNew,
+        "%local", "[64]f32", &no_args
+    );
+    var slot_args = array::new<ir::Value>(allocator);
+    defer slot_args.deinit(allocator);
+    try slot_args.append(allocator, local_arr);
+    let slot = try add_empty_instr(
+        allocator, &var module, entry, ir::Op::LocalSlot,
+        "%slot", "&var [64]f32", &slot_args
+    );
+    var view_args = array::new<ir::Value>(allocator);
+    defer view_args.deinit(allocator);
+    try view_args.append(allocator, slot);
+    let view = try add_empty_instr(
+        allocator, &var module, entry, ir::Op::BufferAsBytes,
+        "%view", "[]f32", &view_args
+    );
+    let zero_i64 = try add_const_instr(allocator, &var module, entry, "%c0", "i64", "0");
+    let eight_i64 = try add_const_instr(allocator, &var module, entry, "%c8", "i64", "8");
+    var store_args = array::new<ir::Value>(allocator);
+    defer store_args.deinit(allocator);
+    try store_args.append(allocator, acc);
+    try store_args.append(allocator, view);
+    try store_args.append(allocator, zero_i64);
+    try store_args.append(allocator, eight_i64);
+    let _ = try add_empty_instr(
+        allocator, &var module, entry, ir::Op::GpuSimdMatrixStoreF32,
+        "", "void", &store_args
+    );
+    try set_return_void(&var module, entry);
+
+    var out = string::new(allocator);
+    defer out.deinit(allocator);
+    if try emit(allocator, &module, &var out) |failed| {
+        failed.deinit(allocator);
+    } else {
+        testing::fail("expected msl::emit to reject thread-memory simd_matrix_store_f32");
+    }
+}
