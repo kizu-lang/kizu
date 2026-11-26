@@ -185,6 +185,103 @@ pub fn shape_named(module: &ir::Module, type_name: ir::Name) -> ?Shape {
     return shape_of(bytes);
 }
 
+enum MslScalar {
+    Bool,
+    I8,
+    I16,
+    I32,
+    I64,
+    U8,
+    U16,
+    U32,
+    U64,
+    F32,
+    SimdMatrix8x8F32,
+    SimdMatrix8x8F16,
+}
+
+struct MslShape {
+    form: Form,
+    element: MslScalar,
+    count: i64,
+}
+
+fn lift_scalar(kind: Scalar) -> MslScalar {
+    return match kind {
+        Bool => MslScalar::Bool,
+        I8 => MslScalar::I8,
+        I16 => MslScalar::I16,
+        I32 => MslScalar::I32,
+        I64 => MslScalar::I64,
+        U8 => MslScalar::U8,
+        U16 => MslScalar::U16,
+        U32 => MslScalar::U32,
+        U64 => MslScalar::U64,
+        F32 => MslScalar::F32,
+    };
+}
+
+fn matrix_scalar_kind(type_name: []u8) -> ?MslScalar {
+    if mem::equal_bytes(type_name, "std::gpu::SimdMatrix8x8F32") {
+        return MslScalar::SimdMatrix8x8F32;
+    }
+    if mem::equal_bytes(type_name, "std::gpu::SimdMatrix8x8F16") {
+        return MslScalar::SimdMatrix8x8F16;
+    }
+    return null;
+}
+
+fn is_simd_matrix(kind: MslScalar) -> bool {
+    return kind == MslScalar::SimdMatrix8x8F32 or kind == MslScalar::SimdMatrix8x8F16;
+}
+
+fn msl_spelling(kind: MslScalar) -> []u8 {
+    return match kind {
+        Bool => "bool",
+        I8 => "char",
+        I16 => "short",
+        I32 => "int",
+        I64 => "long",
+        U8 => "uchar",
+        U16 => "ushort",
+        U32 => "uint",
+        U64 => "ulong",
+        F32 => "float",
+        SimdMatrix8x8F32 => "simdgroup_float8x8",
+        SimdMatrix8x8F16 => "simdgroup_half8x8",
+    };
+}
+
+fn msl_shape_of(text: []u8) -> ?MslShape {
+    if shape_of(text) |shape| {
+        return MslShape {
+            form: shape.form,
+            element: lift_scalar(shape.element),
+            count: shape.count
+        };
+    }
+    if matrix_scalar_kind(text) |kind| {
+        return MslShape { form: Form::Value, element: kind, count: 0 };
+    }
+    let length = mem::len(text);
+    if length > 0 and text[0] == cast<u8>(38) {
+        var start = 1;
+        if length > 5 and text[1] == cast<u8>(118) and text[2] == cast<u8>(97) and text[3] == cast<u8>(114) and text[4] == cast<u8>(32) {
+            start = 5;
+        }
+        if matrix_scalar_kind(text[start..length]) |kind| {
+            return MslShape { form: Form::Pointer, element: kind, count: 0 };
+        }
+    }
+    return null;
+}
+
+fn msl_shape_named(module: &ir::Module, type_name: ir::Name) -> ?MslShape {
+    let retained = ir::name_text(&module.names, type_name);
+    let bytes = retained.as_bytes();
+    return msl_shape_of(bytes);
+}
+
 enum Role {
     Kernel,
     Helper,
@@ -212,6 +309,7 @@ struct Emitter {
     kernel_views: array::Array<i64>,
     role: Role,
     returns_value: bool,
+    uses_simdgroup_matrix: bool,
     generation: i64,
 }
 
@@ -253,6 +351,7 @@ pub fn emit(
         kernel_views: array::new<i64>(allocator),
         role: Role::Kernel,
         returns_value: false,
+        uses_simdgroup_matrix: false,
         generation: 0
     };
     defer emitter.deinit(allocator);
@@ -282,6 +381,9 @@ pub fn emit(
         try emitter.helpers.append_string(allocator, &emitter.out);
     }
     try append_line(allocator, out, "#include <metal_stdlib>");
+    if emitter.uses_simdgroup_matrix {
+        try append_line(allocator, out, "#include <metal_simdgroup_matrix>");
+    }
     try append_line(allocator, out, "using namespace metal;");
     try append_line(allocator, out, "#pragma METAL fp contract(off)");
     try append_line(allocator, out, "struct KzIds { uint thread_id; uint group_id; uint local_id; uint simdgroup_id; uint lane_id; };");
@@ -458,9 +560,12 @@ fn (self: &var Emitter) assign_param_spaces(module: &ir::Module, node: &ir::Func
     var view_position = 0;
     while node.params.get(position) |param| {
         position = position + 1;
-        let shape = shape_named(module, param.type_name) orelse return try unsupported(module, self.allocator, ast::zero_span(),
+        let shape = msl_shape_named(module, param.type_name) orelse return try unsupported(module, self.allocator, ast::zero_span(),
             "a kernel parameter has type `", param.type_name);
         if shape.form == Form::Value {
+            if self.role == Role::Kernel and is_simd_matrix(shape.element) {
+                return try unsupported(module, self.allocator, ast::zero_span(), "a kernel parameter has type `", param.type_name);
+            }
             continue;
         }
         if shape.form != Form::View {
@@ -676,7 +781,7 @@ fn (self: &var Emitter) study_space(module: &ir::Module, node: &ir::InstrNode) -
         BufferNew => try self.set_space(result, Space::Thread),
         GpuGroupArray => try self.set_space(result, Space::Group),
         RefLoad => {
-            let shape = shape_named(module, node.result.type_name) orelse return;
+            let shape = msl_shape_named(module, node.result.type_name) orelse return;
             if shape.form == Form::View {
                 try self.inherit_space(node);
                 return;
@@ -685,7 +790,7 @@ fn (self: &var Emitter) study_space(module: &ir::Module, node: &ir::InstrNode) -
         },
         LocalSlot => {
             let source = node.args.get_or_panic(0);
-            let shape = shape_named(module, source.type_name) orelse return;
+            let shape = msl_shape_named(module, source.type_name) orelse return;
             if shape.form == Form::View {
                 try self.inherit_space(node);
                 return;
@@ -731,12 +836,15 @@ fn (self: &var Emitter) emit_signature(module: &ir::Module, node: &ir::FunctionN
     } else {
         try self.text("static ");
         if self.returns_value {
-            let shape = shape_named(module, node.return_type) orelse return try unsupported(module, self.allocator, ast::zero_span(),
+            let shape = msl_shape_named(module, node.return_type) orelse return try unsupported(module, self.allocator, ast::zero_span(),
                 "a kernel calls a function returning `", node.return_type);
             if shape.form != Form::Value {
                 return try unsupported(module, self.allocator, ast::zero_span(), "a kernel calls a function returning `", node.return_type);
             }
-            try self.text(spelling(shape.element));
+            if is_simd_matrix(shape.element) {
+                self.uses_simdgroup_matrix = true;
+            }
+            try self.text(msl_spelling(shape.element));
         } else {
             try self.text("void");
         }
@@ -746,13 +854,16 @@ fn (self: &var Emitter) emit_signature(module: &ir::Module, node: &ir::FunctionN
     try self.text("(");
     var position = 0;
     while node.params.get(position) |param| {
-        let shape = shape_named(module, param.type_name) orelse return try unsupported(module, self.allocator, ast::zero_span(),
+        let shape = msl_shape_named(module, param.type_name) orelse return try unsupported(module, self.allocator, ast::zero_span(),
             "a kernel parameter has type `", param.type_name);
+        if is_simd_matrix(shape.element) {
+            self.uses_simdgroup_matrix = true;
+        }
         if shape.form == Form::View {
             let space = self.space_of(param.name) orelse Space::Device;
             try self.text(space_spelling(space));
             try self.text(" ");
-            try self.text(spelling(shape.element));
+            try self.text(msl_spelling(shape.element));
             try self.text(" *");
             try self.view_pointer(param.name);
             if self.role == Role::Helper {
@@ -762,10 +873,10 @@ fn (self: &var Emitter) emit_signature(module: &ir::Module, node: &ir::FunctionN
         } else {
             if self.role == Role::Kernel {
                 try self.text("constant ");
-                try self.text(spelling(shape.element));
+                try self.text(msl_spelling(shape.element));
                 try self.text(" &");
             } else {
-                try self.text(spelling(shape.element));
+                try self.text(msl_spelling(shape.element));
                 try self.text(" ");
             }
             try self.value(param.name);
@@ -840,7 +951,7 @@ fn (self: &var Emitter) emit_body(module: &ir::Module, node: &ir::FunctionNode) 
 }
 
 fn (self: &var Emitter) emit_phi_entry(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    let shape = shape_named(module, node.result.type_name) orelse return try unsupported(module, self.allocator, node.span,
+    let shape = msl_shape_named(module, node.result.type_name) orelse return try unsupported(module, self.allocator, node.span,
         "a kernel joins values of type `", node.result.type_name);
     try self.text("            ");
     if shape.form == Form::View {
@@ -887,10 +998,13 @@ fn (self: &var Emitter) declare_values(module: &ir::Module, node: &ir::FunctionN
 
 fn (self: &var Emitter) declare_value(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let result = node.result;
-    let shape = shape_named(module, result.type_name) orelse return try unsupported(module, self.allocator, node.span,
+    let shape = msl_shape_named(module, result.type_name) orelse return try unsupported(module, self.allocator, node.span,
         "a kernel computes a value of type `", result.type_name);
+    if is_simd_matrix(shape.element) {
+        self.uses_simdgroup_matrix = true;
+    }
     let space = self.space_of(result.name) orelse Space::Thread;
-    let element = spelling(shape.element);
+    let element = msl_spelling(shape.element);
     var form = shape.form;
     if form == Form::ViewSlot {
         form = Form::View;
@@ -1016,6 +1130,29 @@ fn (self: &var Emitter) emit_copy(target: ir::Name, target_suffix: []u8, source:
     return self.end_line();
 }
 
+fn (self: &var Emitter) emit_matrix_bounds_check(slice: ir::Name, offset: ir::Name, stride: ir::Name) -> !void {
+    try self.text("            if (");
+    try self.value(offset);
+    try self.text(" < 0 || ");
+    try self.value(stride);
+    try self.text(" < 8 || ");
+    try self.view_length(slice);
+    try self.text(" < 8 || ");
+    try self.value(offset);
+    try self.text(" > ");
+    try self.view_length(slice);
+    try self.text(" - 8 || ");
+    try self.value(stride);
+    try self.text(" > (");
+    try self.view_length(slice);
+    try self.text(" - 8 - ");
+    try self.value(offset);
+    try self.text(") / 7) {");
+    try self.end_line();
+    try self.emit_fail_action("                ");
+    return self.line("            ", "}");
+}
+
 fn (self: &var Emitter) emit_instr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
     let result = node.result.name;
     match node.op {
@@ -1059,6 +1196,75 @@ fn (self: &var Emitter) emit_instr(module: &ir::Module, node: &ir::InstrNode) ->
             try self.line("            ", "threadgroup_barrier(mem_flags::mem_threadgroup);");
             return null;
         },
+        GpuSimdMatrixLoadF16 => {
+            self.uses_simdgroup_matrix = true;
+            let src = node.args.get_or_panic(0);
+            let offset = node.args.get_or_panic(1);
+            let stride = node.args.get_or_panic(2);
+            let transpose = node.args.get_or_panic(3);
+            let space = self.space_of(src.name) orelse Space::Thread;
+            if !self.spaces.contains(self.key(src.name)) or space == Space::Thread {
+                return try fail(self.allocator, module, node.span, "`", node.result.type_name,
+                    "` load requires device or threadgroup memory");
+            }
+            try self.emit_matrix_bounds_check(src.name, offset.name, stride.name);
+            try self.text("            simdgroup_load(");
+            try self.value(result);
+            try self.text(", (const ");
+            try self.text(space_spelling(space));
+            try self.text(" half *)(");
+            try self.view_pointer(src.name);
+            try self.text(" + ");
+            try self.value(offset.name);
+            try self.text("), ulong(");
+            try self.value(stride.name);
+            try self.text("), ulong2(0, 0), ");
+            try self.value(transpose.name);
+            try self.text(");");
+            try self.end_line();
+            return null;
+        },
+        GpuSimdMatrixMmaF16 => {
+            self.uses_simdgroup_matrix = true;
+            let acc = node.args.get_or_panic(0);
+            let left = node.args.get_or_panic(1);
+            let right = node.args.get_or_panic(2);
+            try self.text("            simdgroup_multiply_accumulate(");
+            try self.value(result);
+            try self.text(", ");
+            try self.value(left.name);
+            try self.text(", ");
+            try self.value(right.name);
+            try self.text(", ");
+            try self.value(acc.name);
+            try self.text(");");
+            try self.end_line();
+            return null;
+        },
+        GpuSimdMatrixStoreF32 => {
+            self.uses_simdgroup_matrix = true;
+            let acc = node.args.get_or_panic(0);
+            let dst = node.args.get_or_panic(1);
+            let offset = node.args.get_or_panic(2);
+            let stride = node.args.get_or_panic(3);
+            let space = self.space_of(dst.name) orelse Space::Thread;
+            if !self.spaces.contains(self.key(dst.name)) or space == Space::Thread {
+                return try fail(self.allocator, module, node.span, "`", acc.type_name,
+                    "` store requires device or threadgroup memory");
+            }
+            try self.emit_matrix_bounds_check(dst.name, offset.name, stride.name);
+            try self.text("            simdgroup_store(");
+            try self.value(acc.name);
+            try self.text(", ");
+            try self.view_pointer(dst.name);
+            try self.text(" + ");
+            try self.value(offset.name);
+            try self.text(", ulong(");
+            try self.value(stride.name);
+            try self.text("), ulong2(0, 0), false);");
+            try self.end_line();
+            return null;
+        },
         BufferNew => {
             let shape = shape_named(module, node.result.type_name) orelse return null;
             try self.text("            for (int k = 0; k < ");
@@ -1071,7 +1277,7 @@ fn (self: &var Emitter) emit_instr(module: &ir::Module, node: &ir::InstrNode) ->
         },
         LocalSlot => {
             let source = node.args.get_or_panic(0);
-            let shape = shape_named(module, source.type_name) orelse return try unsupported(module, self.allocator, node.span,
+            let shape = msl_shape_named(module, source.type_name) orelse return try unsupported(module, self.allocator, node.span,
                 "a kernel takes the address of a value of type `", source.type_name);
             if shape.form == Form::View {
                 try self.emit_view_copy(result, source.name);
@@ -1115,7 +1321,7 @@ fn (self: &var Emitter) emit_instr(module: &ir::Module, node: &ir::InstrNode) ->
             return null;
         },
         RefLoad => {
-            let shape = shape_named(module, node.result.type_name) orelse return try unsupported(module, self.allocator, node.span,
+            let shape = msl_shape_named(module, node.result.type_name) orelse return try unsupported(module, self.allocator, node.span,
                 "a kernel loads a value of type `", node.result.type_name);
             if shape.form == Form::Array {
                 if self.aliased_loads.contains(self.key(result)) {
@@ -1147,7 +1353,7 @@ fn (self: &var Emitter) emit_instr(module: &ir::Module, node: &ir::InstrNode) ->
         },
         RefStore => {
             let stored = node.args.get_or_panic(1);
-            let shape = shape_named(module, stored.type_name) orelse return try unsupported(module, self.allocator, node.span,
+            let shape = msl_shape_named(module, stored.type_name) orelse return try unsupported(module, self.allocator, node.span,
                 "a kernel stores a value of type `", stored.type_name);
             if shape.form == Form::Array {
                 try self.emit_copy(node.args.get_or_panic(0).name, "", stored.name, shape.count);
@@ -1228,7 +1434,7 @@ fn (self: &var Emitter) emit_instr(module: &ir::Module, node: &ir::InstrNode) ->
         },
         Id => {
             let source = node.args.get_or_panic(0);
-            let shape = shape_named(module, source.type_name) orelse return try unsupported(module, self.allocator, node.span,
+            let shape = msl_shape_named(module, source.type_name) orelse return try unsupported(module, self.allocator, node.span,
                 "a kernel copies a value of type `", source.type_name);
             if shape.form == Form::View {
                 try self.text("            ");
@@ -1271,7 +1477,7 @@ fn (self: &var Emitter) emit_call(module: &ir::Module, node: &ir::InstrNode) -> 
     var index = 0;
     while node.args.get(index) |arg| {
         index = index + 1;
-        let shape = shape_named(module, arg.type_name) orelse return try unsupported(module, self.allocator, node.span,
+        let shape = msl_shape_named(module, arg.type_name) orelse return try unsupported(module, self.allocator, node.span,
             "a kernel passes a value of type `", arg.type_name);
         if shape.form == Form::View {
             let space = self.space_of(arg.name) orelse Space::Device;
@@ -1294,7 +1500,7 @@ fn (self: &var Emitter) emit_call(module: &ir::Module, node: &ir::InstrNode) -> 
     index = 0;
     while node.args.get(index) |arg| {
         index = index + 1;
-        let shape = shape_named(module, arg.type_name) orelse return null;
+        let shape = msl_shape_named(module, arg.type_name) orelse return null;
         if shape.form == Form::View {
             try self.view_pointer(arg.name);
             try self.text(", ");
@@ -1377,6 +1583,15 @@ fn (self: &var Emitter) emit_expression(module: &ir::Module, node: &ir::InstrNod
             try self.text("simd_max(");
             try self.value(node.args.get_or_panic(0).name);
             try self.text(")");
+        },
+        GpuSimdSum => {
+            try self.text("simd_sum(");
+            try self.value(node.args.get_or_panic(0).name);
+            try self.text(")");
+        },
+        GpuSimdMatrixZeroF32 => {
+            self.uses_simdgroup_matrix = true;
+            try self.text("make_filled_simdgroup_matrix<float, 8, 8>(0.0f)");
         },
         FloatBits => {
             try self.text("as_type<uint>(");
@@ -1591,7 +1806,7 @@ fn (self: &var Emitter) emit_phi_assignments(module: &ir::Module, function: &ir:
 
 fn (self: &var Emitter) emit_phi_assignment(module: &ir::Module, phi: &ir::InstrNode, incoming: ir::Value, indent: []u8) -> !void {
     try self.text(indent);
-    let shape = shape_named(module, phi.result.type_name) orelse Shape { form: Form::Value, element: Scalar::I64, count: 0 };
+    let shape = msl_shape_named(module, phi.result.type_name) orelse MslShape { form: Form::Value, element: MslScalar::I64, count: 0 };
     if shape.form == Form::View {
         try self.phi_input(phi.result.name);
         try self.text("p = ");

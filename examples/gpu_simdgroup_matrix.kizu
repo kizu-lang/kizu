@@ -1,0 +1,43 @@
+import std::gpu;
+
+export "gpu" fn matmul_f16_tile(
+    a: []u16,
+    b_t: []u16,
+    out: &var []f32,
+    k_dim: i64,
+    n_dim: i64
+) -> void {
+    var tile_a = gpu::group_array<[64]u16>();
+    let tile_a_view = tile_a.as_mut_slice();
+    let lane = gpu::lane_index();
+    var acc = gpu::simd_matrix_zero();
+    var k: i64 = 0;
+    while k < k_dim {
+        var elem = lane;
+        while elem < 64 {
+            let row = elem / 8;
+            let col = elem % 8;
+            tile_a_view[elem] = a[row * k_dim + k + col];
+            elem = elem + 32;
+        }
+        gpu::barrier();
+        let ma = gpu::simd_matrix_load_f16(tile_a_view, 0, 8, false);
+        let mb = gpu::simd_matrix_load_f16(b_t, k, k_dim, true);
+        acc = gpu::simd_matrix_mma_f16(acc, ma, mb);
+        gpu::barrier();
+        k = k + 8;
+    }
+    gpu::simd_matrix_store_f32(acc, out, 0, n_dim);
+    return;
+}
+
+export "gpu" fn simd_sum_reduce(values: []f32, out: &var []f32) -> void {
+    let total = gpu::simd_sum(values[gpu::thread_index()]);
+    if gpu::lane_index() == 0 {
+        out[gpu::simdgroup_index()] = total;
+    }
+    return;
+}
+
+// check
+// features: gpu-export
