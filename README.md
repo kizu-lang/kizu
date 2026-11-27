@@ -20,7 +20,7 @@ code, and less likely to grow heavy CI and build caches.
 
 Kizu is an early prototype, and it compiles itself. The binary a release ships
 is the Kizu compiler under `compiler/`, written in Kizu, and the previous
-release is the seed that builds it ([docs/bootstrap.md](docs/bootstrap.md)).
+release is the seed that builds it (`scripts/seed.txt`).
 `just selfhost` requires the self-built compiler to reproduce itself byte for
 byte.
 
@@ -32,7 +32,7 @@ change while the language design is being tested.
 `kizu run` builds the same native executable `kizu build --target native`
 writes, and then runs it. The only difference between the two commands is
 whether the result is executed, so a program cannot behave one way under `run`
-and another way under `build` -- there is one lowering, not two (ADR-0083).
+and another way under `build` -- there is one lowering, not two.
 What a program is *supposed* to do is written at the end of the program itself,
 not in any one execution path.
 
@@ -132,19 +132,18 @@ deliberately excluded, so the two are not confused.
 
 | Feature | State |
 | --- | --- |
-| threads for parallel work | **in progress.** `std::thread::Pool` runs one function over the non-overlapping chunks of a slice on several threads and returns after every chunk ran (native only). `each_lane` does the same for lanes whose elements are a fixed distance apart, such as a matrix's columns. A worker fails with a member of the set the call names, and the first failure is what the call returns (ADR-0025). Coroutines (`std::coro`) and an evented `Io` are concurrency on one thread, not parallelism (ADR-0145, ADR-0146) |
+| threads for parallel work | **in progress.** `std::thread::Pool` runs one function over the non-overlapping chunks of a slice on several threads and returns after every chunk ran (native only). `each_lane` does the same for lanes whose elements are a fixed distance apart, such as a matrix's columns. A worker fails with a member of the set the call names, and the first failure is what the call returns. Coroutines (`std::coro`) and an evented `Io` are concurrency on one thread, not parallelism |
 | GPU kernels | **in progress.** `export "gpu" fn` bodies build to Metal Shading Language with `build --target metal` and to a Vulkan SPIR-V module with `build --target spirv -o out.spv`; `gpu_export.kizu` is checked but not executed, since the conformance runners have no GPU |
 | wasm beyond the current target subsets | **in progress.** Every example the Wasm routes do not run is refused as a capability the target lacks |
 | raw pointer runtime operations | **check-only.** `pointer_policy.kizu` and `raw_pointer_deref.kizu` are checked but not executed |
 | type alias | **not started** |
 | HTTP middleware | **not started.** Middleware waits on closures. `std::http` serves and fetches HTTP/1 over plaintext TCP or TLS 1.3 (`std::tls`) |
-| full generics | **not planned as such.** Explicit static arguments only, no inference, no bounds, no HKT (ADR-0066) |
-| `async fn` / `await` syntax | **not adopted.** Function coloring is the cost this language does not pay (ADR-0025) |
-| Rust `Send` / `Sync` traits | **not adopted.** Whatever replaces them must be one rule users can read, not a hand-written whitelist (ADR-0025) |
+| full generics | **not planned as such.** Explicit static arguments only, no inference, no bounds, no HKT |
+| `async fn` / `await` syntax | **not adopted.** Function coloring is the cost this language does not pay |
+| Rust `Send` / `Sync` traits | **not adopted.** Whatever replaces them must be one rule users can read, not a hand-written whitelist |
 
 A feature is "implemented" here only when a conformance case runs it and checks
-its output. Rules that only a checker enforces are not counted as features --
-that is the mistake ADR-0025 exists to record.
+its output. Rules that only a checker enforces are not counted as features.
 
 ## Example
 
@@ -175,8 +174,6 @@ kizu run examples/std_io_process.kizu -- input.kizu   # process args after --
 `examples/negative/` one per safety rule the language refuses. Every example
 ends with the case it declares -- the command to run it with and what that has
 to produce -- which is what the conformance test reads.
-The safe-code memory-safety contract is documented in
-[docs/memory-safety.md](docs/memory-safety.md).
 
 ## Getting a Binary
 
@@ -188,7 +185,7 @@ with `bin/kizu.exe`; it links through llvm-mingw, so put that on PATH as
 above.
 
 Development builds `compiler/` with the pinned seed release
-([docs/bootstrap.md](docs/bootstrap.md)) into `target/seed/stage1/bin/kizu`, and
+(`scripts/seed.txt`) into `target/seed/stage1/bin/kizu`, and
 the `just` recipes run that build, so a compiler change is one recipe away:
 
 ```sh
@@ -230,7 +227,7 @@ just wasi-smoke      # run the wasm examples under wasmtime
 - `kizu build --target wasm32-wasi [--opt] [--emit wat] [-o <out>] <file|package>` emits WASI-compatible WAT to stdout, or to `-o` when supplied.
 - `kizu build --target wasm32-wasi [--opt] --emit wasm -o <out> <file|package>` writes a binary `.wasm`; binary output never goes to the terminal implicitly.
 - `kizu build --target wasm32-browser [--opt] [--emit wat] [-o <out>] <file|package>` emits browser-hosted WAT for inspection.
-- `kizu build --target wasm32-browser [--opt] --emit wasm -o <out> <file|package>` writes the browser `.wasm`; [`docs/wasm-browser.md`](docs/wasm-browser.md) defines its host adapter and capability boundary.
+- `kizu build --target wasm32-browser [--opt] --emit wasm -o <out> <file|package>` writes the browser `.wasm`.
 - `kizu build --target native [--backend direct|llvm] [--opt [--thinlto]] [--triple <triple>] [--cpu <cpu>] [--abi <abi>] [--libc on|off] [--runtime hosted|freestanding] [--emit exe|obj|llvm] [--linker clang] [-o <out>] <file>` links a native executable. `--thinlto` builds an `--opt` executable one unit per module, each cached as bitcode, and optimizes across them in the link with ThinLTO; it needs Apple's linker on macOS or lld on Linux, and is refused for `--emit obj` and Windows. `--backend` picks the code generator: the default is `direct` (the compiler encodes machine code and writes the object itself) on darwin-arm64, linux-amd64 and windows-amd64 and `llvm` elsewhere; `--thinlto` needs `--backend llvm` where the default is `direct`. `kizu run` and `kizu test` take `--backend` too.
 - `kizu cache status` / `kizu cache prune` show and clear the local build cache.
 - `kizu import-c-header <file>` converts supported C prototypes to Kizu externs.
@@ -238,19 +235,9 @@ just wasi-smoke      # run the wasm examples under wasmtime
 
 ## Project Documents
 
-- [docs/architecture.md](docs/architecture.md): architecture overview (in Japanese; start here for onboarding)
-- [docs/wasm-browser.md](docs/wasm-browser.md): browser WebAssembly ABI, adapter, and target capabilities
-- [SPEC.md](SPEC.md): language specification
 - [docs/principles.md](docs/principles.md): the design principles every decision is checked against
-- [docs/style.md](docs/style.md): how std chooses the shape of an API
-- [docs/memory-safety.md](docs/memory-safety.md): safe Kizu memory-safety contract
-- [docs/std/](docs/std/README.md): standard-library API reference
-- [docs/tutorial/](docs/tutorial/README.md): building one whole thing, start to finish
-- [examples](examples/README.md): readable programs per feature, and the refusals in `negative/`
-- [docs/adr](docs/adr): architecture decision records
-- [docs/language-gaps.md](docs/language-gaps.md): what could not be written yet, and the workaround used
-- [docs/stdlib.md](docs/stdlib.md): the trusted-builtin boundary and the rules for new std APIs
-- [docs/perf.md](docs/perf.md): build and cache performance policy
+- [examples/](examples/README.md): readable programs per feature, and the refusals in `negative/`
+- [spec/](spec/README.md): machine-verified formal specifications (Lean, TLA+, Quint)
 - [CONTRIBUTING.md](CONTRIBUTING.md): contribution policy (PRs and issues are maintainers-only; use [GitHub Discussions](https://github.com/kizu-lang/kizu/discussions) for feedback)
 - [AGENTS.md](AGENTS.md): implementation rules for contributors and coding agents
 

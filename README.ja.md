@@ -19,7 +19,7 @@ Rust より単純で、safe code では C/C++/Zig より安全で、CI とビル
 
 Kizu は初期プロトタイプで、自分自身を compile します。release が配る binary は
 `compiler/` にある Kizu 製の Kizu compiler で、それを build する seed は前のリリース
-です([docs/bootstrap.md](docs/bootstrap.md))。`just selfhost` は、self-build した
+(`scripts/seed.txt`)です。`just selfhost` は、self-build した
 compiler が自分自身を byte 単位で再現することを要求します。
 
 このリポジトリはまだ実験的です。言語設計の検証中は、構文と実装の詳細が変わり得ます。
@@ -29,7 +29,7 @@ compiler が自分自身を byte 単位で再現することを要求します�
 `kizu run` は `kizu build --target native` が書き出すのと同じ native 実行ファイルを
 作り、それを実行します。2 つのコマンドの違いは「実行するかどうか」だけです。
 lowering は 1 本しかないため、同じプログラムが `run` と `build` で違う挙動を示すことは
-原理的に起きません(ADR-0083)。プログラムが「どう動くべきか」を定義するのは
+原理的に起きません。プログラムが「どう動くべきか」を定義するのは
 プログラム自身の末尾に書かれた case であり、特定の実行経路ではありません。
 
 | 機能 | 例の数 | check | run | llvm | wasm | wasm-opt | wasm-bin | browser |
@@ -121,19 +121,18 @@ Windows では `kizu` 自身がそのまま動き、既定で Windows 向けに 
 
 | 機能 | 状態 |
 | --- | --- |
-| 並列処理のための thread | **進行中。** `std::thread::Pool` は slice を重ならない塊に切って 1 つの関数を複数の thread で同時に走らせ、全部の塊が終わってから返ります(native のみ)。`each_lane` は行列の列のように一定間隔で並ぶ要素の列に対して同じことをします。worker は呼び出しが名指した set で失敗でき、最初の失敗が呼び出しの戻り値になります(ADR-0025)。coroutine(`std::coro`)と evented な `Io` は 1 thread 上の並行性であって並列性ではありません(ADR-0145、ADR-0146) |
+| 並列処理のための thread | **進行中。** `std::thread::Pool` は slice を重ならない塊に切って 1 つの関数を複数の thread で同時に走らせ、全部の塊が終わってから返ります(native のみ)。`each_lane` は行列の列のように一定間隔で並ぶ要素の列に対して同じことをします。worker は呼び出しが名指した set で失敗でき、最初の失敗が呼び出しの戻り値になります。coroutine(`std::coro`)と evented な `Io` は 1 thread 上の並行性であって並列性ではありません |
 | GPU kernel | **進行中。** `export "gpu" fn` の本体を `build --target metal` で Metal Shading Language に、`build --target spirv -o out.spv` で Vulkan 向けの SPIR-V module にします。conformance の実行環境に GPU が無いので、`gpu_export.kizu` は check だけで実行しません |
 | 現在の subset を超える wasm backend | **進行中。** Wasm の経路で動かない example は、すべて target が持たない capability として拒否されます |
 | raw pointer の実行時操作 | **check のみ。** `pointer_policy.kizu` と `raw_pointer_deref.kizu` は検査だけで実行しません |
 | type alias | **未着手** |
 | HTTP の middleware | **未着手。** middleware は closure 待ちです。`std::http` は平文 TCP か TLS 1.3(`std::tls`)の上で HTTP/1 の server と client を持ちます |
-| full generics | **その形では予定しません。** 明示的な static 引数のみ。推論・bounds・HKT は入れません(ADR-0066) |
-| `async fn` / `await` 構文 | **採用しません。** function coloring はこの言語が払わないコストです(ADR-0025) |
-| Rust の `Send` / `Sync` trait | **採用しません。** 代わりに置くものは、ユーザーが読める 1 つの規則であって、手書きの whitelist ではありません(ADR-0025) |
+| full generics | **その形では予定しません。** 明示的な static 引数のみ。推論・bounds・HKT は入れません |
+| `async fn` / `await` 構文 | **採用しません。** function coloring はこの言語が払わないコストです |
+| Rust の `Send` / `Sync` trait | **採用しません。** 代わりに置くものは、ユーザーが読める 1 つの規則であって、手書きの whitelist ではありません |
 
 ここで「実装済み」と呼ぶのは、conformance case がそれを実行して出力を検査している
-場合だけです。checker だけが強制する規則は機能に数えません。それが ADR-0025 の
-記録する失敗そのものだからです。
+場合だけです。checker だけが強制する規則は機能に数えません。
 
 ## 例
 
@@ -164,8 +163,6 @@ kizu run examples/std_io_process.kizu -- input.kizu   # process 引数は -- 以
 `examples/negative/` は言語が拒否する規則を 1 つずつ持ちます。
 すべての例は末尾に自分の case -- どのコマンドで実行し、何を出力すべきか -- を
 書いており、conformance test はそれを読みます。
-safe code のメモリ安全契約は
-[docs/memory-safety.md](docs/memory-safety.md) に明文化しています。
 
 ## binary の入手
 
@@ -175,7 +172,7 @@ prebuilt binary は [GitHub Releases](https://github.com/kizu-lang/kizu/releases
 Windows 版は `bin/kizu.exe` を含む zip です。link に llvm-mingw を使うので、上のとおり
 PATH に入れてください。
 
-開発中は pin した種のリリース([docs/bootstrap.md](docs/bootstrap.md))で
+開発中は pin した種のリリース(`scripts/seed.txt`)で
 `compiler/` を `target/seed/stage1/bin/kizu` に build し、`just` の recipe はそれを
 使います。compiler の変更が recipe 1 回で試せます。
 
@@ -218,7 +215,7 @@ just wasi-smoke      # wasm の例を wasmtime で走らせる
 - `kizu build --target wasm32-wasi [--opt] [--emit wat] [-o <out>] <file|package>` は WASI-compatible WAT を stdout、または指定した `-o` へ出力します。
 - `kizu build --target wasm32-wasi [--opt] --emit wasm -o <out> <file|package>` は binary `.wasm` を書きます。binary を暗黙に terminal へ出力することはありません。
 - `kizu build --target wasm32-browser [--opt] [--emit wat] [-o <out>] <file|package>` は inspection 用の browser-hosted WAT を出力します。
-- `kizu build --target wasm32-browser [--opt] --emit wasm -o <out> <file|package>` は browser 用 `.wasm` を書きます。host adapter と capability 境界は [`docs/wasm-browser.md`](docs/wasm-browser.md) にあります。
+- `kizu build --target wasm32-browser [--opt] --emit wasm -o <out> <file|package>` は browser 用 `.wasm` を書きます。
 - `kizu build --target native [--backend direct|llvm] [--opt] [--triple <triple>] [--cpu <cpu>] [--abi <abi>] [--libc on|off] [--runtime hosted|freestanding] [--emit exe|obj|llvm] [--linker clang] [-o <out>] <file>` は native executable を link します。 `--backend` はコード生成器を選びます。darwin-arm64・linux-amd64・windows-amd64 の既定は `direct`(compiler が machine code をエンコードして object を自分で書く)、他の target は `llvm` です。`kizu run` と `kizu test` も `--backend` を受けます。
 - `kizu cache status` / `kizu cache prune` はローカルビルドキャッシュの表示と削除です。
 - `kizu import-c-header <file>` は対応する C prototype を Kizu extern に変換します。
@@ -226,19 +223,9 @@ just wasi-smoke      # wasm の例を wasmtime で走らせる
 
 ## プロジェクト文書
 
-- [docs/architecture.md](docs/architecture.md): アーキテクチャ概観(オンボーディングはここから)
-- [docs/wasm-browser.md](docs/wasm-browser.md): browser WebAssembly の ABI、adapter、target capability
-- [SPEC.md](SPEC.md): 言語仕様
 - [docs/principles.md](docs/principles.md): すべての判断を照らす設計原理
-- [docs/style.md](docs/style.md): std が API の形をどう選ぶか
-- [docs/memory-safety.md](docs/memory-safety.md): safe Kizu memory-safety contract
-- [docs/std/](docs/std/README.md): 標準ライブラリ API リファレンス
-- [docs/tutorial/](docs/tutorial/README.md): 1 つのものを最初から最後まで作る
-- [examples](examples/README.md): 機能ごとの読めるプログラムと、`negative/` の拒否例
-- [docs/adr](docs/adr): Architecture Decision Record
-- [docs/language-gaps.md](docs/language-gaps.md): まだ書けなかったものと、その場で使った局所解
-- [docs/stdlib.md](docs/stdlib.md): trusted builtin の境界と、std API を足すときの規則
-- [docs/perf.md](docs/perf.md): build/cache performance policy
+- [examples/](examples/README.md): 機能ごとの読めるプログラムと、`negative/` の拒否例
+- [spec/](spec/README.md): 機械検証される形式仕様(Lean / TLA+ / Quint)
 - [CONTRIBUTING.md](CONTRIBUTING.md): コントリビューション方針(PR・issue は保守者のみ、質問や不具合報告は [GitHub Discussions](https://github.com/kizu-lang/kizu/discussions) へ)
 - [AGENTS.md](AGENTS.md): contributor / coding agent 向けの実装ルール
 

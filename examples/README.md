@@ -44,5 +44,3 @@ just kizu-check examples/modules/compiler_phases
 
 Which backends accept which examples, grouped by feature tag, is summarized in
 the top-level [README](../README.md).
-The memory-safety invariants and the examples that stand for each are in
-[docs/memory-safety.md](../docs/memory-safety.md).

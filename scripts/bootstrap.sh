@@ -6,7 +6,7 @@
 #
 # The full form, which CI runs on every platform:
 #   1. the seed checks and tests compiler/, which keeps compiler/ inside what
-#      the seed can build (docs/bootstrap.md);
+#      the seed can build;
 #   2. the seed builds stage1, and stage1 checks and tests compiler/, builds
 #      the test harness, and checks the sources the tree derives from it
 #      (scripts/check-sources.sh);
