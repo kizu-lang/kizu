@@ -8,13 +8,13 @@ Kizu はメモリ安全で隠れた制御フローを嫌い、人間がレビュ
 CLI は `run` / `check` / `test` / `parse` が中核で、`build` / `ir` / `fmt` / `lint` / `init` /
 `cache` がその周りにあります。
 
-言語の正しさは 2 つが持ちます。`examples/` は読んで分かるプログラムと、その出力。
+言語の正しさは実装とテストが持ちます。コンパイラ本体(`compiler/`)、標準ライブラリ
+(`lib/kizu/std/`)、`examples/`、`tests/behavior/`、`kizu lint`、`docs/principles.md` が
+唯一の正本(Single Source of Truth)です。`examples/` は読んで分かるプログラムとその出力、
 `tests/behavior/` は振る舞いの assert を 1 package にまとめたもので、link も実行も
 1 回で済みます。どちらも自分が何を約束するかを**ファイル末尾のコメントブロック**に
 書き、conformance test が木を歩いてそれを読みます。書式は
 `compiler/tests/harness/src/conformance/conformance.kizu` の冒頭にあります。
-
-リポジトリ全体の構造とデータフローは `docs/architecture.md` を先に読んでください。
 
 設計判断は `docs/principles.md` の原理に照らします。そこで答えが出る判断は
 ユーザーに聞かずに進め、答えが出ない判断だけをユーザーに委ねます。
@@ -24,19 +24,13 @@ CLI は `run` / `check` / `test` / `parse` が中核で、`build` / `ir` / `fmt`
 ## 実装ルール
 
 - シンプルな設計でコンパイラのビルド時間をgoレベルに高速化できる設計とする
-- `SPEC.md` と矛盾する構文や機能を勝手に追加しない。
-- ユーザー判断で仕様判断を変える場合だけ `SPEC.md` または `docs/adr/` を更新する。
-- `SPEC.md` には今の言語の定義だけを書く。延期・取り下げ・却下した案は
-  adr に書き、SPEC に「〜は延期します」の類を残さない。
-- adrを気軽に追加するな。adrの追加を考える前に、commit message で済む話かどうかを検討する。追加する場合も短く保つ。理想は50行以内。
-- std の API は `docs/std/` に書く。SPEC が std について持つのは compiler が
-  知っている契約だけ —— capability としての `Allocator`、storage 型に対する
-  borrow / ownership の検査規則、`test` 宣言。境界は「利用者が自分で同じものを
-  書けるか」で決まる。`std::json` は書けるので `docs/std/`、`Array.at` が
-  capture 条件でしか消費できないのは書けないので SPEC。
+- 既存の構文・型規則・所有権規則と矛盾する機能を勝手に追加しない。仕様や設計意図の
+  正本は `docs/principles.md`、コンパイラ実装、`lib/kizu/std/` の型と `///` doc comment、
+  `examples/`、`tests/behavior/` とし、実装と重複する散文ドキュメント(仕様書・ADR・API 文書)を
+  新設しない。変更の理由や背景は commit message に書く。
 - shipping する binary は `compiler/` から build した Kizu compiler です。それを
   build する経路は `scripts/seed.txt` に pin した前リリース(種)から始まる 1 本
-  だけです(`docs/bootstrap.md`)。種が `compiler/` を build して stage1 を作り、
+  だけです。種が `compiler/` を build して stage1 を作り、
   stage1 が check / test を回す。`compiler/` の check / test / build は
   `just selfhost`(= `scripts/bootstrap.sh`)から回す。`kizu version` が名乗る行は
   commit ごとに変わるので checked-in にできず、`scripts/gen-selfhost-version.sh` が
@@ -47,7 +41,8 @@ CLI は `run` / `check` / `test` / `parse` が中核で、`build` / `ir` / `fmt`
   stage2 の self-rebuild、`scripts/check-sources.sh`)で完了とする。
 - `compiler/` は `scripts/seed.txt` に pin した前リリース(種)が、その std ごと
   build できる範囲に保つ。種の知らない言語機能や std API を `compiler/` で使う
-  変更は 2 リリースがかりにする(`docs/bootstrap.md`)。確認は `just selfhost`。
+  変更は 2 リリースがかりにする(1 回目のリリースでコンパイラに教え、種を更新した
+  次のリリースで `compiler/` から使う)。確認は `just selfhost`。
 
 ## コメント
 
@@ -56,37 +51,11 @@ CLI は `run` / `check` / `test` / `parse` が中核で、`build` / `ir` / `fmt`
 なぜそう書いたかの理由・背景は commit message に書きます。
 
 - 言語公式の `kizu lint` がコメント規約を機械強制します。通常の `//` コメント(`// SAFETY:` や行末コメントを含む)はすべて禁止し、許可するのは `internal` ではない module の外部公開インターフェース(`pub` 宣言、`export "<abi>" fn`、公開型の公開メンバー、公開型を receiver とする method)の直前に空行なしで付いた `///` doc comment ブロックだけです。
-- コンパイラは `unsafe` 文の `// SAFETY:` や `unsafe fn` / `unsafe struct` の `///` を必須にしません(ADR-0089 §5)。ただし `scripts/seed.txt` に pin した種が旧リリースの間は、`compiler/src` 内の既存の `// SAFETY:` と `unsafe` 向け `///` を種更新後の次段階で削除します。
+- コンパイラは `unsafe` 文の `// SAFETY:` や `unsafe fn` / `unsafe struct` の `///` を必須にしません。ただし `scripts/seed.txt` に pin した種が旧リリースの間は、`compiler/src` 内の既存の `// SAFETY:` と `unsafe` 向け `///` を種更新後の次段階で削除します。
 - `examples/` や `tests/` の末尾ブロック、corpus の期待値のように機械が読む
   コメント形の行はコメントではなくテストデータなので、この規則の外です。
 - pre-commit hook `no-code-comments`(`scripts/comment-lint/check.py`、検査は
   同じ場所の `test.py`)は、種の更新と `lib/kizu/std/src` の既存 `//` から `///` への移行が終わるまで暫定的に残しています。移行が完了したら `kizu lint` へ置き換えます。
-
-## ADR
-
-ADR が持つのは **なぜそうしたか** と **却下した案とその理由** の 2 つです。
-現在の仕様は `SPEC.md`、進行中の作業は GitHub Issues が持ちます。
-
-- **決定が変わったら、その ADR を書き換える。** 前の判断を訂正・置換する
-  だけの ADR を新しく作らない。読む人が最新の判断に辿り着くまでに 3 本読む
-  状態を作らない。変更の経緯は git log が持つ。
-- **別の問いなら別の ADR にする。** 前の判断に触れることと、前の判断の
-  訂正であることは違う。触れるだけなら独立した ADR を立て、`SPEC.md` から
-  見た関係を 1 行で書く。
-- **消す。** 次のものは残さない。
-  - 消した subsystem や、もう存在しない仕組みの記述
-  - 後続の判断に完全に置き換わったもの
-  - 規則を別の場所が持っているもの(`SPEC.md`、`docs/` の他の文書、
-    pre-commit hook、テストや lint)
-  - 進行管理・phase 計画・release gate の類
-- **却下案とその理由があるものは残す。** ADR の主な価値は同じ検討を 2 回
-  しないことなので、決定だけなら SPEC にあっても却下表は ADR にしか無い。
-- **消すときは参照も畳む。** 参照していた側から番号を消し、必要な内容は
-  その場に直接書く。dangling な `ADR-00xx` を残さない。
-- **番号は欠番でよい。** 消した番号は再利用しない。
-
-`docs/adr/README.md` の一覧は、`docs/adr/*.md` の 1 行目から生成できる形に
-保ちます。
 
 ## 禁止事項
 

@@ -8,7 +8,6 @@ primitives themselves are provided by the compiler; the module exists so that
 std can name them and nothing else can. Public std modules wrap them. Pure
 library behavior such as `std::sort::strings` remains ordinary Kizu source;
 only its owner-safe Array slot exchange crosses the trusted primitive boundary.
-What stays a primitive is listed in [docs/stdlib.md](../../../docs/stdlib.md).
 
 Where the compiler reads this tree from is decided by `KIZU_LIB_DIR`, the
 `--lib-dir` flag, or the `lib/kizu` directory beside the running binary. The

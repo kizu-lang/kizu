@@ -107,7 +107,7 @@ wasi-smoke:
 selfhost:
     scripts/bootstrap.sh
 
-# Run every conformance case in examples/, tests/behavior and docs/tutorial with
+# Run every conformance case in examples/ and tests/behavior with
 # stage1. `just selfhost` runs only the behavior part of them.
 conformance: stage1
     {{kizu}} run compiler/tests/harness -- conformance {{kizu}}
