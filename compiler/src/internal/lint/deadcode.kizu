@@ -1,0 +1,1942 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::manifest;
+import compiler::internal::project;
+import compiler::internal::source;
+import compiler::internal::stdmethod;
+import compiler::internal::stdtarget;
+import compiler::internal::typ;
+import compiler::internal::types;
+import std::array;
+import std::fs;
+import std::map;
+import std::mem;
+import std::path;
+import std::string;
+
+enum DeclKind {
+    Function,
+    Method,
+    Struct,
+    Enum,
+    Union,
+    ErrorSet,
+    Contract,
+    Const,
+    Test,
+    Impl,
+}
+
+struct TopDecl {
+    kind: DeclKind,
+    name: string::String,
+    qualified: string::String,
+    receiver_type: string::String,
+    method_name: string::String,
+    module_path: string::String,
+    selection: ast::Span,
+    extent: ast::Span,
+    source_index: i64,
+    public: bool,
+    root: bool,
+    fixable: bool,
+    is_deinit: bool,
+    is_generic: bool,
+    decl_index: i64,
+    impl_target: string::String,
+    impl_contract: string::String,
+}
+
+struct FileDeclRange {
+    start_key: i64,
+    end_key: i64,
+    decl_id: i64,
+}
+
+struct ContractMethodEdge {
+    contract_id: i64,
+    external_contract: bool,
+    receiver_type_id: i64,
+    method_id: i64,
+}
+
+struct FixRemoval {
+    file: string::String,
+    extent: ast::Span,
+}
+
+struct DeadCodeReport {
+    diagnostics: array::Array<diagnostic::Diagnostic>,
+    removals: array::Array<FixRemoval>,
+}
+
+struct DeadCodeAnalyzer {
+    allocator: Allocator,
+    decls: array::Array<TopDecl>,
+    by_qualified: map::Map<[]u8, i64>,
+    by_selection: map::Map<i64, map::Map<i64, i64>>,
+    file_ranges: map::Map<i64, array::Array<FileDeclRange>>,
+    methods_by_short: map::Map<[]u8, array::Array<i64>>,
+    deinit_by_type: map::Map<[]u8, i64>,
+    public_types: map::Map<[]u8, bool>,
+    adj: array::Array<array::Array<i64>>,
+    contract_edges: array::Array<ContractMethodEdge>,
+    reachable: array::Array<bool>,
+}
+
+fn new_dead_code_analyzer(allocator: Allocator) -> DeadCodeAnalyzer {
+    return DeadCodeAnalyzer {
+        allocator: allocator,
+        decls: array::new<TopDecl>(allocator),
+        by_qualified: map::new<[]u8, i64>(allocator),
+        by_selection: map::new<i64, map::Map<i64, i64>>(allocator),
+        file_ranges: map::new<i64, array::Array<FileDeclRange>>(allocator),
+        methods_by_short: map::new<[]u8, array::Array<i64>>(allocator),
+        deinit_by_type: map::new<[]u8, i64>(allocator),
+        public_types: map::new<[]u8, bool>(allocator),
+        adj: array::new<array::Array<i64>>(allocator),
+        contract_edges: array::new<ContractMethodEdge>(allocator),
+        reachable: array::new<bool>(allocator)
+    };
+}
+
+fn position_key(pos: ast::Position) -> i64 {
+    return pos.line * 2147483648 + pos.column;
+}
+
+fn is_std_qualified(name: []u8) -> bool {
+    return mem::equal_bytes(name, "std") or mem::starts_with(name, "std::");
+}
+
+fn short_decl_name(qualified: []u8) -> []u8 {
+    let length = mem::len(qualified);
+    var index = length;
+    while index >= 2 {
+        if qualified[index - 2] == cast<u8>(58) and qualified[index - 1] == cast<u8>(58) {
+            return qualified[index..length];
+        }
+        index = index - 1;
+    }
+    return qualified;
+}
+
+fn is_main_entry(qualified: []u8, package_name: []u8) -> bool {
+    if mem::equal_bytes(qualified, "main") {
+        return true;
+    }
+    let pkg_len = mem::len(package_name);
+    if pkg_len == 0 {
+        return false;
+    }
+    if mem::len(qualified) != pkg_len + 6 {
+        return false;
+    }
+    return mem::equal_bytes(qualified[0..pkg_len], package_name) and
+        mem::equal_bytes(qualified[pkg_len..pkg_len + 6], "::main");
+}
+
+fn decl_has_static_params(signature: &ast::FunctionSignature) -> bool {
+    return signature.static_params.len() > 0;
+}
+
+fn analyze_package_dead_code(
+    io: Io,
+    allocator: Allocator,
+    lib_dir: []u8,
+    pkg_root: []u8,
+    requested_sources: &map::Map<[]u8, source::SourceId>,
+    collect_diagnostics: bool
+) -> !DeadCodeReport {
+    var report = DeadCodeReport {
+        diagnostics: array::new<diagnostic::Diagnostic>(allocator),
+        removals: array::new<FixRemoval>(allocator)
+    };
+    errdefer report.deinit(allocator);
+    let manifest_path = try path::join(allocator, pkg_root, "kizu.toml");
+    defer manifest_path.deinit(allocator);
+    let manifest_bytes = manifest_path.as_bytes();
+    let manifest_text = fs::read_file(io, allocator, manifest_bytes, mem::Limit::Unlimited) catch
+        return move report;
+    defer manifest_text.deinit(allocator);
+    let manifest_text_bytes = manifest_text.as_bytes();
+    let parsed_manifest = try manifest::parse_std_manifest(allocator, manifest_text_bytes);
+    match parsed_manifest {
+        Error(message) => {
+            message.deinit(allocator);
+            return move report;
+        },
+        Manifest(found) => {
+            defer found.deinit(allocator);
+            let pkg_name = found.package_name.as_bytes();
+            let is_std_pkg = mem::equal_bytes(pkg_name, "std");
+            var tree = ast::new(allocator);
+            defer tree.deinit(allocator);
+            tree.locate_names = true;
+            var loader = try project::new_loader(io, allocator, lib_dir);
+            defer loader.deinit(allocator);
+            let resolved = try project::resolve_modules(
+                io, allocator, pkg_root, &found, &var loader.inputs
+            );
+            match resolved {
+                Error(failed) => {
+                    failed.deinit(allocator);
+                    return move report;
+                },
+                Graph(graph) => {
+                    defer graph.deinit(allocator);
+                    let loaded = if is_std_pkg {
+                        try loader.load_std_package(&var tree, &graph, true)
+                    } else {
+                        try loader.load_test_program(&var tree, &graph)
+                    };
+                    match loaded {
+                        Error(failed) => {
+                            failed.deinit(allocator);
+                            return move report;
+                        },
+                        Program(program) => {
+                            defer program.deinit(allocator);
+                            try analyze_loaded_program(
+                                io,
+                                allocator,
+                                &var tree,
+                                &program,
+                                &loader.sources,
+                                pkg_name,
+                                true,
+                                is_std_pkg,
+                                requested_sources,
+                                collect_diagnostics,
+                                &var report
+                            );
+                            return move report;
+                        },
+                    }
+                },
+            }
+        },
+    }
+}
+
+fn analyze_standalone_dead_code(
+    io: Io,
+    allocator: Allocator,
+    lib_dir: []u8,
+    file: []u8,
+    std_cache: &array::Array<project::StdCache>,
+    requested_sources: &map::Map<[]u8, source::SourceId>,
+    collect_diagnostics: bool
+) -> !DeadCodeReport {
+    var report = DeadCodeReport {
+        diagnostics: array::new<diagnostic::Diagnostic>(allocator),
+        removals: array::new<FixRemoval>(allocator)
+    };
+    errdefer report.deinit(allocator);
+    let text = fs::read_file(io, allocator, file, mem::Limit::Unlimited) catch
+        return move report;
+    defer text.deinit(allocator);
+    let text_bytes = text.as_bytes();
+    var tree = ast::new(allocator);
+    defer tree.deinit(allocator);
+    tree.locate_names = true;
+    var loader = try project::new_loader(io, allocator, lib_dir);
+    defer loader.deinit(allocator);
+    let loaded = if std_cache.at(0) |cached| {
+        try loader.load_source_cached(&var tree, file, text_bytes, cached)
+    } else {
+        try loader.load_source(&var tree, file, text_bytes)
+    };
+    match loaded {
+        Error(failed) => {
+            failed.deinit(allocator);
+            return move report;
+        },
+        Program(program) => {
+            defer program.deinit(allocator);
+            try analyze_loaded_program(
+                io,
+                allocator,
+                &var tree,
+                &program,
+                &loader.sources,
+                "",
+                false,
+                false,
+                requested_sources,
+                collect_diagnostics,
+                &var report
+            );
+            return move report;
+        },
+    }
+}
+
+fn program_has_gpu_kernel(tree: &ast::Ast, program: &ast::Program) -> bool {
+    var index = 0;
+    while program.declarations.get(index) |declaration| {
+        index = index + 1;
+        match tree.declarations.at(declaration.node) {
+            Function(value) => {
+                let abi = tree.texts.at(value.signature.export_abi.node);
+                let abi_bytes = abi.as_bytes();
+                if mem::equal_bytes(abi_bytes, "gpu") {
+                    return true;
+                }
+            },
+            _ => {},
+        }
+    }
+    return false;
+}
+
+fn analyze_loaded_program(
+    io: Io,
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    program: &ast::Program,
+    loader_sources: &source::SourceMap,
+    package_name: []u8,
+    is_package: bool,
+    is_std_pkg: bool,
+    requested_sources: &map::Map<[]u8, source::SourceId>,
+    collect_diagnostics: bool,
+    report: &var DeadCodeReport
+) -> !void {
+    let target = stdtarget::host();
+    var checked = try types::check_for_lint(allocator, tree, program, target);
+    defer checked.deinit(allocator);
+    let has_gpu = program_has_gpu_kernel(tree, program);
+    var gpu_checked = array::new<types::IndexedCheck>(allocator);
+    defer gpu_checked.deinit(allocator);
+    if has_gpu {
+        let gpu_run = try types::check_for_lint(allocator, tree, program, stdtarget::Target::GpuMetal);
+        try gpu_checked.append(allocator, move gpu_run);
+    }
+
+    var source_to_caller = map::new<i64, source::SourceId>(allocator);
+    defer source_to_caller.deinit(allocator);
+    var source_to_path = map::new<i64, string::String>(allocator);
+    defer source_to_path.deinit(allocator);
+    for 0..loader_sources.len() |sid| {
+        if loader_sources.at(source::SourceId { index: sid }) |entry| {
+            let entry_path = entry.path.as_bytes();
+            let canon = try canonical_path(io, allocator, entry_path);
+            defer canon.deinit(allocator);
+            let canon_bytes = canon.as_bytes();
+            if requested_sources.get(canon_bytes) |caller_id| {
+                try source_to_caller.insert(allocator, sid, caller_id);
+                let path_copy = try string::from_bytes(allocator, entry_path);
+                errdefer path_copy.deinit(allocator);
+                try source_to_path.insert(allocator, sid, move path_copy);
+            }
+        }
+    }
+
+    var analyzer = new_dead_code_analyzer(allocator);
+    defer analyzer.deinit(allocator);
+    try analyzer.collect_declarations(tree, program, package_name, is_package, is_std_pkg);
+    try analyzer.index_member_symbols(&checked.index);
+    try analyzer.add_semantic_edges(&checked.index);
+    if gpu_checked.at(0) |gpu_run| {
+        try analyzer.add_semantic_edges(&gpu_run.index);
+    }
+    try analyzer.add_named_reference_edges(tree);
+    try analyzer.add_ast_edges(tree, program);
+    try analyzer.compute_reachability();
+
+    var decl_id = 0;
+    while analyzer.decls.at(decl_id) |decl| {
+        let is_alive = analyzer.reachable.get(decl_id) orelse false;
+        if !is_alive and decl.fixable {
+            if source_to_caller.get(decl.source_index) |caller_id| {
+                if source_to_path.at(decl.source_index) |file_path| {
+                    let path_bytes = file_path.as_bytes();
+                    let removal_path = try string::from_bytes(allocator, path_bytes);
+                    errdefer removal_path.deinit(allocator);
+                    try report.removals.append(allocator, FixRemoval {
+                        file: move removal_path,
+                        extent: decl.extent
+                    });
+                }
+                if collect_diagnostics and decl.kind != DeclKind::Impl {
+                    let remapped = remap_span(decl.selection, caller_id);
+                    let diag = try build_dead_decl_diagnostic(allocator, decl, remapped);
+                    errdefer diag.deinit(allocator);
+                    try report.diagnostics.append(allocator, move diag);
+                }
+            }
+        }
+        decl_id = decl_id + 1;
+    }
+
+    if collect_diagnostics {
+        try analyzer.check_unused_bindings(
+            tree,
+            program,
+            &checked.index,
+            &gpu_checked,
+            &source_to_caller,
+            &var report.diagnostics
+        );
+    }
+    return;
+}
+
+fn remap_span(span: ast::Span, target_source: source::SourceId) -> ast::Span {
+    return ast::Span {
+        source: target_source,
+        start: span.start,
+        end: span.end
+    };
+}
+
+fn (self: &var DeadCodeAnalyzer) collect_declarations(
+    tree: &ast::Ast,
+    program: &ast::Program,
+    package_name: []u8,
+    is_package: bool,
+    is_std_pkg: bool
+) -> !void {
+    let allocator = self.allocator;
+    var index = 0;
+    while program.declarations.get(index) |declaration| {
+        index = index + 1;
+        let extent = tree.declaration_span(declaration);
+        if extent.is_zero() {
+            continue;
+        }
+        match tree.declarations.at(declaration.node) {
+            Struct(value) => {
+                if value.public {
+                    let name = tree.texts.at(value.name.node);
+                    let bytes = name.as_bytes();
+                    try self.public_types.insert(allocator, bytes, true);
+                }
+            },
+            Enum(value) => {
+                if value.public {
+                    let name = tree.texts.at(value.name.node);
+                    let bytes = name.as_bytes();
+                    try self.public_types.insert(allocator, bytes, true);
+                }
+            },
+            Union(value) => {
+                if value.public {
+                    let name = tree.texts.at(value.name.node);
+                    let bytes = name.as_bytes();
+                    try self.public_types.insert(allocator, bytes, true);
+                }
+            },
+            ErrorSet(value) => {
+                if value.public {
+                    let name = tree.texts.at(value.name.node);
+                    let bytes = name.as_bytes();
+                    try self.public_types.insert(allocator, bytes, true);
+                }
+            },
+            Contract(value) => {
+                if value.public {
+                    let name = tree.texts.at(value.name.node);
+                    let bytes = name.as_bytes();
+                    try self.public_types.insert(allocator, bytes, true);
+                }
+            },
+            _ => {},
+        }
+    }
+
+    index = 0;
+    while program.declarations.get(index) |declaration| {
+        let decl_index = index;
+        index = index + 1;
+        let extent = tree.declaration_span(declaration);
+        if extent.is_zero() {
+            continue;
+        }
+        let source_id = extent.source orelse continue;
+        match tree.declarations.at(declaration.node) {
+            Function(value) => {
+                if value.derived {
+                    continue;
+                }
+                let q_text = tree.texts.at(value.signature.name.node);
+                let qualified = q_text.as_bytes();
+                if !is_std_pkg and (value.signature.std or is_std_qualified(qualified)) {
+                    continue;
+                }
+                let mod_text = tree.texts.at(value.module.node);
+                let mod_path = mod_text.as_bytes();
+                var selection = tree.text_span(value.signature.name);
+                if selection.is_zero() {
+                    selection = extent;
+                }
+                let export_text = tree.texts.at(value.signature.export_abi.node);
+                let extern_text = tree.texts.at(value.signature.extern_abi.node);
+                let has_export = export_text.len() > 0;
+                let has_extern = extern_text.len() > 0;
+                var kind = DeclKind::Function;
+                var receiver_type = string::new(allocator);
+                errdefer receiver_type.deinit(allocator);
+                var method_name = string::new(allocator);
+                errdefer method_name.deinit(allocator);
+                var display_name = string::new(allocator);
+                errdefer display_name.deinit(allocator);
+                var is_deinit = false;
+                var is_root = value.signature.public or has_export or has_extern;
+                if value.signature.receiver {
+                    kind = DeclKind::Method;
+                    if stdmethod::split_method_name(qualified) |parts| {
+                        try receiver_type.append_bytes(allocator, parts.receiver);
+                        try method_name.append_bytes(allocator, parts.method);
+                        let short_recv = short_decl_name(parts.receiver);
+                        try display_name.append_bytes(allocator, short_recv);
+                        try display_name.append_byte(allocator, cast<u8>(46));
+                        try display_name.append_bytes(allocator, parts.method);
+                        is_deinit = mem::equal_bytes(parts.method, "deinit");
+                        if !is_root and is_package and mem::len(mod_path) > 0 and
+                            !project::internal_module(mod_path).internal {
+                            if self.public_types.contains(parts.receiver) {
+                                is_root = true;
+                            } else if stdmethod::container_of(parts.receiver) |_| {
+                                is_root = true;
+                            }
+                        }
+                    } else {
+                        let short = short_decl_name(qualified);
+                        try display_name.append_bytes(allocator, short);
+                    }
+                } else {
+                    let short = short_decl_name(qualified);
+                    try display_name.append_bytes(allocator, short);
+                    if !is_root and is_main_entry(qualified, package_name) {
+                        is_root = true;
+                    }
+                }
+                let q_copy = try string::from_bytes(allocator, qualified);
+                errdefer q_copy.deinit(allocator);
+                let m_copy = try string::from_bytes(allocator, mod_path);
+                errdefer m_copy.deinit(allocator);
+                try self.add_top_decl(TopDecl {
+                    kind: kind,
+                    name: move display_name,
+                    qualified: move q_copy,
+                    receiver_type: move receiver_type,
+                    method_name: move method_name,
+                    module_path: move m_copy,
+                    selection: selection,
+                    extent: extent,
+                    source_index: source_id.index,
+                    public: value.signature.public,
+                    root: is_root,
+                    fixable: !is_root,
+                    is_deinit: is_deinit,
+                    is_generic: decl_has_static_params(&value.signature),
+                    decl_index: decl_index,
+                    impl_target: string::new(allocator),
+                    impl_contract: string::new(allocator)
+                });
+            },
+            Struct(value) => {
+                let q_text = tree.texts.at(value.name.node);
+                let qualified = q_text.as_bytes();
+                if !is_std_pkg and is_std_qualified(qualified) {
+                    continue;
+                }
+                let mod_text = tree.texts.at(value.module.node);
+                let mod_path = mod_text.as_bytes();
+                let extern_text = tree.texts.at(value.extern_abi.node);
+                let is_root = value.public or extern_text.len() > 0;
+                var selection = tree.text_span(value.name);
+                if selection.is_zero() {
+                    selection = extent;
+                }
+                try self.add_simple_type_decl(
+                    DeclKind::Struct, qualified, mod_path, selection, extent,
+                    source_id.index, value.public, is_root, decl_index
+                );
+            },
+            Enum(value) => {
+                let q_text = tree.texts.at(value.name.node);
+                let qualified = q_text.as_bytes();
+                if !is_std_pkg and is_std_qualified(qualified) {
+                    continue;
+                }
+                var selection = tree.text_span(value.name);
+                if selection.is_zero() {
+                    selection = extent;
+                }
+                try self.add_simple_type_decl(
+                    DeclKind::Enum, qualified, "", selection, extent,
+                    source_id.index, value.public, value.public, decl_index
+                );
+            },
+            Union(value) => {
+                let q_text = tree.texts.at(value.name.node);
+                let qualified = q_text.as_bytes();
+                if !is_std_pkg and is_std_qualified(qualified) {
+                    continue;
+                }
+                let mod_text = tree.texts.at(value.module.node);
+                let mod_path = mod_text.as_bytes();
+                var selection = tree.text_span(value.name);
+                if selection.is_zero() {
+                    selection = extent;
+                }
+                try self.add_simple_type_decl(
+                    DeclKind::Union, qualified, mod_path, selection, extent,
+                    source_id.index, value.public, value.public, decl_index
+                );
+            },
+            ErrorSet(value) => {
+                let q_text = tree.texts.at(value.name.node);
+                let qualified = q_text.as_bytes();
+                if !is_std_pkg and is_std_qualified(qualified) {
+                    continue;
+                }
+                var selection = tree.text_span(value.name);
+                if selection.is_zero() {
+                    selection = extent;
+                }
+                try self.add_simple_type_decl(
+                    DeclKind::ErrorSet, qualified, "", selection, extent,
+                    source_id.index, value.public, value.public, decl_index
+                );
+            },
+            Contract(value) => {
+                let q_text = tree.texts.at(value.name.node);
+                let qualified = q_text.as_bytes();
+                if !is_std_pkg and is_std_qualified(qualified) {
+                    continue;
+                }
+                var selection = tree.text_span(value.name);
+                if selection.is_zero() {
+                    selection = extent;
+                }
+                try self.add_simple_type_decl(
+                    DeclKind::Contract, qualified, "", selection, extent,
+                    source_id.index, value.public, value.public, decl_index
+                );
+            },
+            Const(value) => {
+                let q_text = tree.texts.at(value.name.node);
+                let qualified = q_text.as_bytes();
+                if !is_std_pkg and is_std_qualified(qualified) {
+                    continue;
+                }
+                var selection = tree.text_span(value.name);
+                if selection.is_zero() {
+                    selection = value.span;
+                }
+                if selection.is_zero() {
+                    selection = extent;
+                }
+                try self.add_simple_type_decl(
+                    DeclKind::Const, qualified, "", selection, extent,
+                    source_id.index, false, false, decl_index
+                );
+            },
+            Test(value) => {
+                let mod_text = tree.texts.at(value.module.node);
+                let mod_path = mod_text.as_bytes();
+                if !is_std_pkg and is_std_qualified(mod_path) {
+                    continue;
+                }
+                var selection = tree.text_span(value.name);
+                if selection.is_zero() {
+                    selection = extent;
+                }
+                let name_text = tree.texts.at(value.name.node);
+                let name_bytes = name_text.as_bytes();
+                let name_copy = try string::from_bytes(allocator, name_bytes);
+                errdefer name_copy.deinit(allocator);
+                let mod_copy = try string::from_bytes(allocator, mod_path);
+                errdefer mod_copy.deinit(allocator);
+                try self.add_top_decl(TopDecl {
+                    kind: DeclKind::Test,
+                    name: move name_copy,
+                    qualified: string::new(allocator),
+                    receiver_type: string::new(allocator),
+                    method_name: string::new(allocator),
+                    module_path: move mod_copy,
+                    selection: selection,
+                    extent: extent,
+                    source_index: source_id.index,
+                    public: false,
+                    root: true,
+                    fixable: false,
+                    is_deinit: false,
+                    is_generic: false,
+                    decl_index: decl_index,
+                    impl_target: string::new(allocator),
+                    impl_contract: string::new(allocator)
+                });
+            },
+            Impl(value) => {
+                let t_text = tree.texts.at(value.type_name.node);
+                let c_text = tree.texts.at(value.contract_name.node);
+                let t_bytes = t_text.as_bytes();
+                let c_bytes = c_text.as_bytes();
+                if !is_std_pkg and is_std_qualified(t_bytes) {
+                    continue;
+                }
+                let t_copy = try string::from_bytes(allocator, t_bytes);
+                errdefer t_copy.deinit(allocator);
+                let c_copy = try string::from_bytes(allocator, c_bytes);
+                errdefer c_copy.deinit(allocator);
+                try self.add_top_decl(TopDecl {
+                    kind: DeclKind::Impl,
+                    name: string::new(allocator),
+                    qualified: string::new(allocator),
+                    receiver_type: string::new(allocator),
+                    method_name: string::new(allocator),
+                    module_path: string::new(allocator),
+                    selection: extent,
+                    extent: extent,
+                    source_index: source_id.index,
+                    public: false,
+                    root: false,
+                    fixable: true,
+                    is_deinit: false,
+                    is_generic: false,
+                    decl_index: decl_index,
+                    impl_target: move t_copy,
+                    impl_contract: move c_copy
+                });
+            },
+            _ => {},
+        }
+    }
+
+    var file_idx = 0;
+    while self.file_ranges.key_at(file_idx) |sid| {
+        file_idx = file_idx + 1;
+        if self.file_ranges.at_mut(sid) |ranges| {
+            try sort_file_ranges(ranges);
+        }
+    }
+    return;
+}
+
+fn (self: &var DeadCodeAnalyzer) add_simple_type_decl(
+    kind: DeclKind,
+    qualified: []u8,
+    module_path: []u8,
+    selection: ast::Span,
+    extent: ast::Span,
+    source_index: i64,
+    public: bool,
+    root: bool,
+    decl_index: i64
+) -> !void {
+    let allocator = self.allocator;
+    let short = short_decl_name(qualified);
+    let display = try string::from_bytes(allocator, short);
+    errdefer display.deinit(allocator);
+    let q_copy = try string::from_bytes(allocator, qualified);
+    errdefer q_copy.deinit(allocator);
+    let m_copy = try string::from_bytes(allocator, module_path);
+    errdefer m_copy.deinit(allocator);
+    return self.add_top_decl(TopDecl {
+        kind: kind,
+        name: move display,
+        qualified: move q_copy,
+        receiver_type: string::new(allocator),
+        method_name: string::new(allocator),
+        module_path: move m_copy,
+        selection: selection,
+        extent: extent,
+        source_index: source_index,
+        public: public,
+        root: root,
+        fixable: !root,
+        is_deinit: false,
+        is_generic: false,
+        decl_index: decl_index,
+        impl_target: string::new(allocator),
+        impl_contract: string::new(allocator)
+    });
+}
+
+fn (self: &var DeadCodeAnalyzer) add_top_decl(decl: TopDecl) -> !void {
+    let allocator = self.allocator;
+    errdefer decl.deinit(allocator);
+    let id = self.decls.len();
+    let qualified = decl.qualified.as_bytes();
+    if mem::len(qualified) > 0 {
+        try self.by_qualified.insert(allocator, qualified, id);
+    }
+    if decl.kind == DeclKind::Method {
+        let short_m = decl.method_name.as_bytes();
+        if mem::len(short_m) > 0 {
+            if self.methods_by_short.at_mut(short_m) |bucket| {
+                try bucket.append(allocator, id);
+            } else {
+                var bucket = array::new<i64>(allocator);
+                errdefer bucket.deinit(allocator);
+                try bucket.append(allocator, id);
+                try self.methods_by_short.insert(allocator, short_m, move bucket);
+            }
+        }
+        if decl.is_deinit {
+            let recv = decl.receiver_type.as_bytes();
+            if mem::len(recv) > 0 {
+                try self.deinit_by_type.insert(allocator, recv, id);
+            }
+        }
+    }
+    try self.record_selection(decl.selection, id);
+    let range = FileDeclRange {
+        start_key: position_key(decl.extent.start),
+        end_key: position_key(decl.extent.end),
+        decl_id: id
+    };
+    if self.file_ranges.at_mut(decl.source_index) |ranges| {
+        try ranges.append(allocator, range);
+    } else {
+        var ranges = array::new<FileDeclRange>(allocator);
+        errdefer ranges.deinit(allocator);
+        try ranges.append(allocator, range);
+        try self.file_ranges.insert(allocator, decl.source_index, move ranges);
+    }
+    try self.adj.append(allocator, array::new<i64>(allocator));
+    try self.reachable.append(allocator, false);
+    return self.decls.append(allocator, move decl);
+}
+
+fn (self: &var DeadCodeAnalyzer) record_selection(span: ast::Span, decl_id: i64) -> !void {
+    let sid = span.source orelse return;
+    let key = position_key(span.start);
+    if self.by_selection.at_mut(sid.index) |table| {
+        return table.insert(self.allocator, key, decl_id);
+    }
+    var table = map::new<i64, i64>(self.allocator);
+    errdefer table.deinit(self.allocator);
+    try table.insert(self.allocator, key, decl_id);
+    return self.by_selection.insert(self.allocator, sid.index, move table);
+}
+
+fn (self: &DeadCodeAnalyzer) decl_at_selection(span: ast::Span) -> ?i64 {
+    let sid = span.source orelse return null;
+    if self.by_selection.at(sid.index) |table| {
+        return table.get(position_key(span.start));
+    }
+    return null;
+}
+
+fn (self: &DeadCodeAnalyzer) enclosing_decl(span: ast::Span) -> ?i64 {
+    let sid = span.source orelse return null;
+    let key = position_key(span.start);
+    if self.file_ranges.at(sid.index) |ranges| {
+        var low = 0;
+        var high = ranges.len();
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let entry = ranges.get_or_panic(mid);
+            if key < entry.start_key {
+                high = mid;
+            } else if key > entry.end_key {
+                low = mid + 1;
+            } else {
+                return entry.decl_id;
+            }
+        }
+    }
+    return null;
+}
+
+fn sort_file_ranges(ranges: &var array::Array<FileDeclRange>) -> !void {
+    var outer = 1;
+    while outer < ranges.len() {
+        var inner = outer;
+        while inner > 0 {
+            let left = ranges.get_or_panic(inner - 1);
+            let right = ranges.get_or_panic(inner);
+            if left.start_key <= right.start_key {
+                break;
+            }
+            try ranges.swap(inner - 1, inner);
+            inner = inner - 1;
+        }
+        outer = outer + 1;
+    }
+    return;
+}
+
+fn (self: &var DeadCodeAnalyzer) add_edge(from_id: i64, to_id: i64) -> !void {
+    if from_id == to_id or from_id < 0 or to_id < 0 {
+        return;
+    }
+    if self.adj.at_mut(from_id) |list| {
+        try list.append(self.allocator, to_id);
+    }
+    return;
+}
+
+fn (self: &var DeadCodeAnalyzer) index_member_symbols(index: &types::SemanticIndex) -> !void {
+    var at = 0;
+    while index.symbols.at(at) |symbol| {
+        at = at + 1;
+        if symbol.kind == types::SymbolKind::Field or
+            symbol.kind == types::SymbolKind::Variant or
+            (symbol.kind == types::SymbolKind::Method and !symbol.container.is_zero()) {
+            if self.decl_at_selection(symbol.container) |owner_id| {
+                try self.record_selection(symbol.selection, owner_id);
+            }
+        }
+    }
+    return;
+}
+
+fn (self: &var DeadCodeAnalyzer) add_semantic_edges(index: &types::SemanticIndex) -> !void {
+    var at = 0;
+    while index.reach_edges.get(at) |edge| {
+        at = at + 1;
+        if self.decl_at_selection(edge.caller) |from_id| {
+            if self.decl_at_selection(edge.target) |to_id| {
+                try self.add_edge(from_id, to_id);
+            }
+        }
+    }
+    at = 0;
+    while index.calls.at(at) |call| {
+        at = at + 1;
+        if self.decl_at_selection(call.declaration) |to_id| {
+            if self.decl_at_selection(call.caller) |from_id| {
+                try self.add_edge(from_id, to_id);
+            } else if self.enclosing_decl(call.callee) |from_id| {
+                try self.add_edge(from_id, to_id);
+            }
+        }
+    }
+    at = 0;
+    while index.references.get(at) |ref| {
+        at = at + 1;
+        if self.decl_at_selection(ref.declaration) |to_id| {
+            if self.enclosing_decl(ref.selection) |from_id| {
+                try self.add_edge(from_id, to_id);
+            }
+        }
+    }
+    at = 0;
+    while index.implementations.get(at) |impl_item| {
+        at = at + 1;
+        if self.decl_at_selection(impl_item.implementor) |impl_id| {
+            var recv_copy = string::new(self.allocator);
+            defer recv_copy.deinit(self.allocator);
+            var is_method = false;
+            if self.decls.at(impl_id) |decl| {
+                if decl.kind == DeclKind::Method {
+                    is_method = true;
+                    try recv_copy.append_string(self.allocator, &decl.receiver_type);
+                }
+            }
+            if is_method {
+                let recv = recv_copy.as_bytes();
+                if self.by_qualified.get(recv) |recv_id| {
+                    var contract_id = 0 - 1;
+                    var external_contract = true;
+                    if self.decl_at_selection(impl_item.contract_span) |cid| {
+                        contract_id = cid;
+                        external_contract = false;
+                    }
+                    try self.contract_edges.append(self.allocator, ContractMethodEdge {
+                        contract_id: contract_id,
+                        external_contract: external_contract,
+                        receiver_type_id: recv_id,
+                        method_id: impl_id
+                    });
+                }
+            }
+        }
+    }
+    return;
+}
+
+fn (self: &var DeadCodeAnalyzer) add_named_reference_edges(tree: &ast::Ast) -> !void {
+    var at = 0;
+    while tree.named_references.at(at) |ref| {
+        at = at + 1;
+        let target = ref.target.as_bytes();
+        if self.by_qualified.get(target) |to_id| {
+            if self.enclosing_decl(ref.selection) |from_id| {
+                try self.add_edge(from_id, to_id);
+            }
+        }
+    }
+    return;
+}
+
+fn (self: &var DeadCodeAnalyzer) add_ast_edges(tree: &ast::Ast, program: &ast::Program) -> !void {
+    var id = 0;
+    while id < self.decls.len() {
+        var decl_index = 0;
+        var is_generic = false;
+        var kind = DeclKind::Function;
+        var q_copy = string::new(self.allocator);
+        defer q_copy.deinit(self.allocator);
+        var impl_target = string::new(self.allocator);
+        defer impl_target.deinit(self.allocator);
+        var impl_contract = string::new(self.allocator);
+        defer impl_contract.deinit(self.allocator);
+        if self.decls.at(id) |decl| {
+            decl_index = decl.decl_index;
+            is_generic = decl.is_generic;
+            kind = decl.kind;
+            try q_copy.append_string(self.allocator, &decl.qualified);
+            try impl_target.append_string(self.allocator, &decl.impl_target);
+            try impl_contract.append_string(self.allocator, &decl.impl_contract);
+        }
+        if kind == DeclKind::Struct or kind == DeclKind::Union or kind == DeclKind::Enum {
+            let q_bytes = q_copy.as_bytes();
+            if self.deinit_by_type.get(q_bytes) |deinit_id| {
+                try self.add_edge(id, deinit_id);
+            }
+        }
+        if kind == DeclKind::Impl {
+            let target_bytes = impl_target.as_bytes();
+            let contract_bytes = impl_contract.as_bytes();
+            if self.by_qualified.get(target_bytes) |target_id| {
+                try self.add_edge(target_id, id);
+                if self.by_qualified.get(contract_bytes) |contract_id| {
+                    try self.add_edge(target_id, contract_id);
+                }
+            }
+            id = id + 1;
+            continue;
+        }
+        if program.declarations.get(decl_index) |declaration| {
+            try self.walk_declaration_edges(tree, id, declaration, is_generic);
+        }
+        id = id + 1;
+    }
+    return;
+}
+
+fn (self: &var DeadCodeAnalyzer) walk_declaration_edges(
+    tree: &ast::Ast,
+    from_id: i64,
+    declaration: ast::Declaration,
+    unchecked: bool
+) -> !void {
+    match tree.declarations.at(declaration.node) {
+        Function(value) => {
+            try self.walk_signature_edges(tree, from_id, &value.signature);
+            if value.body |body| {
+                try self.walk_block_edges(tree, from_id, body, unchecked);
+            }
+        },
+        Test(value) => {
+            if value.body |body| {
+                try self.walk_block_edges(tree, from_id, body, false);
+            }
+        },
+        Struct(value) => {
+            var index = 0;
+            while value.fields.at(index) |field| {
+                index = index + 1;
+                try self.walk_typ_edges(from_id, &tree.types, field.type_name);
+            }
+        },
+        Union(value) => {
+            var index = 0;
+            while value.variants.at(index) |variant| {
+                index = index + 1;
+                if variant.payload |payload| {
+                    try self.walk_typ_edges(from_id, &tree.types, payload);
+                }
+            }
+        },
+        ErrorSet(value) => {
+            var index = 0;
+            while value.combines.get(index) |item| {
+                index = index + 1;
+                let text = tree.texts.at(item.node);
+                let bytes = text.as_bytes();
+                if self.by_qualified.get(bytes) |to_id| {
+                    try self.add_edge(from_id, to_id);
+                }
+            }
+        },
+        Contract(value) => {
+            var index = 0;
+            while value.methods.at(index) |method| {
+                index = index + 1;
+                try self.walk_signature_edges(tree, from_id, &method.signature);
+            }
+        },
+        Const(value) => {
+            try self.walk_expr_edges(tree, from_id, value.value, false);
+        },
+        _ => {},
+    }
+    return;
+}
+
+fn (self: &var DeadCodeAnalyzer) walk_signature_edges(
+    tree: &ast::Ast,
+    from_id: i64,
+    signature: &ast::FunctionSignature
+) -> !void {
+    var index = 0;
+    while signature.static_params.at(index) |param| {
+        index = index + 1;
+        if param.type_name |t| {
+            try self.walk_typ_edges(from_id, &tree.types, t);
+        }
+    }
+    index = 0;
+    while signature.params.at(index) |param| {
+        index = index + 1;
+        try self.walk_typ_edges(from_id, &tree.types, param.type_name);
+    }
+    if signature.return_type |ret| {
+        try self.walk_typ_edges(from_id, &tree.types, ret);
+    }
+    return;
+}
+
+fn (self: &var DeadCodeAnalyzer) walk_typ_edges(
+    from_id: i64,
+    table: &typ::Table,
+    value: typ::Type
+) -> !void {
+    match typ::root_node(table, value) {
+        Name(node) => {
+            var joined = string::new(self.allocator);
+            defer joined.deinit(self.allocator);
+            var idx = 0;
+            while node.path.at(idx) |part| {
+                if idx > 0 {
+                    try joined.append_bytes(self.allocator, "::");
+                }
+                try joined.append_string(self.allocator, part);
+                idx = idx + 1;
+            }
+            let bytes = joined.as_bytes();
+            if self.by_qualified.get(bytes) |to_id| {
+                try self.add_edge(from_id, to_id);
+            }
+            idx = 0;
+            while node.args.get(idx) |arg| {
+                idx = idx + 1;
+                try self.walk_typ_edges(from_id, table, typ::child_type(value, arg));
+            }
+        },
+        Slice(node) => try self.walk_typ_edges(from_id, table, typ::child_type(value, node.elem)),
+        Buffer(node) => try self.walk_typ_edges(from_id, table, typ::child_type(value, node.elem)),
+        Borrow(node) => try self.walk_typ_edges(from_id, table, typ::child_type(value, node.elem)),
+        Optional(node) => try self.walk_typ_edges(from_id, table, typ::child_type(value, node.elem)),
+        Const(node) => try self.walk_typ_edges(from_id, table, typ::child_type(value, node.elem)),
+        ErrorUnion(node) => {
+            try self.walk_typ_edges(from_id, table, typ::child_type(value, node.ok));
+            if node.err |err| {
+                try self.walk_typ_edges(from_id, table, typ::child_type(value, err));
+            }
+        },
+        Func(node) => {
+            var idx = 0;
+            while node.params.get(idx) |param| {
+                idx = idx + 1;
+                try self.walk_typ_edges(from_id, table, typ::child_type(value, param));
+            }
+            try self.walk_typ_edges(from_id, table, typ::child_type(value, node.result));
+        },
+    }
+    return;
+}
+
+fn (self: &var DeadCodeAnalyzer) walk_type_spelling_edges(from_id: i64, spelling: []u8) -> !void {
+    if mem::len(spelling) == 0 {
+        return;
+    }
+    if self.by_qualified.get(spelling) |to_id| {
+        try self.add_edge(from_id, to_id);
+    }
+    var local_types = typ::new(self.allocator);
+    defer local_types.deinit(self.allocator);
+    let parsed = try local_types.parse(spelling);
+    return self.walk_typ_edges(from_id, &local_types, parsed);
+}
+
+fn (self: &var DeadCodeAnalyzer) walk_block_edges(
+    tree: &ast::Ast,
+    from_id: i64,
+    block: ast::Block,
+    unchecked: bool
+) -> !void {
+    match tree.statements.at(block.node) {
+        Block(value) => {
+            var index = 0;
+            while value.statements.get(index) |stmt| {
+                index = index + 1;
+                try self.walk_stmt_edges(tree, from_id, stmt, unchecked);
+            }
+        },
+        _ => {},
+    }
+    return;
+}
+
+fn (self: &var DeadCodeAnalyzer) walk_stmt_edges(
+    tree: &ast::Ast,
+    from_id: i64,
+    stmt: ast::Statement,
+    unchecked: bool
+) -> !void {
+    match tree.statements.at(stmt.node) {
+        Block(value) => {
+            var index = 0;
+            while value.statements.get(index) |inner| {
+                index = index + 1;
+                try self.walk_stmt_edges(tree, from_id, inner, unchecked);
+            }
+        },
+        Let(value) => {
+            if value.type_name |t| {
+                try self.walk_typ_edges(from_id, &tree.types, t);
+            }
+            try self.walk_expr_edges(tree, from_id, value.value, unchecked);
+        },
+        Assign(value) => {
+            try self.walk_expr_edges(tree, from_id, value.target, unchecked);
+            try self.walk_expr_edges(tree, from_id, value.value, unchecked);
+        },
+        Return(value) => {
+            if value.value |expr| {
+                try self.walk_expr_edges(tree, from_id, expr, unchecked);
+            }
+        },
+        Defer(value) => try self.walk_expr_edges(tree, from_id, value.expr, unchecked),
+        ErrDefer(value) => try self.walk_expr_edges(tree, from_id, value.expr, unchecked),
+        If(value) => {
+            try self.walk_expr_edges(tree, from_id, value.condition, unchecked);
+            try self.walk_block_edges(tree, from_id, value.consequence, unchecked);
+            if value.alternative |alt| {
+                try self.walk_block_edges(tree, from_id, alt, unchecked);
+            }
+        },
+        While(value) => {
+            try self.walk_expr_edges(tree, from_id, value.condition, unchecked);
+            try self.walk_block_edges(tree, from_id, value.body, unchecked);
+        },
+        For(value) => {
+            try self.walk_expr_edges(tree, from_id, value.start, unchecked);
+            try self.walk_expr_edges(tree, from_id, value.end, unchecked);
+            try self.walk_block_edges(tree, from_id, value.body, unchecked);
+        },
+        Match(value) => {
+            try self.walk_expr_edges(tree, from_id, value.value, unchecked);
+            let owner = tree.texts.at(value.meta_owner.node);
+            let owner_bytes = owner.as_bytes();
+            if mem::len(owner_bytes) > 0 {
+                try self.walk_type_spelling_edges(from_id, owner_bytes);
+            }
+            var index = 0;
+            while value.arms.at(index) |arm| {
+                index = index + 1;
+                let tag_set = tree.texts.at(arm.tag_set.node);
+                let tag_set_bytes = tag_set.as_bytes();
+                if mem::len(tag_set_bytes) > 0 {
+                    if self.by_qualified.get(tag_set_bytes) |to_id| {
+                        try self.add_edge(from_id, to_id);
+                    }
+                }
+                try self.walk_stmt_edges(tree, from_id, arm.body, unchecked);
+            }
+        },
+        ComptimeIf(value) => {
+            try self.walk_expr_edges(tree, from_id, value.condition, true);
+            try self.walk_block_edges(tree, from_id, value.consequence, true);
+            if value.alternative |alt| {
+                try self.walk_block_edges(tree, from_id, alt, true);
+            }
+        },
+        ComptimeFor(value) => {
+            match value.iterable {
+                List(expr) => try self.walk_expr_edges(tree, from_id, expr, true),
+                Range(range) => {
+                    try self.walk_expr_edges(tree, from_id, range.start, true);
+                    try self.walk_expr_edges(tree, from_id, range.end, true);
+                },
+            }
+            try self.walk_block_edges(tree, from_id, value.body, true);
+        },
+        ComptimeMatch(value) => {
+            try self.walk_expr_edges(tree, from_id, value.value, true);
+            try self.walk_block_edges(tree, from_id, value.body, true);
+        },
+        Expr(value) => try self.walk_expr_edges(tree, from_id, value.expr, unchecked),
+        _ => {},
+    }
+    return;
+}
+
+fn (self: &var DeadCodeAnalyzer) walk_expr_edges(
+    tree: &ast::Ast,
+    from_id: i64,
+    expr: ast::Expression,
+    unchecked: bool
+) -> !void {
+    match tree.expressions.at(expr.node) {
+        Ident(value) => {
+            let text = tree.texts.at(value.name.node);
+            let bytes = text.as_bytes();
+            if self.by_qualified.get(bytes) |to_id| {
+                try self.add_edge(from_id, to_id);
+            }
+        },
+        Type(value) => {
+            let text = tree.texts.at(value.type_name.node);
+            let bytes = text.as_bytes();
+            try self.walk_type_spelling_edges(from_id, bytes);
+        },
+        Comptime(value) => try self.walk_expr_edges(tree, from_id, value.expr, true),
+        Prefix(value) => try self.walk_expr_edges(tree, from_id, value.right, unchecked),
+        Binary(value) => {
+            try self.walk_expr_edges(tree, from_id, value.left, unchecked);
+            try self.walk_expr_edges(tree, from_id, value.right, unchecked);
+        },
+        Call(value) => {
+            try self.walk_expr_edges(tree, from_id, value.callee, unchecked);
+            for 0..value.args.len(tree) |at| {
+                try self.walk_expr_edges(tree, from_id, value.args.get_or_panic(tree, at), unchecked);
+            }
+        },
+        TypeApply(value) => {
+            try self.walk_expr_edges(tree, from_id, value.callee, unchecked);
+            let arg_text = tree.texts.at(value.type_arg.node);
+            let arg_bytes = arg_text.as_bytes();
+            if try typ::split_args_optional(self.allocator, arg_bytes) |parts| {
+                defer parts.deinit(self.allocator);
+                var idx = 0;
+                while parts.at(idx) |part| {
+                    idx = idx + 1;
+                    let part_bytes = part.as_bytes();
+                    try self.walk_type_spelling_edges(from_id, part_bytes);
+                }
+            }
+        },
+        Cast(value) => {
+            try self.walk_typ_edges(from_id, &tree.types, value.target_type);
+            try self.walk_expr_edges(tree, from_id, value.value, unchecked);
+        },
+        Try(value) => try self.walk_expr_edges(tree, from_id, value.value, unchecked),
+        Move(value) => try self.walk_expr_edges(tree, from_id, value.value, unchecked),
+        Unsafe(value) => try self.walk_expr_edges(tree, from_id, value.value, unchecked),
+        OrelseGuard(value) => {
+            try self.walk_expr_edges(tree, from_id, value.condition, unchecked);
+            try self.walk_stmt_edges(tree, from_id, value.exit, unchecked);
+        },
+        CatchGuard(value) => {
+            try self.walk_expr_edges(tree, from_id, value.condition, unchecked);
+            try self.walk_stmt_edges(tree, from_id, value.exit, unchecked);
+        },
+        Index(value) => {
+            try self.walk_expr_edges(tree, from_id, value.target, unchecked);
+            if value.index |idx| {
+                try self.walk_expr_edges(tree, from_id, idx, unchecked);
+            }
+            if value.start |s| {
+                try self.walk_expr_edges(tree, from_id, s, unchecked);
+            }
+            if value.end |e| {
+                try self.walk_expr_edges(tree, from_id, e, unchecked);
+            }
+        },
+        StructLiteral(value) => {
+            let text = tree.texts.at(value.type_name.node);
+            let bytes = text.as_bytes();
+            try self.walk_type_spelling_edges(from_id, bytes);
+            var idx = 0;
+            while value.fields.at(idx) |field| {
+                idx = idx + 1;
+                try self.walk_expr_edges(tree, from_id, field.value, unchecked);
+            }
+        },
+        BufferLiteral(value) => {
+            let text = tree.texts.at(value.elem.node);
+            let bytes = text.as_bytes();
+            try self.walk_type_spelling_edges(from_id, bytes);
+            var idx = 0;
+            while value.elements.get(idx) |elem| {
+                idx = idx + 1;
+                try self.walk_expr_edges(tree, from_id, elem, unchecked);
+            }
+        },
+        VectorLiteral(value) => {
+            let text = tree.texts.at(value.type_name.node);
+            let bytes = text.as_bytes();
+            try self.walk_type_spelling_edges(from_id, bytes);
+            var idx = 0;
+            while value.lanes.get(idx) |lane| {
+                idx = idx + 1;
+                try self.walk_expr_edges(tree, from_id, lane, unchecked);
+            }
+        },
+        Field(value) => {
+            try self.walk_expr_edges(tree, from_id, value.receiver, unchecked);
+            if !value.namespace and unchecked {
+                let name = tree.texts.at(value.name.node);
+                let bytes = name.as_bytes();
+                if self.methods_by_short.at(bytes) |bucket| {
+                    var copy = try bucket.clone(self.allocator);
+                    defer copy.deinit(self.allocator);
+                    var idx = 0;
+                    while copy.get(idx) |method_id| {
+                        idx = idx + 1;
+                        try self.add_edge(from_id, method_id);
+                    }
+                }
+            }
+        },
+        Deref(value) => try self.walk_expr_edges(tree, from_id, value.receiver, unchecked),
+        If(value) => {
+            try self.walk_expr_edges(tree, from_id, value.condition, unchecked);
+            try self.walk_block_edges(tree, from_id, value.consequence, unchecked);
+            if value.alternative |alt| {
+                try self.walk_block_edges(tree, from_id, alt, unchecked);
+            }
+        },
+        Match(value) => {
+            try self.walk_expr_edges(tree, from_id, value.value, unchecked);
+            var idx = 0;
+            while value.arms.at(idx) |arm| {
+                idx = idx + 1;
+                try self.walk_stmt_edges(tree, from_id, arm.body, unchecked);
+            }
+        },
+        _ => {},
+    }
+    return;
+}
+
+fn (self: &var DeadCodeAnalyzer) compute_reachability() -> !void {
+    var queue = array::new<i64>(self.allocator);
+    defer queue.deinit(self.allocator);
+    var id = 0;
+    while id < self.decls.len() {
+        var is_root = false;
+        if self.decls.at(id) |decl| {
+            is_root = decl.root;
+        }
+        if is_root {
+            let _ = try self.mark_reachable(id, &var queue);
+        }
+        id = id + 1;
+    }
+    var head = 0;
+    var progressed = true;
+    while progressed {
+        progressed = false;
+        while head < queue.len() {
+            let current = queue.get_or_panic(head);
+            head = head + 1;
+            var neighbor_count = 0;
+            if self.adj.at(current) |neighbors| {
+                neighbor_count = neighbors.len();
+            }
+            var idx = 0;
+            while idx < neighbor_count {
+                var next = 0 - 1;
+                if self.adj.at(current) |neighbors| {
+                    next = neighbors.get_or_panic(idx);
+                }
+                idx = idx + 1;
+                if try self.mark_reachable(next, &var queue) {
+                    progressed = true;
+                }
+            }
+        }
+        var ce_idx = 0;
+        while self.contract_edges.get(ce_idx) |edge| {
+            ce_idx = ce_idx + 1;
+            let recv_alive = self.reachable.get(edge.receiver_type_id) orelse false;
+            if !recv_alive {
+                continue;
+            }
+            let contract_alive = edge.external_contract or
+                (self.reachable.get(edge.contract_id) orelse false);
+            if contract_alive {
+                if try self.mark_reachable(edge.method_id, &var queue) {
+                    progressed = true;
+                }
+            }
+        }
+    }
+    return;
+}
+
+fn (self: &var DeadCodeAnalyzer) mark_reachable(id: i64, queue: &var array::Array<i64>) -> !bool {
+    if id < 0 or id >= self.reachable.len() {
+        return false;
+    }
+    let already = self.reachable.get_or_panic(id);
+    if already {
+        return false;
+    }
+    if self.reachable.at_mut(id) |slot| {
+        slot.* = true;
+    }
+    try queue.append(self.allocator, id);
+    return true;
+}
+
+fn build_dead_decl_diagnostic(
+    allocator: Allocator,
+    decl: &TopDecl,
+    span: ast::Span
+) -> !diagnostic::Diagnostic {
+    let kind_label = match decl.kind {
+        Function => "function",
+        Method => "method",
+        Struct => "struct",
+        Enum => "enum",
+        Union => "union",
+        ErrorSet => "error set",
+        Contract => "contract",
+        Const => "const",
+        _ => "declaration",
+    };
+    var message = try string::from_bytes(allocator, "unused private ");
+    defer message.deinit(allocator);
+    try message.append_bytes(allocator, kind_label);
+    try message.append_bytes(allocator, " `");
+    try message.append_string(allocator, &decl.name);
+    try message.append_byte(allocator, cast<u8>(96));
+    let message_bytes = message.as_bytes();
+    var diag = try diagnostic::new(
+        allocator,
+        diagnostic::Severity::Error,
+        "lint error",
+        span,
+        message_bytes
+    );
+    errdefer diag.deinit(allocator);
+    var help = try string::from_bytes(allocator, "remove the unused ");
+    defer help.deinit(allocator);
+    try help.append_bytes(allocator, kind_label);
+    if decl.kind != DeclKind::Const and decl.kind != DeclKind::Method {
+        try help.append_bytes(allocator, ", or mark it `pub` if it is part of the module API");
+    }
+    let help_bytes = help.as_bytes();
+    try diag.with_help(allocator, help_bytes);
+    return move diag;
+}
+
+fn (self: &DeadCodeAnalyzer) check_unused_bindings(
+    tree: &ast::Ast,
+    program: &ast::Program,
+    index: &types::SemanticIndex,
+    gpu_checked: &array::Array<types::IndexedCheck>,
+    source_to_caller: &map::Map<i64, source::SourceId>,
+    diagnostics: &var array::Array<diagnostic::Diagnostic>
+) -> !void {
+    let allocator = self.allocator;
+    var read_decls = map::new<i64, map::Map<i64, bool>>(allocator);
+    defer read_decls.deinit(allocator);
+    try collect_read_references(allocator, index, &var read_decls);
+    if gpu_checked.at(0) |gpu_run| {
+        try collect_read_references(allocator, &gpu_run.index, &var read_decls);
+    }
+
+    var comptime_names_cache = map::new<i64, map::Map<[]u8, bool>>(allocator);
+    defer comptime_names_cache.deinit(allocator);
+
+    var reported = map::new<i64, map::Map<i64, bool>>(allocator);
+    defer reported.deinit(allocator);
+
+    var receiver_params = map::new<i64, map::Map<i64, bool>>(allocator);
+    defer receiver_params.deinit(allocator);
+    var decl_idx = 0;
+    while program.declarations.get(decl_idx) |declaration| {
+        decl_idx = decl_idx + 1;
+        match tree.declarations.at(declaration.node) {
+            Function(value) => {
+                if value.signature.receiver {
+                    if value.signature.params.at(0) |first_param| {
+                        try mark_span_key(allocator, &var receiver_params, tree.text_span(first_param.name));
+                    }
+                }
+            },
+            _ => {},
+        }
+    }
+
+    var at = 0;
+    while index.symbols.at(at) |symbol| {
+        at = at + 1;
+        if symbol.kind != types::SymbolKind::Variable and
+            symbol.kind != types::SymbolKind::Parameter {
+            continue;
+        }
+        let sid = symbol.selection.source orelse continue;
+        let caller_id = source_to_caller.get(sid.index) orelse continue;
+        let name = symbol.name.as_bytes();
+        if mem::len(name) == 0 or name[0] == cast<u8>(95) {
+            continue;
+        }
+        if symbol.kind == types::SymbolKind::Parameter and has_span_key(&receiver_params, symbol.selection) {
+            continue;
+        }
+        if has_span_key(&read_decls, symbol.selection) {
+            continue;
+        }
+        var container_decl_id = 0 - 1;
+        if self.decl_at_selection(symbol.container) |cid| {
+            container_decl_id = cid;
+            let alive = self.reachable.get(cid) orelse false;
+            if !alive {
+                continue;
+            }
+        }
+        if container_decl_id >= 0 {
+            if !comptime_names_cache.contains(container_decl_id) {
+                var names = map::new<[]u8, bool>(allocator);
+                errdefer names.deinit(allocator);
+                if self.decls.at(container_decl_id) |decl| {
+                    if program.declarations.get(decl.decl_index) |ast_decl| {
+                        try collect_comptime_branch_idents(allocator, tree, ast_decl, &var names);
+                    }
+                }
+                try comptime_names_cache.insert(allocator, container_decl_id, move names);
+            }
+            if comptime_names_cache.at(container_decl_id) |names| {
+                if names.contains(name) {
+                    continue;
+                }
+            }
+        }
+        if has_span_key(&reported, symbol.selection) {
+            continue;
+        }
+        try mark_span_key(allocator, &var reported, symbol.selection);
+        let remapped = remap_span(symbol.selection, caller_id);
+        let diag = try build_unused_binding_diagnostic(allocator, symbol.kind, name, remapped);
+        errdefer diag.deinit(allocator);
+        try diagnostics.append(allocator, move diag);
+    }
+    return;
+}
+
+fn collect_read_references(
+    allocator: Allocator,
+    index: &types::SemanticIndex,
+    out: &var map::Map<i64, map::Map<i64, bool>>
+) -> !void {
+    var at = 0;
+    while index.references.get(at) |ref| {
+        at = at + 1;
+        if ref.write {
+            continue;
+        }
+        try mark_span_key(allocator, out, ref.declaration);
+    }
+    return;
+}
+
+fn mark_span_key(
+    allocator: Allocator,
+    table: &var map::Map<i64, map::Map<i64, bool>>,
+    span: ast::Span
+) -> !void {
+    let sid = span.source orelse return;
+    let key = position_key(span.start);
+    if table.at_mut(sid.index) |inner| {
+        return inner.insert(allocator, key, true);
+    }
+    var inner = map::new<i64, bool>(allocator);
+    errdefer inner.deinit(allocator);
+    try inner.insert(allocator, key, true);
+    return table.insert(allocator, sid.index, move inner);
+}
+
+fn has_span_key(
+    table: &map::Map<i64, map::Map<i64, bool>>,
+    span: ast::Span
+) -> bool {
+    let sid = span.source orelse return false;
+    if table.at(sid.index) |inner| {
+        return inner.contains(position_key(span.start));
+    }
+    return false;
+}
+
+fn build_unused_binding_diagnostic(
+    allocator: Allocator,
+    kind: types::SymbolKind,
+    name: []u8,
+    span: ast::Span
+) -> !diagnostic::Diagnostic {
+    var message = string::new(allocator);
+    defer message.deinit(allocator);
+    if kind == types::SymbolKind::Parameter {
+        try message.append_bytes(allocator, "unused parameter `");
+    } else {
+        try message.append_bytes(allocator, "unused local `");
+    }
+    try message.append_bytes(allocator, name);
+    try message.append_byte(allocator, cast<u8>(96));
+    let message_bytes = message.as_bytes();
+    var diag = try diagnostic::new(
+        allocator,
+        diagnostic::Severity::Error,
+        "lint error",
+        span,
+        message_bytes
+    );
+    errdefer diag.deinit(allocator);
+    var help = string::new(allocator);
+    defer help.deinit(allocator);
+    if kind == types::SymbolKind::Parameter {
+        try help.append_bytes(allocator, "remove it, or prefix with `_` (`_");
+        try help.append_bytes(allocator, name);
+        try help.append_bytes(allocator, "`) if the signature requires it");
+    } else {
+        try help.append_bytes(allocator, "remove it, or prefix with `_` (`_");
+        try help.append_bytes(allocator, name);
+        try help.append_bytes(allocator, "`) if intentionally unused");
+    }
+    let help_bytes = help.as_bytes();
+    try diag.with_help(allocator, help_bytes);
+    return move diag;
+}
+
+fn collect_comptime_branch_idents(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    declaration: ast::Declaration,
+    out: &var map::Map<[]u8, bool>
+) -> !void {
+    match tree.declarations.at(declaration.node) {
+        Function(value) => {
+            if value.body |body| {
+                try collect_comptime_block_idents(allocator, tree, body, false, out);
+            }
+        },
+        Test(value) => {
+            if value.body |body| {
+                try collect_comptime_block_idents(allocator, tree, body, false, out);
+            }
+        },
+        _ => {},
+    }
+    return;
+}
+
+fn collect_comptime_block_idents(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    block: ast::Block,
+    inside: bool,
+    out: &var map::Map<[]u8, bool>
+) -> !void {
+    match tree.statements.at(block.node) {
+        Block(value) => {
+            var idx = 0;
+            while value.statements.get(idx) |stmt| {
+                idx = idx + 1;
+                try collect_comptime_stmt_idents(allocator, tree, stmt, inside, out);
+            }
+        },
+        _ => {},
+    }
+    return;
+}
+
+fn collect_comptime_stmt_idents(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    stmt: ast::Statement,
+    inside: bool,
+    out: &var map::Map<[]u8, bool>
+) -> !void {
+    match tree.statements.at(stmt.node) {
+        Block(value) => {
+            var idx = 0;
+            while value.statements.get(idx) |inner| {
+                idx = idx + 1;
+                try collect_comptime_stmt_idents(allocator, tree, inner, inside, out);
+            }
+        },
+        Let(value) => {
+            if inside {
+                try collect_expr_idents(allocator, tree, value.value, out);
+            }
+        },
+        Assign(value) => {
+            if inside {
+                try collect_expr_idents(allocator, tree, value.target, out);
+                try collect_expr_idents(allocator, tree, value.value, out);
+            }
+        },
+        Return(value) => {
+            if inside {
+                if value.value |expr| {
+                    try collect_expr_idents(allocator, tree, expr, out);
+                }
+            }
+        },
+        Defer(value) => {
+            if inside {
+                try collect_expr_idents(allocator, tree, value.expr, out);
+            }
+        },
+        ErrDefer(value) => {
+            if inside {
+                try collect_expr_idents(allocator, tree, value.expr, out);
+            }
+        },
+        If(value) => {
+            if inside {
+                try collect_expr_idents(allocator, tree, value.condition, out);
+            }
+            try collect_comptime_block_idents(allocator, tree, value.consequence, inside, out);
+            if value.alternative |alt| {
+                try collect_comptime_block_idents(allocator, tree, alt, inside, out);
+            }
+        },
+        While(value) => {
+            if inside {
+                try collect_expr_idents(allocator, tree, value.condition, out);
+            }
+            try collect_comptime_block_idents(allocator, tree, value.body, inside, out);
+        },
+        For(value) => {
+            if inside {
+                try collect_expr_idents(allocator, tree, value.start, out);
+                try collect_expr_idents(allocator, tree, value.end, out);
+            }
+            try collect_comptime_block_idents(allocator, tree, value.body, inside, out);
+        },
+        Match(value) => {
+            if inside {
+                try collect_expr_idents(allocator, tree, value.value, out);
+            }
+            var idx = 0;
+            while value.arms.at(idx) |arm| {
+                idx = idx + 1;
+                try collect_comptime_stmt_idents(allocator, tree, arm.body, inside, out);
+            }
+        },
+        ComptimeIf(value) => {
+            try collect_expr_idents(allocator, tree, value.condition, out);
+            try collect_comptime_block_idents(allocator, tree, value.consequence, true, out);
+            if value.alternative |alt| {
+                try collect_comptime_block_idents(allocator, tree, alt, true, out);
+            }
+        },
+        ComptimeFor(value) => {
+            match value.iterable {
+                List(expr) => try collect_expr_idents(allocator, tree, expr, out),
+                Range(range) => {
+                    try collect_expr_idents(allocator, tree, range.start, out);
+                    try collect_expr_idents(allocator, tree, range.end, out);
+                },
+            }
+            try collect_comptime_block_idents(allocator, tree, value.body, true, out);
+        },
+        ComptimeMatch(value) => {
+            try collect_expr_idents(allocator, tree, value.value, out);
+            try collect_comptime_block_idents(allocator, tree, value.body, true, out);
+        },
+        Expr(value) => {
+            if inside {
+                try collect_expr_idents(allocator, tree, value.expr, out);
+            }
+        },
+        _ => {},
+    }
+    return;
+}
+
+fn collect_expr_idents(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    expr: ast::Expression,
+    out: &var map::Map<[]u8, bool>
+) -> !void {
+    match tree.expressions.at(expr.node) {
+        Ident(value) => {
+            let text = tree.texts.at(value.name.node);
+            let bytes = text.as_bytes();
+            try out.insert(allocator, bytes, true);
+        },
+        Comptime(value) => try collect_expr_idents(allocator, tree, value.expr, out),
+        Prefix(value) => try collect_expr_idents(allocator, tree, value.right, out),
+        Binary(value) => {
+            try collect_expr_idents(allocator, tree, value.left, out);
+            try collect_expr_idents(allocator, tree, value.right, out);
+        },
+        Call(value) => {
+            try collect_expr_idents(allocator, tree, value.callee, out);
+            for 0..value.args.len(tree) |at| {
+                try collect_expr_idents(allocator, tree, value.args.get_or_panic(tree, at), out);
+            }
+        },
+        TypeApply(value) => try collect_expr_idents(allocator, tree, value.callee, out),
+        Cast(value) => try collect_expr_idents(allocator, tree, value.value, out),
+        Try(value) => try collect_expr_idents(allocator, tree, value.value, out),
+        Move(value) => try collect_expr_idents(allocator, tree, value.value, out),
+        Unsafe(value) => try collect_expr_idents(allocator, tree, value.value, out),
+        OrelseGuard(value) => {
+            try collect_expr_idents(allocator, tree, value.condition, out);
+            try collect_comptime_stmt_idents(allocator, tree, value.exit, true, out);
+        },
+        CatchGuard(value) => {
+            try collect_expr_idents(allocator, tree, value.condition, out);
+            try collect_comptime_stmt_idents(allocator, tree, value.exit, true, out);
+        },
+        Index(value) => {
+            try collect_expr_idents(allocator, tree, value.target, out);
+            if value.index |idx| {
+                try collect_expr_idents(allocator, tree, idx, out);
+            }
+            if value.start |s| {
+                try collect_expr_idents(allocator, tree, s, out);
+            }
+            if value.end |e| {
+                try collect_expr_idents(allocator, tree, e, out);
+            }
+        },
+        StructLiteral(value) => {
+            var idx = 0;
+            while value.fields.at(idx) |field| {
+                idx = idx + 1;
+                try collect_expr_idents(allocator, tree, field.value, out);
+            }
+        },
+        BufferLiteral(value) => {
+            var idx = 0;
+            while value.elements.get(idx) |elem| {
+                idx = idx + 1;
+                try collect_expr_idents(allocator, tree, elem, out);
+            }
+        },
+        VectorLiteral(value) => {
+            var idx = 0;
+            while value.lanes.get(idx) |lane| {
+                idx = idx + 1;
+                try collect_expr_idents(allocator, tree, lane, out);
+            }
+        },
+        Field(value) => try collect_expr_idents(allocator, tree, value.receiver, out),
+        Deref(value) => try collect_expr_idents(allocator, tree, value.receiver, out),
+        If(value) => {
+            try collect_expr_idents(allocator, tree, value.condition, out);
+            try collect_comptime_block_idents(allocator, tree, value.consequence, true, out);
+            if value.alternative |alt| {
+                try collect_comptime_block_idents(allocator, tree, alt, true, out);
+            }
+        },
+        Match(value) => {
+            try collect_expr_idents(allocator, tree, value.value, out);
+            var idx = 0;
+            while value.arms.at(idx) |arm| {
+                idx = idx + 1;
+                try collect_comptime_stmt_idents(allocator, tree, arm.body, true, out);
+            }
+        },
+        _ => {},
+    }
+    return;
+}

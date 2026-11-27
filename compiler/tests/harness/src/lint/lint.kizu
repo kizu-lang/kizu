@@ -16,17 +16,18 @@ struct RunResult {
     stderr: string::String,
 }
 
-fn spawn_lint(
+fn spawn_kizu(
     handle: Io,
     allocator: Allocator,
     kizu: []u8,
     cwd: []u8,
+    subcommand: []u8,
     first: []u8,
     second: []u8
 ) -> Failure!RunResult {
     var command = try net::command(allocator, kizu);
     defer command.deinit(allocator);
-    try command.arg(allocator, "lint");
+    try command.arg(allocator, subcommand);
     if mem::len(first) > 0 {
         try command.arg(allocator, first);
     }
@@ -75,6 +76,17 @@ fn spawn_lint(
     }
     let status = try child.wait(handle);
     return RunResult { status: status, stdout: move stdout, stderr: move stderr };
+}
+
+fn spawn_lint(
+    handle: Io,
+    allocator: Allocator,
+    kizu: []u8,
+    cwd: []u8,
+    first: []u8,
+    second: []u8
+) -> Failure!RunResult {
+    return spawn_kizu(handle, allocator, kizu, cwd, "lint", first, second);
 }
 
 fn write_file(handle: Io, allocator: Allocator, root: []u8, rel: []u8, content: []u8) -> Failure!void {
@@ -203,6 +215,55 @@ fn steps(handle: Io, allocator: Allocator, kizu: []u8, root: []u8) -> Failure!bo
         return false;
     }
 
+    let dead_check = try spawn_lint(handle, allocator, kizu, root, "dead_pkg", "");
+    defer dead_check.deinit(allocator);
+    if !try check_fails(handle, allocator, "dead code detected", &dead_check, 1, "unused private function `dead_entry`") {
+        return false;
+    }
+    let dead_stderr = dead_check.stderr.as_bytes();
+    if !conformance::contains(dead_stderr, "unused private function `dead_leaf`") {
+        return fail_step(handle, allocator, "transitive dead code", dead_stderr);
+    }
+
+    let dead_fix = try spawn_lint(handle, allocator, kizu, root, "--fix", "dead_pkg");
+    defer dead_fix.deinit(allocator);
+    if !try check_ok(handle, allocator, "fix dead code package", &dead_fix) {
+        return false;
+    }
+
+    let dead_run = try spawn_kizu(handle, allocator, kizu, root, "run", "dead_pkg", "");
+    defer dead_run.deinit(allocator);
+    if dead_run.status != 0 {
+        let err_bytes = dead_run.stderr.as_bytes();
+        return fail_step(handle, allocator, "post-fix run dead_pkg", err_bytes);
+    }
+    let dead_run_out = dead_run.stdout.as_bytes();
+    let expected_run =
+        \\0
+        \\
+    ;
+    if !mem::equal_bytes(dead_run_out, expected_run) {
+        return fail_step(handle, allocator, "post-fix run output", dead_run_out);
+    }
+
+    let mixed_fix = try spawn_lint(handle, allocator, kizu, root, "--fix", "mixed_pkg");
+    defer mixed_fix.deinit(allocator);
+    if !try check_fails(handle, allocator, "fix keeps unused local", &mixed_fix, 1, "unused local `kept`") {
+        return false;
+    }
+    let mixed_path = try scratch::join(allocator, root, "mixed_pkg/src/main.kizu");
+    defer mixed_path.deinit(allocator);
+    let mixed_path_bytes = mixed_path.as_bytes();
+    let mixed_after = try fs::read_file(handle, allocator, mixed_path_bytes, mem::Limit::Unlimited);
+    defer mixed_after.deinit(allocator);
+    let mixed_bytes = mixed_after.as_bytes();
+    if conformance::contains(mixed_bytes, "dead_helper") {
+        return fail_step(handle, allocator, "fix removed dead_helper", mixed_bytes);
+    }
+    if !conformance::contains(mixed_bytes, "let kept = 1;") {
+        return fail_step(handle, allocator, "fix preserved unused local", mixed_bytes);
+    }
+
     return true;
 }
 
@@ -224,6 +285,10 @@ pub fn run(handle: Io, allocator: Allocator, kizu: []u8) -> Failure!bool {
         \\bad_pkg/src
         \\bad_pkg/src/internal
         \\bad_pkg/src/internal/secret
+        \\dead_pkg
+        \\dead_pkg/src
+        \\mixed_pkg
+        \\mixed_pkg/src
     ;
     var start = 0;
     var index = 0;
@@ -268,7 +333,7 @@ pub fn run(handle: Io, allocator: Allocator, kizu: []u8) -> Failure!bool {
     let good_methods =
         \\/// Returns the item count.
         \\fn (self: &Item) len() -> i64 {
-        \\    let text = "https://example.com//not-a-comment";
+        \\    let _ = "https://example.com//not-a-comment";
         \\    return self.count;
         \\}
         \\
@@ -301,6 +366,50 @@ pub fn run(handle: Io, allocator: Allocator, kizu: []u8) -> Failure!bool {
         \\
     ;
 
+    let dead_manifest =
+        \\[package]
+        \\name = "dead_pkg"
+        \\version = "0.1.0"
+        \\
+        \\[modules]
+        \\paths = ["src"]
+        \\
+    ;
+    let dead_main =
+        \\fn dead_leaf() -> i64 {
+        \\    return 1;
+        \\}
+        \\
+        \\fn dead_entry() -> i64 {
+        \\    return dead_leaf();
+        \\}
+        \\
+        \\fn main() {
+        \\    print(0);
+        \\}
+        \\
+    ;
+    let mixed_manifest =
+        \\[package]
+        \\name = "mixed_pkg"
+        \\version = "0.1.0"
+        \\
+        \\[modules]
+        \\paths = ["src"]
+        \\
+    ;
+    let mixed_main =
+        \\fn dead_helper() -> i64 {
+        \\    return 2;
+        \\}
+        \\
+        \\fn main() {
+        \\    let kept = 1;
+        \\    print(0);
+        \\}
+        \\
+    ;
+
     try write_file(handle, allocator, root_path, "good_pkg/kizu.toml", good_manifest);
     try write_file(handle, allocator, root_path, "good_pkg/src/api/types.kizu", good_types);
     try write_file(handle, allocator, root_path, "good_pkg/src/api/methods.kizu", good_methods);
@@ -309,6 +418,10 @@ pub fn run(handle: Io, allocator: Allocator, kizu: []u8) -> Failure!bool {
     try write_file(handle, allocator, root_path, "bad_pkg/src/plain.kizu", bad_plain);
     try write_file(handle, allocator, root_path, "bad_pkg/src/internal/secret/secret.kizu", bad_internal);
     try write_file(handle, allocator, root_path, "bad_pkg/src/private_doc.kizu", bad_private);
+    try write_file(handle, allocator, root_path, "dead_pkg/kizu.toml", dead_manifest);
+    try write_file(handle, allocator, root_path, "dead_pkg/src/main.kizu", dead_main);
+    try write_file(handle, allocator, root_path, "mixed_pkg/kizu.toml", mixed_manifest);
+    try write_file(handle, allocator, root_path, "mixed_pkg/src/main.kizu", mixed_main);
 
     let passed = try steps(handle, allocator, kizu_path, root_path);
     try scratch::remove_tree(handle, allocator, root_path);

@@ -1,0 +1,261 @@
+import compiler::internal::ast;
+import std::array;
+import std::fs;
+import std::map;
+import std::mem;
+import std::string;
+
+struct ByteRange {
+    start: i64,
+    end: i64,
+}
+
+fn apply_fix_removals(
+    io: Io,
+    allocator: Allocator,
+    removals: &array::Array<FixRemoval>
+) -> !i64 {
+    var by_file = map::new<[]u8, array::Array<ast::Span>>(allocator);
+    defer by_file.deinit(allocator);
+    var file_order = array::new<string::String>(allocator);
+    defer file_order.deinit(allocator);
+    var idx = 0;
+    while removals.at(idx) |item| {
+        idx = idx + 1;
+        let path_bytes = item.file.as_bytes();
+        if by_file.at_mut(path_bytes) |spans| {
+            try spans.append(allocator, item.extent);
+        } else {
+            var spans = array::new<ast::Span>(allocator);
+            errdefer spans.deinit(allocator);
+            try spans.append(allocator, item.extent);
+            try by_file.insert(allocator, path_bytes, move spans);
+            let path_copy = try string::from_bytes(allocator, path_bytes);
+            errdefer path_copy.deinit(allocator);
+            try file_order.append(allocator, move path_copy);
+        }
+    }
+    var modified = 0;
+    var file_idx = 0;
+    while file_order.at(file_idx) |file_path| {
+        file_idx = file_idx + 1;
+        let path_bytes = file_path.as_bytes();
+        if by_file.at(path_bytes) |spans| {
+            if try apply_file_removals(io, allocator, path_bytes, spans) {
+                modified = modified + 1;
+            }
+        }
+    }
+    return modified;
+}
+
+fn apply_file_removals(
+    io: Io,
+    allocator: Allocator,
+    file_path: []u8,
+    spans: &array::Array<ast::Span>
+) -> !bool {
+    let original = fs::read_file(io, allocator, file_path, mem::Limit::Unlimited) catch
+        return false;
+    defer original.deinit(allocator);
+    let text = original.as_bytes();
+    let updated = try remove_declaration_spans(allocator, text, spans);
+    defer updated.deinit(allocator);
+    let updated_bytes = updated.as_bytes();
+    if mem::equal_bytes(text, updated_bytes) {
+        return false;
+    }
+    try fs::write_file(io, file_path, updated_bytes);
+    return true;
+}
+
+fn remove_declaration_spans(
+    allocator: Allocator,
+    text: []u8,
+    spans: &array::Array<ast::Span>
+) -> !string::String {
+    var ranges = array::new<ByteRange>(allocator);
+    defer ranges.deinit(allocator);
+    var idx = 0;
+    while spans.get(idx) |span| {
+        idx = idx + 1;
+        if span_to_expanded_range(text, span) |range| {
+            try ranges.append(allocator, range);
+        }
+    }
+    if ranges.len() == 0 {
+        return string::from_bytes(allocator, text);
+    }
+    try sort_byte_ranges(&var ranges);
+    var merged = array::new<ByteRange>(allocator);
+    defer merged.deinit(allocator);
+    idx = 0;
+    while ranges.get(idx) |range| {
+        idx = idx + 1;
+        if merged.len() > 0 {
+            if merged.at_mut(merged.len() - 1) |last| {
+                if range.start <= last.end {
+                    if range.end > last.end {
+                        last.end = range.end;
+                    }
+                    continue;
+                }
+            }
+        }
+        try merged.append(allocator, range);
+    }
+
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    let length = mem::len(text);
+    var cursor = 0;
+    var removed_any = false;
+    idx = 0;
+    while merged.get(idx) |range| {
+        idx = idx + 1;
+        var start = range.start;
+        if start < cursor {
+            start = cursor;
+        }
+        if start > cursor {
+            try out.append_bytes(allocator, text[cursor..start]);
+        }
+        cursor = range.end;
+        removed_any = true;
+        if out.len() == 0 or ends_with_blank_line(&out) {
+            cursor = skip_leading_blank_lines(text, cursor);
+        }
+    }
+    if cursor < length {
+        try out.append_bytes(allocator, text[cursor..length]);
+    } else if removed_any {
+        trim_trailing_extra_blank_lines(&var out);
+    }
+    return move out;
+}
+
+fn span_to_expanded_range(text: []u8, span: ast::Span) -> ?ByteRange {
+    let start_offset = position_to_byte_offset(text, span.start) orelse return null;
+    let end_offset = position_to_byte_offset(text, span.end) orelse return null;
+    if end_offset <= start_offset {
+        return null;
+    }
+    var start = start_offset;
+    var line_start = start_offset;
+    while line_start > 0 and text[line_start - 1] != cast<u8>(10) {
+        line_start = line_start - 1;
+    }
+    var only_ws = true;
+    var scan = line_start;
+    while scan < start_offset {
+        if text[scan] != cast<u8>(32) and text[scan] != cast<u8>(9) {
+            only_ws = false;
+            break;
+        }
+        scan = scan + 1;
+    }
+    if only_ws {
+        start = line_start;
+    }
+    var end = end_offset;
+    let length = mem::len(text);
+    var tail = end_offset;
+    while tail < length and (text[tail] == cast<u8>(32) or text[tail] == cast<u8>(9) or text[tail] == cast<u8>(13)) {
+        tail = tail + 1;
+    }
+    if tail < length and text[tail] == cast<u8>(10) {
+        end = tail + 1;
+    } else if tail == length {
+        end = length;
+    }
+    return ByteRange { start: start, end: end };
+}
+
+fn position_to_byte_offset(text: []u8, pos: ast::Position) -> ?i64 {
+    if pos.line < 1 or pos.column < 1 {
+        return null;
+    }
+    let length = mem::len(text);
+    var line = 1;
+    var at = 0;
+    while line < pos.line and at < length {
+        if text[at] == cast<u8>(10) {
+            line = line + 1;
+        }
+        at = at + 1;
+    }
+    if line != pos.line {
+        return null;
+    }
+    var col = 1;
+    while col < pos.column and at < length and text[at] != cast<u8>(10) {
+        let width = utf8_scalar_width(text, at);
+        at = at + width;
+        col = col + 1;
+    }
+    return at;
+}
+
+fn sort_byte_ranges(ranges: &var array::Array<ByteRange>) -> !void {
+    var outer = 1;
+    while outer < ranges.len() {
+        var inner = outer;
+        while inner > 0 {
+            let left = ranges.get_or_panic(inner - 1);
+            let right = ranges.get_or_panic(inner);
+            if left.start < right.start or (left.start == right.start and left.end <= right.end) {
+                break;
+            }
+            try ranges.swap(inner - 1, inner);
+            inner = inner - 1;
+        }
+        outer = outer + 1;
+    }
+    return;
+}
+
+fn ends_with_blank_line(text: &string::String) -> bool {
+    let bytes = text.as_bytes();
+    let length = mem::len(bytes);
+    if length < 2 {
+        return false;
+    }
+    if bytes[length - 1] != cast<u8>(10) {
+        return false;
+    }
+    var pos = length - 2;
+    if pos >= 0 and bytes[pos] == cast<u8>(13) {
+        pos = pos - 1;
+    }
+    return pos >= 0 and bytes[pos] == cast<u8>(10);
+}
+
+fn skip_leading_blank_lines(text: []u8, start: i64) -> i64 {
+    let length = mem::len(text);
+    var cursor = start;
+    while cursor < length {
+        var scan = cursor;
+        while scan < length and (text[scan] == cast<u8>(32) or text[scan] == cast<u8>(9) or text[scan] == cast<u8>(13)) {
+            scan = scan + 1;
+        }
+        if scan < length and text[scan] == cast<u8>(10) {
+            cursor = scan + 1;
+            continue;
+        }
+        break;
+    }
+    return cursor;
+}
+
+fn trim_trailing_extra_blank_lines(out: &var string::String) -> void {
+    while ends_with_blank_line(out) {
+        let bytes = out.as_bytes();
+        let length = mem::len(bytes);
+        var drop = 1;
+        if length >= 2 and bytes[length - 2] == cast<u8>(13) {
+            drop = 2;
+        }
+        out.truncate(length - drop);
+    }
+    return;
+}

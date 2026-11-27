@@ -60,6 +60,11 @@ pub struct Implementation {
     pub implementor: ast::Span,
 }
 
+pub struct ReachEdge {
+    pub caller: ast::Span,
+    pub target: ast::Span,
+}
+
 union IndexedPosition {
     Declaration(i64),
     Usage(i64),
@@ -71,6 +76,7 @@ pub struct SemanticIndex {
     pub expressions: array::Array<ExpressionType>,
     pub calls: array::Array<CallSite>,
     pub implementations: array::Array<Implementation>,
+    pub reach_edges: array::Array<ReachEdge>,
     globals: map::Map<[]u8, i64>,
     positions: map::Map<i64, map::Map<i64, IndexedPosition>>,
 }
@@ -87,9 +93,104 @@ pub fn new_index(allocator: Allocator) -> SemanticIndex {
         expressions: array::new<ExpressionType>(allocator),
         calls: array::new<CallSite>(allocator),
         implementations: array::new<Implementation>(allocator),
+        reach_edges: array::new<ReachEdge>(allocator),
         globals: map::new<[]u8, i64>(allocator),
         positions: map::new<i64, map::Map<i64, IndexedPosition>>(allocator)
     };
+}
+
+pub fn check_for_lint(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    program: &ast::Program,
+    target: stdtarget::Target
+) -> !IndexedCheck {
+    var checker = new_checker_for_target(allocator, target);
+    defer checker.deinit(allocator);
+    checker.lint_mode = true;
+    checker.lazy_std = program_has_non_std_decl(tree, program);
+    try checker.editor.append(allocator, new_index(allocator));
+    let empty_previous = new_index(allocator);
+    defer empty_previous.deinit(allocator);
+    let unchanged = map::new<i64, bool>(allocator);
+    defer unchanged.deinit(allocator);
+    try checker.index_declarations(tree, program, &empty_previous, &unchanged);
+    let problems = try checker.check_lint_bodies(tree, program);
+    errdefer problems.deinit(allocator);
+    let index = checker.editor.pop_or_panic();
+    return IndexedCheck {
+        index: move index,
+        problems: move problems
+    };
+}
+
+fn (self: &var Checker) check_lint_bodies(
+    tree: &var ast::Ast,
+    program: &ast::Program
+) -> !array::Array<diagnostic::Diagnostic> {
+    var problems = array::new<diagnostic::Diagnostic>(self.allocator);
+    errdefer problems.deinit(self.allocator);
+    if try self.check_setup(tree, program) |failed| {
+        try problems.append(self.allocator, move failed);
+        return move problems;
+    }
+    try self.index_contract_implementations();
+    var index = 0;
+    while program.declarations.get(index) |declaration| {
+        index = index + 1;
+        if self.lazy_std {
+            match self.body_check_target(tree, declaration) {
+                Function(handle) => {
+                    if self.is_std_function(handle) {
+                        continue;
+                    }
+                },
+                _ => {},
+            }
+        }
+        self.editor_function = self.lint_declaration_symbol(tree, declaration);
+        if try self.check_declaration_body(tree, declaration) |failed| {
+            try problems.append(self.allocator, move failed);
+        }
+    }
+    var pending_index = 0;
+    while self.pending_std.get(pending_index) |handle| {
+        pending_index = pending_index + 1;
+        self.editor_function = self.function_handle_span(handle);
+        if try self.check_function(tree, handle) |failed| {
+            failed.deinit(self.allocator);
+        }
+    }
+    return move problems;
+}
+
+fn (self: &Checker) lint_declaration_symbol(tree: &ast::Ast, declaration: ast::Declaration) -> ast::Span {
+    match tree.declarations.at(declaration.node) {
+        Function(value) => {
+            if value.derived {
+                let full_name = semantic_text(tree, value.signature.name);
+                if stdmethod::split_method_name(full_name) |parts| {
+                    if self.editor.at(0) |index| {
+                        return index.global_span(parts.receiver);
+                    }
+                }
+                return ast::zero_span();
+            }
+            return tree.text_span(value.signature.name);
+        },
+        Test(value) => return tree.text_span(value.name),
+        _ => return ast::zero_span(),
+    }
+}
+
+fn (self: &Checker) function_handle_span(handle: FunctionHandle) -> ast::Span {
+    if self.metadata.functions.at(handle.index) |callable| {
+        let name = callable.name.as_bytes();
+        if self.editor.at(0) |index| {
+            return index.global_span(name);
+        }
+    }
+    return ast::zero_span();
 }
 
 pub fn check_indexed(
@@ -501,6 +602,10 @@ fn (self: &var SemanticIndex) add_reference(allocator: Allocator, selection: ast
                     if self.references.at_mut(index) |found| {
                         found.write = true;
                     }
+                } else {
+                    if self.references.at_mut(index) |found| {
+                        found.write = false;
+                    }
                 }
                 return;
             },
@@ -523,14 +628,18 @@ fn (self: &var Checker) record_reference(selection: ast::Span, declaration: ast:
 }
 
 fn (self: &var Checker) record_function_reference(selection: ast::Span, function: FunctionHandle) -> !void {
-    if self.instantiation_depth > 0 {
-        return;
-    }
     if self.metadata.functions.at(function.index) |callable| {
         let name = callable.name.as_bytes();
         if self.editor.at_mut(0) |index| {
             let declaration = index.global_span(name);
-            return index.add_reference(self.allocator, selection, declaration, false);
+            if self.lint_mode and !self.editor_function.is_zero() and !declaration.is_zero() {
+                try index.reach_edges.append(self.allocator, ReachEdge {
+                    caller: self.editor_function, target: declaration
+                });
+            }
+            if self.instantiation_depth == 0 {
+                return index.add_reference(self.allocator, selection, declaration, false);
+            }
         }
     }
     return;
@@ -542,14 +651,19 @@ fn (self: &var Checker) record_call(
     function: FunctionHandle,
     args: ast::ExpressionList
 ) -> !void {
-    if self.instantiation_depth > 0 or selection.is_zero() {
-        return;
-    }
     if self.metadata.functions.at(function.index) |callable| {
         let name = callable.name.as_bytes();
         if self.editor.at_mut(0) |index| {
             let declaration = index.global_span(name);
             if declaration.is_zero() {
+                return;
+            }
+            if self.lint_mode and !self.editor_function.is_zero() {
+                try index.reach_edges.append(self.allocator, ReachEdge {
+                    caller: self.editor_function, target: declaration
+                });
+            }
+            if self.instantiation_depth > 0 or selection.is_zero() {
                 return;
             }
             try index.add_reference(self.allocator, selection, declaration, false);
@@ -568,7 +682,7 @@ fn (self: &var Checker) record_call(
 }
 
 fn (self: &var Checker) record_expression(span: ast::Span, value: Type) -> !void {
-    if self.instantiation_depth > 0 or span.is_zero() {
+    if self.lint_mode or self.instantiation_depth > 0 or span.is_zero() {
         return;
     }
     if self.editor.at_mut(0) |index| {
@@ -816,7 +930,7 @@ fn (self: &var SemanticIndex) index_implementation(
 fn (self: &var Checker) record_known_method(
     tree: &ast::Ast, field: &ast::FieldExpr, receiver: Type, name: []u8, args: ast::ExpressionList
 ) -> !void {
-    if self.editor.len() == 0 or self.instantiation_depth > 0 {
+    if self.editor.len() == 0 or (!self.lint_mode and self.instantiation_depth > 0) {
         return;
     }
     let spelling = try self.types.copy_text(self.allocator, receiver);

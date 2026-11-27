@@ -71,13 +71,18 @@ pub fn lint_targets(
     sources: &var source::SourceMap,
     diagnostics: &var array::Array<diagnostic::Diagnostic>
 ) -> !?string::String {
-    var session = Session {
-        io: io,
-        allocator: allocator,
-        packages: map::new<[]u8, PackageEntry>(allocator),
-        dir_types: map::new<[]u8, map::Map<[]u8, bool>>(allocator)
-    };
-    defer session.deinit(allocator);
+    return lint_targets_with_options(io, allocator, "", targets, false, sources, diagnostics);
+}
+
+pub fn lint_targets_with_options(
+    io: Io,
+    allocator: Allocator,
+    lib_dir: []u8,
+    targets: &array::Array<string::String>,
+    fix: bool,
+    sources: &var source::SourceMap,
+    diagnostics: &var array::Array<diagnostic::Diagnostic>
+) -> !?string::String {
     var files = array::new<string::String>(allocator);
     defer files.deinit(allocator);
     var index = 0;
@@ -88,15 +93,252 @@ pub fn lint_targets(
             return move failure;
         }
     }
+    if fix and mem::len(lib_dir) > 0 {
+        try run_fix_passes(io, allocator, lib_dir, &files);
+    }
+    var session = Session {
+        io: io,
+        allocator: allocator,
+        packages: map::new<[]u8, PackageEntry>(allocator),
+        dir_types: map::new<[]u8, map::Map<[]u8, bool>>(allocator)
+    };
+    defer session.deinit(allocator);
+    var requested_sources = map::new<[]u8, source::SourceId>(allocator);
+    defer requested_sources.deinit(allocator);
+    var pkg_roots = array::new<string::String>(allocator);
+    defer pkg_roots.deinit(allocator);
+    var seen_pkgs = map::new<[]u8, bool>(allocator);
+    defer seen_pkgs.deinit(allocator);
+    var standalone_files = array::new<string::String>(allocator);
+    defer standalone_files.deinit(allocator);
+
     var file_index = 0;
     while files.at(file_index) |file| {
         file_index = file_index + 1;
         let file_bytes = file.as_bytes();
-        if try session.lint_file(file_bytes, sources, diagnostics) |failure| {
+        var added_source: ?source::SourceId = null;
+        if try session.lint_file(file_bytes, sources, diagnostics, &var added_source) |failure| {
             return move failure;
         }
+        if added_source |sid| {
+            let canon = try canonical_path(io, allocator, file_bytes);
+            defer canon.deinit(allocator);
+            let canon_bytes = canon.as_bytes();
+            try requested_sources.insert(allocator, canon_bytes, sid);
+            if try session.find_package_root(file_bytes) |pkg_root| {
+                defer pkg_root.deinit(allocator);
+                let pkg_bytes = pkg_root.as_bytes();
+                if !seen_pkgs.contains(pkg_bytes) {
+                    try seen_pkgs.insert(allocator, pkg_bytes, true);
+                    let pkg_copy = try string::from_bytes(allocator, pkg_bytes);
+                    errdefer pkg_copy.deinit(allocator);
+                    try pkg_roots.append(allocator, move pkg_copy);
+                }
+            } else {
+                let file_copy = try string::from_bytes(allocator, file_bytes);
+                errdefer file_copy.deinit(allocator);
+                try standalone_files.append(allocator, move file_copy);
+            }
+        }
+    }
+
+    if mem::len(lib_dir) > 0 {
+        var pkg_idx = 0;
+        while pkg_roots.at(pkg_idx) |pkg_root| {
+            pkg_idx = pkg_idx + 1;
+            let pkg_bytes = pkg_root.as_bytes();
+            var report = try analyze_package_dead_code(
+                io, allocator, lib_dir, pkg_bytes, &requested_sources, true
+            );
+            defer report.deinit(allocator);
+            try move_diagnostics(allocator, &var report.diagnostics, diagnostics);
+        }
+        if standalone_files.len() > 0 {
+            var std_cache = array::new<project::StdCache>(allocator);
+            defer std_cache.deinit(allocator);
+            try load_optional_std_cache(io, allocator, lib_dir, &var std_cache);
+            var solo_idx = 0;
+            while standalone_files.at(solo_idx) |solo_file| {
+                solo_idx = solo_idx + 1;
+                let solo_bytes = solo_file.as_bytes();
+                var report = try analyze_standalone_dead_code(
+                    io, allocator, lib_dir, solo_bytes, &std_cache, &requested_sources, true
+                );
+                defer report.deinit(allocator);
+                try move_diagnostics(allocator, &var report.diagnostics, diagnostics);
+            }
+        }
+        try sort_diagnostics(diagnostics);
     }
     return null;
+}
+
+fn run_fix_passes(
+    io: Io,
+    allocator: Allocator,
+    lib_dir: []u8,
+    files: &array::Array<string::String>
+) -> !void {
+    var pass = 0;
+    while pass < 16 {
+        pass = pass + 1;
+        var session = Session {
+            io: io,
+            allocator: allocator,
+            packages: map::new<[]u8, PackageEntry>(allocator),
+            dir_types: map::new<[]u8, map::Map<[]u8, bool>>(allocator)
+        };
+        defer session.deinit(allocator);
+        var requested_sources = map::new<[]u8, source::SourceId>(allocator);
+        defer requested_sources.deinit(allocator);
+        var pkg_roots = array::new<string::String>(allocator);
+        defer pkg_roots.deinit(allocator);
+        var seen_pkgs = map::new<[]u8, bool>(allocator);
+        defer seen_pkgs.deinit(allocator);
+        var standalone_files = array::new<string::String>(allocator);
+        defer standalone_files.deinit(allocator);
+        var idx = 0;
+        while files.at(idx) |file| {
+            let file_bytes = file.as_bytes();
+            let canon = try canonical_path(io, allocator, file_bytes);
+            defer canon.deinit(allocator);
+            let canon_bytes = canon.as_bytes();
+            try requested_sources.insert(allocator, canon_bytes, source::SourceId { index: idx });
+            if try session.find_package_root(file_bytes) |pkg_root| {
+                defer pkg_root.deinit(allocator);
+                let pkg_bytes = pkg_root.as_bytes();
+                if !seen_pkgs.contains(pkg_bytes) {
+                    try seen_pkgs.insert(allocator, pkg_bytes, true);
+                    let pkg_copy = try string::from_bytes(allocator, pkg_bytes);
+                    errdefer pkg_copy.deinit(allocator);
+                    try pkg_roots.append(allocator, move pkg_copy);
+                }
+            } else {
+                let file_copy = try string::from_bytes(allocator, file_bytes);
+                errdefer file_copy.deinit(allocator);
+                try standalone_files.append(allocator, move file_copy);
+            }
+            idx = idx + 1;
+        }
+        var all_removals = array::new<FixRemoval>(allocator);
+        defer all_removals.deinit(allocator);
+        var pkg_idx = 0;
+        while pkg_roots.at(pkg_idx) |pkg_root| {
+            pkg_idx = pkg_idx + 1;
+            let pkg_bytes = pkg_root.as_bytes();
+            var report = try analyze_package_dead_code(
+                io, allocator, lib_dir, pkg_bytes, &requested_sources, false
+            );
+            defer report.deinit(allocator);
+            try move_removals(allocator, &var report.removals, &var all_removals);
+        }
+        if standalone_files.len() > 0 {
+            var std_cache = array::new<project::StdCache>(allocator);
+            defer std_cache.deinit(allocator);
+            try load_optional_std_cache(io, allocator, lib_dir, &var std_cache);
+            var solo_idx = 0;
+            while standalone_files.at(solo_idx) |solo_file| {
+                solo_idx = solo_idx + 1;
+                let solo_bytes = solo_file.as_bytes();
+                var report = try analyze_standalone_dead_code(
+                    io, allocator, lib_dir, solo_bytes, &std_cache, &requested_sources, false
+                );
+                defer report.deinit(allocator);
+                try move_removals(allocator, &var report.removals, &var all_removals);
+            }
+        }
+        if all_removals.len() == 0 {
+            break;
+        }
+        let changed = try apply_fix_removals(io, allocator, &all_removals);
+        if changed == 0 {
+            break;
+        }
+    }
+    return;
+}
+
+fn load_optional_std_cache(
+    io: Io,
+    allocator: Allocator,
+    lib_dir: []u8,
+    out: &var array::Array<project::StdCache>
+) -> !void {
+    let outcome = try project::load_std_cache(io, allocator, lib_dir);
+    match outcome {
+        Cache(cached) => try out.append(allocator, move cached),
+        Error(failed) => failed.deinit(allocator),
+    }
+    return;
+}
+
+fn move_diagnostics(
+    allocator: Allocator,
+    from: &var array::Array<diagnostic::Diagnostic>,
+    to: &var array::Array<diagnostic::Diagnostic>
+) -> !void {
+    while from.len() > 0 {
+        let item = from.pop_or_panic();
+        errdefer item.deinit(allocator);
+        try to.append(allocator, move item);
+    }
+    return;
+}
+
+fn move_removals(
+    allocator: Allocator,
+    from: &var array::Array<FixRemoval>,
+    to: &var array::Array<FixRemoval>
+) -> !void {
+    while from.len() > 0 {
+        let item = from.pop_or_panic();
+        errdefer item.deinit(allocator);
+        try to.append(allocator, move item);
+    }
+    return;
+}
+
+fn diagnostic_before(
+    left: &diagnostic::Diagnostic,
+    right: &diagnostic::Diagnostic
+) -> bool {
+    var left_src = 0 - 1;
+    if left.span.source |id| {
+        left_src = id.index;
+    }
+    var right_src = 0 - 1;
+    if right.span.source |id| {
+        right_src = id.index;
+    }
+    if left_src != right_src {
+        return left_src < right_src;
+    }
+    if left.span.start.line != right.span.start.line {
+        return left.span.start.line < right.span.start.line;
+    }
+    return left.span.start.column < right.span.start.column;
+}
+
+fn sort_diagnostics(diagnostics: &var array::Array<diagnostic::Diagnostic>) -> !void {
+    var outer = 1;
+    while outer < diagnostics.len() {
+        var inner = outer;
+        while inner > 0 {
+            var should_swap = false;
+            if diagnostics.at(inner) |right| {
+                if diagnostics.at(inner - 1) |left| {
+                    should_swap = diagnostic_before(right, left);
+                }
+            }
+            if !should_swap {
+                break;
+            }
+            try diagnostics.swap(inner - 1, inner);
+            inner = inner - 1;
+        }
+        outer = outer + 1;
+    }
+    return;
 }
 
 pub fn lint_source(
@@ -162,7 +404,8 @@ fn is_public_type_in_memory(
 fn (self: &var Session) lint_file(
     file: []u8,
     sources: &var source::SourceMap,
-    diagnostics: &var array::Array<diagnostic::Diagnostic>
+    diagnostics: &var array::Array<diagnostic::Diagnostic>,
+    out_source: &var ?source::SourceId
 ) -> !?string::String {
     let allocator = self.allocator;
     if fs::read_file(self.io, allocator, file, mem::Limit::Unlimited) |text| {
@@ -170,6 +413,7 @@ fn (self: &var Session) lint_file(
         let path_copy = try string::from_bytes(allocator, file);
         errdefer path_copy.deinit(allocator);
         let source_id = try sources.add(move path_copy, move text);
+        out_source.* = source_id;
         if sources.at(source_id) |stored| {
             let bytes = stored.text.as_bytes();
             let file_ctx = try self.resolve_file_context(file);
@@ -323,6 +567,38 @@ fn (self: &Session) scan_dir_types(dir: []u8, out: &var map::Map<[]u8, bool>) ->
         }
     } else |_| {}
     return;
+}
+
+fn (self: &var Session) find_package_root(file: []u8) -> !?string::String {
+    let allocator = self.allocator;
+    let abs = try canonical_path(self.io, allocator, file);
+    defer abs.deinit(allocator);
+    let abs_bytes = abs.as_bytes();
+    let module_dir_bytes = path::dirname(abs_bytes);
+    var current = try string::from_bytes(allocator, module_dir_bytes);
+    defer current.deinit(allocator);
+    while true {
+        let dir_bytes = current.as_bytes();
+        if try self.lookup_package(dir_bytes) {
+            if self.packages.at(dir_bytes) |entry| {
+                if entry.found {
+                    if matching_source_root(&entry.source_roots, abs_bytes) |_| {
+                        return try string::from_bytes(allocator, dir_bytes);
+                    }
+                }
+            }
+        }
+        let parent = path::dirname(dir_bytes);
+        if mem::equal_bytes(parent, dir_bytes) {
+            break;
+        }
+        let next = try string::from_bytes(allocator, parent);
+        defer next.deinit(allocator);
+        current.clear();
+        let next_bytes = next.as_bytes();
+        try current.append_bytes(allocator, next_bytes);
+    }
+    return null;
 }
 
 fn (self: &var Session) resolve_file_context(file: []u8) -> !FileContext {
