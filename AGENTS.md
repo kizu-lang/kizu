@@ -61,7 +61,7 @@ CLI は `run` / `check` / `test` / `parse` が中核で、`build` / `ir` / `fmt`
 
 - テストを pass させるだけの場当たり的変更やハードコードを入れない。
 - LLVM を文字列リテラルで書き下ろさない。ソースの形ごとの payload 型・
-  関数名分岐・形状 template を作らない(`docs/principles.md` §11)。
+  関数名分岐・形状 template を作らない(`docs/principles.md` §7)。
 - 利用者が通る経路を 2 つにしない。Go を fallback にも feature flag にも戻さない。
 - hidden fallback、Go fallback、削除条件のない互換分岐を入れない。
 - 関数の内部形状や生成テキスト断片を grep で固定する**構造 pin を新規に追加しない**。
