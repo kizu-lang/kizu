@@ -139,12 +139,50 @@ fn decl_has_static_params(signature: &ast::FunctionSignature) -> bool {
     return signature.static_params.len() > 0;
 }
 
+fn collect_orphaned_import_removals(
+    io: Io,
+    allocator: Allocator,
+    loader_sources: &source::SourceMap,
+    parse_diagnostics: &array::Array<diagnostic::Diagnostic>,
+    modified_files: &map::Map<[]u8, bool>,
+    out: &var array::Array<FixRemoval>
+) -> !void {
+    if modified_files.len() == 0 {
+        return;
+    }
+    var idx = 0;
+    while parse_diagnostics.at(idx) |diag| {
+        idx = idx + 1;
+        let msg = diag.message.as_bytes();
+        if !mem::starts_with(msg, "unused import ") {
+            continue;
+        }
+        let sid = diag.span.source orelse continue;
+        if loader_sources.at(sid) |entry| {
+            let entry_path = entry.path.as_bytes();
+            let canon = try canonical_path(io, allocator, entry_path);
+            defer canon.deinit(allocator);
+            let canon_bytes = canon.as_bytes();
+            if modified_files.contains(canon_bytes) {
+                let path_copy = try string::from_bytes(allocator, entry_path);
+                errdefer path_copy.deinit(allocator);
+                try out.append(allocator, FixRemoval {
+                    file: move path_copy,
+                    extent: diag.span
+                });
+            }
+        }
+    }
+    return;
+}
+
 fn analyze_package_dead_code(
     io: Io,
     allocator: Allocator,
     lib_dir: []u8,
     pkg_root: []u8,
     requested_sources: &map::Map<[]u8, source::SourceId>,
+    modified_files: &map::Map<[]u8, bool>,
     collect_diagnostics: bool
 ) -> !DeadCodeReport {
     var report = DeadCodeReport {
@@ -196,6 +234,16 @@ fn analyze_package_dead_code(
                         },
                         Program(program) => {
                             defer program.deinit(allocator);
+                            if !collect_diagnostics {
+                                try collect_orphaned_import_removals(
+                                    io,
+                                    allocator,
+                                    &loader.sources,
+                                    &loader.parse_diagnostics,
+                                    modified_files,
+                                    &var report.removals
+                                );
+                            }
                             try analyze_loaded_program(
                                 io,
                                 allocator,
@@ -225,6 +273,7 @@ fn analyze_standalone_dead_code(
     file: []u8,
     std_cache: &array::Array<project::StdCache>,
     requested_sources: &map::Map<[]u8, source::SourceId>,
+    modified_files: &map::Map<[]u8, bool>,
     collect_diagnostics: bool
 ) -> !DeadCodeReport {
     var report = DeadCodeReport {
@@ -253,6 +302,16 @@ fn analyze_standalone_dead_code(
         },
         Program(program) => {
             defer program.deinit(allocator);
+            if !collect_diagnostics {
+                try collect_orphaned_import_removals(
+                    io,
+                    allocator,
+                    &loader.sources,
+                    &loader.parse_diagnostics,
+                    modified_files,
+                    &var report.removals
+                );
+            }
             try analyze_loaded_program(
                 io,
                 allocator,

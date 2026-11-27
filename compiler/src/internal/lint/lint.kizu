@@ -143,12 +143,14 @@ pub fn lint_targets_with_options(
     }
 
     if mem::len(lib_dir) > 0 {
+        var empty_modified = map::new<[]u8, bool>(allocator);
+        defer empty_modified.deinit(allocator);
         var pkg_idx = 0;
         while pkg_roots.at(pkg_idx) |pkg_root| {
             pkg_idx = pkg_idx + 1;
             let pkg_bytes = pkg_root.as_bytes();
             var report = try analyze_package_dead_code(
-                io, allocator, lib_dir, pkg_bytes, &requested_sources, true
+                io, allocator, lib_dir, pkg_bytes, &requested_sources, &empty_modified, true
             );
             defer report.deinit(allocator);
             try move_diagnostics(allocator, &var report.diagnostics, diagnostics);
@@ -162,7 +164,7 @@ pub fn lint_targets_with_options(
                 solo_idx = solo_idx + 1;
                 let solo_bytes = solo_file.as_bytes();
                 var report = try analyze_standalone_dead_code(
-                    io, allocator, lib_dir, solo_bytes, &std_cache, &requested_sources, true
+                    io, allocator, lib_dir, solo_bytes, &std_cache, &requested_sources, &empty_modified, true
                 );
                 defer report.deinit(allocator);
                 try move_diagnostics(allocator, &var report.diagnostics, diagnostics);
@@ -179,6 +181,8 @@ fn run_fix_passes(
     lib_dir: []u8,
     files: &array::Array<string::String>
 ) -> !void {
+    var modified_files = map::new<[]u8, bool>(allocator);
+    defer modified_files.deinit(allocator);
     var pass = 0;
     while pass < 16 {
         pass = pass + 1;
@@ -227,7 +231,7 @@ fn run_fix_passes(
             pkg_idx = pkg_idx + 1;
             let pkg_bytes = pkg_root.as_bytes();
             var report = try analyze_package_dead_code(
-                io, allocator, lib_dir, pkg_bytes, &requested_sources, false
+                io, allocator, lib_dir, pkg_bytes, &requested_sources, &modified_files, false
             );
             defer report.deinit(allocator);
             try move_removals(allocator, &var report.removals, &var all_removals);
@@ -241,7 +245,7 @@ fn run_fix_passes(
                 solo_idx = solo_idx + 1;
                 let solo_bytes = solo_file.as_bytes();
                 var report = try analyze_standalone_dead_code(
-                    io, allocator, lib_dir, solo_bytes, &std_cache, &requested_sources, false
+                    io, allocator, lib_dir, solo_bytes, &std_cache, &requested_sources, &modified_files, false
                 );
                 defer report.deinit(allocator);
                 try move_removals(allocator, &var report.removals, &var all_removals);
@@ -250,7 +254,7 @@ fn run_fix_passes(
         if all_removals.len() == 0 {
             break;
         }
-        let changed = try apply_fix_removals(io, allocator, &all_removals);
+        let changed = try apply_fix_removals(io, allocator, &all_removals, &var modified_files);
         if changed == 0 {
             break;
         }
