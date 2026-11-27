@@ -473,6 +473,7 @@ pub struct Loader {
     std_graph: array::Array<Graph>,
     consts: map::Map<[]u8, ConstEntry>,
     last_source: ?source::SourceId,
+    current_decl_span: ast::Span,
     pub sources: source::SourceMap,
     pub parse_diagnostics: array::Array<diagnostic::Diagnostic>,
     pub embedded_inputs: bool,
@@ -498,6 +499,7 @@ pub fn new_loader(io: Io, allocator: Allocator, lib_dir: []u8) -> !Loader {
         std_graph: array::new<Graph>(allocator),
         consts: map::new<[]u8, ConstEntry>(allocator),
         last_source: null,
+        current_decl_span: ast::zero_span(),
         sources: source::new(allocator),
         parse_diagnostics: array::new<diagnostic::Diagnostic>(allocator),
         embedded_inputs: false,
@@ -596,6 +598,24 @@ pub fn (self: &var Loader) load_test_program_cached(
     cache: &StdCache
 ) -> !LoadResult {
     return self.load_program_with_cache(tree, graph, true, cache);
+}
+
+pub fn (self: &var Loader) load_std_package(
+    tree: &var ast::Ast,
+    graph: &Graph,
+    include_tests: bool
+) -> !LoadResult {
+    try self.remember_std_modules(graph);
+    if try self.load_package(tree, graph, include_tests, true) |failed| {
+        return LoadResult::Error(move failed);
+    }
+    if try self.collect_types(tree) |failed| {
+        return LoadResult::Error(move failed);
+    }
+    if try self.collect_functions(tree) |failed| {
+        return LoadResult::Error(move failed);
+    }
+    return self.program(tree);
 }
 
 fn (self: &var Loader) load_program_with_sources(

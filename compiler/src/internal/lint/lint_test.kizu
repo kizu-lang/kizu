@@ -466,3 +466,282 @@ test "lint resolves package modules sibling files imports and internal paths on 
     expect_diag_at(&pkg_diagnostics, 1, 8, 1, "doc comment must directly precede");
     expect_diag_at(&pkg_diagnostics, 2, 1, 1, "internal module `demo::internal::inner`");
 }
+
+fn test_lib_dir(allocator: Allocator) -> !string::String {
+    if process::env("KIZU_LIB_DIR") |from_env| {
+        if mem::len(from_env) > 0 {
+            return string::from_bytes(allocator, from_env);
+        }
+    }
+    return string::from_bytes(allocator, "lib/kizu");
+}
+
+fn has_diag_containing(
+    diagnostics: &array::Array<diagnostic::Diagnostic>,
+    needle: []u8
+) -> bool {
+    var idx = 0;
+    while diagnostics.at(idx) |diag| {
+        idx = idx + 1;
+        let msg = diag.message.as_bytes();
+        if contains_bytes(msg, needle) {
+            return true;
+        }
+    }
+    return false;
+}
+
+test "lint detects transitive dead code and preserves roots deinit and comptime branches" {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    let lib_dir = try test_lib_dir(allocator);
+    defer lib_dir.deinit(allocator);
+    let lib_dir_bytes = lib_dir.as_bytes();
+    let root = try make_temp_dir(io, allocator, "deadcode");
+    defer root.deinit(allocator);
+    let root_bytes = root.as_bytes();
+    defer cleanup_tree(io, allocator, root_bytes);
+    let manifest =
+        \\[package]
+        \\name = "dead_demo"
+        \\version = "0.1.0"
+        \\
+        \\[modules]
+        \\paths = ["src"]
+        \\
+    ;
+    let main_src =
+        \\import std::array;
+        \\import std::mem;
+        \\import std::string;
+        \\
+        \\const LIVE_CONST = 10;
+        \\const DEAD_LEAF_CONST = 20;
+        \\const DEAD_CHAIN_CONST = DEAD_LEAF_CONST + 1;
+        \\
+        \\struct LiveOwner {
+        \\    buf: string::String,
+        \\}
+        \\
+        \\fn (self: LiveOwner) deinit(allocator: Allocator) -> void {
+        \\    self.buf.deinit(allocator);
+        \\}
+        \\
+        \\struct DeadStruct {
+        \\    x: i64,
+        \\}
+        \\
+        \\fn (self: &DeadStruct) read_x() -> i64 {
+        \\    return self.x;
+        \\}
+        \\
+        \\enum DeadEnum {
+        \\    A,
+        \\    B,
+        \\}
+        \\
+        \\union DeadUnion {
+        \\    Empty,
+        \\    Num(i64),
+        \\}
+        \\
+        \\fn dead_leaf() -> i64 {
+        \\    let s = DeadStruct { x: DEAD_CHAIN_CONST };
+        \\    let e = DeadEnum::A;
+        \\    let u = DeadUnion::Num(s.read_x());
+        \\    let _ = e;
+        \\    match u {
+        \\        Empty => return 0,
+        \\        Num(v) => return v,
+        \\    }
+        \\}
+        \\
+        \\fn dead_caller() -> i64 {
+        \\    return dead_leaf();
+        \\}
+        \\
+        \\fn win_only_helper() -> i64 {
+        \\    return 7;
+        \\}
+        \\
+        \\fn live_helper() -> i64 {
+        \\    comptime if std::target::is_windows() {
+        \\        return win_only_helper();
+        \\    } else {
+        \\        return LIVE_CONST;
+        \\    }
+        \\}
+        \\
+        \\export "c" fn exported_entry(a: i64) -> i64 {
+        \\    return a + 1;
+        \\}
+        \\
+        \\fn main() -> !void {
+        \\    let allocator = mem::page_allocator();
+        \\    var items = array::new<LiveOwner>(allocator);
+        \\    defer items.deinit(allocator);
+        \\    let _ = live_helper();
+        \\}
+        \\
+    ;
+    try write_tree_file(io, allocator, root_bytes, "kizu.toml", manifest);
+    try write_tree_file(io, allocator, root_bytes, "src/main.kizu", main_src);
+
+    var targets = array::new<string::String>(allocator);
+    defer targets.deinit(allocator);
+    try targets.append(allocator, try string::from_bytes(allocator, root_bytes));
+    var sources = source::new(allocator);
+    defer sources.deinit(allocator);
+    var diagnostics = array::new<diagnostic::Diagnostic>(allocator);
+    defer diagnostics.deinit(allocator);
+    if try lint_targets_with_options(
+        io, allocator, lib_dir_bytes, &targets, false, &var sources, &var diagnostics
+    ) |err| {
+        defer err.deinit(allocator);
+        let err_bytes = err.as_bytes();
+        testing::fail(err_bytes);
+    }
+    testing::expect(has_diag_containing(&diagnostics, "unused private const `DEAD_LEAF_CONST`"));
+    testing::expect(has_diag_containing(&diagnostics, "unused private const `DEAD_CHAIN_CONST`"));
+    testing::expect(has_diag_containing(&diagnostics, "unused private struct `DeadStruct`"));
+    testing::expect(has_diag_containing(&diagnostics, "unused private method `DeadStruct.read_x`"));
+    testing::expect(has_diag_containing(&diagnostics, "unused private enum `DeadEnum`"));
+    testing::expect(has_diag_containing(&diagnostics, "unused private union `DeadUnion`"));
+    testing::expect(has_diag_containing(&diagnostics, "unused private function `dead_leaf`"));
+    testing::expect(has_diag_containing(&diagnostics, "unused private function `dead_caller`"));
+    testing::expect(!has_diag_containing(&diagnostics, "LIVE_CONST"));
+    testing::expect(!has_diag_containing(&diagnostics, "LiveOwner"));
+    testing::expect(!has_diag_containing(&diagnostics, "deinit"));
+    testing::expect(!has_diag_containing(&diagnostics, "win_only_helper"));
+    testing::expect(!has_diag_containing(&diagnostics, "live_helper"));
+    testing::expect(!has_diag_containing(&diagnostics, "exported_entry"));
+    testing::expect(!has_diag_containing(&diagnostics, "main"));
+    testing::expect_equal<i64>(8, diagnostics.len());
+}
+
+test "lint fix removes dead private declarations to fixed point and never modifies locals params or comments" {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    let lib_dir = try test_lib_dir(allocator);
+    defer lib_dir.deinit(allocator);
+    let lib_dir_bytes = lib_dir.as_bytes();
+    let root = try make_temp_dir(io, allocator, "fix");
+    defer root.deinit(allocator);
+    let root_bytes = root.as_bytes();
+    defer cleanup_tree(io, allocator, root_bytes);
+    let manifest =
+        \\[package]
+        \\name = "fix_demo"
+        \\version = "0.1.0"
+        \\
+        \\[modules]
+        \\paths = ["src"]
+        \\
+    ;
+    let clean_fixable =
+        \\import std::mem;
+        \\
+        \\/// Public entry point.
+        \\pub fn live() -> i64 {
+        \\    return 42;
+        \\}
+        \\
+        \\const UNUSED_C = 9;
+        \\
+        \\struct DeadBox {
+        \\    v: i64,
+        \\}
+        \\
+        \\fn dead_b() -> i64 {
+        \\    let b = DeadBox { v: UNUSED_C };
+        \\    let _ = mem::len("hi");
+        \\    return b.v;
+        \\}
+        \\
+        \\fn dead_a() -> i64 {
+        \\    return dead_b();
+        \\}
+        \\
+    ;
+    try write_tree_file(io, allocator, root_bytes, "kizu.toml", manifest);
+    try write_tree_file(io, allocator, root_bytes, "src/lib.kizu", clean_fixable);
+
+    var targets = array::new<string::String>(allocator);
+    defer targets.deinit(allocator);
+    try targets.append(allocator, try string::from_bytes(allocator, root_bytes));
+    var sources = source::new(allocator);
+    defer sources.deinit(allocator);
+    var diagnostics = array::new<diagnostic::Diagnostic>(allocator);
+    defer diagnostics.deinit(allocator);
+    if try lint_targets_with_options(
+        io, allocator, lib_dir_bytes, &targets, true, &var sources, &var diagnostics
+    ) |err| {
+        defer err.deinit(allocator);
+        let err_bytes = err.as_bytes();
+        testing::fail(err_bytes);
+    }
+    testing::expect_equal<i64>(0, diagnostics.len());
+    let lib_path = try path::join(allocator, root_bytes, "src/lib.kizu");
+    defer lib_path.deinit(allocator);
+    let lib_path_bytes = lib_path.as_bytes();
+    let after = try fs::read_file(io, allocator, lib_path_bytes, mem::Limit::Unlimited);
+    defer after.deinit(allocator);
+    let after_bytes = after.as_bytes();
+    testing::expect(contains_bytes(after_bytes, "/// Public entry point."));
+    testing::expect(contains_bytes(after_bytes, "pub fn live() -> i64"));
+    testing::expect(!contains_bytes(after_bytes, "dead_a"));
+    testing::expect(!contains_bytes(after_bytes, "dead_b"));
+    testing::expect(!contains_bytes(after_bytes, "DeadBox"));
+    testing::expect(!contains_bytes(after_bytes, "UNUSED_C"));
+    testing::expect(!contains_bytes(after_bytes, "import std::mem;"));
+
+    let unsafe_case =
+        \\// keep this comment error
+        \\pub fn with_unused(unused_p: i64, _ok_p: i64, out: &var i64) -> i64 {
+        \\    out.* = 1;
+        \\    let unused_l = 5;
+        \\    let _ok_l = 6;
+        \\    for 0..2 |unused_i| {
+        \\        let _ = 0;
+        \\    }
+        \\    for 0..2 |_ok_i| {
+        \\        let _ = 0;
+        \\    }
+        \\    return 1;
+        \\}
+        \\
+        \\fn dead_only() -> i64 {
+        \\    return 0;
+        \\}
+        \\
+    ;
+    try write_tree_file(io, allocator, root_bytes, "src/lib.kizu", unsafe_case);
+    var sources2 = source::new(allocator);
+    defer sources2.deinit(allocator);
+    var diags2 = array::new<diagnostic::Diagnostic>(allocator);
+    defer diags2.deinit(allocator);
+    if try lint_targets_with_options(
+        io, allocator, lib_dir_bytes, &targets, true, &var sources2, &var diags2
+    ) |err| {
+        defer err.deinit(allocator);
+        let err_bytes = err.as_bytes();
+        testing::fail(err_bytes);
+    }
+    let after2 = try fs::read_file(io, allocator, lib_path_bytes, mem::Limit::Unlimited);
+    defer after2.deinit(allocator);
+    let after2_bytes = after2.as_bytes();
+    testing::expect(!contains_bytes(after2_bytes, "dead_only"));
+    testing::expect(contains_bytes(after2_bytes, "// keep this comment error"));
+    testing::expect(contains_bytes(after2_bytes, "unused_p: i64"));
+    testing::expect(contains_bytes(after2_bytes, "let unused_l = 5;"));
+    testing::expect(contains_bytes(after2_bytes, "|unused_i|"));
+    testing::expect(has_diag_containing(&diags2, "comment is not allowed"));
+    testing::expect(has_diag_containing(&diags2, "unused parameter `unused_p`"));
+    testing::expect(has_diag_containing(&diags2, "unused local `unused_l`"));
+    testing::expect(has_diag_containing(&diags2, "unused local `unused_i`"));
+    testing::expect(!has_diag_containing(&diags2, "_ok_p"));
+    testing::expect(!has_diag_containing(&diags2, "_ok_l"));
+    testing::expect(!has_diag_containing(&diags2, "_ok_i"));
+    testing::expect(!has_diag_containing(&diags2, "out"));
+    testing::expect_equal<i64>(4, diags2.len());
+}
