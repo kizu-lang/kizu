@@ -16,97 +16,54 @@ fn (self: &var Lowerer) mutably_borrowed_locals(tree: &var ast::Ast, decl: Facts
     while self.lent_places.pop() |_| {}
     while self.for_indexes.pop() |_| {}
     if self.decl_body(decl) |body| {
-        if try self.collect_mut_borrows_stmt(tree, body.as_statement()) |failed| {
+        if try self.collect_slots_stmt(tree, body.as_statement()) |failed| {
             return move failed;
         }
-        try self.collect_index_writes(tree, body.as_statement());
     }
     return null;
 }
 
-fn (self: &var Lowerer) collect_index_writes(tree: &var ast::Ast, statement: ast::Statement) -> !void {
-    if ownership::assign_stmt(tree, statement) |assign| {
-        var element = assign.target;
-        while ownership::field_expr(tree, element) |field| {
-            if field.namespace {
-                break;
-            }
-            element = field.receiver;
+fn (self: &var Lowerer) note_assign_index_write(tree: &ast::Ast, target: ast::Expression) -> !void {
+    var element = target;
+    while ownership::field_expr(tree, element) |field| {
+        if field.namespace {
+            break;
         }
-        if ownership::index_expr(tree, element) |index| {
-            if !index.slice {
-                var root = element;
-                while ownership::index_expr(tree, root) |inner| {
-                    root = inner.target;
+        element = field.receiver;
+    }
+    if ownership::index_expr(tree, element) |index| {
+        if !index.slice {
+            var root = element;
+            while ownership::index_expr(tree, root) |inner| {
+                root = inner.target;
+            }
+            while ownership::field_expr(tree, root) |field| {
+                if field.namespace {
+                    break;
                 }
-                while ownership::field_expr(tree, root) |field| {
-                    if field.namespace {
-                        break;
-                    }
-                    root = field.receiver;
-                }
-                if ownership::ident_expr(tree, root) |ident| {
-                    let name = try self.text_name(tree, ident.name);
-                    if !self.is_index_written(name) {
-                        try self.index_written.append(self.allocator, name);
-                    }
+                root = field.receiver;
+            }
+            if ownership::ident_expr(tree, root) |ident| {
+                let name = try self.text_name(tree, ident.name);
+                if !self.is_index_written(name) {
+                    try self.index_written.append(self.allocator, name);
                 }
             }
         }
-    }
-    var exprs = array::new<ast::Expression>(self.allocator);
-    defer exprs.deinit(self.allocator);
-    var stmts = array::new<ast::Statement>(self.allocator);
-    defer stmts.deinit(self.allocator);
-    let _ = try statement_children(self.allocator, tree, statement, &var exprs, &var stmts);
-    var index = 0;
-    while exprs.get(index) |expression| {
-        index = index + 1;
-        try self.collect_index_writes_expr(tree, expression);
-    }
-    index = 0;
-    while stmts.get(index) |inner| {
-        index = index + 1;
-        try self.collect_index_writes(tree, inner);
     }
     return;
 }
 
-fn (self: &var Lowerer) collect_index_writes_expr(tree: &var ast::Ast, expression: ast::Expression) -> !void {
-    if ownership::index_expr(tree, expression) |index| {
-        if !index.slice {
-            var root = expression;
-            while ownership::index_expr(tree, root) |inner| {
-                root = inner.target;
-            }
-            if ownership::ident_expr(tree, root) |ident| {
-                let name = try self.text_name(tree, ident.name);
-                if !self.is_index_read(name) {
-                    try self.index_read.append(self.allocator, name);
-                }
-            }
+fn (self: &var Lowerer) note_index_read(tree: &ast::Ast, expression: ast::Expression) -> !void {
+    var root = expression;
+    while ownership::index_expr(tree, root) |inner| {
+        root = inner.target;
+    }
+    if ownership::ident_expr(tree, root) |ident| {
+        let name = try self.text_name(tree, ident.name);
+        if !self.is_index_read(name) {
+            try self.index_read.append(self.allocator, name);
         }
-    }
-    var exprs = array::new<ast::Expression>(self.allocator);
-    defer exprs.deinit(self.allocator);
-    var stmts = array::new<ast::Statement>(self.allocator);
-    defer stmts.deinit(self.allocator);
-    match tree.expressions.at(expression.node) {
-        If(branch) => try if_children(self.allocator, branch, &var exprs, &var stmts),
-        Match(value) => try match_children(self.allocator, value, &var exprs, &var stmts),
-        _ => {
-            let _ = try expression_children(self.allocator, tree, expression, &var exprs);
-        },
-    }
-    var index = 0;
-    while exprs.get(index) |child| {
-        index = index + 1;
-        try self.collect_index_writes_expr(tree, child);
-    }
-    index = 0;
-    while stmts.get(index) |inner| {
-        index = index + 1;
-        try self.collect_index_writes(tree, inner);
     }
     return;
 }
@@ -250,200 +207,415 @@ fn (self: &var Lowerer) add_slot(name: Name) -> !void {
     return self.slots.append(self.allocator, name);
 }
 
-fn match_binds_payload(tree: &ast::Ast, arms: &array::Array<ast::MatchArm>) -> bool {
-    var index = 0;
-    while arms.get(index) |arm| {
-        index = index + 1;
-        if !text_empty(tree, arm.binding) and !arm.is_wildcard(tree) {
-            return true;
-        }
-    }
-    return false;
-}
-
-fn (self: &var Lowerer) collect_mut_borrows_stmt(tree: &var ast::Ast, statement: ast::Statement) -> !?diagnostic::Diagnostic {
-    if ownership::defer_stmt(tree, statement) |value| {
-        if cleanup_receiver(tree, value.expr) |receiver| {
-            try self.mark_if_name(tree, ast::Expression { node: receiver, location: null });
-        }
-    }
-    if ownership::errdefer_stmt(tree, statement) |value| {
-        if cleanup_receiver(tree, value.expr) |receiver| {
-            try self.mark_if_name(tree, ast::Expression { node: receiver, location: null });
-        }
-    }
-    if ownership::match_stmt_head(tree, statement) |head| {
-        if ownership::field_expr(tree, head.value) |field| {
-            let arms = try ownership::match_stmt_arms(self.allocator, tree, statement);
-            defer arms.deinit(self.allocator);
-            if !field.namespace and match_binds_payload(tree, &arms) {
-                try self.mark_if_name(tree, head.value);
+fn match_stmt_binds_payload(tree: &ast::Ast, statement: ast::Statement) -> bool {
+    match tree.statements.at(statement.node) {
+        Match(value) => {
+            var index = 0;
+            while value.arms.get(index) |arm| {
+                index = index + 1;
+                if !text_empty(tree, arm.binding) and !arm.is_wildcard(tree) {
+                    return true;
+                }
             }
-        }
+            return false;
+        },
+        _ => return false,
     }
-    var exprs = array::new<ast::Expression>(self.allocator);
-    defer exprs.deinit(self.allocator);
-    var stmts = array::new<ast::Statement>(self.allocator);
-    defer stmts.deinit(self.allocator);
-    let known = try statement_children(self.allocator, tree, statement, &var exprs, &var stmts);
-    if !known {
-        let kind = try self.name(statement_go_type(tree, statement));
-        return try self.fail1(tree, "ir error: slot analysis does not know statement `%s`", Arg::Str(kind));
-    }
-    return self.collect_mut_borrows_children(tree, &exprs, &stmts);
 }
 
-fn (self: &var Lowerer) collect_mut_borrows_children(
-    tree: &var ast::Ast,
-    exprs: &array::Array<ast::Expression>,
-    stmts: &array::Array<ast::Statement>
-) -> !?diagnostic::Diagnostic {
-    var index = 0;
-    while exprs.get(index) |expression| {
-        index = index + 1;
-        if try self.collect_mut_borrows_expr(tree, expression) |failed| {
-            return move failed;
-        }
+fn match_stmt_arm_body_at(tree: &ast::Ast, statement: ast::Statement, index: i64) -> ?ast::Statement {
+    match tree.statements.at(statement.node) {
+        Match(value) => {
+            if value.arms.get(index) |arm| {
+                return arm.body;
+            }
+            return null;
+        },
+        _ => return null,
     }
-    index = 0;
-    while stmts.get(index) |inner| {
-        index = index + 1;
-        if try self.collect_mut_borrows_stmt(tree, inner) |failed| {
-            return move failed;
-        }
+}
+
+fn match_expr_arm_body_at(tree: &ast::Ast, expression: ast::Expression, index: i64) -> ?ast::Statement {
+    match tree.expressions.at(expression.node) {
+        Match(value) => {
+            if value.arms.get(index) |arm| {
+                return arm.body;
+            }
+            return null;
+        },
+        _ => return null,
+    }
+}
+
+fn buffer_element_at(tree: &ast::Ast, expression: ast::Expression, index: i64) -> ?ast::Expression {
+    match tree.expressions.at(expression.node) {
+        BufferLiteral(value) => return value.elements.get(index),
+        _ => return null,
+    }
+}
+
+fn vector_lane_at(tree: &ast::Ast, expression: ast::Expression, index: i64) -> ?ast::Expression {
+    match tree.expressions.at(expression.node) {
+        VectorLiteral(value) => return value.lanes.get(index),
+        _ => return null,
+    }
+}
+
+fn (self: &var Lowerer) collect_slots_if(tree: &var ast::Ast, branch: ast::IfStmt) -> !?diagnostic::Diagnostic {
+    if try self.collect_slots_expr(tree, branch.condition) |failed| {
+        return move failed;
+    }
+    if try self.collect_slots_stmt(tree, branch.consequence.as_statement()) |failed| {
+        return move failed;
+    }
+    if branch.alternative |alternative| {
+        return self.collect_slots_stmt(tree, alternative.as_statement());
     }
     return null;
 }
 
-fn statement_children(
-    allocator: Allocator,
-    tree: &ast::Ast,
-    statement: ast::Statement,
-    exprs: &var array::Array<ast::Expression>,
-    stmts: &var array::Array<ast::Statement>
-) -> !bool {
+fn (self: &var Lowerer) collect_slots_stmt(tree: &var ast::Ast, statement: ast::Statement) -> !?diagnostic::Diagnostic {
     match tree.statements.at(statement.node) {
-        Let(s) => try exprs.append(allocator, s.value),
+        Let(s) => {
+            let value = s.value;
+            return self.collect_slots_expr(tree, value);
+        },
         Assign(s) => {
-            try exprs.append(allocator, s.target);
-            try exprs.append(allocator, s.value);
+            let target = s.target;
+            let value = s.value;
+            try self.note_assign_index_write(tree, target);
+            if try self.collect_slots_expr(tree, target) |failed| {
+                return move failed;
+            }
+            return self.collect_slots_expr(tree, value);
         },
         Return(s) => {
             if s.value |value| {
-                try exprs.append(allocator, value);
+                return self.collect_slots_expr(tree, value);
             }
+            return null;
         },
-        Defer(s) => try exprs.append(allocator, s.expr),
-        ErrDefer(s) => try exprs.append(allocator, s.expr),
-        Expr(s) => try exprs.append(allocator, s.expr),
-        Break(_) => {},
-        Continue(_) => {},
-        Block(s) => {
+        Defer(s) => {
+            let expr = s.expr;
+            if cleanup_receiver(tree, expr) |receiver| {
+                try self.mark_if_name(tree, ast::Expression { node: receiver, location: null });
+            }
+            return self.collect_slots_expr(tree, expr);
+        },
+        ErrDefer(s) => {
+            let expr = s.expr;
+            if cleanup_receiver(tree, expr) |receiver| {
+                try self.mark_if_name(tree, ast::Expression { node: receiver, location: null });
+            }
+            return self.collect_slots_expr(tree, expr);
+        },
+        Expr(s) => {
+            let expr = s.expr;
+            return self.collect_slots_expr(tree, expr);
+        },
+        Break(_) => return null,
+        Continue(_) => return null,
+        Block(_) => {
+            let block = ast::Block { node: statement.node, location: null };
             var index = 0;
-            while s.statements.get(index) |inner| {
+            while ownership::block_statement_at(tree, block, index) |inner| {
                 index = index + 1;
-                try stmts.append(allocator, inner);
+                if try self.collect_slots_stmt(tree, inner) |failed| {
+                    return move failed;
+                }
             }
+            return null;
         },
-        If(s) => try if_children(allocator, s, exprs, stmts),
+        If(s) => {
+            let copied = ast::IfStmt {
+                condition: s.condition,
+                consequence: s.consequence,
+                alternative: s.alternative,
+                capture: s.capture,
+                err_capture: s.err_capture
+            };
+            return self.collect_slots_if(tree, copied);
+        },
         ComptimeIf(s) => {
-            try exprs.append(allocator, s.condition);
-            try stmts.append(allocator, s.consequence.as_statement());
-            if s.alternative |alternative| {
-                try stmts.append(allocator, alternative.as_statement());
+            let cond = s.condition;
+            let cons = s.consequence;
+            let alt = s.alternative;
+            if try self.collect_slots_expr(tree, cond) |failed| {
+                return move failed;
             }
+            if try self.collect_slots_stmt(tree, cons.as_statement()) |failed| {
+                return move failed;
+            }
+            if alt |alternative| {
+                return self.collect_slots_stmt(tree, alternative.as_statement());
+            }
+            return null;
         },
         ComptimeFor(s) => {
+            let body = s.body;
+            var range_start: ?ast::Expression = null;
+            var range_end: ?ast::Expression = null;
             match s.iterable {
                 List(_) => {},
                 Range(range) => {
-                    try exprs.append(allocator, range.start);
-                    try exprs.append(allocator, range.end);
+                    range_start = range.start;
+                    range_end = range.end;
                 },
             }
-            try stmts.append(allocator, s.body.as_statement());
+            if range_start |start_expr| {
+                if try self.collect_slots_expr(tree, start_expr) |failed| {
+                    return move failed;
+                }
+            }
+            if range_end |end_expr| {
+                if try self.collect_slots_expr(tree, end_expr) |failed| {
+                    return move failed;
+                }
+            }
+            return self.collect_slots_stmt(tree, body.as_statement());
         },
         ComptimeMatch(s) => {
-            try exprs.append(allocator, s.value);
-            try stmts.append(allocator, s.body.as_statement());
+            let value = s.value;
+            let body = s.body;
+            if try self.collect_slots_expr(tree, value) |failed| {
+                return move failed;
+            }
+            return self.collect_slots_stmt(tree, body.as_statement());
         },
         While(s) => {
-            try exprs.append(allocator, s.condition);
-            try stmts.append(allocator, s.body.as_statement());
+            let cond = s.condition;
+            let body = s.body;
+            if try self.collect_slots_expr(tree, cond) |failed| {
+                return move failed;
+            }
+            return self.collect_slots_stmt(tree, body.as_statement());
         },
         For(s) => {
-            try exprs.append(allocator, s.start);
-            try exprs.append(allocator, s.end);
-            try stmts.append(allocator, s.body.as_statement());
+            let start = s.start;
+            let end = s.end;
+            let body = s.body;
+            if try self.collect_slots_expr(tree, start) |failed| {
+                return move failed;
+            }
+            if try self.collect_slots_expr(tree, end) |failed| {
+                return move failed;
+            }
+            return self.collect_slots_stmt(tree, body.as_statement());
         },
-        Match(s) => try match_children(allocator, s, exprs, stmts),
-        Recovered(_) => return false,
+        Match(s) => {
+            let match_value = s.value;
+            if ownership::field_expr(tree, match_value) |field| {
+                if !field.namespace and match_stmt_binds_payload(tree, statement) {
+                    try self.mark_if_name(tree, match_value);
+                }
+            }
+            if try self.collect_slots_expr(tree, match_value) |failed| {
+                return move failed;
+            }
+            var index = 0;
+            while match_stmt_arm_body_at(tree, statement, index) |body| {
+                index = index + 1;
+                if try self.collect_slots_stmt(tree, body) |failed| {
+                    return move failed;
+                }
+            }
+            return null;
+        },
+        Recovered(_) => {
+            let kind = try self.name(statement_go_type(tree, statement));
+            return try self.fail1(tree, "ir error: slot analysis does not know statement `%s`", Arg::Str(kind));
+        },
     }
-    return true;
 }
 
-fn if_children(
-    allocator: Allocator,
-    branch: ast::IfStmt,
-    exprs: &var array::Array<ast::Expression>,
-    stmts: &var array::Array<ast::Statement>
-) -> !void {
-    try exprs.append(allocator, branch.condition);
-    try stmts.append(allocator, branch.consequence.as_statement());
-    if branch.alternative |alternative| {
-        try stmts.append(allocator, alternative.as_statement());
-    }
-    return;
-}
-
-fn match_children(
-    allocator: Allocator,
-    value: &ast::MatchStmt,
-    exprs: &var array::Array<ast::Expression>,
-    stmts: &var array::Array<ast::Statement>
-) -> !void {
-    try exprs.append(allocator, value.value);
-    var index = 0;
-    while value.arms.get(index) |arm| {
-        index = index + 1;
-        try stmts.append(allocator, arm.body);
-    }
-    return;
-}
-
-fn (self: &var Lowerer) collect_mut_borrows_expr(tree: &var ast::Ast, expression: ast::Expression) -> !?diagnostic::Diagnostic {
-    if self.function_pointer_mutably_borrows(expression) {
+fn (self: &var Lowerer) collect_slots_expr(tree: &var ast::Ast, expression: ast::Expression) -> !?diagnostic::Diagnostic {
+    if self.function_pointer_mut_borrows.len() > 0 and self.function_pointer_mutably_borrows(expression) {
         try self.mark_if_name(tree, expression);
     }
-    if ownership::call_expr(tree, expression) |call| {
-        try self.mark_lent_args(tree, call);
+    match tree.expressions.at(expression.node) {
+        Ident(_) => return null,
+        Int(_) => return null,
+        Float(_) => return null,
+        String(_) => return null,
+        CString(_) => return null,
+        Bool(_) => return null,
+        Type(_) => return null,
+        Null(_) => return null,
+        Prefix(e) => {
+            let op = e.operator;
+            let right = e.right;
+            if text_is(tree, op, "&var") {
+                try self.mark_if_name(tree, right);
+            }
+            return self.collect_slots_expr(tree, right);
+        },
+        Binary(e) => {
+            let left = e.left;
+            let right = e.right;
+            if try self.collect_slots_expr(tree, left) |failed| {
+                return move failed;
+            }
+            return self.collect_slots_expr(tree, right);
+        },
+        TypeApply(e) => {
+            let callee = e.callee;
+            return self.collect_slots_expr(tree, callee);
+        },
+        Cast(e) => {
+            let value = e.value;
+            return self.collect_slots_expr(tree, value);
+        },
+        Try(e) => {
+            let value = e.value;
+            return self.collect_slots_expr(tree, value);
+        },
+        Unsafe(e) => {
+            let value = e.value;
+            return self.collect_slots_expr(tree, value);
+        },
+        Move(e) => {
+            let value = e.value;
+            return self.collect_slots_expr(tree, value);
+        },
+        Comptime(e) => {
+            let expr = e.expr;
+            return self.collect_slots_expr(tree, expr);
+        },
+        Deref(e) => {
+            let receiver = e.receiver;
+            return self.collect_slots_expr(tree, receiver);
+        },
+        Field(e) => {
+            let receiver = e.receiver;
+            return self.collect_slots_expr(tree, receiver);
+        },
+        Index(e) => {
+            let slice = e.slice;
+            let target = e.target;
+            let idx = e.index;
+            let start = e.start;
+            let end = e.end;
+            if !slice {
+                try self.note_index_read(tree, expression);
+            }
+            if try self.collect_slots_expr(tree, target) |failed| {
+                return move failed;
+            }
+            if idx |index_expr| {
+                if try self.collect_slots_expr(tree, index_expr) |failed| {
+                    return move failed;
+                }
+            }
+            if start |start_expr| {
+                if try self.collect_slots_expr(tree, start_expr) |failed| {
+                    return move failed;
+                }
+            }
+            if end |end_expr| {
+                return self.collect_slots_expr(tree, end_expr);
+            }
+            return null;
+        },
+        StructLiteral(_) => {
+            var index = 0;
+            while ownership::struct_literal_field_at(tree, expression, index) |field| {
+                index = index + 1;
+                if try self.collect_slots_expr(tree, field.value) |failed| {
+                    return move failed;
+                }
+            }
+            return null;
+        },
+        BufferLiteral(_) => {
+            var index = 0;
+            while buffer_element_at(tree, expression, index) |element| {
+                index = index + 1;
+                if try self.collect_slots_expr(tree, element) |failed| {
+                    return move failed;
+                }
+            }
+            return null;
+        },
+        VectorLiteral(_) => {
+            var index = 0;
+            while vector_lane_at(tree, expression, index) |lane| {
+                index = index + 1;
+                if try self.collect_slots_expr(tree, lane) |failed| {
+                    return move failed;
+                }
+            }
+            return null;
+        },
+        Call(e) => {
+            let call = ast::CallExpr { callee: e.callee, args: e.args };
+            try self.mark_lent_args(tree, call);
+            if try self.collect_slots_expr(tree, call.callee) |failed| {
+                return move failed;
+            }
+            var index = 0;
+            while ownership::arg_at(tree, call.args, index) |arg| {
+                index = index + 1;
+                if try self.collect_slots_expr(tree, arg) |failed| {
+                    return move failed;
+                }
+            }
+            return null;
+        },
+        OrelseGuard(e) => {
+            let cond = e.condition;
+            let exit = e.exit;
+            if try self.collect_slots_expr(tree, cond) |failed| {
+                return move failed;
+            }
+            if ownership::return_stmt(tree, exit) |returned| {
+                if returned.value |value| {
+                    return self.collect_slots_expr(tree, value);
+                }
+            }
+            return null;
+        },
+        CatchGuard(e) => {
+            let cond = e.condition;
+            let exit = e.exit;
+            if try self.collect_slots_expr(tree, cond) |failed| {
+                return move failed;
+            }
+            if ownership::return_stmt(tree, exit) |returned| {
+                if returned.value |value| {
+                    return self.collect_slots_expr(tree, value);
+                }
+            }
+            return null;
+        },
+        If(branch) => {
+            let copied = ast::IfStmt {
+                condition: branch.condition,
+                consequence: branch.consequence,
+                alternative: branch.alternative,
+                capture: branch.capture,
+                err_capture: branch.err_capture
+            };
+            return self.collect_slots_if(tree, copied);
+        },
+        Match(value) => {
+            let match_value = value.value;
+            if try self.collect_slots_expr(tree, match_value) |failed| {
+                return move failed;
+            }
+            var index = 0;
+            while match_expr_arm_body_at(tree, expression, index) |body| {
+                index = index + 1;
+                if try self.collect_slots_stmt(tree, body) |failed| {
+                    return move failed;
+                }
+            }
+            return null;
+        },
+        Recovered(_) => {
+            let kind = try self.name(expression_go_type(tree, expression));
+            return try self.fail1(tree, "ir error: slot analysis does not know expression `%s`", Arg::Str(kind));
+        },
     }
-    if ownership::prefix_expr(tree, expression) |prefix| {
-        if text_is(tree, prefix.operator, "&var") {
-            try self.mark_if_name(tree, prefix.right);
-        }
-    }
-    if ownership::if_expr(tree, expression) |_| {
-        return self.collect_mut_borrows_value_stmt(tree, expression);
-    }
-    if ownership::is_match_expr(tree, expression) {
-        return self.collect_mut_borrows_value_stmt(tree, expression);
-    }
-    var children = array::new<ast::Expression>(self.allocator);
-    defer children.deinit(self.allocator);
-    let known = try expression_children(self.allocator, tree, expression, &var children);
-    if !known {
-        let kind = try self.name(expression_go_type(tree, expression));
-        return try self.fail1(tree, "ir error: slot analysis does not know expression `%s`", Arg::Str(kind));
-    }
-    var index = 0;
-    while children.get(index) |child| {
-        index = index + 1;
-        if try self.collect_mut_borrows_expr(tree, child) |failed| {
-            return move failed;
-        }
-    }
-    return null;
 }
 
 fn (self: &Lowerer) function_pointer_mutably_borrows(expression: ast::Expression) -> bool {
@@ -455,111 +627,6 @@ fn (self: &Lowerer) function_pointer_mutably_borrows(expression: ast::Expression
         index = index + 1;
     }
     return false;
-}
-
-fn (self: &var Lowerer) collect_mut_borrows_value_stmt(tree: &var ast::Ast, expression: ast::Expression) -> !?diagnostic::Diagnostic {
-    var exprs = array::new<ast::Expression>(self.allocator);
-    defer exprs.deinit(self.allocator);
-    var stmts = array::new<ast::Statement>(self.allocator);
-    defer stmts.deinit(self.allocator);
-    match tree.expressions.at(expression.node) {
-        If(branch) => try if_children(self.allocator, branch, &var exprs, &var stmts),
-        Match(value) => try match_children(self.allocator, value, &var exprs, &var stmts),
-        _ => {},
-    }
-    return self.collect_mut_borrows_children(tree, &exprs, &stmts);
-}
-
-fn expression_children(
-    allocator: Allocator,
-    tree: &ast::Ast,
-    expression: ast::Expression,
-    children: &var array::Array<ast::Expression>
-) -> !bool {
-    match tree.expressions.at(expression.node) {
-        Ident(_) => {},
-        Int(_) => {},
-        Float(_) => {},
-        String(_) => {},
-        CString(_) => {},
-        Bool(_) => {},
-        Type(_) => {},
-        BufferLiteral(e) => {
-            var index = 0;
-            while e.elements.get(index) |element| {
-                try children.append(allocator, element);
-                index = index + 1;
-            }
-        },
-        VectorLiteral(e) => {
-            var index = 0;
-            while e.lanes.get(index) |lane| {
-                try children.append(allocator, lane);
-                index = index + 1;
-            }
-        },
-        Null(_) => {},
-        Prefix(e) => try children.append(allocator, e.right),
-        Binary(e) => {
-            try children.append(allocator, e.left);
-            try children.append(allocator, e.right);
-        },
-        TypeApply(e) => try children.append(allocator, e.callee),
-        Cast(e) => try children.append(allocator, e.value),
-        Try(e) => try children.append(allocator, e.value),
-        Unsafe(e) => try children.append(allocator, e.value),
-        Move(e) => try children.append(allocator, e.value),
-        Comptime(e) => try children.append(allocator, e.expr),
-        Deref(e) => try children.append(allocator, e.receiver),
-        Field(e) => try children.append(allocator, e.receiver),
-        Index(e) => {
-            try children.append(allocator, e.target);
-            if e.index |index| {
-                try children.append(allocator, index);
-            }
-            if e.start |start| {
-                try children.append(allocator, start);
-            }
-            if e.end |end| {
-                try children.append(allocator, end);
-            }
-        },
-        StructLiteral(e) => {
-            var index = 0;
-            while e.fields.get(index) |field| {
-                index = index + 1;
-                try children.append(allocator, field.value);
-            }
-        },
-        Call(e) => {
-            try children.append(allocator, e.callee);
-            var index = 0;
-            while ownership::arg_at(tree, e.args, index) |arg| {
-                index = index + 1;
-                try children.append(allocator, arg);
-            }
-        },
-        OrelseGuard(e) => {
-            try children.append(allocator, e.condition);
-            if ownership::return_stmt(tree, e.exit) |returned| {
-                if returned.value |value| {
-                    try children.append(allocator, value);
-                }
-            }
-        },
-        CatchGuard(e) => {
-            try children.append(allocator, e.condition);
-            if ownership::return_stmt(tree, e.exit) |returned| {
-                if returned.value |value| {
-                    try children.append(allocator, value);
-                }
-            }
-        },
-        If(_) => return false,
-        Match(_) => return false,
-        Recovered(_) => return false,
-    }
-    return true;
 }
 
 fn (self: &var Lowerer) mark_lent_args(tree: &var ast::Ast, call: ast::CallExpr) -> !void {
@@ -802,12 +869,18 @@ fn (self: &Lowerer) is_storage_param(name: Name) -> bool {
 }
 
 fn (self: &var Lowerer) slot_pointer(tree: &ast::Ast, expression: ast::Expression) -> !?Value {
+    if self.slots.len() == 0 and self.place_slots.len() == 0 and self.lent_places.len() == 0 {
+        return null;
+    }
     let ident = ownership::ident_expr(tree, expression) orelse return null;
     let name = try self.text_name(tree, ident.name);
     return self.named_storage(name);
 }
 
 fn (self: &Lowerer) named_storage(name: Name) -> ?Value {
+    if self.slots.len() == 0 and self.place_slots.len() == 0 and self.lent_places.len() == 0 {
+        return null;
+    }
     let value = self.envs.get(self.env, name) orelse return null;
     if self.is_for_index(value.name) {
         return null;

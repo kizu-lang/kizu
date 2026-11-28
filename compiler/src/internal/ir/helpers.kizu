@@ -19,11 +19,18 @@ fn (self: &var Lowerer) next_block_name(prefix: []u8) -> !Name {
 }
 
 fn (self: &var Lowerer) next(type_name: Name) -> !Value {
-    self.next_value = self.next_value + 1;
+    let index = self.next_value;
+    self.next_value = index + 1;
+    if self.value_names.get(index) |known| {
+        return Value { name: known, type_name: type_name };
+    }
     var out = try string::from_bytes(self.allocator, "%");
     errdefer out.deinit(self.allocator);
     try fmt::append_i64(self.allocator, &var out, self.next_value);
     let name = try self.module.names.intern_owned(move out);
+    if index == self.value_names.len() {
+        try self.value_names.append(self.allocator, name);
+    }
     return Value { name: name, type_name: type_name };
 }
 
@@ -283,12 +290,24 @@ fn (self: &var Lowerer) error_union_parts(result: Name) -> !?ErrorUnionParts {
     return error_union_parts_in(&var self.types, &var self.module.names, result);
 }
 
+fn has_bang(bytes: []u8) -> bool {
+    for 0..mem::len(bytes) |index| {
+        if bytes[index] == cast<u8>(33) {
+            return true;
+        }
+    }
+    return false;
+}
+
 fn error_union_parts_in(types: &var typ::Table, names: &var NameTable, result: Name) -> !?ErrorUnionParts {
     if is_empty(result) {
         return null;
     }
     let retained = name_text(names, result);
     let bytes = retained.as_bytes();
+    if !has_bang(bytes) {
+        return null;
+    }
     let parsed = try types.parse(bytes);
     var has_err = false;
     var err_text = string::new(names.allocator);

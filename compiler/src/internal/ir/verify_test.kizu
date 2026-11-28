@@ -134,7 +134,8 @@ test "verify rejects a phi that takes a value of another type" {
     let b_name = try module.names.intern("b");
     let merge_name = try module.names.intern("merge");
     let entry = entry_block(&module);
-    let define = module.blank_instr(x, Op::Const, empty_name(), try module.names.intern("1"));
+    let one = try module.names.intern("1");
+    let define = module.blank_instr(x, Op::Const, empty_name(), one);
     let _ = try module.add_instr(allocator, entry, move define);
     module.set_terminator(entry, branch_terminator(cond, a_name, b_name));
     let a = try module.add_block(function, a_name);
@@ -151,4 +152,95 @@ test "verify rejects a phi that takes a value of another type" {
     testing::expect(try rejects_with(
         allocator, &module, "caller: phi %p in block merge is i64, but takes &var i64 %r from b"
     ));
+}
+
+test "verify isolates per-function definition tables across functions" {
+    let allocator = mem::page_allocator();
+    var module = try caller_module(allocator, "i64");
+    defer module.deinit(allocator);
+    let i64_type = try module.names.intern("i64");
+    let x = Value { name: try module.names.intern("%x"), type_name: i64_type };
+    let y = Value { name: try module.names.intern("%y"), type_name: i64_type };
+    let one = try module.names.intern("1");
+    let first_entry = entry_block(&module);
+    let define = module.blank_instr(x, Op::Const, empty_name(), one);
+    let _ = try module.add_instr(allocator, first_entry, move define);
+    module.set_terminator(first_entry, return_terminator(x));
+    let second_name = try module.names.intern("second");
+    let second = Function {
+        node: try module.function_nodes.add(allocator, FunctionNode {
+            name: second_name,
+            params: array::new<Param>(allocator),
+            return_type: i64_type,
+            blocks: array::new<Block>(allocator),
+            export_abi: empty_name(),
+            export_name: empty_name(),
+            module: empty_name(),
+            instance: false
+        })
+    };
+    try module.functions.append(allocator, second);
+    let second_entry_name = try module.names.intern("entry");
+    let second_entry = try module.add_block(second, second_entry_name);
+    let minus = try module.names.intern("-");
+    var read = module.blank_instr(y, Op::Unary, minus, empty_name());
+    errdefer read.deinit(allocator);
+    try read.args.append(allocator, x);
+    let _ = try module.add_instr(allocator, second_entry, move read);
+    let late_define = module.blank_instr(x, Op::Const, empty_name(), one);
+    let _ = try module.add_instr(allocator, second_entry, move late_define);
+    module.set_terminator(second_entry, return_terminator(y));
+    testing::expect(try rejects_with(allocator, &module, "second: block entry reads %x before it is defined"));
+}
+
+test "verify rejects non-dominating definition across blocks" {
+    let allocator = mem::page_allocator();
+    var module = try caller_module(allocator, "i64");
+    defer module.deinit(allocator);
+    let function = module.functions.get_or_panic(0);
+    let i64_type = try module.names.intern("i64");
+    let cond = Value { name: try module.names.intern("%c"), type_name: try module.names.intern("bool") };
+    let x = Value { name: try module.names.intern("%x"), type_name: i64_type };
+    let a_name = try module.names.intern("a");
+    let b_name = try module.names.intern("b");
+    let merge_name = try module.names.intern("merge");
+    let entry = entry_block(&module);
+    module.set_terminator(entry, branch_terminator(cond, a_name, b_name));
+    let a = try module.add_block(function, a_name);
+    let one = try module.names.intern("1");
+    let define = module.blank_instr(x, Op::Const, empty_name(), one);
+    let _ = try module.add_instr(allocator, a, move define);
+    module.set_terminator(a, jump_terminator(merge_name));
+    let b = try module.add_block(function, b_name);
+    module.set_terminator(b, jump_terminator(merge_name));
+    let merge = try module.add_block(function, merge_name);
+    module.set_terminator(merge, return_terminator(x));
+    testing::expect(try rejects_with(
+        allocator, &module, "caller: block merge reads %x, which is defined in a, and a does not dominate merge"
+    ));
+}
+
+test "verify accepts matching absorbed error set return and rejects mismatched payload" {
+    let allocator = mem::page_allocator();
+    var ok_module = try caller_module(allocator, "!i64");
+    defer ok_module.deinit(allocator);
+    let ok_val = Value { name: try ok_module.names.intern("%v"), type_name: try ok_module.names.intern("E!i64") };
+    module_return(&var ok_module, ok_val);
+    if try verify(allocator, &ok_module) |failed| {
+        failed.deinit(allocator);
+        testing::expect(false);
+    }
+    var bad_module = try caller_module(allocator, "!i64");
+    defer bad_module.deinit(allocator);
+    let bad_val = Value { name: try bad_module.names.intern("%v"), type_name: try bad_module.names.intern("E!i32") };
+    module_return(&var bad_module, bad_val);
+    testing::expect(try rejects_with(
+        allocator, &bad_module, "caller: return value in block entry is E!i32, declared !i64"
+    ));
+}
+
+fn module_return(module: &var Module, value: Value) -> void {
+    let entry = entry_block(module);
+    module.set_terminator(entry, return_terminator(value));
+    return;
 }
