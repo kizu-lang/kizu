@@ -7,6 +7,7 @@ import std::testing;
 
 fn bounds_version_source() -> []u8 {
     return
+        \\import std::array;
         \\import std::mem;
         \\import std::process;
         \\
@@ -87,12 +88,94 @@ fn bounds_version_source() -> []u8 {
         \\    return total;
         \\}
         \\
+        \\fn run_strided_fixed(start: i64, step: i64) -> i64 {
+        \\    var storage = [16]i64{};
+        \\    for 0..16 |k| {
+        \\        storage[k] = k + 1;
+        \\    }
+        \\    var total: i64 = 0;
+        \\    var j = start;
+        \\    while j < 16 {
+        \\        total = total + storage[j];
+        \\        j = j + step;
+        \\    }
+        \\    return total;
+        \\}
+        \\
+        \\fn run_sieve_small() -> i64 {
+        \\    var flags = [64]bool{};
+        \\    for 0..64 |i| {
+        \\        flags[i] = true;
+        \\    }
+        \\    flags[0] = false;
+        \\    flags[1] = false;
+        \\    var p: i64 = 2;
+        \\    while p * p < 64 {
+        \\        if flags[p] {
+        \\            var m = p * p;
+        \\            while m < 64 {
+        \\                flags[m] = false;
+        \\                m = m + p;
+        \\            }
+        \\        }
+        \\        p = p + 1;
+        \\    }
+        \\    var count: i64 = 0;
+        \\    for 0..64 |i| {
+        \\        if flags[i] {
+        \\            count = count + 1;
+        \\        }
+        \\    }
+        \\    return count;
+        \\}
+        \\
+        \\fn run_sub_headroom(buf: []u8, start: i64) -> i64 {
+        \\    let n = mem::len(buf);
+        \\    var total: i64 = 0;
+        \\    var j = start;
+        \\    while j < n - 3 {
+        \\        total = total + cast<i64>(buf[j]);
+        \\        j = j + 4;
+        \\    }
+        \\    return total;
+        \\}
+        \\
+        \\fn run_doubling(buf: []i64, limit: i64) -> i64 {
+        \\    var total: i64 = 0;
+        \\    var j: i64 = 1;
+        \\    while j < limit {
+        \\        total = total + buf[j];
+        \\        j = j + j;
+        \\    }
+        \\    return total;
+        \\}
+        \\
+        \\fn run_array_shrink_strided() -> i64 {
+        \\    let allocator = mem::page_allocator();
+        \\    var arr = array::new<i64>(allocator);
+        \\    defer arr.deinit(allocator);
+        \\    for 0..4 |i| {
+        \\        arr.append(allocator, i + 1) catch return 0;
+        \\    }
+        \\    var total: i64 = 0;
+        \\    var j: i64 = 0;
+        \\    while j < arr.len() {
+        \\        let _ = arr.pop();
+        \\        total = total + arr.get_or_panic(j);
+        \\        j = j + 2;
+        \\    }
+        \\    return total;
+        \\}
+        \\
         \\fn main() {
         \\    var storage = [16]i64{};
+        \\    var byte_storage = [16]u8{};
         \\    for 0..16 |i| {
         \\        storage[i] = i + 1;
+        \\        byte_storage[i] = cast<u8>(i + 1);
         \\    }
         \\    let buf = storage.as_slice();
+        \\    let byte_buf = byte_storage.as_bytes();
         \\    var at: i64 = 0;
         \\    while at < process::arg_count() {
         \\        let kind = parse_arg(at);
@@ -111,8 +194,18 @@ fn bounds_version_source() -> []u8 {
         \\            answer = run_slice_range(buf, a, b);
         \\        } else if kind == 5 {
         \\            answer = run_nested_add(buf, a, b, c);
-        \\        } else {
+        \\        } else if kind == 6 {
         \\            answer = run_fixed(a);
+        \\        } else if kind == 7 {
+        \\            answer = run_strided_fixed(a, b);
+        \\        } else if kind == 8 {
+        \\            answer = run_sieve_small();
+        \\        } else if kind == 9 {
+        \\            answer = run_sub_headroom(byte_buf, a);
+        \\        } else if kind == 10 {
+        \\            answer = run_doubling(buf, a);
+        \\        } else {
+        \\            answer = run_array_shrink_strided();
         \\        }
         \\        print(answer);
         \\        print("=");
@@ -180,30 +273,50 @@ test "affine, strided, slice-range, and fixed-array bounds optimization preserve
     try push_argv(allocator, &var argv, "5 -1 2 4 0");
     try push_argv(allocator, &var argv, "6 8 0 0 0");
     try push_argv(allocator, &var argv, "6 9 0 0 0");
+    try push_argv(allocator, &var argv, "7 0 3 0 0");
+    try push_argv(allocator, &var argv, "7 -1 4 0 0");
+    try push_argv(allocator, &var argv, "7 0 -1 0 0");
+    try push_argv(allocator, &var argv, "7 1 9223372036854775807 0 0");
+    try push_argv(allocator, &var argv, "8 0 0 0 0");
+    try push_argv(allocator, &var argv, "9 0 0 0 0");
+    try push_argv(allocator, &var argv, "9 -1 0 0 0");
+    try push_argv(allocator, &var argv, "10 16 0 0 0");
+    try push_argv(allocator, &var argv, "10 9223372036854775807 0 0");
+    try push_argv(allocator, &var argv, "11 0 0 0 0");
     var results = array::new<RuntimeMbtResult>(allocator);
     defer results.deinit(allocator);
     let node_bytes = node.as_bytes();
     try runtime_mbt_run_wasi(io, allocator, node_bytes, module_bytes, &argv, &var results, &var problem);
     let ran = problem.as_bytes();
     testing::expect_equal<[]u8>("", ran);
-    testing::expect_equal<i64>(15, results.len());
-    let expect_trap = [15]bool{
+    testing::expect_equal<i64>(25, results.len());
+    let expect_trap = [25]bool{
         false, true, true, true,
         false, true,
         false, true,
         false, true,
         false, true, false,
-        false, true
+        false, true,
+        false, true, true, true,
+        false,
+        false, true,
+        false, true,
+        true
     };
-    let expected_values = [15]i64{
+    let expected_values = [25]i64{
         40, 0, 0, 0,
         34, 0,
         40, 0,
         68, 0,
         121, 0, 14,
-        72, 0
+        72, 0,
+        51, 0, 0, 0,
+        18,
+        28, 0,
+        19, 0,
+        0
     };
-    for 0..15 |case_index| {
+    for 0..25 |case_index| {
         if results.at(case_index) |r| {
             let code = r.code.as_bytes();
             if expect_trap[case_index] {

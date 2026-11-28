@@ -28,7 +28,7 @@ struct LengthFact {
 
 struct BoundsFacts {
     less: map::Map<i64, bool>,
-    less_left: map::Map<i64, bool>,
+    headroom: map::Map<i64, i64>,
     less_const: map::Map<i64, i64>,
     nonneg: map::Map<i64, bool>,
     length: map::Map<i64, LengthFact>,
@@ -40,7 +40,7 @@ struct BoundsFacts {
 fn new_bounds_facts(allocator: Allocator) -> BoundsFacts {
     return BoundsFacts {
         less: map::new<i64, bool>(allocator),
-        less_left: map::new<i64, bool>(allocator),
+        headroom: map::new<i64, i64>(allocator),
         less_const: map::new<i64, i64>(allocator),
         nonneg: map::new<i64, bool>(allocator),
         length: map::new<i64, LengthFact>(allocator),
@@ -52,7 +52,7 @@ fn new_bounds_facts(allocator: Allocator) -> BoundsFacts {
 
 fn (self: BoundsFacts) deinit(allocator: Allocator) -> void {
     self.less.deinit(allocator);
-    self.less_left.deinit(allocator);
+    self.headroom.deinit(allocator);
     self.less_const.deinit(allocator);
     self.nonneg.deinit(allocator);
     self.length.deinit(allocator);
@@ -70,9 +70,11 @@ fn (self: &BoundsFacts) copy_facts(allocator: Allocator) -> !BoundsFacts {
         try out.less.insert(allocator, key, true);
     }
     index = 0;
-    while self.less_left.key_at(index) |key| {
+    while self.headroom.key_at(index) |key| {
         index = index + 1;
-        try out.less_left.insert(allocator, key, true);
+        if self.headroom.get(key) |margin| {
+            try out.headroom.insert(allocator, key, margin);
+        }
     }
     index = 0;
     while self.less_const.key_at(index) |key| {
@@ -119,9 +121,22 @@ fn (self: &var BoundsFacts) forget_headers() -> void {
     return;
 }
 
+fn (self: &var BoundsFacts) add_headroom(allocator: Allocator, left: Name, margin: i64) -> !void {
+    if margin <= 0 {
+        return;
+    }
+    let key = name_id(left);
+    if self.headroom.get(key) |existing| {
+        if existing >= margin {
+            return;
+        }
+    }
+    return self.headroom.insert(allocator, key, margin);
+}
+
 fn (self: &var BoundsFacts) add_less(allocator: Allocator, left: Name, right: Name) -> !void {
     try self.less.insert(allocator, pair_key(left, right), true);
-    return self.less_left.insert(allocator, name_id(left), true);
+    return self.add_headroom(allocator, left, 1);
 }
 
 fn (self: &var BoundsFacts) add_less_const(allocator: Allocator, left: Name, bound: i64) -> !void {
@@ -131,7 +146,11 @@ fn (self: &var BoundsFacts) add_less_const(allocator: Allocator, left: Name, bou
             return;
         }
     }
-    return self.less_const.insert(allocator, key, bound);
+    try self.less_const.insert(allocator, key, bound);
+    if bound > 0 {
+        return self.add_headroom(allocator, left, 9223372036854775807 - bound + 1);
+    }
+    return self.add_headroom(allocator, left, 9223372036854775807);
 }
 
 fn (self: &BoundsFacts) length_of(container: Name) -> ?Value {
@@ -151,8 +170,8 @@ fn (self: &BoundsFacts) is_checked(pair: i64) -> bool {
     return headers == self.headers;
 }
 
-fn (self: &BoundsFacts) has_upper_bound(name: Name) -> bool {
-    return self.less_left.contains(name_id(name));
+fn (self: &BoundsFacts) headroom_of(name: Name) -> i64 {
+    return self.headroom.get(name_id(name)) orelse 0;
 }
 
 struct BoundsPlan {
@@ -189,12 +208,10 @@ fn (self: &BoundsPlan) resolved_name(name: Name) -> Name {
 
 struct LoopCounters {
     counter: map::Map<i64, bool>,
-    steps: map::Map<i64, array::Array<Name>>,
 }
 
 fn (self: LoopCounters) deinit(allocator: Allocator) -> void {
     self.counter.deinit(allocator);
-    self.steps.deinit(allocator);
     return;
 }
 
@@ -327,8 +344,7 @@ fn loop_counters(
     excluded: &map::Map<i64, bool>
 ) -> !LoopCounters {
     var counters = LoopCounters {
-        counter: map::new<i64, bool>(allocator),
-        steps: map::new<i64, array::Array<Name>>(allocator)
+        counter: map::new<i64, bool>(allocator)
     };
     errdefer counters.deinit(allocator);
     var block_at = 0;
@@ -339,85 +355,28 @@ fn loop_counters(
             instr_index = instr_index + 1;
             let node = module.instrs.at(instr.node);
             if node.op == Op::Phi and module.names.is(node.result.type_name, "i64") and
-                !excluded.contains(name_id(node.result.name)) {
+                !excluded.contains(name_id(node.result.name)) and
+                phi_candidate(module, instr, defs) {
                 try counters.counter.insert(allocator, name_id(node.result.name), true);
-            }
-        }
-    }
-    var changed = true;
-    while changed {
-        changed = try drop_counters(allocator, module, function, defs, &var counters);
-    }
-    block_at = 0;
-    while function_block_at(module, function, block_at) |block| {
-        block_at = block_at + 1;
-        var instr_index = 0;
-        while block_instr_at(module, block, instr_index) |instr| {
-            instr_index = instr_index + 1;
-            let result = module.instr_result(instr);
-            if !counters.is_counter(result.name) {
-                continue;
-            }
-            var incoming_index = 0;
-            while phi_incoming_at(module, instr, incoming_index) |incoming| {
-                incoming_index = incoming_index + 1;
-                if step_of(module, defs, incoming.value) |_| {
-                    try add_step(allocator, &var counters.steps, incoming.value.name, result.name);
-                }
             }
         }
     }
     return move counters;
 }
 
-fn add_step(allocator: Allocator, steps: &var map::Map<i64, array::Array<Name>>, step: Name, counter: Name) -> !void {
-    if steps.at_mut(name_id(step)) |fed| {
-        return fed.append(allocator, counter);
-    }
-    var fed = array::new<Name>(allocator);
-    errdefer fed.deinit(allocator);
-    try fed.append(allocator, counter);
-    return steps.insert(allocator, name_id(step), move fed);
-}
-
-fn drop_counters(
-    allocator: Allocator,
-    module: &Module,
-    function: Function,
-    defs: &map::Map<i64, Instr>,
-    counters: &var LoopCounters
-) -> !bool {
-    var changed = false;
-    var block_at = 0;
-    while function_block_at(module, function, block_at) |block| {
-        block_at = block_at + 1;
-        var instr_index = 0;
-        while block_instr_at(module, block, instr_index) |instr| {
-            instr_index = instr_index + 1;
-            let result = module.instr_result(instr);
-            if counters.is_counter(result.name) and !counts_up(module, instr, defs, counters) {
-                try counters.counter.insert(allocator, name_id(result.name), false);
-                changed = true;
-            }
-        }
-    }
-    return changed;
-}
-
-fn counts_up(module: &Module, phi: Instr, defs: &map::Map<i64, Instr>, counters: &LoopCounters) -> bool {
+fn phi_candidate(module: &Module, phi: Instr, defs: &map::Map<i64, Instr>) -> bool {
     let node = module.instrs.at(phi.node);
+    if node.incoming.len() == 0 {
+        return false;
+    }
     var index = 0;
     while node.incoming.get(index) |incoming| {
         index = index + 1;
-        if non_negative_constant(module, incoming.value, defs) {
-            continue;
-        }
-        if step_of(module, defs, incoming.value) |from| {
-            if counters.is_counter(from) {
-                continue;
+        if constant_value(module, incoming.value, defs) |number| {
+            if number < 0 {
+                return false;
             }
         }
-        return false;
     }
     return true;
 }
@@ -447,28 +406,6 @@ fn constant_value(module: &Module, value: Value, defs: &map::Map<i64, Instr>) ->
     return parse_i64(bytes);
 }
 
-fn step_of(module: &Module, defs: &map::Map<i64, Instr>, value: Value) -> ?Name {
-    let instr = defs.get(name_id(value.name)) orelse return null;
-    let node = module.instrs.at(instr.node);
-    if node.op != Op::Binary or !module.names.is(node.operand, "+") or node.args.len() != 2 or
-        !module.names.is(node.result.type_name, "i64") {
-        return null;
-    }
-    let left = node.args.get_or_panic(0);
-    let right = node.args.get_or_panic(1);
-    if constant_value(module, right, defs) |one| {
-        if one == 1 {
-            return left.name;
-        }
-    }
-    if constant_value(module, left, defs) |one| {
-        if one == 1 {
-            return right.name;
-        }
-    }
-    return null;
-}
-
 fn (self: &BoundsWalker) walk(allocator: Allocator, module: &Module, counters: &LoopCounters) -> !BoundsPlan {
     var plan = new_bounds_plan(allocator);
     errdefer plan.deinit(allocator);
@@ -477,7 +414,7 @@ fn (self: &BoundsWalker) walk(allocator: Allocator, module: &Module, counters: &
     var index = 0;
     while self.order.get(index) |position| {
         let block = self.blocks.block_at(position);
-        var facts = try self.starting_facts(allocator, module, &plan, &ends, index, position);
+        var facts = try self.starting_facts(allocator, module, counters, &plan, &ends, index, position);
         errdefer facts.deinit(allocator);
         index = index + 1;
         var instr_index = 0;
@@ -487,12 +424,14 @@ fn (self: &BoundsWalker) walk(allocator: Allocator, module: &Module, counters: &
         }
         try ends.insert(allocator, position, move facts);
     }
+    try self.verify_counters(allocator, module, counters, &var plan, &ends);
     return move plan;
 }
 
 fn (self: &BoundsWalker) starting_facts(
     allocator: Allocator,
     module: &Module,
+    counters: &LoopCounters,
     plan: &BoundsPlan,
     ends: &map::Map<i64, BoundsFacts>,
     index: i64,
@@ -511,7 +450,7 @@ fn (self: &BoundsWalker) starting_facts(
         }
         if direct {
             let term = module.block_terminator(self.blocks.block_at(idom));
-            try self.learn_edge(allocator, module, plan, &var facts, term, self.blocks.name_at(position));
+            try self.learn_edge(allocator, module, counters, plan, &var facts, term, self.blocks.name_at(position));
         } else {
             if try self.paths_may_write_headers(allocator, module, position, idom) {
                 facts.forget_headers();
@@ -577,6 +516,7 @@ fn leaves_headers(op: Op) -> bool {
 fn (self: &BoundsWalker) learn_edge(
     allocator: Allocator,
     module: &Module,
+    counters: &LoopCounters,
     plan: &BoundsPlan,
     facts: &var BoundsFacts,
     term: Terminator,
@@ -585,7 +525,7 @@ fn (self: &BoundsWalker) learn_edge(
     if term.op != TermOp::Branch or same_name(term.target, term.else_target) {
         return;
     }
-    return self.learn_condition(allocator, module, plan, facts, term.cond, same_name(term.target, target));
+    return self.learn_condition(allocator, module, counters, plan, facts, term.cond, same_name(term.target, target));
 }
 
 enum Ordering {
@@ -628,6 +568,7 @@ fn negated_ordering(ordering: Ordering) -> Ordering {
 fn (self: &BoundsWalker) learn_condition(
     allocator: Allocator,
     module: &Module,
+    counters: &LoopCounters,
     plan: &BoundsPlan,
     facts: &var BoundsFacts,
     cond: Value,
@@ -643,52 +584,120 @@ fn (self: &BoundsWalker) learn_condition(
     if !module.names.is(left_arg.type_name, "i64") {
         return;
     }
-    let left = self.fact_name(plan, left_arg.name);
-    let right = self.fact_name(plan, right_arg.name);
     var ordering = ordering_of(module, node.op, node.operand);
     if !holds {
         ordering = negated_ordering(ordering);
     }
     match ordering {
-        Less => {
-            try facts.add_less(allocator, left, right);
-            if constant_value(module, right_arg, &self.defs) |bound| {
-                try facts.add_less_const(allocator, left, bound);
-            }
-        },
-        Greater => {
-            try facts.add_less(allocator, right, left);
-            if constant_value(module, left_arg, &self.defs) |bound| {
-                try facts.add_less_const(allocator, right, bound);
-            }
-        },
-        GreaterEqual => {
-            if constant_value(module, right_arg, &self.defs) |zero| {
-                if zero >= 0 {
-                    try facts.nonneg.insert(allocator, name_id(left), true);
-                }
-            }
-            if constant_value(module, left_arg, &self.defs) |bound| {
-                if bound < 9223372036854775807 {
-                    try facts.add_less_const(allocator, right, bound + 1);
-                }
-            }
-        },
-        LessEqual => {
-            if constant_value(module, left_arg, &self.defs) |zero| {
-                if zero >= 0 {
-                    try facts.nonneg.insert(allocator, name_id(right), true);
-                }
-            }
-            if constant_value(module, right_arg, &self.defs) |bound| {
-                if bound < 9223372036854775807 {
-                    try facts.add_less_const(allocator, left, bound + 1);
-                }
-            }
-        },
+        Less => return self.learn_less(allocator, module, counters, plan, facts, left_arg, right_arg, true),
+        Greater => return self.learn_less(allocator, module, counters, plan, facts, right_arg, left_arg, true),
+        LessEqual => return self.learn_less(allocator, module, counters, plan, facts, left_arg, right_arg, false),
+        GreaterEqual => return self.learn_less(allocator, module, counters, plan, facts, right_arg, left_arg, false),
         None => {},
     }
     return;
+}
+
+fn (self: &BoundsWalker) learn_less(
+    allocator: Allocator,
+    module: &Module,
+    counters: &LoopCounters,
+    plan: &BoundsPlan,
+    facts: &var BoundsFacts,
+    low_arg: Value,
+    high_arg: Value,
+    strict: bool
+) -> !void {
+    let low = self.fact_name(plan, low_arg.name);
+    let high = self.fact_name(plan, high_arg.name);
+    if strict {
+        try facts.add_less(allocator, low, high);
+    }
+    if self.non_negative(module, counters, plan, facts, low_arg) {
+        try facts.nonneg.insert(allocator, name_id(high), true);
+    } else if strict {
+        if constant_value(module, low_arg, &self.defs) |number| {
+            if number >= -1 {
+                try facts.nonneg.insert(allocator, name_id(high), true);
+            }
+        }
+    }
+    if self.inclusive_upper_bound(module, counters, plan, facts, high_arg, high) |most| {
+        if strict {
+            try facts.add_less_const(allocator, low, most);
+        } else if most < 9223372036854775807 {
+            try facts.add_less_const(allocator, low, most + 1);
+        }
+    }
+    let high_margin = facts.headroom_of(high);
+    if high_margin > 0 {
+        if strict and high_margin < 9223372036854775807 {
+            try facts.add_headroom(allocator, low, high_margin + 1);
+        } else {
+            try facts.add_headroom(allocator, low, high_margin);
+        }
+    }
+    if self.defs.get(name_id(high_arg.name)) |high_instr| {
+        let high_node = module.instrs.at(high_instr.node);
+        if high_node.op == Op::Binary and module.names.is(high_node.operand, "-") and high_node.args.len() == 2 {
+            let base = high_node.args.get_or_panic(0);
+            let sub = high_node.args.get_or_panic(1);
+            if self.non_negative(module, counters, plan, facts, base) {
+                if constant_value(module, sub, &self.defs) |offset| {
+                    if offset >= 0 {
+                        if strict {
+                            try facts.add_less(allocator, low, self.fact_name(plan, base.name));
+                            if offset < 9223372036854775807 {
+                                try facts.add_headroom(allocator, low, offset + 1);
+                            } else {
+                                try facts.add_headroom(allocator, low, offset);
+                            }
+                        } else if offset >= 1 {
+                            try facts.add_less(allocator, low, self.fact_name(plan, base.name));
+                            try facts.add_headroom(allocator, low, offset);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return;
+}
+
+fn (self: &BoundsWalker) inclusive_upper_bound(
+    module: &Module,
+    counters: &LoopCounters,
+    plan: &BoundsPlan,
+    facts: &BoundsFacts,
+    value: Value,
+    fact_name: Name
+) -> ?i64 {
+    var best: ?i64 = null;
+    if constant_length(module, self.function, &self.defs, value) |count| {
+        best = count;
+    }
+    if facts.less_const.get(name_id(fact_name)) |bound| {
+        if bound > -9223372036854775807 {
+            let tight = bound - 1;
+            if best |existing| {
+                if tight < existing {
+                    best = tight;
+                }
+            } else {
+                best = tight;
+            }
+        }
+    }
+    if self.upper_bound_in(module, counters, plan, facts, value, 0) |most| {
+        if best |existing| {
+            if most < existing {
+                best = most;
+            }
+        } else {
+            best = most;
+        }
+    }
+    return best;
 }
 
 fn (self: &BoundsWalker) visit(
@@ -709,7 +718,6 @@ fn (self: &BoundsWalker) visit(
         ArraySet => return self.visit_array_check(allocator, module, counters, plan, facts, instr, key),
         ArrayAt => return self.visit_array_check(allocator, module, counters, plan, facts, instr, key),
         ArrayAtMut => return self.visit_array_check(allocator, module, counters, plan, facts, instr, key),
-        Binary => try self.visit_step(allocator, module, counters, plan, facts, instr),
         _ => {},
     }
     if !leaves_headers(op) {
@@ -718,33 +726,120 @@ fn (self: &BoundsWalker) visit(
     return;
 }
 
-fn (self: &BoundsWalker) visit_step(
+fn (self: &BoundsWalker) verify_counters(
     allocator: Allocator,
     module: &Module,
     counters: &LoopCounters,
     plan: &var BoundsPlan,
-    facts: &BoundsFacts,
-    instr: Instr
+    ends: &map::Map<i64, BoundsFacts>
 ) -> !void {
-    let node = module.instrs.at(instr.node);
-    if !module.names.is(node.operand, "+") {
-        return;
-    }
-    let result = node.result;
-    if counters.steps.at(name_id(result.name)) |fed| {
-        if fed.len() == 0 {
-            return;
-        }
-        let from = step_of(module, &self.defs, result) orelse empty_name();
-        if !facts.has_upper_bound(from) {
-            var index = 0;
-            while fed.get(index) |counter| {
-                index = index + 1;
-                try plan.unsafe_steps.insert(allocator, name_id(counter), true);
+    var index = 0;
+    while self.order.get(index) |position| {
+        index = index + 1;
+        let block = self.blocks.block_at(position);
+        let target = self.blocks.name_at(position);
+        var instr_index = 0;
+        while block_instr_at(module, block, instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let node = module.instrs.at(instr.node);
+            if node.op != Op::Phi or !counters.is_counter(node.result.name) {
+                continue;
+            }
+            if !try self.phi_is_safe(allocator, module, counters, plan, ends, instr, target) {
+                try plan.unsafe_steps.insert(allocator, name_id(node.result.name), true);
             }
         }
     }
     return;
+}
+
+fn (self: &BoundsWalker) phi_is_safe(
+    allocator: Allocator,
+    module: &Module,
+    counters: &LoopCounters,
+    plan: &BoundsPlan,
+    ends: &map::Map<i64, BoundsFacts>,
+    phi: Instr,
+    target: Name
+) -> !bool {
+    let node = module.instrs.at(phi.node);
+    if node.incoming.len() == 0 {
+        return false;
+    }
+    var saw_reachable = false;
+    var index = 0;
+    while node.incoming.get(index) |incoming| {
+        index = index + 1;
+        let pred_pos = self.blocks.position_of(module, incoming.block) orelse continue;
+        if ends.at(pred_pos) |pred_facts| {
+            saw_reachable = true;
+            let pred_term = module.block_terminator(self.blocks.block_at(pred_pos));
+            if pred_term.op == TermOp::Branch and !same_name(pred_term.target, pred_term.else_target) {
+                var edge_facts = try pred_facts.copy_facts(allocator);
+                defer edge_facts.deinit(allocator);
+                try self.learn_edge(allocator, module, counters, plan, &var edge_facts, pred_term, target);
+                if !self.safe_incoming(module, counters, plan, &edge_facts, incoming.value) {
+                    return false;
+                }
+            } else {
+                if !self.safe_incoming(module, counters, plan, pred_facts, incoming.value) {
+                    return false;
+                }
+            }
+        }
+    }
+    return saw_reachable;
+}
+
+fn (self: &BoundsWalker) safe_incoming(
+    module: &Module,
+    counters: &LoopCounters,
+    plan: &BoundsPlan,
+    facts: &BoundsFacts,
+    value: Value
+) -> bool {
+    if self.non_negative(module, counters, plan, facts, value) {
+        return true;
+    }
+    var current = value;
+    var depth = 0;
+    while depth < upper_bound_depth() {
+        let instr = self.defs.get(name_id(current.name)) orelse return false;
+        let node = module.instrs.at(instr.node);
+        if node.op == Op::Id and node.args.len() == 1 {
+            current = node.args.get_or_panic(0);
+            depth = depth + 1;
+            continue;
+        }
+        if node.op != Op::Binary or !module.names.is(node.operand, "+") or node.args.len() != 2 or
+            !module.names.is(node.result.type_name, "i64") {
+            return false;
+        }
+        let left = node.args.get_or_panic(0);
+        let right = node.args.get_or_panic(1);
+        return self.safe_add(module, counters, plan, facts, left, right) or
+            self.safe_add(module, counters, plan, facts, right, left);
+    }
+    return false;
+}
+
+fn (self: &BoundsWalker) safe_add(
+    module: &Module,
+    counters: &LoopCounters,
+    plan: &BoundsPlan,
+    facts: &BoundsFacts,
+    base: Value,
+    step: Value
+) -> bool {
+    if !self.non_negative(module, counters, plan, facts, base) {
+        return false;
+    }
+    let step_max = self.upper_bound_in(module, counters, plan, facts, step, 0) orelse return false;
+    if step_max == 0 {
+        return true;
+    }
+    let margin = facts.headroom_of(self.fact_name(plan, base.name));
+    return margin >= step_max;
 }
 
 fn (self: &BoundsWalker) visit_cond_fail(
@@ -790,7 +885,7 @@ fn (self: &BoundsWalker) visit_cond_fail(
             }
         }
     }
-    return self.learn_condition(allocator, module, plan, facts, tested, false);
+    return self.learn_condition(allocator, module, counters, plan, facts, tested, false);
 }
 
 fn (self: &BoundsWalker) fact_name(plan: &BoundsPlan, name: Name) -> Name {
@@ -846,12 +941,54 @@ fn (self: &BoundsWalker) visit_unsigned_check(
     }
     if self.non_negative(module, counters, plan, facts, length) {
         try facts.nonneg.insert(allocator, name_id(index_name), true);
-        try facts.add_less(allocator, index_name, length_name);
+        try self.learn_less(allocator, module, counters, plan, facts, index, length, true);
         if const_count |count| {
             try facts.add_less_const(allocator, index_name, count);
         }
     }
     return;
+}
+
+fn (self: &BoundsWalker) direct_non_negative(
+    module: &Module,
+    counters: &LoopCounters,
+    plan: &BoundsPlan,
+    facts: &BoundsFacts,
+    value: Value
+) -> bool {
+    var current = value;
+    var depth = 0;
+    while depth < upper_bound_depth() {
+        let name = self.fact_name(plan, current.name);
+        if facts.nonneg.contains(name_id(name)) or counters.is_counter(name) or
+            non_negative_constant(module, current, &self.defs) {
+            return true;
+        }
+        let instr = self.defs.get(name_id(name)) orelse return false;
+        let node = module.instrs.at(instr.node);
+        if node.op == Op::Id and node.args.len() == 1 {
+            current = node.args.get_or_panic(0);
+            depth = depth + 1;
+            continue;
+        }
+        if node.op == Op::ArrayLen or node.op == Op::SliceLen or node.op == Op::GpuIndex {
+            return true;
+        }
+        if node.op == Op::Cast and node.args.len() == 1 {
+            let source = node.args.get_or_panic(0);
+            if unsigned_max(module, source.type_name) |_| {
+                return true;
+            }
+        }
+        if node.op == Op::Binary and node.args.len() == 2 and module.names.is(node.operand, "&") {
+            if non_negative_constant(module, node.args.get_or_panic(0), &self.defs) or
+                non_negative_constant(module, node.args.get_or_panic(1), &self.defs) {
+                return true;
+            }
+        }
+        return false;
+    }
+    return false;
 }
 
 fn (self: &BoundsWalker) non_negative(
@@ -861,27 +998,11 @@ fn (self: &BoundsWalker) non_negative(
     facts: &BoundsFacts,
     value: Value
 ) -> bool {
-    let name = self.fact_name(plan, value.name);
-    if facts.nonneg.contains(name_id(name)) or counters.is_counter(name) or
-        non_negative_constant(module, value, &self.defs) {
+    if self.direct_non_negative(module, counters, plan, facts, value) {
         return true;
     }
-    let instr = self.defs.get(name_id(name)) orelse return false;
-    let node = module.instrs.at(instr.node);
-    if node.op == Op::ArrayLen or node.op == Op::SliceLen or node.op == Op::GpuIndex {
+    if self.upper_bound_in(module, counters, plan, facts, value, 0) |_| {
         return true;
-    }
-    if node.op == Op::Cast and node.args.len() == 1 {
-        let source = node.args.get_or_panic(0);
-        if unsigned_max(module, source.type_name) |_| {
-            return true;
-        }
-    }
-    if node.op == Op::Binary and node.args.len() == 2 and module.names.is(node.operand, "&") {
-        if non_negative_constant(module, node.args.get_or_panic(0), &self.defs) or
-            non_negative_constant(module, node.args.get_or_panic(1), &self.defs) {
-            return true;
-        }
     }
     return false;
 }
@@ -1158,6 +1279,28 @@ fn upper_bound_depth() -> i64 {
     return 16;
 }
 
+fn (self: &BoundsWalker) tighten_upper_bound(
+    plan: &BoundsPlan,
+    facts: &BoundsFacts,
+    value: Value,
+    bound: i64,
+    limit: ?i64
+) -> i64 {
+    var out = bound;
+    if limit |existing| {
+        if existing < out {
+            out = existing;
+        }
+    }
+    let fact = self.fact_name(plan, value.name);
+    if facts.less_const.get(name_id(fact)) |strict| {
+        if strict > 0 and strict - 1 < out {
+            out = strict - 1;
+        }
+    }
+    return out;
+}
+
 fn (self: &BoundsWalker) upper_bound_in(
     module: &Module,
     counters: &LoopCounters,
@@ -1167,7 +1310,7 @@ fn (self: &BoundsWalker) upper_bound_in(
     depth: i64
 ) -> ?i64 {
     var limit = unsigned_max(module, value.type_name);
-    if self.non_negative(module, counters, plan, facts, value) {
+    if self.direct_non_negative(module, counters, plan, facts, value) {
         let fact = self.fact_name(plan, value.name);
         if facts.less_const.get(name_id(fact)) |bound| {
             if bound > 0 {
@@ -1194,11 +1337,11 @@ fn (self: &BoundsWalker) upper_bound_in(
     let instr = self.defs.get(name_id(value.name)) orelse return limit;
     let node = module.instrs.at(instr.node);
     if node.op == Op::GpuIndex {
-        return 4294967295;
+        return self.tighten_upper_bound(plan, facts, value, 4294967295, limit);
     }
     if node.op == Op::Id and node.args.len() == 1 {
         if self.upper_bound_in(module, counters, plan, facts, node.args.get_or_panic(0), depth + 1) |most| {
-            return most;
+            return self.tighten_upper_bound(plan, facts, value, most, limit);
         }
         return limit;
     }
@@ -1206,10 +1349,10 @@ fn (self: &BoundsWalker) upper_bound_in(
         let most = self.upper_bound_in(module, counters, plan, facts, node.args.get_or_panic(0), depth + 1) orelse return limit;
         if integer_max(module, node.result.type_name) |widest| {
             if most <= widest {
-                return most;
+                return self.tighten_upper_bound(plan, facts, value, most, limit);
             }
         } else if module.names.is(node.result.type_name, "u64") {
-            return most;
+            return self.tighten_upper_bound(plan, facts, value, most, limit);
         }
         return limit;
     }
@@ -1226,14 +1369,14 @@ fn (self: &BoundsWalker) upper_bound_in(
         if left_most |l| {
             if right_most |r| {
                 if l < r {
-                    return l;
+                    return self.tighten_upper_bound(plan, facts, value, l, limit);
                 }
-                return r;
+                return self.tighten_upper_bound(plan, facts, value, r, limit);
             }
-            return l;
+            return self.tighten_upper_bound(plan, facts, value, l, limit);
         }
         if right_most |r| {
-            return r;
+            return self.tighten_upper_bound(plan, facts, value, r, limit);
         }
         return limit;
     }
@@ -1248,47 +1391,47 @@ fn (self: &BoundsWalker) upper_bound_in(
         while filled < larger {
             filled = filled * 2 + 1;
         }
-        return filled;
+        return self.tighten_upper_bound(plan, facts, value, filled, limit);
     }
     if names.is(node.operand, "+") {
         let right_most = self.upper_bound_in(module, counters, plan, facts, right, depth + 1) orelse return limit;
         if right_most <= widest - left_most {
-            return left_most + right_most;
+            return self.tighten_upper_bound(plan, facts, value, left_most + right_most, limit);
         }
         return limit;
     }
     if names.is(node.operand, "*") {
         let right_most = self.upper_bound_in(module, counters, plan, facts, right, depth + 1) orelse return limit;
         if left_most == 0 or right_most <= widest / left_most {
-            return left_most * right_most;
+            return self.tighten_upper_bound(plan, facts, value, left_most * right_most, limit);
         }
         return limit;
     }
     let amount = integer_immediate(module, right, &self.defs) orelse return limit;
     if names.is(node.operand, ">>") {
         if amount >= 0 and amount < 63 {
-            return left_most >> amount;
+            return self.tighten_upper_bound(plan, facts, value, left_most >> amount, limit);
         }
         return limit;
     }
     if names.is(node.operand, "<<") {
         if amount >= 0 and amount < 63 and left_most <= widest >> amount {
-            return left_most << amount;
+            return self.tighten_upper_bound(plan, facts, value, left_most << amount, limit);
         }
         return limit;
     }
     if names.is(node.operand, "/") {
         if amount > 0 {
-            return left_most / amount;
+            return self.tighten_upper_bound(plan, facts, value, left_most / amount, limit);
         }
         return limit;
     }
     if names.is(node.operand, "%") {
         if amount > 0 and amount - 1 < left_most {
-            return amount - 1;
+            return self.tighten_upper_bound(plan, facts, value, amount - 1, limit);
         }
         if amount > 0 {
-            return left_most;
+            return self.tighten_upper_bound(plan, facts, value, left_most, limit);
         }
     }
     return limit;
