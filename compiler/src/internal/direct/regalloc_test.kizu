@@ -175,3 +175,171 @@ test "fold indexed addresses preserves safety on offset, reuse, mutation, call, 
         testing::expect(false);
     }
 }
+
+fn madd_inst(rd: i64, rn: i64, rm: i64, ra: i64) -> MInst {
+    var inst = blank(MOp::MAdd);
+    inst.rd = rd;
+    inst.rn = rn;
+    inst.rm = rm;
+    inst.ra = ra;
+    return inst;
+}
+
+fn add_imm_inst(rd: i64, rn: i64, imm: i64) -> MInst {
+    var inst = blank(MOp::AddImm);
+    inst.rd = rd;
+    inst.rn = rn;
+    inst.imm = imm;
+    return inst;
+}
+
+fn extend_inst(rd: i64, rn: i64, width: i64, signed: bool) -> MInst {
+    var inst = blank(MOp::Extend);
+    inst.rd = rd;
+    inst.rn = rn;
+    inst.width = width;
+    inst.signed = signed;
+    return inst;
+}
+
+test "cse_local deduplicates madd, commutative ops, and chained expressions" {
+    let allocator = mem::page_allocator();
+    var func = new_function(allocator);
+    defer func.deinit(allocator);
+    let b = try func.add_block(allocator);
+    let base = func.new_vreg();
+    let idx = func.new_vreg();
+    let stride = func.new_vreg();
+    let a1 = func.new_vreg();
+    let v1 = func.new_vreg();
+    let a2 = func.new_vreg();
+    let v2 = func.new_vreg();
+    let a3 = func.new_vreg();
+    let off1 = func.new_vreg();
+    let off2 = func.new_vreg();
+    let sum1 = func.new_vreg();
+    let sum2 = func.new_vreg();
+    let out = func.new_vreg();
+    try func.emit(allocator, b, madd_inst(a1, idx, stride, base));
+    try func.emit(allocator, b, load_inst(v1, a1, 0, 8, false));
+    try func.emit(allocator, b, madd_inst(a2, stride, idx, base));
+    try func.emit(allocator, b, load_inst(v2, a2, 8, 8, false));
+    try func.emit(allocator, b, madd_inst(a3, idx, stride, base));
+    try func.emit(allocator, b, store_inst(v1, a3, 16, 8));
+    try func.emit(allocator, b, add_imm_inst(off1, a1, 24));
+    try func.emit(allocator, b, add_imm_inst(off2, a2, 24));
+    try func.emit(allocator, b, add_inst(sum1, v1, v2));
+    try func.emit(allocator, b, add_inst(sum2, v2, v1));
+    try func.emit(allocator, b, store_inst(sum2, off2, 0, 8));
+    try func.emit(allocator, b, add_inst(out, sum1, sum2));
+    func.end(b, Term::Return, Cond::Eq, out, 0 - 1, 0 - 1);
+    testing::expect(try cse_local(allocator, &var func));
+    try remove_dead(allocator, &var func);
+    if func.blocks.at(b) |block| {
+        testing::expect_equal<i64>(8, block.insts.len());
+        let i0 = block.insts.get_or_panic(0);
+        let i2 = block.insts.get_or_panic(2);
+        let i3 = block.insts.get_or_panic(3);
+        let i4 = block.insts.get_or_panic(4);
+        let i6 = block.insts.get_or_panic(6);
+        let i7 = block.insts.get_or_panic(7);
+        testing::expect(i0.op == MOp::MAdd);
+        testing::expect_equal<i64>(a1, i0.rd);
+        testing::expect(i2.op == MOp::Load);
+        testing::expect_equal<i64>(a1, i2.rn);
+        testing::expect(i3.op == MOp::Store);
+        testing::expect_equal<i64>(a1, i3.rn);
+        testing::expect(i4.op == MOp::AddImm);
+        testing::expect_equal<i64>(off1, i4.rd);
+        testing::expect(i6.op == MOp::Store);
+        testing::expect_equal<i64>(off1, i6.rn);
+        testing::expect_equal<i64>(sum1, i6.rd);
+        testing::expect(i7.op == MOp::Add);
+        testing::expect_equal<i64>(sum1, i7.rn);
+        testing::expect_equal<i64>(sum1, i7.rm);
+    } else {
+        testing::expect(false);
+    }
+}
+
+test "cse_local preserves safety across calls, mutations, extend widths, non-commutative ops, and blocks" {
+    let allocator = mem::page_allocator();
+    var func = new_function(allocator);
+    defer func.deinit(allocator);
+    let b0 = try func.add_block(allocator);
+    let b1 = try func.add_block(allocator);
+    let base = func.new_vreg();
+    let idx = func.new_vreg();
+    let stride = func.new_vreg();
+    let val = func.new_vreg();
+    let a1 = func.new_vreg();
+    let a2 = func.new_vreg();
+    let a3 = func.new_vreg();
+    let e1 = func.new_vreg();
+    let e2 = func.new_vreg();
+    let s1 = func.new_vreg();
+    let s2 = func.new_vreg();
+    let b1_a = func.new_vreg();
+    try func.emit(allocator, b0, madd_inst(a1, idx, stride, base));
+    try func.emit(allocator, b0, blank(MOp::Call));
+    try func.emit(allocator, b0, madd_inst(a2, idx, stride, base));
+    try func.emit(allocator, b0, mov_imm_inst(idx, 1));
+    try func.emit(allocator, b0, madd_inst(a3, idx, stride, base));
+    try func.emit(allocator, b0, extend_inst(e1, val, 4, false));
+    try func.emit(allocator, b0, extend_inst(e2, val, 4, true));
+    var sub1 = blank(MOp::Sub);
+    sub1.rd = s1;
+    sub1.rn = base;
+    sub1.rm = stride;
+    var sub2 = blank(MOp::Sub);
+    sub2.rd = s2;
+    sub2.rn = stride;
+    sub2.rm = base;
+    try func.emit(allocator, b0, sub1);
+    try func.emit(allocator, b0, sub2);
+    try func.emit(allocator, b0, store_inst(a1, a2, 0, 8));
+    try func.emit(allocator, b0, store_inst(a3, e1, 0, 8));
+    try func.emit(allocator, b0, store_inst(e2, s1, 0, 8));
+    try func.emit(allocator, b0, store_inst(s2, base, 0, 8));
+    func.end(b0, Term::Jump, Cond::Eq, reg_none(), b1, 0 - 1);
+    try func.emit(allocator, b1, madd_inst(b1_a, idx, stride, base));
+    try func.emit(allocator, b1, store_inst(val, b1_a, 0, 8));
+    func.end(b1, Term::Return, Cond::Eq, reg_none(), 0 - 1, 0 - 1);
+    testing::expect(!try cse_local(allocator, &var func));
+    try remove_dead(allocator, &var func);
+    if func.blocks.at(b0) |blk0| {
+        testing::expect_equal<i64>(13, blk0.insts.len());
+    } else {
+        testing::expect(false);
+    }
+    if func.blocks.at(b1) |blk1| {
+        testing::expect_equal<i64>(2, blk1.insts.len());
+        testing::expect(blk1.insts.get_or_panic(0).op == MOp::MAdd);
+    } else {
+        testing::expect(false);
+    }
+}
+
+test "cse_local does not rename loop-carried vreg read before its definition" {
+    let allocator = mem::page_allocator();
+    var func = new_function(allocator);
+    defer func.deinit(allocator);
+    let b = try func.add_block(allocator);
+    let x = func.new_vreg();
+    let y = func.new_vreg();
+    let r1 = func.new_vreg();
+    let r2 = func.new_vreg();
+    try func.emit(allocator, b, add_inst(r1, x, y));
+    try func.emit(allocator, b, store_inst(r2, x, 0, 8));
+    try func.emit(allocator, b, add_inst(r2, x, y));
+    try func.emit(allocator, b, store_inst(r1, y, 0, 8));
+    func.end(b, Term::Jump, Cond::Eq, reg_none(), b, 0 - 1);
+    testing::expect(!try cse_local(allocator, &var func));
+    try remove_dead(allocator, &var func);
+    if func.blocks.at(b) |block| {
+        testing::expect_equal<i64>(4, block.insts.len());
+        testing::expect_equal<i64>(r2, block.insts.get_or_panic(1).rd);
+    } else {
+        testing::expect(false);
+    }
+}

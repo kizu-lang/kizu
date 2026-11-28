@@ -602,6 +602,317 @@ fn fold_indexed_addresses(allocator: Allocator, func: &var MFunction, arch: Arch
     return;
 }
 
+struct CseEntry {
+    op: MOp,
+    rn: i64,
+    rm: i64,
+    ra: i64,
+    imm: i64,
+    slot: i64,
+    width: i64,
+    signed: bool,
+    rd: i64,
+}
+
+fn cse_op_bit(op: MOp) -> i64 {
+    return match op {
+        Add => 1 << 0,
+        Sub => 1 << 1,
+        Mul => 1 << 2,
+        And => 1 << 3,
+        Orr => 1 << 4,
+        Eor => 1 << 5,
+        Lsl => 1 << 6,
+        Lsr => 1 << 7,
+        Asr => 1 << 8,
+        AddImm => 1 << 9,
+        SubImm => 1 << 10,
+        LslImm => 1 << 11,
+        LsrImm => 1 << 12,
+        AsrImm => 1 << 13,
+        MSub => 1 << 14,
+        MAdd => 1 << 15,
+        AddShift => 1 << 16,
+        SubShift => 1 << 17,
+        AddLsr => 1 << 18,
+        SMulH => 1 << 19,
+        UMulH => 1 << 20,
+        AndImm => 1 << 21,
+        Neg => 1 << 22,
+        Mvn => 1 << 23,
+        Extend => 1 << 24,
+        FrameAddr => 1 << 25,
+        _ => 0,
+    };
+}
+
+fn has_cse_pair(func: &MFunction) -> bool {
+    var block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        block_id = block_id + 1;
+        var seen = 0;
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            if inst.op == MOp::Call or inst.op == MOp::CallReg or inst.op == MOp::ParCopy or inst.op == MOp::Trap {
+                seen = 0;
+                continue;
+            }
+            let bit = cse_op_bit(inst.op);
+            if bit != 0 and is_vreg(inst.rd) {
+                if (seen & bit) != 0 {
+                    return true;
+                }
+                seen = seen | bit;
+            }
+        }
+    }
+    return false;
+}
+
+fn mark_early_read(
+    def_block: &array::Array<i64>,
+    def_pos: &array::Array<i64>,
+    early_read: &var array::Array<bool>,
+    reg: i64,
+    block_id: i64,
+    inst_index: i64
+) -> !void {
+    if is_vreg(reg) {
+        let id = reg - first_vreg();
+        if def_block.get_or_panic(id) == block_id and inst_index <= def_pos.get_or_panic(id) {
+            try early_read.set(id, true);
+        }
+    }
+    return;
+}
+
+fn is_cse_commutative(op: MOp) -> bool {
+    return match op {
+        Add => true,
+        Mul => true,
+        And => true,
+        Orr => true,
+        Eor => true,
+        SMulH => true,
+        UMulH => true,
+        MAdd => true,
+        MSub => true,
+        _ => false,
+    };
+}
+
+fn valid_cse_operand(reg: i64) -> bool {
+    return reg == reg_none() or reg == reg_zr() or is_vreg(reg) or (reg >= 0 and reg < 31);
+}
+
+fn cse_resolve(rename: &array::Array<i64>, reg: i64) -> i64 {
+    var current = reg;
+    while is_vreg(current) {
+        let next = rename.get_or_panic(current - first_vreg());
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+    return current;
+}
+
+fn cse_kill(allocator: Allocator, entries: &var array::Array<CseEntry>, killed: i64) -> !void {
+    if killed < 0 {
+        return;
+    }
+    var write = 0;
+    var read = 0;
+    while entries.get(read) |entry| {
+        read = read + 1;
+        if entry.rd == killed or entry.rn == killed or entry.rm == killed or entry.ra == killed {
+            continue;
+        }
+        if write != read - 1 {
+            try entries.set(write, entry);
+        }
+        write = write + 1;
+    }
+    if write != read {
+        try entries.truncate(allocator, write);
+    }
+    return;
+}
+
+fn cse_local(allocator: Allocator, func: &var MFunction) -> !bool {
+    let nv = func.vregs;
+    if nv <= 0 or !has_cse_pair(func) {
+        return false;
+    }
+    var def_count = array::new<i64>(allocator);
+    defer def_count.deinit(allocator);
+    var def_block = array::new<i64>(allocator);
+    defer def_block.deinit(allocator);
+    var def_pos = array::new<i64>(allocator);
+    defer def_pos.deinit(allocator);
+    var early_read = array::new<bool>(allocator);
+    defer early_read.deinit(allocator);
+    var rename = array::new<i64>(allocator);
+    defer rename.deinit(allocator);
+    for 0..nv |v| {
+        try def_count.append(allocator, 0);
+        try def_block.append(allocator, 0 - 1);
+        try def_pos.append(allocator, 0 - 1);
+        try early_read.append(allocator, false);
+        try rename.append(allocator, first_vreg() + v);
+    }
+    var block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            if writes_rd(inst.op) and is_vreg(inst.rd) {
+                let id = inst.rd - first_vreg();
+                try bump(&var def_count, id);
+                try def_block.set(id, block_id);
+                try def_pos.set(id, inst_index);
+            }
+            if inst.op == MOp::ParCopy {
+                var index = 0;
+                while index < inst.imm {
+                    let copy = func.copies.get_or_panic(inst.slot + index);
+                    index = index + 1;
+                    if is_vreg(copy.dst) {
+                        try bump(&var def_count, copy.dst - first_vreg());
+                    }
+                }
+            }
+            inst_index = inst_index + 1;
+        }
+        block_id = block_id + 1;
+    }
+    block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            try mark_early_read(&def_block, &def_pos, &var early_read, inst.rn, block_id, inst_index);
+            try mark_early_read(&def_block, &def_pos, &var early_read, inst.rm, block_id, inst_index);
+            try mark_early_read(&def_block, &def_pos, &var early_read, inst.ra, block_id, inst_index);
+            if inst.op == MOp::Store or inst.op == MOp::StoreIdx {
+                try mark_early_read(&def_block, &def_pos, &var early_read, inst.rd, block_id, inst_index);
+            } else if inst.op == MOp::ParCopy {
+                var index = 0;
+                while index < inst.imm {
+                    let copy = func.copies.get_or_panic(inst.slot + index);
+                    index = index + 1;
+                    if !copy.src_imm {
+                        try mark_early_read(&def_block, &def_pos, &var early_read, copy.src, block_id, inst_index);
+                    }
+                }
+            }
+            inst_index = inst_index + 1;
+        }
+        block_id = block_id + 1;
+    }
+    var entries = array::new<CseEntry>(allocator);
+    defer entries.deinit(allocator);
+    var changed = false;
+    block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        block_id = block_id + 1;
+        entries.clear(allocator);
+        var next_evict = 0;
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            inst_index = inst_index + 1;
+            if inst.op == MOp::Call or inst.op == MOp::CallReg or inst.op == MOp::ParCopy or inst.op == MOp::Trap {
+                entries.clear(allocator);
+                next_evict = 0;
+                continue;
+            }
+            if cse_op_bit(inst.op) != 0 and is_vreg(inst.rd) {
+                let id = inst.rd - first_vreg();
+                let ssa = def_count.get_or_panic(id) == 1 and !early_read.get_or_panic(id);
+                var rn = cse_resolve(&rename, inst.rn);
+                var rm = cse_resolve(&rename, inst.rm);
+                let ra = cse_resolve(&rename, inst.ra);
+                if is_cse_commutative(inst.op) and rn > rm {
+                    let tmp = rn;
+                    rn = rm;
+                    rm = tmp;
+                }
+                if ssa and valid_cse_operand(rn) and valid_cse_operand(rm) and valid_cse_operand(ra) and
+                    inst.rd != rn and inst.rd != rm and inst.rd != ra {
+                    var found = 0 - 1;
+                    var index = 0;
+                    while entries.get(index) |entry| {
+                        index = index + 1;
+                        if entry.op == inst.op and entry.rn == rn and entry.rm == rm and entry.ra == ra and
+                            entry.imm == inst.imm and entry.slot == inst.slot and entry.width == inst.width and
+                            entry.signed == inst.signed {
+                            found = entry.rd;
+                            break;
+                        }
+                    }
+                    if found >= 0 {
+                        try rename.set(id, found);
+                        changed = true;
+                        continue;
+                    }
+                    let made = CseEntry {
+                        op: inst.op,
+                        rn: rn,
+                        rm: rm,
+                        ra: ra,
+                        imm: inst.imm,
+                        slot: inst.slot,
+                        width: inst.width,
+                        signed: inst.signed,
+                        rd: inst.rd
+                    };
+                    if entries.len() < 64 {
+                        try entries.append(allocator, made);
+                    } else {
+                        if next_evict >= entries.len() {
+                            next_evict = 0;
+                        }
+                        try entries.set(next_evict, made);
+                        next_evict = (next_evict + 1) % 64;
+                    }
+                    continue;
+                }
+            }
+            if entries.len() > 0 and writes_rd(inst.op) and inst.rd >= 0 {
+                try cse_kill(allocator, &var entries, inst.rd);
+            }
+        }
+    }
+    if !changed {
+        return false;
+    }
+    block_id = 0;
+    while func.blocks.at_mut(block_id) |block| {
+        block_id = block_id + 1;
+        var inst_index = 0;
+        while inst_index < block.insts.len() {
+            let inst = block.insts.get_or_panic(inst_index);
+            var fixed = inst;
+            fixed.rn = cse_resolve(&rename, inst.rn);
+            fixed.rm = cse_resolve(&rename, inst.rm);
+            fixed.ra = cse_resolve(&rename, inst.ra);
+            if inst.op == MOp::Store or inst.op == MOp::StoreIdx {
+                fixed.rd = cse_resolve(&rename, inst.rd);
+            }
+            try block.insts.set(inst_index, fixed);
+            inst_index = inst_index + 1;
+        }
+        block.treg = cse_resolve(&rename, block.treg);
+    }
+    var copy_index = 0;
+    while func.copies.at_mut(copy_index) |copy| {
+        copy_index = copy_index + 1;
+        if !copy.src_imm {
+            copy.src = cse_resolve(&rename, copy.src);
+        }
+    }
+    return true;
+}
+
 fn add_to(table: &var array::Array<i64>, at: i64, amount: i64) -> !void {
     return table.set(at, table.get_or_panic(at) + amount);
 }
@@ -1701,6 +2012,9 @@ fn run_passes(allocator: Allocator, func: &var MFunction, arch: Arch) -> !void {
         try store_immediates(allocator, func);
     }
     try remove_dead(allocator, func);
+    if try cse_local(allocator, func) {
+        try remove_dead(allocator, func);
+    }
     return;
 }
 
