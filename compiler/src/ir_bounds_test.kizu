@@ -1,0 +1,251 @@
+import compiler::internal::ast;
+import compiler::internal::ir;
+import compiler::internal::ownership;
+import compiler::internal::pool;
+import compiler::internal::project;
+import compiler::internal::stdtarget;
+import compiler::internal::types;
+import std::io;
+import std::mem;
+import std::testing;
+
+fn bounds_strided_ir_source() -> []u8 {
+    return
+        \\import std::array;
+        \\import std::mem;
+        \\
+        \\fn const_stride_fixed(arr: &var [256]i64) -> i64 {
+        \\    var total: i64 = 0;
+        \\    var j: i64 = 0;
+        \\    while j < 256 {
+        \\        arr[j] = j;
+        \\        total = total + arr[j];
+        \\        j = j + 4;
+        \\    }
+        \\    return total;
+        \\}
+        \\
+        \\fn guarded_dyn_stride_fixed(arr: &var [256]i64, start: i64, step: i64) -> i64 {
+        \\    if start < 0 {
+        \\        return 0;
+        \\    }
+        \\    if step <= 0 {
+        \\        return 0;
+        \\    }
+        \\    if step > 16 {
+        \\        return 0;
+        \\    }
+        \\    var total: i64 = 0;
+        \\    var j = start;
+        \\    while j < 256 {
+        \\        arr[j] = j;
+        \\        total = total + arr[j];
+        \\        j = j + step;
+        \\    }
+        \\    return total;
+        \\}
+        \\
+        \\fn sieve_inner(flags: &var [256]bool) -> i64 {
+        \\    var p: i64 = 2;
+        \\    while p < 256 {
+        \\        if flags[p] {
+        \\            var m = p * p;
+        \\            while m < 256 {
+        \\                flags[m] = false;
+        \\                m = m + p;
+        \\            }
+        \\        }
+        \\        p = p + 1;
+        \\    }
+        \\    return 0;
+        \\}
+        \\
+        \\fn sub_headroom_slice(buf: []u8) -> i64 {
+        \\    let n = mem::len(buf);
+        \\    var total: i64 = 0;
+        \\    var j: i64 = 0;
+        \\    while j < n - 3 {
+        \\        total = total + cast<i64>(buf[j]);
+        \\        j = j + 4;
+        \\    }
+        \\    return total;
+        \\}
+        \\
+        \\fn doubling_bounded(arr: &[256]i64) -> i64 {
+        \\    var total: i64 = 0;
+        \\    var j: i64 = 1;
+        \\    while j < 256 {
+        \\        total = total + arr[j];
+        \\        j = j + j;
+        \\    }
+        \\    return total;
+        \\}
+        \\
+        \\fn unbounded_slice_len_strided(buf: []u8) -> i64 {
+        \\    let n = mem::len(buf);
+        \\    var total: i64 = 0;
+        \\    var j: i64 = 0;
+        \\    while j < n {
+        \\        total = total + cast<i64>(buf[j]);
+        \\        j = j + 4;
+        \\    }
+        \\    return total;
+        \\}
+        \\
+        \\fn unbounded_step_fixed(arr: &var [256]i64, step: i64) -> i64 {
+        \\    if step <= 0 {
+        \\        return 0;
+        \\    }
+        \\    var total: i64 = 0;
+        \\    var j: i64 = 0;
+        \\    while j < 256 {
+        \\        arr[j] = j;
+        \\        total = total + arr[j];
+        \\        j = j + step;
+        \\    }
+        \\    return total;
+        \\}
+        \\
+        \\fn unbounded_doubling(buf: []u8) -> i64 {
+        \\    let n = mem::len(buf);
+        \\    var total: i64 = 0;
+        \\    var j: i64 = 1;
+        \\    while j < n {
+        \\        total = total + cast<i64>(buf[j]);
+        \\        j = j + j;
+        \\    }
+        \\    return total;
+        \\}
+        \\
+        \\fn negative_start_strided(arr: &var [256]i64, start: i64) -> i64 {
+        \\    var total: i64 = 0;
+        \\    var j = start;
+        \\    while j < 256 {
+        \\        total = total + arr[j];
+        \\        j = j + 4;
+        \\    }
+        \\    return total;
+        \\}
+        \\
+        \\fn negative_step_strided(arr: &var [256]i64, step: i64) -> i64 {
+        \\    var total: i64 = 0;
+        \\    var j: i64 = 0;
+        \\    while j < 256 {
+        \\        total = total + arr[j];
+        \\        j = j + step;
+        \\    }
+        \\    return total;
+        \\}
+        \\
+        \\fn array_pop_strided(arr: &var array::Array<i64>) -> i64 {
+        \\    var total: i64 = 0;
+        \\    var j: i64 = 0;
+        \\    while j < arr.len() {
+        \\        let _ = arr.pop();
+        \\        total = total + arr.get_or_panic(j);
+        \\        j = j + 2;
+        \\    }
+        \\    return total;
+        \\}
+        \\
+        \\fn main() -> void {
+        \\    return;
+        \\}
+    ;
+}
+
+fn count_op_in_function(module: &ir::Module, fn_name: []u8, target_op: ir::Op) -> i64 {
+    var fn_index = 0;
+    while module.functions.get(fn_index) |function| {
+        fn_index = fn_index + 1;
+        if !module.names.is(module.function_name(function), fn_name) {
+            continue;
+        }
+        var count = 0;
+        let fn_node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while fn_node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                if module.instr_op(instr) == target_op {
+                    count = count + 1;
+                }
+            }
+        }
+        return count;
+    }
+    return -1;
+}
+
+fn run_bounds_strided_test(io: Io, allocator: Allocator) -> !void {
+    let cached = try project::load_std_cache(io, allocator, "lib/kizu");
+    match cached {
+        Error(failed) => {
+            defer failed.deinit(allocator);
+            testing::expect(false);
+        },
+        Cache(std_cache) => {
+            defer std_cache.deinit(allocator);
+            var tree = ast::new(allocator);
+            defer tree.deinit(allocator);
+            var loader = try project::new_loader(io, allocator, "lib/kizu");
+            defer loader.deinit(allocator);
+            let loaded = try loader.load_source_cached(&var tree, "", bounds_strided_ir_source(), &std_cache);
+            match loaded {
+                Error(failed) => {
+                    defer failed.deinit(allocator);
+                    testing::expect(false);
+                },
+                Program(program) => {
+                    defer program.deinit(allocator);
+                    if try types::check(allocator, &var tree, &program) |failed| {
+                        defer failed.deinit(allocator);
+                        testing::expect(false);
+                        return;
+                    }
+                    var checker = try ownership::new_checker(allocator, &tree, &program);
+                    defer checker.deinit(allocator);
+                    if try checker.check_program(&var tree, &program) |failed| {
+                        defer failed.deinit(allocator);
+                        testing::expect(false);
+                        return;
+                    }
+                    var lowerer = try ir::new_lowerer(allocator, &tree, &program, &checker);
+                    defer lowerer.deinit(allocator);
+                    if try lowerer.lower(&var tree, &program, &std_cache.error_codes, &loader.sources) |failed| {
+                        defer failed.deinit(allocator);
+                        testing::expect(false);
+                        return;
+                    }
+                    if try ir::optimize(allocator, &var lowerer.module, stdtarget::host()) |failed| {
+                        defer failed.deinit(allocator);
+                        testing::expect(false);
+                        return;
+                    }
+                    testing::expect_equal<i64>(0, count_op_in_function(&lowerer.module, "const_stride_fixed", ir::Op::CondFail));
+                    testing::expect_equal<i64>(0, count_op_in_function(&lowerer.module, "guarded_dyn_stride_fixed", ir::Op::CondFail));
+                    testing::expect_equal<i64>(0, count_op_in_function(&lowerer.module, "sieve_inner", ir::Op::CondFail));
+                    testing::expect_equal<i64>(0, count_op_in_function(&lowerer.module, "sub_headroom_slice", ir::Op::CondFail));
+                    testing::expect_equal<i64>(0, count_op_in_function(&lowerer.module, "doubling_bounded", ir::Op::CondFail));
+                    testing::expect(count_op_in_function(&lowerer.module, "unbounded_slice_len_strided", ir::Op::CondFail) > 0);
+                    testing::expect(count_op_in_function(&lowerer.module, "unbounded_step_fixed", ir::Op::CondFail) > 0);
+                    testing::expect(count_op_in_function(&lowerer.module, "unbounded_doubling", ir::Op::CondFail) > 0);
+                    testing::expect(count_op_in_function(&lowerer.module, "negative_start_strided", ir::Op::CondFail) > 0);
+                    testing::expect(count_op_in_function(&lowerer.module, "negative_step_strided", ir::Op::CondFail) > 0);
+                    testing::expect_equal<i64>(1, count_op_in_function(&lowerer.module, "array_pop_strided", ir::Op::ArrayGetOrPanic));
+                },
+            }
+        },
+    }
+    return;
+}
+
+test "strided bounds elimination removes proven checks and keeps overflow or negative risks" {
+    var mem_pool = try pool::new(mem::page_allocator());
+    defer mem_pool.deinit(mem::page_allocator());
+    let allocator = pool::allocator_of(&var mem_pool);
+    return run_bounds_strided_test(io::blocking(), allocator);
+}
