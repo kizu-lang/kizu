@@ -11,26 +11,37 @@ fn (self: &var Checker) check_scalar_expr(
     expression: ast::Expression,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
+    if try self.check_scalar_expr_ok(tree, expression, out) {
+        return self.take_failure();
+    }
+    return null;
+}
+
+fn (self: &var Checker) check_scalar_expr_ok(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    out: &var Type
+) -> !bool {
     match tree.expressions.at(expression.node) {
         Int(_) => {
             out.* = try self.types.i64_type();
-            return null;
+            return false;
         },
         Float(_) => {
-            out.* = try self.types.intern("f64");
-            return null;
+            out.* = try self.types.f64_type();
+            return false;
         },
         String(_) => {
             out.* = try self.types.byte_string_type();
-            return null;
+            return false;
         },
         CString(_) => {
             out.* = try self.types.c_string_type();
-            return null;
+            return false;
         },
         Bool(_) => {
             out.* = try self.types.bool_type();
-            return null;
+            return false;
         },
         Type(value) => {
             let retained = tree.texts.at(value.type_name.node);
@@ -38,22 +49,25 @@ fn (self: &var Checker) check_scalar_expr(
             match try self.resolve_type(tree, bytes) {
                 Value(_) => {
                     out.* = try self.types.type_value_type();
-                    return null;
+                    return false;
                 },
                 Issue(issue) => {
-                    return try self.type_resolution_diagnostic(issue);
+                    let problem = try self.type_resolution_diagnostic(issue);
+                    return self.fail(move problem);
                 },
             }
         },
         Null(_) => {
-            return try self.checker_error_at(
+            let problem = try self.checker_error_at(
                 "type error",
                 ast::zero_span(),
                 "`null` needs an optional context (a `?T` return or argument)"
             );
+            return self.fail(move problem);
         },
         _ => {
-            return try self.checker_error_at("type error", ast::zero_span(), "unsupported literal");
+            let problem = try self.checker_error_at("type error", ast::zero_span(), "unsupported literal");
+            return self.fail(move problem);
         },
     }
 }
@@ -64,6 +78,18 @@ fn (self: &var Checker) check_ident_expr(
     expression: &ast::IdentExpr,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
+    if try self.check_ident_expr_ok(tree, scope, expression, out) {
+        return self.take_failure();
+    }
+    return null;
+}
+
+fn (self: &var Checker) check_ident_expr_ok(
+    tree: &ast::Ast,
+    scope: ScopeHandle,
+    expression: &ast::IdentExpr,
+    out: &var Type
+) -> !bool {
     let retained = tree.texts.at(expression.name.node);
     let name = retained.as_bytes();
     if self.scopes.lookup(scope, name) |resolved| {
@@ -72,8 +98,20 @@ fn (self: &var Checker) check_ident_expr(
             let selection = self.scopes.selection(scope, name);
             try self.record_reference(tree.text_span(expression.name), selection, false);
         }
-        return null;
+        return false;
     }
+    if try self.check_non_local_ident_expr(tree, expression, name, out) |problem| {
+        return self.fail(move problem);
+    }
+    return false;
+}
+
+fn (self: &var Checker) check_non_local_ident_expr(
+    tree: &ast::Ast,
+    expression: &ast::IdentExpr,
+    name: []u8,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
     if self.type_args.contains(name) {
         out.* = try self.types.type_value_type();
         return null;
@@ -402,10 +440,23 @@ fn integer_literal_fits_type(table: &TypeTable, value: i64, type_name: Type) -> 
 }
 
 fn (self: &Checker) checker_integer_type(value: Type) -> bool {
-    if value.node |handle| {
-        let entry = self.types.entries.at(handle);
-        let bytes = entry.spelling.as_bytes();
-        return is_integer_type(bytes);
+    return self.types.is_integer_fast(value);
+}
+
+fn (self: &var Checker) check_logical_ok(
+    operator: []u8,
+    left: Type,
+    right: Type,
+    span: ast::Span,
+    out: &var Type
+) -> !bool {
+    let bool_type = try self.types.bool_type();
+    if same_type(left, bool_type) and same_type(right, bool_type) {
+        out.* = bool_type;
+        return false;
+    }
+    if try self.check_logical(operator, left, right, span, out) |problem| {
+        return self.fail(move problem);
     }
     return false;
 }
@@ -429,6 +480,24 @@ fn (self: &var Checker) check_logical(
     try message.append_bytes(self.allocator, "` expects bool operands");
     try self.append_operand_text(&var message, left, right);
     return try self.checker_text_diagnostic_at(span, move message);
+}
+
+fn (self: &var Checker) check_equality_ok(
+    operator: []u8,
+    left: Type,
+    right: Type,
+    span: ast::Span,
+    out: &var Type
+) -> !bool {
+    if same_type(left, right) and
+        (self.types.is_numeric_fast(left) or self.types.is_text(left, "bool")) {
+        out.* = try self.types.bool_type();
+        return false;
+    }
+    if try self.check_equality(operator, left, right, span, out) |problem| {
+        return self.fail(move problem);
+    }
+    return false;
 }
 
 fn (self: &var Checker) check_equality(
@@ -535,17 +604,6 @@ fn is_comparison(operator: []u8) -> bool {
         mem::equal_bytes(operator, "<=") or
         mem::equal_bytes(operator, ">") or
         mem::equal_bytes(operator, ">=");
-}
-
-fn is_bitwise(operator: []u8) -> bool {
-    return mem::equal_bytes(operator, "&") or
-        mem::equal_bytes(operator, "|") or
-        mem::equal_bytes(operator, "^") or
-        is_shift(operator);
-}
-
-fn is_shift(operator: []u8) -> bool {
-    return mem::equal_bytes(operator, "<<") or mem::equal_bytes(operator, ">>");
 }
 
 fn (self: &Checker) coerce_binary_literal(

@@ -1,4 +1,5 @@
 import compiler::internal::ast;
+import compiler::internal::diagnostic;
 import compiler::internal::staticexpr;
 import compiler::internal::stdmeta;
 import compiler::internal::stdtarget;
@@ -101,6 +102,12 @@ union MetaCaptureResolution {
     Issue(TypeResolutionIssue),
 }
 
+struct StructLiteralSlot {
+    present: bool,
+    expression: ast::Expression,
+    typ: Type,
+}
+
 struct Checker {
     allocator: Allocator,
     target: stdtarget::Target,
@@ -134,6 +141,9 @@ struct Checker {
     lazy_std: bool,
     reached_std: map::Map<i64, bool>,
     pending_std: array::Array<FunctionHandle>,
+    failure: array::Array<diagnostic::Diagnostic>,
+    struct_by_type_id: array::Array<i64>,
+    struct_literal_slots: array::Array<StructLiteralSlot>,
 }
 
 fn new_checker(allocator: Allocator) -> Checker {
@@ -176,8 +186,59 @@ fn new_checker_for_target(
         member_span: ast::zero_span(),
         lazy_std: false,
         reached_std: map::new<i64, bool>(allocator),
-        pending_std: array::new<FunctionHandle>(allocator)
+        pending_std: array::new<FunctionHandle>(allocator),
+        failure: array::new<diagnostic::Diagnostic>(allocator),
+        struct_by_type_id: array::new<i64>(allocator),
+        struct_literal_slots: array::new<StructLiteralSlot>(allocator)
     };
+}
+
+fn (self: &var Checker) fail(problem: diagnostic::Diagnostic) -> !bool {
+    errdefer problem.deinit(self.allocator);
+    self.clear_failure();
+    try self.failure.append(self.allocator, move problem);
+    return true;
+}
+
+fn (self: &var Checker) take_failure() -> ?diagnostic::Diagnostic {
+    return self.failure.pop();
+}
+
+fn (self: &var Checker) clear_failure() -> void {
+    while self.failure.pop() |old| {
+        old.deinit(self.allocator);
+    }
+    return;
+}
+
+fn (self: &var Checker) locate_failure(span: ast::Span) -> void {
+    if self.failure.at_mut(0) |problem| {
+        if problem.span.is_zero() {
+            problem.span = span;
+        }
+    }
+    return;
+}
+
+fn (self: &var Checker) struct_index_for_type(value: Type) -> !i64 {
+    let handle = value.node orelse return -1;
+    let id = self.types.entries.at(handle).id;
+    if self.plain_data_ready and id < self.struct_by_type_id.len() {
+        let cached = self.struct_by_type_id.get_or_panic(id);
+        if cached != -2 {
+            return cached;
+        }
+    }
+    let entry = self.types.entries.at(handle);
+    let bytes = entry.spelling.as_bytes();
+    let found = self.metadata.struct_infos_by_name.get(bytes) orelse -1;
+    if self.plain_data_ready {
+        while self.struct_by_type_id.len() <= id {
+            try self.struct_by_type_id.append(self.allocator, -2);
+        }
+        try self.struct_by_type_id.set(id, found);
+    }
+    return found;
 }
 
 fn (self: &var Checker) retain_meta_field(
@@ -817,6 +878,9 @@ fn (self: &var Checker) append_meta_type_deep(
 }
 
 fn (self: &var Checker) resolve_meta_type(tree: &ast::Ast, value: Type) -> !TypeResolution {
+    if !self.types.has_meta_prefix_fast(value) {
+        return TypeResolution::Value(value);
+    }
     let parsed = self.types.lookup(value) orelse
         return TypeResolution::Value(value);
     match typ::root_node(&self.types.parsed, parsed) {

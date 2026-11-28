@@ -70,7 +70,8 @@ fn is_builtin_call_name(name: []u8) -> bool {
 
 fn (self: &var Checker) enter_loop(label: []u8) -> !?diagnostic::Diagnostic {
     let allocator = self.allocator;
-    if mem::len(label) > 0 and self.has_loop_label(label) {
+    let has_label = mem::len(label) > 0;
+    if has_label and self.has_loop_label(label) {
         var message = string::new(allocator);
         errdefer message.deinit(allocator);
         try message.append_bytes(allocator, "duplicate loop label `");
@@ -79,13 +80,23 @@ fn (self: &var Checker) enter_loop(label: []u8) -> !?diagnostic::Diagnostic {
         return try self.checker_message_at("type error", ast::zero_span(), move message);
     }
     if self.current_body |handle| {
-        let owned = try string::from_bytes(allocator, label);
-        errdefer owned.deinit(allocator);
-        if self.body_contexts.at_mut(handle) |context| {
-            try context.loop_labels.append(allocator, move owned);
-            return null;
+        if !has_label {
+            if self.body_contexts.at_mut(handle) |context| {
+                context.loop_depth = context.loop_depth + 1;
+                return null;
+            }
+        } else {
+            let owned = try string::from_bytes(allocator, label);
+            errdefer owned.deinit(allocator);
+            if self.body_contexts.at_mut(handle) |context| {
+                let next_depth = context.loop_depth + 1;
+                try context.loop_labels.append(allocator, move owned);
+                try context.loop_label_depths.append(allocator, next_depth);
+                context.loop_depth = next_depth;
+                return null;
+            }
+            owned.deinit(allocator);
         }
-        owned.deinit(allocator);
     }
     return try self.checker_error_at(
         "type error", ast::zero_span(),
@@ -96,8 +107,14 @@ fn (self: &var Checker) enter_loop(label: []u8) -> !?diagnostic::Diagnostic {
 fn (self: &var Checker) leave_loop() -> void {
     if self.current_body |handle| {
         if self.body_contexts.at_mut(handle) |context| {
-            let label = context.loop_labels.pop_or_panic();
-            label.deinit(self.allocator);
+            let depth = context.loop_depth;
+            let label_count = context.loop_label_depths.len();
+            if label_count > 0 and context.loop_label_depths.get_or_panic(label_count - 1) == depth {
+                let _ = context.loop_label_depths.pop_or_panic();
+                let label = context.loop_labels.pop_or_panic();
+                label.deinit(self.allocator);
+            }
+            context.loop_depth = depth - 1;
         }
     }
     return;
@@ -126,7 +143,7 @@ fn (self: &Checker) check_loop_branch(kind: []u8, label: []u8) -> !?diagnostic::
 fn (self: &Checker) loop_depth() -> i64 {
     let handle = self.current_body orelse return 0;
     let context = self.body_contexts.at(handle);
-    return context.loop_labels.len();
+    return context.loop_depth;
 }
 
 fn (self: &Checker) has_loop_label(label: []u8) -> bool {

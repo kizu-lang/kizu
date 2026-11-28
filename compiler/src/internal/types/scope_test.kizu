@@ -27,12 +27,14 @@ fn expect_borrow_source(
     binding_name: []u8,
     expected: []u8
 ) -> void {
-    let retained = scopes.scopes.at(scope.node);
-    if retained.bindings.at(binding_name) |binding| {
-        if binding.borrow_sources.at(0) |source| {
-            let bytes = source.as_bytes();
-            testing::expect(equal(bytes, expected));
-            return;
+    let idx = scopes.find_entry_in_scope(scope.index, binding_name);
+    if idx >= 0 {
+        if scopes.entries.at(idx) |entry| {
+            if entry.binding.borrow_sources.at(0) |source| {
+                let bytes = source.as_bytes();
+                testing::expect(equal(bytes, expected));
+                return;
+            }
         }
     }
     testing::fail("scope binding lost its borrow source");
@@ -44,14 +46,16 @@ fn expect_unread(
     name: []u8,
     expected: bool
 ) -> void {
-    let retained = scopes.scopes.at(scope.node);
-    if retained.bindings.at(name) |binding| {
-        if binding.unread |_| {
-            testing::expect(expected);
-        } else {
-            testing::expect(!expected);
+    let idx = scopes.find_entry_in_scope(scope.index, name);
+    if idx >= 0 {
+        if scopes.entries.at(idx) |entry| {
+            if entry.binding.unread |_| {
+                testing::expect(expected);
+            } else {
+                testing::expect(!expected);
+            }
+            return;
         }
-        return;
     }
     testing::fail("scope lost its local binding");
 }
@@ -133,4 +137,67 @@ test "scope resolves borrow facts at the nearest binding" {
     ));
     testing::expect(!scopes.is_mut_borrowed_param(child, "out"));
     expect_borrow_source(&scopes, child, "out", "owner");
+}
+
+test "scope promotes large scopes to index map, tracks unread counts, and resets cleanly" {
+    let allocator = mem::page_allocator();
+    var table = new_type_table(allocator);
+    defer table.deinit(allocator);
+    var scopes = new_scope_store(allocator);
+    defer scopes.deinit(allocator);
+    let i64_type = try table.i64_type();
+    let bool_type = try table.bool_type();
+    let root = try scopes.new_scope(null);
+    var names = array::new<[]u8>(allocator);
+    defer names.deinit(allocator);
+    try names.append(allocator, "v00");
+    try names.append(allocator, "v01");
+    try names.append(allocator, "v02");
+    try names.append(allocator, "v03");
+    try names.append(allocator, "v04");
+    try names.append(allocator, "v05");
+    try names.append(allocator, "v06");
+    try names.append(allocator, "v07");
+    try names.append(allocator, "v08");
+    try names.append(allocator, "v09");
+    try names.append(allocator, "v10");
+    try names.append(allocator, "v11");
+    try names.append(allocator, "v12");
+    try names.append(allocator, "v13");
+    try names.append(allocator, "v14");
+    try names.append(allocator, "v15");
+    try names.append(allocator, "v16");
+    try names.append(allocator, "v17");
+    try names.append(allocator, "v18");
+    try names.append(allocator, "v19");
+    var idx = 0;
+    while names.get(idx) |name| {
+        testing::expect(try scopes.define(root, name, i64_type, idx % 2 == 0));
+        scopes.declare_local(root, name, test_span(idx + 1, 1));
+        idx = idx + 1;
+    }
+    testing::expect(!(try scopes.define(root, "v00", bool_type, false)));
+    testing::expect(!(try scopes.define(root, "v19", bool_type, false)));
+    testing::expect(scopes.has_unread(root));
+    let empty1 = try scopes.new_scope(root);
+    let empty2 = try scopes.new_scope(empty1);
+    testing::expect(!scopes.has_unread(empty2));
+    idx = 0;
+    while names.get(idx) |name| {
+        if scopes.lookup(empty2, name) |found| {
+            testing::expect(same_type(found, i64_type));
+        } else {
+            testing::fail("promoted scope lost a binding across empty child scopes");
+        }
+        idx = idx + 1;
+    }
+    testing::expect(!scopes.has_unread(root));
+    scopes.reset();
+    let fresh = try scopes.new_scope(null);
+    testing::expect(try scopes.define(fresh, "v00", bool_type, true));
+    if scopes.lookup(fresh, "v00") |found| {
+        testing::expect(same_type(found, bool_type));
+    } else {
+        testing::fail("reset scope did not bind fresh variable");
+    }
 }

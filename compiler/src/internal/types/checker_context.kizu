@@ -267,7 +267,10 @@ struct BodyContext {
     return_type: Type,
     function: CurrentFunction,
     std: bool,
+    module_id: i64,
+    loop_depth: i64,
     loop_labels: array::Array<string::String>,
+    loop_label_depths: array::Array<i64>,
 }
 
 union CurrentFunction {
@@ -299,13 +302,57 @@ fn (self: &var Checker) enter_body_context(
         type_args: try self.type_args.enter(move type_args),
         static_values: try self.static_values.enter(move static_values)
     };
+    let module_id = self.function_module_id_for(function);
     self.current_body = try self.body_contexts.add(self.allocator, BodyContext {
         return_type: return_type,
         function: function,
         std: std,
-        loop_labels: array::new<string::String>(self.allocator)
+        module_id: module_id,
+        loop_depth: 0,
+        loop_labels: array::new<string::String>(self.allocator),
+        loop_label_depths: array::new<i64>(self.allocator)
     });
     return previous;
+}
+
+fn (self: &var Checker) enter_plain_body_context(
+    function: FunctionHandle,
+    std: bool,
+    return_type: Type
+) -> !BodyContextRestore {
+    let previous = BodyContextRestore {
+        body: self.current_body,
+        type_params: self.type_params.current,
+        type_args: self.type_args.current,
+        static_values: self.static_values.current
+    };
+    self.type_params.current = null;
+    self.type_args.current = null;
+    self.static_values.current = null;
+    let current_fn = CurrentFunction::Value(function);
+    let module_id = self.function_module_id_for(current_fn);
+    self.current_body = try self.body_contexts.add(self.allocator, BodyContext {
+        return_type: return_type,
+        function: current_fn,
+        std: std,
+        module_id: module_id,
+        loop_depth: 0,
+        loop_labels: array::new<string::String>(self.allocator),
+        loop_label_depths: array::new<i64>(self.allocator)
+    });
+    return previous;
+}
+
+fn (self: &Checker) function_module_id_for(function: CurrentFunction) -> i64 {
+    match function {
+        None => return -1,
+        Value(handle) => {
+            if self.metadata.function_module_ids.get(handle.index) |id| {
+                return id;
+            }
+            return -1;
+        },
+    }
 }
 
 fn (self: &var Checker) restore_body_context(previous: BodyContextRestore) -> void {
@@ -327,6 +374,11 @@ fn (self: &Checker) current_function_handle() -> ?FunctionHandle {
         None => return null,
         Value(function) => return function,
     }
+}
+
+fn (self: &Checker) current_module_id() -> i64 {
+    let handle = self.current_body orelse return -1;
+    return self.body_contexts.at(handle).module_id;
 }
 
 fn (self: &Checker) checking_std_body() -> bool {

@@ -14,16 +14,53 @@ union MatchTarget {
     ErrorSet(ErrorSetHandle),
 }
 
-fn (self: &var Checker) check_if_stmt(
+fn (self: &var Checker) check_if_stmt_ok(
     tree: &var ast::Ast,
     scope: ScopeHandle,
     statement: &ast::IfStmt,
     want_return: Type,
     out: &var bool
-) -> !?diagnostic::Diagnostic {
+) -> !bool {
     let condition = statement.condition;
     let consequence_block = statement.consequence;
     let alternative = statement.alternative;
+    let has_capture = tree.texts.at(statement.capture.node).len() > 0;
+    let has_err = tree.texts.at(statement.err_capture.node).len() > 0;
+    if !has_capture and !has_err {
+        var cond = empty_type();
+        if try self.check_expr_ok(tree, scope, condition, &var cond) {
+            return true;
+        }
+        if !self.types.is_text(cond, "bool") {
+            if try self.types.error_union_parts(cond) |_| {
+                let dummy = try self.scopes.new_scope(scope);
+                if try self.bind_error_union_captures("", "", cond, dummy, dummy) |problem| {
+                    return self.fail(move problem);
+                }
+                return false;
+            }
+            if try self.bind_condition_capture("if", "", cond, scope) |problem| {
+                return self.fail(move problem);
+            }
+            return false;
+        }
+        let consequence = try self.scopes.new_scope(scope);
+        var left_returns = false;
+        if try self.check_block_ok(tree, consequence, consequence_block, want_return, &var left_returns) {
+            return true;
+        }
+        if alternative |alternative_block| {
+            let alternative_scope = try self.scopes.new_scope(scope);
+            var right_returns = false;
+            if try self.check_block_ok(tree, alternative_scope, alternative_block, want_return, &var right_returns) {
+                return true;
+            }
+            out.* = left_returns and right_returns;
+            return false;
+        }
+        out.* = false;
+        return false;
+    }
     let retained_capture = tree.texts.at(statement.capture.node);
     let source_capture = retained_capture.as_bytes();
     let owned_capture = try string::from_bytes(self.allocator, source_capture);
@@ -39,7 +76,7 @@ fn (self: &var Checker) check_if_stmt(
     if try self.bind_if_captures(
         tree, scope, capture, err_capture, condition, consequence, alternative_scope
     ) |problem| {
-        return move problem;
+        return self.fail(move problem);
     }
     if self.editor.len() > 0 {
         try self.record_capture(tree, consequence, statement.capture, capture, tree.statement_span(consequence_block.as_statement()));
@@ -48,31 +85,31 @@ fn (self: &var Checker) check_if_stmt(
         }
     }
     var left_returns = false;
-    if try self.check_block(
+    if try self.check_block_ok(
         tree,
         consequence,
         consequence_block,
         want_return,
         &var left_returns
-    ) |problem| {
-        return move problem;
+    ) {
+        return true;
     }
     if alternative |alternative_block| {
         var right_returns = false;
-        if try self.check_block(
+        if try self.check_block_ok(
             tree,
             alternative_scope,
             alternative_block,
             want_return,
             &var right_returns
-        ) |problem| {
-            return move problem;
+        ) {
+            return true;
         }
         out.* = left_returns and right_returns;
-        return null;
+        return false;
     }
     out.* = false;
-    return null;
+    return false;
 }
 
 fn (self: &var Checker) bind_if_captures(
@@ -295,72 +332,85 @@ fn (self: &var Checker) check_container_borrow_condition(
     return null;
 }
 
-fn (self: &var Checker) check_while_stmt(
+fn (self: &var Checker) check_while_stmt_ok(
     tree: &var ast::Ast,
     scope: ScopeHandle,
     statement: &ast::WhileStmt,
     want_return: Type,
     out: &var bool
-) -> !?diagnostic::Diagnostic {
+) -> !bool {
     let label_text = statement.label;
     let condition = statement.condition;
     let body_block = statement.body;
-    let retained_capture = tree.texts.at(statement.capture.node);
-    let source_capture = retained_capture.as_bytes();
-    let owned_capture = try string::from_bytes(self.allocator, source_capture);
-    defer owned_capture.deinit(self.allocator);
-    let capture = owned_capture.as_bytes();
     let body = try self.scopes.new_scope(scope);
-    var handled = false;
-    if try self.bind_container_borrow_capture(
-        tree, scope, capture, condition, body, &var handled
-    ) |problem| {
-        return move problem;
-    }
-    if !handled {
+    if tree.texts.at(statement.capture.node).len() == 0 {
         var cond = empty_type();
-        if try self.check_expr(tree, scope, condition, &var cond) |problem| {
-            return move problem;
+        if try self.check_expr_ok(tree, scope, condition, &var cond) {
+            return true;
         }
-        if try self.bind_condition_capture("while", capture, cond, body) |problem| {
-            return move problem;
+        if !self.types.is_text(cond, "bool") {
+            if try self.bind_condition_capture("while", "", cond, body) |problem| {
+                return self.fail(move problem);
+            }
+            return false;
+        }
+    } else {
+        let owned_capture = try string::from_bytes(self.allocator, semantic_text(tree, statement.capture));
+        defer owned_capture.deinit(self.allocator);
+        let capture = owned_capture.as_bytes();
+        var handled = false;
+        if try self.bind_container_borrow_capture(
+            tree, scope, capture, condition, body, &var handled
+        ) |problem| {
+            return self.fail(move problem);
+        }
+        if !handled {
+            var cond = empty_type();
+            if try self.check_expr_ok(tree, scope, condition, &var cond) {
+                return true;
+            }
+            if try self.bind_condition_capture("while", capture, cond, body) |problem| {
+                return self.fail(move problem);
+            }
+        }
+        if self.editor.len() > 0 {
+            try self.record_capture(tree, body, statement.capture, capture, tree.statement_span(body_block.as_statement()));
         }
     }
-    try self.record_capture(tree, body, statement.capture, capture, tree.statement_span(body_block.as_statement()));
     let retained_label = tree.texts.at(label_text.node);
     let label = retained_label.as_bytes();
     if try self.enter_loop(label) |problem| {
-        return move problem;
+        return self.fail(move problem);
     }
     var returns = false;
-    if try self.check_block(tree, body, body_block, want_return, &var returns) |problem| {
+    if try self.check_block_ok(tree, body, body_block, want_return, &var returns) {
         self.leave_loop();
-        return move problem;
+        return true;
     }
     self.leave_loop();
     out.* = false;
-    return null;
+    return false;
 }
 
-fn (self: &var Checker) check_for_stmt(
+fn (self: &var Checker) check_for_stmt_ok(
     tree: &var ast::Ast,
     scope: ScopeHandle,
     statement: &ast::ForStmt,
     want_return: Type,
     out: &var bool
-) -> !?diagnostic::Diagnostic {
+) -> !bool {
     let label_text = statement.label;
     let name_text = statement.name;
     let start = statement.start;
     let end = statement.end;
     let body_block = statement.body;
-    if try self.check_for_bounds(tree, scope, start, end) |problem| {
-        return move problem;
+    if try self.check_for_bounds_ok(tree, scope, start, end) {
+        return true;
     }
     let retained_label = tree.texts.at(label_text.node);
     let label = retained_label.as_bytes();
     if try self.enter_loop(label) |problem| {
-        return move problem;
+        return self.fail(move problem);
     }
     let child = try self.scopes.new_scope(scope);
     let retained_name = tree.texts.at(name_text.node);
@@ -369,44 +419,47 @@ fn (self: &var Checker) check_for_stmt(
     let defined = try self.scopes.define(child, name, index_type, false);
     if try self.require_scope_definition(name, defined) |problem| {
         self.leave_loop();
-        return move problem;
+        return self.fail(move problem);
     }
-    try self.record_capture(tree, child, name_text, name, tree.statement_span(body_block.as_statement()));
+    if self.editor.len() > 0 {
+        try self.record_capture(tree, child, name_text, name, tree.statement_span(body_block.as_statement()));
+    }
     var returns = false;
-    if try self.check_block(tree, child, body_block, want_return, &var returns) |problem| {
+    if try self.check_block_ok(tree, child, body_block, want_return, &var returns) {
         self.leave_loop();
-        return move problem;
+        return true;
     }
     self.leave_loop();
     out.* = false;
-    return null;
+    return false;
 }
 
-fn (self: &var Checker) check_for_bounds(
+fn (self: &var Checker) check_for_bounds_ok(
     tree: &var ast::Ast,
     scope: ScopeHandle,
     start: ast::Expression,
     end: ast::Expression
-) -> !?diagnostic::Diagnostic {
+) -> !bool {
     var start_type = empty_type();
-    if try self.check_expr(tree, scope, start, &var start_type) |problem| {
-        return move problem;
+    if try self.check_expr_ok(tree, scope, start, &var start_type) {
+        return true;
     }
     var end_type = empty_type();
-    if try self.check_expr(tree, scope, end, &var end_type) |problem| {
-        return move problem;
+    if try self.check_expr_ok(tree, scope, end, &var end_type) {
+        return true;
     }
-    if !self.types.is_text(start_type, "i64") or
-        !self.types.is_text(end_type, "i64") {
+    let i64_t = try self.types.i64_type();
+    if !same_type(start_type, i64_t) or !same_type(end_type, i64_t) {
         var message = string::new(self.allocator);
         errdefer message.deinit(self.allocator);
         try message.append_bytes(self.allocator, "for range expects i64 bounds, got ");
         try self.append_checker_type(&var message, start_type);
         try message.append_bytes(self.allocator, "..");
         try self.append_checker_type(&var message, end_type);
-        return try self.checker_message_at("type error", ast::zero_span(), move message);
+        let problem = try self.checker_message_at("type error", ast::zero_span(), move message);
+        return self.fail(move problem);
     }
-    return null;
+    return false;
 }
 
 fn (self: &Checker) tagged_type(name: []u8) -> ?EnumHandle {
