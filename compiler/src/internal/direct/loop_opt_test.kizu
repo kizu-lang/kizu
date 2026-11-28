@@ -1,0 +1,354 @@
+import std::mem;
+import std::testing;
+
+fn emit_parcopy1(allocator: Allocator, func: &var MFunction, block: i64, dst: i64, src: i64, imm: i64, src_imm: bool) -> !void {
+    let slot = func.copies.len();
+    try func.copies.append(allocator, Copy { dst: dst, src: src, imm: imm, src_imm: src_imm });
+    var pc = blank(MOp::ParCopy);
+    pc.slot = slot;
+    pc.imm = 1;
+    return func.emit(allocator, block, pc);
+}
+
+fn load_idx_inst(rd: i64, rn: i64, rm: i64, shift: i64, width: i64) -> MInst {
+    var inst = blank(MOp::LoadIdx);
+    inst.rd = rd;
+    inst.rn = rn;
+    inst.rm = rm;
+    inst.imm = shift;
+    inst.width = width;
+    return inst;
+}
+
+fn cmp_imm_inst(rn: i64, imm: i64) -> MInst {
+    var inst = blank(MOp::CmpImm);
+    inst.rn = rn;
+    inst.imm = imm;
+    return inst;
+}
+
+fn mul_inst(rd: i64, rn: i64, rm: i64) -> MInst {
+    var inst = blank(MOp::Mul);
+    inst.rd = rd;
+    inst.rn = rn;
+    inst.rm = rm;
+    return inst;
+}
+
+fn sub_imm_inst(rd: i64, rn: i64, imm: i64) -> MInst {
+    var inst = blank(MOp::SubImm);
+    inst.rd = rd;
+    inst.rn = rn;
+    inst.imm = imm;
+    return inst;
+}
+
+test "reduce_loop_strength hoists invariant madd, splits indexed base, and strength-reduces affine IV" {
+    let allocator = mem::page_allocator();
+    for 0..2 |arch_i| {
+        var arch = Arch::Arm64;
+        if arch_i == 1 {
+            arch = Arch::Amd64;
+        }
+        var func = new_function(allocator);
+        defer func.deinit(allocator);
+        let entry = try func.add_block(allocator);
+        let body = try func.add_block(allocator);
+        let exit_b = try func.add_block(allocator);
+        let a = func.new_vreg();
+        let b = func.new_vreg();
+        let row = func.new_vreg();
+        let col = func.new_vreg();
+        let stride = func.new_vreg();
+        let k = func.new_vreg();
+        let inv_addr = func.new_vreg();
+        let idx_a = func.new_vreg();
+        let val_a = func.new_vreg();
+        let idx_b = func.new_vreg();
+        let val_b = func.new_vreg();
+        let val_inv = func.new_vreg();
+        let sum1 = func.new_vreg();
+        let sum2 = func.new_vreg();
+        let k_next = func.new_vreg();
+        try func.emit(allocator, entry, mov_imm_inst(stride, 200));
+        try emit_parcopy1(allocator, &var func, entry, k, reg_none(), 0, true);
+        try func.emit(allocator, entry, cmp_imm_inst(k, 200));
+        func.end(entry, Term::Flags, Cond::Lt, reg_none(), body, exit_b);
+        try func.emit(allocator, body, madd_inst(inv_addr, row, stride, a));
+        try func.emit(allocator, body, load_inst(val_inv, inv_addr, 0, 8, false));
+        try func.emit(allocator, body, madd_inst(idx_a, row, stride, k));
+        try func.emit(allocator, body, load_idx_inst(val_a, a, idx_a, 3, 8));
+        try func.emit(allocator, body, madd_inst(idx_b, k, stride, col));
+        try func.emit(allocator, body, load_idx_inst(val_b, b, idx_b, 3, 8));
+        try func.emit(allocator, body, add_inst(sum1, val_a, val_b));
+        try func.emit(allocator, body, add_inst(sum2, sum1, val_inv));
+        try func.emit(allocator, body, store_inst(sum2, inv_addr, 8, 8));
+        try func.emit(allocator, body, add_imm_inst(k_next, k, 1));
+        try emit_parcopy1(allocator, &var func, body, k, k_next, 0, false);
+        try func.emit(allocator, body, cmp_imm_inst(k, 200));
+        func.end(body, Term::Flags, Cond::Lt, reg_none(), body, exit_b);
+        func.end(exit_b, Term::Return, Cond::Eq, reg_none(), 0 - 1, 0 - 1);
+        testing::expect(try reduce_loop_strength(allocator, &var func, arch));
+        try remove_dead(allocator, &var func);
+        testing::expect_equal<i64>(4, func.blocks.len());
+        let preheader = 3;
+        if func.blocks.at(entry) |eblk| {
+            testing::expect_equal<i64>(preheader, eblk.succ0);
+            testing::expect_equal<i64>(exit_b, eblk.succ1);
+        } else {
+            testing::expect(false);
+        }
+        if func.blocks.at(preheader) |pblk| {
+            testing::expect(pblk.term == Term::Jump);
+            testing::expect_equal<i64>(body, pblk.succ0);
+            testing::expect_equal<i64>(4, pblk.insts.len());
+            testing::expect(pblk.insts.get_or_panic(0).op == MOp::MAdd);
+            testing::expect_equal<i64>(inv_addr, pblk.insts.get_or_panic(0).rd);
+            testing::expect(pblk.insts.get_or_panic(1).op == MOp::Mul);
+            testing::expect(pblk.insts.get_or_panic(2).op == MOp::AddShift);
+            testing::expect(pblk.insts.get_or_panic(3).op == MOp::MAdd);
+        } else {
+            testing::expect(false);
+        }
+        if func.blocks.at(body) |bblk| {
+            var madds = 0;
+            var add_imms = 0;
+            var has_delta_200 = false;
+            var has_parcopy2 = false;
+            var i = 0;
+            while bblk.insts.at(i) |inst| {
+                i = i + 1;
+                if inst.op == MOp::MAdd {
+                    madds = madds + 1;
+                }
+                if inst.op == MOp::AddImm {
+                    add_imms = add_imms + 1;
+                    if inst.imm == 200 {
+                        has_delta_200 = true;
+                    }
+                }
+                if inst.op == MOp::ParCopy and inst.imm == 2 {
+                    has_parcopy2 = true;
+                }
+            }
+            testing::expect_equal<i64>(0, madds);
+            testing::expect_equal<i64>(2, add_imms);
+            testing::expect(has_delta_200);
+            testing::expect(has_parcopy2);
+        } else {
+            testing::expect(false);
+        }
+    }
+}
+
+test "reduce_loop_strength handles negative step with SubImm and rejects calls, quadratic mul, and overflowing arm64 delta" {
+    let allocator = mem::page_allocator();
+    var func_neg = new_function(allocator);
+    defer func_neg.deinit(allocator);
+    let e0 = try func_neg.add_block(allocator);
+    let b0 = try func_neg.add_block(allocator);
+    let x0 = try func_neg.add_block(allocator);
+    let base = func_neg.new_vreg();
+    let stride = func_neg.new_vreg();
+    let iv = func_neg.new_vreg();
+    let iv_next = func_neg.new_vreg();
+    let addr = func_neg.new_vreg();
+    let val = func_neg.new_vreg();
+    try func_neg.emit(allocator, e0, mov_imm_inst(stride, 56));
+    try emit_parcopy1(allocator, &var func_neg, e0, iv, reg_none(), 10, true);
+    func_neg.end(e0, Term::Jump, Cond::Eq, reg_none(), b0, 0 - 1);
+    try func_neg.emit(allocator, b0, madd_inst(addr, iv, stride, base));
+    try func_neg.emit(allocator, b0, load_inst(val, addr, 0, 8, false));
+    try func_neg.emit(allocator, b0, store_inst(val, base, 0, 8));
+    try func_neg.emit(allocator, b0, sub_imm_inst(iv_next, iv, 1));
+    try emit_parcopy1(allocator, &var func_neg, b0, iv, iv_next, 0, false);
+    try func_neg.emit(allocator, b0, cmp_imm_inst(iv, 0));
+    func_neg.end(b0, Term::Flags, Cond::Gt, reg_none(), b0, x0);
+    func_neg.end(x0, Term::Return, Cond::Eq, reg_none(), 0 - 1, 0 - 1);
+    testing::expect(try reduce_loop_strength(allocator, &var func_neg, Arch::Arm64));
+    try remove_dead(allocator, &var func_neg);
+    if func_neg.blocks.at(b0) |blk| {
+        var found_sub56 = false;
+        var i = 0;
+        while blk.insts.at(i) |inst| {
+            i = i + 1;
+            if inst.op == MOp::SubImm and inst.imm == 56 {
+                found_sub56 = true;
+            }
+            testing::expect(inst.op != MOp::MAdd);
+        }
+        testing::expect(found_sub56);
+    } else {
+        testing::expect(false);
+    }
+
+    var func_unsafe = new_function(allocator);
+    defer func_unsafe.deinit(allocator);
+    let e1 = try func_unsafe.add_block(allocator);
+    let b1 = try func_unsafe.add_block(allocator);
+    let x1 = try func_unsafe.add_block(allocator);
+    let s1 = func_unsafe.new_vreg();
+    let iv1 = func_unsafe.new_vreg();
+    let iv1_next = func_unsafe.new_vreg();
+    let sq = func_unsafe.new_vreg();
+    let big = func_unsafe.new_vreg();
+    let sum = func_unsafe.new_vreg();
+    try func_unsafe.emit(allocator, e1, mov_imm_inst(s1, 5000));
+    try emit_parcopy1(allocator, &var func_unsafe, e1, iv1, reg_none(), 0, true);
+    func_unsafe.end(e1, Term::Jump, Cond::Eq, reg_none(), b1, 0 - 1);
+    try func_unsafe.emit(allocator, b1, mul_inst(sq, iv1, iv1));
+    try func_unsafe.emit(allocator, b1, mul_inst(big, iv1, s1));
+    try func_unsafe.emit(allocator, b1, add_inst(sum, sq, big));
+    try func_unsafe.emit(allocator, b1, store_inst(sum, s1, 0, 8));
+    try func_unsafe.emit(allocator, b1, add_imm_inst(iv1_next, iv1, 1));
+    try emit_parcopy1(allocator, &var func_unsafe, b1, iv1, iv1_next, 0, false);
+    try func_unsafe.emit(allocator, b1, cmp_imm_inst(iv1, 10));
+    func_unsafe.end(b1, Term::Flags, Cond::Lt, reg_none(), b1, x1);
+    func_unsafe.end(x1, Term::Return, Cond::Eq, reg_none(), 0 - 1, 0 - 1);
+    testing::expect(!(try reduce_loop_strength(allocator, &var func_unsafe, Arch::Arm64)));
+
+    var func_call = new_function(allocator);
+    defer func_call.deinit(allocator);
+    let e2 = try func_call.add_block(allocator);
+    let b2 = try func_call.add_block(allocator);
+    let x2 = try func_call.add_block(allocator);
+    let s2 = func_call.new_vreg();
+    let iv2 = func_call.new_vreg();
+    let iv2_next = func_call.new_vreg();
+    let p2 = func_call.new_vreg();
+    try func_call.emit(allocator, e2, mov_imm_inst(s2, 56));
+    try emit_parcopy1(allocator, &var func_call, e2, iv2, reg_none(), 0, true);
+    func_call.end(e2, Term::Jump, Cond::Eq, reg_none(), b2, 0 - 1);
+    try func_call.emit(allocator, b2, mul_inst(p2, iv2, s2));
+    try func_call.emit(allocator, b2, blank(MOp::Call));
+    try func_call.emit(allocator, b2, store_inst(p2, s2, 0, 8));
+    try func_call.emit(allocator, b2, add_imm_inst(iv2_next, iv2, 1));
+    try emit_parcopy1(allocator, &var func_call, b2, iv2, iv2_next, 0, false);
+    try func_call.emit(allocator, b2, cmp_imm_inst(iv2, 10));
+    func_call.end(b2, Term::Flags, Cond::Lt, reg_none(), b2, x2);
+    func_call.end(x2, Term::Return, Cond::Eq, reg_none(), 0 - 1, 0 - 1);
+    testing::expect(!(try reduce_loop_strength(allocator, &var func_call, Arch::Amd64)));
+}
+
+test "reduce_loop_strength rejects escaping LSR value and post-parcopy use" {
+    let allocator = mem::page_allocator();
+    var func = new_function(allocator);
+    defer func.deinit(allocator);
+    let e = try func.add_block(allocator);
+    let b = try func.add_block(allocator);
+    let x = try func.add_block(allocator);
+    let s = func.new_vreg();
+    let iv = func.new_vreg();
+    let iv_next = func.new_vreg();
+    let p = func.new_vreg();
+    try func.emit(allocator, e, mov_imm_inst(s, 56));
+    try emit_parcopy1(allocator, &var func, e, iv, reg_none(), 0, true);
+    func.end(e, Term::Jump, Cond::Eq, reg_none(), b, 0 - 1);
+    try func.emit(allocator, b, mul_inst(p, iv, s));
+    try func.emit(allocator, b, add_imm_inst(iv_next, iv, 1));
+    try emit_parcopy1(allocator, &var func, b, iv, iv_next, 0, false);
+    try func.emit(allocator, b, cmp_imm_inst(iv, 10));
+    func.end(b, Term::Flags, Cond::Lt, reg_none(), b, x);
+    try func.emit(allocator, x, store_inst(p, s, 0, 8));
+    func.end(x, Term::Return, Cond::Eq, reg_none(), 0 - 1, 0 - 1);
+    testing::expect(!(try reduce_loop_strength(allocator, &var func, Arch::Amd64)));
+}
+
+test "reduce_loop_strength splits Add indexed base and skips non-loop functions" {
+    let allocator = mem::page_allocator();
+    var func_noloop = new_function(allocator);
+    defer func_noloop.deinit(allocator);
+    let only = try func_noloop.add_block(allocator);
+    let a0 = func_noloop.new_vreg();
+    let b0 = func_noloop.new_vreg();
+    let c0 = func_noloop.new_vreg();
+    try func_noloop.emit(allocator, only, add_inst(c0, a0, b0));
+    func_noloop.end(only, Term::Return, Cond::Eq, c0, 0 - 1, 0 - 1);
+    testing::expect(!(try reduce_loop_strength(allocator, &var func_noloop, Arch::Amd64)));
+
+    var func = new_function(allocator);
+    defer func.deinit(allocator);
+    let e = try func.add_block(allocator);
+    let b = try func.add_block(allocator);
+    let x = try func.add_block(allocator);
+    let base = func.new_vreg();
+    let off = func.new_vreg();
+    let iv = func.new_vreg();
+    let iv_next = func.new_vreg();
+    let idx = func.new_vreg();
+    let val = func.new_vreg();
+    try emit_parcopy1(allocator, &var func, e, iv, reg_none(), 0, true);
+    func.end(e, Term::Jump, Cond::Eq, reg_none(), b, 0 - 1);
+    try func.emit(allocator, b, add_inst(idx, off, iv));
+    try func.emit(allocator, b, load_idx_inst(val, base, idx, 3, 8));
+    try func.emit(allocator, b, store_inst(val, base, 0, 8));
+    try func.emit(allocator, b, add_imm_inst(iv_next, iv, 1));
+    try emit_parcopy1(allocator, &var func, b, iv, iv_next, 0, false);
+    try func.emit(allocator, b, cmp_imm_inst(iv, 10));
+    func.end(b, Term::Flags, Cond::Lt, reg_none(), b, x);
+    func.end(x, Term::Return, Cond::Eq, reg_none(), 0 - 1, 0 - 1);
+    testing::expect(try reduce_loop_strength(allocator, &var func, Arch::Amd64));
+    try remove_dead(allocator, &var func);
+    if func.blocks.at(b) |blk| {
+        testing::expect(blk.insts.get_or_panic(0).op == MOp::LoadIdx);
+        testing::expect_equal<i64>(iv, blk.insts.get_or_panic(0).rm);
+    } else {
+        testing::expect(false);
+    }
+}
+
+test "reduce_loop_strength only transforms innermost loops and skips enclosing outer loops" {
+    let allocator = mem::page_allocator();
+    var func = new_function(allocator);
+    defer func.deinit(allocator);
+    let entry = try func.add_block(allocator);
+    let outer = try func.add_block(allocator);
+    let inner = try func.add_block(allocator);
+    let outer_latch = try func.add_block(allocator);
+    let exit_b = try func.add_block(allocator);
+    let base = func.new_vreg();
+    let stride = func.new_vreg();
+    let i = func.new_vreg();
+    let j = func.new_vreg();
+    let i_next = func.new_vreg();
+    let j_next = func.new_vreg();
+    let outer_addr = func.new_vreg();
+    let inner_addr = func.new_vreg();
+    let val = func.new_vreg();
+    try func.emit(allocator, entry, mov_imm_inst(stride, 56));
+    try emit_parcopy1(allocator, &var func, entry, i, reg_none(), 0, true);
+    func.end(entry, Term::Jump, Cond::Eq, reg_none(), outer, 0 - 1);
+    try emit_parcopy1(allocator, &var func, outer, j, reg_none(), 0, true);
+    func.end(outer, Term::Jump, Cond::Eq, reg_none(), inner, 0 - 1);
+    try func.emit(allocator, inner, madd_inst(inner_addr, j, stride, base));
+    try func.emit(allocator, inner, load_inst(val, inner_addr, 0, 8, false));
+    try func.emit(allocator, inner, store_inst(val, base, 0, 8));
+    try func.emit(allocator, inner, add_imm_inst(j_next, j, 1));
+    try emit_parcopy1(allocator, &var func, inner, j, j_next, 0, false);
+    try func.emit(allocator, inner, cmp_imm_inst(j, 5));
+    func.end(inner, Term::Flags, Cond::Lt, reg_none(), inner, outer_latch);
+    try func.emit(allocator, outer_latch, madd_inst(outer_addr, i, stride, base));
+    try func.emit(allocator, outer_latch, store_inst(val, outer_addr, 0, 8));
+    try func.emit(allocator, outer_latch, add_imm_inst(i_next, i, 1));
+    try emit_parcopy1(allocator, &var func, outer_latch, i, i_next, 0, false);
+    try func.emit(allocator, outer_latch, cmp_imm_inst(i, 5));
+    func.end(outer_latch, Term::Flags, Cond::Lt, reg_none(), outer, exit_b);
+    func.end(exit_b, Term::Return, Cond::Eq, reg_none(), 0 - 1, 0 - 1);
+    testing::expect(try reduce_loop_strength(allocator, &var func, Arch::Amd64));
+    try remove_dead(allocator, &var func);
+    testing::expect_equal<i64>(6, func.blocks.len());
+    if func.blocks.at(inner) |iblk| {
+        var idx = 0;
+        while iblk.insts.at(idx) |inst| {
+            idx = idx + 1;
+            testing::expect(inst.op != MOp::MAdd);
+        }
+    } else {
+        testing::expect(false);
+    }
+    if func.blocks.at(outer_latch) |oblk| {
+        testing::expect(oblk.insts.get_or_panic(0).op == MOp::MAdd);
+    } else {
+        testing::expect(false);
+    }
+}
