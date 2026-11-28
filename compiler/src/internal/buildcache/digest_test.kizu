@@ -1,0 +1,383 @@
+import compiler::internal::fsutil;
+import compiler::internal::sha256;
+import std::fmt;
+import std::fs;
+import std::io;
+import std::mem;
+import std::path;
+import std::process;
+import std::string;
+import std::testing;
+
+extern "c" fn symlink(target: ptr<const u8>, linkpath: ptr<const u8>) -> i32
+fn create_symlink(allocator: Allocator, target: []u8, linkpath: []u8) -> !bool {
+    comptime if std::target::is_windows() {
+        return false;
+    }
+    var c_target = try string::from_bytes(allocator, target);
+    defer c_target.deinit(allocator);
+    try c_target.append_byte(allocator, cast<u8>(0));
+    var c_link = try string::from_bytes(allocator, linkpath);
+    defer c_link.deinit(allocator);
+    try c_link.append_byte(allocator, cast<u8>(0));
+    let c_target_bytes = c_target.as_bytes();
+    let c_link_bytes = c_link.as_bytes();
+    return unsafe symlink(ptr_of(c_target_bytes), ptr_of(c_link_bytes)) == cast<i32>(0);
+}
+
+fn digest_test_root(allocator: Allocator, tag: []u8) -> !string::String {
+    let base = process::env("TMPDIR") orelse "/tmp";
+    var dir = string::new(allocator);
+    errdefer dir.deinit(allocator);
+    try dir.append_bytes(allocator, base);
+    try dir.append_bytes(allocator, "/kizu-digest-test-");
+    try dir.append_bytes(allocator, tag);
+    try dir.append_byte(allocator, cast<u8>(45));
+    try fmt::append_i64(allocator, &var dir, fsutil::current_pid());
+    try dir.append_byte(allocator, cast<u8>(45));
+    try fmt::append_i64(allocator, &var dir, process::unix_millis());
+    try dir.append_byte(allocator, cast<u8>(45));
+    try fmt::append_i64(allocator, &var dir, process::monotonic_millis());
+    return move dir;
+}
+
+fn expected_sha256(allocator: Allocator, bytes: []u8) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit(allocator);
+    try sha256::append_hex_digest(allocator, bytes, &var out);
+    return move out;
+}
+
+fn sentinel_digest() -> []u8 {
+    return "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+}
+
+fn plant_sentinel_sidecar(
+    io: Io,
+    allocator: Allocator,
+    cache_dir: []u8,
+    file_path: []u8,
+    out_sidecar: &var string::String
+) -> !void {
+    let resolved = try fs::real_path(io, allocator, file_path);
+    defer resolved.deinit(allocator);
+    let resolved_bytes = resolved.as_bytes();
+    let stamp = try stamp_file(io, allocator, resolved_bytes);
+    var key = string::new(allocator);
+    defer key.deinit(allocator);
+    try digest_sidecar_key(allocator, resolved_bytes, &var key);
+    let key_bytes = key.as_bytes();
+    let sidecar = try digest_sidecar_path(allocator, cache_dir, key_bytes);
+    defer sidecar.deinit(allocator);
+    let sidecar_bytes = sidecar.as_bytes();
+    if stamp |given| {
+        var meta = string::new(allocator);
+        defer meta.deinit(allocator);
+        try append_stamp_meta(allocator, given, resolved_bytes, &var meta);
+        let meta_bytes = meta.as_bytes();
+        try write_cached_digest(
+            io,
+            allocator,
+            cache_dir,
+            key_bytes,
+            sidecar_bytes,
+            sentinel_digest(),
+            meta_bytes
+        );
+    } else {
+        testing::expect(false);
+    }
+    return out_sidecar.append_bytes(allocator, sidecar_bytes);
+}
+
+fn digest_hit_and_prune(io: Io, allocator: Allocator) -> !void {
+    let root = try digest_test_root(allocator, "hit");
+    defer root.deinit(allocator);
+    let root_bytes = root.as_bytes();
+    try fsutil::create_dir_all(io, root_bytes);
+    let cache_path = try path::join(allocator, root_bytes, "cache");
+    defer cache_path.deinit(allocator);
+    let cache_bytes = cache_path.as_bytes();
+    let bin_path = try path::join(allocator, root_bytes, "kizu-bin");
+    defer bin_path.deinit(allocator);
+    let bin_bytes = bin_path.as_bytes();
+    let payload = "compiler-binary-v1";
+    try fs::write_file(io, bin_bytes, payload);
+    let want = try expected_sha256(allocator, payload);
+    defer want.deinit(allocator);
+    let want_bytes = want.as_bytes();
+    let settled_now = process::unix_millis() + 60000;
+    var first = string::new(allocator);
+    defer first.deinit(allocator);
+    testing::expect(try cached_file_digest_at(io, allocator, cache_bytes, bin_bytes, settled_now, &var first));
+    let first_bytes = first.as_bytes();
+    testing::expect_equal<[]u8>(want_bytes, first_bytes);
+
+    var cache = Cache {
+        dir: try string::from_bytes(allocator, cache_bytes),
+        max_bytes: default_max_bytes(),
+        scratch_sequence: 0
+    };
+    defer cache.deinit(allocator);
+    let status = try cache.status(io, allocator);
+    defer status.deinit(allocator);
+    testing::expect_equal<i64>(0, status.entries);
+    testing::expect_equal<i64>(0, status.size_bytes);
+
+    comptime if std::target::is_darwin() or std::target::is_linux() {
+        var sidecar = string::new(allocator);
+        defer sidecar.deinit(allocator);
+        try plant_sentinel_sidecar(io, allocator, cache_bytes, bin_bytes, &var sidecar);
+        let sidecar_bytes = sidecar.as_bytes();
+        testing::expect(try fs::exists(io, sidecar_bytes));
+        var second = string::new(allocator);
+        defer second.deinit(allocator);
+        testing::expect(try cached_file_digest_at(io, allocator, cache_bytes, bin_bytes, settled_now, &var second));
+        let second_bytes = second.as_bytes();
+        testing::expect_equal<[]u8>(sentinel_digest(), second_bytes);
+        let pruned = try cache.prune(io, allocator);
+        testing::expect_equal<i64>(0, pruned.entries);
+        testing::expect(!try fs::exists(io, sidecar_bytes));
+    } else {
+        let _ = try cache.prune(io, allocator);
+    }
+
+    try remove_if_present(io, bin_bytes);
+    if try fs::exists(io, cache_bytes) {
+        try fs::remove_dir(io, cache_bytes);
+    }
+    try fs::remove_dir(io, root_bytes);
+    return;
+}
+
+test "cached_file_digest matches sha256, serves O(1) hits, and prunes cleanly" {
+    let allocator = mem::page_allocator();
+    let stdio = io::blocking();
+    try digest_hit_and_prune(stdio, allocator);
+}
+
+fn digest_invalidation(io: Io, allocator: Allocator) -> !void {
+    let root = try digest_test_root(allocator, "invalidate");
+    defer root.deinit(allocator);
+    let root_bytes = root.as_bytes();
+    try fsutil::create_dir_all(io, root_bytes);
+    let cache_path = try path::join(allocator, root_bytes, "cache");
+    defer cache_path.deinit(allocator);
+    let cache_bytes = cache_path.as_bytes();
+    let bin_a = try path::join(allocator, root_bytes, "bin-a");
+    defer bin_a.deinit(allocator);
+    let bin_a_bytes = bin_a.as_bytes();
+    let bin_b = try path::join(allocator, root_bytes, "bin-b");
+    defer bin_b.deinit(allocator);
+    let bin_b_bytes = bin_b.as_bytes();
+    let bin_new = try path::join(allocator, root_bytes, "bin-a.new");
+    defer bin_new.deinit(allocator);
+    let bin_new_bytes = bin_new.as_bytes();
+    let settled_now = process::unix_millis() + 60000;
+
+    let v1 = "compiler-v1";
+    try fs::write_file(io, bin_a_bytes, v1);
+    comptime if std::target::is_darwin() or std::target::is_linux() {
+        var sidecar1 = string::new(allocator);
+        defer sidecar1.deinit(allocator);
+        try plant_sentinel_sidecar(io, allocator, cache_bytes, bin_a_bytes, &var sidecar1);
+    }
+
+    let v2 = "compiler-v1-extended";
+    try fs::write_file(io, bin_a_bytes, v2);
+    let want_v2 = try expected_sha256(allocator, v2);
+    defer want_v2.deinit(allocator);
+    let want_v2_bytes = want_v2.as_bytes();
+    var got_v2 = string::new(allocator);
+    defer got_v2.deinit(allocator);
+    testing::expect(try cached_file_digest_at(io, allocator, cache_bytes, bin_a_bytes, settled_now, &var got_v2));
+    let got_v2_bytes = got_v2.as_bytes();
+    testing::expect_equal<[]u8>(want_v2_bytes, got_v2_bytes);
+
+    comptime if std::target::is_darwin() or std::target::is_linux() {
+        var sidecar2 = string::new(allocator);
+        defer sidecar2.deinit(allocator);
+        try plant_sentinel_sidecar(io, allocator, cache_bytes, bin_a_bytes, &var sidecar2);
+    }
+
+    let v3 = "compiler-v2-extended";
+    try fs::write_file(io, bin_new_bytes, v3);
+    try fs::rename(io, bin_new_bytes, bin_a_bytes);
+    let want_v3 = try expected_sha256(allocator, v3);
+    defer want_v3.deinit(allocator);
+    let want_v3_bytes = want_v3.as_bytes();
+    var got_v3 = string::new(allocator);
+    defer got_v3.deinit(allocator);
+    testing::expect(try cached_file_digest_at(io, allocator, cache_bytes, bin_a_bytes, settled_now, &var got_v3));
+    let got_v3_bytes = got_v3.as_bytes();
+    testing::expect_equal<[]u8>(want_v3_bytes, got_v3_bytes);
+
+    let other = "other-compiler-bytes";
+    try fs::write_file(io, bin_b_bytes, other);
+    let want_other = try expected_sha256(allocator, other);
+    defer want_other.deinit(allocator);
+    let want_other_bytes = want_other.as_bytes();
+    var got_other = string::new(allocator);
+    defer got_other.deinit(allocator);
+    testing::expect(try cached_file_digest_at(io, allocator, cache_bytes, bin_b_bytes, settled_now, &var got_other));
+    let got_other_bytes = got_other.as_bytes();
+    testing::expect_equal<[]u8>(want_other_bytes, got_other_bytes);
+
+    var recheck_a = string::new(allocator);
+    defer recheck_a.deinit(allocator);
+    testing::expect(try cached_file_digest_at(io, allocator, cache_bytes, bin_a_bytes, settled_now, &var recheck_a));
+    let recheck_a_bytes = recheck_a.as_bytes();
+    testing::expect_equal<[]u8>(want_v3_bytes, recheck_a_bytes);
+
+    comptime if std::target::is_darwin() or std::target::is_linux() {
+        let link_path = try path::join(allocator, root_bytes, "kizu-link");
+        defer link_path.deinit(allocator);
+        let link_bytes = link_path.as_bytes();
+        testing::expect(try create_symlink(allocator, bin_a_bytes, link_bytes));
+        var via_link_a = string::new(allocator);
+        defer via_link_a.deinit(allocator);
+        testing::expect(try cached_file_digest_at(io, allocator, cache_bytes, link_bytes, settled_now, &var via_link_a));
+        let via_link_a_bytes = via_link_a.as_bytes();
+        testing::expect_equal<[]u8>(want_v3_bytes, via_link_a_bytes);
+        try remove_if_present(io, link_bytes);
+        testing::expect(try create_symlink(allocator, bin_b_bytes, link_bytes));
+        var via_link_b = string::new(allocator);
+        defer via_link_b.deinit(allocator);
+        testing::expect(try cached_file_digest_at(io, allocator, cache_bytes, link_bytes, settled_now, &var via_link_b));
+        let via_link_b_bytes = via_link_b.as_bytes();
+        testing::expect_equal<[]u8>(want_other_bytes, via_link_b_bytes);
+        try remove_if_present(io, link_bytes);
+    }
+
+    try remove_digest_sidecars(io, allocator, cache_bytes);
+    try remove_if_present(io, bin_a_bytes);
+    try remove_if_present(io, bin_b_bytes);
+    try remove_if_present(io, bin_new_bytes);
+    if try fs::exists(io, cache_bytes) {
+        try fs::remove_dir(io, cache_bytes);
+    }
+    try fs::remove_dir(io, root_bytes);
+    return;
+}
+
+test "cached_file_digest invalidates on size change, replacement, and distinct paths" {
+    let allocator = mem::page_allocator();
+    let stdio = io::blocking();
+    try digest_invalidation(stdio, allocator);
+}
+
+fn digest_racy_and_fallbacks(io: Io, allocator: Allocator) -> !void {
+    let root = try digest_test_root(allocator, "fallback");
+    defer root.deinit(allocator);
+    let root_bytes = root.as_bytes();
+    try fsutil::create_dir_all(io, root_bytes);
+    let cache_path = try path::join(allocator, root_bytes, "cache");
+    defer cache_path.deinit(allocator);
+    let cache_bytes = cache_path.as_bytes();
+    let bin_path = try path::join(allocator, root_bytes, "kizu-bin");
+    defer bin_path.deinit(allocator);
+    let bin_bytes = bin_path.as_bytes();
+    let payload = "fallback-compiler-bytes";
+    try fs::write_file(io, bin_bytes, payload);
+    let want = try expected_sha256(allocator, payload);
+    defer want.deinit(allocator);
+    let want_bytes = want.as_bytes();
+    let settled_now = process::unix_millis() + 60000;
+
+    comptime if std::target::is_darwin() or std::target::is_linux() {
+        let resolved = try fs::real_path(io, allocator, bin_bytes);
+        defer resolved.deinit(allocator);
+        let resolved_bytes = resolved.as_bytes();
+        let stamp = try stamp_file(io, allocator, resolved_bytes);
+        var sidecar = string::new(allocator);
+        defer sidecar.deinit(allocator);
+        try plant_sentinel_sidecar(io, allocator, cache_bytes, bin_bytes, &var sidecar);
+        let sidecar_bytes = sidecar.as_bytes();
+        if stamp |given| {
+            let mtime_ms = given.mtime_sec * 1000 + given.mtime_nsec / 1000000;
+            let ctime_ms = given.ctime_sec * 1000 + given.ctime_nsec / 1000000;
+            var latest_ms = mtime_ms;
+            if ctime_ms > latest_ms {
+                latest_ms = ctime_ms;
+            }
+            var racy = string::new(allocator);
+            defer racy.deinit(allocator);
+            testing::expect(try cached_file_digest_at(io, allocator, cache_bytes, bin_bytes, latest_ms + 5, &var racy));
+            let racy_bytes = racy.as_bytes();
+            testing::expect_equal<[]u8>(want_bytes, racy_bytes);
+        } else {
+            testing::expect(false);
+        }
+
+        try fs::write_file(io, sidecar_bytes, "kizu-compiler-digest-v1");
+        var truncated = string::new(allocator);
+        defer truncated.deinit(allocator);
+        testing::expect(try cached_file_digest_at(io, allocator, cache_bytes, bin_bytes, settled_now, &var truncated));
+        let truncated_bytes = truncated.as_bytes();
+        testing::expect_equal<[]u8>(want_bytes, truncated_bytes);
+
+        let good_sidecar = try fs::read_file(io, allocator, sidecar_bytes, mem::Limit::Unlimited);
+        defer good_sidecar.deinit(allocator);
+        let good_bytes = good_sidecar.as_bytes();
+        var bad_hex = try string::from_bytes(allocator, good_bytes[0..24]);
+        defer bad_hex.deinit(allocator);
+        try bad_hex.append_byte(allocator, cast<u8>(90));
+        try bad_hex.append_bytes(allocator, good_bytes[25..mem::len(good_bytes)]);
+        let bad_hex_bytes = bad_hex.as_bytes();
+        try fs::write_file(io, sidecar_bytes, bad_hex_bytes);
+        var repaired = string::new(allocator);
+        defer repaired.deinit(allocator);
+        testing::expect(try cached_file_digest_at(io, allocator, cache_bytes, bin_bytes, settled_now, &var repaired));
+        let repaired_bytes = repaired.as_bytes();
+        testing::expect_equal<[]u8>(want_bytes, repaired_bytes);
+
+        var trailing = try string::from_bytes(allocator, good_bytes);
+        defer trailing.deinit(allocator);
+        try trailing.append_byte(allocator, cast<u8>(120));
+        let trailing_bytes = trailing.as_bytes();
+        try fs::write_file(io, sidecar_bytes, trailing_bytes);
+        var repaired_tail = string::new(allocator);
+        defer repaired_tail.deinit(allocator);
+        testing::expect(try cached_file_digest_at(io, allocator, cache_bytes, bin_bytes, settled_now, &var repaired_tail));
+        let repaired_tail_bytes = repaired_tail.as_bytes();
+        testing::expect_equal<[]u8>(want_bytes, repaired_tail_bytes);
+    }
+
+    let blocker = try path::join(allocator, root_bytes, "not-a-dir");
+    defer blocker.deinit(allocator);
+    let blocker_bytes = blocker.as_bytes();
+    try fs::write_file(io, blocker_bytes, "file-blocker");
+    var unwritable = string::new(allocator);
+    defer unwritable.deinit(allocator);
+    testing::expect(try cached_file_digest_at(io, allocator, blocker_bytes, bin_bytes, settled_now, &var unwritable));
+    let unwritable_bytes = unwritable.as_bytes();
+    testing::expect_equal<[]u8>(want_bytes, unwritable_bytes);
+
+    var empty_cache = string::new(allocator);
+    defer empty_cache.deinit(allocator);
+    testing::expect(try cached_file_digest_at(io, allocator, "", bin_bytes, settled_now, &var empty_cache));
+    let empty_cache_bytes = empty_cache.as_bytes();
+    testing::expect_equal<[]u8>(want_bytes, empty_cache_bytes);
+
+    let missing_path = try path::join(allocator, root_bytes, "does-not-exist");
+    defer missing_path.deinit(allocator);
+    let missing_bytes = missing_path.as_bytes();
+    var missing_out = string::new(allocator);
+    defer missing_out.deinit(allocator);
+    testing::expect(!try cached_file_digest_at(io, allocator, cache_bytes, missing_bytes, settled_now, &var missing_out));
+
+    try remove_digest_sidecars(io, allocator, cache_bytes);
+    try remove_if_present(io, blocker_bytes);
+    try remove_if_present(io, bin_bytes);
+    if try fs::exists(io, cache_bytes) {
+        try fs::remove_dir(io, cache_bytes);
+    }
+    try fs::remove_dir(io, root_bytes);
+    return;
+}
+
+test "cached_file_digest handles racy timestamps, corrupt sidecars, and unwritable cache dirs" {
+    let allocator = mem::page_allocator();
+    let stdio = io::blocking();
+    try digest_racy_and_fallbacks(stdio, allocator);
+}
