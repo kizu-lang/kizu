@@ -1,5 +1,125 @@
+import compiler::internal::buildcache;
+import compiler::internal::buildplan;
+import compiler::internal::fsutil;
+import compiler::internal::sha256;
+import std::fmt;
+import std::fs;
+import std::io;
+import std::mem;
+import std::path;
+import std::process;
+import std::string;
 import std::testing;
 
 test "compiler port package is reachable" {
     testing::expect(true);
+}
+
+fn compiler_digest_matches_executable(io: Io, allocator: Allocator) -> !void {
+    let executable = try process::executable_path(allocator);
+    defer executable.deinit(allocator);
+    let executable_bytes = executable.as_bytes();
+    let raw = try fs::read_file(io, allocator, executable_bytes, mem::Limit::Unlimited);
+    defer raw.deinit(allocator);
+    let raw_bytes = raw.as_bytes();
+    var want = string::new(allocator);
+    defer want.deinit(allocator);
+    try sha256::append_hex_digest(allocator, raw_bytes, &var want);
+    let want_bytes = want.as_bytes();
+
+    var options = try default_native_options(allocator);
+    defer options.deinit(allocator);
+    var first = string::new(allocator);
+    defer first.deinit(allocator);
+    testing::expect(try compiler_digest(io, allocator, &var options, &var first));
+    let first_bytes = first.as_bytes();
+    let cached_bytes = options.compiler.as_bytes();
+    testing::expect_equal<[]u8>(want_bytes, first_bytes);
+    testing::expect_equal<[]u8>(want_bytes, cached_bytes);
+
+    options.compiler.clear();
+    try options.compiler.append_bytes(allocator, "memoized-compiler-digest");
+    var second = string::new(allocator);
+    defer second.deinit(allocator);
+    testing::expect(try compiler_digest(io, allocator, &var options, &var second));
+    let second_bytes = second.as_bytes();
+    testing::expect_equal<[]u8>("memoized-compiler-digest", second_bytes);
+    return;
+}
+
+test "compiler_digest matches executable sha256 and memoizes in options" {
+    let allocator = mem::page_allocator();
+    let stdio = io::blocking();
+    try compiler_digest_matches_executable(stdio, allocator);
+}
+
+fn plan_invalidates_on_compiler_digest_change(io: Io, allocator: Allocator) -> !void {
+    let base = process::env("TMPDIR") orelse "/tmp";
+    var root = string::new(allocator);
+    defer root.deinit(allocator);
+    try root.append_bytes(allocator, base);
+    try root.append_bytes(allocator, "/kizu-plan-digest-test-");
+    try fmt::append_i64(allocator, &var root, fsutil::current_pid());
+    try root.append_byte(allocator, cast<u8>(45));
+    try fmt::append_i64(allocator, &var root, process::unix_millis());
+    try root.append_byte(allocator, cast<u8>(45));
+    try fmt::append_i64(allocator, &var root, process::monotonic_millis());
+    let root_bytes = root.as_bytes();
+    try fsutil::create_dir_all(io, root_bytes);
+
+    let cache_dir = try path::join(allocator, root_bytes, "cache");
+    defer cache_dir.deinit(allocator);
+    let cache_bytes = cache_dir.as_bytes();
+    var cache = try buildcache::new(io, allocator);
+    defer cache.deinit(allocator);
+    cache.dir.clear();
+    try cache.dir.append_bytes(allocator, cache_bytes);
+
+    let src_path = try path::join(allocator, root_bytes, "app.kizu");
+    defer src_path.deinit(allocator);
+    let src_bytes = src_path.as_bytes();
+    let src_text = "fn main() -> void { return; }";
+    try fs::write_file(io, src_bytes, src_text);
+
+    let exe_path = try path::join(allocator, root_bytes, "app");
+    defer exe_path.deinit(allocator);
+    let exe_bytes = exe_path.as_bytes();
+    let meta_path = try path::join(allocator, root_bytes, "app.kizu-build.json");
+    defer meta_path.deinit(allocator);
+    let meta_bytes = meta_path.as_bytes();
+    try fs::write_file(io, exe_bytes, "built-exe-bytes");
+    try fs::write_file(io, meta_bytes, "{}");
+
+    var log = buildplan::new_log(allocator, true);
+    defer log.deinit(allocator);
+    try log.add_file(allocator, src_bytes, src_text);
+
+    let req_a = "compiler-digest-aaa\napp.kizu";
+    let req_b = "compiler-digest-bbb\napp.kizu";
+    try buildplan::store(io, allocator, &var cache, req_a, &log, exe_bytes);
+
+    try fs::remove_file(io, exe_bytes);
+    try fs::remove_file(io, meta_bytes);
+    testing::expect(!try buildplan::restore(io, allocator, &var cache, req_b, exe_bytes));
+    testing::expect(try buildplan::restore(io, allocator, &var cache, req_a, exe_bytes));
+    let restored = try fs::read_file(io, allocator, exe_bytes, mem::Limit::Unlimited);
+    defer restored.deinit(allocator);
+    let restored_bytes = restored.as_bytes();
+    testing::expect_equal<[]u8>("built-exe-bytes", restored_bytes);
+
+    let _ = try cache.prune(io, allocator);
+    try fs::remove_file(io, exe_bytes);
+    try fs::remove_file(io, meta_bytes);
+    try fs::remove_file(io, src_bytes);
+    if try fs::exists(io, cache_bytes) {
+        try fs::remove_dir(io, cache_bytes);
+    }
+    try fs::remove_dir(io, root_bytes);
+    return;
+}
+
+test "buildplan invalidates cached output when compiler digest changes" {
+    let allocator = mem::page_allocator();
+    let stdio = io::blocking();
+    try plan_invalidates_on_compiler_digest_change(stdio, allocator);
 }
