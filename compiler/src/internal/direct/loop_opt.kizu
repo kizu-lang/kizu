@@ -1,0 +1,1384 @@
+import std::array;
+
+fn wrapping_mul(a: i64, b: i64) -> i64 {
+    return cast<i64>(cast<u64>(a) * cast<u64>(b));
+}
+
+fn wrapping_neg(a: i64) -> i64 {
+    return cast<i64>(cast<u64>(0) - cast<u64>(a));
+}
+
+fn delta_fits_imm(arch: Arch, delta: i64) -> bool {
+    if delta == 0 {
+        return false;
+    }
+    if is_x86(arch) {
+        return delta > 0 - 2147483648 and delta <= 2147483647;
+    }
+    return delta > 0 - 4096 and delta < 4096;
+}
+
+fn is_pure_licm_op(op: MOp) -> bool {
+    return match op {
+        Mul => true,
+        MSub => true,
+        MAdd => true,
+        AddShift => true,
+        SubShift => true,
+        AddLsr => true,
+        SMulH => true,
+        UMulH => true,
+        _ => false,
+    };
+}
+
+fn is_loop_opt_trigger(op: MOp) -> bool {
+    return is_pure_licm_op(op) or op == MOp::LoadIdx or op == MOp::StoreIdx;
+}
+
+fn has_loop_opt_candidate(func: &MFunction) -> bool {
+    var block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        block_id = block_id + 1;
+        if block.cold {
+            continue;
+        }
+        var ii = 0;
+        while block.insts.at(ii) |inst| {
+            ii = ii + 1;
+            if is_loop_opt_trigger(inst.op) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+fn has_rpo_backedge(func: &MFunction, order: &array::Array<i64>, place: &array::Array<i64>) -> bool {
+    var index = 0;
+    while order.get(index) |b| {
+        index = index + 1;
+        let here = place.get_or_panic(b);
+        for 0..2 |pos| {
+            let succ = func.successor(b, pos);
+            if succ > 0 and place.get_or_panic(succ) >= 0 and place.get_or_panic(succ) <= here {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+fn compute_idom_and_preds(
+    allocator: Allocator,
+    func: &MFunction,
+    order: &array::Array<i64>,
+    place: &array::Array<i64>,
+    pred_start: &var array::Array<i64>,
+    preds: &var array::Array<i64>,
+    idom: &var array::Array<i64>
+) -> !void {
+    let nb = func.blocks.len();
+    pred_start.clear(allocator);
+    preds.clear(allocator);
+    idom.clear(allocator);
+    var fill = array::new<i64>(allocator);
+    defer fill.deinit(allocator);
+    for 0..nb + 1 |_i| {
+        try pred_start.append(allocator, 0);
+    }
+    for 0..nb |b| {
+        try idom.append(allocator, 0 - 1);
+        for 0..2 |pos| {
+            let succ = func.successor(b, pos);
+            if succ >= 0 {
+                try pred_start.set(succ + 1, pred_start.get_or_panic(succ + 1) + 1);
+            }
+        }
+    }
+    for 0..nb |b| {
+        try pred_start.set(b + 1, pred_start.get_or_panic(b + 1) + pred_start.get_or_panic(b));
+        try fill.append(allocator, pred_start.get_or_panic(b));
+    }
+    for 0..pred_start.get_or_panic(nb) |_i| {
+        try preds.append(allocator, 0);
+    }
+    for 0..nb |b| {
+        for 0..2 |pos| {
+            let succ = func.successor(b, pos);
+            if succ >= 0 {
+                let at = fill.get_or_panic(succ);
+                try preds.set(at, b);
+                try fill.set(succ, at + 1);
+            }
+        }
+    }
+    let entry = order.get(0) orelse return;
+    try idom.set(entry, entry);
+    var changed = true;
+    while changed {
+        changed = false;
+        var index = 1;
+        while order.get(index) |b| {
+            index = index + 1;
+            var chosen = 0 - 1;
+            for pred_start.get_or_panic(b)..pred_start.get_or_panic(b + 1) |at| {
+                let p = preds.get_or_panic(at);
+                if idom.get_or_panic(p) < 0 {
+                    continue;
+                }
+                if chosen < 0 {
+                    chosen = p;
+                } else {
+                    chosen = common_dominator(place, idom, chosen, p);
+                }
+            }
+            if chosen != idom.get_or_panic(b) {
+                try idom.set(b, chosen);
+                changed = true;
+            }
+        }
+    }
+    return;
+}
+
+fn is_loop_inv_reg(
+    reg: i64,
+    old_nv: i64,
+    stamp: i64,
+    non_par_stamp: &array::Array<i64>,
+    par_stamp: &array::Array<i64>,
+    hoisted_stamp: &array::Array<i64>
+) -> bool {
+    if reg == reg_zr() or reg == reg_none() {
+        return true;
+    }
+    if !is_vreg(reg) {
+        return false;
+    }
+    let id = reg - first_vreg();
+    if id < 0 or id >= old_nv {
+        return false;
+    }
+    if hoisted_stamp.get_or_panic(id) == stamp {
+        return true;
+    }
+    return non_par_stamp.get_or_panic(id) != stamp and par_stamp.get_or_panic(id) != stamp;
+}
+
+fn is_const_inv_reg(
+    reg: i64,
+    old_nv: i64,
+    stamp: i64,
+    non_par_stamp: &array::Array<i64>,
+    par_stamp: &array::Array<i64>,
+    hoisted_stamp: &array::Array<i64>,
+    const_valid: &array::Array<bool>
+) -> bool {
+    if !is_vreg(reg) {
+        return false;
+    }
+    let id = reg - first_vreg();
+    if id < 0 or id >= old_nv {
+        return false;
+    }
+    if !const_valid.get_or_panic(id) {
+        return false;
+    }
+    return is_loop_inv_reg(reg, old_nv, stamp, non_par_stamp, par_stamp, hoisted_stamp);
+}
+
+fn is_biv_reg(reg: i64, old_nv: i64, stamp: i64, biv_stamp: &array::Array<i64>) -> bool {
+    if !is_vreg(reg) {
+        return false;
+    }
+    let id = reg - first_vreg();
+    if id < 0 or id >= old_nv {
+        return false;
+    }
+    return biv_stamp.get_or_panic(id) == stamp;
+}
+
+fn find_latch_parcopy(block: &MBlock) -> i64 {
+    var index = block.insts.len() - 1;
+    while index >= 0 {
+        if block.insts.get_or_panic(index).op == MOp::ParCopy {
+            return index;
+        }
+        index = index - 1;
+    }
+    return 0 - 1;
+}
+
+fn biv_step_from_def(
+    inst: &MInst,
+    iv: i64,
+    old_nv: i64,
+    stamp: i64,
+    non_par_stamp: &array::Array<i64>,
+    par_stamp: &array::Array<i64>,
+    hoisted_stamp: &array::Array<i64>,
+    const_valid: &array::Array<bool>,
+    const_val: &array::Array<i64>
+) -> i64 {
+    if inst.op == MOp::AddImm and inst.rn == iv {
+        return inst.imm;
+    }
+    if inst.op == MOp::SubImm and inst.rn == iv {
+        return wrapping_neg(inst.imm);
+    }
+    if inst.op == MOp::Add {
+        if inst.rn == iv and is_const_inv_reg(inst.rm, old_nv, stamp, non_par_stamp, par_stamp, hoisted_stamp, const_valid) {
+            return const_val.get_or_panic(inst.rm - first_vreg());
+        }
+        if inst.rm == iv and is_const_inv_reg(inst.rn, old_nv, stamp, non_par_stamp, par_stamp, hoisted_stamp, const_valid) {
+            return const_val.get_or_panic(inst.rn - first_vreg());
+        }
+    }
+    if inst.op == MOp::Sub {
+        if inst.rn == iv and is_const_inv_reg(inst.rm, old_nv, stamp, non_par_stamp, par_stamp, hoisted_stamp, const_valid) {
+            return wrapping_neg(const_val.get_or_panic(inst.rm - first_vreg()));
+        }
+    }
+    return 0;
+}
+
+fn uses_safe_for_lsr(
+    allocator: Allocator,
+    func: &MFunction,
+    reg: i64,
+    def_b: i64,
+    def_p: i64,
+    loop_blocks_list: &array::Array<i64>,
+    latch_parcopy: &array::Array<i64>,
+    idom: &array::Array<i64>,
+    entry: i64,
+    expected_uses: i64,
+    reads_buf: &var array::Array<i64>
+) -> !bool {
+    var found = 0;
+    var li = 0;
+    while loop_blocks_list.get(li) |b| {
+        li = li + 1;
+        let dom = dominates(idom, entry, def_b, b);
+        let par_pos = latch_parcopy.get_or_panic(b);
+        if func.blocks.at(b) |block| {
+            var inst_index = 0;
+            while block.insts.at(inst_index) |inst| {
+                try reads(inst, reads_buf, allocator, &func.copies);
+                var ri = 0;
+                while reads_buf.get(ri) |r| {
+                    ri = ri + 1;
+                    if r == reg {
+                        if !dom {
+                            return false;
+                        }
+                        if b == def_b and inst_index <= def_p {
+                            return false;
+                        }
+                        if par_pos >= 0 and inst_index >= par_pos {
+                            return false;
+                        }
+                        found = found + 1;
+                    }
+                }
+                inst_index = inst_index + 1;
+            }
+            if block.treg == reg {
+                if !dom or par_pos >= 0 {
+                    return false;
+                }
+                found = found + 1;
+            }
+        }
+    }
+    return found == expected_uses;
+}
+
+fn find_or_emit_preheader_mul(
+    allocator: Allocator,
+    func: &var MFunction,
+    preheader_insts: &var array::Array<MInst>,
+    rn: i64,
+    rm: i64
+) -> !i64 {
+    var index = 0;
+    while preheader_insts.at(index) |existing| {
+        index = index + 1;
+        if existing.op == MOp::Mul {
+            if (existing.rn == rn and existing.rm == rm) or (existing.rn == rm and existing.rm == rn) {
+                return existing.rd;
+            }
+        }
+    }
+    let rd = func.new_vreg();
+    var mul = blank(MOp::Mul);
+    mul.rd = rd;
+    mul.rn = rn;
+    mul.rm = rm;
+    try preheader_insts.append(allocator, mul);
+    return rd;
+}
+
+fn find_or_emit_preheader_addshift(
+    allocator: Allocator,
+    func: &var MFunction,
+    preheader_insts: &var array::Array<MInst>,
+    base: i64,
+    offset_reg: i64,
+    shift: i64
+) -> !i64 {
+    var index = 0;
+    while preheader_insts.at(index) |existing| {
+        index = index + 1;
+        if existing.op == MOp::AddShift and existing.rn == base and existing.rm == offset_reg and existing.imm == shift {
+            return existing.rd;
+        }
+    }
+    let rd = func.new_vreg();
+    var add_shift = blank(MOp::AddShift);
+    add_shift.rd = rd;
+    add_shift.rn = base;
+    add_shift.rm = offset_reg;
+    add_shift.imm = shift;
+    try preheader_insts.append(allocator, add_shift);
+    return rd;
+}
+
+fn reg_written_between(block: &MBlock, from: i64, to: i64, reg: i64) -> bool {
+    var at = from;
+    while at < to {
+        let inst = block.insts.get_or_panic(at);
+        at = at + 1;
+        if inst.op == MOp::ParCopy or inst.op == MOp::Call or inst.op == MOp::CallReg {
+            return true;
+        }
+        if writes_rd(inst.op) and inst.rd == reg {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn is_hoisted_pos(hoisted_blocks: &array::Array<i64>, hoisted_pos: &array::Array<i64>, b: i64, pos: i64) -> bool {
+    var i = 0;
+    while hoisted_blocks.get(i) |hb| {
+        if hb == b and hoisted_pos.get_or_panic(i) == pos {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+fn lsr_lookup(lsr_old: &array::Array<i64>, lsr_new: &array::Array<i64>, reg: i64) -> i64 {
+    var i = 0;
+    while lsr_old.get(i) |old| {
+        if old == reg {
+            return lsr_new.get_or_panic(i);
+        }
+        i = i + 1;
+    }
+    return reg;
+}
+
+fn affine_delta(
+    inst: &MInst,
+    arch: Arch,
+    old_nv: i64,
+    stamp: i64,
+    non_par_stamp: &array::Array<i64>,
+    par_stamp: &array::Array<i64>,
+    hoisted_stamp: &array::Array<i64>,
+    const_valid: &array::Array<bool>,
+    const_val: &array::Array<i64>,
+    biv_stamp: &array::Array<i64>,
+    biv_step: &array::Array<i64>
+) -> i64 {
+    if inst.op == MOp::MAdd or inst.op == MOp::MSub {
+        let neg = inst.op == MOp::MSub;
+        if inst.rn != inst.rm and is_loop_inv_reg(inst.ra, old_nv, stamp, non_par_stamp, par_stamp, hoisted_stamp) {
+            if is_biv_reg(inst.rn, old_nv, stamp, biv_stamp) and
+                is_const_inv_reg(inst.rm, old_nv, stamp, non_par_stamp, par_stamp, hoisted_stamp, const_valid) {
+                let step = biv_step.get_or_panic(inst.rn - first_vreg());
+                let c = const_val.get_or_panic(inst.rm - first_vreg());
+                let prod = wrapping_mul(step, c);
+                if neg {
+                    return wrapping_neg(prod);
+                }
+                return prod;
+            }
+            if is_biv_reg(inst.rm, old_nv, stamp, biv_stamp) and
+                is_const_inv_reg(inst.rn, old_nv, stamp, non_par_stamp, par_stamp, hoisted_stamp, const_valid) {
+                let step = biv_step.get_or_panic(inst.rm - first_vreg());
+                let c = const_val.get_or_panic(inst.rn - first_vreg());
+                let prod = wrapping_mul(step, c);
+                if neg {
+                    return wrapping_neg(prod);
+                }
+                return prod;
+            }
+        }
+        if is_loop_inv_reg(inst.rn, old_nv, stamp, non_par_stamp, par_stamp, hoisted_stamp) and
+            is_loop_inv_reg(inst.rm, old_nv, stamp, non_par_stamp, par_stamp, hoisted_stamp) and
+            is_biv_reg(inst.ra, old_nv, stamp, biv_stamp) {
+            return biv_step.get_or_panic(inst.ra - first_vreg());
+        }
+        return 0;
+    }
+    if inst.op == MOp::Mul and inst.rn != inst.rm {
+        if is_biv_reg(inst.rn, old_nv, stamp, biv_stamp) and
+            is_const_inv_reg(inst.rm, old_nv, stamp, non_par_stamp, par_stamp, hoisted_stamp, const_valid) {
+            return wrapping_mul(biv_step.get_or_panic(inst.rn - first_vreg()), const_val.get_or_panic(inst.rm - first_vreg()));
+        }
+        if is_biv_reg(inst.rm, old_nv, stamp, biv_stamp) and
+            is_const_inv_reg(inst.rn, old_nv, stamp, non_par_stamp, par_stamp, hoisted_stamp, const_valid) {
+            return wrapping_mul(biv_step.get_or_panic(inst.rm - first_vreg()), const_val.get_or_panic(inst.rn - first_vreg()));
+        }
+        return 0;
+    }
+    if inst.op == MOp::AddShift and is_x86(arch) and inst.imm > 3 and inst.imm < 63 {
+        if is_loop_inv_reg(inst.rn, old_nv, stamp, non_par_stamp, par_stamp, hoisted_stamp) and
+            is_biv_reg(inst.rm, old_nv, stamp, biv_stamp) {
+            return wrapping_mul(biv_step.get_or_panic(inst.rm - first_vreg()), 1 << inst.imm);
+        }
+    }
+    return 0;
+}
+
+fn collect_loop(
+    allocator: Allocator,
+    header: i64,
+    nb: i64,
+    entry: i64,
+    place: &array::Array<i64>,
+    idom: &array::Array<i64>,
+    pred_start: &array::Array<i64>,
+    preds: &array::Array<i64>,
+    in_loop: &var array::Array<bool>,
+    latches: &var array::Array<i64>,
+    stack: &var array::Array<i64>
+) -> !void {
+    for 0..nb |b| {
+        try in_loop.set(b, false);
+    }
+    latches.clear(allocator);
+    stack.clear(allocator);
+    try in_loop.set(header, true);
+    for pred_start.get_or_panic(header)..pred_start.get_or_panic(header + 1) |at| {
+        let p = preds.get_or_panic(at);
+        if place.get_or_panic(p) >= 0 and dominates(idom, entry, header, p) {
+            try latches.append(allocator, p);
+            if !in_loop.get_or_panic(p) {
+                try in_loop.set(p, true);
+                try stack.append(allocator, p);
+            }
+        }
+    }
+    while stack.pop() |x| {
+        for pred_start.get_or_panic(x)..pred_start.get_or_panic(x + 1) |at| {
+            let p = preds.get_or_panic(at);
+            if place.get_or_panic(p) >= 0 and !in_loop.get_or_panic(p) {
+                try in_loop.set(p, true);
+                try stack.append(allocator, p);
+            }
+        }
+    }
+    return;
+}
+
+fn block_dominates_latches(idom: &array::Array<i64>, entry: i64, header: i64, b: i64, latches: &array::Array<i64>) -> bool {
+    if b == header {
+        return true;
+    }
+    var k = 0;
+    while latches.get(k) |latch| {
+        k = k + 1;
+        if !dominates(idom, entry, b, latch) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn loop_is_eligible_innermost(
+    func: &MFunction,
+    header: i64,
+    nb: i64,
+    entry: i64,
+    place: &array::Array<i64>,
+    idom: &array::Array<i64>,
+    pred_start: &array::Array<i64>,
+    preds: &array::Array<i64>,
+    is_header: &array::Array<bool>,
+    in_loop: &array::Array<bool>,
+    latches: &array::Array<i64>
+) -> bool {
+    if latches.len() == 0 {
+        return false;
+    }
+    var outside_preds = 0;
+    for pred_start.get_or_panic(header)..pred_start.get_or_panic(header + 1) |at| {
+        let p = preds.get_or_panic(at);
+        if p >= 0 and p < nb and place.get_or_panic(p) >= 0 and !in_loop.get_or_panic(p) {
+            outside_preds = outside_preds + 1;
+        }
+    }
+    if outside_preds == 0 {
+        return false;
+    }
+    var has_trigger = false;
+    for 0..nb |b| {
+        if !in_loop.get_or_panic(b) {
+            continue;
+        }
+        if b != header and is_header.get_or_panic(b) {
+            return false;
+        }
+        if func.blocks.at(b) |block| {
+            var block_trigger = false;
+            var ii = 0;
+            while block.insts.at(ii) |inst| {
+                ii = ii + 1;
+                if inst.op == MOp::Call or inst.op == MOp::CallReg or inst.op == MOp::Trap or is_vector(inst.op) {
+                    return false;
+                }
+                if !block.cold and !has_trigger and !block_trigger and is_loop_opt_trigger(inst.op) {
+                    block_trigger = true;
+                }
+            }
+            if block_trigger and block_dominates_latches(idom, entry, header, b, latches) {
+                has_trigger = true;
+            }
+        }
+    }
+    if !has_trigger {
+        return false;
+    }
+    var li = 0;
+    while latches.get(li) |b| {
+        li = li + 1;
+        if func.blocks.at(b) |block| {
+            if block.cold {
+                return false;
+            }
+            for 0..2 |pos| {
+                let succ = func.successor(b, pos);
+                if succ >= 0 and succ != header and succ < nb and in_loop.get_or_panic(succ) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+fn optimize_loop(
+    allocator: Allocator,
+    func: &var MFunction,
+    arch: Arch,
+    header: i64,
+    old_nb: i64,
+    old_nv: i64,
+    stamp: i64,
+    entry: i64,
+    order: &array::Array<i64>,
+    idom: &array::Array<i64>,
+    in_loop: &array::Array<bool>,
+    latches: &array::Array<i64>,
+    def_count: &array::Array<i64>,
+    def_block: &array::Array<i64>,
+    def_pos: &array::Array<i64>,
+    early_read: &array::Array<bool>,
+    use_count: &var array::Array<i64>,
+    const_valid: &array::Array<bool>,
+    const_val: &array::Array<i64>,
+    non_par_stamp: &var array::Array<i64>,
+    par_stamp: &var array::Array<i64>,
+    par_count: &var array::Array<i64>,
+    hoisted_stamp: &var array::Array<i64>,
+    biv_stamp: &var array::Array<i64>,
+    biv_step: &var array::Array<i64>,
+    reads_buf: &var array::Array<i64>
+) -> !bool {
+    var loop_blocks_list = array::new<i64>(allocator);
+    defer loop_blocks_list.deinit(allocator);
+    var oi = 0;
+    while order.get(oi) |b| {
+        oi = oi + 1;
+        if b < old_nb and in_loop.get_or_panic(b) {
+            try loop_blocks_list.append(allocator, b);
+        }
+    }
+    var latch_parcopy = array::new<i64>(allocator);
+    defer latch_parcopy.deinit(allocator);
+    for 0..old_nb |_i| {
+        try latch_parcopy.append(allocator, 0 - 1);
+    }
+    var latch_i = 0;
+    while latches.get(latch_i) |b| {
+        latch_i = latch_i + 1;
+        if func.blocks.at(b) |block| {
+            try latch_parcopy.set(b, find_latch_parcopy(block));
+        }
+    }
+    var dom_latches = array::new<bool>(allocator);
+    defer dom_latches.deinit(allocator);
+    for 0..old_nb |_i| {
+        try dom_latches.append(allocator, false);
+    }
+    var li = 0;
+    while loop_blocks_list.get(li) |b| {
+        li = li + 1;
+        var all_dom = true;
+        var k = 0;
+        while latches.get(k) |latch| {
+            k = k + 1;
+            if !dominates(idom, entry, b, latch) {
+                all_dom = false;
+                break;
+            }
+        }
+        try dom_latches.set(b, all_dom);
+    }
+    li = 0;
+    while loop_blocks_list.get(li) |b| {
+        li = li + 1;
+        if func.blocks.at(b) |block| {
+            var ii = 0;
+            while block.insts.at(ii) |inst| {
+                ii = ii + 1;
+                if writes_rd(inst.op) and is_vreg(inst.rd) {
+                    let id = inst.rd - first_vreg();
+                    if id < old_nv {
+                        try non_par_stamp.set(id, stamp);
+                    }
+                }
+                if inst.op == MOp::ParCopy {
+                    for 0..inst.imm |ci| {
+                        let copy = func.copies.get_or_panic(inst.slot + ci);
+                        if is_vreg(copy.dst) {
+                            let id = copy.dst - first_vreg();
+                            if id < old_nv {
+                                if par_stamp.get_or_panic(id) != stamp {
+                                    try par_stamp.set(id, stamp);
+                                    try par_count.set(id, 1);
+                                } else {
+                                    try par_count.set(id, par_count.get_or_panic(id) + 1);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    var has_any_biv = false;
+    let first_latch = latches.get_or_panic(0);
+    let first_pc_pos = latch_parcopy.get_or_panic(first_latch);
+    if first_pc_pos >= 0 {
+        var cand_ivs = array::new<i64>(allocator);
+        defer cand_ivs.deinit(allocator);
+        if func.blocks.at(first_latch) |block| {
+            let pc = block.insts.get_or_panic(first_pc_pos);
+            for 0..pc.imm |ci| {
+                let copy = func.copies.get_or_panic(pc.slot + ci);
+                if !copy.src_imm and is_vreg(copy.dst) and is_vreg(copy.src) {
+                    let id = copy.dst - first_vreg();
+                    if id < old_nv and non_par_stamp.get_or_panic(id) != stamp and
+                        par_stamp.get_or_panic(id) == stamp and par_count.get_or_panic(id) == latches.len() {
+                        try cand_ivs.append(allocator, copy.dst);
+                    }
+                }
+            }
+        }
+        var ci = 0;
+        while cand_ivs.get(ci) |iv| {
+            ci = ci + 1;
+            var step = 0;
+            var ok = true;
+            var k = 0;
+            while latches.get(k) |latch| {
+                k = k + 1;
+                let pc_pos = latch_parcopy.get_or_panic(latch);
+                if pc_pos < 0 {
+                    ok = false;
+                    break;
+                }
+                var src = reg_none();
+                if func.blocks.at(latch) |block| {
+                    let pc = block.insts.get_or_panic(pc_pos);
+                    for 0..pc.imm |j| {
+                        let copy = func.copies.get_or_panic(pc.slot + j);
+                        if copy.dst == iv {
+                            if copy.src_imm or !is_vreg(copy.src) {
+                                ok = false;
+                                break;
+                            }
+                            src = copy.src;
+                            break;
+                        }
+                    }
+                }
+                if !ok or src == reg_none() {
+                    ok = false;
+                    break;
+                }
+                let src_id = src - first_vreg();
+                if src_id >= old_nv or def_count.get_or_panic(src_id) != 1 or early_read.get_or_panic(src_id) {
+                    ok = false;
+                    break;
+                }
+                let db = def_block.get_or_panic(src_id);
+                let dp = def_pos.get_or_panic(src_id);
+                if db < 0 or db >= old_nb or !in_loop.get_or_panic(db) or !dominates(idom, entry, db, latch) {
+                    ok = false;
+                    break;
+                }
+                if db == latch and dp >= pc_pos {
+                    ok = false;
+                    break;
+                }
+                var latch_step = 0;
+                if func.blocks.at(db) |def_blk| {
+                    let def_inst = def_blk.insts.get_or_panic(dp);
+                    latch_step = biv_step_from_def(
+                        &def_inst, iv, old_nv, stamp, non_par_stamp, par_stamp, hoisted_stamp, const_valid, const_val
+                    );
+                }
+                if latch_step == 0 {
+                    ok = false;
+                    break;
+                }
+                if k == 1 {
+                    step = latch_step;
+                } else if latch_step != step {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok and step != 0 {
+                let iv_id = iv - first_vreg();
+                try biv_stamp.set(iv_id, stamp);
+                try biv_step.set(iv_id, step);
+                has_any_biv = true;
+            }
+        }
+    }
+    var max_added = 4;
+    if is_x86(arch) {
+        max_added = 3;
+    }
+    var added = 0;
+    var preheader_insts = array::new<MInst>(allocator);
+    defer preheader_insts.deinit(allocator);
+    var hoisted_blocks = array::new<i64>(allocator);
+    defer hoisted_blocks.deinit(allocator);
+    var hoisted_pos = array::new<i64>(allocator);
+    defer hoisted_pos.deinit(allocator);
+    var lsr_old = array::new<i64>(allocator);
+    defer lsr_old.deinit(allocator);
+    var lsr_new = array::new<i64>(allocator);
+    defer lsr_new.deinit(allocator);
+    var lsr_deltas = array::new<i64>(allocator);
+    defer lsr_deltas.deinit(allocator);
+    li = 0;
+    while loop_blocks_list.get(li) |b| {
+        li = li + 1;
+        if !dom_latches.get_or_panic(b) {
+            continue;
+        }
+        var end_pos = 0;
+        var is_cold = false;
+        if func.blocks.at(b) |block| {
+            end_pos = block.insts.len();
+            is_cold = block.cold;
+        }
+        if is_cold {
+            continue;
+        }
+        let par_pos = latch_parcopy.get_or_panic(b);
+        if par_pos >= 0 and par_pos < end_pos {
+            end_pos = par_pos;
+        }
+        var inst_index = 0;
+        while inst_index < end_pos and added < max_added {
+            var inst = blank(MOp::Trap);
+            if func.blocks.at(b) |blk| {
+                inst = blk.insts.get_or_panic(inst_index);
+            }
+            if is_pure_licm_op(inst.op) and is_vreg(inst.rd) {
+                let id = inst.rd - first_vreg();
+                if id < old_nv and def_count.get_or_panic(id) == 1 and !early_read.get_or_panic(id) and
+                    use_count.get_or_panic(id) > 0 and
+                    is_loop_inv_reg(inst.rn, old_nv, stamp, non_par_stamp, par_stamp, hoisted_stamp) and
+                    is_loop_inv_reg(inst.rm, old_nv, stamp, non_par_stamp, par_stamp, hoisted_stamp) and
+                    is_loop_inv_reg(inst.ra, old_nv, stamp, non_par_stamp, par_stamp, hoisted_stamp) {
+                    try preheader_insts.append(allocator, inst);
+                    try hoisted_blocks.append(allocator, b);
+                    try hoisted_pos.append(allocator, inst_index);
+                    try hoisted_stamp.set(id, stamp);
+                    added = added + 1;
+                    inst_index = inst_index + 1;
+                    continue;
+                }
+            }
+            if (inst.op == MOp::LoadIdx or inst.op == MOp::StoreIdx) and
+                inst.imm >= 0 and inst.imm <= 3 and is_vreg(inst.rn) and is_vreg(inst.rm) and
+                is_loop_inv_reg(inst.rn, old_nv, stamp, non_par_stamp, par_stamp, hoisted_stamp) {
+                let idx = inst.rm;
+                let idx_id = idx - first_vreg();
+                if idx_id < old_nv and def_count.get_or_panic(idx_id) == 1 and !early_read.get_or_panic(idx_id) and
+                    use_count.get_or_panic(idx_id) == 1 and def_block.get_or_panic(idx_id) == b and
+                    def_pos.get_or_panic(idx_id) < inst_index and
+                    !(inst.op == MOp::StoreIdx and inst.rd == idx) {
+                    let dp = def_pos.get_or_panic(idx_id);
+                    var def_inst = blank(MOp::Trap);
+                    if func.blocks.at(b) |blk| {
+                        def_inst = blk.insts.get_or_panic(dp);
+                    }
+                    if def_inst.op == MOp::MAdd and
+                        is_vreg(def_inst.rn) and is_vreg(def_inst.rm) and
+                        is_loop_inv_reg(def_inst.rn, old_nv, stamp, non_par_stamp, par_stamp, hoisted_stamp) and
+                        is_loop_inv_reg(def_inst.rm, old_nv, stamp, non_par_stamp, par_stamp, hoisted_stamp) and
+                        is_vreg(def_inst.ra) and
+                        !is_loop_inv_reg(def_inst.ra, old_nv, stamp, non_par_stamp, par_stamp, hoisted_stamp) {
+                        var written = true;
+                        if func.blocks.at(b) |blk| {
+                            written = reg_written_between(blk, dp + 1, inst_index, def_inst.ra);
+                        }
+                        if !written {
+                            let t_mul = try find_or_emit_preheader_mul(allocator, func, &var preheader_insts, def_inst.rn, def_inst.rm);
+                            let base_row = try find_or_emit_preheader_addshift(allocator, func, &var preheader_insts, inst.rn, t_mul, inst.imm);
+                            var fixed = inst;
+                            fixed.rn = base_row;
+                            fixed.rm = def_inst.ra;
+                            if func.blocks.at_mut(b) |blk| {
+                                try blk.insts.set(inst_index, fixed);
+                            }
+                            try use_count.set(idx_id, 0);
+                            let ra_id = def_inst.ra - first_vreg();
+                            if ra_id >= 0 and ra_id < old_nv {
+                                try bump(use_count, ra_id);
+                            }
+                            added = added + 1;
+                        }
+                    } else if def_inst.op == MOp::Add and is_vreg(def_inst.rn) and is_vreg(def_inst.rm) {
+                        let rn_inv = is_loop_inv_reg(def_inst.rn, old_nv, stamp, non_par_stamp, par_stamp, hoisted_stamp);
+                        let rm_inv = is_loop_inv_reg(def_inst.rm, old_nv, stamp, non_par_stamp, par_stamp, hoisted_stamp);
+                        if rn_inv != rm_inv {
+                            var inv_op = def_inst.rn;
+                            var var_op = def_inst.rm;
+                            if rm_inv {
+                                inv_op = def_inst.rm;
+                                var_op = def_inst.rn;
+                            }
+                            var written = true;
+                            if func.blocks.at(b) |blk| {
+                                written = reg_written_between(blk, dp + 1, inst_index, var_op);
+                            }
+                            if !written {
+                                let base_row = try find_or_emit_preheader_addshift(allocator, func, &var preheader_insts, inst.rn, inv_op, inst.imm);
+                                var fixed = inst;
+                                fixed.rn = base_row;
+                                fixed.rm = var_op;
+                                if func.blocks.at_mut(b) |blk| {
+                                    try blk.insts.set(inst_index, fixed);
+                                }
+                                try use_count.set(idx_id, 0);
+                                let var_id = var_op - first_vreg();
+                                if var_id >= 0 and var_id < old_nv {
+                                    try bump(use_count, var_id);
+                                }
+                                added = added + 1;
+                            }
+                        }
+                    }
+                }
+            }
+            inst_index = inst_index + 1;
+        }
+    }
+    if has_any_biv and added < max_added {
+        li = 0;
+        while loop_blocks_list.get(li) |b| {
+            li = li + 1;
+            if !dom_latches.get_or_panic(b) {
+                continue;
+            }
+            var end_pos = 0;
+            var is_cold = false;
+            if func.blocks.at(b) |block| {
+                end_pos = block.insts.len();
+                is_cold = block.cold;
+            }
+            if is_cold {
+                continue;
+            }
+            let par_pos = latch_parcopy.get_or_panic(b);
+            if par_pos >= 0 and par_pos < end_pos {
+                end_pos = par_pos;
+            }
+            var inst_index = 0;
+            while inst_index < end_pos and added < max_added {
+                var inst = blank(MOp::Trap);
+                if func.blocks.at(b) |blk| {
+                    inst = blk.insts.get_or_panic(inst_index);
+                }
+                if is_vreg(inst.rd) and !is_hoisted_pos(&hoisted_blocks, &hoisted_pos, b, inst_index) {
+                    let id = inst.rd - first_vreg();
+                    if id < old_nv and def_count.get_or_panic(id) == 1 and !early_read.get_or_panic(id) and
+                        use_count.get_or_panic(id) > 0 and hoisted_stamp.get_or_panic(id) != stamp {
+                        let delta = affine_delta(
+                            &inst, arch, old_nv, stamp, non_par_stamp, par_stamp, hoisted_stamp,
+                            const_valid, const_val, biv_stamp, biv_step
+                        );
+                        if delta_fits_imm(arch, delta) {
+                            let safe = try uses_safe_for_lsr(
+                                allocator, func, inst.rd, b, inst_index, &loop_blocks_list, &latch_parcopy,
+                                idom, entry, use_count.get_or_panic(id), reads_buf
+                            );
+                            if safe {
+                                let x_iv = func.new_vreg();
+                                var init_inst = inst;
+                                init_inst.rd = x_iv;
+                                try preheader_insts.append(allocator, init_inst);
+                                try lsr_old.append(allocator, inst.rd);
+                                try lsr_new.append(allocator, x_iv);
+                                try lsr_deltas.append(allocator, delta);
+                                added = added + 1;
+                            }
+                        }
+                    }
+                }
+                inst_index = inst_index + 1;
+            }
+        }
+    }
+    if preheader_insts.len() == 0 {
+        return false;
+    }
+    var header_cold = false;
+    if func.blocks.at(header) |hblk| {
+        header_cold = hblk.cold;
+    }
+    let preheader = try func.add_block(allocator);
+    if func.blocks.at_mut(preheader) |pblk| {
+        pblk.cold = header_cold;
+        var pi = 0;
+        while preheader_insts.get(pi) |pinst| {
+            pi = pi + 1;
+            try pblk.insts.append(allocator, pinst);
+        }
+    }
+    func.end(preheader, Term::Jump, Cond::Eq, reg_none(), header, 0 - 1);
+    for 0..old_nb |e| {
+        if in_loop.get_or_panic(e) {
+            continue;
+        }
+        if func.blocks.at_mut(e) |eblk| {
+            if eblk.succ0 == header {
+                eblk.succ0 = preheader;
+            }
+            if (eblk.term == Term::Flags or eblk.term == Term::Zero or eblk.term == Term::NonZero) and eblk.succ1 == header {
+                eblk.succ1 = preheader;
+            }
+        }
+    }
+    if lsr_old.len() > 0 {
+        li = 0;
+        while loop_blocks_list.get(li) |b| {
+            li = li + 1;
+            if func.blocks.at_mut(b) |block| {
+                var ii = 0;
+                while ii < block.insts.len() {
+                    let inst = block.insts.get_or_panic(ii);
+                    if inst.op == MOp::ParCopy {
+                        for 0..inst.imm |ci| {
+                            if func.copies.at_mut(inst.slot + ci) |copy| {
+                                if !copy.src_imm {
+                                    copy.src = lsr_lookup(&lsr_old, &lsr_new, copy.src);
+                                }
+                            }
+                        }
+                    } else {
+                        var fixed = inst;
+                        fixed.rn = lsr_lookup(&lsr_old, &lsr_new, inst.rn);
+                        fixed.rm = lsr_lookup(&lsr_old, &lsr_new, inst.rm);
+                        fixed.ra = lsr_lookup(&lsr_old, &lsr_new, inst.ra);
+                        if inst.op == MOp::Store or inst.op == MOp::StoreIdx {
+                            fixed.rd = lsr_lookup(&lsr_old, &lsr_new, inst.rd);
+                        }
+                        try block.insts.set(ii, fixed);
+                    }
+                    ii = ii + 1;
+                }
+                block.treg = lsr_lookup(&lsr_old, &lsr_new, block.treg);
+            }
+        }
+    }
+    if hoisted_blocks.len() > 0 {
+        li = 0;
+        while loop_blocks_list.get(li) |b| {
+            li = li + 1;
+            var removed_before_par = 0;
+            let par_pos = latch_parcopy.get_or_panic(b);
+            if func.blocks.at_mut(b) |block| {
+                var write = 0;
+                var read = 0;
+                while read < block.insts.len() {
+                    if is_hoisted_pos(&hoisted_blocks, &hoisted_pos, b, read) {
+                        if par_pos >= 0 and read < par_pos {
+                            removed_before_par = removed_before_par + 1;
+                        }
+                        read = read + 1;
+                        continue;
+                    }
+                    if write != read {
+                        try block.insts.set(write, block.insts.get_or_panic(read));
+                    }
+                    write = write + 1;
+                    read = read + 1;
+                }
+                if write != read {
+                    try block.insts.truncate(allocator, write);
+                }
+            }
+            if par_pos >= 0 and removed_before_par > 0 {
+                try latch_parcopy.set(b, par_pos - removed_before_par);
+            }
+        }
+    }
+    if lsr_old.len() > 0 {
+        var rebuilt = array::new<MInst>(allocator);
+        defer rebuilt.deinit(allocator);
+        var next_regs = array::new<i64>(allocator);
+        defer next_regs.deinit(allocator);
+        var k = 0;
+        while latches.get(k) |latch| {
+            k = k + 1;
+            let pc_pos = latch_parcopy.get_or_panic(latch);
+            rebuilt.clear(allocator);
+            next_regs.clear(allocator);
+            var orig_len = 0;
+            if func.blocks.at(latch) |block| {
+                orig_len = block.insts.len();
+                for 0..pc_pos |i| {
+                    try rebuilt.append(allocator, block.insts.get_or_panic(i));
+                }
+            }
+            var j = 0;
+            while lsr_new.get(j) |x_iv| {
+                let delta = lsr_deltas.get_or_panic(j);
+                j = j + 1;
+                let x_next = func.new_vreg();
+                var step_inst = blank(MOp::AddImm);
+                step_inst.rd = x_next;
+                step_inst.rn = x_iv;
+                if delta > 0 {
+                    step_inst.imm = delta;
+                } else {
+                    step_inst.op = MOp::SubImm;
+                    step_inst.imm = 0 - delta;
+                }
+                try rebuilt.append(allocator, step_inst);
+                try next_regs.append(allocator, x_next);
+            }
+            var pc = blank(MOp::ParCopy);
+            if func.blocks.at(latch) |block| {
+                pc = block.insts.get_or_panic(pc_pos);
+            }
+            let new_slot = func.copies.len();
+            for 0..pc.imm |ci| {
+                let copy = func.copies.get_or_panic(pc.slot + ci);
+                try func.copies.append(allocator, copy);
+            }
+            j = 0;
+            while lsr_new.get(j) |x_iv| {
+                let x_next = next_regs.get_or_panic(j);
+                j = j + 1;
+                try func.copies.append(allocator, Copy { dst: x_iv, src: x_next, imm: 0, src_imm: false });
+            }
+            pc.slot = new_slot;
+            pc.imm = pc.imm + lsr_new.len();
+            try rebuilt.append(allocator, pc);
+            if func.blocks.at(latch) |block| {
+                var i = pc_pos + 1;
+                while i < orig_len {
+                    try rebuilt.append(allocator, block.insts.get_or_panic(i));
+                    i = i + 1;
+                }
+            }
+            if func.blocks.at_mut(latch) |block| {
+                block.insts.clear(allocator);
+                var i = 0;
+                while rebuilt.get(i) |ri| {
+                    i = i + 1;
+                    try block.insts.append(allocator, ri);
+                }
+            }
+        }
+    }
+    return true;
+}
+
+fn reduce_loop_strength(allocator: Allocator, func: &var MFunction, arch: Arch) -> !bool {
+    let nb = func.blocks.len();
+    let nv = func.vregs;
+    if nb < 2 or nv <= 0 or !has_loop_opt_candidate(func) {
+        return false;
+    }
+    var order = array::new<i64>(allocator);
+    defer order.deinit(allocator);
+    try reverse_postorder(allocator, func, &var order);
+    if order.len() < 2 {
+        return false;
+    }
+    var place = array::new<i64>(allocator);
+    defer place.deinit(allocator);
+    for 0..nb |_i| {
+        try place.append(allocator, 0 - 1);
+    }
+    var oi = 0;
+    while order.get(oi) |b| {
+        try place.set(b, oi);
+        oi = oi + 1;
+    }
+    if !has_rpo_backedge(func, &order, &place) {
+        return false;
+    }
+    var idom = array::new<i64>(allocator);
+    defer idom.deinit(allocator);
+    var pred_start = array::new<i64>(allocator);
+    defer pred_start.deinit(allocator);
+    var preds = array::new<i64>(allocator);
+    defer preds.deinit(allocator);
+    try compute_idom_and_preds(allocator, func, &order, &place, &var pred_start, &var preds, &var idom);
+    let entry = order.get_or_panic(0);
+    var headers = array::new<i64>(allocator);
+    defer headers.deinit(allocator);
+    var is_header = array::new<bool>(allocator);
+    defer is_header.deinit(allocator);
+    for 0..nb |_i| {
+        try is_header.append(allocator, false);
+    }
+    oi = 0;
+    while order.get(oi) |b| {
+        oi = oi + 1;
+        for 0..2 |pos| {
+            let h = func.successor(b, pos);
+            if h > 0 and place.get_or_panic(h) >= 0 and dominates(&idom, entry, h, b) {
+                if !is_header.get_or_panic(h) {
+                    try is_header.set(h, true);
+                    try headers.append(allocator, h);
+                }
+            }
+        }
+    }
+    if headers.len() == 0 {
+        return false;
+    }
+    var in_loop = array::new<bool>(allocator);
+    defer in_loop.deinit(allocator);
+    for 0..nb |_i| {
+        try in_loop.append(allocator, false);
+    }
+    var latches = array::new<i64>(allocator);
+    defer latches.deinit(allocator);
+    var stack = array::new<i64>(allocator);
+    defer stack.deinit(allocator);
+    var eligible = array::new<i64>(allocator);
+    defer eligible.deinit(allocator);
+    var hi = 0;
+    while headers.get(hi) |h| {
+        hi = hi + 1;
+        if func.blocks.at(h) |hblk| {
+            if hblk.cold {
+                continue;
+            }
+        }
+        try collect_loop(allocator, h, nb, entry, &place, &idom, &pred_start, &preds, &var in_loop, &var latches, &var stack);
+        if loop_is_eligible_innermost(func, h, nb, entry, &place, &idom, &pred_start, &preds, &is_header, &in_loop, &latches) {
+            try eligible.append(allocator, h);
+        }
+    }
+    if eligible.len() == 0 {
+        return false;
+    }
+    var reads_buf = array::new<i64>(allocator);
+    defer reads_buf.deinit(allocator);
+    var def_count = array::new<i64>(allocator);
+    defer def_count.deinit(allocator);
+    var def_block = array::new<i64>(allocator);
+    defer def_block.deinit(allocator);
+    var def_pos = array::new<i64>(allocator);
+    defer def_pos.deinit(allocator);
+    var early_read = array::new<bool>(allocator);
+    defer early_read.deinit(allocator);
+    var use_count = array::new<i64>(allocator);
+    defer use_count.deinit(allocator);
+    var const_valid = array::new<bool>(allocator);
+    defer const_valid.deinit(allocator);
+    var const_val = array::new<i64>(allocator);
+    defer const_val.deinit(allocator);
+    var non_par_stamp = array::new<i64>(allocator);
+    defer non_par_stamp.deinit(allocator);
+    var par_stamp = array::new<i64>(allocator);
+    defer par_stamp.deinit(allocator);
+    var par_count = array::new<i64>(allocator);
+    defer par_count.deinit(allocator);
+    var hoisted_stamp = array::new<i64>(allocator);
+    defer hoisted_stamp.deinit(allocator);
+    var biv_stamp = array::new<i64>(allocator);
+    defer biv_stamp.deinit(allocator);
+    var biv_step = array::new<i64>(allocator);
+    defer biv_step.deinit(allocator);
+    for 0..nv |_v| {
+        try def_count.append(allocator, 0);
+        try def_block.append(allocator, 0 - 1);
+        try def_pos.append(allocator, 0 - 1);
+        try early_read.append(allocator, false);
+        try use_count.append(allocator, 0);
+        try const_valid.append(allocator, false);
+        try const_val.append(allocator, 0);
+        try non_par_stamp.append(allocator, 0);
+        try par_stamp.append(allocator, 0);
+        try par_count.append(allocator, 0);
+        try hoisted_stamp.append(allocator, 0);
+        try biv_stamp.append(allocator, 0);
+        try biv_step.append(allocator, 0);
+    }
+    var block_id = 0;
+    while block_id < nb {
+        if func.blocks.at(block_id) |block| {
+            var ii = 0;
+            while block.insts.at(ii) |inst| {
+                try reads(inst, &var reads_buf, allocator, &func.copies);
+                var ri = 0;
+                while reads_buf.get(ri) |r| {
+                    ri = ri + 1;
+                    if is_vreg(r) {
+                        let id = r - first_vreg();
+                        if id < nv {
+                            try bump(&var use_count, id);
+                        }
+                    }
+                }
+                if writes_rd(inst.op) and is_vreg(inst.rd) {
+                    let id = inst.rd - first_vreg();
+                    if id < nv {
+                        try bump(&var def_count, id);
+                        try def_block.set(id, block_id);
+                        try def_pos.set(id, ii);
+                        if inst.op == MOp::MovImm {
+                            try const_valid.set(id, true);
+                            try const_val.set(id, inst.imm);
+                        }
+                    }
+                }
+                if inst.op == MOp::ParCopy {
+                    for 0..inst.imm |ci| {
+                        let copy = func.copies.get_or_panic(inst.slot + ci);
+                        if is_vreg(copy.dst) {
+                            let id = copy.dst - first_vreg();
+                            if id < nv {
+                                try bump(&var def_count, id);
+                            }
+                        }
+                    }
+                }
+                ii = ii + 1;
+            }
+            if is_vreg(block.treg) {
+                let id = block.treg - first_vreg();
+                if id < nv {
+                    try bump(&var use_count, id);
+                }
+            }
+        }
+        block_id = block_id + 1;
+    }
+    for 0..nv |v| {
+        if def_count.get_or_panic(v) != 1 {
+            try const_valid.set(v, false);
+        }
+    }
+    block_id = 0;
+    while block_id < nb {
+        if func.blocks.at(block_id) |block| {
+            var ii = 0;
+            while block.insts.at(ii) |inst| {
+                try reads(inst, &var reads_buf, allocator, &func.copies);
+                var ri = 0;
+                while reads_buf.get(ri) |r| {
+                    ri = ri + 1;
+                    if is_vreg(r) {
+                        let id = r - first_vreg();
+                        if id < nv and def_block.get_or_panic(id) == block_id and ii <= def_pos.get_or_panic(id) {
+                            try early_read.set(id, true);
+                        }
+                    }
+                }
+                ii = ii + 1;
+            }
+        }
+        block_id = block_id + 1;
+    }
+    var touched = array::new<bool>(allocator);
+    defer touched.deinit(allocator);
+    for 0..nb |_b| {
+        try touched.append(allocator, false);
+    }
+    var any_changed = false;
+    var stamp = 0;
+    hi = 0;
+    while eligible.get(hi) |h| {
+        hi = hi + 1;
+        if touched.get_or_panic(h) {
+            continue;
+        }
+        try collect_loop(allocator, h, nb, entry, &place, &idom, &pred_start, &preds, &var in_loop, &var latches, &var stack);
+        var overlaps = false;
+        for 0..nb |b| {
+            if in_loop.get_or_panic(b) and touched.get_or_panic(b) {
+                overlaps = true;
+                break;
+            }
+        }
+        if overlaps {
+            continue;
+        }
+        for pred_start.get_or_panic(h)..pred_start.get_or_panic(h + 1) |at| {
+            let p = preds.get_or_panic(at);
+            if p >= 0 and p < nb and !in_loop.get_or_panic(p) and touched.get_or_panic(p) {
+                overlaps = true;
+                break;
+            }
+        }
+        if overlaps {
+            continue;
+        }
+        stamp = stamp + 1;
+        let changed = try optimize_loop(
+            allocator, func, arch, h, nb, nv, stamp, entry, &order, &idom,
+            &in_loop, &latches, &def_count, &def_block, &def_pos, &early_read, &var use_count,
+            &const_valid, &const_val, &var non_par_stamp, &var par_stamp, &var par_count,
+            &var hoisted_stamp, &var biv_stamp, &var biv_step, &var reads_buf
+        );
+        if changed {
+            any_changed = true;
+            for 0..nb |b| {
+                if in_loop.get_or_panic(b) {
+                    try touched.set(b, true);
+                }
+            }
+            for pred_start.get_or_panic(h)..pred_start.get_or_panic(h + 1) |at| {
+                let p = preds.get_or_panic(at);
+                if p >= 0 and p < nb {
+                    try touched.set(p, true);
+                }
+            }
+        }
+    }
+    return any_changed;
+}
