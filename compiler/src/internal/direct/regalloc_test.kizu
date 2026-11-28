@@ -1,0 +1,177 @@
+import std::mem;
+import std::testing;
+
+fn add_shift_inst(rd: i64, rn: i64, rm: i64, shift: i64) -> MInst {
+    var inst = blank(MOp::AddShift);
+    inst.rd = rd;
+    inst.rn = rn;
+    inst.rm = rm;
+    inst.imm = shift;
+    return inst;
+}
+
+fn add_inst(rd: i64, rn: i64, rm: i64) -> MInst {
+    var inst = blank(MOp::Add);
+    inst.rd = rd;
+    inst.rn = rn;
+    inst.rm = rm;
+    return inst;
+}
+
+fn load_inst(rd: i64, rn: i64, offset: i64, width: i64, signed: bool) -> MInst {
+    var inst = blank(MOp::Load);
+    inst.rd = rd;
+    inst.rn = rn;
+    inst.imm = offset;
+    inst.width = width;
+    inst.signed = signed;
+    return inst;
+}
+
+fn store_inst(val: i64, rn: i64, offset: i64, width: i64) -> MInst {
+    var inst = blank(MOp::Store);
+    inst.rd = val;
+    inst.rn = rn;
+    inst.imm = offset;
+    inst.width = width;
+    return inst;
+}
+
+fn mov_imm_inst(rd: i64, imm: i64) -> MInst {
+    var inst = blank(MOp::MovImm);
+    inst.rd = rd;
+    inst.imm = imm;
+    return inst;
+}
+
+test "fold indexed load and store on arm64 and amd64" {
+    let allocator = mem::page_allocator();
+    for 0..2 |arch_i| {
+        var arch = Arch::Arm64;
+        if arch_i == 1 {
+            arch = Arch::Amd64;
+        }
+        var func = new_function(allocator);
+        defer func.deinit(allocator);
+        let b = try func.add_block(allocator);
+        let base = func.new_vreg();
+        let idx = func.new_vreg();
+        let addr1 = func.new_vreg();
+        let out1 = func.new_vreg();
+        let addr2 = func.new_vreg();
+        let addr3 = func.new_vreg();
+        let out3 = func.new_vreg();
+        let addr4 = func.new_vreg();
+        try func.emit(allocator, b, add_shift_inst(addr1, base, idx, 3));
+        try func.emit(allocator, b, load_inst(out1, addr1, 0, 8, false));
+        try func.emit(allocator, b, add_shift_inst(addr2, base, idx, 0));
+        try func.emit(allocator, b, store_inst(out1, addr2, 0, 1));
+        try func.emit(allocator, b, add_inst(addr3, base, idx));
+        try func.emit(allocator, b, load_inst(out3, addr3, 0, 4, true));
+        try func.emit(allocator, b, add_shift_inst(addr4, base, idx, 2));
+        try func.emit(allocator, b, store_inst(reg_zr(), addr4, 0, 4));
+        func.end(b, Term::Return, Cond::Eq, out3, 0 - 1, 0 - 1);
+        try fold_indexed_addresses(allocator, &var func, arch);
+        try remove_dead(allocator, &var func);
+        if func.blocks.at(b) |block| {
+            testing::expect_equal<i64>(4, block.insts.len());
+            let first = block.insts.get_or_panic(0);
+            testing::expect(first.op == MOp::LoadIdx);
+            testing::expect_equal<i64>(out1, first.rd);
+            testing::expect_equal<i64>(base, first.rn);
+            testing::expect_equal<i64>(idx, first.rm);
+            testing::expect_equal<i64>(3, first.imm);
+            testing::expect_equal<i64>(8, first.width);
+            let second = block.insts.get_or_panic(1);
+            testing::expect(second.op == MOp::StoreIdx);
+            testing::expect_equal<i64>(out1, second.rd);
+            testing::expect_equal<i64>(base, second.rn);
+            testing::expect_equal<i64>(idx, second.rm);
+            testing::expect_equal<i64>(0, second.imm);
+            testing::expect_equal<i64>(1, second.width);
+            let third = block.insts.get_or_panic(2);
+            testing::expect(third.op == MOp::LoadIdx);
+            testing::expect_equal<i64>(out3, third.rd);
+            testing::expect_equal<i64>(base, third.rn);
+            testing::expect_equal<i64>(idx, third.rm);
+            testing::expect_equal<i64>(0, third.imm);
+            testing::expect_equal<i64>(4, third.width);
+            testing::expect(third.signed);
+            let fourth = block.insts.get_or_panic(3);
+            testing::expect(fourth.op == MOp::StoreIdx);
+            testing::expect_equal<i64>(reg_zr(), fourth.rd);
+            testing::expect_equal<i64>(base, fourth.rn);
+            testing::expect_equal<i64>(idx, fourth.rm);
+            testing::expect_equal<i64>(2, fourth.imm);
+            testing::expect_equal<i64>(4, fourth.width);
+        } else {
+            testing::expect(false);
+        }
+    }
+}
+
+test "indexed shift legality distinguishes arm64 and amd64" {
+    testing::expect(indexed_shift_valid(Arch::Arm64, 1, 0));
+    testing::expect(!indexed_shift_valid(Arch::Arm64, 1, 1));
+    testing::expect(indexed_shift_valid(Arch::Arm64, 2, 1));
+    testing::expect(!indexed_shift_valid(Arch::Arm64, 2, 2));
+    testing::expect(indexed_shift_valid(Arch::Arm64, 4, 2));
+    testing::expect(!indexed_shift_valid(Arch::Arm64, 4, 3));
+    testing::expect(indexed_shift_valid(Arch::Arm64, 8, 3));
+    testing::expect(indexed_shift_valid(Arch::Arm64, 8, 0));
+    testing::expect(!indexed_shift_valid(Arch::Arm64, 8, 4));
+    testing::expect(indexed_shift_valid(Arch::Amd64, 1, 3));
+    testing::expect(indexed_shift_valid(Arch::Amd64, 4, 3));
+    testing::expect(!indexed_shift_valid(Arch::Amd64, 8, 4));
+    testing::expect(!indexed_shift_valid(Arch::Amd64, 8, 0 - 1));
+}
+
+test "fold indexed addresses preserves safety on offset, reuse, mutation, call, and special regs" {
+    let allocator = mem::page_allocator();
+    var func = new_function(allocator);
+    defer func.deinit(allocator);
+    let b0 = try func.add_block(allocator);
+    let b1 = try func.add_block(allocator);
+    let base = func.new_vreg();
+    let idx = func.new_vreg();
+    let val = func.new_vreg();
+    let a_off = func.new_vreg();
+    let a_multi = func.new_vreg();
+    let a_mut = func.new_vreg();
+    let a_call = func.new_vreg();
+    let a_sp = func.new_vreg();
+    let a_cross = func.new_vreg();
+    try func.emit(allocator, b0, add_shift_inst(a_off, base, idx, 3));
+    try func.emit(allocator, b0, store_inst(val, a_off, 8, 8));
+    try func.emit(allocator, b0, add_shift_inst(a_multi, base, idx, 3));
+    try func.emit(allocator, b0, store_inst(val, a_multi, 0, 8));
+    try func.emit(allocator, b0, store_inst(val, a_multi, 0, 8));
+    try func.emit(allocator, b0, add_shift_inst(a_mut, base, idx, 3));
+    try func.emit(allocator, b0, mov_imm_inst(idx, 1));
+    try func.emit(allocator, b0, store_inst(val, a_mut, 0, 8));
+    try func.emit(allocator, b0, add_shift_inst(a_call, base, idx, 3));
+    try func.emit(allocator, b0, blank(MOp::Call));
+    try func.emit(allocator, b0, store_inst(val, a_call, 0, 8));
+    try func.emit(allocator, b0, add_shift_inst(a_sp, reg_sp(), idx, 3));
+    try func.emit(allocator, b0, store_inst(val, a_sp, 0, 8));
+    try func.emit(allocator, b0, add_shift_inst(a_cross, base, idx, 3));
+    func.end(b0, Term::Jump, Cond::Eq, reg_none(), b1, 0 - 1);
+    try func.emit(allocator, b1, store_inst(val, a_cross, 0, 8));
+    func.end(b1, Term::Return, Cond::Eq, reg_none(), 0 - 1, 0 - 1);
+    try fold_indexed_addresses(allocator, &var func, Arch::Arm64);
+    if func.blocks.at(b0) |blk0| {
+        var i = 0;
+        while blk0.insts.at(i) |inst| {
+            i = i + 1;
+            testing::expect(inst.op != MOp::LoadIdx);
+            testing::expect(inst.op != MOp::StoreIdx);
+        }
+    } else {
+        testing::expect(false);
+    }
+    if func.blocks.at(b1) |blk1| {
+        testing::expect(blk1.insts.get_or_panic(0).op == MOp::Store);
+    } else {
+        testing::expect(false);
+    }
+}

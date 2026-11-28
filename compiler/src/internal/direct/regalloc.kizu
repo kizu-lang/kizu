@@ -455,6 +455,153 @@ fn fold_frame_addresses(allocator: Allocator, func: &var MFunction) -> !void {
     return;
 }
 
+fn valid_index_reg(reg: i64) -> bool {
+    return is_vreg(reg) or (reg >= 0 and reg < 31);
+}
+
+fn indexed_shift_valid(arch: Arch, width: i64, shift: i64) -> bool {
+    if width != 1 and width != 2 and width != 4 and width != 8 {
+        return false;
+    }
+    if shift < 0 or shift > 3 {
+        return false;
+    }
+    if is_x86(arch) {
+        return true;
+    }
+    if shift == 0 {
+        return true;
+    }
+    return width > 1 and (1 << shift) == width;
+}
+
+fn fold_indexed_addresses(allocator: Allocator, func: &var MFunction, arch: Arch) -> !void {
+    let nv = func.vregs;
+    if nv <= 0 {
+        return;
+    }
+    var reads_buf = array::new<i64>(allocator);
+    defer reads_buf.deinit(allocator);
+    var use_count = array::new<i64>(allocator);
+    defer use_count.deinit(allocator);
+    var def_count = array::new<i64>(allocator);
+    defer def_count.deinit(allocator);
+    var def_block = array::new<i64>(allocator);
+    defer def_block.deinit(allocator);
+    var def_pos = array::new<i64>(allocator);
+    defer def_pos.deinit(allocator);
+    for 0..nv |_index| {
+        try use_count.append(allocator, 0);
+        try def_count.append(allocator, 0);
+        try def_block.append(allocator, 0 - 1);
+        try def_pos.append(allocator, 0 - 1);
+    }
+    var block_id = 0;
+    while func.blocks.at(block_id) |block| {
+        var inst_index = 0;
+        while block.insts.at(inst_index) |inst| {
+            try reads(inst, &var reads_buf, allocator, &func.copies);
+            var read_index = 0;
+            while reads_buf.get(read_index) |reg| {
+                read_index = read_index + 1;
+                if is_vreg(reg) {
+                    try bump(&var use_count, reg - first_vreg());
+                }
+            }
+            if writes_rd(inst.op) and is_vreg(inst.rd) {
+                let id = inst.rd - first_vreg();
+                try bump(&var def_count, id);
+                try def_block.set(id, block_id);
+                try def_pos.set(id, inst_index);
+            }
+            if inst.op == MOp::ParCopy {
+                var index = 0;
+                while index < inst.imm {
+                    let copy = func.copies.get_or_panic(inst.slot + index);
+                    index = index + 1;
+                    if is_vreg(copy.dst) {
+                        try bump(&var def_count, copy.dst - first_vreg());
+                    }
+                }
+            }
+            inst_index = inst_index + 1;
+        }
+        if is_vreg(block.treg) {
+            try bump(&var use_count, block.treg - first_vreg());
+        }
+        block_id = block_id + 1;
+    }
+    block_id = 0;
+    while func.blocks.at_mut(block_id) |block| {
+        var inst_index = 0;
+        while inst_index < block.insts.len() {
+            let inst = block.insts.get_or_panic(inst_index);
+            inst_index = inst_index + 1;
+            if (inst.op != MOp::Load and inst.op != MOp::Store) or inst.imm != 0 or inst.slot >= 0 or !is_vreg(inst.rn) {
+                continue;
+            }
+            if inst.op == MOp::Store and inst.rd == inst.rn {
+                continue;
+            }
+            let id = inst.rn - first_vreg();
+            if def_count.get_or_panic(id) != 1 or use_count.get_or_panic(id) != 1 {
+                continue;
+            }
+            if def_block.get_or_panic(id) != block_id {
+                continue;
+            }
+            let pos = def_pos.get_or_panic(id);
+            if pos < 0 or pos >= inst_index - 1 {
+                continue;
+            }
+            let earlier = block.insts.get_or_panic(pos);
+            if earlier.op != MOp::AddShift and earlier.op != MOp::Add {
+                continue;
+            }
+            var shift = 0;
+            if earlier.op == MOp::AddShift {
+                shift = earlier.imm;
+            }
+            if !indexed_shift_valid(arch, inst.width, shift) {
+                continue;
+            }
+            if !valid_index_reg(earlier.rn) or !valid_index_reg(earlier.rm) {
+                continue;
+            }
+            var clean = true;
+            var between = pos + 1;
+            while between < inst_index - 1 {
+                let middle = block.insts.get_or_panic(between);
+                between = between + 1;
+                if middle.op == MOp::ParCopy or middle.op == MOp::Call or middle.op == MOp::CallReg {
+                    clean = false;
+                    break;
+                }
+                if writes_rd(middle.op) and (middle.rd == earlier.rn or middle.rd == earlier.rm) {
+                    clean = false;
+                    break;
+                }
+            }
+            if !clean {
+                continue;
+            }
+            var folded = inst;
+            if inst.op == MOp::Load {
+                folded.op = MOp::LoadIdx;
+            } else {
+                folded.op = MOp::StoreIdx;
+            }
+            folded.rn = earlier.rn;
+            folded.rm = earlier.rm;
+            folded.imm = shift;
+            try block.insts.set(inst_index - 1, folded);
+            try use_count.set(id, 0);
+        }
+        block_id = block_id + 1;
+    }
+    return;
+}
+
 fn add_to(table: &var array::Array<i64>, at: i64, amount: i64) -> !void {
     return table.set(at, table.get_or_panic(at) + amount);
 }
@@ -1547,6 +1694,7 @@ fn run_passes(allocator: Allocator, func: &var MFunction, arch: Arch) -> !void {
     try fold_increments(allocator, func);
     try fuse_multiply_adds(allocator, func);
     try fold_frame_addresses(allocator, func);
+    try fold_indexed_addresses(allocator, func, arch);
     try remove_dead(allocator, func);
     try promote_slots(allocator, func);
     if is_x86(arch) {
