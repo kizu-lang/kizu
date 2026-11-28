@@ -19,6 +19,196 @@ struct CallableParamFacts {
     mutable: bool,
 }
 
+fn (self: &Checker) resolve_called_function_text(
+    tree: &ast::Ast,
+    name_handle: ast::Text
+) -> !?FunctionHandle {
+    let source_name = semantic_text(tree, name_handle);
+    return self.resolve_called_function(source_name);
+}
+
+fn (self: &var Checker) check_user_call_by_text_ok(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    name_handle: ast::Text,
+    span: ast::Span,
+    selection: ast::Span,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !bool {
+    var function_handle = FunctionHandle { index: 0 };
+    if try self.resolve_called_function_text(tree, name_handle) |found| {
+        function_handle = found;
+    } else {
+        let problem = try self.undefined_function_error(semantic_text(tree, name_handle));
+        return self.fail(move problem);
+    }
+    try self.reach_std_function(function_handle);
+    if self.editor.len() > 0 {
+        try self.record_call(tree, selection, function_handle, args);
+    }
+    var facts = CallableFacts {
+        extern_call: false,
+        requires_unsafe: false,
+        has_type_params: false,
+        variadic: false,
+        parameter_count: 0,
+        return_type: empty_type()
+    };
+    if self.callable_facts(function_handle) |found| {
+        facts = found;
+    } else {
+        let problem = try self.undefined_function_error(semantic_text(tree, name_handle));
+        return self.fail(move problem);
+    }
+    if facts.extern_call or facts.requires_unsafe {
+        let operation = try call_operation(self.allocator, semantic_text(tree, name_handle));
+        defer operation.deinit(self.allocator);
+        let operation_bytes = operation.as_bytes();
+        if facts.extern_call {
+            if try self.require_unsafe_capability_at(
+                UnsafeCapability::ExternCall,
+                operation_bytes,
+                span
+            ) |problem| {
+                return self.fail(move problem);
+            }
+        }
+        if facts.requires_unsafe {
+            if try self.require_unsafe_capability_at(
+                UnsafeCapability::UnsafeCall,
+                operation_bytes,
+                span
+            ) |problem| {
+                return self.fail(move problem);
+            }
+        }
+    }
+    if facts.has_type_params {
+        var message = string::new(self.allocator);
+        errdefer message.deinit(self.allocator);
+        try message.append_byte(self.allocator, cast<u8>(96));
+        try message.append_bytes(self.allocator, semantic_text(tree, name_handle));
+        try message.append_bytes(self.allocator, "` requires explicit static arguments");
+        let problem = try self.checker_message_at("type error", ast::zero_span(), move message);
+        return self.fail(move problem);
+    }
+    let arg_count = args.len(tree);
+    if facts.variadic {
+        if arg_count < facts.parameter_count {
+            let problem = try self.variadic_arity_error(semantic_text(tree, name_handle), facts.parameter_count, arg_count);
+            return self.fail(move problem);
+        }
+    } else if arg_count != facts.parameter_count {
+        let problem = try self.user_call_arity_error(function_handle, semantic_text(tree, name_handle), arg_count);
+        return self.fail(move problem);
+    }
+    var index = 0;
+    while index < facts.parameter_count {
+        let argument = args.get_or_panic(tree, index);
+        if try self.check_user_call_arg_by_text_ok(
+            tree,
+            scope,
+            function_handle,
+            name_handle,
+            index,
+            argument
+        ) {
+            return true;
+        }
+        index = index + 1;
+    }
+    while index < arg_count {
+        let argument = args.get_or_panic(tree, index);
+        let variadic_name = try string::from_bytes(self.allocator, semantic_text(tree, name_handle));
+        defer variadic_name.deinit(self.allocator);
+        let variadic_bytes = variadic_name.as_bytes();
+        if try self.check_c_variadic_arg(tree, scope, variadic_bytes, index, argument) |problem| {
+            return self.fail(move problem);
+        }
+        index = index + 1;
+    }
+    out.* = facts.return_type;
+    return false;
+}
+
+fn (self: &var Checker) check_user_call_arg_by_text_ok(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    function: FunctionHandle,
+    name_handle: ast::Text,
+    index: i64,
+    argument: ast::Expression
+) -> !bool {
+    var parameter = CallableParamFacts {
+        typ: empty_type(),
+        borrow: false,
+        mutable: false
+    };
+    if self.callable_param_facts(function, index) |found| {
+        parameter = found;
+    } else {
+        let problem = try self.undefined_function_error(semantic_text(tree, name_handle));
+        return self.fail(move problem);
+    }
+    var checked_argument = argument;
+    if try self.prepare_borrow_argument(
+        tree,
+        scope,
+        argument,
+        parameter.borrow,
+        parameter.mutable,
+        &var checked_argument
+    ) |problem| {
+        return self.fail(move problem);
+    }
+    if parameter.mutable {
+        if try self.require_mutable_borrow_arg(
+            tree,
+            scope,
+            checked_argument,
+            parameter.typ
+        ) |problem| {
+            return self.fail(move problem);
+        }
+    }
+    var got = empty_type();
+    if try self.check_contextual_expr_ok(
+        tree,
+        scope,
+        checked_argument,
+        parameter.typ,
+        &var got
+    ) {
+        return true;
+    }
+    if parameter.mutable {
+        if try self.require_unsafe_field_lend(tree, scope, checked_argument) |problem| {
+            return self.fail(move problem);
+        }
+    }
+    match try self.types.coerce_returned_borrow_argument(
+        got,
+        parameter.typ,
+        parameter.borrow,
+        parameter.mutable
+    ) {
+        Value(value) => {
+            got = value;
+        },
+        Error(reason) => {
+            let problem = try self.borrow_argument_error(reason);
+            return self.fail(move problem);
+        },
+    }
+    if !same_type(got, parameter.typ) {
+        let name = semantic_text(tree, name_handle);
+        let problem = try self.user_call_arg_error(function, name, index, parameter.typ, got);
+        return self.fail(move problem);
+    }
+    return false;
+}
+
 fn (self: &var Checker) check_user_call(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -411,12 +601,14 @@ fn (self: &Checker) borrow_argument_error(reason: BorrowCoercionError) -> !diagn
 }
 
 fn (self: &Checker) resolve_called_function(name: []u8) -> !?FunctionHandle {
-    var bound = string::new(self.allocator);
-    defer bound.deinit(self.allocator);
-    let forwarded = try self.function_bindings.copy_target(self.allocator, name, &var bound);
-    if forwarded {
-        let bytes = bound.as_bytes();
-        return self.metadata.functions_by_name.get(bytes);
+    if self.function_bindings.current |_| {
+        var bound = string::new(self.allocator);
+        defer bound.deinit(self.allocator);
+        let forwarded = try self.function_bindings.copy_target(self.allocator, name, &var bound);
+        if forwarded {
+            let bytes = bound.as_bytes();
+            return self.metadata.functions_by_name.get(bytes);
+        }
     }
     return self.metadata.functions_by_name.get(name);
 }

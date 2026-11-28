@@ -12,10 +12,35 @@ pub struct Type {
     node: ?arena::Handle<TypeEntry>,
 }
 
+enum TypeRootKind {
+    Name,
+    Slice,
+    Buffer,
+    Borrow,
+    Optional,
+    Const,
+    ErrorUnion,
+    Func,
+}
+
 struct TypeEntry {
+    id: i64,
     spelling: string::String,
     parsed: typ::Type,
+    root_kind: TypeRootKind,
+    vector_kind: i64,
     static_length: bool,
+    is_numeric: bool,
+    is_signed_numeric: bool,
+    is_integer: bool,
+    is_pointer: bool,
+    is_borrow_optional: bool,
+    is_borrowed_view_return: bool,
+    has_raw_pointer: bool,
+    has_type_value: bool,
+    has_compile_time_only: bool,
+    has_borrow_optional: bool,
+    has_meta_prefix: bool,
 }
 
 pub struct TypeTable {
@@ -23,6 +48,17 @@ pub struct TypeTable {
     parsed: typ::Table,
     entries: arena::Arena<TypeEntry>,
     by_spelling: map::Map<[]u8, Type>,
+    next_id: i64,
+    cached_bool: Type,
+    cached_field: Type,
+    cached_function: Type,
+    cached_i64: Type,
+    cached_u8: Type,
+    cached_f64: Type,
+    cached_byte_string: Type,
+    cached_c_string: Type,
+    cached_type_value: Type,
+    cached_void: Type,
 }
 
 pub struct BorrowParts {
@@ -57,23 +93,15 @@ pub union BorrowCoercionResult {
     Error(BorrowCoercionError),
 }
 
-enum WrappedKind {
-    RawPointer,
-    TypeValue,
-    CompileTimeOnly,
-    BorrowOptional,
-}
-
-struct WrappedTypeVisitor {
-    kind: WrappedKind,
-    found: bool,
+struct TypeScanVisitor {
+    has_raw_pointer: bool,
+    has_type_value: bool,
+    has_compile_time_only: bool,
+    has_borrow_optional: bool,
     optional_child: bool,
 }
 
-fn (self: &var WrappedTypeVisitor) visit(value: &typ::Node) -> void {
-    if self.found {
-        return;
-    }
+fn (self: &var TypeScanVisitor) visit(value: &typ::Node) -> void {
     let directly_optional = self.optional_child;
     self.optional_child = false;
     match value {
@@ -83,18 +111,19 @@ fn (self: &var WrappedTypeVisitor) visit(value: &typ::Node) -> void {
             }
             if node.path.at(0) |part| {
                 let name = part.as_bytes();
-                self.found = match self.kind {
-                    RawPointer => node.args.len() > 0 and equal(name, "ptr"),
-                    TypeValue => equal(name, "type"),
-                    CompileTimeOnly => equal(name, "Field") or
-                        equal(name, "Function"),
-                    BorrowOptional => false,
-                };
+                if node.args.len() > 0 and equal(name, "ptr") {
+                    self.has_raw_pointer = true;
+                } else if equal(name, "type") {
+                    self.has_type_value = true;
+                } else if equal(name, "Field") or equal(name, "Function") {
+                    self.has_compile_time_only = true;
+                }
             }
         },
         Borrow(_) => {
-            self.found = directly_optional and
-                self.kind == WrappedKind::BorrowOptional;
+            if directly_optional {
+                self.has_borrow_optional = true;
+            }
         },
         Optional(_) => {
             self.optional_child = true;
@@ -102,6 +131,49 @@ fn (self: &var WrappedTypeVisitor) visit(value: &typ::Node) -> void {
         _ => {},
     }
     return;
+}
+
+fn classify_root(table: &typ::Table, value: typ::Type) -> TypeRootKind {
+    return match typ::root_node(table, value) {
+        Name(_) => TypeRootKind::Name,
+        Slice(_) => TypeRootKind::Slice,
+        Buffer(_) => TypeRootKind::Buffer,
+        Borrow(_) => TypeRootKind::Borrow,
+        Optional(_) => TypeRootKind::Optional,
+        Const(_) => TypeRootKind::Const,
+        ErrorUnion(_) => TypeRootKind::ErrorUnion,
+        Func(_) => TypeRootKind::Func,
+    };
+}
+
+fn compute_borrowed_view_return(table: &typ::Table, value: typ::Type, root_kind: TypeRootKind) -> bool {
+    if root_kind == TypeRootKind::Borrow or root_kind == TypeRootKind::Slice {
+        return true;
+    }
+    if root_kind == TypeRootKind::ErrorUnion {
+        match typ::root_node(table, value) {
+            ErrorUnion(node) => {
+                let ok_child = typ::child_type(value, node.ok);
+                return match typ::root_node(table, ok_child) {
+                    Borrow(_) => true,
+                    Slice(_) => true,
+                    _ => false,
+                };
+            },
+            _ => return false,
+        }
+    }
+    return false;
+}
+
+fn is_borrow_optional_bytes(bytes: []u8) -> bool {
+    if mem::len(bytes) < 2 or bytes[0] != cast<u8>(63) or bytes[1] != cast<u8>(38) {
+        return false;
+    }
+    if typ::borrow_optional_elem(bytes) |_| {
+        return true;
+    }
+    return false;
 }
 
 pub struct EnumHandle {
@@ -183,7 +255,18 @@ pub fn new_type_table(allocator: Allocator) -> TypeTable {
         allocator: allocator,
         parsed: typ::new(allocator),
         entries: arena::new<TypeEntry>(allocator),
-        by_spelling: map::new<[]u8, Type>(allocator)
+        by_spelling: map::new<[]u8, Type>(allocator),
+        next_id: 0,
+        cached_bool: empty_type(),
+        cached_field: empty_type(),
+        cached_function: empty_type(),
+        cached_i64: empty_type(),
+        cached_u8: empty_type(),
+        cached_f64: empty_type(),
+        cached_byte_string: empty_type(),
+        cached_c_string: empty_type(),
+        cached_type_value: empty_type(),
+        cached_void: empty_type()
     };
 }
 
@@ -192,39 +275,165 @@ pub fn empty_type() -> Type {
 }
 
 pub fn (self: &var TypeTable) bool_type() -> !Type {
-    return self.intern("bool");
+    if self.cached_bool.node |_| {
+        return self.cached_bool;
+    }
+    let value = try self.intern("bool");
+    self.cached_bool = value;
+    return value;
 }
 
 pub fn (self: &var TypeTable) field_type() -> !Type {
-    return self.intern("Field");
+    if self.cached_field.node |_| {
+        return self.cached_field;
+    }
+    let value = try self.intern("Field");
+    self.cached_field = value;
+    return value;
 }
 
 pub fn (self: &var TypeTable) function_type() -> !Type {
-    return self.intern("Function");
+    if self.cached_function.node |_| {
+        return self.cached_function;
+    }
+    let value = try self.intern("Function");
+    self.cached_function = value;
+    return value;
 }
 
 pub fn (self: &var TypeTable) i64_type() -> !Type {
-    return self.intern("i64");
+    if self.cached_i64.node |_| {
+        return self.cached_i64;
+    }
+    let value = try self.intern("i64");
+    self.cached_i64 = value;
+    return value;
 }
 
 pub fn (self: &var TypeTable) u8_type() -> !Type {
-    return self.intern("u8");
+    if self.cached_u8.node |_| {
+        return self.cached_u8;
+    }
+    let value = try self.intern("u8");
+    self.cached_u8 = value;
+    return value;
+}
+
+fn (self: &var TypeTable) f64_type() -> !Type {
+    if self.cached_f64.node |_| {
+        return self.cached_f64;
+    }
+    let value = try self.intern("f64");
+    self.cached_f64 = value;
+    return value;
 }
 
 pub fn (self: &var TypeTable) byte_string_type() -> !Type {
-    return self.intern("[]u8");
+    if self.cached_byte_string.node |_| {
+        return self.cached_byte_string;
+    }
+    let value = try self.intern("[]u8");
+    self.cached_byte_string = value;
+    return value;
 }
 
 pub fn (self: &var TypeTable) c_string_type() -> !Type {
-    return self.intern("ptr<const u8>");
+    if self.cached_c_string.node |_| {
+        return self.cached_c_string;
+    }
+    let value = try self.intern("ptr<const u8>");
+    self.cached_c_string = value;
+    return value;
 }
 
 pub fn (self: &var TypeTable) type_value_type() -> !Type {
-    return self.intern("type");
+    if self.cached_type_value.node |_| {
+        return self.cached_type_value;
+    }
+    let value = try self.intern("type");
+    self.cached_type_value = value;
+    return value;
 }
 
 pub fn (self: &var TypeTable) void_type() -> !Type {
-    return self.intern("void");
+    if self.cached_void.node |_| {
+        return self.cached_void;
+    }
+    let value = try self.intern("void");
+    self.cached_void = value;
+    return value;
+}
+
+fn (self: &var TypeTable) add_entry(spelling: string::String, parsed: typ::Type) -> !Type {
+    errdefer spelling.deinit(self.allocator);
+    let bytes = spelling.as_bytes();
+    let static_length = typ::has_static_length(bytes);
+    let root_kind = classify_root(&self.parsed, parsed);
+    var vector_kind = -1;
+    var is_integer = false;
+    var is_numeric = false;
+    var is_signed_numeric = false;
+    var has_meta_prefix = false;
+    if root_kind == TypeRootKind::Name {
+        is_integer = is_integer_type(bytes);
+        if is_integer {
+            is_numeric = true;
+            is_signed_numeric = is_signed_numeric_type(bytes);
+        } else if equal(bytes, "f32") or equal(bytes, "f64") {
+            is_numeric = true;
+            is_signed_numeric = true;
+        } else {
+            vector_kind = typ::vector_kind(bytes);
+            if vector_kind < 0 and mem::starts_with(bytes, "std::meta::") {
+                has_meta_prefix = true;
+            }
+        }
+    }
+    var is_pointer = false;
+    if root_kind == TypeRootKind::Name or root_kind == TypeRootKind::Optional {
+        is_pointer = parsed_is_pointer(&self.parsed, parsed);
+    }
+    var is_borrow_optional = false;
+    if root_kind == TypeRootKind::Optional {
+        is_borrow_optional = is_borrow_optional_bytes(bytes);
+    }
+    let is_borrowed_view_return = compute_borrowed_view_return(&self.parsed, parsed, root_kind);
+    var scan = TypeScanVisitor {
+        has_raw_pointer: false,
+        has_type_value: false,
+        has_compile_time_only: false,
+        has_borrow_optional: false,
+        optional_child: false
+    };
+    if !is_numeric and vector_kind < 0 and !equal(bytes, "bool") and !equal(bytes, "void") {
+        typ::walk<TypeScanVisitor>(&self.parsed, parsed, &var scan);
+    }
+    let id = self.next_id;
+    self.next_id = id + 1;
+    let handle = try self.entries.add(self.allocator, TypeEntry {
+        id: id,
+        spelling: move spelling,
+        parsed: parsed,
+        root_kind: root_kind,
+        vector_kind: vector_kind,
+        static_length: static_length,
+        is_numeric: is_numeric,
+        is_signed_numeric: is_signed_numeric,
+        is_integer: is_integer,
+        is_pointer: is_pointer,
+        is_borrow_optional: is_borrow_optional,
+        is_borrowed_view_return: is_borrowed_view_return,
+        has_raw_pointer: scan.has_raw_pointer,
+        has_type_value: scan.has_type_value,
+        has_compile_time_only: scan.has_compile_time_only,
+        has_borrow_optional: scan.has_borrow_optional,
+        has_meta_prefix: has_meta_prefix
+    });
+    let value = Type { node: handle };
+    let retained = self.entries.at(handle);
+    let retained_text = retained.spelling.as_bytes();
+    try self.by_spelling.insert(self.allocator, retained_text, value);
+    return value;
 }
 
 pub fn (self: &var TypeTable) intern(text: []u8) -> !Type {
@@ -236,20 +445,36 @@ pub fn (self: &var TypeTable) intern(text: []u8) -> !Type {
     }
     let parsed = try self.parsed.parse(text);
     let spelling = try string::from_bytes(self.allocator, text);
-    errdefer spelling.deinit(self.allocator);
-    let handle = try self.entries.add(self.allocator, TypeEntry {
-        spelling: move spelling,
-        parsed: parsed,
-        static_length: typ::has_static_length(text)
-    });
-    let value = Type { node: handle };
-    let retained = self.entries.at(handle);
-    let retained_text = retained.spelling.as_bytes();
-    try self.by_spelling.insert(self.allocator, retained_text, value);
-    return value;
+    return self.add_entry(move spelling, parsed);
 }
 
 pub fn (self: &var TypeTable) remember(source: &typ::Table, parsed: typ::Type) -> !Type {
+    match typ::root_node(source, parsed) {
+        Name(node) => {
+            if node.path.len() == 1 and node.args.len() == 0 {
+                if node.path.at(0) |part| {
+                    let bytes = part.as_bytes();
+                    if equal(bytes, "i64") {
+                        return self.i64_type();
+                    }
+                    if equal(bytes, "bool") {
+                        return self.bool_type();
+                    }
+                    if equal(bytes, "void") {
+                        return self.void_type();
+                    }
+                    if equal(bytes, "u8") {
+                        return self.u8_type();
+                    }
+                    if equal(bytes, "f64") {
+                        return self.f64_type();
+                    }
+                    return self.intern(bytes);
+                }
+            }
+        },
+        _ => {},
+    }
     let spelling = try typ::render(self.allocator, source, parsed);
     defer spelling.deinit(self.allocator);
     let bytes = spelling.as_bytes();
@@ -266,10 +491,69 @@ pub fn (self: &TypeTable) copy_text(allocator: Allocator, value: Type) -> !strin
 }
 
 pub fn (self: &TypeTable) mints_wrapper(allocator: Allocator, value: Type) -> !bool {
-    let text = try self.copy_text(allocator, value);
-    defer text.deinit(allocator);
-    let bytes = text.as_bytes();
-    return has_wrapper_byte(bytes);
+    let _ = allocator;
+    if value.node |handle| {
+        let entry = self.entries.at(handle);
+        let bytes = entry.spelling.as_bytes();
+        return has_wrapper_byte(bytes);
+    }
+    return false;
+}
+
+fn (self: &TypeTable) vector_kind_fast(value: Type) -> i64 {
+    if value.node |handle| {
+        return self.entries.at(handle).vector_kind;
+    }
+    return -1;
+}
+
+fn (self: &TypeTable) is_vector_fast(value: Type) -> bool {
+    if value.node |handle| {
+        return self.entries.at(handle).vector_kind >= 0;
+    }
+    return false;
+}
+
+fn (self: &TypeTable) is_numeric_fast(value: Type) -> bool {
+    if value.node |handle| {
+        return self.entries.at(handle).is_numeric;
+    }
+    return false;
+}
+
+fn (self: &TypeTable) is_signed_numeric_fast(value: Type) -> bool {
+    if value.node |handle| {
+        return self.entries.at(handle).is_signed_numeric;
+    }
+    return false;
+}
+
+fn (self: &TypeTable) is_integer_fast(value: Type) -> bool {
+    if value.node |handle| {
+        return self.entries.at(handle).is_integer;
+    }
+    return false;
+}
+
+fn (self: &TypeTable) is_borrow_optional_fast(value: Type) -> bool {
+    if value.node |handle| {
+        return self.entries.at(handle).is_borrow_optional;
+    }
+    return false;
+}
+
+fn (self: &TypeTable) has_meta_prefix_fast(value: Type) -> bool {
+    if value.node |handle| {
+        return self.entries.at(handle).has_meta_prefix;
+    }
+    return false;
+}
+
+fn (self: &TypeTable) is_borrowed_view_return_fast(value: Type) -> bool {
+    if value.node |handle| {
+        return self.entries.at(handle).is_borrowed_view_return;
+    }
+    return false;
 }
 
 fn has_wrapper_byte(bytes: []u8) -> bool {
@@ -292,22 +576,12 @@ fn (self: &var TypeTable) retain_parsed(value: typ::Type) -> !Type {
     let spelling = try typ::render(self.allocator, &self.parsed, value);
     errdefer spelling.deinit(self.allocator);
     let bytes = spelling.as_bytes();
-    let static_length = typ::has_static_length(bytes);
     let known = self.by_spelling.get(bytes);
     if known |retained_type| {
         spelling.deinit(self.allocator);
         return retained_type;
     }
-    let handle = try self.entries.add(self.allocator, TypeEntry {
-        spelling: move spelling,
-        parsed: value,
-        static_length: static_length
-    });
-    let retained = self.entries.at(handle);
-    let retained_text = retained.spelling.as_bytes();
-    let result = Type { node: handle };
-    try self.by_spelling.insert(self.allocator, retained_text, result);
-    return result;
+    return self.add_entry(move spelling, value);
 }
 
 pub fn same_type(left: Type, right: Type) -> bool {
@@ -342,7 +616,12 @@ pub fn (self: &TypeTable) is_map_key_type(value: Type) -> bool {
 }
 
 pub fn (self: &var TypeTable) slice_elem(value: Type) -> !?Type {
-    if self.lookup(value) |parsed| {
+    if value.node |handle| {
+        let entry = self.entries.at(handle);
+        if entry.root_kind != TypeRootKind::Slice {
+            return null;
+        }
+        let parsed = entry.parsed;
         match typ::root_node(&self.parsed, parsed) {
             Slice(node) => {
                 let child = typ::child_type(parsed, node.elem);
@@ -355,17 +634,19 @@ pub fn (self: &var TypeTable) slice_elem(value: Type) -> !?Type {
 }
 
 pub fn (self: &TypeTable) is_slice_type(value: Type) -> bool {
-    if self.lookup(value) |parsed| {
-        return match typ::root_node(&self.parsed, parsed) {
-            Slice(_) => true,
-            _ => false,
-        };
+    if value.node |handle| {
+        return self.entries.at(handle).root_kind == TypeRootKind::Slice;
     }
     return false;
 }
 
 pub fn (self: &var TypeTable) buffer_elem(value: Type) -> !?Type {
-    if self.lookup(value) |parsed| {
+    if value.node |handle| {
+        let entry = self.entries.at(handle);
+        if entry.root_kind != TypeRootKind::Buffer {
+            return null;
+        }
+        let parsed = entry.parsed;
         match typ::root_node(&self.parsed, parsed) {
             Buffer(node) => {
                 let child = typ::child_type(parsed, node.elem);
@@ -378,7 +659,12 @@ pub fn (self: &var TypeTable) buffer_elem(value: Type) -> !?Type {
 }
 
 pub fn (self: &var TypeTable) buffer_size(value: Type) -> ?i64 {
-    if self.lookup(value) |parsed| {
+    if value.node |handle| {
+        let entry = self.entries.at(handle);
+        if entry.root_kind != TypeRootKind::Buffer {
+            return null;
+        }
+        let parsed = entry.parsed;
         match typ::root_node(&self.parsed, parsed) {
             Buffer(node) => return node.size,
             _ => return null,
@@ -398,17 +684,17 @@ pub fn (self: &var TypeTable) slice_of(elem: Type) -> !Type {
 }
 
 pub fn (self: &TypeTable) is_buffer_type(value: Type) -> bool {
-    if self.lookup(value) |parsed| {
-        return match typ::root_node(&self.parsed, parsed) {
-            Buffer(_) => true,
-            _ => false,
-        };
+    if value.node |handle| {
+        return self.entries.at(handle).root_kind == TypeRootKind::Buffer;
     }
     return false;
 }
 
 pub fn (self: &TypeTable) contains_borrow_optional(value: Type) -> bool {
-    return self.contains_wrapped_type(value, WrappedKind::BorrowOptional);
+    if value.node |handle| {
+        return self.entries.at(handle).has_borrow_optional;
+    }
+    return false;
 }
 
 pub fn (self: &var TypeTable) unwrap_return_success_type(value: Type) -> !Type {
@@ -419,13 +705,8 @@ pub fn (self: &var TypeTable) unwrap_return_success_type(value: Type) -> !Type {
 }
 
 pub fn (self: &var TypeTable) is_borrowed_view_return_type(value: Type) -> !bool {
-    let success = try self.unwrap_return_success_type(value);
-    if self.lookup(success) |parsed| {
-        return match typ::root_node(&self.parsed, parsed) {
-            Borrow(_) => true,
-            Slice(_) => true,
-            _ => false,
-        };
+    if value.node |handle| {
+        return self.entries.at(handle).is_borrowed_view_return;
     }
     return false;
 }
@@ -555,13 +836,15 @@ fn method_matches(want: &FunctionType, got: &FunctionType) -> bool {
 }
 
 pub fn (self: &var TypeTable) optional_elem(value: Type) -> !?Type {
-    if self.lookup(value) |parsed| {
+    if value.node |handle| {
+        let entry = self.entries.at(handle);
+        if entry.root_kind != TypeRootKind::Optional or entry.is_pointer {
+            return null;
+        }
+        let parsed = entry.parsed;
         match typ::root_node(&self.parsed, parsed) {
             Optional(node) => {
                 let child = typ::child_type(parsed, node.elem);
-                if parsed_pointer_element(&self.parsed, child) |_| {
-                    return null;
-                }
                 return try self.retain_parsed(child);
             },
             _ => return null,
@@ -571,7 +854,12 @@ pub fn (self: &var TypeTable) optional_elem(value: Type) -> !?Type {
 }
 
 pub fn (self: &var TypeTable) openable_elem(value: Type) -> !?Type {
-    if self.lookup(value) |parsed| {
+    if value.node |handle| {
+        let entry = self.entries.at(handle);
+        if entry.root_kind != TypeRootKind::Optional {
+            return null;
+        }
+        let parsed = entry.parsed;
         match typ::root_node(&self.parsed, parsed) {
             Optional(node) => {
                 let child = typ::child_type(parsed, node.elem);
@@ -584,8 +872,8 @@ pub fn (self: &var TypeTable) openable_elem(value: Type) -> !?Type {
 }
 
 pub fn (self: &var TypeTable) takes_null(value: Type) -> !bool {
-    if try self.openable_elem(value) |_| {
-        return true;
+    if value.node |handle| {
+        return self.entries.at(handle).root_kind == TypeRootKind::Optional;
     }
     return false;
 }
@@ -604,7 +892,12 @@ pub fn (self: &var TypeTable) absorbs_error_union(want: Type, got: Type) -> !boo
 }
 
 pub fn (self: &var TypeTable) explicit_borrow_type(value: Type) -> !?BorrowParts {
-    if self.lookup(value) |parsed| {
+    if value.node |handle| {
+        let entry = self.entries.at(handle);
+        if entry.root_kind != TypeRootKind::Borrow {
+            return null;
+        }
+        let parsed = entry.parsed;
         match typ::root_node(&self.parsed, parsed) {
             Borrow(node) => {
                 let child = typ::child_type(parsed, node.elem);
@@ -620,6 +913,13 @@ pub fn (self: &var TypeTable) explicit_borrow_type(value: Type) -> !?BorrowParts
 }
 
 pub fn (self: &var TypeTable) borrowed_value_type(value: Type) -> !Type {
+    if value.node |handle| {
+        if self.entries.at(handle).root_kind != TypeRootKind::Borrow {
+            return value;
+        }
+    } else {
+        return value;
+    }
     if try self.explicit_borrow_type(value) |parts| {
         return parts.inner;
     }
@@ -632,6 +932,13 @@ pub fn (self: &var TypeTable) coerce_returned_borrow_argument(
     want_borrow: bool,
     want_mutable: bool
 ) -> !BorrowCoercionResult {
+    if got.node |handle| {
+        if self.entries.at(handle).root_kind != TypeRootKind::Borrow {
+            return BorrowCoercionResult::Value(got);
+        }
+    } else {
+        return BorrowCoercionResult::Value(got);
+    }
     if try self.explicit_borrow_type(got) |parts| {
         if !want_borrow {
             return BorrowCoercionResult::Error(BorrowCoercionError::OwningParameter);
@@ -681,12 +988,12 @@ pub fn (self: &var TypeTable) pointer_element(value: Type) -> !?Type {
 
 pub fn (self: &TypeTable) fills_nullable_pointer(want: Type, got: Type) -> bool {
     let want_handle = want.node orelse return false;
-    let got_handle = got.node orelse return false;
     let want_entry = self.entries.at(want_handle);
-    let want_bytes = want_entry.spelling.as_bytes();
-    if !mem::starts_with(want_bytes, "?ptr<") {
+    if want_entry.root_kind != TypeRootKind::Optional or !want_entry.is_pointer {
         return false;
     }
+    let got_handle = got.node orelse return false;
+    let want_bytes = want_entry.spelling.as_bytes();
     let got_entry = self.entries.at(got_handle);
     let got_bytes = got_entry.spelling.as_bytes();
     if mem::len(want_bytes) != mem::len(got_bytes) + 1 {
@@ -696,11 +1003,8 @@ pub fn (self: &TypeTable) fills_nullable_pointer(want: Type, got: Type) -> bool 
 }
 
 pub fn (self: &TypeTable) is_function_pointer(value: Type) -> bool {
-    if self.lookup(value) |parsed| {
-        match typ::root_node(&self.parsed, parsed) {
-            Func(_) => return true,
-            _ => return false,
-        }
+    if value.node |handle| {
+        return self.entries.at(handle).root_kind == TypeRootKind::Func;
     }
     return false;
 }
@@ -757,10 +1061,8 @@ fn function_pointer_child(table: &TypeTable, value: Type, index: i64) -> ?typ::T
 }
 
 pub fn (self: &TypeTable) is_pointer_type(value: Type) -> bool {
-    if self.lookup(value) |parsed| {
-        if parsed_pointer_element(&self.parsed, parsed) |_| {
-            return true;
-        }
+    if value.node |handle| {
+        return self.entries.at(handle).is_pointer;
     }
     return false;
 }
@@ -968,32 +1270,33 @@ fn is_const_root(table: &typ::Table, value: ?typ::Type) -> bool {
 }
 
 pub fn (self: &TypeTable) contains_raw_pointer(value: Type) -> bool {
-    return self.contains_wrapped_type(value, WrappedKind::RawPointer);
+    if value.node |handle| {
+        return self.entries.at(handle).has_raw_pointer;
+    }
+    return false;
 }
 
 pub fn (self: &TypeTable) contains_type_value(value: Type) -> bool {
-    return self.contains_wrapped_type(value, WrappedKind::TypeValue);
+    if value.node |handle| {
+        return self.entries.at(handle).has_type_value;
+    }
+    return false;
 }
 
 pub fn (self: &TypeTable) contains_compile_time_only(value: Type) -> bool {
-    return self.contains_wrapped_type(value, WrappedKind::CompileTimeOnly);
-}
-
-fn (self: &TypeTable) contains_wrapped_type(value: Type, kind: WrappedKind) -> bool {
-    if self.lookup(value) |parsed| {
-        var visitor = WrappedTypeVisitor {
-            kind: kind,
-            found: false,
-            optional_child: false
-        };
-        typ::walk<WrappedTypeVisitor>(&self.parsed, parsed, &var visitor);
-        return visitor.found;
+    if value.node |handle| {
+        return self.entries.at(handle).has_compile_time_only;
     }
     return false;
 }
 
 pub fn (self: &var TypeTable) error_union_parts(value: Type) -> !?ErrorUnionTypeParts {
-    if self.lookup(value) |parsed| {
+    if value.node |handle| {
+        let entry = self.entries.at(handle);
+        if entry.root_kind != TypeRootKind::ErrorUnion {
+            return null;
+        }
+        let parsed = entry.parsed;
         match typ::root_node(&self.parsed, parsed) {
             ErrorUnion(node) => {
                 var err = empty_type();

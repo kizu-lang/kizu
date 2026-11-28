@@ -1,28 +1,22 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import std::array;
-import std::map;
 import std::mem;
 import std::sort;
 import std::string;
 
-struct CheckedStructField {
-    expression: ast::Expression,
-    typ: Type,
-}
-
-fn (self: &var Checker) check_struct_literal_expr(
+fn (self: &var Checker) check_struct_literal_expr_ok(
     tree: &var ast::Ast,
     scope: ScopeHandle,
     expression: ast::Expression,
     out: &var Type
-) -> !?diagnostic::Diagnostic {
+) -> !bool {
     match tree.expressions.at(expression.node) {
         StructLiteral(literal) => {
             let type_name = literal.type_name;
             let span = literal.span;
             let field_count = literal.fields.len();
-            return self.check_struct_literal_parts(
+            return self.check_struct_literal_parts_ok(
                 tree,
                 scope,
                 expression,
@@ -32,14 +26,77 @@ fn (self: &var Checker) check_struct_literal_expr(
                 out
             );
         },
-        _ => return try self.checker_error_at(
-            "type error", expression_span(tree, expression),
-            "expected struct literal"
-        ),
+        _ => {
+            let problem = try self.checker_error_at(
+                "type error", expression_span(tree, expression),
+                "expected struct literal"
+            );
+            return self.fail(move problem);
+        },
     }
 }
 
-fn (self: &var Checker) check_struct_literal_parts(
+fn (self: &Checker) find_struct_field_index(
+    tree: &ast::Ast,
+    struct_idx: i64,
+    field_name: []u8
+) -> i64 {
+    if self.metadata.struct_infos.at(struct_idx) |info| {
+        var index = 0;
+        while info.fields.at(index) |field| {
+            if mem::equal_bytes(semantic_text(tree, field.name), field_name) {
+                return index;
+            }
+            index = index + 1;
+        }
+    }
+    return -1;
+}
+
+fn (self: &var Checker) pop_struct_literal_slots(base: i64) -> void {
+    while self.struct_literal_slots.len() > base {
+        let _ = self.struct_literal_slots.pop_or_panic();
+    }
+    return;
+}
+
+fn (self: &Checker) lookup_struct_info_text(tree: &ast::Ast, name_handle: ast::Text) -> ?i64 {
+    return self.metadata.struct_infos_by_name.get(semantic_text(tree, name_handle));
+}
+
+fn (self: &Checker) find_struct_field_index_text(
+    tree: &ast::Ast,
+    struct_idx: i64,
+    field_name_handle: ast::Text
+) -> i64 {
+    return self.find_struct_field_index(tree, struct_idx, semantic_text(tree, field_name_handle));
+}
+
+fn (self: &Checker) has_duplicate_unknown_field(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    written_index: i64,
+    field_name_handle: ast::Text
+) -> bool {
+    let field_name = semantic_text(tree, field_name_handle);
+    var prior = 0;
+    while prior < written_index {
+        match tree.expressions.at(expression.node) {
+            StructLiteral(literal) => {
+                if literal.fields.at(prior) |prev_field| {
+                    if mem::equal_bytes(semantic_text(tree, prev_field.name), field_name) {
+                        return true;
+                    }
+                }
+            },
+            _ => {},
+        }
+        prior = prior + 1;
+    }
+    return false;
+}
+
+fn (self: &var Checker) check_struct_literal_parts_ok(
     tree: &var ast::Ast,
     scope: ScopeHandle,
     expression: ast::Expression,
@@ -47,179 +104,285 @@ fn (self: &var Checker) check_struct_literal_parts(
     span: ast::Span,
     field_count: i64,
     out: &var Type
-) -> !?diagnostic::Diagnostic {
-    let retained_name = tree.texts.at(type_name_handle.node);
-    let source_type_name = retained_name.as_bytes();
-    let owned_type_name = try string::from_bytes(self.allocator, source_type_name);
-    defer owned_type_name.deinit(self.allocator);
-    let type_name = owned_type_name.as_bytes();
-    let handle = self.metadata.structs.get(type_name) orelse
-        return try self.unknown_struct_error(type_name);
-    match tree.declarations.at(handle.node) {
-        Struct(declaration) => {
-            if try self.require_unsafe_struct_invariant(
-                declaration,
-                type_name,
-                "construction of",
-                "",
-                span
-            ) |problem| {
-                return move problem;
-            }
-        },
-        _ => return try self.unknown_struct_error(type_name),
+) -> !bool {
+    var struct_idx = -1;
+    if self.lookup_struct_info_text(tree, type_name_handle) |found| {
+        struct_idx = found;
+    } else {
+        let problem = try self.unknown_struct_error(semantic_text(tree, type_name_handle));
+        return self.fail(move problem);
     }
-    var values = map::new<[]u8, CheckedStructField>(self.allocator);
-    defer values.deinit(self.allocator);
+    var maybe_decl: ?ast::Declaration = null;
+    var declared_count = 0;
+    var requires_unsafe = false;
+    var is_extern = false;
+    var is_std = false;
+    var module_id = -1;
+    if self.metadata.struct_infos.at(struct_idx) |info| {
+        maybe_decl = info.declaration;
+        declared_count = info.fields.len();
+        requires_unsafe = info.requires_unsafe;
+        is_extern = info.is_extern;
+        is_std = info.is_std;
+        module_id = info.module_id;
+    }
+    if maybe_decl |_| {} else {
+        let problem = try self.unknown_struct_error(semantic_text(tree, type_name_handle));
+        return self.fail(move problem);
+    }
+    let decl_handle = maybe_decl orelse return true;
+    if requires_unsafe {
+        match tree.declarations.at(decl_handle.node) {
+            Struct(declaration) => {
+                if try self.require_unsafe_struct_invariant(
+                    declaration,
+                    semantic_text(tree, type_name_handle),
+                    "construction of",
+                    "",
+                    span
+                ) |problem| {
+                    return self.fail(move problem);
+                }
+            },
+            _ => {
+                let problem = try self.unknown_struct_error(semantic_text(tree, type_name_handle));
+                return self.fail(move problem);
+            },
+        }
+    }
+    let slot_base = self.struct_literal_slots.len();
+    var init_index = 0;
+    while init_index < declared_count {
+        try self.struct_literal_slots.append(self.allocator, StructLiteralSlot {
+            present: false,
+            expression: expression,
+            typ: empty_type()
+        });
+        init_index = init_index + 1;
+    }
+    var unknown_written_index = -1;
     var written_index = 0;
     while written_index < field_count {
-        let struct_name = owned_type_name.as_bytes();
-        if try self.check_struct_literal_written_field(
-            tree,
-            scope,
-            expression,
-            written_index,
-            handle,
-            struct_name,
-            &var values
-        ) |problem| {
-            return move problem;
+        var field_name_handle = type_name_handle;
+        var field_value_expr = expression;
+        match tree.expressions.at(expression.node) {
+            StructLiteral(literal) => {
+                if literal.fields.at(written_index) |field| {
+                    field_name_handle = field.name;
+                    field_value_expr = field.value;
+                } else {
+                    self.pop_struct_literal_slots(slot_base);
+                    let problem = try self.checker_error_at(
+                        "type error", expression_span(tree, expression),
+                        "invalid struct literal field"
+                    );
+                    return self.fail(move problem);
+                }
+            },
+            _ => {
+                self.pop_struct_literal_slots(slot_base);
+                let problem = try self.checker_error_at(
+                    "type error", expression_span(tree, expression),
+                    "invalid struct literal field"
+                );
+                return self.fail(move problem);
+            },
+        }
+        let declared_idx = self.find_struct_field_index_text(tree, struct_idx, field_name_handle);
+        if declared_idx >= 0 {
+            var already_present = false;
+            if self.struct_literal_slots.at(slot_base + declared_idx) |slot| {
+                already_present = slot.present;
+            }
+            if already_present {
+                let type_bytes = semantic_text(tree, type_name_handle);
+                let field_bytes = semantic_text(tree, field_name_handle);
+                self.pop_struct_literal_slots(slot_base);
+                let problem = try self.struct_member_error("duplicate field", type_bytes, field_bytes);
+                return self.fail(move problem);
+            }
+        } else {
+            if self.has_duplicate_unknown_field(tree, expression, written_index, field_name_handle) {
+                let type_bytes = semantic_text(tree, type_name_handle);
+                let field_bytes = semantic_text(tree, field_name_handle);
+                self.pop_struct_literal_slots(slot_base);
+                let problem = try self.struct_member_error("duplicate field", type_bytes, field_bytes);
+                return self.fail(move problem);
+            }
+            if unknown_written_index < 0 {
+                unknown_written_index = written_index;
+            }
+        }
+        if self.editor.len() > 0 {
+            try self.record_literal_field(tree, decl_handle, field_name_handle, semantic_text(tree, field_name_handle));
+        }
+        var got = empty_type();
+        if expression_is_null(tree, field_value_expr) {
+            let copied_field = ast::FieldValue { name: field_name_handle, value: field_value_expr };
+            let owned_type_name = try string::from_bytes(self.allocator, semantic_text(tree, type_name_handle));
+            defer owned_type_name.deinit(self.allocator);
+            let owned_type_bytes = owned_type_name.as_bytes();
+            if try self.check_struct_literal_field_value(
+                tree,
+                scope,
+                decl_handle,
+                owned_type_bytes,
+                &copied_field,
+                &var got
+            ) |problem| {
+                self.pop_struct_literal_slots(slot_base);
+                return self.fail(move problem);
+            }
+        } else {
+            if try self.check_expr_ok(tree, scope, field_value_expr, &var got) {
+                self.pop_struct_literal_slots(slot_base);
+                return true;
+            }
+        }
+        if declared_idx >= 0 {
+            if self.struct_literal_slots.at_mut(slot_base + declared_idx) |slot| {
+                slot.present = true;
+                slot.expression = field_value_expr;
+                slot.typ = got;
+            }
         }
         written_index = written_index + 1;
     }
-    match tree.declarations.at(handle.node) {
-        Struct(declaration) => {
-            var field_index = 0;
-            while declaration.fields.at(field_index) |field| {
-                let retained_field_name = tree.texts.at(field.name.node);
-                let field_name = retained_field_name.as_bytes();
-                let checked = values.get(field_name);
-                if checked |_| {} else {
-                    return try self.struct_member_error("missing field", type_name, field_name);
-                }
-                if try self.check_private_field_access(tree, type_name, field) |problem| {
-                    return move problem;
-                }
-                var want = empty_type();
-                match try self.resolve_instance_field_type(tree, field) {
-                    Value(value) => {
-                        want = value;
-                    },
-                    Issue(issue) => return try self.type_resolution_diagnostic(issue),
-                }
-                let checked_field = checked orelse return try self.struct_member_error(
-                    "missing field", type_name, field_name
-                );
-                var got = empty_type();
-                if try self.coerce_contextual_literal(
-                    tree,
-                    checked_field.expression,
-                    want,
-                    checked_field.typ,
-                    &var got
-                ) |problem| {
-                    return move problem;
-                }
-                var matches = false;
-                if try self.struct_literal_field_matches(
-                    tree,
-                    scope,
-                    checked_field.expression,
-                    want,
-                    got,
-                    &var matches
-                ) |problem| {
-                    return move problem;
-                }
-                if !matches {
-                    return try self.struct_field_type_error(type_name, field_name, want, got);
-                }
-                field_index = field_index + 1;
-            }
-            var value_index = 0;
-            while values.key_at(value_index) |field_name| {
-                if !struct_declares_field(tree, declaration, field_name) {
-                    return try self.struct_member_error("unknown field", type_name, field_name);
-                }
-                value_index = value_index + 1;
-            }
-        },
-        _ => return try self.unknown_struct_error(type_name),
+    let current_module = self.current_module_id();
+    let in_std = self.checking_std_body();
+    var has_subst = false;
+    if self.type_args.current |_| {
+        has_subst = true;
     }
-    out.* = try self.types.intern(type_name);
-    return null;
+    if self.meta_bindings.current |_| {
+        has_subst = true;
+    }
+    var field_index = 0;
+    while field_index < declared_count {
+        var slot_present = false;
+        var slot_expr = expression;
+        var slot_typ = empty_type();
+        if self.struct_literal_slots.at(slot_base + field_index) |slot| {
+            slot_present = slot.present;
+            slot_expr = slot.expression;
+            slot_typ = slot.typ;
+        }
+        var field_name_handle = type_name_handle;
+        var field_public = false;
+        var cached_type = empty_type();
+        if self.metadata.struct_infos.at(struct_idx) |info| {
+            if info.fields.at(field_index) |field| {
+                field_name_handle = field.name;
+                field_public = field.public;
+                cached_type = field.resolved_type;
+            }
+        }
+        if !slot_present {
+            let type_bytes = semantic_text(tree, type_name_handle);
+            let field_bytes = semantic_text(tree, field_name_handle);
+            self.pop_struct_literal_slots(slot_base);
+            let problem = try self.struct_member_error("missing field", type_bytes, field_bytes);
+            return self.fail(move problem);
+        }
+        let accessible = field_public or is_extern or
+            (is_std and in_std) or
+            (!is_std and (module_id < 0 or module_id == current_module));
+        if !accessible {
+            let type_bytes = semantic_text(tree, type_name_handle);
+            let field_bytes = semantic_text(tree, field_name_handle);
+            self.pop_struct_literal_slots(slot_base);
+            let problem = try self.private_field_error(type_bytes, field_bytes);
+            return self.fail(move problem);
+        }
+        var want = cached_type;
+        var need_resolve = has_subst;
+        if want.node |_| {} else {
+            need_resolve = true;
+        }
+        if need_resolve {
+            match tree.declarations.at(decl_handle.node) {
+                Struct(declaration) => {
+                    if declaration.fields.at(field_index) |field| {
+                        match try self.resolve_instance_field_type(tree, field) {
+                            Value(value) => {
+                                want = value;
+                            },
+                            Issue(issue) => {
+                                self.pop_struct_literal_slots(slot_base);
+                                let problem = try self.type_resolution_diagnostic(issue);
+                                return self.fail(move problem);
+                            },
+                        }
+                    }
+                },
+                _ => {},
+            }
+        }
+        if !same_type(slot_typ, want) {
+            var got = empty_type();
+            if try self.coerce_contextual_literal(
+                tree,
+                slot_expr,
+                want,
+                slot_typ,
+                &var got
+            ) |problem| {
+                self.pop_struct_literal_slots(slot_base);
+                return self.fail(move problem);
+            }
+            var matches = false;
+            if try self.struct_literal_field_matches(
+                tree,
+                scope,
+                slot_expr,
+                want,
+                got,
+                &var matches
+            ) |problem| {
+                self.pop_struct_literal_slots(slot_base);
+                return self.fail(move problem);
+            }
+            if !matches {
+                let type_bytes = semantic_text(tree, type_name_handle);
+                let field_bytes = semantic_text(tree, field_name_handle);
+                self.pop_struct_literal_slots(slot_base);
+                let problem = try self.struct_field_type_error(type_bytes, field_bytes, want, got);
+                return self.fail(move problem);
+            }
+        }
+        field_index = field_index + 1;
+    }
+    self.pop_struct_literal_slots(slot_base);
+    if unknown_written_index >= 0 {
+        match tree.expressions.at(expression.node) {
+            StructLiteral(literal) => {
+                if literal.fields.at(unknown_written_index) |unknown_field| {
+                    let type_bytes = semantic_text(tree, type_name_handle);
+                    let field_bytes = semantic_text(tree, unknown_field.name);
+                    let problem = try self.struct_member_error("unknown field", type_bytes, field_bytes);
+                    return self.fail(move problem);
+                }
+            },
+            _ => {},
+        }
+    }
+    let final_type_name = semantic_text(tree, type_name_handle);
+    out.* = try self.types.intern(final_type_name);
+    return false;
 }
 
-fn (self: &var Checker) check_struct_literal_written_field(
-    tree: &var ast::Ast,
-    scope: ScopeHandle,
-    expression: ast::Expression,
-    index: i64,
-    declaration: ast::Declaration,
+fn (self: &Checker) private_field_error(
     type_name: []u8,
-    values: &var map::Map<[]u8, CheckedStructField>
-) -> !?diagnostic::Diagnostic {
-    match tree.expressions.at(expression.node) {
-        StructLiteral(literal) => {
-            if literal.fields.at(index) |field| {
-                let copied = ast::FieldValue {
-                    name: field.name,
-                    value: field.value
-                };
-                return self.check_struct_literal_written_value(self.allocator,
-                    tree,
-                    scope,
-                    declaration,
-                    type_name,
-                    &copied,
-                    values
-                );
-            }
-        },
-        _ => {},
-    }
-    return try self.checker_error_at(
-        "type error", expression_span(tree, expression),
-        "invalid struct literal field"
-    );
-}
-
-fn (self: &var Checker) check_struct_literal_written_value(
-    allocator: Allocator,
-    tree: &var ast::Ast,
-    scope: ScopeHandle,
-    declaration: ast::Declaration,
-    type_name: []u8,
-    field: &ast::FieldValue,
-    values: &var map::Map<[]u8, CheckedStructField>
-) -> !?diagnostic::Diagnostic {
-    let retained_name = tree.texts.at(field.name.node);
-    let source_name = retained_name.as_bytes();
-    let owned_name = try string::from_bytes(self.allocator, source_name);
-    defer owned_name.deinit(self.allocator);
-    let field_name = owned_name.as_bytes();
-    if values.contains(field_name) {
-        return try self.struct_member_error("duplicate field", type_name, field_name);
-    }
-    if self.editor.len() > 0 {
-        try self.record_literal_field(tree, declaration, field.name, field_name);
-    }
-    var got = empty_type();
-    if try self.check_struct_literal_field_value(
-        tree,
-        scope,
-        declaration,
-        type_name,
-        field,
-        &var got
-    ) |problem| {
-        return move problem;
-    }
-    try values.insert(allocator, field_name, CheckedStructField {
-        expression: field.value,
-        typ: got
-    });
-    return null;
+    field_name: []u8
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit(self.allocator);
+    try message.append_bytes(self.allocator, "field `");
+    try message.append_bytes(self.allocator, type_name);
+    try message.append_byte(self.allocator, cast<u8>(46));
+    try message.append_bytes(self.allocator, field_name);
+    try message.append_bytes(self.allocator, "` is private");
+    return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
 fn (self: &Checker) unknown_struct_error(name: []u8) -> !diagnostic::Diagnostic {
@@ -245,19 +408,6 @@ fn (self: &Checker) struct_member_error(
     try message.append_bytes(self.allocator, field_name);
     try message.append_byte(self.allocator, cast<u8>(96));
     return self.checker_message_at("type error", ast::zero_span(), move message);
-}
-
-fn struct_declares_field(tree: &ast::Ast, declaration: &ast::StructDecl, name: []u8) -> bool {
-    var index = 0;
-    while declaration.fields.at(index) |field| {
-        let retained = tree.texts.at(field.name.node);
-        let field_name = retained.as_bytes();
-        if mem::equal_bytes(field_name, name) {
-            return true;
-        }
-        index = index + 1;
-    }
-    return false;
 }
 
 fn (self: &var Checker) resolve_instance_field_type(
@@ -378,96 +528,201 @@ fn (self: &Checker) struct_field_type_error(
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-fn (self: &var Checker) check_field_expr(
-    tree: &var ast::Ast,
-    scope: ScopeHandle,
-    expression: &ast::FieldExpr,
-    out: &var Type
-) -> !?diagnostic::Diagnostic {
-    return self.resolve_field_expr(tree, scope, expression, false, out);
+fn (self: &var Checker) check_namespace_receiver_dot_error(
+    tree: &ast::Ast,
+    expression: &ast::FieldExpr
+) -> !bool {
+    if self.metadata.namespaces.len() == 0 {
+        return false;
+    }
+    match tree.expressions.at(expression.receiver.node) {
+        Ident(identifier) => {
+            let name = semantic_text(tree, identifier.name);
+            if self.metadata.namespaces.get(name) |entry| {
+                let member = semantic_text(tree, expression.name);
+                match entry {
+                    Enum(handle) => {
+                        if self.metadata.enums.at(handle.index) |tagged| {
+                            let enum_name = semantic_text(tree, tagged.name);
+                            let problem = try self.namespace_separator_error(
+                                "enum tag", enum_name, member
+                            );
+                            return self.fail(move problem);
+                        }
+                    },
+                    ErrorSet(handle) => {
+                        if self.metadata.error_sets.at(handle.index) |set| {
+                            let set_name = semantic_text(tree, set.name);
+                            let problem = try self.namespace_separator_error(
+                                "error", set_name, member
+                            );
+                            return self.fail(move problem);
+                        }
+                    },
+                    Union(handle) => {
+                        if self.metadata.unions.at(handle.index) |tagged| {
+                            let union_name = tagged.name.as_bytes();
+                            let problem = try self.namespace_separator_error(
+                                "union variant", union_name, member
+                            );
+                            return self.fail(move problem);
+                        }
+                    },
+                }
+            }
+            return false;
+        },
+        Field(recv_field) => {
+            if !recv_field.namespace {
+                return false;
+            }
+            if try self.error_set_receiver(tree, expression.receiver) |handle| {
+                if self.metadata.error_sets.at(handle.index) |set| {
+                    let name = semantic_text(tree, set.name);
+                    let member = semantic_text(tree, expression.name);
+                    let problem = try self.namespace_separator_error("error", name, member);
+                    return self.fail(move problem);
+                }
+            }
+            return false;
+        },
+        _ => return false,
+    }
 }
 
-fn (self: &var Checker) resolve_field_expr(
+fn (self: &var Checker) resolve_field_expr_ok(
     tree: &var ast::Ast,
     scope: ScopeHandle,
     expression: &ast::FieldExpr,
     write: bool,
     out: &var Type
-) -> !?diagnostic::Diagnostic {
+) -> !bool {
     if expression.namespace {
-        return self.check_namespace_expr(tree, expression, out);
-    }
-    if self.enum_receiver(tree, expression.receiver) |handle| {
-        if self.metadata.enums.at(handle.index) |tagged| {
-            let retained = tree.texts.at(tagged.name.node);
-            let name = retained.as_bytes();
-            let field_name = tree.texts.at(expression.name.node);
-            let member = field_name.as_bytes();
-            return try self.namespace_separator_error("enum tag", name, member);
+        if try self.check_namespace_expr(tree, expression, out) |problem| {
+            return self.fail(move problem);
         }
+        return false;
     }
-    if try self.error_set_receiver(tree, expression.receiver) |handle| {
-        if self.metadata.error_sets.at(handle.index) |set| {
-            let retained = tree.texts.at(set.name.node);
-            let name = retained.as_bytes();
-            let field_name = tree.texts.at(expression.name.node);
-            let member = field_name.as_bytes();
-            return try self.namespace_separator_error("error", name, member);
-        }
-    }
-    if self.union_receiver(tree, expression.receiver) |handle| {
-        if self.metadata.unions.at(handle.index) |tagged| {
-            let name = tagged.name.as_bytes();
-            let field_name = tree.texts.at(expression.name.node);
-            let member = field_name.as_bytes();
-            return try self.namespace_separator_error("union variant", name, member);
-        }
+    if try self.check_namespace_receiver_dot_error(tree, expression) {
+        return true;
     }
     var receiver = empty_type();
-    if try self.check_expr(tree, scope, expression.receiver, &var receiver) |problem| {
-        return move problem;
+    if try self.check_expr_ok(tree, scope, expression.receiver, &var receiver) {
+        return true;
     }
     receiver = try self.types.borrowed_value_type(receiver);
-    let retained_field_name = tree.texts.at(expression.name.node);
-    let field_name = retained_field_name.as_bytes();
-    if self.types.is_text(receiver, "std::fs::Metadata") {
-        return self.check_fs_metadata_field(field_name, out);
+    let struct_idx = try self.struct_index_for_type(receiver);
+    let field_name = semantic_text(tree, expression.name);
+    if struct_idx < 0 {
+        if self.types.is_text(receiver, "std::fs::Metadata") {
+            if try self.check_fs_metadata_field(field_name, out) |problem| {
+                return self.fail(move problem);
+            }
+            return false;
+        }
+        if self.types.is_text(receiver, "std::fs::DirEntry") {
+            if try self.check_fs_dir_entry_field(field_name, out) |problem| {
+                return self.fail(move problem);
+            }
+            return false;
+        }
+        let problem = try self.no_fields_error(receiver);
+        return self.fail(move problem);
     }
-    if self.types.is_text(receiver, "std::fs::DirEntry") {
-        return self.check_fs_dir_entry_field(field_name, out);
+    let field_index = self.find_struct_field_index(tree, struct_idx, field_name);
+    if field_index < 0 {
+        let problem = try self.unknown_field_error(receiver, field_name);
+        return self.fail(move problem);
     }
-    let receiver_text = try self.types.copy_text(self.allocator, receiver);
-    defer receiver_text.deinit(self.allocator);
-    let receiver_name = receiver_text.as_bytes();
-    let declaration = self.metadata.structs.get(receiver_name) orelse
-        return try self.no_fields_error(receiver);
-    match tree.declarations.at(declaration.node) {
-        Struct(value) => {
-            var index = 0;
-            while value.fields.at(index) |field| {
-                let retained = tree.texts.at(field.name.node);
-                let name = retained.as_bytes();
-                if mem::equal_bytes(name, field_name) {
-                    if try self.check_private_field_access(tree, receiver_name, field) |problem| {
-                        return move problem;
-                    }
+    var maybe_decl: ?ast::Declaration = null;
+    var struct_name_handle = expression.name;
+    var field_name_handle = expression.name;
+    var field_public = false;
+    var is_extern = false;
+    var is_std = false;
+    var requires_unsafe = false;
+    var module_id = -1;
+    var cached_type = empty_type();
+    if self.metadata.struct_infos.at(struct_idx) |info| {
+        maybe_decl = info.declaration;
+        struct_name_handle = info.name;
+        is_extern = info.is_extern;
+        is_std = info.is_std;
+        requires_unsafe = info.requires_unsafe;
+        module_id = info.module_id;
+        if info.fields.at(field_index) |field| {
+            field_name_handle = field.name;
+            field_public = field.public;
+            cached_type = field.resolved_type;
+        }
+    }
+    if maybe_decl |_| {} else {
+        let problem = try self.no_fields_error(receiver);
+        return self.fail(move problem);
+    }
+    let decl_handle = maybe_decl orelse return true;
+    let accessible = field_public or is_extern or
+        (is_std and self.checking_std_body()) or
+        (!is_std and (module_id < 0 or module_id == self.current_module_id()));
+    if !accessible {
+        let type_bytes = semantic_text(tree, struct_name_handle);
+        let problem = try self.private_field_error(type_bytes, field_name);
+        return self.fail(move problem);
+    }
+    var field_type = cached_type;
+    var need_resolve = false;
+    if self.type_args.current |_| {
+        need_resolve = true;
+    }
+    if self.meta_bindings.current |_| {
+        need_resolve = true;
+    }
+    if field_type.node |_| {} else {
+        need_resolve = true;
+    }
+    if need_resolve {
+        match tree.declarations.at(decl_handle.node) {
+            Struct(value) => {
+                if value.fields.at(field_index) |field| {
                     match try self.resolve_instance_field_type(tree, field) {
-                        Value(field_type) => {
-                            out.* = field_type;
-                            if self.editor.len() > 0 {
-                                try self.record_reference(tree.text_span(expression.name), tree.text_span(field.name), write);
-                            }
-                            return null;
+                        Value(resolved) => {
+                            field_type = resolved;
                         },
-                        Issue(issue) => return try self.type_resolution_diagnostic(issue),
+                        Issue(issue) => {
+                            let problem = try self.type_resolution_diagnostic(issue);
+                            return self.fail(move problem);
+                        },
                     }
                 }
-                index = index + 1;
-            }
-        },
-        _ => return try self.no_fields_error(receiver),
+            },
+            _ => {
+                let problem = try self.no_fields_error(receiver);
+                return self.fail(move problem);
+            },
+        }
     }
-    return try self.unknown_field_error(receiver, field_name);
+    if write and requires_unsafe {
+        match tree.declarations.at(decl_handle.node) {
+            Struct(declaration) => {
+                let type_bytes = semantic_text(tree, declaration.name);
+                if try self.require_unsafe_struct_invariant(
+                    declaration,
+                    type_bytes,
+                    "write to field",
+                    field_name,
+                    expression.span
+                ) |problem| {
+                    return self.fail(move problem);
+                }
+            },
+            _ => {},
+        }
+    }
+    out.* = field_type;
+    if self.editor.len() > 0 {
+        try self.record_reference(tree.text_span(expression.name), tree.text_span(field_name_handle), write);
+    }
+    return false;
 }
 
 fn (self: &Checker) namespace_separator_error(
@@ -486,42 +741,8 @@ fn (self: &Checker) namespace_separator_error(
     return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
-fn (self: &Checker) check_private_field_access(
-    tree: &ast::Ast,
-    type_name: []u8,
-    field: &ast::Field
-) -> !?diagnostic::Diagnostic {
-    if field.public or self.is_extern_struct_name(tree, type_name) or
-        (is_std_type_name(type_name) and self.checking_std_body()) or
-        (!is_std_type_name(type_name) and
-        self.same_user_module(type_name)) {
-        return null;
-    }
-    let retained = tree.texts.at(field.name.node);
-    let field_name = retained.as_bytes();
-    var message = string::new(self.allocator);
-    errdefer message.deinit(self.allocator);
-    try message.append_bytes(self.allocator, "field `");
-    try message.append_bytes(self.allocator, type_name);
-    try message.append_byte(self.allocator, cast<u8>(46));
-    try message.append_bytes(self.allocator, field_name);
-    try message.append_bytes(self.allocator, "` is private");
-    return try self.checker_message_at("type error", ast::zero_span(), move message);
-}
-
 fn is_std_type_name(name: []u8) -> bool {
     return mem::starts_with(name, "std::");
-}
-
-fn (self: &Checker) same_user_module(type_name: []u8) -> bool {
-    let type_end = user_module_end(type_name) orelse return true;
-    let function_handle = self.current_function_handle() orelse return false;
-    if self.metadata.functions.at(function_handle.index) |function| {
-        let function_name = function.name.as_bytes();
-        let function_end = user_module_end(function_name) orelse return false;
-        return mem::equal_bytes(function_name[0..function_end], type_name[0..type_end]);
-    }
-    return false;
 }
 
 fn user_module_end(name: []u8) -> ?i64 {

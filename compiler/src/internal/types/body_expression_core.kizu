@@ -6,56 +6,148 @@ import std::fmt;
 import std::mem;
 import std::string;
 
+enum BinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    And,
+    Or,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+    Orelse,
+    Catch,
+    Other,
+}
+
+fn classify_binary_op(op: []u8) -> BinaryOp {
+    let n = mem::len(op);
+    if n == 1 {
+        let b = op[0];
+        if b == cast<u8>(43) { return BinaryOp::Add; }
+        if b == cast<u8>(45) { return BinaryOp::Sub; }
+        if b == cast<u8>(42) { return BinaryOp::Mul; }
+        if b == cast<u8>(47) { return BinaryOp::Div; }
+        if b == cast<u8>(37) { return BinaryOp::Mod; }
+        if b == cast<u8>(60) { return BinaryOp::Lt; }
+        if b == cast<u8>(62) { return BinaryOp::Gt; }
+        if b == cast<u8>(38) { return BinaryOp::BitAnd; }
+        if b == cast<u8>(124) { return BinaryOp::BitOr; }
+        if b == cast<u8>(94) { return BinaryOp::BitXor; }
+        return BinaryOp::Other;
+    }
+    if n == 2 {
+        if mem::equal_bytes(op, "==") { return BinaryOp::Eq; }
+        if mem::equal_bytes(op, "!=") { return BinaryOp::Ne; }
+        if mem::equal_bytes(op, "<=") { return BinaryOp::Le; }
+        if mem::equal_bytes(op, ">=") { return BinaryOp::Ge; }
+        if mem::equal_bytes(op, "or") { return BinaryOp::Or; }
+        if mem::equal_bytes(op, "<<") { return BinaryOp::Shl; }
+        if mem::equal_bytes(op, ">>") { return BinaryOp::Shr; }
+        return BinaryOp::Other;
+    }
+    if mem::equal_bytes(op, "and") { return BinaryOp::And; }
+    if mem::equal_bytes(op, "orelse") { return BinaryOp::Orelse; }
+    if mem::equal_bytes(op, "catch") { return BinaryOp::Catch; }
+    return BinaryOp::Other;
+}
+
+fn binary_op_text(op: BinaryOp) -> []u8 {
+    return match op {
+        Add => "+",
+        Sub => "-",
+        Mul => "*",
+        Div => "/",
+        Mod => "%",
+        Eq => "==",
+        Ne => "!=",
+        Lt => "<",
+        Le => "<=",
+        Gt => ">",
+        Ge => ">=",
+        And => "and",
+        Or => "or",
+        BitAnd => "&",
+        BitOr => "|",
+        BitXor => "^",
+        Shl => "<<",
+        Shr => ">>",
+        Orelse => "orelse",
+        Catch => "catch",
+        Other => "",
+    };
+}
+
 fn (self: &var Checker) check_expr(
     tree: &var ast::Ast,
     scope: ScopeHandle,
     expression: ast::Expression,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
-    if try self.check_expr_form(tree, scope, expression, out) |problem| {
-        if self.checking_std() {
-            return move problem;
-        }
-        return diagnostic::locate(move problem, expression_span(tree, expression));
-    }
-    if self.editor.len() > 0 {
-        try self.record_expression(tree.expression_extent(expression), out.*);
+    if try self.check_expr_ok(tree, scope, expression, out) {
+        return self.take_failure();
     }
     return null;
 }
 
-fn (self: &var Checker) check_expr_form(
+fn (self: &var Checker) check_expr_ok(
     tree: &var ast::Ast,
     scope: ScopeHandle,
     expression: ast::Expression,
     out: &var Type
-) -> !?diagnostic::Diagnostic {
-    if try ast::copy_vector_literal(self.allocator, tree, expression) |literal| {
-        defer literal.deinit(self.allocator);
-        return self.check_vector_literal_expr(tree, scope, &literal, out);
+) -> !bool {
+    if try self.check_expr_form_ok(tree, scope, expression, out) {
+        if !self.checking_std() {
+            self.locate_failure(expression_span(tree, expression));
+        }
+        return true;
     }
-    if try ast::copy_array_literal(self.allocator, tree, expression) |literal| {
-        defer literal.deinit(self.allocator);
-        return self.check_array_literal_expr(tree, scope, &literal, out);
+    if self.editor.len() > 0 {
+        try self.record_expression(tree.expression_extent(expression), out.*);
     }
+    return false;
+}
+
+fn (self: &var Checker) check_expr_form_ok(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    expression: ast::Expression,
+    out: &var Type
+) -> !bool {
     match tree.expressions.at(expression.node) {
-        Int(_) => return self.check_scalar_expr(tree, expression, out),
-        Float(_) => return self.check_scalar_expr(tree, expression, out),
-        String(_) => return self.check_scalar_expr(tree, expression, out),
-        CString(_) => return self.check_scalar_expr(tree, expression, out),
-        Bool(_) => return self.check_scalar_expr(tree, expression, out),
-        Type(_) => return self.check_scalar_expr(tree, expression, out),
-        Null(_) => return self.check_scalar_expr(tree, expression, out),
+        Int(_) => return self.check_scalar_expr_ok(tree, expression, out),
+        Float(_) => return self.check_scalar_expr_ok(tree, expression, out),
+        String(_) => return self.check_scalar_expr_ok(tree, expression, out),
+        CString(_) => return self.check_scalar_expr_ok(tree, expression, out),
+        Bool(_) => return self.check_scalar_expr_ok(tree, expression, out),
+        Type(_) => return self.check_scalar_expr_ok(tree, expression, out),
+        Null(_) => return self.check_scalar_expr_ok(tree, expression, out),
         Comptime(value) => {
             let copied = ast::ComptimeExpr { expr: value.expr };
-            return self.check_comptime_expr(tree, scope, &copied, out);
+            if try self.check_comptime_expr(tree, scope, &copied, out) |problem| {
+                return self.fail(move problem);
+            }
+            return false;
         },
-        Ident(value) => return self.check_ident_expr(tree, scope, value, out),
+        Ident(value) => return self.check_ident_expr_ok(tree, scope, value, out),
         Prefix(value) => {
             let copied = ast::PrefixExpr {
                 operator: value.operator, right: value.right
             };
-            return self.check_prefix_expr(tree, scope, &copied, out);
+            if try self.check_prefix_expr(tree, scope, &copied, out) |problem| {
+                return self.fail(move problem);
+            }
+            return false;
         },
         Binary(value) => {
             let copied = ast::BinaryExpr {
@@ -64,38 +156,50 @@ fn (self: &var Checker) check_expr_form(
                 operator_span: value.operator_span,
                 right: value.right
             };
-            return self.check_binary_expr(tree, scope, &copied, out);
+            return self.check_binary_expr_ok(tree, scope, &copied, out);
         },
         Call(value) => {
             let copied = ast::CallExpr {
                 callee: value.callee, args: value.args
             };
-            return self.check_call_expr(tree, scope, &copied, out);
+            return self.check_call_expr_ok(tree, scope, &copied, out);
         },
-        TypeApply(_) => return try self.checker_error_at(
-            "type error", expression_span(tree, expression),
-            "unsupported expression TypeApply"
-        ),
+        TypeApply(_) => {
+            let problem = try self.checker_error_at(
+                "type error", expression_span(tree, expression),
+                "unsupported expression TypeApply"
+            );
+            return self.fail(move problem);
+        },
         Cast(value) => {
             let copied = ast::CastExpr {
                 target_type: value.target_type,
                 value: value.value,
                 keyword_span: value.keyword_span
             };
-            return self.check_cast_expr(tree, scope, &copied, out);
+            if try self.check_cast_expr(tree, scope, &copied, out) |problem| {
+                return self.fail(move problem);
+            }
+            return false;
         },
         Try(value) => {
             let copied = ast::TryExpr { value: value.value };
-            return self.check_try_expr(tree, scope, &copied, out);
+            if try self.check_try_expr(tree, scope, &copied, out) |problem| {
+                return self.fail(move problem);
+            }
+            return false;
         },
         Unsafe(value) => {
             let copied = ast::UnsafeExpr {
                 value: value.value,
                 span: value.span
             };
-            return self.check_unsafe_expr(tree, scope, &copied, out);
+            if try self.check_unsafe_expr(tree, scope, &copied, out) |problem| {
+                return self.fail(move problem);
+            }
+            return false;
         },
-        Move(value) => return self.check_expr(tree, scope, value.value, out),
+        Move(value) => return self.check_expr_ok(tree, scope, value.value, out),
         Index(value) => {
             let copied = ast::IndexExpr {
                 target: value.target,
@@ -105,13 +209,36 @@ fn (self: &var Checker) check_expr_form(
                 slice: value.slice,
                 span: value.span
             };
-            return self.check_index_expr(tree, scope, &copied, out);
+            if try self.check_index_expr(tree, scope, &copied, out) |problem| {
+                return self.fail(move problem);
+            }
+            return false;
         },
-        StructLiteral(_) => return self.check_struct_literal_expr(tree, scope, expression, out),
-        VectorLiteral(_) => return try self.checker_error_at(
-            "type error", ast::zero_span(), "vector literal reached the node dispatch"),
-        BufferLiteral(_) => return try self.checker_error_at(
-            "type error", ast::zero_span(), "array literal reached the node dispatch"),
+        StructLiteral(_) => return self.check_struct_literal_expr_ok(tree, scope, expression, out),
+        VectorLiteral(_) => {
+            if try ast::copy_vector_literal(self.allocator, tree, expression) |literal| {
+                defer literal.deinit(self.allocator);
+                if try self.check_vector_literal_expr(tree, scope, &literal, out) |problem| {
+                    return self.fail(move problem);
+                }
+                return false;
+            }
+            let problem = try self.checker_error_at(
+                "type error", ast::zero_span(), "vector literal reached the node dispatch");
+            return self.fail(move problem);
+        },
+        BufferLiteral(_) => {
+            if try ast::copy_array_literal(self.allocator, tree, expression) |literal| {
+                defer literal.deinit(self.allocator);
+                if try self.check_array_literal_expr(tree, scope, &literal, out) |problem| {
+                    return self.fail(move problem);
+                }
+                return false;
+            }
+            let problem = try self.checker_error_at(
+                "type error", ast::zero_span(), "array literal reached the node dispatch");
+            return self.fail(move problem);
+        },
         Field(value) => {
             let copied = ast::FieldExpr {
                 receiver: value.receiver,
@@ -119,20 +246,48 @@ fn (self: &var Checker) check_expr_form(
                 namespace: value.namespace,
                 span: value.span
             };
-            return self.check_field_expr(tree, scope, &copied, out);
+            return self.resolve_field_expr_ok(tree, scope, &copied, false, out);
         },
         Deref(value) => {
             let copied = ast::DerefExpr {
                 receiver: value.receiver,
                 operator_span: value.operator_span
             };
-            return self.check_deref_expr(tree, scope, &copied, out);
+            if try self.check_deref_expr(tree, scope, &copied, out) |problem| {
+                return self.fail(move problem);
+            }
+            return false;
         },
-        If(_) => return self.check_control_expr(tree, scope, expression, out),
-        Match(_) => return self.check_control_expr(tree, scope, expression, out),
-        OrelseGuard(_) => return self.check_control_expr(tree, scope, expression, out),
-        CatchGuard(_) => return self.check_control_expr(tree, scope, expression, out),
-        Recovered(_) => return self.check_control_expr(tree, scope, expression, out),
+        If(_) => {
+            if try self.check_control_expr(tree, scope, expression, out) |problem| {
+                return self.fail(move problem);
+            }
+            return false;
+        },
+        Match(_) => {
+            if try self.check_control_expr(tree, scope, expression, out) |problem| {
+                return self.fail(move problem);
+            }
+            return false;
+        },
+        OrelseGuard(_) => {
+            if try self.check_control_expr(tree, scope, expression, out) |problem| {
+                return self.fail(move problem);
+            }
+            return false;
+        },
+        CatchGuard(_) => {
+            if try self.check_control_expr(tree, scope, expression, out) |problem| {
+                return self.fail(move problem);
+            }
+            return false;
+        },
+        Recovered(_) => {
+            if try self.check_control_expr(tree, scope, expression, out) |problem| {
+                return self.fail(move problem);
+            }
+            return false;
+        },
     }
 }
 
@@ -258,21 +413,11 @@ fn (self: &Checker) unary_type_error(
 }
 
 fn (self: &Checker) checker_signed_numeric_type(value: Type) -> bool {
-    if value.node |handle| {
-        let entry = self.types.entries.at(handle);
-        let bytes = entry.spelling.as_bytes();
-        return is_signed_numeric_type(bytes);
-    }
-    return false;
+    return self.types.is_signed_numeric_fast(value);
 }
 
 fn (self: &Checker) checker_numeric_type(value: Type) -> bool {
-    if value.node |handle| {
-        let entry = self.types.entries.at(handle);
-        let bytes = entry.spelling.as_bytes();
-        return is_numeric_type(bytes);
-    }
-    return false;
+    return self.types.is_numeric_fast(value);
 }
 
 fn is_borrow_prefix(tree: &ast::Ast, expression: ast::Expression) -> bool {
@@ -297,87 +442,118 @@ fn (self: &var Checker) borrow_operand_of_bit_and(span: ast::Span) -> !?diagnost
     return try self.checker_text_diagnostic_at(span, move message);
 }
 
-fn (self: &var Checker) check_binary_expr(
+fn (self: &var Checker) check_binary_expr_ok(
     tree: &var ast::Ast,
     scope: ScopeHandle,
     expression: &ast::BinaryExpr,
     out: &var Type
-) -> !?diagnostic::Diagnostic {
-    let retained = tree.texts.at(expression.operator.node);
-    let source_operator = retained.as_bytes();
-    let owned_operator = try string::from_bytes(self.allocator, source_operator);
-    defer owned_operator.deinit(self.allocator);
-    let operator = owned_operator.as_bytes();
-    if mem::equal_bytes(operator, "orelse") {
-        return self.check_orelse_expr(tree, scope, expression, out);
+) -> !bool {
+    let op = classify_binary_op(semantic_text(tree, expression.operator));
+    if op == BinaryOp::Orelse {
+        if try self.check_orelse_expr(tree, scope, expression, out) |problem| {
+            return self.fail(move problem);
+        }
+        return false;
     }
-    if mem::equal_bytes(operator, "catch") {
-        return self.check_catch_expr(tree, scope, expression, out);
+    if op == BinaryOp::Catch {
+        if try self.check_catch_expr(tree, scope, expression, out) |problem| {
+            return self.fail(move problem);
+        }
+        return false;
     }
     var left = empty_type();
-    if try self.check_expr(tree, scope, expression.left, &var left) |problem| {
-        return move problem;
+    if try self.check_expr_ok(tree, scope, expression.left, &var left) {
+        return true;
     }
     var right = empty_type();
-    if try self.check_expr(tree, scope, expression.right, &var right) |problem| {
-        return move problem;
+    if try self.check_expr_ok(tree, scope, expression.right, &var right) {
+        return true;
     }
-    if mem::equal_bytes(operator, "and") or
-        mem::equal_bytes(operator, "or") {
-        return self.check_logical(operator, left, right, expression.operator_span, out);
-    }
-    if try self.coerce_binary_literal(tree, expression, &var left, &var right) |problem| {
-        return move problem;
-    }
-    if try self.is_vector_type(left) or try self.is_vector_type(right) {
-        return self.check_vector_operands(operator, left, right, expression.operator_span, out);
-    }
-    if mem::equal_bytes(operator, "==") or
-        mem::equal_bytes(operator, "!=") {
-        return self.check_equality(operator, left, right, expression.operator_span, out);
-    }
-    if mem::equal_bytes(operator, "&") and is_borrow_prefix(tree, expression.right) {
-        return self.borrow_operand_of_bit_and(expression.operator_span);
+    if op == BinaryOp::And or op == BinaryOp::Or {
+        return self.check_logical_ok(binary_op_text(op), left, right, expression.operator_span, out);
     }
     if !same_type(left, right) {
-        return try self.operator_type_mismatch(operator, left, right, expression.operator_span);
-    }
-    if !self.checker_numeric_type(left) {
-        return try self.operator_operand_kind_error(
-            operator, "numeric", left, right, expression.operator_span
-        );
-    }
-    if (mem::equal_bytes(operator, "%") or is_bitwise(operator)) and
-        !self.checker_integer_type(left) {
-        return try self.operator_operand_kind_error(
-            operator, "integer", left, right, expression.operator_span
-        );
-    }
-    if is_shift(operator) {
-        if try self.check_shift_literal(tree, expression, operator) |problem| {
-            return move problem;
+        if try self.coerce_binary_literal(tree, expression, &var left, &var right) |problem| {
+            return self.fail(move problem);
         }
     }
-    if is_comparison(operator) {
+    if self.types.is_vector_fast(left) or self.types.is_vector_fast(right) {
+        let operator = if op == BinaryOp::Other {
+            semantic_text(tree, expression.operator)
+        } else {
+            binary_op_text(op)
+        };
+        if try self.check_vector_operands(operator, left, right, expression.operator_span, out) |problem| {
+            return self.fail(move problem);
+        }
+        return false;
+    }
+    if op == BinaryOp::Eq or op == BinaryOp::Ne {
+        return self.check_equality_ok(binary_op_text(op), left, right, expression.operator_span, out);
+    }
+    if op == BinaryOp::BitAnd and is_borrow_prefix(tree, expression.right) {
+        if try self.borrow_operand_of_bit_and(expression.operator_span) |problem| {
+            return self.fail(move problem);
+        }
+        return false;
+    }
+    if !same_type(left, right) {
+        let operator = if op == BinaryOp::Other {
+            semantic_text(tree, expression.operator)
+        } else {
+            binary_op_text(op)
+        };
+        let problem = try self.operator_type_mismatch(operator, left, right, expression.operator_span);
+        return self.fail(move problem);
+    }
+    if !self.types.is_numeric_fast(left) {
+        let operator = if op == BinaryOp::Other {
+            semantic_text(tree, expression.operator)
+        } else {
+            binary_op_text(op)
+        };
+        let problem = try self.operator_operand_kind_error(
+            operator, "numeric", left, right, expression.operator_span
+        );
+        return self.fail(move problem);
+    }
+    let is_int_only = match op {
+        Mod => true,
+        BitAnd => true,
+        BitOr => true,
+        BitXor => true,
+        Shl => true,
+        Shr => true,
+        _ => false,
+    };
+    if is_int_only and !self.types.is_integer_fast(left) {
+        let problem = try self.operator_operand_kind_error(
+            binary_op_text(op), "integer", left, right, expression.operator_span
+        );
+        return self.fail(move problem);
+    }
+    if op == BinaryOp::Shl or op == BinaryOp::Shr {
+        if try self.check_shift_literal(tree, expression, binary_op_text(op)) |problem| {
+            return self.fail(move problem);
+        }
+    }
+    let is_cmp = match op {
+        Lt => true,
+        Le => true,
+        Gt => true,
+        Ge => true,
+        _ => false,
+    };
+    if is_cmp {
         out.* = try self.types.bool_type();
-        return null;
+        return false;
     }
     out.* = left;
-    return null;
+    return false;
 }
 
 fn (self: &var Checker) vector_kind_of(value: Type) -> !i64 {
-    let text = try self.types.copy_text(self.allocator, value);
-    defer text.deinit(self.allocator);
-    let bytes = text.as_bytes();
-    return typ::vector_kind(bytes);
-}
-
-fn (self: &var Checker) is_vector_type(value: Type) -> !bool {
-    let text = try self.types.copy_text(self.allocator, value);
-    defer text.deinit(self.allocator);
-    let bytes = text.as_bytes();
-    return typ::is_vector(bytes);
+    return self.types.vector_kind_fast(value);
 }
 
 fn (self: &var Checker) check_vector_operands(
@@ -760,36 +936,54 @@ fn (self: &var Checker) check_contextual_expr(
     want: Type,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
+    if try self.check_contextual_expr_ok(tree, scope, expression, want, out) {
+        return self.take_failure();
+    }
+    return null;
+}
+
+fn (self: &var Checker) check_contextual_expr_ok(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    expression: ast::Expression,
+    want: Type,
+    out: &var Type
+) -> !bool {
     match tree.expressions.at(expression.node) {
         Null(_) => {
             if try self.types.takes_null(want) {
                 out.* = want;
-                return null;
+                return false;
             }
             var message = string::new(self.allocator);
             errdefer message.deinit(self.allocator);
             try message.append_bytes(self.allocator, "`null` needs an optional context, expected ");
             try self.append_checker_type(&var message, want);
-            return try self.checker_message_at("type error", ast::zero_span(), move message);
+            let problem = try self.checker_message_at("type error", ast::zero_span(), move message);
+            return self.fail(move problem);
         },
         _ => {},
     }
     var got = empty_type();
-    if try self.check_expr(tree, scope, expression, &var got) |problem| {
-        return move problem;
+    if try self.check_expr_ok(tree, scope, expression, &var got) {
+        return true;
+    }
+    if same_type(got, want) {
+        out.* = want;
+        return false;
     }
     if self.types.fills_nullable_pointer(want, got) {
         out.* = want;
-        return null;
+        return false;
     }
     if try self.types.optional_elem(want) |_| {
         var wrapped = false;
         if try self.wraps_into_optional(tree, expression, want, got, &var wrapped) |problem| {
-            return move problem;
+            return self.fail(move problem);
         }
         if wrapped {
             out.* = want;
-            return null;
+            return false;
         }
         var message = string::new(self.allocator);
         errdefer message.deinit(self.allocator);
@@ -797,9 +991,13 @@ fn (self: &var Checker) check_contextual_expr(
         try self.append_checker_type(&var message, want);
         try message.append_bytes(self.allocator, ", got ");
         try self.append_checker_type(&var message, got);
-        return try self.checker_message_at("type error", ast::zero_span(), move message);
+        let problem = try self.checker_message_at("type error", ast::zero_span(), move message);
+        return self.fail(move problem);
     }
-    return self.coerce_contextual_literal(tree, expression, want, got, out);
+    if try self.coerce_contextual_literal(tree, expression, want, got, out) |problem| {
+        return self.fail(move problem);
+    }
+    return false;
 }
 
 fn (self: &var Checker) check_index_expr(

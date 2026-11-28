@@ -1020,21 +1020,38 @@ fn (self: &var Checker) check_function(
     tree: &var ast::Ast,
     function: FunctionHandle
 ) -> !?diagnostic::Diagnostic {
-    if self.function_is_extern(function) {
-        return null;
-    }
-    if self.function_has_value_static_param(function) {
-        return null;
-    }
-    let facts = try self.copy_instance_function_facts(function) orelse
+    var is_extern = false;
+    var has_static_params = false;
+    var maybe_body: ?ast::Block = null;
+    var return_type = empty_type();
+    var is_std = false;
+    var is_main = false;
+    var implicit_return = false;
+    if self.metadata.functions.at(function.index) |value| {
+        is_extern = value.signature.extern_abi.len() > 0;
+        has_static_params = value.signature.static_params.len() > 0;
+        maybe_body = value.body;
+        return_type = value.return_type;
+        is_std = value.signature.std;
+        let fn_name_bytes = value.name.as_bytes();
+        is_main = mem::equal_bytes(fn_name_bytes, "main");
+        implicit_return = value.implicit_return;
+    } else {
         return try self.checker_error_at(
-        "type error", ast::zero_span(), "missing function metadata"
-    );
-    defer facts.deinit(self.allocator);
-    let body = facts.body orelse return null;
-    let name = facts.name.as_bytes();
-    if try self.check_main_return_type(name, facts.return_type) |problem| {
-        return move problem;
+            "type error", ast::zero_span(), "missing function metadata"
+        );
+    }
+    if is_extern {
+        return null;
+    }
+    if has_static_params and self.function_has_value_static_param(function) {
+        return null;
+    }
+    let body = maybe_body orelse return null;
+    if is_main {
+        if try self.check_main_return_type("main", return_type) |problem| {
+            return move problem;
+        }
     }
     let root = try self.scopes.new_scope(null);
     if self.editor.len() > 0 {
@@ -1042,86 +1059,124 @@ fn (self: &var Checker) check_function(
     }
     var static_values = map::new<[]u8, Type>(self.allocator);
     errdefer static_values.deinit(self.allocator);
-    if try self.define_static_value_params(self.allocator, root, function, &var static_values) |problem| {
-        static_values.deinit(self.allocator);
-        return move problem;
+    if has_static_params {
+        if try self.define_static_value_params(self.allocator, root, function, &var static_values) |problem| {
+            static_values.deinit(self.allocator);
+            return move problem;
+        }
     }
     let runtime_count = self.function_runtime_param_count(function);
     var index = 0;
     while index < runtime_count {
-        if try self.copy_instance_param(function, index) |parameter| {
-            defer parameter.deinit(self.allocator);
-            let parameter_name = parameter.name.as_bytes();
-            let defined = try self.define_scope_param(
-                root,
-                parameter_name,
-                parameter.type_name,
-                parameter.borrow,
-                parameter.mutable,
-                true
-            );
-            if try self.require_scope_definition(parameter_name, defined) |problem| {
+        var defined = false;
+        var dup_index = -1;
+        var param_selection = ast::zero_span();
+        if self.metadata.functions.at(function.index) |fn_val| {
+            if fn_val.signature.params.at(index) |parameter| {
+                if fn_val.params.get(index) |type_name| {
+                    let parameter_name = parameter.name.as_bytes();
+                    let borrow = fn_val.borrow_params.get_or_panic(index);
+                    let mutable = fn_val.mut_borrow_params.get_or_panic(index);
+                    param_selection = parameter.selection;
+                    var sources = array::new<string::String>(self.allocator);
+                    errdefer sources.deinit(self.allocator);
+                    if borrow or self.types.is_borrowed_view_return_fast(type_name) {
+                        let source = try string::from_bytes(self.allocator, parameter_name);
+                        errdefer source.deinit(self.allocator);
+                        try sources.append(self.allocator, move source);
+                    }
+                    defined = try self.scopes.define_param_with_source(
+                        root,
+                        parameter_name,
+                        type_name,
+                        borrow,
+                        mutable,
+                        move sources,
+                        true
+                    );
+                    if !defined {
+                        dup_index = index;
+                    }
+                } else {
+                    static_values.deinit(self.allocator);
+                    return try self.checker_error_at(
+                        "type error",
+                        ast::zero_span(),
+                        "missing runtime parameter metadata"
+                    );
+                }
+            } else {
                 static_values.deinit(self.allocator);
-                return move problem;
+                return try self.checker_error_at(
+                    "type error",
+                    ast::zero_span(),
+                    "missing runtime parameter metadata"
+                );
             }
-            if self.editor.len() > 0 {
-                try self.record_binding(root, parameter_name, parameter.selection, true, false);
+        }
+        if dup_index >= 0 {
+            if self.metadata.functions.at(function.index) |fn_val| {
+                if fn_val.signature.params.at(dup_index) |parameter| {
+                    let dup_bytes = parameter.name.as_bytes();
+                    static_values.deinit(self.allocator);
+                    return self.require_scope_definition(dup_bytes, false);
+                }
             }
-        } else {
-            static_values.deinit(self.allocator);
-            return try self.checker_error_at(
-                "type error",
-                ast::zero_span(),
-                "missing runtime parameter metadata"
-            );
+        }
+        if self.editor.len() > 0 {
+            if try self.copy_instance_param(function, index) |parameter| {
+                defer parameter.deinit(self.allocator);
+                let param_bytes = parameter.name.as_bytes();
+                try self.record_binding(root, param_bytes, param_selection, true, false);
+            }
         }
         index = index + 1;
     }
-    let type_params = try self.signature_type_params(self.allocator, function);
-    let type_args = map::new<[]u8, Type>(self.allocator);
-    let previous_context = try self.enter_body_context(
-        CurrentFunction::Value(function),
-        facts.std,
-        facts.return_type,
-        move type_params,
-        move type_args,
-        move static_values
-    );
+    var previous_context = BodyContextRestore {
+        body: null,
+        type_params: null,
+        type_args: null,
+        static_values: null
+    };
+    if !has_static_params {
+        static_values.deinit(self.allocator);
+        previous_context = try self.enter_plain_body_context(function, is_std, return_type);
+    } else {
+        let type_params = try self.signature_type_params(self.allocator, function);
+        let type_args = map::new<[]u8, Type>(self.allocator);
+        previous_context = try self.enter_body_context(
+            CurrentFunction::Value(function),
+            is_std,
+            return_type,
+            move type_params,
+            move type_args,
+            move static_values
+        );
+    }
     let saved_mark = self.mark;
     self.mark = UnsafeMark { used: null };
     var returns = false;
-    if try self.check_block(tree, root, body, facts.return_type, &var returns) |problem| {
+    if try self.check_block_ok(tree, root, body, return_type, &var returns) {
         self.mark = saved_mark;
         self.restore_body_context(previous_context);
-        return move problem;
+        return self.take_failure();
     }
     self.mark = saved_mark;
     self.restore_body_context(previous_context);
-    if !self.types.is_text(facts.return_type, "void") and
-        !self.function_implicit_return(function) and !returns {
+    if !self.types.is_text(return_type, "void") and
+        !implicit_return and !returns {
         var message = string::new(self.allocator);
         errdefer message.deinit(self.allocator);
         try message.append_bytes(self.allocator, "function `");
-        try message.append_bytes(self.allocator, name);
+        if self.metadata.functions.at(function.index) |fn_val| {
+            let fn_bytes = fn_val.name.as_bytes();
+            try message.append_bytes(self.allocator, fn_bytes);
+        }
         try message.append_bytes(self.allocator, "` must return ");
-        try self.append_checker_type(&var message, facts.return_type);
+        try self.append_checker_type(&var message, return_type);
         return try self.checker_message_at("type error", ast::zero_span(), move message);
     }
     return null;
-}
-
-fn (self: &Checker) function_is_extern(function: FunctionHandle) -> bool {
-    if self.metadata.functions.at(function.index) |value| {
-        return value.signature.extern_abi.len() > 0;
-    }
-    return false;
-}
-
-fn (self: &Checker) function_implicit_return(function: FunctionHandle) -> bool {
-    if self.metadata.functions.at(function.index) |value| {
-        return value.implicit_return;
-    }
-    return false;
 }
 
 fn (self: &Checker) signature_type_params(allocator: Allocator, function: FunctionHandle) -> !map::Map<[]u8, bool> {
@@ -1150,6 +1205,7 @@ fn (self: &var Checker) check_test_decl(
     errdefer name.deinit(self.allocator);
     let retained_module = tree.texts.at(test.module.node);
     let module_bytes = retained_module.as_bytes();
+    let module_id = try self.metadata.intern_module_prefix(self.allocator, module_bytes);
     if mem::len(module_bytes) > 0 {
         try name.append_bytes(self.allocator, module_bytes);
         try name.append_bytes(self.allocator, "::");
@@ -1179,6 +1235,7 @@ fn (self: &var Checker) check_test_decl(
     };
     let handle = FunctionHandle { index: self.metadata.functions.len() };
     try self.metadata.functions.append(self.allocator, move function);
+    try self.metadata.function_module_ids.append(self.allocator, module_id);
     if try self.check_function(tree, handle) |problem| {
         self.discard_test_function();
         return move problem;
@@ -1190,5 +1247,6 @@ fn (self: &var Checker) check_test_decl(
 fn (self: &var Checker) discard_test_function() -> void {
     let removed = self.metadata.functions.pop_or_panic();
     removed.deinit(self.allocator);
+    let _ = self.metadata.function_module_ids.pop_or_panic();
     return;
 }

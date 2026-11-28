@@ -1,11 +1,11 @@
 import compiler::internal::ast;
-import std::arena;
 import std::array;
 import std::map;
+import std::mem;
 import std::string;
 
 pub struct ScopeHandle {
-    node: arena::Handle<Scope>,
+    index: i64,
 }
 
 struct ScopeBinding {
@@ -19,45 +19,18 @@ struct ScopeBinding {
     selection: ast::Span,
 }
 
+struct ScopeEntry {
+    name_start: i64,
+    name_len: i64,
+    first_byte: u8,
+    prev: i64,
+    binding: ScopeBinding,
+}
+
 struct BindingSelection {
     typ: Type,
     borrowed: bool,
     mut_borrow: bool,
-}
-
-fn (self: &var ScopeStore) set_extent(scope: ScopeHandle, extent: ast::Span) -> void {
-    if self.scopes.at_mut(scope.node) |entry| {
-        entry.extent = extent;
-    }
-    return;
-}
-
-fn (self: &ScopeStore) extent(scope: ScopeHandle) -> ast::Span {
-    return self.scopes.at(scope.node).extent;
-}
-
-fn (self: &var ScopeStore) set_selection(scope: ScopeHandle, name: []u8, selection: ast::Span) -> ?BindingSelection {
-    if self.scopes.at_mut(scope.node) |current| {
-        if current.bindings.at_mut(name) |binding| {
-            binding.selection = selection;
-            return BindingSelection {
-                typ: binding.typ, borrowed: binding.borrowed, mut_borrow: binding.mut_borrow
-            };
-        }
-    }
-    return null;
-}
-
-fn (self: &ScopeStore) selection(scope: ScopeHandle, name: []u8) -> ast::Span {
-    var current = optional_scope(scope);
-    while current |handle| {
-        let retained = self.scopes.at(handle.node);
-        if retained.bindings.at(name) |binding| {
-            return binding.selection;
-        }
-        current = retained.parent;
-    }
-    return ast::zero_span();
 }
 
 struct BindingFacts {
@@ -70,29 +43,144 @@ struct BindingFacts {
 struct Scope {
     parent: ?ScopeHandle,
     extent: ast::Span,
-    bindings: map::Map<[]u8, ScopeBinding>,
+    head: i64,
+    count: i64,
+    unread_count: i64,
+    index_map: i64,
 }
 
 pub struct ScopeStore {
     allocator: Allocator,
-    scopes: arena::Arena<Scope>,
+    scopes: array::Array<Scope>,
+    entries: array::Array<ScopeEntry>,
+    key_bytes: string::String,
+    index_maps: array::Array<map::Map<[]u8, i64>>,
 }
 
 pub fn new_scope_store(allocator: Allocator) -> ScopeStore {
     return ScopeStore {
         allocator: allocator,
-        scopes: arena::new<Scope>(allocator)
+        scopes: array::new<Scope>(allocator),
+        entries: array::new<ScopeEntry>(allocator),
+        key_bytes: string::new(allocator),
+        index_maps: array::new<map::Map<[]u8, i64>>(allocator)
     };
 }
 
+fn (self: &var ScopeStore) reset() -> void {
+    self.scopes.clear(self.allocator);
+    self.entries.clear(self.allocator);
+    self.key_bytes.clear();
+    self.index_maps.clear(self.allocator);
+    return;
+}
+
 pub fn (self: &var ScopeStore) new_scope(parent: ?ScopeHandle) -> !ScopeHandle {
-    return ScopeHandle {
-        node: try self.scopes.add(self.allocator, Scope {
-            parent: parent,
-            extent: ast::zero_span(),
-            bindings: map::new<[]u8, ScopeBinding>(self.allocator)
-        })
-    };
+    let idx = self.scopes.len();
+    try self.scopes.append(self.allocator, Scope {
+        parent: parent,
+        extent: ast::zero_span(),
+        head: -1,
+        count: 0,
+        unread_count: 0,
+        index_map: -1
+    });
+    return ScopeHandle { index: idx };
+}
+
+fn (self: &ScopeStore) find_entry_in_scope(scope_idx: i64, name: []u8) -> i64 {
+    var cursor = -1;
+    var map_idx = -1;
+    if self.scopes.at(scope_idx) |retained| {
+        if retained.count == 0 {
+            return -1;
+        }
+        cursor = retained.head;
+        map_idx = retained.index_map;
+    } else {
+        return -1;
+    }
+    if map_idx >= 0 {
+        if self.index_maps.at(map_idx) |index_map| {
+            return index_map.get(name) orelse -1;
+        }
+        return -1;
+    }
+    let name_len = mem::len(name);
+    var first = cast<u8>(0);
+    if name_len > 0 {
+        first = name[0];
+    }
+    let keys = self.key_bytes.as_bytes();
+    while cursor >= 0 {
+        if self.entries.at(cursor) |entry| {
+            if entry.name_len == name_len and entry.first_byte == first {
+                if name_len <= 1 or mem::equal_bytes(keys[entry.name_start..entry.name_start + name_len], name) {
+                    return cursor;
+                }
+            }
+            cursor = entry.prev;
+        } else {
+            return -1;
+        }
+    }
+    return -1;
+}
+
+fn (self: &ScopeStore) find_entry_in_chain(scope: ScopeHandle, name: []u8) -> i64 {
+    var current = optional_scope(scope);
+    while current |handle| {
+        let idx = self.find_entry_in_scope(handle.index, name);
+        if idx >= 0 {
+            return idx;
+        }
+        if self.scopes.at(handle.index) |retained| {
+            current = retained.parent;
+        } else {
+            return -1;
+        }
+    }
+    return -1;
+}
+
+fn (self: &var ScopeStore) set_extent(scope: ScopeHandle, extent: ast::Span) -> void {
+    if self.scopes.at_mut(scope.index) |entry| {
+        entry.extent = extent;
+    }
+    return;
+}
+
+fn (self: &ScopeStore) extent(scope: ScopeHandle) -> ast::Span {
+    if self.scopes.at(scope.index) |entry| {
+        return entry.extent;
+    }
+    return ast::zero_span();
+}
+
+fn (self: &var ScopeStore) set_selection(scope: ScopeHandle, name: []u8, selection: ast::Span) -> ?BindingSelection {
+    let idx = self.find_entry_in_scope(scope.index, name);
+    if idx < 0 {
+        return null;
+    }
+    if self.entries.at_mut(idx) |entry| {
+        entry.binding.selection = selection;
+        return BindingSelection {
+            typ: entry.binding.typ,
+            borrowed: entry.binding.borrowed,
+            mut_borrow: entry.binding.mut_borrow
+        };
+    }
+    return null;
+}
+
+fn (self: &ScopeStore) selection(scope: ScopeHandle, name: []u8) -> ast::Span {
+    let idx = self.find_entry_in_chain(scope, name);
+    if idx >= 0 {
+        if self.entries.at(idx) |entry| {
+            return entry.binding.selection;
+        }
+    }
+    return ast::zero_span();
 }
 
 pub fn (self: &var ScopeStore) declare_local(
@@ -103,12 +191,68 @@ pub fn (self: &var ScopeStore) declare_local(
     if equal(name, "_") {
         return;
     }
-    if self.scopes.at_mut(scope.node) |current| {
-        if current.bindings.at_mut(name) |binding| {
-            binding.unread = span;
+    let idx = self.find_entry_in_scope(scope.index, name);
+    if idx < 0 {
+        return;
+    }
+    var became_unread = false;
+    if self.entries.at_mut(idx) |entry| {
+        if entry.binding.unread |_| {} else {
+            became_unread = true;
+        }
+        entry.binding.unread = span;
+    }
+    if became_unread {
+        if self.scopes.at_mut(scope.index) |current| {
+            current.unread_count = current.unread_count + 1;
         }
     }
     return;
+}
+
+fn (self: &ScopeStore) has_unread(scope: ScopeHandle) -> bool {
+    if self.scopes.at(scope.index) |retained| {
+        return retained.unread_count > 0;
+    }
+    return false;
+}
+
+fn (self: &ScopeStore) append_unread_names(
+    allocator: Allocator,
+    scope: ScopeHandle,
+    out: &var array::Array<string::String>
+) -> !void {
+    var cursor = -1;
+    if self.scopes.at(scope.index) |retained| {
+        cursor = retained.head;
+    } else {
+        return;
+    }
+    let keys = self.key_bytes.as_bytes();
+    while cursor >= 0 {
+        if self.entries.at(cursor) |entry| {
+            if entry.binding.unread |_| {
+                let name = keys[entry.name_start..entry.name_start + entry.name_len];
+                let copied = try string::from_bytes(allocator, name);
+                errdefer copied.deinit(allocator);
+                try out.append(allocator, move copied);
+            }
+            cursor = entry.prev;
+        } else {
+            return;
+        }
+    }
+    return;
+}
+
+fn (self: &ScopeStore) unread_span(scope: ScopeHandle, name: []u8) -> ?ast::Span {
+    let idx = self.find_entry_in_scope(scope.index, name);
+    if idx >= 0 {
+        if self.entries.at(idx) |entry| {
+            return entry.binding.unread;
+        }
+    }
+    return null;
 }
 
 pub fn (self: &var ScopeStore) define(
@@ -169,6 +313,33 @@ fn new_scope_binding(
     };
 }
 
+fn (self: &var ScopeStore) promote_index_map(scope_idx: i64) -> !void {
+    var cursor = -1;
+    if self.scopes.at(scope_idx) |retained| {
+        cursor = retained.head;
+    } else {
+        return;
+    }
+    var index_map = map::new<[]u8, i64>(self.allocator);
+    errdefer index_map.deinit(self.allocator);
+    let keys = self.key_bytes.as_bytes();
+    while cursor >= 0 {
+        if self.entries.at(cursor) |entry| {
+            let name = keys[entry.name_start..entry.name_start + entry.name_len];
+            try index_map.insert(self.allocator, name, cursor);
+            cursor = entry.prev;
+        } else {
+            break;
+        }
+    }
+    let map_idx = self.index_maps.len();
+    try self.index_maps.append(self.allocator, move index_map);
+    if self.scopes.at_mut(scope_idx) |slot| {
+        slot.index_map = map_idx;
+    }
+    return;
+}
+
 fn (self: &var ScopeStore) define_binding(
     scope: ScopeHandle,
     name: []u8,
@@ -179,46 +350,93 @@ fn (self: &var ScopeStore) define_binding(
         binding.deinit(allocator);
         return true;
     }
-    if self.scopes.at_mut(scope.node) |current| {
-        if current.bindings.contains(name) {
-            binding.deinit(allocator);
-            return false;
-        }
-        try current.bindings.insert(allocator, name, move binding);
-        return true;
+    if scope.index < 0 or scope.index >= self.scopes.len() {
+        binding.deinit(allocator);
+        return false;
     }
-    binding.deinit(allocator);
-    return false;
+    if self.find_entry_in_scope(scope.index, name) >= 0 {
+        binding.deinit(allocator);
+        return false;
+    }
+    let name_start = self.key_bytes.len();
+    let name_len = mem::len(name);
+    var first = cast<u8>(0);
+    if name_len > 0 {
+        first = name[0];
+    }
+    errdefer binding.deinit(allocator);
+    try self.key_bytes.append_bytes(allocator, name);
+    var prev = -1;
+    var count = 0;
+    var map_idx = -1;
+    if self.scopes.at(scope.index) |current| {
+        prev = current.head;
+        count = current.count;
+        map_idx = current.index_map;
+    }
+    let entry_idx = self.entries.len();
+    try self.entries.append(allocator, ScopeEntry {
+        name_start: name_start,
+        name_len: name_len,
+        first_byte: first,
+        prev: prev,
+        binding: move binding
+    });
+    if self.scopes.at_mut(scope.index) |current| {
+        current.head = entry_idx;
+        current.count = count + 1;
+    }
+    if map_idx >= 0 {
+        if self.index_maps.at_mut(map_idx) |index_map| {
+            try index_map.insert(allocator, name, entry_idx);
+        }
+    } else if count + 1 == 16 {
+        try self.promote_index_map(scope.index);
+    }
+    return true;
 }
 
 pub fn (self: &var ScopeStore) lookup(scope: ScopeHandle, name: []u8) -> ?Type {
     var current = optional_scope(scope);
     while current |handle| {
-        let parent = self.scopes.at(handle.node).parent;
-        if self.scopes.at_mut(handle.node) |retained| {
-            if retained.bindings.at_mut(name) |binding| {
-                binding.unread = null;
-                return binding.typ;
+        let idx = self.find_entry_in_scope(handle.index, name);
+        if idx >= 0 {
+            var found_type = empty_type();
+            var cleared_unread = false;
+            if self.entries.at_mut(idx) |entry| {
+                if entry.binding.unread |_| {
+                    entry.binding.unread = null;
+                    cleared_unread = true;
+                }
+                found_type = entry.binding.typ;
             }
+            if cleared_unread {
+                if self.scopes.at_mut(handle.index) |slot| {
+                    slot.unread_count = slot.unread_count - 1;
+                }
+            }
+            return found_type;
         }
-        current = parent;
+        if self.scopes.at(handle.index) |retained| {
+            current = retained.parent;
+        } else {
+            return null;
+        }
     }
     return null;
 }
 
 fn (self: &ScopeStore) binding_facts(scope: ScopeHandle, name: []u8) -> ?BindingFacts {
-    var current = optional_scope(scope);
-    while current |handle| {
-        let retained = self.scopes.at(handle.node);
-        if retained.bindings.at(name) |binding| {
+    let idx = self.find_entry_in_chain(scope, name);
+    if idx >= 0 {
+        if self.entries.at(idx) |entry| {
             return BindingFacts {
-                mutable: binding.mutable,
-                borrowed: binding.borrowed,
-                mut_borrow: binding.mut_borrow,
-                signature_param: binding.signature_param
+                mutable: entry.binding.mutable,
+                borrowed: entry.binding.borrowed,
+                mut_borrow: entry.binding.mut_borrow,
+                signature_param: entry.binding.signature_param
             };
         }
-        current = retained.parent;
     }
     return null;
 }

@@ -109,41 +109,31 @@ fn (self: &Checker) require_scope_definition(
 }
 
 fn (self: &Checker) unread_local_error(scope: ScopeHandle) -> !?diagnostic::Diagnostic {
-    let retained = self.scopes.scopes.at(scope.node);
+    if !self.scopes.has_unread(scope) {
+        return null;
+    }
     var names = array::new<string::String>(self.allocator);
     defer names.deinit(self.allocator);
-    var index = 0;
-    while retained.bindings.key_at(index) |name| {
-        if retained.bindings.at(name) |binding| {
-            if binding.unread |_| {
-                let copied = try string::from_bytes(self.allocator, name);
-                errdefer copied.deinit(self.allocator);
-                try names.append(self.allocator, move copied);
-            }
-        }
-        index = index + 1;
-    }
+    try self.scopes.append_unread_names(self.allocator, scope, &var names);
     if names.len() == 0 {
         return null;
     }
     try sort::strings(&var names);
     if names.at(0) |first| {
         let name = first.as_bytes();
-        if retained.bindings.at(name) |binding| {
-            if binding.unread |span| {
-                var message = string::new(self.allocator);
-                errdefer message.deinit(self.allocator);
-                try message.append_bytes(self.allocator, "local `");
-                try message.append_bytes(self.allocator, name);
-                try message.append_bytes(self.allocator, "` is never read");
-                var problem = try self.checker_message_at("type error", span, move message);
-                errdefer problem.deinit(self.allocator);
-                try problem.with_code(self.allocator, "type.unused_local");
-                try problem.with_help(self.allocator,
-                    "remove it, or write `let _ = ...` to drop the value on purpose"
-                );
-                return move problem;
-            }
+        if self.scopes.unread_span(scope, name) |span| {
+            var message = string::new(self.allocator);
+            errdefer message.deinit(self.allocator);
+            try message.append_bytes(self.allocator, "local `");
+            try message.append_bytes(self.allocator, name);
+            try message.append_bytes(self.allocator, "` is never read");
+            var problem = try self.checker_message_at("type error", span, move message);
+            errdefer problem.deinit(self.allocator);
+            try problem.with_code(self.allocator, "type.unused_local");
+            try problem.with_help(self.allocator,
+                "remove it, or write `let _ = ...` to drop the value on purpose"
+            );
+            return move problem;
         }
     }
     return null;

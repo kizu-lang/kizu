@@ -204,10 +204,33 @@ fn (self: &var Checker) collect_struct(
         return issue;
     }
     try self.metadata.structs.insert(self.allocator, name, declaration_handle);
+    try self.metadata.declared_types.insert(self.allocator, name, true);
+    let has_type_params = declaration.type_params.len() > 0;
+    let is_extern = is_extern_struct_decl(tree, declaration);
+    let is_std = is_std_type_name(name);
+    let module_id = try self.metadata.intern_module_id(self.allocator, name);
+    var fields = array::new<StructFieldInfo>(self.allocator);
+    errdefer fields.deinit(self.allocator);
     let previous = try self.type_params.enter_ast(self.allocator, tree, &declaration.type_params);
-    let result = try self.collect_struct_fields(tree, declaration, owners);
+    let result = try self.collect_struct_fields(tree, declaration, owners, has_type_params, &var fields);
     self.type_params.restore(previous);
-    return result;
+    if result |issue| {
+        fields.deinit(self.allocator);
+        return issue;
+    }
+    let info_idx = self.metadata.struct_infos.len();
+    try self.metadata.struct_infos.append(self.allocator, StructInfo {
+        declaration: declaration_handle,
+        name: declaration.name,
+        is_extern: is_extern,
+        is_std: is_std,
+        requires_unsafe: declaration.requires_unsafe,
+        has_type_params: has_type_params,
+        module_id: module_id,
+        fields: move fields
+    });
+    try self.metadata.struct_infos_by_name.insert(self.allocator, name, info_idx);
+    return null;
 }
 
 fn extern_struct_shape_issue(
@@ -236,7 +259,8 @@ fn is_extern_struct_decl(tree: &ast::Ast, declaration: &ast::StructDecl) -> bool
 }
 
 fn (self: &var Checker) collect_struct_fields(
-    tree: &ast::Ast, declaration: &ast::StructDecl, owners: &map::Map<[]u8, bool>
+    tree: &ast::Ast, declaration: &ast::StructDecl, owners: &map::Map<[]u8, bool>,
+    has_type_params: bool, out_fields: &var array::Array<StructFieldInfo>
 ) -> !?TypeCollectionIssue {
     let extern_struct = is_extern_struct_decl(tree, declaration);
     var index = 0;
@@ -257,6 +281,19 @@ fn (self: &var Checker) collect_struct_fields(
                         return issue;
                     }
                 }
+                var cached_type = empty_type();
+                if !has_type_params and !self.types.has_static_length(field_type) and
+                    !self.types.has_meta_prefix_fast(field_type) {
+                    cached_type = field_type;
+                }
+                try out_fields.append(self.allocator, StructFieldInfo {
+                    name: field.name,
+                    resolved_type: cached_type,
+                    public: field.public,
+                    borrow: field.borrow,
+                    mut_borrow: field.mut_borrow,
+                    span: field.span
+                });
             },
             Issue(issue) => return TypeCollectionIssue::Resolution(issue),
         }
@@ -547,6 +584,8 @@ fn (self: &var Checker) collect_union_in_scope(allocator: Allocator, tree: &ast:
     let handle = UnionHandle { index: self.metadata.unions.len() };
     try self.metadata.unions.append(self.allocator, move value);
     try self.metadata.unions_by_name.insert(allocator, name, handle);
+    try self.metadata.namespaces.insert(allocator, name, NamespaceEntry::Union(handle));
+    try self.metadata.declared_types.insert(allocator, name, true);
     return null;
 }
 
@@ -602,6 +641,7 @@ fn (self: &var Checker) collect_contract(allocator: Allocator, tree: &ast::Ast, 
     let handle = ContractHandle { index: self.metadata.contracts.len() };
     try self.metadata.contracts.append(self.allocator, move value);
     try self.metadata.contracts_by_name.insert(allocator, name, handle);
+    try self.metadata.declared_types.insert(allocator, name, true);
     return null;
 }
 
@@ -685,10 +725,11 @@ fn (self: &var Checker) new_declared_function_type_in_scope(tree: &ast::Ast, dec
     ) |issue| {
         return function_storage_issue(self.allocator, move storage, issue);
     }
-    let cached = try self.cache_function_signature(tree, signature);
+    let cached = try self.cache_function_signature(tree, signature, return_type);
     errdefer cached.deinit(self.allocator);
     let retained_name = tree.texts.at(signature.name.node);
     let name = retained_name.as_bytes();
+    let module_id = try self.metadata.intern_module_id(self.allocator, name);
     let function_type = FunctionType {
         name: try string::from_bytes(self.allocator, name),
         signature: move cached,
@@ -701,6 +742,7 @@ fn (self: &var Checker) new_declared_function_type_in_scope(tree: &ast::Ast, dec
     };
     let handle = FunctionHandle { index: self.metadata.functions.len() };
     try self.metadata.functions.append(self.allocator, move function_type);
+    try self.metadata.function_module_ids.append(self.allocator, module_id);
     return DeclaredFunctionResult::Value(handle);
 }
 
@@ -1076,7 +1118,11 @@ fn (self: &var Checker) reserved_static_parameter(tree: &ast::Ast, signature: &a
     return null;
 }
 
-fn (self: &var Checker) cache_function_signature(tree: &ast::Ast, source: &ast::FunctionSignature) -> !FunctionSignatureType {
+fn (self: &var Checker) cache_function_signature(
+    tree: &ast::Ast,
+    source: &ast::FunctionSignature,
+    resolved_return: Type
+) -> !FunctionSignatureType {
     let retained_abi = tree.texts.at(source.extern_abi.node);
     let abi = retained_abi.as_bytes();
     let retained_export_abi = tree.texts.at(source.export_abi.node);
@@ -1124,7 +1170,11 @@ fn (self: &var Checker) cache_function_signature(tree: &ast::Ast, source: &ast::
         index = index + 1;
     }
     if source.return_type |written_return| {
-        signature.return_type = try self.types.remember(&tree.types, written_return);
+        if source.static_params.len() == 0 and !self.types.has_static_length(resolved_return) {
+            signature.return_type = resolved_return;
+        } else {
+            signature.return_type = try self.types.remember(&tree.types, written_return);
+        }
     }
     return move signature;
 }

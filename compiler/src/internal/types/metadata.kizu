@@ -1,6 +1,7 @@
 import compiler::internal::ast;
 import std::array;
 import std::map;
+import std::mem;
 
 struct ErrorSetHandle {
     index: i64,
@@ -14,38 +15,92 @@ struct ContractHandle {
     index: i64,
 }
 
+union NamespaceEntry {
+    Enum(EnumHandle),
+    ErrorSet(ErrorSetHandle),
+    Union(UnionHandle),
+}
+
+struct StructFieldInfo {
+    name: ast::Text,
+    resolved_type: Type,
+    public: bool,
+    borrow: bool,
+    mut_borrow: bool,
+    span: ast::Span,
+}
+
+struct StructInfo {
+    declaration: ast::Declaration,
+    name: ast::Text,
+    is_extern: bool,
+    is_std: bool,
+    requires_unsafe: bool,
+    has_type_params: bool,
+    module_id: i64,
+    fields: array::Array<StructFieldInfo>,
+}
+
 struct CheckerMetadata {
     functions: array::Array<FunctionType>,
+    function_module_ids: array::Array<i64>,
     functions_by_name: map::Map<[]u8, FunctionHandle>,
     structs: map::Map<[]u8, ast::Declaration>,
+    struct_infos: array::Array<StructInfo>,
+    struct_infos_by_name: map::Map<[]u8, i64>,
     enums: array::Array<EnumType>,
     enums_by_name: map::Map<[]u8, EnumHandle>,
     error_sets: array::Array<ErrorSetType>,
     error_sets_by_name: map::Map<[]u8, ErrorSetHandle>,
     unions: array::Array<UnionType>,
     unions_by_name: map::Map<[]u8, UnionHandle>,
+    namespaces: map::Map<[]u8, NamespaceEntry>,
     contracts: array::Array<ContractType>,
     contracts_by_name: map::Map<[]u8, ContractHandle>,
     impls: map::Map<[]u8, map::Map<[]u8, FunctionHandle>>,
     declared_types: map::Map<[]u8, bool>,
+    module_ids: map::Map<[]u8, i64>,
 }
 
 fn new_checker_metadata(allocator: Allocator) -> CheckerMetadata {
     return CheckerMetadata {
         functions: array::new<FunctionType>(allocator),
+        function_module_ids: array::new<i64>(allocator),
         functions_by_name: map::new<[]u8, FunctionHandle>(allocator),
         structs: map::new<[]u8, ast::Declaration>(allocator),
+        struct_infos: array::new<StructInfo>(allocator),
+        struct_infos_by_name: map::new<[]u8, i64>(allocator),
         enums: array::new<EnumType>(allocator),
         enums_by_name: map::new<[]u8, EnumHandle>(allocator),
         error_sets: array::new<ErrorSetType>(allocator),
         error_sets_by_name: map::new<[]u8, ErrorSetHandle>(allocator),
         unions: array::new<UnionType>(allocator),
         unions_by_name: map::new<[]u8, UnionHandle>(allocator),
+        namespaces: map::new<[]u8, NamespaceEntry>(allocator),
         contracts: array::new<ContractType>(allocator),
         contracts_by_name: map::new<[]u8, ContractHandle>(allocator),
         impls: map::new<[]u8, map::Map<[]u8, FunctionHandle>>(allocator),
-        declared_types: map::new<[]u8, bool>(allocator)
+        declared_types: map::new<[]u8, bool>(allocator),
+        module_ids: map::new<[]u8, i64>(allocator)
     };
+}
+
+fn (self: &var CheckerMetadata) intern_module_prefix(allocator: Allocator, prefix: []u8) -> !i64 {
+    if mem::len(prefix) == 0 {
+        return -1;
+    }
+    if self.module_ids.get(prefix) |existing| {
+        return existing;
+    }
+    let id = self.module_ids.len();
+    try self.module_ids.insert(allocator, prefix, id);
+    return id;
+}
+
+fn (self: &var CheckerMetadata) intern_module_id(allocator: Allocator, full_name: []u8) -> !i64 {
+    let end = user_module_end(full_name) orelse return -1;
+    let prefix = full_name[0..end];
+    return self.intern_module_prefix(allocator, prefix);
 }
 
 fn (self: &var Checker) predeclare_type_names(allocator: Allocator, tree: &ast::Ast, program: &ast::Program) -> !void {
@@ -70,11 +125,8 @@ fn (self: &CheckerMetadata) has_collected_type(name: []u8) -> bool {
 }
 
 fn (self: &CheckerMetadata) is_type_name(name: []u8) -> bool {
-    if is_known_type(name) or self.declared_types.contains(name) or
-        is_known_generic_base(name) {
-        return true;
-    }
-    return self.has_collected_type(name);
+    return is_known_type(name) or self.declared_types.contains(name) or
+        is_known_generic_base(name);
 }
 
 fn declared_type_name(node: &ast::DeclarationNode) -> ?ast::Text {

@@ -418,3 +418,35 @@ test "checker metadata sorts methods and compares receiver-less contracts" {
     }
     testing::expect(!method_matches(&want, &got));
 }
+
+test "type table precomputes flags, primitive handles, and single-segment remember fast path" {
+    let allocator = mem::page_allocator();
+    var table = new_type_table(allocator);
+    defer table.deinit(allocator);
+    var source = typ::new(allocator);
+    defer source.deinit(allocator);
+    let parsed_i64 = try source.parse("i64");
+    let remembered_i64 = try table.remember(&source, parsed_i64);
+    let cached_i64 = try table.i64_type();
+    testing::expect(same_type(remembered_i64, cached_i64));
+    testing::expect(table.is_integer_fast(cached_i64));
+    testing::expect(table.is_numeric_fast(cached_i64));
+    testing::expect(table.is_signed_numeric_fast(cached_i64));
+    testing::expect(!table.is_vector_fast(cached_i64));
+    testing::expect(!table.is_borrow_optional_fast(cached_i64));
+    let f64_t = try table.f64_type();
+    testing::expect(same_type(f64_t, try table.intern("f64")));
+    testing::expect(table.is_numeric_fast(f64_t));
+    testing::expect(!table.is_integer_fast(f64_t));
+    let vec_t = try table.intern("f64x2");
+    testing::expect(table.is_vector_fast(vec_t));
+    testing::expect(table.vector_kind_fast(vec_t) == 0);
+    let borrow_opt = try table.intern("?&i64");
+    testing::expect(table.is_borrow_optional_fast(borrow_opt));
+    testing::expect(table.contains_borrow_optional(borrow_opt));
+    let err_view = try table.intern("![]u8");
+    testing::expect(table.is_borrowed_view_return_fast(err_view));
+    let meta_t = try table.intern("std::meta::element<[]u8>");
+    testing::expect(table.has_meta_prefix_fast(meta_t));
+    testing::expect(!table.has_meta_prefix_fast(cached_i64));
+}
