@@ -13,87 +13,155 @@ fn (self: &var Lowerer) lower_expr(
     expression: ast::Expression,
     out: &var Value
 ) -> !?diagnostic::Diagnostic {
-    if ast::marker_value(tree, expression) |inner| {
-        return self.lower_marked_expr(tree, expression, inner, out);
-    }
-    if ownership::int_expr(tree, expression) |_| {
-        return self.lower_literal_expr(tree, expression, out);
-    }
-    if ownership::float_expr(tree, expression) |_| {
-        return self.lower_literal_expr(tree, expression, out);
-    }
-    if ownership::bool_expr(tree, expression) |_| {
-        return self.lower_literal_expr(tree, expression, out);
-    }
-    if is_string_expr(tree, expression) or is_null_expr(tree, expression) {
-        return self.lower_literal_expr(tree, expression, out);
-    }
-    if c_string_literal_text(tree, expression) |_| {
-        return self.lower_literal_expr(tree, expression, out);
-    }
-    if ownership::type_expr(tree, expression) |typed| {
-        let immediate = try self.text_name(tree, typed.type_name);
-        out.* = try self.emit_const(self.common.type_type, immediate);
-        return null;
-    }
-    if ownership::ident_expr(tree, expression) |ident| {
-        return self.lower_ident_expr(tree, expression, ident, out);
-    }
-    if ownership::prefix_expr(tree, expression) |prefix| {
-        return self.lower_prefix_expr(tree, prefix, out);
-    }
-    if ownership::binary_expr(tree, expression) |binary| {
-        return self.lower_binary_expr(tree, binary, out);
-    }
-    if ownership::call_expr(tree, expression) |call| {
-        return self.lower_call_expr(tree, call, out);
-    }
-    if ownership::cast_expr(tree, expression) |cast| {
-        return self.lower_cast_expr(tree, cast, out);
-    }
-    if ownership::try_expr(tree, expression) |attempt| {
-        return self.lower_try_expr(tree, expression, attempt, out);
-    }
-    if ownership::if_expr(tree, expression) |branch| {
-        return self.lower_if_expr(tree, branch, out);
-    }
-    if ownership::is_match_expr(tree, expression) {
-        return self.lower_match_expr(tree, MatchNode::Expression(expression), out);
-    }
-    if ownership::orelse_guard_expr(tree, expression) |guard| {
-        return self.lower_orelse_guard_expr(tree, guard, out);
-    }
-    if ownership::catch_guard_expr(tree, expression) |guard| {
-        return self.lower_catch_guard_expr(tree, guard, out);
-    }
-    if ownership::is_struct_literal_expr(tree, expression) {
-        return self.lower_struct_literal_expr(tree, expression, out);
-    }
-    if try ast::copy_array_literal(self.allocator, tree, expression) |literal| {
-        defer literal.deinit(self.allocator);
-        return self.lower_array_literal(tree, &literal, out);
-    }
-    if try ast::copy_vector_literal(self.allocator, tree, expression) |literal| {
-        defer literal.deinit(self.allocator);
-        return self.lower_vector_literal_expr(tree, &literal, out);
-    }
-    if ownership::field_expr(tree, expression) |field| {
-        return self.lower_field_expr(tree, field, out);
-    }
-    if ownership::index_expr(tree, expression) |index| {
-        return self.lower_index_expr(tree, index, out);
-    }
-    if ownership::deref_expr(tree, expression) |deref| {
-        return self.lower_deref_expr(tree, deref, out);
-    }
-    let rendered = try self.expression_name(tree, expression);
-    return try self.fail1(tree, "ir error: unsupported expression `%s`", Arg::Str(rendered));
-}
-
-fn is_string_expr(tree: &ast::Ast, expression: ast::Expression) -> bool {
     match tree.expressions.at(expression.node) {
-        String(_) => return true,
-        _ => return false,
+        Comptime(node) => {
+            let inner = node.expr;
+            return self.lower_marked_expr(tree, expression, inner, out);
+        },
+        Unsafe(node) => {
+            let inner = node.value;
+            return self.lower_marked_expr(tree, expression, inner, out);
+        },
+        Move(node) => {
+            let inner = node.value;
+            return self.lower_marked_expr(tree, expression, inner, out);
+        },
+        Int(literal) => {
+            let immediate = try self.text_name(tree, literal.value);
+            out.* = try self.emit_const(self.common.i64_type, immediate);
+            return null;
+        },
+        Float(literal) => {
+            let immediate = try self.text_name(tree, literal.value);
+            out.* = try self.emit_const(self.common.f64_type, immediate);
+            return null;
+        },
+        Bool(literal) => {
+            if literal.value {
+                out.* = try self.emit_const(self.common.bool_type, self.common.true_text);
+            } else {
+                out.* = try self.emit_const(self.common.bool_type, self.common.false_text);
+            }
+            return null;
+        },
+        String(_) => return self.lower_literal_expr(tree, expression, out),
+        CString(_) => return self.lower_literal_expr(tree, expression, out),
+        Null(_) => return self.lower_literal_expr(tree, expression, out),
+        Type(typed) => {
+            let immediate = try self.text_name(tree, typed.type_name);
+            out.* = try self.emit_const(self.common.type_type, immediate);
+            return null;
+        },
+        Ident(ident) => {
+            let copied = ast::IdentExpr { name: ident.name, span: ident.span };
+            return self.lower_ident_expr(tree, expression, copied, out);
+        },
+        Prefix(prefix) => {
+            let copied = ast::PrefixExpr { operator: prefix.operator, right: prefix.right };
+            return self.lower_prefix_expr(tree, copied, out);
+        },
+        Binary(binary) => {
+            let copied = ast::BinaryExpr {
+                left: binary.left,
+                operator: binary.operator,
+                operator_span: binary.operator_span,
+                right: binary.right
+            };
+            return self.lower_binary_expr(tree, copied, out);
+        },
+        Call(call) => {
+            let copied = ast::CallExpr { callee: call.callee, args: call.args };
+            return self.lower_call_expr(tree, copied, out);
+        },
+        Cast(cast) => {
+            let copied = ast::CastExpr {
+                target_type: cast.target_type,
+                value: cast.value,
+                keyword_span: cast.keyword_span
+            };
+            return self.lower_cast_expr(tree, copied, out);
+        },
+        Try(attempt) => {
+            let copied = ast::TryExpr { value: attempt.value };
+            return self.lower_try_expr(tree, expression, copied, out);
+        },
+        If(branch) => {
+            let copied = ast::IfStmt {
+                condition: branch.condition,
+                consequence: branch.consequence,
+                alternative: branch.alternative,
+                capture: branch.capture,
+                err_capture: branch.err_capture
+            };
+            return self.lower_if_expr(tree, copied, out);
+        },
+        Match(_) => return self.lower_match_expr(tree, MatchNode::Expression(expression), out),
+        OrelseGuard(guard) => {
+            let copied = ast::OrelseGuardExpr {
+                condition: guard.condition,
+                exit: guard.exit,
+                span: guard.span
+            };
+            return self.lower_orelse_guard_expr(tree, copied, out);
+        },
+        CatchGuard(guard) => {
+            let copied = ast::CatchGuardExpr {
+                condition: guard.condition,
+                exit: guard.exit,
+                span: guard.span
+            };
+            return self.lower_catch_guard_expr(tree, copied, out);
+        },
+        StructLiteral(_) => return self.lower_struct_literal_expr(tree, expression, out),
+        BufferLiteral(_) => {
+            if try ast::copy_array_literal(self.allocator, tree, expression) |literal| {
+                defer literal.deinit(self.allocator);
+                return self.lower_array_literal(tree, &literal, out);
+            }
+            return null;
+        },
+        VectorLiteral(_) => {
+            if try ast::copy_vector_literal(self.allocator, tree, expression) |literal| {
+                defer literal.deinit(self.allocator);
+                return self.lower_vector_literal_expr(tree, &literal, out);
+            }
+            return null;
+        },
+        Field(field) => {
+            let copied = ast::FieldExpr {
+                receiver: field.receiver,
+                name: field.name,
+                namespace: field.namespace,
+                span: field.span
+            };
+            return self.lower_field_expr(tree, copied, out);
+        },
+        Index(index) => {
+            let copied = ast::IndexExpr {
+                target: index.target,
+                index: index.index,
+                start: index.start,
+                end: index.end,
+                slice: index.slice,
+                span: index.span
+            };
+            return self.lower_index_expr(tree, copied, out);
+        },
+        Deref(deref) => {
+            let copied = ast::DerefExpr {
+                receiver: deref.receiver,
+                operator_span: deref.operator_span
+            };
+            return self.lower_deref_expr(tree, copied, out);
+        },
+        TypeApply(_) => {
+            let rendered = try self.expression_name(tree, expression);
+            return try self.fail1(tree, "ir error: unsupported expression `%s`", Arg::Str(rendered));
+        },
+        Recovered(_) => {
+            let rendered = try self.expression_name(tree, expression);
+            return try self.fail1(tree, "ir error: unsupported expression `%s`", Arg::Str(rendered));
+        },
     }
 }
 

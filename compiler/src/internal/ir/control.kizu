@@ -2,7 +2,6 @@ import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::ownership;
 import std::array;
-import std::string;
 
 struct BranchResult {
     env: EnvHandle,
@@ -48,26 +47,30 @@ fn (self: &var Lowerer) lower_if_stmt(tree: &var ast::Ast, statement: ast::IfStm
         try self.restore_loop_var(saved);
         try self.restore_branch_var(then_result.env, saved);
     }
-    let else_body = statement.alternative orelse try tree.add_block(
-        array::new<ast::Statement>(self.allocator)
-    );
-    var saved_err = ScopedBinding { name: empty_name(), value: empty_value(), bound: false };
-    if has_err_capture {
-        let err_capture = try self.text_name(tree, statement.err_capture);
-        saved_err = self.saved_binding(err_capture);
-        try self.envs.bind(self.allocator, self.env, err_capture, err_payload);
-    }
     var else_result = self.blank_branch();
-    if try self.lower_branch_block(tree, else_block, else_body, merge_name, false, &var else_result) |failed| {
-        errdefer failed.deinit(self.allocator);
+    if statement.alternative |alt| {
+        var saved_err = ScopedBinding { name: empty_name(), value: empty_value(), bound: false };
+        if has_err_capture {
+            let err_capture = try self.text_name(tree, statement.err_capture);
+            saved_err = self.saved_binding(err_capture);
+            try self.envs.bind(self.allocator, self.env, err_capture, err_payload);
+        }
+        if try self.lower_branch_block(tree, else_block, alt, merge_name, false, &var else_result) |failed| {
+            errdefer failed.deinit(self.allocator);
+            if has_err_capture {
+                try self.restore_loop_var(saved_err);
+            }
+            return move failed;
+        }
         if has_err_capture {
             try self.restore_loop_var(saved_err);
+            try self.restore_branch_var(else_result.env, saved_err);
         }
-        return move failed;
-    }
-    if has_err_capture {
-        try self.restore_loop_var(saved_err);
-        try self.restore_branch_var(else_result.env, saved_err);
+    } else {
+        self.block = else_block;
+        let else_end = self.block_label();
+        self.terminate(jump_terminator(merge_name));
+        else_result = BranchResult { env: self.env, end: else_end, reachable: true, value: empty_value() };
     }
     self.block = merge_block;
     if !then_result.reachable and !else_result.reachable {
@@ -322,9 +325,9 @@ fn (self: &var Lowerer) lower_logical_const(block: Block, is_and: bool, target: 
     self.block = block;
     var value = empty_value();
     if is_and {
-        value = try self.emit_const_text(self.common.bool_type, "false");
+        value = try self.emit_const(self.common.bool_type, self.common.false_text);
     } else {
-        value = try self.emit_const_text(self.common.bool_type, "true");
+        value = try self.emit_const(self.common.bool_type, self.common.true_text);
     }
     end.* = self.block_label();
     self.terminate(jump_terminator(target));
@@ -492,9 +495,10 @@ fn (self: &var Lowerer) merge_envs(
 ) -> !EnvHandle {
     let merged = try self.envs.clone_env(left);
     var index = 0;
-    while self.envs.name_at(right, index) |name| {
+    while self.envs.entry_at(right, index) |entry| {
         index = index + 1;
-        let right_value = self.envs.get(right, name) orelse empty_value();
+        let name = entry.name;
+        let right_value = entry.value;
         if self.envs.get(left, name) |left_value| {
             if same_value(left_value, right_value) {
                 continue;
@@ -532,13 +536,6 @@ struct ForShape {
     end: Value,
 }
 
-fn loop_form_name(form: LoopForm) -> []u8 {
-    match form {
-        While(_) => return "while",
-        For(_) => return "for",
-    }
-}
-
 fn loop_has_advance(form: LoopForm) -> bool {
     match form {
         While(_) => return false,
@@ -568,12 +565,33 @@ fn (self: &var Lowerer) new_block_named(prefix: []u8) -> !Block {
     return self.new_block(name);
 }
 
-fn (self: &var Lowerer) new_loop_block(form: LoopForm, suffix: []u8) -> !Block {
-    var prefix = try string::from_bytes(self.allocator, loop_form_name(form));
-    defer prefix.deinit(self.allocator);
-    try prefix.append_bytes(self.allocator, suffix);
-    let bytes = prefix.as_bytes();
-    return self.new_block_named(bytes);
+fn loop_block_prefix(form: LoopForm, kind: i64) -> []u8 {
+    match form {
+        While(_) => {
+            if kind == 0 {
+                return "while.header";
+            }
+            if kind == 1 {
+                return "while.body";
+            }
+            if kind == 2 {
+                return "while.step";
+            }
+            return "while.end";
+        },
+        For(_) => {
+            if kind == 0 {
+                return "for.header";
+            }
+            if kind == 1 {
+                return "for.body";
+            }
+            if kind == 2 {
+                return "for.step";
+            }
+            return "for.end";
+        },
+    }
 }
 
 fn (self: &var Lowerer) lower_loop(tree: &var ast::Ast, shape: LoopShape) -> !?diagnostic::Diagnostic {
@@ -583,13 +601,13 @@ fn (self: &var Lowerer) lower_loop(tree: &var ast::Ast, shape: LoopShape) -> !?d
         return move failed;
     }
     let preheader = self.block;
-    let header = try self.new_loop_block(shape.form, ".header");
-    let body = try self.new_loop_block(shape.form, ".body");
+    let header = try self.new_block_named(loop_block_prefix(shape.form, 0));
+    let body = try self.new_block_named(loop_block_prefix(shape.form, 1));
     var latch: ?Block = null;
     if loop_has_advance(shape.form) {
-        latch = try self.new_loop_block(shape.form, ".step");
+        latch = try self.new_block_named(loop_block_prefix(shape.form, 2));
     }
-    let exit = try self.new_loop_block(shape.form, ".end");
+    let exit = try self.new_block_named(loop_block_prefix(shape.form, 3));
     let header_name = self.module.block_name(header);
     self.module.set_terminator(preheader, jump_terminator(header_name));
     var phis = array::new<LoopPhi>(self.allocator);
@@ -675,8 +693,7 @@ fn (self: &var Lowerer) lower_loop_header(
             let name = try self.text_name(tree, loop.name);
             try self.for_indexes.append(self.allocator, index.name);
             try self.envs.bind(self.allocator, self.env, name, index);
-            let less = try self.name("<");
-            let cond = try self.emit_op2(Op::Binary, less, self.common.bool_type, index, loop.end);
+            let cond = try self.emit_op2(Op::Binary, self.common.less_op, self.common.bool_type, index, loop.end);
             out.* = LoopTest::Indexed(IndexedTest { cond: cond, phi: phi });
             return null;
         },
@@ -687,10 +704,9 @@ fn (self: &var Lowerer) lower_loop_advance(latch: Block, test: LoopTest) -> !voi
     match test {
         Plain(_) => return,
         Indexed(indexed) => {
-            let one = try self.emit_const_text(self.common.i64_type, "1");
-            let plus = try self.name("+");
+            let one = try self.emit_const(self.common.i64_type, self.common.one_text);
             let index = self.module.instr_result(indexed.phi);
-            let next = try self.emit_op2(Op::Binary, plus, self.common.i64_type, index, one);
+            let next = try self.emit_op2(Op::Binary, self.common.plus_op, self.common.i64_type, index, one);
             let latch_name = self.module.block_name(latch);
             return self.module.add_incoming(self.allocator, indexed.phi, latch_name, next);
         },
@@ -944,35 +960,105 @@ fn (self: &var Lowerer) collect_assigned(
     statement: ast::Statement,
     names: &var array::Array<Name>
 ) -> !?diagnostic::Diagnostic {
-    if ownership::assign_stmt(tree, statement) |assign| {
-        if assign_target_root(tree, assign.target) |root| {
-            let name = try self.text_name(tree, root);
-            try add_assigned(self.allocator, names, name);
-        }
+    match tree.statements.at(statement.node) {
+        Let(s) => return self.collect_assigned_expr(tree, s.value, names),
+        Assign(s) => {
+            if assign_target_root(tree, s.target) |root| {
+                let name = try self.text_name(tree, root);
+                try add_assigned(self.allocator, names, name);
+            }
+            if try self.collect_assigned_expr(tree, s.target, names) |failed| {
+                return move failed;
+            }
+            return self.collect_assigned_expr(tree, s.value, names);
+        },
+        Return(s) => {
+            if s.value |value| {
+                return self.collect_assigned_expr(tree, value, names);
+            }
+            return null;
+        },
+        Defer(s) => return self.collect_assigned_expr(tree, s.expr, names),
+        ErrDefer(s) => return self.collect_assigned_expr(tree, s.expr, names),
+        Expr(s) => return self.collect_assigned_expr(tree, s.expr, names),
+        Break(_) => return null,
+        Continue(_) => return null,
+        Block(s) => {
+            var index = 0;
+            while s.statements.get(index) |inner| {
+                index = index + 1;
+                if try self.collect_assigned(tree, inner, names) |failed| {
+                    return move failed;
+                }
+            }
+            return null;
+        },
+        If(s) => return self.collect_assigned_if(tree, s, names),
+        ComptimeIf(s) => {
+            if try self.collect_assigned_expr(tree, s.condition, names) |failed| {
+                return move failed;
+            }
+            if try self.collect_assigned(tree, s.consequence.as_statement(), names) |failed| {
+                return move failed;
+            }
+            if s.alternative |alternative| {
+                return self.collect_assigned(tree, alternative.as_statement(), names);
+            }
+            return null;
+        },
+        ComptimeFor(s) => {
+            match s.iterable {
+                List(_) => {},
+                Range(range) => {
+                    if try self.collect_assigned_expr(tree, range.start, names) |failed| {
+                        return move failed;
+                    }
+                    if try self.collect_assigned_expr(tree, range.end, names) |failed| {
+                        return move failed;
+                    }
+                },
+            }
+            return self.collect_assigned(tree, s.body.as_statement(), names);
+        },
+        ComptimeMatch(s) => {
+            if try self.collect_assigned_expr(tree, s.value, names) |failed| {
+                return move failed;
+            }
+            return self.collect_assigned(tree, s.body.as_statement(), names);
+        },
+        While(s) => {
+            if try self.collect_assigned_expr(tree, s.condition, names) |failed| {
+                return move failed;
+            }
+            return self.collect_assigned(tree, s.body.as_statement(), names);
+        },
+        For(s) => {
+            if try self.collect_assigned_expr(tree, s.start, names) |failed| {
+                return move failed;
+            }
+            if try self.collect_assigned_expr(tree, s.end, names) |failed| {
+                return move failed;
+            }
+            return self.collect_assigned(tree, s.body.as_statement(), names);
+        },
+        Match(s) => {
+            if try self.collect_assigned_expr(tree, s.value, names) |failed| {
+                return move failed;
+            }
+            var index = 0;
+            while s.arms.get(index) |arm| {
+                index = index + 1;
+                if try self.collect_assigned(tree, arm.body, names) |failed| {
+                    return move failed;
+                }
+            }
+            return null;
+        },
+        Recovered(_) => {
+            let kind = try self.name(statement_go_type(tree, statement));
+            return try self.fail1(tree, "ir error: loop analysis does not know statement `%s`", Arg::Str(kind));
+        },
     }
-    var exprs = array::new<ast::Expression>(self.allocator);
-    defer exprs.deinit(self.allocator);
-    var stmts = array::new<ast::Statement>(self.allocator);
-    defer stmts.deinit(self.allocator);
-    if !try statement_children(self.allocator, tree, statement, &var exprs, &var stmts) {
-        let kind = try self.name(statement_go_type(tree, statement));
-        return try self.fail1(tree, "ir error: loop analysis does not know statement `%s`", Arg::Str(kind));
-    }
-    var index = 0;
-    while exprs.get(index) |expression| {
-        index = index + 1;
-        if try self.collect_assigned_expr(tree, expression, names) |failed| {
-            return move failed;
-        }
-    }
-    index = 0;
-    while stmts.get(index) |inner| {
-        index = index + 1;
-        if try self.collect_assigned(tree, inner, names) |failed| {
-            return move failed;
-        }
-    }
-    return null;
 }
 
 fn (self: &var Lowerer) collect_assigned_expr(
@@ -980,26 +1066,133 @@ fn (self: &var Lowerer) collect_assigned_expr(
     expression: ast::Expression,
     names: &var array::Array<Name>
 ) -> !?diagnostic::Diagnostic {
-    if ownership::if_expr(tree, expression) |branch| {
-        return self.collect_assigned_if(tree, branch, names);
+    match tree.expressions.at(expression.node) {
+        Ident(_) => return null,
+        Int(_) => return null,
+        Float(_) => return null,
+        String(_) => return null,
+        CString(_) => return null,
+        Bool(_) => return null,
+        Type(_) => return null,
+        Null(_) => return null,
+        Prefix(e) => return self.collect_assigned_expr(tree, e.right, names),
+        Binary(e) => {
+            if try self.collect_assigned_expr(tree, e.left, names) |failed| {
+                return move failed;
+            }
+            return self.collect_assigned_expr(tree, e.right, names);
+        },
+        TypeApply(e) => return self.collect_assigned_expr(tree, e.callee, names),
+        Cast(e) => return self.collect_assigned_expr(tree, e.value, names),
+        Try(e) => return self.collect_assigned_expr(tree, e.value, names),
+        Unsafe(e) => return self.collect_assigned_expr(tree, e.value, names),
+        Move(e) => return self.collect_assigned_expr(tree, e.value, names),
+        Comptime(e) => return self.collect_assigned_expr(tree, e.expr, names),
+        Deref(e) => return self.collect_assigned_expr(tree, e.receiver, names),
+        Field(e) => return self.collect_assigned_expr(tree, e.receiver, names),
+        Index(e) => {
+            if try self.collect_assigned_expr(tree, e.target, names) |failed| {
+                return move failed;
+            }
+            if e.index |index| {
+                if try self.collect_assigned_expr(tree, index, names) |failed| {
+                    return move failed;
+                }
+            }
+            if e.start |start| {
+                if try self.collect_assigned_expr(tree, start, names) |failed| {
+                    return move failed;
+                }
+            }
+            if e.end |end| {
+                return self.collect_assigned_expr(tree, end, names);
+            }
+            return null;
+        },
+        BufferLiteral(e) => {
+            var index = 0;
+            while e.elements.get(index) |element| {
+                index = index + 1;
+                if try self.collect_assigned_expr(tree, element, names) |failed| {
+                    return move failed;
+                }
+            }
+            return null;
+        },
+        VectorLiteral(e) => {
+            var index = 0;
+            while e.lanes.get(index) |lane| {
+                index = index + 1;
+                if try self.collect_assigned_expr(tree, lane, names) |failed| {
+                    return move failed;
+                }
+            }
+            return null;
+        },
+        StructLiteral(e) => {
+            var index = 0;
+            while e.fields.get(index) |field| {
+                index = index + 1;
+                if try self.collect_assigned_expr(tree, field.value, names) |failed| {
+                    return move failed;
+                }
+            }
+            return null;
+        },
+        Call(e) => {
+            if try self.collect_assigned_expr(tree, e.callee, names) |failed| {
+                return move failed;
+            }
+            var index = 0;
+            while ownership::arg_at(tree, e.args, index) |arg| {
+                index = index + 1;
+                if try self.collect_assigned_expr(tree, arg, names) |failed| {
+                    return move failed;
+                }
+            }
+            return null;
+        },
+        OrelseGuard(e) => {
+            if try self.collect_assigned_expr(tree, e.condition, names) |failed| {
+                return move failed;
+            }
+            if ownership::return_stmt(tree, e.exit) |returned| {
+                if returned.value |value| {
+                    return self.collect_assigned_expr(tree, value, names);
+                }
+            }
+            return null;
+        },
+        CatchGuard(e) => {
+            if try self.collect_assigned_expr(tree, e.condition, names) |failed| {
+                return move failed;
+            }
+            if ownership::return_stmt(tree, e.exit) |returned| {
+                if returned.value |value| {
+                    return self.collect_assigned_expr(tree, value, names);
+                }
+            }
+            return null;
+        },
+        If(branch) => return self.collect_assigned_if(tree, branch, names),
+        Match(value) => {
+            if try self.collect_assigned_expr(tree, value.value, names) |failed| {
+                return move failed;
+            }
+            var index = 0;
+            while value.arms.get(index) |arm| {
+                index = index + 1;
+                if try self.collect_assigned(tree, arm.body, names) |failed| {
+                    return move failed;
+                }
+            }
+            return null;
+        },
+        Recovered(_) => {
+            let kind = try self.name(expression_go_type(tree, expression));
+            return try self.fail1(tree, "ir error: loop analysis does not know expression `%s`", Arg::Str(kind));
+        },
     }
-    if ownership::is_match_expr(tree, expression) {
-        return self.collect_assigned_match(tree, expression, names);
-    }
-    var children = array::new<ast::Expression>(self.allocator);
-    defer children.deinit(self.allocator);
-    if !try expression_children(self.allocator, tree, expression, &var children) {
-        let kind = try self.name(expression_go_type(tree, expression));
-        return try self.fail1(tree, "ir error: loop analysis does not know expression `%s`", Arg::Str(kind));
-    }
-    var index = 0;
-    while children.get(index) |child| {
-        index = index + 1;
-        if try self.collect_assigned_expr(tree, child, names) |failed| {
-            return move failed;
-        }
-    }
-    return null;
 }
 
 fn (self: &var Lowerer) collect_assigned_if(
@@ -1016,27 +1209,6 @@ fn (self: &var Lowerer) collect_assigned_if(
     }
     let alternative = branch.alternative orelse return null;
     return self.collect_assigned(tree, ast::Statement { node: alternative.node, span: null }, names);
-}
-
-fn (self: &var Lowerer) collect_assigned_match(
-    tree: &ast::Ast,
-    expression: ast::Expression,
-    names: &var array::Array<Name>
-) -> !?diagnostic::Diagnostic {
-    let head = ownership::match_expr_head(tree, expression) orelse return null;
-    if try self.collect_assigned_expr(tree, head.value, names) |failed| {
-        return move failed;
-    }
-    let arms = try ownership::match_expr_arms(self.allocator, tree, expression);
-    defer arms.deinit(self.allocator);
-    var index = 0;
-    while arms.get(index) |arm| {
-        index = index + 1;
-        if try self.collect_assigned(tree, arm.body, names) |failed| {
-            return move failed;
-        }
-    }
-    return null;
 }
 
 fn assign_target_root(tree: &ast::Ast, target: ast::Expression) -> ?ast::Text {

@@ -35,9 +35,40 @@ pub fn verify_appended(allocator: Allocator, module: &Module, function: Function
 }
 
 fn new_verifier(allocator: Allocator, module: &Module) -> !Verifier {
+    let limit = module.names.id_limit();
+    var block_gen = array::new<i64>(allocator);
+    errdefer block_gen.deinit(allocator);
+    try block_gen.reserve(allocator, limit);
+    var block_pos = array::new<i64>(allocator);
+    errdefer block_pos.deinit(allocator);
+    try block_pos.reserve(allocator, limit);
+    var defined_gen = array::new<i64>(allocator);
+    errdefer defined_gen.deinit(allocator);
+    try defined_gen.reserve(allocator, limit);
+    var defined_block = array::new<i64>(allocator);
+    errdefer defined_block.deinit(allocator);
+    try defined_block.reserve(allocator, limit);
+    var defined_step = array::new<i64>(allocator);
+    errdefer defined_step.deinit(allocator);
+    try defined_step.reserve(allocator, limit);
+    var slot = 0;
+    while slot < limit {
+        try block_gen.append(allocator, 0);
+        try block_pos.append(allocator, 0);
+        try defined_gen.append(allocator, 0);
+        try defined_block.append(allocator, 0);
+        try defined_step.append(allocator, 0);
+        slot = slot + 1;
+    }
     var verifier = Verifier {
         allocator: allocator,
-        params: map::new<[]u8, Function>(allocator),
+        params: map::new<i64, Function>(allocator),
+        block_gen: move block_gen,
+        block_pos: move block_pos,
+        defined_gen: move defined_gen,
+        defined_block: move defined_block,
+        defined_step: move defined_step,
+        gen: 0,
         fn_name: empty_name(),
         fn_return: empty_name(),
         block_name: empty_name()
@@ -47,16 +78,20 @@ fn new_verifier(allocator: Allocator, module: &Module) -> !Verifier {
     while module.functions.get(index) |function| {
         index = index + 1;
         let name = module.function_name(function);
-        let retained = name_text(&module.names, name);
-        let bytes = retained.as_bytes();
-        try verifier.params.insert(allocator, bytes, function);
+        try verifier.params.insert(allocator, name_id(name), function);
     }
     return move verifier;
 }
 
 struct Verifier {
     allocator: Allocator,
-    params: map::Map<[]u8, Function>,
+    params: map::Map<i64, Function>,
+    block_gen: array::Array<i64>,
+    block_pos: array::Array<i64>,
+    defined_gen: array::Array<i64>,
+    defined_block: array::Array<i64>,
+    defined_step: array::Array<i64>,
+    gen: i64,
     fn_name: Name,
     fn_return: Name,
     block_name: Name,
@@ -68,44 +103,81 @@ union VerifyArg {
     None,
 }
 
+fn (self: &Verifier) block_position(name: Name) -> ?i64 {
+    let id = name_id(name);
+    if id < 0 or id >= self.block_gen.len() {
+        return null;
+    }
+    if self.block_gen.get_or_panic(id) != self.gen {
+        return null;
+    }
+    return self.block_pos.get_or_panic(id);
+}
+
 fn (self: &var Verifier) verify_function(module: &Module, types: &var typ::Table, function: Function) -> !?diagnostic::Diagnostic {
     let node = module.function_nodes.at(function.node);
     self.fn_name = node.name;
     self.fn_return = node.return_type;
-    var blocks = try block_index(self.allocator, module, function);
-    defer blocks.deinit(self.allocator);
+    self.gen = self.gen + 1;
+    let gen = self.gen;
+    let block_count = node.blocks.len();
     var index = 0;
     while node.blocks.get(index) |block| {
+        let id = name_id(module.block_name(block));
+        try self.block_gen.set(id, gen);
+        try self.block_pos.set(id, index);
+        index = index + 1;
+    }
+    var has_phi = false;
+    index = 0;
+    while node.blocks.get(index) |block| {
+        let block_index = index;
         index = index + 1;
         self.block_name = module.block_name(block);
         let block_node = module.blocks.at(block.node);
         var instr_index = 0;
         while block_node.instrs.get(instr_index) |instr| {
+            let step = instr_index;
             instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if instr_node.op == Op::Phi {
+                has_phi = true;
+            }
+            if !is_empty(instr_node.result.name) {
+                let def_id = name_id(instr_node.result.name);
+                try self.defined_gen.set(def_id, gen);
+                try self.defined_block.set(def_id, block_index);
+                try self.defined_step.set(def_id, step);
+            }
             if try self.verify_instr(module, types, instr) |failed| {
                 return move failed;
             }
         }
-        if try self.verify_terminator(module, types, &blocks, block) |failed| {
+        if try self.verify_terminator(module, types, block) |failed| {
             return move failed;
         }
     }
-    var preds = try block_predecessors(self.allocator, module, function, &blocks);
-    defer preds.deinit(self.allocator);
-    if try self.phi_incoming_matches_predecessors(module, function, &blocks, &preds) |failed| {
-        return move failed;
-    }
-    if node.blocks.len() == 0 {
+    if block_count == 0 {
         return null;
     }
-    var defined_in = try value_defining_blocks(self.allocator, module, function);
-    defer defined_in.deinit(self.allocator);
-    var tree = try build_dominator_tree(self.allocator, module, function, &blocks, &preds);
-    defer tree.deinit(self.allocator);
-    if try self.phi_incoming_dominates(module, function, &tree, &defined_in, &blocks) |failed| {
-        return move failed;
+    if !has_phi and block_count == 1 {
+        return self.values_dominate_uses_single_block(module, function);
     }
-    return self.values_dominate_uses(module, function, &tree, &defined_in, &blocks);
+    var preds = try self.verifier_predecessors(module, function, block_count);
+    defer preds.deinit(self.allocator);
+    if has_phi {
+        if try self.phi_incoming_matches_predecessors(module, function, block_count, &preds) |failed| {
+            return move failed;
+        }
+    }
+    var tree = try self.verifier_dominator_tree(module, function, block_count, &preds);
+    defer tree.deinit(self.allocator);
+    if has_phi {
+        if try self.phi_incoming_dominates(module, function, &tree) |failed| {
+            return move failed;
+        }
+    }
+    return self.values_dominate_uses(module, function, &tree);
 }
 
 struct BlockIndex {
@@ -122,6 +194,8 @@ fn block_index(allocator: Allocator, module: &Module, function: Function) -> !Bl
     };
     errdefer out.deinit(allocator);
     let node = module.function_nodes.at(function.node);
+    try out.names.reserve(allocator, node.blocks.len());
+    try out.handles.reserve(allocator, node.blocks.len());
     var index = 0;
     while node.blocks.get(index) |block| {
         let name = module.block_name(block);
@@ -210,9 +284,7 @@ fn (self: &Verifier) verify_indirect_call(
 }
 
 fn (self: &Verifier) verify_call(module: &Module, node: &InstrNode, callee: Name) -> !?diagnostic::Diagnostic {
-    let callee_text = name_text(&module.names, callee);
-    let callee_bytes = callee_text.as_bytes();
-    let declared = self.params.get(callee_bytes) orelse return null;
+    let declared = self.params.get(name_id(callee)) orelse return null;
     let declared_node = module.function_nodes.at(declared.node);
     if declared_node.params.len() != node.args.len() {
         return null;
@@ -364,7 +436,6 @@ fn error_union_parts_of(types: &typ::Table, value: typ::Type) -> ?ParsedErrorUni
 fn (self: &Verifier) verify_terminator(
     module: &Module,
     types: &var typ::Table,
-    blocks: &BlockIndex,
     block: Block
 ) -> !?diagnostic::Diagnostic {
     let term = module.block_terminator(block);
@@ -378,7 +449,7 @@ fn (self: &Verifier) verify_terminator(
     var position = 0;
     while term.successor(position) |target| {
         position = position + 1;
-        if blocks.position_of(module, target) |_| {
+        if self.block_position(target) |_| {
             continue;
         } else {
             return try self.failure(
@@ -389,15 +460,15 @@ fn (self: &Verifier) verify_terminator(
         }
     }
     let got = term.value.type_name;
-    if term.op != TermOp::Return or is_empty(got) or try absorbs_error_set(module, types, self.fn_return, got) {
+    if term.op != TermOp::Return or is_empty(got) or same_name(self.fn_return, got) {
         return null;
     }
-    if !same_name(self.fn_return, got) and
-        !fills_nullable_pointer(module, self.fn_return, got) {
-        let position_text = try string::from_bytes(self.allocator, "return value");
-        return try self.fail(module, move position_text, self.fn_return, got);
+    if try absorbs_error_set(module, types, self.fn_return, got) or
+        fills_nullable_pointer(module, self.fn_return, got) {
+        return null;
     }
-    return null;
+    let position_text = try string::from_bytes(self.allocator, "return value");
+    return try self.fail(module, move position_text, self.fn_return, got);
 }
 
 fn fills_nullable_pointer(module: &Module, want: Name, got: Name) -> bool {
@@ -420,9 +491,15 @@ fn absorbs_error_set(module: &Module, types: &var typ::Table, want: Name, got: N
     }
     let want_text = name_text(&module.names, want);
     let want_bytes = want_text.as_bytes();
-    let want_type = try types.parse(want_bytes);
+    if !mem::starts_with(want_bytes, "!") {
+        return false;
+    }
     let got_text = name_text(&module.names, got);
     let got_bytes = got_text.as_bytes();
+    if !has_bang(got_bytes) {
+        return false;
+    }
+    let want_type = try types.parse(want_bytes);
     let got_type = try types.parse(got_bytes);
     let want_parts = error_union_parts_of(types, want_type) orelse return false;
     if want_parts.has_err {
@@ -523,13 +600,13 @@ fn append_verify_arg(allocator: Allocator, out: &var string::String, module: &Mo
 fn (self: &Verifier) phi_incoming_matches_predecessors(
     module: &Module,
     function: Function,
-    blocks: &BlockIndex,
+    block_count: i64,
     preds: &array::Array<array::Array<i64>>
 ) -> !?diagnostic::Diagnostic {
     let node = module.function_nodes.at(function.node);
-    var arrives = try flags(self.allocator, blocks.len());
+    var arrives = try flags(self.allocator, block_count);
     defer arrives.deinit(self.allocator);
-    var named = try flags(self.allocator, blocks.len());
+    var named = try flags(self.allocator, block_count);
     defer named.deinit(self.allocator);
     var index = 0;
     while node.blocks.get(index) |block| {
@@ -543,7 +620,7 @@ fn (self: &Verifier) phi_incoming_matches_predecessors(
                 if instr_node.op != Op::Phi {
                     continue;
                 }
-                if try self.phi_edges(module, block_node.name, instr_node, blocks, into, &var arrives, &var named) |failed| {
+                if try self.phi_edges(module, node, block_node.name, instr_node, into, &var arrives, &var named) |failed| {
                     return move failed;
                 }
             }
@@ -557,6 +634,7 @@ fn (self: &Verifier) phi_incoming_matches_predecessors(
 fn flags(allocator: Allocator, count: i64) -> !array::Array<bool> {
     var out = array::new<bool>(allocator);
     errdefer out.deinit(allocator);
+    try out.reserve(allocator, count);
     var index = 0;
     while index < count {
         try out.append(allocator, false);
@@ -576,9 +654,9 @@ fn set_flags(out: &var array::Array<bool>, list: &array::Array<i64>, value: bool
 
 fn (self: &Verifier) phi_edges(
     module: &Module,
+    node: &FunctionNode,
     block_name: Name,
     instr_node: &InstrNode,
-    blocks: &BlockIndex,
     into: &array::Array<i64>,
     arrives: &var array::Array<bool>,
     named: &var array::Array<bool>
@@ -586,7 +664,7 @@ fn (self: &Verifier) phi_edges(
     var index = 0;
     while instr_node.incoming.get(index) |incoming| {
         index = index + 1;
-        if incoming_arrives(module, blocks, arrives, incoming.block) |from| {
+        if self.incoming_arrives(arrives, incoming.block) |from| {
             try named.set(from, true);
         } else {
             return try self.failure(
@@ -603,10 +681,11 @@ fn (self: &Verifier) phi_edges(
         if named.get_or_panic(pred) {
             continue;
         }
+        let pred_name = module.block_name(node.blocks.get_or_panic(pred));
         return try self.failure(
             module, "phi %s in block %s has no value for %s, which jumps to %s",
             VerifyArg::Str(instr_node.result.name), VerifyArg::Str(block_name),
-            VerifyArg::Str(blocks.name_at(pred)), VerifyArg::Str(block_name), VerifyArg::None,
+            VerifyArg::Str(pred_name), VerifyArg::Str(block_name), VerifyArg::None,
             VerifyArg::None, VerifyArg::None
         );
     }
@@ -622,7 +701,7 @@ fn (self: &Verifier) phi_edges(
     index = 0;
     while instr_node.incoming.get(index) |incoming| {
         index = index + 1;
-        if blocks.position_of(module, incoming.block) |from| {
+        if self.block_position(incoming.block) |from| {
             try named.set(from, false);
         }
     }
@@ -642,13 +721,11 @@ fn (self: &Verifier) phi_edges(
     return null;
 }
 
-fn incoming_arrives(
-    module: &Module,
-    blocks: &BlockIndex,
+fn (self: &Verifier) incoming_arrives(
     arrives: &array::Array<bool>,
     block: Name
 ) -> ?i64 {
-    let from = blocks.position_of(module, block) orelse return null;
+    let from = self.block_position(block) orelse return null;
     if arrives.get_or_panic(from) {
         return from;
     }
@@ -658,9 +735,7 @@ fn incoming_arrives(
 fn (self: &Verifier) phi_incoming_dominates(
     module: &Module,
     function: Function,
-    tree: &DominatorTree,
-    defined_in: &map::Map<[]u8, Definition>,
-    blocks: &BlockIndex
+    tree: &DominatorTree
 ) -> !?diagnostic::Diagnostic {
     let node = module.function_nodes.at(function.node);
     var index = 0;
@@ -677,18 +752,22 @@ fn (self: &Verifier) phi_incoming_dominates(
             var incoming_index = 0;
             while instr_node.incoming.get(incoming_index) |incoming| {
                 incoming_index = incoming_index + 1;
-                let value_text = name_text(&module.names, incoming.value.name);
-                let value_bytes = value_text.as_bytes();
-                let defined = defined_in.get(value_bytes) orelse continue;
-                let from = blocks.position_of(module, incoming.block) orelse continue;
-                if tree.dominates(defined.block, from) {
+                let value_id = name_id(incoming.value.name);
+                if value_id <= 0 or value_id >= self.defined_gen.len() or
+                    self.defined_gen.get_or_panic(value_id) != self.gen {
                     continue;
                 }
+                let def_block = self.defined_block.get_or_panic(value_id);
+                let from = self.block_position(incoming.block) orelse continue;
+                if tree.dominates(def_block, from) {
+                    continue;
+                }
+                let def_name = module.block_name(node.blocks.get_or_panic(def_block));
                 return try self.failure(
                     module, "phi %s in block %s takes %s from %s, but %s is defined in %s, which does not dominate %s",
                     VerifyArg::Str(instr_node.result.name), VerifyArg::Str(block_node.name),
                     VerifyArg::Str(incoming.value.name), VerifyArg::Str(incoming.block),
-                    VerifyArg::Str(incoming.value.name), VerifyArg::Str(blocks.name_at(defined.block)),
+                    VerifyArg::Str(incoming.value.name), VerifyArg::Str(def_name),
                     VerifyArg::Str(incoming.block)
                 );
             }
@@ -697,59 +776,46 @@ fn (self: &Verifier) phi_incoming_dominates(
     return null;
 }
 
-fn (self: &Verifier) values_dominate_uses(
+fn (self: &Verifier) values_dominate_uses_single_block(
     module: &Module,
-    function: Function,
-    tree: &DominatorTree,
-    defined_in: &map::Map<[]u8, Definition>,
-    blocks: &BlockIndex
+    function: Function
 ) -> !?diagnostic::Diagnostic {
     let node = module.function_nodes.at(function.node);
-    var index = 0;
-    while node.blocks.get(index) |block| {
-        let block_node = module.blocks.at(block.node);
-        var step = 0;
-        while block_node.instrs.get(step) |instr| {
-            let instr_node = module.instrs.at(instr.node);
-            if instr_node.op != Op::Phi {
-                if try self.check_operands(module, tree, defined_in, blocks, index, step, instr_node) |failed| {
-                    return move failed;
-                }
-            }
-            step = step + 1;
-        }
-        let end = block_node.instrs.len();
-        if try self.dominates_use(module, tree, defined_in, blocks, index, end, block_node.terminator.cond) |failed| {
+    let block = node.blocks.get_or_panic(0);
+    let block_node = module.blocks.at(block.node);
+    let block_name = block_node.name;
+    var step = 0;
+    while block_node.instrs.get(step) |instr| {
+        let instr_node = module.instrs.at(instr.node);
+        if try self.check_operands_single_block(module, block_name, step, instr_node) |failed| {
             return move failed;
         }
-        if try self.dominates_use(module, tree, defined_in, blocks, index, end, block_node.terminator.value) |failed| {
-            return move failed;
-        }
-        index = index + 1;
+        step = step + 1;
     }
-    return null;
+    let end = block_node.instrs.len();
+    if try self.dominates_use_single_block(module, block_name, end, block_node.terminator.cond) |failed| {
+        return move failed;
+    }
+    return self.dominates_use_single_block(module, block_name, end, block_node.terminator.value);
 }
 
-fn (self: &Verifier) check_operands(
+fn (self: &Verifier) check_operands_single_block(
     module: &Module,
-    tree: &DominatorTree,
-    defined_in: &map::Map<[]u8, Definition>,
-    blocks: &BlockIndex,
-    position: i64,
+    block_name: Name,
     step: i64,
     instr_node: &InstrNode
 ) -> !?diagnostic::Diagnostic {
     var index = 0;
     while instr_node.args.get(index) |arg| {
         index = index + 1;
-        if try self.dominates_use(module, tree, defined_in, blocks, position, step, arg) |failed| {
+        if try self.dominates_use_single_block(module, block_name, step, arg) |failed| {
             return move failed;
         }
     }
     index = 0;
     while instr_node.fields.get(index) |field| {
         index = index + 1;
-        if try self.dominates_use(module, tree, defined_in, blocks, position, step, field.value) |failed| {
+        if try self.dominates_use_single_block(module, block_name, step, field.value) |failed| {
             return move failed;
         }
     }
@@ -759,7 +825,94 @@ fn (self: &Verifier) check_operands(
         var arg_index = 0;
         while module.cleanup_arg(cleanup, arg_index) |arg| {
             arg_index = arg_index + 1;
-            if try self.dominates_use(module, tree, defined_in, blocks, position, step, arg) |failed| {
+            if try self.dominates_use_single_block(module, block_name, step, arg) |failed| {
+                return move failed;
+            }
+        }
+    }
+    return null;
+}
+
+fn (self: &Verifier) dominates_use_single_block(
+    module: &Module,
+    block_name: Name,
+    step: i64,
+    operand: Value
+) -> !?diagnostic::Diagnostic {
+    let id = name_id(operand.name);
+    if id <= 0 or id >= self.defined_gen.len() or self.defined_gen.get_or_panic(id) != self.gen {
+        return null;
+    }
+    if self.defined_step.get_or_panic(id) < step {
+        return null;
+    }
+    return try self.failure(
+        module, "block %s reads %s before it is defined",
+        VerifyArg::Str(block_name), VerifyArg::Str(operand.name), VerifyArg::None,
+        VerifyArg::None, VerifyArg::None, VerifyArg::None, VerifyArg::None
+    );
+}
+
+fn (self: &Verifier) values_dominate_uses(
+    module: &Module,
+    function: Function,
+    tree: &DominatorTree
+) -> !?diagnostic::Diagnostic {
+    let node = module.function_nodes.at(function.node);
+    var index = 0;
+    while node.blocks.get(index) |block| {
+        let block_node = module.blocks.at(block.node);
+        var step = 0;
+        while block_node.instrs.get(step) |instr| {
+            let instr_node = module.instrs.at(instr.node);
+            if instr_node.op != Op::Phi {
+                if try self.check_operands(module, node, tree, index, step, instr_node) |failed| {
+                    return move failed;
+                }
+            }
+            step = step + 1;
+        }
+        let end = block_node.instrs.len();
+        if try self.dominates_use(module, node, tree, index, end, block_node.terminator.cond) |failed| {
+            return move failed;
+        }
+        if try self.dominates_use(module, node, tree, index, end, block_node.terminator.value) |failed| {
+            return move failed;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+fn (self: &Verifier) check_operands(
+    module: &Module,
+    node: &FunctionNode,
+    tree: &DominatorTree,
+    position: i64,
+    step: i64,
+    instr_node: &InstrNode
+) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    while instr_node.args.get(index) |arg| {
+        index = index + 1;
+        if try self.dominates_use(module, node, tree, position, step, arg) |failed| {
+            return move failed;
+        }
+    }
+    index = 0;
+    while instr_node.fields.get(index) |field| {
+        index = index + 1;
+        if try self.dominates_use(module, node, tree, position, step, field.value) |failed| {
+            return move failed;
+        }
+    }
+    index = 0;
+    while instr_node.cleanups.get(index) |cleanup| {
+        index = index + 1;
+        var arg_index = 0;
+        while module.cleanup_arg(cleanup, arg_index) |arg| {
+            arg_index = arg_index + 1;
+            if try self.dominates_use(module, node, tree, position, step, arg) |failed| {
                 return move failed;
             }
         }
@@ -769,19 +922,20 @@ fn (self: &Verifier) check_operands(
 
 fn (self: &Verifier) dominates_use(
     module: &Module,
+    node: &FunctionNode,
     tree: &DominatorTree,
-    defined_in: &map::Map<[]u8, Definition>,
-    blocks: &BlockIndex,
     position: i64,
     step: i64,
     operand: Value
 ) -> !?diagnostic::Diagnostic {
-    let operand_text = name_text(&module.names, operand.name);
-    let operand_bytes = operand_text.as_bytes();
-    let defined = defined_in.get(operand_bytes) orelse return null;
-    let block_name = blocks.name_at(position);
-    if defined.block == position {
-        if defined.step < step {
+    let id = name_id(operand.name);
+    if id <= 0 or id >= self.defined_gen.len() or self.defined_gen.get_or_panic(id) != self.gen {
+        return null;
+    }
+    let def_block = self.defined_block.get_or_panic(id);
+    let block_name = module.block_name(node.blocks.get_or_panic(position));
+    if def_block == position {
+        if self.defined_step.get_or_panic(id) < step {
             return null;
         }
         return try self.failure(
@@ -790,10 +944,10 @@ fn (self: &Verifier) dominates_use(
             VerifyArg::None, VerifyArg::None, VerifyArg::None, VerifyArg::None
         );
     }
-    if tree.dominates(defined.block, position) {
+    if tree.dominates(def_block, position) {
         return null;
     }
-    let defined_at = blocks.name_at(defined.block);
+    let defined_at = module.block_name(node.blocks.get_or_panic(def_block));
     return try self.failure(
         module, "block %s reads %s, which is defined in %s, and %s does not dominate %s",
         VerifyArg::Str(block_name), VerifyArg::Str(operand.name), VerifyArg::Str(defined_at),
@@ -801,38 +955,22 @@ fn (self: &Verifier) dominates_use(
     );
 }
 
-struct Definition {
-    block: i64,
-    step: i64,
-}
-
-fn value_defining_blocks(allocator: Allocator, module: &Module, function: Function) -> !map::Map<[]u8, Definition> {
-    var defined = map::new<[]u8, Definition>(allocator);
-    errdefer defined.deinit(allocator);
-    let node = module.function_nodes.at(function.node);
-    var index = 0;
-    while node.blocks.get(index) |block| {
-        let block_node = module.blocks.at(block.node);
-        var step = 0;
-        while block_node.instrs.get(step) |instr| {
-            let instr_node = module.instrs.at(instr.node);
-            if !is_empty(instr_node.result.name) {
-                let result_text = name_text(&module.names, instr_node.result.name);
-                let result_bytes = result_text.as_bytes();
-                try defined.insert(allocator, result_bytes, Definition { block: index, step: step });
-            }
-            step = step + 1;
-        }
-        index = index + 1;
-    }
-    return move defined;
-}
-
 struct DominatorTree {
     place: array::Array<i64>,
     idom: array::Array<i64>,
     enter: array::Array<i64>,
     exit: array::Array<i64>,
+}
+
+fn (self: &Verifier) verifier_dominator_tree(
+    module: &Module,
+    function: Function,
+    block_count: i64,
+    preds: &array::Array<array::Array<i64>>
+) -> !DominatorTree {
+    var order = try self.verifier_reverse_postorder(module, function, block_count);
+    defer order.deinit(self.allocator);
+    return build_dominator_tree_from_order(self.allocator, block_count, &order, preds);
 }
 
 fn build_dominator_tree(
@@ -844,6 +982,15 @@ fn build_dominator_tree(
 ) -> !DominatorTree {
     var order = try reverse_postorder(allocator, module, function, blocks);
     defer order.deinit(allocator);
+    return build_dominator_tree_from_order(allocator, blocks.len(), &order, preds);
+}
+
+fn build_dominator_tree_from_order(
+    allocator: Allocator,
+    block_count: i64,
+    order: &array::Array<i64>,
+    preds: &array::Array<array::Array<i64>>
+) -> !DominatorTree {
     var tree = DominatorTree {
         place: array::new<i64>(allocator),
         idom: array::new<i64>(allocator),
@@ -851,11 +998,13 @@ fn build_dominator_tree(
         exit: array::new<i64>(allocator)
     };
     errdefer tree.deinit(allocator);
+    try tree.place.reserve(allocator, block_count);
     var position = 0;
-    while position < blocks.len() {
+    while position < block_count {
         try tree.place.append(allocator, -1);
         position = position + 1;
     }
+    try tree.idom.reserve(allocator, order.len());
     position = 0;
     while order.get(position) |block| {
         try tree.place.set(block, position);
@@ -902,8 +1051,12 @@ fn (self: &var DominatorTree) number(allocator: Allocator) -> !void {
     let count = self.idom.len();
     var size = array::new<i64>(allocator);
     defer size.deinit(allocator);
+    try size.reserve(allocator, count);
     var next = array::new<i64>(allocator);
     defer next.deinit(allocator);
+    try next.reserve(allocator, count);
+    try self.enter.reserve(allocator, count);
+    try self.exit.reserve(allocator, count);
     var at = 0;
     while at < count {
         try size.append(allocator, 1);
@@ -962,6 +1115,82 @@ fn (self: &DominatorTree) dominates(dominator: i64, block: i64) -> bool {
     return self.enter.get_or_panic(target) <= first and first < self.exit.get_or_panic(target);
 }
 
+fn (self: &Verifier) verifier_reverse_postorder(
+    module: &Module,
+    function: Function,
+    block_count: i64
+) -> !array::Array<i64> {
+    let node = module.function_nodes.at(function.node);
+    var visited = try flags(self.allocator, block_count);
+    defer visited.deinit(self.allocator);
+    var order = array::new<i64>(self.allocator);
+    errdefer order.deinit(self.allocator);
+    if block_count == 0 {
+        return move order;
+    }
+    try order.reserve(self.allocator, block_count);
+    try self.verifier_visit_postorder(module, node, &var visited, &var order, 0);
+    var head = 0;
+    var tail = order.len() - 1;
+    while head < tail {
+        try order.swap(head, tail);
+        head = head + 1;
+        tail = tail - 1;
+    }
+    return move order;
+}
+
+fn (self: &Verifier) verifier_visit_postorder(
+    module: &Module,
+    node: &FunctionNode,
+    visited: &var array::Array<bool>,
+    order: &var array::Array<i64>,
+    position: i64
+) -> !void {
+    if visited.get_or_panic(position) {
+        return;
+    }
+    try visited.set(position, true);
+    let term = module.block_terminator(node.blocks.get_or_panic(position));
+    var index = 0;
+    while term.successor(index) |target| {
+        index = index + 1;
+        if self.block_position(target) |to| {
+            try self.verifier_visit_postorder(module, node, visited, order, to);
+        }
+    }
+    return order.append(self.allocator, position);
+}
+
+fn (self: &Verifier) verifier_predecessors(
+    module: &Module,
+    function: Function,
+    block_count: i64
+) -> !array::Array<array::Array<i64>> {
+    var preds = array::new<array::Array<i64>>(self.allocator);
+    errdefer preds.deinit(self.allocator);
+    try preds.reserve(self.allocator, block_count);
+    var index = 0;
+    while index < block_count {
+        try preds.append(self.allocator, array::new<i64>(self.allocator));
+        index = index + 1;
+    }
+    let node = module.function_nodes.at(function.node);
+    index = 0;
+    while node.blocks.get(index) |block| {
+        let block_node = module.blocks.at(block.node);
+        var position = 0;
+        while block_node.terminator.successor(position) |target| {
+            position = position + 1;
+            if self.block_position(target) |to| {
+                try add_predecessor(self.allocator, &var preds, to, index);
+            }
+        }
+        index = index + 1;
+    }
+    return move preds;
+}
+
 fn reverse_postorder(
     allocator: Allocator,
     module: &Module,
@@ -976,6 +1205,7 @@ fn reverse_postorder(
     if node.blocks.len() == 0 {
         return move order;
     }
+    try order.reserve(allocator, blocks.len());
     try visit_postorder(allocator, module, blocks, &var visited, &var order, 0);
     var head = 0;
     var tail = order.len() - 1;
@@ -1018,6 +1248,7 @@ fn block_predecessors(
 ) -> !array::Array<array::Array<i64>> {
     var preds = array::new<array::Array<i64>>(allocator);
     errdefer preds.deinit(allocator);
+    try preds.reserve(allocator, blocks.len());
     var index = 0;
     while index < blocks.len() {
         try preds.append(allocator, array::new<i64>(allocator));

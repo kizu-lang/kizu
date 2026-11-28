@@ -211,6 +211,12 @@ pub struct CommonNames {
     pub bytes_type: Name,
     pub unknown: Name,
     pub type_type: Name,
+    pub entry_block: Name,
+    pub true_text: Name,
+    pub false_text: Name,
+    pub one_text: Name,
+    pub less_op: Name,
+    pub plus_op: Name,
     pub void_value: Value,
     pub zero_index: Value,
 }
@@ -221,6 +227,7 @@ pub struct Lowerer {
     pub module: Module,
     types: typ::Table,
     common: CommonNames,
+    value_names: array::Array<Name>,
     decl_facts: arena::Arena<FunctionFacts>,
     test_name: Name,
     test_file: Name,
@@ -232,7 +239,8 @@ pub struct Lowerer {
     tests: array::Array<TestFacts>,
     current_test_module: Name,
     signature_nodes: arena::Arena<Signature>,
-    signatures: map::Map<[]u8, SignatureHandle>,
+    signatures: map::Map<i64, SignatureHandle>,
+    signature_names: array::Array<Name>,
     method_signatures: map::Map<[]u8, array::Array<SignatureHandle>>,
     current: Function,
     block: Block,
@@ -389,6 +397,7 @@ pub fn new_lowerer_for_target(
         module: move module,
         types: typ::new(allocator),
         common: common,
+        value_names: array::new<Name>(allocator),
         decl_facts: move decl_facts,
         test_name: empty_name(),
         test_file: empty_name(),
@@ -400,7 +409,8 @@ pub fn new_lowerer_for_target(
         tests: array::new<TestFacts>(allocator),
         current_test_module: empty_name(),
         signature_nodes: move signature_nodes,
-        signatures: map::new<[]u8, SignatureHandle>(allocator),
+        signatures: map::new<i64, SignatureHandle>(allocator),
+        signature_names: array::new<Name>(allocator),
         method_signatures: map::new<[]u8, array::Array<SignatureHandle>>(allocator),
         current: scratch_function,
         block: scratch_block,
@@ -460,6 +470,12 @@ fn intern_common(names: &var NameTable) -> !CommonNames {
         bytes_type: try names.intern("[]u8"),
         unknown: try names.intern("unknown"),
         type_type: try names.intern("type"),
+        entry_block: try names.intern("entry"),
+        true_text: try names.intern("true"),
+        false_text: try names.intern("false"),
+        one_text: try names.intern("1"),
+        less_op: try names.intern("<"),
+        plus_op: try names.intern("+"),
         void_value: Value { name: void_type, type_name: void_type },
         zero_index: Value { name: try names.intern("0"), type_name: i64_type }
     };
@@ -703,15 +719,12 @@ fn (self: &var Lowerer) lower_reached(
     defer queue.deinit(self.allocator);
     var next = 0;
     while true {
-        while self.module.functions.get(scanned) |function| {
-            scanned = scanned + 1;
-            let callees = try direct_callees(self.allocator, &self.module, function);
-            defer callees.deinit(self.allocator);
-            var callee_index = 0;
-            while callees.get(callee_index) |callee| {
-                callee_index = callee_index + 1;
-                if std.remove(self.allocator, name_id(callee)) |handle| {
-                    try queue.append(self.allocator, handle);
+        if std.len() > 0 {
+            while self.module.functions.get(scanned) |function| {
+                scanned = scanned + 1;
+                try self.queue_reached_std(function, std, &var queue);
+                if std.len() == 0 {
+                    break;
                 }
             }
         }
@@ -733,6 +746,43 @@ fn (self: &var Lowerer) lower_reached(
         return null;
     }
     return null;
+}
+
+fn (self: &Lowerer) queue_reached_std(
+    function: Function,
+    std: &var map::Map<i64, FactsHandle>,
+    queue: &var array::Array<FactsHandle>
+) -> !void {
+    let node = self.module.function_nodes.at(function.node);
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = self.module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = self.module.instrs.at(instr.node);
+            if is_empty(instr_node.extern_abi) {
+                if direct_callee(instr_node.op, instr_node.operand) |callee| {
+                    if std.remove(self.allocator, name_id(callee)) |handle| {
+                        try queue.append(self.allocator, handle);
+                    }
+                }
+            }
+            var cleanup_index = 0;
+            while instr_node.cleanups.get(cleanup_index) |cleanup| {
+                cleanup_index = cleanup_index + 1;
+                if is_empty(cleanup.extern_abi) {
+                    if direct_callee(cleanup.op, cleanup.operand) |callee| {
+                        if std.remove(self.allocator, name_id(callee)) |handle| {
+                            try queue.append(self.allocator, handle);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return;
 }
 
 fn (self: &var Lowerer) lower_tests(
@@ -858,26 +908,25 @@ fn (self: &var Lowerer) collect_decls(
 fn (self: &var Lowerer) index_method_signatures() -> !void {
     var method = string::new(self.allocator);
     defer method.deinit(self.allocator);
-    let count = self.signatures.len();
     var position = 0;
-    while position < count {
+    while self.signature_names.get(position) |name| {
+        position = position + 1;
         method.clear();
         var signature = self.scratch_signature;
         var found = false;
-        if self.signatures.key_at(position) |key| {
-            if stdmethod::split_method_name(key) |parts| {
-                try method.append_bytes(self.allocator, parts.method);
-                if self.signatures.get(key) |handle| {
-                    signature = handle;
-                    found = true;
-                }
+        let retained = name_text(&self.module.names, name);
+        let key = retained.as_bytes();
+        if stdmethod::split_method_name(key) |parts| {
+            try method.append_bytes(self.allocator, parts.method);
+            if self.signatures.get(name_id(name)) |handle| {
+                signature = handle;
+                found = true;
             }
         }
         if found {
             let method_bytes = method.as_bytes();
             try self.add_method_signature(method_bytes, signature);
         }
-        position = position + 1;
     }
     var generic_index = 0;
     while self.generic_decls.key_at(generic_index) |key| {
@@ -929,13 +978,13 @@ fn (self: &Lowerer) method_signature_at(method: []u8, position: i64) -> ?Signatu
 }
 
 fn (self: &var Lowerer) record_signature(name: Name, signature: SignatureHandle) -> !void {
-    let retained = name_text(&self.module.names, name);
-    let name_bytes = retained.as_bytes();
-    if self.signatures.at_mut(name_bytes) |slot| {
+    let key = name_id(name);
+    if self.signatures.at_mut(key) |slot| {
         slot.* = signature;
         return;
     }
-    return self.signatures.insert(self.allocator, name_bytes, signature);
+    try self.signature_names.append(self.allocator, name);
+    return self.signatures.insert(self.allocator, key, signature);
 }
 
 fn (self: &var Lowerer) record_extern_decl(name: Name, declared: ExternDecl) -> !void {
@@ -1442,15 +1491,11 @@ fn (self: &var Lowerer) function_pointer_type(signature: SignatureHandle) -> !Na
 }
 
 fn (self: &Lowerer) signature_named(name: Name) -> ?SignatureHandle {
-    let retained = name_text(&self.module.names, name);
-    let bytes = retained.as_bytes();
-    return self.signatures.get(bytes);
+    return self.signatures.get(name_id(name));
 }
 
 fn (self: &Lowerer) has_signature(name: Name) -> bool {
-    let retained = name_text(&self.module.names, name);
-    let bytes = retained.as_bytes();
-    return self.signatures.contains(bytes);
+    return self.signatures.contains(name_id(name));
 }
 
 fn (self: &var Lowerer) bind_param_read_storage(decl: FactsHandle, signature: SignatureHandle) -> !void {
@@ -1477,7 +1522,17 @@ fn (self: &var Lowerer) lower_function_named(
     decl: FactsHandle,
     name: Name
 ) -> !?diagnostic::Diagnostic {
-    let signature = try self.lower_signature(decl);
+    var signature = self.scratch_signature;
+    var reused = false;
+    if self.current_args |_| {} else {
+        if self.signature_named(name) |known| {
+            signature = known;
+            reused = true;
+        }
+    }
+    if !reused {
+        signature = try self.lower_signature(decl);
+    }
     var params = array::new<Param>(self.allocator);
     errdefer params.deinit(self.allocator);
     let count = self.signature_param_count(signature);
@@ -1540,8 +1595,7 @@ fn (self: &var Lowerer) lower_function_named(
         }
         index = index + 1;
     }
-    let entry = try self.module.names.intern("entry");
-    self.block = try self.new_block(entry);
+    self.block = try self.new_block(self.common.entry_block);
     var slot_index = 0;
     while value_slots.get(slot_index) |slot_name| {
         slot_index = slot_index + 1;
@@ -1628,7 +1682,7 @@ fn (self: &Lowerer) borrow_passing(elem: Name, mutable: bool) -> Passing {
 }
 
 fn (self: &var Lowerer) lower_return_type(name: Name) -> !Name {
-    if is_empty(name) {
+    if is_empty(name) or !self.module.names.is_reference_type(name) {
         return self.return_type(name);
     }
     let parsed = try self.parse_type(name);

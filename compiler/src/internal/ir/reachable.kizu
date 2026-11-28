@@ -9,17 +9,16 @@ pub fn keep_target_reachable_functions(
     roots: &array::Array<string::String>,
     export_abi: []u8
 ) -> !void {
-    var functions = map::new<[]u8, Function>(allocator);
+    let limit = module.names.id_limit();
+    var functions = map::new<i64, Function>(allocator);
     defer functions.deinit(allocator);
     var index = 0;
     while module.functions.get(index) |function| {
         index = index + 1;
         let name = module.function_name(function);
-        let retained = name_text(&module.names, name);
-        let bytes = retained.as_bytes();
-        try functions.insert(allocator, bytes, function);
+        try functions.insert(allocator, name_id(name), function);
     }
-    var reachable = map::new<[]u8, bool>(allocator);
+    var reachable = try flags(allocator, limit);
     defer reachable.deinit(allocator);
     var queue = array::new<Function>(allocator);
     defer queue.deinit(allocator);
@@ -27,11 +26,8 @@ pub fn keep_target_reachable_functions(
     while roots.at(index) |root| {
         index = index + 1;
         let root_bytes = root.as_bytes();
-        if functions.get(root_bytes) |function| {
-            if !reachable.contains(root_bytes) {
-                try reachable.insert(allocator, root_bytes, true);
-                try queue.append(allocator, function);
-            }
+        if module.names.lookup(root_bytes) |root_name| {
+            try mark_reachable(allocator, &functions, &var reachable, &var queue, root_name);
         }
     }
     index = 0;
@@ -46,12 +42,7 @@ pub fn keep_target_reachable_functions(
         if !mem::equal_bytes(abi_bytes, export_abi) {
             continue;
         }
-        let retained = name_text(&module.names, node.name);
-        let bytes = retained.as_bytes();
-        if !reachable.contains(bytes) {
-            try reachable.insert(allocator, bytes, true);
-            try queue.append(allocator, function);
-        }
+        try mark_reachable(allocator, &functions, &var reachable, &var queue, node.name);
     }
     if queue.len() == 0 {
         return;
@@ -59,23 +50,40 @@ pub fn keep_target_reachable_functions(
     var head = 0;
     while queue.get(head) |function| {
         head = head + 1;
-        var callees = try direct_callees(allocator, module, function);
-        defer callees.deinit(allocator);
-        var callee_index = 0;
-        while callees.get(callee_index) |callee| {
-            callee_index = callee_index + 1;
-            try mark_reachable(allocator, module, &functions, &var reachable, &var queue, callee);
+        let node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let instr_node = module.instrs.at(instr.node);
+                if is_empty(instr_node.extern_abi) {
+                    if direct_callee(instr_node.op, instr_node.operand) |callee| {
+                        try mark_reachable(allocator, &functions, &var reachable, &var queue, callee);
+                    }
+                }
+                var cleanup_index = 0;
+                while instr_node.cleanups.get(cleanup_index) |cleanup| {
+                    cleanup_index = cleanup_index + 1;
+                    if is_empty(cleanup.extern_abi) {
+                        if direct_callee(cleanup.op, cleanup.operand) |callee| {
+                            try mark_reachable(allocator, &functions, &var reachable, &var queue, callee);
+                        }
+                    }
+                }
+            }
         }
     }
     var kept = array::new<Function>(allocator);
     defer kept.deinit(allocator);
+    try kept.reserve(allocator, queue.len());
     index = 0;
     while module.functions.get(index) |function| {
         index = index + 1;
-        let name = module.function_name(function);
-        let retained = name_text(&module.names, name);
-        let bytes = retained.as_bytes();
-        if reachable.contains(bytes) {
+        let id = name_id(module.function_name(function));
+        if id >= 0 and id < reachable.len() and reachable.get_or_panic(id) {
             try kept.append(allocator, function);
         }
     }
@@ -89,6 +97,11 @@ pub fn keep_target_reachable_functions(
 }
 
 pub fn keep_referenced_error_sets(allocator: Allocator, module: &var Module) -> !void {
+    if module.error_sets.len() == 0 {
+        return;
+    }
+    var seen_types = try flags(allocator, module.names.id_limit());
+    defer seen_types.deinit(allocator);
     var referenced = map::new<[]u8, bool>(allocator);
     defer referenced.deinit(allocator);
     var index = 0;
@@ -98,9 +111,9 @@ pub fn keep_referenced_error_sets(allocator: Allocator, module: &var Module) -> 
         var param_index = 0;
         while node.params.get(param_index) |param| {
             param_index = param_index + 1;
-            try note_error_sets(allocator, module, &var referenced, param.type_name);
+            try note_error_sets(allocator, module, &var seen_types, &var referenced, param.type_name);
         }
-        try note_error_sets(allocator, module, &var referenced, node.return_type);
+        try note_error_sets(allocator, module, &var seen_types, &var referenced, node.return_type);
         var block_index = 0;
         while node.blocks.get(block_index) |block| {
             block_index = block_index + 1;
@@ -109,15 +122,15 @@ pub fn keep_referenced_error_sets(allocator: Allocator, module: &var Module) -> 
             while block_node.instrs.get(instr_index) |instr| {
                 instr_index = instr_index + 1;
                 let instr_node = module.instrs.at(instr.node);
-                try note_error_sets(allocator, module, &var referenced, instr_node.result.type_name);
+                try note_error_sets(allocator, module, &var seen_types, &var referenced, instr_node.result.type_name);
                 var arg_index = 0;
                 while instr_node.args.get(arg_index) |arg| {
                     arg_index = arg_index + 1;
-                    try note_error_sets(allocator, module, &var referenced, arg.type_name);
+                    try note_error_sets(allocator, module, &var seen_types, &var referenced, arg.type_name);
                 }
-                try note_error_sets(allocator, module, &var referenced, instr_node.immediate);
+                try note_error_sets(allocator, module, &var seen_types, &var referenced, instr_node.immediate);
             }
-            try note_error_sets(allocator, module, &var referenced, block_node.terminator.value.type_name);
+            try note_error_sets(allocator, module, &var seen_types, &var referenced, block_node.terminator.value.type_name);
         }
     }
     var pending = array::new<string::String>(allocator);
@@ -170,11 +183,19 @@ pub fn keep_referenced_error_sets(allocator: Allocator, module: &var Module) -> 
 fn note_error_sets(
     allocator: Allocator,
     module: &Module,
+    seen_types: &var array::Array<bool>,
     referenced: &var map::Map<[]u8, bool>,
     typ: Name
 ) -> !void {
     if is_empty(typ) {
         return;
+    }
+    let id = name_id(typ);
+    if id >= 0 and id < seen_types.len() {
+        if seen_types.get_or_panic(id) {
+            return;
+        }
+        try seen_types.set(id, true);
     }
     let retained = name_text(&module.names, typ);
     let bytes = retained.as_bytes();
@@ -215,19 +236,17 @@ fn is_type_name_byte(byte: u8) -> bool {
 
 fn mark_reachable(
     allocator: Allocator,
-    module: &Module,
-    functions: &map::Map<[]u8, Function>,
-    reachable: &var map::Map<[]u8, bool>,
+    functions: &map::Map<i64, Function>,
+    reachable: &var array::Array<bool>,
     queue: &var array::Array<Function>,
     callee: Name
 ) -> !void {
-    let retained = name_text(&module.names, callee);
-    let bytes = retained.as_bytes();
-    let function = functions.get(bytes) orelse return;
-    if reachable.contains(bytes) {
+    let id = name_id(callee);
+    if id < 0 or id >= reachable.len() or reachable.get_or_panic(id) {
         return;
     }
-    try reachable.insert(allocator, bytes, true);
+    let function = functions.get(id) orelse return;
+    try reachable.set(id, true);
     return queue.append(allocator, function);
 }
 

@@ -239,66 +239,106 @@ fn first_span(first: ast::Span, second: ast::Span) -> ast::Span {
 }
 
 fn (self: &var Lowerer) lower_stmt(tree: &var ast::Ast, statement: ast::Statement) -> !?diagnostic::Diagnostic {
-    if ownership::let_stmt(tree, statement) |value| {
-        return self.lower_let_stmt(tree, value);
+    match tree.statements.at(statement.node) {
+        Let(value) => {
+            let copied = ast::LetStmt {
+                mutable: value.mutable,
+                name: value.name,
+                type_name: value.type_name,
+                value: value.value
+            };
+            return self.lower_let_stmt(tree, copied);
+        },
+        Assign(value) => {
+            let target = value.target;
+            let rhs = value.value;
+            let want = try self.assign_target_type(tree, target);
+            var lowered = empty_value();
+            if try self.lower_contextual_expr(tree, rhs, want, &var lowered) |failed| {
+                return move failed;
+            }
+            return self.lower_assign_target(tree, target, lowered);
+        },
+        Return(value) => {
+            let copied = ast::ReturnStmt { value: value.value };
+            return self.lower_return_stmt(tree, statement, copied);
+        },
+        Defer(_) => return try self.fail0("ir error: defer statement must appear directly in a block"),
+        ErrDefer(_) => return try self.fail0("ir error: defer statement must appear directly in a block"),
+        Expr(value) => {
+            let expr = value.expr;
+            var ignored = empty_value();
+            return self.lower_expr(tree, expr, &var ignored);
+        },
+        If(value) => {
+            let copied = ast::IfStmt {
+                condition: value.condition,
+                consequence: value.consequence,
+                alternative: value.alternative,
+                capture: value.capture,
+                err_capture: value.err_capture
+            };
+            return self.lower_if_stmt(tree, copied);
+        },
+        While(value) => {
+            let copied = ast::WhileStmt {
+                label: value.label,
+                condition: value.condition,
+                body: value.body,
+                capture: value.capture
+            };
+            return self.lower_while_stmt(tree, copied);
+        },
+        For(value) => {
+            let copied = ast::ForStmt {
+                label: value.label,
+                name: value.name,
+                start: value.start,
+                end: value.end,
+                body: value.body
+            };
+            return self.lower_for_stmt(tree, copied);
+        },
+        Break(value) => {
+            let label = value.label;
+            return self.lower_loop_branch(tree, false, label);
+        },
+        Continue(value) => {
+            let label = value.label;
+            return self.lower_loop_branch(tree, true, label);
+        },
+        Match(_) => return self.lower_match_stmt(tree, statement),
+        Block(_) => return self.lower_block(tree, ast::Block { node: statement.node, location: null }),
+        ComptimeIf(value) => {
+            let copied = ast::ComptimeIfStmt {
+                condition: value.condition,
+                consequence: value.consequence,
+                alternative: value.alternative
+            };
+            return self.lower_comptime_if_stmt(tree, copied);
+        },
+        ComptimeFor(value) => {
+            let copied = ast::ComptimeForStmt {
+                iterable: value.iterable,
+                name: value.name,
+                body: value.body
+            };
+            return self.lower_comptime_for_stmt(tree, copied);
+        },
+        ComptimeMatch(value) => {
+            let copied = ast::ComptimeMatchStmt {
+                value: value.value,
+                name: value.name,
+                binding: value.binding,
+                body: value.body
+            };
+            return self.lower_comptime_match_stmt(tree, copied);
+        },
+        Recovered(_) => {
+            let kind = try self.name(statement_go_type(tree, statement));
+            return try self.fail1(tree, "ir error: unsupported statement %s", Arg::Str(kind));
+        },
     }
-    if ownership::assign_stmt(tree, statement) |value| {
-        let want = try self.assign_target_type(tree, value.target);
-        var lowered = empty_value();
-        if try self.lower_contextual_expr(tree, value.value, want, &var lowered) |failed| {
-            return move failed;
-        }
-        return self.lower_assign_target(tree, value.target, lowered);
-    }
-    if ownership::return_stmt(tree, statement) |value| {
-        return self.lower_return_stmt(tree, statement, value);
-    }
-    if ownership::defer_stmt(tree, statement) |_| {
-        return try self.fail0("ir error: defer statement must appear directly in a block");
-    }
-    if ownership::errdefer_stmt(tree, statement) |_| {
-        return try self.fail0("ir error: defer statement must appear directly in a block");
-    }
-    if ownership::expr_stmt(tree, statement) |value| {
-        var ignored = empty_value();
-        return self.lower_expr(tree, value.expr, &var ignored);
-    }
-    return self.lower_body_stmt(tree, statement);
-}
-
-fn (self: &var Lowerer) lower_body_stmt(tree: &var ast::Ast, statement: ast::Statement) -> !?diagnostic::Diagnostic {
-    if ownership::if_stmt(tree, statement) |value| {
-        return self.lower_if_stmt(tree, value);
-    }
-    if ownership::while_stmt(tree, statement) |value| {
-        return self.lower_while_stmt(tree, value);
-    }
-    if ownership::for_stmt(tree, statement) |value| {
-        return self.lower_for_stmt(tree, value);
-    }
-    if ownership::break_stmt(tree, statement) |value| {
-        return self.lower_loop_branch(tree, false, value.label);
-    }
-    if ownership::continue_stmt(tree, statement) |value| {
-        return self.lower_loop_branch(tree, true, value.label);
-    }
-    if ownership::is_match_stmt(tree, statement) {
-        return self.lower_match_stmt(tree, statement);
-    }
-    if ownership::is_block_stmt(tree, statement) {
-        return self.lower_block(tree, ast::Block { node: statement.node, location: null });
-    }
-    if ownership::comptime_if_stmt(tree, statement) |value| {
-        return self.lower_comptime_if_stmt(tree, value);
-    }
-    if ownership::comptime_for_stmt(tree, statement) |value| {
-        return self.lower_comptime_for_stmt(tree, value);
-    }
-    if ownership::comptime_match_stmt(tree, statement) |value| {
-        return self.lower_comptime_match_stmt(tree, value);
-    }
-    let kind = try self.name(statement_go_type(tree, statement));
-    return try self.fail1(tree, "ir error: unsupported statement %s", Arg::Str(kind));
 }
 
 fn statement_go_type(tree: &ast::Ast, statement: ast::Statement) -> []u8 {
